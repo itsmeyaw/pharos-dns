@@ -66,7 +66,7 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `cache`, `errors`, `forward`, `health`, `hosts`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
+Only `cache`, `errors`, `forward`, `health`, `hosts`, `loadbalance`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
 
@@ -142,6 +142,21 @@ Responses require a preallocated UDP buffer, as with Whoami. Hosts-file reloads
 stop during configuration Restart and resume if that Restart fails.
 File parsing runs on a Tokio worker, so a large or slow hosts file can delay
 other tasks on that worker.
+
+## Loadbalance
+
+Pharos permutes encoded records without re-encoding names. If any bytes could
+be a compression pointer into a section that could move, it leaves the entire
+Response unchanged to avoid invalidating pointers. This conservative check can
+also match ordinary RDATA bytes. Signed TSIG Responses are not reordered.
+CoreDNS re-encodes its records and does not have these restrictions.
+Relative weight file paths use the working directory until `root` is implemented.
+Weight files must be UTF-8; CoreDNS accepts arbitrary bytes. Pharos compares
+file contents directly instead of CoreDNS's MD5 checksum and keeps the last
+valid weights when parsing fails. Weight file Domains that cannot be parsed as
+DNS names cannot match Responses. Negative reload durations are accepted as
+zero; CoreDNS's negative ticker interval panics when started. Random choices
+use a thread-local xorshift generator rather than CoreDNS's generators.
 
 ## Reload
 
