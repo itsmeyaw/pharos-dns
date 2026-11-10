@@ -20,9 +20,12 @@ pub mod errors;
 #[cfg(any(
     feature = "plugin-health",
     feature = "plugin-errors",
-    feature = "plugin-reload"
+    feature = "plugin-reload",
+    feature = "plugin-hosts"
 ))]
 pub mod health;
+#[cfg(feature = "plugin-hosts")]
+pub mod hosts;
 pub mod proxy;
 
 #[cfg(feature = "plugin-forward")]
@@ -437,6 +440,17 @@ fn setup_forward(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Re
 #[cfg(feature = "plugin-health")]
 fn setup_health(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.health = Some(health::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-hosts")]
+fn setup_hosts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    let domains = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.as_str())
+        .collect::<Vec<_>>();
+    block.config.hosts = Some(hosts::Hosts::parse(cursor, &domains)?);
     Ok(())
 }
 

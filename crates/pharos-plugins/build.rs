@@ -29,6 +29,7 @@ fn main() {
             "ready" => "ready::Ready",
             "forward" => "forward::Forward",
             "health" => "health::Health",
+            "hosts" => "hosts::Hosts",
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",
             _ => "Unimplemented",
@@ -45,13 +46,14 @@ fn main() {
             "ready" => "setup_ready",
             "forward" => "setup_forward",
             "health" => "setup_health",
+            "hosts" => "setup_hosts",
             "reload" => "setup_reload",
             "errors" => "setup_errors",
             _ => "setup_unimplemented",
         };
         let once = matches!(
             *name,
-            "cache" | "prometheus" | "ready" | "errors" | "reload"
+            "cache" | "prometheus" | "ready" | "errors" | "reload" | "hosts"
         );
         writeln!(
             code,
