@@ -11,7 +11,9 @@ async fn scrape_counts_only_blocks_with_prometheus() {
     let address = socket.local_addr().unwrap();
     drop(socket);
     let corefile = format!(
-        "example.org:0 {{\n prometheus {address}\n whoami\n}}\nsecond.org:0 {{\n prometheus {address}\n whoami\n}}\nother.org:0 {{\n whoami\n}}"
+        "example.org:0 {{\n prometheus :{}\n whoami\n}}\nsecond.org:0 {{\n prometheus :{}\n whoami\n}}\nother.org:0 {{\n whoami\n}}",
+        address.port(),
+        address.port()
     );
     let blocks = parse("Corefile", &corefile).unwrap();
     let (mut servers, lifecycle) =
