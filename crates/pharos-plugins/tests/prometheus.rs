@@ -54,6 +54,17 @@ async fn scrape_counts_only_blocks_with_prometheus() {
         "{response}"
     );
     assert!(response.contains("pharos_build_info{"), "{response}");
+    #[cfg(feature = "plugin-forward")]
+    {
+        assert!(
+            response.contains("pharos_forward_healthcheck_broken_total 0\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains("pharos_forward_max_concurrent_rejects_total 0\n"),
+            "{response}"
+        );
+    }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(response.contains("process_open_fds "), "{response}");
     assert!(response.contains("zone=\"example.org.\""), "{response}");

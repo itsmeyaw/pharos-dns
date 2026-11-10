@@ -1,0 +1,16 @@
+.:{port} {
+    forward . 127.0.0.1:{port2}
+}
+tcp.example.:{port} {
+    forward . 127.0.0.1:{port2} {
+        force_tcp
+    }
+}
+udp.example.:{port} {
+    forward . 127.0.0.1:{port2} {
+        prefer_udp
+    }
+}
+.:{port2} {
+    whoami
+}

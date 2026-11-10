@@ -9,6 +9,12 @@ pub struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
+    /// Whether another token remains after the current token.
+    #[must_use]
+    pub fn has_next(&self) -> bool {
+        self.position.map_or(0, |position| position + 1) < self.tokens.len()
+    }
+
     /// Start before the first token.
     pub fn new(file: &'a str, tokens: &'a [Token]) -> Self {
         Self {

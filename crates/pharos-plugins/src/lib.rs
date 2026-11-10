@@ -19,6 +19,9 @@ pub mod errors;
 pub mod health;
 pub mod proxy;
 
+#[cfg(feature = "plugin-forward")]
+pub mod forward;
+
 #[cfg(feature = "plugin-log")]
 pub mod log;
 #[cfg(feature = "plugin-log")]
@@ -72,6 +75,8 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     let metrics = pharos_server::metrics::Registry::default();
+    #[cfg(feature = "plugin-forward")]
+    let _ = metrics.forward();
     #[cfg(feature = "plugin-health")]
     metrics.enable_health_metrics();
     #[cfg(feature = "plugin-prometheus")]
@@ -92,6 +97,12 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         });
     }
     for block in blocks {
+        #[cfg(feature = "plugin-forward")]
+        let mut block = block;
+        #[cfg(feature = "plugin-forward")]
+        if let Some(forward) = &mut block.config.forward {
+            forward.set_metrics(&metrics);
+        }
         #[cfg(feature = "plugin-health")]
         if let Some(health) = &block.config.health
             && !health_addresses
@@ -125,6 +136,16 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         let empty = pharos_server::Chain::is_empty(&block.config);
         lifecycle.extend(&block.config.lifecycle);
         let chain = Arc::new(block.config);
+        #[cfg(feature = "plugin-forward")]
+        if chain.forward.is_some() {
+            let chain = Arc::clone(&chain);
+            lifecycle.register_sync(pharos_server::Phase::Shutdown, move || {
+                if let Some(forward) = &chain.forward {
+                    forward.stop();
+                }
+                Ok(())
+            });
+        }
         #[cfg(feature = "plugin-ready")]
         if chain.ready.is_some() {
             chain.collect_readiness(&ready_state);
@@ -327,6 +348,12 @@ fn setup_prometheus(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
 #[cfg(feature = "plugin-ready")]
 fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.ready = Some(ready::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-forward")]
+fn setup_forward(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.forward = Some(forward::Forward::parse(cursor)?);
     Ok(())
 }
 

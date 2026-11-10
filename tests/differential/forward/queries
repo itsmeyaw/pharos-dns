@@ -1,0 +1,7 @@
+www.example.org. A IN udp
+www.example.org. AAAA IN tcp
+www.example.org. TXT IN udp +norec
+www.tcp.example. A IN udp
+www.tcp.example. A IN tcp
+www.udp.example. A IN udp
+www.udp.example. A IN tcp

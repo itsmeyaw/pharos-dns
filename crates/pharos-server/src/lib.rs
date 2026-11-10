@@ -123,11 +123,19 @@ impl std::error::Error for Error {}
 /// Caller-provided, fixed-capacity Metadata slots.
 pub struct Metadata<'a> {
     slots: &'a mut [Option<(&'a str, &'a str)>],
+    inline_name: Option<&'static str>,
+    inline_value: [u8; 64],
+    inline_len: usize,
 }
 
 impl<'a> Metadata<'a> {
     pub fn new(slots: &'a mut [Option<(&'a str, &'a str)>]) -> Self {
-        Self { slots }
+        Self {
+            slots,
+            inline_name: None,
+            inline_value: [0; 64],
+            inline_len: 0,
+        }
     }
 
     /// Insert or replace a named value; returns false when no slot is free.
@@ -138,17 +146,40 @@ impl<'a> Metadata<'a> {
             .find(|slot| slot.is_some_and(|(existing, _)| existing == name))
         {
             *slot = Some((name, value));
+            if self.inline_name == Some(name) {
+                self.inline_name = None;
+            }
             return true;
         }
         if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
             *slot = Some((name, value));
+            if self.inline_name == Some(name) {
+                self.inline_name = None;
+            }
             return true;
         }
         false
     }
 
+    /// Copy a short value whose lifetime is shorter than the Query's.
+    pub fn insert_inline(&mut self, name: &'static str, value: &str) -> bool {
+        if value.len() > self.inline_value.len()
+            || self.inline_name.is_some_and(|existing| existing != name)
+        {
+            return false;
+        }
+        // shortcut: one copied value suffices for forward; add slots for other producers.
+        self.inline_name = Some(name);
+        self.inline_len = value.len();
+        self.inline_value[..value.len()].copy_from_slice(value.as_bytes());
+        true
+    }
+
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
+        if self.inline_name == Some(name) {
+            return std::str::from_utf8(&self.inline_value[..self.inline_len]).ok();
+        }
         self.slots
             .iter()
             .flatten()

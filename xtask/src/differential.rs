@@ -142,6 +142,27 @@ pub(crate) fn free_port() -> Result<u16, String> {
     Ok(port)
 }
 
+struct ReservedPort {
+    tcp: TcpListener,
+    _udp: UdpSocket,
+}
+
+impl ReservedPort {
+    fn port(&self) -> Result<u16, String> {
+        self.tcp
+            .local_addr()
+            .map(|addr| addr.port())
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn reserve_port() -> Result<ReservedPort, String> {
+    let tcp = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let port = tcp.local_addr().map_err(|e| e.to_string())?.port();
+    let udp = UdpSocket::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    Ok(ReservedPort { tcp, _udp: udp })
+}
+
 fn copy_fixtures(source: &Path, target: &Path) -> Result<(), String> {
     copy_fixture_dir(source, target, true)
 }
@@ -170,6 +191,7 @@ fn start(
     binary: &Path,
     cwd: &Path,
     port: u16,
+    port2: u16,
     metrics_port: u16,
     corefile: Option<&str>,
     pharos: bool,
@@ -180,6 +202,7 @@ fn start(
             &conf,
             corefile
                 .replace("{port}", &port.to_string())
+                .replace("{port2}", &port2.to_string())
                 .replace("{metrics_port}", &metrics_port.to_string()),
         )
         .map_err(|e| e.to_string())?;
@@ -304,26 +327,53 @@ fn scenario(
     let (pcwd, ccwd) = (temp.0.join("pharos"), temp.0.join("coredns"));
     copy_fixtures(path, &pcwd)?;
     copy_fixtures(path, &ccwd)?;
-    let (pp, cp) = (free_port()?, free_port()?);
-    if pp == cp {
-        return Err("port collision; retry differential run".into());
-    }
-    let (pm, cm) = if corefile
+    let (pp, cp) = (reserve_port()?, reserve_port()?);
+    let has_port2 = corefile.as_deref().is_some_and(|s| s.contains("{port2}"));
+    let has_metrics = corefile
         .as_deref()
-        .is_some_and(|s| s.contains("{metrics_port}"))
-    {
-        let (pm, cm) = (free_port()?, free_port()?);
-        if pm == cm || [pp, cp].contains(&pm) || [pp, cp].contains(&cm) {
-            return Err("port collision; retry differential run".into());
-        }
-        (pm, cm)
-    } else {
-        (0, 0)
-    };
-    let mut p = start(pharos, &pcwd, pp, pm, corefile.as_deref(), true)?;
-    let mut c = start(coredns, &ccwd, cp, cm, corefile.as_deref(), false)?;
-    ready(&mut p, &pcwd.with_extension("server.log"), pp)?;
-    ready(&mut c, &ccwd.with_extension("server.log"), cp)?;
+        .is_some_and(|s| s.contains("{metrics_port}"));
+    let (pp2, cp2) = (
+        has_port2.then(reserve_port).transpose()?,
+        has_port2.then(reserve_port).transpose()?,
+    );
+    let (pm, cm) = (
+        has_metrics.then(reserve_port).transpose()?,
+        has_metrics.then(reserve_port).transpose()?,
+    );
+    let (pp_num, cp_num) = (pp.port()?, cp.port()?);
+    let optional_port =
+        |port: &Option<ReservedPort>| port.as_ref().map_or(Ok(0), ReservedPort::port);
+    let (pp2_num, cp2_num) = (optional_port(&pp2)?, optional_port(&cp2)?);
+    let (pm_num, cm_num) = (optional_port(&pm)?, optional_port(&cm)?);
+    // shortcut: ports can be taken during startup; inherit sockets when supported.
+    drop((pp, pp2, pm));
+    let mut p = start(
+        pharos,
+        &pcwd,
+        pp_num,
+        pp2_num,
+        pm_num,
+        corefile.as_deref(),
+        true,
+    )?;
+    ready(&mut p, &pcwd.with_extension("server.log"), pp_num)?;
+    if has_port2 {
+        ready(&mut p, &pcwd.with_extension("server.log"), pp2_num)?;
+    }
+    drop((cp, cp2, cm));
+    let mut c = start(
+        coredns,
+        &ccwd,
+        cp_num,
+        cp2_num,
+        cm_num,
+        corefile.as_deref(),
+        false,
+    )?;
+    ready(&mut c, &ccwd.with_extension("server.log"), cp_num)?;
+    if has_port2 {
+        ready(&mut c, &ccwd.with_extension("server.log"), cp2_num)?;
+    }
     let mut count = 0;
     for line in input
         .lines()
@@ -333,9 +383,9 @@ fn scenario(
         let query = query::parse(line).map_err(|e| format!("{line}: {e}"))?;
         let wire = query.wire()?;
         let mut pwire =
-            exchange(pp, query.transport, &wire).map_err(|e| format!("Pharos {line}: {e}"))?;
+            exchange(pp_num, query.transport, &wire).map_err(|e| format!("Pharos {line}: {e}"))?;
         let cwire =
-            exchange(cp, query.transport, &wire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            exchange(cp_num, query.transport, &wire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
         if pwire.len() < 4 || cwire.len() < 4 {
             return Err(format!("{line}: truncated Response header"));
         }
@@ -400,12 +450,12 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
-    use super::{TempDir, apply_deviation, copy_fixtures, parse_expect, start};
+    use super::{TempDir, apply_deviation, copy_fixtures, parse_expect, reserve_port, start};
 
     #[test]
-    fn substitutes_dns_and_metrics_ports_for_each_server() {
+    fn substitutes_dns_upstream_and_metrics_ports_for_each_server() {
         let temp = TempDir::new().unwrap();
-        let config = ".:{port} {\n    prometheus localhost:{metrics_port}\n}\n";
+        let config = ".:{port} {\n    forward . 127.0.0.1:{port2}\n    prometheus localhost:{metrics_port}\n}\n";
         let pharos = temp.0.join("pharos");
         let coredns = temp.0.join("coredns");
         std::fs::create_dir(&pharos).unwrap();
@@ -414,6 +464,7 @@ mod tests {
             std::path::Path::new("/usr/bin/true"),
             &pharos,
             1001,
+            1003,
             1002,
             Some(config),
             true,
@@ -423,6 +474,7 @@ mod tests {
             std::path::Path::new("/usr/bin/true"),
             &coredns,
             2001,
+            2003,
             2002,
             Some(config),
             false,
@@ -430,12 +482,22 @@ mod tests {
         .unwrap();
         assert_eq!(
             std::fs::read_to_string(pharos.join("Corefile")).unwrap(),
-            ".:1001 {\n    prometheus localhost:1002\n}\n"
+            ".:1001 {\n    forward . 127.0.0.1:1003\n    prometheus localhost:1002\n}\n"
         );
         assert_eq!(
             std::fs::read_to_string(coredns.join("Corefile")).unwrap(),
-            ".:2001 {\n    prometheus localhost:2002\n}\n"
+            ".:2001 {\n    forward . 127.0.0.1:2003\n    prometheus localhost:2002\n}\n"
         );
+    }
+
+    #[test]
+    fn reserved_ports_are_distinct_and_block_both_transports() {
+        let first = reserve_port().unwrap();
+        let second = reserve_port().unwrap();
+        let port = first.port().unwrap();
+        assert_ne!(port, second.port().unwrap());
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
+        assert!(std::net::UdpSocket::bind(("127.0.0.1", port)).is_err());
     }
 
     #[test]
