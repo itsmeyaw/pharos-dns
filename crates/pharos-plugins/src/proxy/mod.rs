@@ -116,6 +116,11 @@ impl Proxy {
             expire: EXPIRE,
         }
     }
+
+    /// Set the maximum idle time before an Upstream connection is discarded.
+    pub fn set_expire(&mut self, expire: Duration) {
+        self.expire = expire;
+    }
     pub async fn exchange(
         &self,
         query: &[u8],

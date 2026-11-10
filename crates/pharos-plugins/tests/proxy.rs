@@ -119,3 +119,53 @@ async fn prefer_udp_retries_truncated_response_over_tcp() {
     assert_eq!(response[2] & 0x02, 0);
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn rejects_a_response_with_the_wrong_question() {
+    use pharos_plugins::proxy::Error;
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+        wire[2] |= 0x80;
+        wire[len - 1] = 3;
+        server.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let mut response = [0; 512];
+    assert!(matches!(
+        proxy
+            .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+            .await,
+        Err(Error::Mismatch)
+    ));
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_connections_are_not_reused() {
+    use std::time::Duration;
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut proxy = Proxy::new(server.local_addr().unwrap());
+    proxy.set_expire(Duration::ZERO);
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let mut peers = Vec::new();
+        for _ in 0..2 {
+            let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+            peers.push(peer);
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+        peers
+    });
+    let mut response = [0; 512];
+    for _ in 0..2 {
+        proxy
+            .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+            .await
+            .unwrap();
+    }
+    let peers = task.await.unwrap();
+    assert_ne!(peers[0], peers[1]);
+}
