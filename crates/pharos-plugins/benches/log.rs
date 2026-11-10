@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "512"]
 
 use std::{hint::black_box, time::Duration};
 

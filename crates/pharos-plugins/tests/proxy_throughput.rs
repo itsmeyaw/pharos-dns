@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "512"]
 
 // Run the measurement with: cargo test --release -p pharos-plugins --test proxy_throughput -- --nocapture
 #[path = "support/proxy_benchmark.rs"]

@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 use pharos_plugins::proxy::{Options, Proxy, Transport};
 use tokio::net::UdpSocket;
 

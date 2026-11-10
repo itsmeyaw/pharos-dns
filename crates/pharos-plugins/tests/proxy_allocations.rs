@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "512"]
 use pharos_plugins::proxy::{Options, Proxy, Transport};
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::{alloc::System, net::UdpSocket, time::Duration};

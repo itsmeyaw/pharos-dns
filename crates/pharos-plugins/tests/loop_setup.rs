@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "512"]
 #![cfg(feature = "plugin-loop")]
 
 use pharos_corefile::{configure, parse};

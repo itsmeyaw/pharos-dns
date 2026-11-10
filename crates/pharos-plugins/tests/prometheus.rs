@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 #![cfg(all(feature = "plugin-prometheus", feature = "plugin-whoami"))]
 
 use pharos_corefile::{configure, parse};

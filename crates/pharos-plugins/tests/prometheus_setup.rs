@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 #![cfg(feature = "plugin-prometheus")]
 
 use pharos_corefile::{configure, parse};

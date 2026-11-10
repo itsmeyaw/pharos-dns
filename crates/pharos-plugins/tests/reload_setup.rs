@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 #![cfg(feature = "plugin-reload")]
 
 use pharos_corefile::{BlockContext, Error, configure, parse};
