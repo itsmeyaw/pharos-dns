@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 //! Plugins are enabled by `plugin-<directive>` Cargo features (underscores in
-//! Directive names become hyphens). Log, prometheus and whoami are implemented; other enabled
-//! Directives reject configuration rather than silently accepting it.
+//! Directive names become hyphens). Enabled but unimplemented Directives reject
+//! configuration rather than silently accepting it.
 
 use pharos_corefile::{BlockContext, Cursor, Directive, Error};
 use pharos_server::{Lifecycle, ListenerKey, Router, Server, Transport};

@@ -66,9 +66,19 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `cache`, `errors`, `forward`, `health`, `log`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
+Only `cache`, `errors`, `forward`, `health`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
+
+The `loop` Plugin probes only the first Domain in a Server Block at startup
+and after Reload. Following the requested two-second grace period, Pharos
+disables detection two seconds after a successful exchange. CoreDNS v1.15.0
+also schedules that delay but disables immediately on exiting its probe loop.
+Fatal loop detection logs and exits immediately with status 1, without running
+Shutdown hooks or removing the pidfile, as CoreDNS's fatal logger does. Probe
+Queries may allocate while running concurrently with UDP reception; ordinary
+Queries do not. Like CoreDNS, a configured port 0 is probed as port 0 rather
+than the actual ephemeral Listener port.
 
 The `errors` Plugin uses Rust's `regex` syntax rather than Go's RE2 syntax.
 For example, `\w`, `\d`, `\s` and word boundaries are Unicode-aware in
