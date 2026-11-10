@@ -1,0 +1,9 @@
+.:{port} {
+    loadbalance weighted weights {
+        reload 0
+    }
+    hosts empty.hosts {
+        192.0.2.1 example.org
+        reload 0
+    }
+}

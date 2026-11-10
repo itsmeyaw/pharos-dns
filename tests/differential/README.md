@@ -26,6 +26,9 @@ Each scenario is a directory containing:
   directories for both processes, preserving relative paths.
 
 IDs and RR order within each section are ignored; all other fields are compared.
+The loadbalance scenarios compare a multi-address `hosts` Response with
+round-robin and subnet preference, and a single-address weighted Response.
+They do not compare randomized order or weight distributions.
 The `whoami-log` scenario compares Responses, not log output. The current whoami
 Responses cannot exceed the 512-octet UDP minimum for these short Queries, so
 truncation is not covered.

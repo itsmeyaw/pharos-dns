@@ -1,0 +1,13 @@
+.:{port} {
+    loadbalance round_robin {
+        prefer 10.9.20.0/24
+    }
+    hosts empty.hosts {
+        10.9.20.1 example.org
+        10.9.20.2 example.org
+        192.0.2.1 example.org
+        2001:db8::1 example.org
+        2001:db8::2 example.org
+        reload 0
+    }
+}
