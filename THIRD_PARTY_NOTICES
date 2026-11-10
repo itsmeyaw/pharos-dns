@@ -6,6 +6,12 @@
 - License: Apache-2.0
 - Copyright 2016-2020 The CoreDNS authors and contributors
 
+## coredns/caddy
+
+- Source: https://github.com/coredns/caddy
+- License: Apache-2.0
+- Copyright 2015 Light Code Labs, LLC
+
 ## miekg/dns
 
 - Source: https://github.com/miekg/dns
