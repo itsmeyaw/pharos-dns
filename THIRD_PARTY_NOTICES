@@ -9,6 +9,7 @@
 - `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
 - The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
 - EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
+- Server routing, startup formatting, and tests in `crates/pharos-server` follow CoreDNS v1.15.0's `core/dnsserver/server.go`, `server_test.go`, and `onstartup.go`.
 
 ## coredns/caddy
 
@@ -25,6 +26,7 @@
 - DNS wire fixtures in `crates/pharos-proto/tests/corpus` are from miekg/dns tests; see the corpus README for the revision and original tests.
 - EDNS option formatting and tests in `crates/pharos-proto` follow miekg/dns v1.1.73's `edns.go` and `edns_test.go`.
 - RDATA presentation in `crates/pharos-proto/src/rdata.rs` follows miekg/dns v1.1.73; fixtures in `crates/pharos-proto/tests/rdata_*.rs` adapt its `parse_test.go`, `dns_test.go`, `msg_helpers_test.go`, `svcb_test.go` and `tsig_test.go`.
+- Response truncation in `crates/pharos-server` follows miekg/dns v1.1.73's `msg_truncate.go`, without recompression.
 
 BSD 3-Clause License
 

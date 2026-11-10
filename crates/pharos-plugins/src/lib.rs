@@ -5,6 +5,13 @@
 //! Directives reject configuration rather than silently accepting it.
 
 use pharos_corefile::{BlockContext, Cursor, Directive, Error};
+use pharos_server::{Lifecycle, ListenerKey, Router, Server, Transport};
+use std::{
+    collections::HashMap,
+    io,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+};
 
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
@@ -21,6 +28,63 @@ pub fn directives() -> &'static [Directive<'static, Chain>] {
 #[must_use]
 pub const fn plugins_listing() -> &'static str {
     PLUGINS_LISTING
+}
+
+/// Configured DNS Servers keyed by Listener.
+pub type Servers = HashMap<ListenerKey, Server<Arc<Chain>>>;
+
+/// Group Server Blocks by Listener and collect their hooks in block order.
+/// The caller runs Startup before serving and Shutdown after all Listeners drain.
+pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecycle)> {
+    let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
+    let mut lifecycle = Lifecycle::default();
+    for block in blocks {
+        let keys = block.keys().to_vec();
+        let addresses = block.listen_addresses.clone();
+        let empty = pharos_server::Chain::is_empty(&block.config);
+        lifecycle.extend(&block.config.lifecycle);
+        let chain = Arc::new(block.config);
+        for key in keys {
+            if key.transport != "dns" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsupported Listener transport",
+                ));
+            }
+            let port: u16 = key.port.parse().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener port")
+            })?;
+            let domain: pharos_proto::Name = key.domain.parse().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener Domain")
+            })?;
+            for address in &addresses {
+                let ip: IpAddr = if address.is_empty() {
+                    Ipv4Addr::UNSPECIFIED.into()
+                } else {
+                    address.parse().map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
+                    })?
+                };
+                let listener = ListenerKey {
+                    transport: Transport::Dns,
+                    address: SocketAddr::new(ip, port),
+                };
+                groups.entry(listener).or_default().add(
+                    listener,
+                    domain.clone(),
+                    (!empty).then(|| Arc::clone(&chain)),
+                    vec![],
+                );
+            }
+        }
+    }
+    Ok((
+        groups
+            .into_iter()
+            .map(|(key, router)| (key, Server::new(router, key)))
+            .collect(),
+        lifecycle,
+    ))
 }
 
 /// Placeholder for enabled but unimplemented Plugins, whose setup always fails.

@@ -139,6 +139,31 @@ fn insufficient_preallocated_buffer_is_an_error() {
 }
 
 #[test]
+fn tcp_response_allocates_only_when_the_plugin_runs() {
+    let blocks = parse("Corefile", ". {\n whoami\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let wire = [0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1];
+    let mut response = Vec::new();
+    let mut slots = [];
+    let domain: Name = ".".parse().unwrap();
+    let mut context = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 65535,
+    };
+    assert_eq!(
+        run(configured[0].config.serve(&mut context)),
+        Outcome::Response
+    );
+    assert!(Message::parse(&response).is_ok());
+}
+
+#[test]
 fn generated_chain_future_is_send_and_small() {
     fn assert_send<T: Send>(_: &T) {}
     let blocks = parse("Corefile", ". {\n whoami\n}").unwrap();

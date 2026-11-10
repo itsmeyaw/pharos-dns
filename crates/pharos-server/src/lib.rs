@@ -3,7 +3,9 @@
 //! Listener; earlier Plugins may inspect and modify the caller-owned Response
 //! buffer after awaiting Next. The Listener handles unanswered codes and errors.
 
-use std::{collections::HashMap, fmt, future::Future, io, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap, fmt, future::Future, io, net::SocketAddr, sync::Arc, time::Duration,
+};
 
 use pharos_proto::{BuildError, Message, Name, Rcode};
 use tokio::{
@@ -12,7 +14,21 @@ use tokio::{
     task::JoinHandle,
 };
 
+mod admission;
+mod lifecycle;
+mod outcome;
+mod panic;
 mod quota;
+pub use admission::{Admission, admit};
+pub use lifecycle::{Lifecycle, Phase};
+pub use outcome::{finish_outcome, response_limit};
+pub use panic::{contain_panic, panics_total};
+mod router;
+mod server;
+mod startup;
+pub use router::{Router, ServerBlock, ViewFilter};
+pub use server::{Chain, Server};
+pub use startup::startup_domains;
 mod tcp;
 mod udp;
 #[cfg(target_os = "linux")]
@@ -72,6 +88,7 @@ pub enum Error {
     ResponseBufferTooSmall,
     NotImplemented,
     NoNextPlugin,
+    PluginPanic,
 }
 
 impl fmt::Display for Error {
@@ -82,6 +99,7 @@ impl fmt::Display for Error {
             Self::ResponseBufferTooSmall => f.write_str("Response buffer too small"),
             Self::NotImplemented => f.write_str("plugin is not implemented"),
             Self::NoNextPlugin => f.write_str("no next plugin found"),
+            Self::PluginPanic => f.write_str("plugin panicked"),
         }
     }
 }
@@ -148,11 +166,10 @@ pub enum Action {
     Drop,
 }
 
-/// Synchronous, statically dispatched Query handling. Clear and reuse the
-/// supplied Response buffer; return `Drop` to suppress a Response.
-///
-/// UDP handlers must not block the runtime worker. TCP handlers run on Tokio's
-/// blocking pool and may execute concurrently for a single connection.
+/// Async, statically dispatched Query handling. Clear and reuse the supplied
+/// Response buffer; return `Drop` to suppress a Response.
+/// Handlers must not block the runtime; TCP Queries on a connection may run
+/// concurrently.
 pub trait Handler: Send + Sync + 'static {
     fn handle(
         &self,
@@ -160,7 +177,7 @@ pub trait Handler: Send + Sync + 'static {
         peer: SocketAddr,
         protocol: Protocol,
         response: &mut Vec<u8>,
-    ) -> Action;
+    ) -> impl Future<Output = Action> + Send;
 }
 
 /// A DNS Listener serving UDP and TCP on the same address.
@@ -201,14 +218,30 @@ impl Listener {
         self.address
     }
 
-    /// Stop accepting Queries and wait for accepted Queries to finish.
+    /// Stop accepting Queries and drain for at most five seconds.
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.stop.send_replace(true);
         let mut result = Ok(());
-        for task in self.tasks.drain(..) {
-            let next = task.await.map_err(io::Error::other).and_then(|v| v);
-            if result.is_ok() {
-                result = next;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while let Some(mut task) = self.tasks.pop() {
+            match tokio::time::timeout_at(deadline, &mut task).await {
+                Ok(next) => {
+                    let next = next.map_err(io::Error::other).and_then(|v| v);
+                    if result.is_ok() {
+                        result = next;
+                    }
+                }
+                Err(_) => {
+                    task.abort();
+                    for task in &self.tasks {
+                        task.abort();
+                    }
+                    let _ = task.await;
+                    for task in self.tasks.drain(..) {
+                        let _ = task.await;
+                    }
+                    break;
+                }
             }
         }
         result

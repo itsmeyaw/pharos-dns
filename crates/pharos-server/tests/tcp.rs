@@ -1,16 +1,12 @@
 #![forbid(unsafe_code)]
 
-use std::{
-    net::SocketAddr,
-    sync::{Mutex, mpsc},
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use pharos_server::{Action, Handler, Listener, Protocol};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::mpsc as async_mpsc,
+    sync::{Mutex, Semaphore, mpsc as async_mpsc},
     time::timeout,
 };
 
@@ -19,7 +15,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 struct Echo;
 
 impl Handler for Echo {
-    fn handle(
+    async fn handle(
         &self,
         query: &[u8],
         _peer: SocketAddr,
@@ -34,13 +30,158 @@ impl Handler for Echo {
 
 struct Slow {
     started: async_mpsc::UnboundedSender<()>,
-    release: Mutex<mpsc::Receiver<()>>,
+    release: Mutex<async_mpsc::UnboundedReceiver<()>>,
 }
 
 struct Conditional;
 
+struct BufferProbe {
+    started: async_mpsc::UnboundedSender<usize>,
+    release: Arc<Semaphore>,
+}
+
+struct RejectedBufferProbe {
+    capacities: async_mpsc::UnboundedSender<usize>,
+}
+
+impl Handler for RejectedBufferProbe {
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        match query {
+            b"drop" => {
+                response.resize(1024, 0);
+                self.capacities.send(0).unwrap();
+                Action::Drop
+            }
+            b"oversized" => {
+                response.resize(65536, 0);
+                self.capacities.send(0).unwrap();
+                Action::Respond
+            }
+            _ => {
+                assert!(response.is_empty());
+                self.capacities.send(response.capacity()).unwrap();
+                response.extend_from_slice(b"ok");
+                Action::Respond
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropped_and_oversized_responses_return_their_buffers() {
+    let (capacities, mut observed) = async_mpsc::unbounded_channel();
+    let (listener, mut stream) = connect(RejectedBufferProbe { capacities }).await;
+    for (query, minimum) in [(b"drop".as_slice(), 1024), (b"oversized".as_slice(), 65536)] {
+        send(&mut stream, query).await;
+        timeout(TEST_TIMEOUT, observed.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        send(&mut stream, b"probe").await;
+        assert!(
+            timeout(TEST_TIMEOUT, observed.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                >= minimum
+        );
+        assert_eq!(receive(&mut stream).await, b"ok");
+    }
+    listener.shutdown().await.unwrap();
+}
+
+impl Handler for BufferProbe {
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        assert!(response.is_empty());
+        self.started.send(response.capacity()).unwrap();
+        response.resize(1024, query[0]);
+        if query == b"warm" {
+            self.release.acquire().await.unwrap().forget();
+        }
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn pipelined_tcp_queries_reuse_response_buffers() {
+    let (started, mut capacities) = async_mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    let (listener, mut stream) = connect(BufferProbe {
+        started,
+        release: Arc::clone(&release),
+    })
+    .await;
+    for _ in 0..16 {
+        send(&mut stream, b"warm").await;
+    }
+    for _ in 0..16 {
+        timeout(TEST_TIMEOUT, capacities.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    release.add_permits(16);
+    for _ in 0..16 {
+        assert_eq!(receive(&mut stream).await, vec![b'w'; 1024]);
+    }
+    for _ in 0..16 {
+        send(&mut stream, b"reuse").await;
+    }
+    for _ in 0..16 {
+        let capacity = timeout(TEST_TIMEOUT, capacities.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(capacity >= 1024, "Response buffer was not reused");
+    }
+    for _ in 0..16 {
+        assert_eq!(receive(&mut stream).await, vec![b'r'; 1024]);
+    }
+    listener.shutdown().await.unwrap();
+}
+
+struct NeverFinishes {
+    started: async_mpsc::UnboundedSender<()>,
+}
+
+impl Handler for NeverFinishes {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        self.started.send(()).unwrap();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn shutdown_closes_a_stalled_query_after_grace_period() {
+    let (started, mut received) = async_mpsc::unbounded_channel();
+    let (listener, mut stream) = connect(NeverFinishes { started }).await;
+    send(&mut stream, b"query").await;
+    timeout(TEST_TIMEOUT, received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(7), listener.shutdown())
+        .await
+        .expect("shutdown exceeded grace period")
+        .unwrap();
+    let mut byte = [0];
+    assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+}
+
 impl Handler for Conditional {
-    fn handle(
+    async fn handle(
         &self,
         query: &[u8],
         _peer: SocketAddr,
@@ -57,7 +198,7 @@ impl Handler for Conditional {
 }
 
 impl Handler for Slow {
-    fn handle(
+    async fn handle(
         &self,
         query: &[u8],
         _peer: SocketAddr,
@@ -66,7 +207,7 @@ impl Handler for Slow {
     ) -> Action {
         if query == b"slow" {
             self.started.send(()).unwrap();
-            self.release.lock().unwrap().recv().unwrap();
+            self.release.lock().await.recv().await.unwrap();
         }
         response.extend_from_slice(query);
         Action::Respond
@@ -100,9 +241,13 @@ async fn receive(stream: &mut TcpStream) -> Vec<u8> {
     .expect("response timed out")
 }
 
-fn slow_handler() -> (Slow, async_mpsc::UnboundedReceiver<()>, mpsc::Sender<()>) {
+fn slow_handler() -> (
+    Slow,
+    async_mpsc::UnboundedReceiver<()>,
+    async_mpsc::UnboundedSender<()>,
+) {
     let (started, started_rx) = async_mpsc::unbounded_channel();
-    let (release, release_rx) = mpsc::channel();
+    let (release, release_rx) = async_mpsc::unbounded_channel();
     (
         Slow {
             started,
@@ -142,6 +287,41 @@ async fn pipelined_queries_can_complete_out_of_order() {
         b"fast"
     );
     assert_eq!(receive(&mut stream).await, b"slow");
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn slow_connections_do_not_throttle_other_connections() {
+    // Fill the former global 256-Query limit across multiple connections.
+    const CONNECTIONS: usize = 16;
+    const QUERIES_PER_CONNECTION: usize = 16;
+    const QUERIES: usize = CONNECTIONS * QUERIES_PER_CONNECTION;
+    let (handler, mut started, release) = slow_handler();
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), handler)
+        .await
+        .unwrap();
+    let mut slow = Vec::new();
+    for _ in 0..CONNECTIONS {
+        let mut stream = TcpStream::connect(listener.local_addr()).await.unwrap();
+        for _ in 0..QUERIES_PER_CONNECTION {
+            send(&mut stream, b"slow").await;
+        }
+        slow.push(stream);
+    }
+    for _ in 0..QUERIES {
+        timeout(TEST_TIMEOUT, started.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let mut fast = TcpStream::connect(listener.local_addr()).await.unwrap();
+    send(&mut fast, b"fast").await;
+    let result = timeout(TEST_TIMEOUT, receive(&mut fast)).await;
+    for _ in 0..QUERIES {
+        release.send(()).unwrap();
+    }
+    assert_eq!(result.expect("fast Query was throttled"), b"fast");
+    drop(slow);
     listener.shutdown().await.unwrap();
 }
 

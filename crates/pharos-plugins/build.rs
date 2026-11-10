@@ -17,7 +17,9 @@ fn main() {
         })
         .collect();
 
-    let mut code = String::from("#[derive(Debug, Default)]\npub struct Chain {\n");
+    let mut code = String::from(
+        "#[derive(Debug, Default)]\npub struct Chain {\npub lifecycle: pharos_server::Lifecycle,\n",
+    );
     for name in &enabled {
         let ty = if *name == "whoami" {
             "whoami::Whoami"
@@ -58,6 +60,11 @@ fn main() {
     }
     writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
     code.push_str("}\n");
+    code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
+    for name in &enabled {
+        write!(code, " && self.r#{name}.is_none()").unwrap();
+    }
+    code.push_str(" }\n}\n");
     for i in 0..enabled.len() {
         let next = i + 1;
         writeln!(code, "struct Next{i}<'a>(&'a Chain);\nimpl pharos_server::Next for Next{i}<'_> {{ async fn run(self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.0.serve_{next}(cx).await }} }}").unwrap();

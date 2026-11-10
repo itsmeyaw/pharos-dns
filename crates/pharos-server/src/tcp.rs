@@ -3,7 +3,7 @@ use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, tcp::OwnedReadHalf},
-    sync::{Mutex, Semaphore, watch},
+    sync::{Mutex, watch},
     task::{JoinHandle, JoinSet},
     time::timeout,
 };
@@ -13,7 +13,6 @@ use crate::{Action, Handler, Protocol};
 // CoreDNS has no default connection limit; cap ours to bound resource use.
 const MAX_CONNECTIONS: usize = 1024;
 const MAX_IN_FLIGHT_PER_CONNECTION: usize = 16;
-const MAX_IN_FLIGHT: usize = 256;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -25,7 +24,6 @@ pub(crate) fn spawn<H: Handler>(
 ) -> JoinHandle<io::Result<()>> {
     tokio::spawn(async move {
         let mut connections = JoinSet::new();
-        let permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
         let (stop, connections_stop) = watch::channel(false);
         let result = loop {
             if *shutdown.borrow() {
@@ -40,7 +38,7 @@ pub(crate) fn spawn<H: Handler>(
                         Ok((stream, peer)) => {
                             connections.spawn(serve(
                                 stream, peer, Arc::clone(&handler),
-                                connections_stop.clone(), Arc::clone(&permits),
+                                connections_stop.clone(),
                             ));
                         }
                         Err(error) => {
@@ -81,14 +79,19 @@ async fn serve<H: Handler>(
     peer: SocketAddr,
     handler: Arc<H>,
     mut shutdown: watch::Receiver<bool>,
-    permits: Arc<Semaphore>,
 ) {
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(Some(writer)));
     let (failed, mut write_failed) = watch::channel(false);
-    let mut queries = JoinSet::new();
+    let mut queries: JoinSet<Vec<u8>> = JoinSet::new();
+    let mut responses = Vec::with_capacity(MAX_IN_FLIGHT_PER_CONNECTION);
 
     'read: loop {
+        while let Some(result) = queries.try_join_next() {
+            if let Ok(response) = result {
+                responses.push(response);
+            }
+        }
         if *shutdown.borrow() || *write_failed.borrow() {
             break;
         }
@@ -97,7 +100,11 @@ async fn serve<H: Handler>(
                 biased;
                 _ = shutdown.changed() => break 'read,
                 _ = write_failed.changed() => break 'read,
-                _ = queries.join_next() => {},
+                result = queries.join_next() => {
+                    if let Some(Ok(response)) = result {
+                        responses.push(response);
+                    }
+                },
             }
         }
         let query = tokio::select! {
@@ -110,39 +117,39 @@ async fn serve<H: Handler>(
             },
         };
 
+        while let Some(result) = queries.try_join_next() {
+            if let Ok(response) = result {
+                responses.push(response);
+            }
+        }
+
         // A complete frame is accepted work and must finish even during shutdown.
-        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
-            break;
-        };
         let handler = Arc::clone(&handler);
         let writer = Arc::clone(&writer);
         let failed = failed.clone();
+        let mut response = responses.pop().unwrap_or_default();
+        response.clear();
         queries.spawn(async move {
-            let _permit = permit;
-            let result = tokio::task::spawn_blocking(move || {
-                let mut response = Vec::new();
-                let action = handler.handle(&query, peer, Protocol::Tcp, &mut response);
-                (action, response)
-            })
-            .await;
-            let Ok((Action::Respond, response)) = result else {
-                return;
-            };
-            let Ok(length) = u16::try_from(response.len()) else {
-                return;
-            };
-            let mut writer = writer.lock().await;
-            if let Some(stream) = writer.as_mut() {
-                let result = timeout(WRITE_TIMEOUT, async {
-                    stream.write_all(&length.to_be_bytes()).await?;
-                    stream.write_all(&response).await
-                })
-                .await;
-                if !matches!(result, Ok(Ok(()))) {
-                    *writer = None;
-                    let _ = failed.send(true);
+            if handler
+                .handle(&query, peer, Protocol::Tcp, &mut response)
+                .await
+                == Action::Respond
+                && let Ok(length) = u16::try_from(response.len())
+            {
+                let mut writer = writer.lock().await;
+                if let Some(stream) = writer.as_mut() {
+                    let result = timeout(WRITE_TIMEOUT, async {
+                        stream.write_all(&length.to_be_bytes()).await?;
+                        stream.write_all(&response).await
+                    })
+                    .await;
+                    if !matches!(result, Ok(Ok(()))) {
+                        *writer = None;
+                        let _ = failed.send(true);
+                    }
                 }
             }
+            response
         });
     }
     while queries.join_next().await.is_some() {}

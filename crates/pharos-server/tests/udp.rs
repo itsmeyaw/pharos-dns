@@ -9,8 +9,43 @@ use tokio::net::UdpSocket;
 
 struct Echo;
 
+struct AsyncEcho;
+
+impl Handler for AsyncEcho {
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        tokio::task::yield_now().await;
+        response.extend_from_slice(query);
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn udp_awaits_async_handler() {
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), AsyncEcho)
+        .await
+        .unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket
+        .send_to(b"query", listener.local_addr())
+        .await
+        .unwrap();
+    let mut buf = [0; 32];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf[..n], b"query");
+    listener.shutdown().await.unwrap();
+}
+
 impl Handler for Echo {
-    fn handle(
+    async fn handle(
         &self,
         query: &[u8],
         _: SocketAddr,
@@ -97,7 +132,13 @@ async fn registry_keeps_a_listener_by_transport_and_address() {
 struct Oversized;
 
 impl Handler for Oversized {
-    fn handle(&self, query: &[u8], _: SocketAddr, _: Protocol, response: &mut Vec<u8>) -> Action {
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
         if query == b"large" {
             response.resize(65536, 0);
         } else {

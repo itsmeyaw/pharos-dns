@@ -8,8 +8,8 @@ not-implemented error rather than accepting their configuration.
 
 Whoami reports an error if adding the protocol label would make its SRV owner
 name exceed the DNS name length limit. CoreDNS ignores the resulting write
-error. The caller must supply a Response buffer with enough capacity; otherwise
-Pharos reports an error instead of allocating on the Query path.
+error. The UDP caller must supply a Response buffer with enough capacity;
+otherwise Pharos reports an error instead of allocating on the UDP Query path.
 
 ## Domain names
 
@@ -25,10 +25,23 @@ to an octet as miekg/dns does.
 
 The protocol parser rejects duplicate OPT records, OPT records outside
 Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
-Listener-side FORMERR handling is not implemented yet. CoreDNS v1.15.0 accepts
-these when its header-count policy allows them, and selects the last OPT in
-Additional. CoreDNS's UDP/TCP Listener returns FORMERR on option unpacking
-errors; short headers are dropped. HTTP and QUIC report transport errors.
+The DNS Listener returns FORMERR for these malformed Messages and drops
+short headers. CoreDNS v1.15.0 accepts
+them when its header-count policy allows them, and selects the last OPT in
+Additional. CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC
+report transport errors. Pharos returns a header-only FORMERR
+for malformed Messages, whereas CoreDNS may retain a partially decoded Question.
+For a header-only Message claiming one Question, Pharos returns FORMERR;
+CoreDNS returns SERVFAIL.
+
+For pass-through Responses, Pharos truncates the encoded Message without
+recompression; CoreDNS may fit more records by recompressing first.
+If an OPT precedes other Additional records, Pharos drops the following
+records and sets TC rather than shifting their compression pointers.
+Pharos removes OPT from a Response to a non-EDNS Query, as RFC 6891 requires;
+CoreDNS may preserve a Plugin-supplied OPT in that case.
+Pharos logs Plugin errors and answers SERVFAIL; CoreDNS ignores returned errors.
+Zone Transfer streams are not yet served by the Listener.
 
 Pharos also rejects Client Subnet address lengths that do not match the prefix
 and non-zero host bits, which miekg/dns accepts. It validates the supported
@@ -92,21 +105,14 @@ CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each
 reference loops forever. Pharos reports an error instead, and also stops
 after 10,000 replacements or 16 MiB of expanded text.
 
-## DNS Listener
+## Listener
 
-CoreDNS v1.15.0 defaults to no per-connection Query limit
-(`core/dnsserver/server.go`, `tcpMaxQueries = -1`). Pharos also leaves the
-total number of Queries per connection unlimited, but limits a Listener to
-1,024 simultaneous TCP connections, 256 in-flight TCP Queries overall, and
-16 in-flight Queries per connection. Excess connections wait in the TCP
-backlog; excess Queries wait until a slot is available.
+CoreDNS v1.15.0 has no connection cap or per-connection in-flight cap
+(`core/dnsserver/server.go`, `tcpMaxQueries = -1`). Pharos limits a Listener
+to 1,024 simultaneous TCP connections and 16 in-flight Queries per connection.
+Excess connections wait in the TCP backlog; excess Queries wait for a slot.
 
 The default TCP read, write, and idle timeouts are 3, 5, and 10 seconds,
-respectively, matching CoreDNS v1.15.0 `core/dnsserver/server.go`. Pharos
-drains in-flight Queries on shutdown without CoreDNS's five-second grace
-deadline. A Handler that does not return can therefore delay shutdown.
+respectively, matching CoreDNS v1.15.0 `core/dnsserver/server.go`.
 
-On Linux, receive calls batch up to 16 UDP Queries. Sends currently use
-`sendmmsg` one Response at a time: nix 0.31's send-result iterator reads
-uninitialized addresses (nix-rust/nix#2797), so it cannot safely report
-partial sends for a batch of Responses to different clients.
+On Linux, each `sendmmsg` sends one Response (nix-rust/nix#2797).

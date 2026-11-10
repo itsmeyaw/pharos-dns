@@ -37,6 +37,19 @@ fn size_and_version_follow_coredns() {
 }
 
 #[test]
+fn response_opt_can_be_appended_to_an_existing_message() {
+    let opt = Opt::new(1232, 0, 0, 0x8000, EdnsOptions::parse(&[]).unwrap());
+    let mut wire = vec![0; 12];
+    opt.response(None, &[], Rcode::NOERROR)
+        .encode(&mut wire)
+        .unwrap();
+    wire[11] = 1;
+    let parsed = Message::parse(&wire).unwrap();
+    assert_eq!(parsed.opt().unwrap().udp_payload_size(), 1232);
+    assert!(parsed.opt().unwrap().dnssec_ok());
+}
+
+#[test]
 fn badvers_response_preserves_question_and_query_flags() {
     let query = [
         0x12, 0x34, 1, 0x10, 0, 1, 0, 0, 0, 0, 0, 1, 1, b'x', 0, 0, 1, 0, 1, 0, 0, 41, 2, 0, 0, 2,

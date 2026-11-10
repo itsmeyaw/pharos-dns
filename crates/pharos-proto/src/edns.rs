@@ -171,7 +171,8 @@ impl ResponseOpt<'_, '_> {
         11 + self.selected().map(<[u8]>::len).sum::<usize>()
     }
 
-    pub(crate) fn encode(&self, output: &mut Vec<u8>) -> Result<(), BuildError> {
+    /// Append this Response OPT to a caller-owned Message buffer.
+    pub fn encode(&self, output: &mut Vec<u8>) -> Result<(), BuildError> {
         let len = u16::try_from(self.wire_len() - 11).map_err(|_| BuildError::RdataTooLong)?;
         output.extend_from_slice(&[0, 0, 41]);
         output.extend_from_slice(&self.source.size.to_be_bytes());

@@ -12,6 +12,7 @@ pharos-server = { path = "../pharos-server" }
 
 [dev-dependencies]
 stats_alloc = "0.1.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [features]
 default = ["plugin-whoami"]
