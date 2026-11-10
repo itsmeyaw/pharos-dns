@@ -140,6 +140,15 @@ fn follows_backwards_compression_pointers_without_allocating() {
 }
 
 #[test]
+fn rejects_compression_target_overlapping_its_pointer() {
+    let message = b"\x03a\xc0\x00\x00";
+    assert_eq!(
+        NameRef::parse(message, 2).unwrap_err(),
+        NameError::PointerNotBackwards
+    );
+}
+
+#[test]
 fn rejects_hostile_wire_names() {
     let forward_pointer = b"\xc0\x02\0";
     let unsupported_label = b"\x40";

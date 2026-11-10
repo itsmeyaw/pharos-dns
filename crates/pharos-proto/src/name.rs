@@ -363,7 +363,11 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
     let mut expanded_len = 0;
     let mut hops = 0;
     let mut jumped = false;
+    let mut pointer_limit = message.len();
     loop {
+        if jumped && position >= pointer_limit {
+            return Err(NameError::PointerNotBackwards);
+        }
         let length = *message.get(position).ok_or(NameError::Truncated)?;
         match length {
             0 => {
@@ -375,6 +379,9 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
             }
             1..=63 => {
                 let end = position + 1 + usize::from(length);
+                if jumped && end > pointer_limit {
+                    return Err(NameError::PointerNotBackwards);
+                }
                 if message.get(position + 1..end).is_none() {
                     return Err(NameError::Truncated);
                 }
@@ -388,6 +395,9 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
                 position = end;
             }
             0xc0..=0xff => {
+                if jumped && position + 2 > pointer_limit {
+                    return Err(NameError::PointerNotBackwards);
+                }
                 let low = *message.get(position + 1).ok_or(NameError::Truncated)?;
                 let target = usize::from(length & 0x3f) << 8 | usize::from(low);
                 if target >= position {
@@ -401,6 +411,7 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
                     wire_len += 2;
                     jumped = true;
                 }
+                pointer_limit = position;
                 position = target;
             }
             _ => return Err(NameError::InvalidLabelType),
