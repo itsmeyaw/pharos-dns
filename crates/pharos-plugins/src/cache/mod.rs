@@ -455,10 +455,16 @@ impl Cache {
             }
         }
         if denial {
-            self.denial.insert(key, response, ttl, false)
+            self.denial
+                .insert(key, response, ttl, false, expected.is_some())
         } else {
-            self.success
-                .insert(key, response, ttl, self.config.prefer_positive)
+            self.success.insert(
+                key,
+                response,
+                ttl,
+                self.config.prefer_positive,
+                expected.is_some(),
+            )
         }
     }
 

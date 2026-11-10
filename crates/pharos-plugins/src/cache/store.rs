@@ -96,14 +96,17 @@ impl Store {
         response: &Message<'_>,
         ttl: u32,
         preserve_positive: bool,
+        preserve_frequency: bool,
     ) -> Option<bool> {
         let mut item = Item::new(response, ttl)?;
         let mut shard = self.shards[key as usize & 255].lock().unwrap();
         let previous = shard.items.remove(&key);
         let exists = previous.is_some();
         if let Some(mut previous) = previous {
-            item.hits = previous.hits;
-            item.last_hit = previous.last_hit;
+            if preserve_frequency {
+                item.hits = previous.hits;
+                item.last_hit = previous.last_hit;
+            }
             if preserve_positive && !item.answering {
                 item.last_known_good = if previous.answering {
                     Some(Box::new(previous))
