@@ -38,14 +38,16 @@ UTF-8 in Extended DNS Error text is rendered with replacement characters.
 
 ## Record data
 
-The typed RDATA parser currently supports A, AAAA, NS, CNAME, PTR, MX,
-SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG,
-NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SSHFP, ZONEMD and TSIG.
+The requested record-data families are complete: the typed RDATA parser supports
+A, AAAA, NS, CNAME, PTR, MX, SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS,
+DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SSHFP,
+ZONEMD and TSIG.
 Unsupported name-bearing types are rejected by the typed parser;
-other types remain opaque and print in RFC 3597 form rather than using their
-CoreDNS presentation. Presentation parsing is not yet implemented. Unlike
-miekg/dns, incomplete typed records are rejected rather than accepted as
-partial values.
+other types remain opaque, preserve their bytes and print in RFC 3597 form
+rather than using their CoreDNS presentation. Presentation parsing is deferred
+to the zone-file parsing issue (see the existing `shortcut:` comment in
+`rdata.rs`). Unlike miekg/dns, incomplete typed records are rejected rather
+than accepted as partial values.
 
 Pharos rejects a zero-length TXT RDATA, which lacks the required character
 string; miekg/dns accepts it. TXT strings of length zero are accepted. Pharos

@@ -2,9 +2,43 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pharos_proto::{EdnsOptions, Message, MessageMut};
+use pharos_proto::{EdnsOptions, Message, MessageMut, Rdata, Type};
 
 fuzz_target!(|wire: &[u8]| {
+    for rtype in [
+        Type::A,
+        Type::AAAA,
+        Type::NS,
+        Type::CNAME,
+        Type::PTR,
+        Type::MX,
+        Type::SOA,
+        Type::TXT,
+        Type::HINFO,
+        Type::CAA,
+        Type::URI,
+        Type::SRV,
+        Type::NAPTR,
+        Type::DS,
+        Type::CDS,
+        Type::DNSKEY,
+        Type::CDNSKEY,
+        Type::RRSIG,
+        Type::NSEC,
+        Type::NSEC3,
+        Type::NSEC3PARAM,
+        Type::SVCB,
+        Type::HTTPS,
+        Type::TLSA,
+        Type::SSHFP,
+        Type::ZONEMD,
+        Type::TSIG,
+        Type(731),
+    ] {
+        if let Ok(data) = Rdata::parse(rtype, wire) {
+            let _ = data.to_string();
+        }
+    }
     if let Ok(options) = EdnsOptions::parse(wire) {
         assert_eq!(options.as_bytes(), wire);
         assert!(options.iter().eq(options.iter()));
@@ -33,6 +67,11 @@ fuzz_target!(|wire: &[u8]| {
             let _ = record.name.to_name();
             if let Ok(data) = record.data() {
                 let _ = data.to_string();
+            }
+            if record.rtype == Type::TSIG {
+                if let Ok(display) = record.display_tsig() {
+                    let _ = display.to_string();
+                }
             }
         }
         if let Some(opt) = message.opt() {

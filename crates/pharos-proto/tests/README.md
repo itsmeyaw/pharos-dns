@@ -14,5 +14,8 @@ SVCB and HTTPS fixtures in `rdata_svcb.rs` adapt miekg/dns v1.1.73
 Security fixtures in `rdata_security.rs` adapt miekg/dns v1.1.73
 `parse_test.go` (`TestParseTLSA`, `TestParseSSHFP`, `TestParseZONEMD`)
 and `tsig_test.go` under the same license.
+The type-name fixture `corpus/miekg-types.txt` derives from miekg/dns v1.1.73
+`ztypes.go` and `types.go`, under the same license. RFC 3597 examples are
+covered in `rdata_unknown.rs`.
 Differential RDATA tests use NLnet Labs' domain as a reference. Licenses are
 listed in the repository's `THIRD_PARTY_NOTICES`.

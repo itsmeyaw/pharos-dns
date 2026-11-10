@@ -346,6 +346,11 @@ impl RdataWriter<'_, '_> {
     }
 
     /// Writes a name, compressing against earlier Message names when possible.
+    ///
+    /// This low-level hook does not know the RR type. Call it only when that
+    /// type permits compression in RDATA (RFC 3597); otherwise use
+    /// [`Self::write_uncompressed_name`]. Unknown RDATA must remain opaque and
+    /// should be written with [`Self::write_bytes`].
     pub fn write_name(&mut self, name: NameRef<'_>) -> Result<(), BuildError> {
         self.builder.write_name(name)
     }

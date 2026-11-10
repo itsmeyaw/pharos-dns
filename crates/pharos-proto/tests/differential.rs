@@ -368,6 +368,32 @@ fn compare_opt(wire: &[u8]) {
 
 proptest! {
     #[test]
+    fn generated_unknown_rdata_agrees_with_domain(
+        number in prop_oneof![Just(0u16), Just(11u16), Just(731u16), Just(62347u16), 65000u16..=u16::MAX],
+        bytes in prop::collection::vec(any::<u8>(), 0..128),
+    ) {
+        let root: Name = ".".parse().unwrap();
+        let root = NameRef::parse(root.as_wire(), 0).unwrap();
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
+        assert!(builder.record(Section::Answer, root, Type(number), Class::IN, 0, &bytes).unwrap());
+        let _ = builder.finish();
+        let ours = Message::parse(&wire).unwrap().answers().next().unwrap().data().unwrap();
+        let domain = DomainMessage::from_octets(wire.as_slice()).unwrap();
+        let theirs = domain.question().answer().unwrap().next().unwrap().unwrap()
+            .to_any_record::<AllRecordData<_, ParsedName<_>>>().unwrap().into_data();
+        match (ours, theirs) {
+            (pharos_proto::Rdata::Unknown(rtype, data), AllRecordData::Unknown(b)) => {
+                prop_assert_eq!(rtype.0, number);
+                prop_assert_eq!(rtype.0, b.rtype().to_int());
+                prop_assert_eq!(data, *b.data());
+                prop_assert_eq!(data, bytes.as_slice());
+            }
+            pair => prop_assert!(false, "unknown RDATA mismatch: {pair:?}"),
+        }
+    }
+
+    #[test]
     fn generated_opt_fields_and_raw_options(
         size in any::<u16>(), ttl in any::<u32>(),
         options in prop::collection::vec((any::<u16>(), prop::collection::vec(any::<u8>(), 0..20)), 0..8),
@@ -938,6 +964,7 @@ fn supported_typed_rdata_agrees_with_domain() {
             }
             (pharos_proto::Rdata::Unknown(rtype, bytes), AllRecordData::Unknown(b)) => {
                 assert_eq!(rtype, Type(65000));
+                assert_eq!(rtype.0, b.rtype().to_int());
                 assert_eq!(bytes, *b.data());
             }
             (pharos_proto::Rdata::Ns(a), AllRecordData::Ns(b)) => {
