@@ -3,6 +3,7 @@ use pharos_server::{Listener, Phase, startup_domains};
 use std::{
     collections::BTreeMap,
     fs,
+    future::Future,
     io::{self, Read},
     path::Path,
 };
@@ -112,10 +113,10 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
         fs::write(path, format!("{}\n", std::process::id()))
             .map_err(|e| (1, format!("{path}: {e}")))?;
     }
-    loop {
+    let terminate = loop {
         tokio::select! {
-            _ = signals.interrupt.recv() => break,
-            _ = signals.terminate.recv() => break,
+            _ = signals.interrupt.recv() => break false,
+            _ = signals.terminate.recv() => break true,
             _ = signals.quit.recv() => { remove_pidfile(&options); return Ok(0); },
             _ = signals.hangup.recv() => {},
             _ = signals.reload.recv() => {
@@ -123,25 +124,28 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
                 eprintln!("Reload");
             },
         }
-    }
-    let shutdown = async {
-        let mut code = 0;
+    };
+    let stop = async {
+        let mut result = Ok(());
         for listener in listeners {
             if let Err(error) = listener.shutdown().await {
-                eprintln!("{error}");
-                code = 3;
+                if result.is_ok() {
+                    result = Err(error);
+                }
             }
         }
-        if let Err(error) = lifecycle.run(Phase::Shutdown).await {
-            eprintln!("{error}");
-            code = 4;
-        }
-        code
+        result
     };
+    let shutdown = shutdown(
+        terminate,
+        lifecycle.run(Phase::Shutdown),
+        || remove_pidfile(&options),
+        stop,
+    );
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            code = &mut shutdown => { remove_pidfile(&options); return Ok(code); },
+            code = &mut shutdown => return Ok(code),
             _ = signals.interrupt.recv() => { remove_pidfile(&options); return Ok(2); },
             _ = signals.quit.recv() => { remove_pidfile(&options); return Ok(0); },
             _ = signals.hangup.recv() => {},
@@ -151,8 +155,72 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     }
 }
 
+async fn shutdown(
+    terminate: bool,
+    hooks: impl Future<Output = io::Result<()>>,
+    remove: impl FnOnce(),
+    stop: impl Future<Output = io::Result<()>>,
+) -> u8 {
+    let hooks = hooks.await;
+    if let Err(error) = &hooks {
+        eprintln!("{error}");
+    }
+    remove();
+    let stopped = stop.await;
+    if let Err(error) = &stopped {
+        eprintln!("{error}");
+    }
+    if hooks.is_err() {
+        4
+    } else if terminate && stopped.is_err() {
+        3
+    } else {
+        0
+    }
+}
+
 fn remove_pidfile(options: &Options) {
     if let Some(path) = &options.pidfile {
         let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, io};
+
+    use super::shutdown;
+
+    #[tokio::test]
+    async fn shutdown_hooks_run_before_pidfile_removal_and_listener_stop() {
+        for (terminate, hook_fails, stop_fails, expected) in [
+            (true, false, false, 0),
+            (true, true, false, 4),
+            (true, false, true, 3),
+            (true, true, true, 4),
+            (false, false, true, 0),
+            (false, true, true, 4),
+        ] {
+            let steps = RefCell::new(Vec::new());
+            let hooks = async {
+                steps.borrow_mut().push("hooks");
+                if hook_fails {
+                    Err(io::Error::other("hook"))
+                } else {
+                    Ok(())
+                }
+            };
+            let remove = || steps.borrow_mut().push("pidfile");
+            let stop = async {
+                steps.borrow_mut().push("stop");
+                if stop_fails {
+                    Err(io::Error::other("stop"))
+                } else {
+                    Ok(())
+                }
+            };
+            assert_eq!(shutdown(terminate, hooks, remove, stop).await, expected);
+            assert_eq!(*steps.borrow(), ["hooks", "pidfile", "stop"]);
+        }
     }
 }
