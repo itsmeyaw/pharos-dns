@@ -2,10 +2,20 @@ use pharos_proto::{Class, MessageBuilder, NameRef, Opcode, Section, Type};
 use pharos_server::{Context, Error, Outcome, Protocol};
 use std::net::IpAddr;
 
-pub fn serve(context: &mut Context<'_>) -> Outcome {
-    match response(context) {
-        Ok(()) => Outcome::Response,
-        Err(error) => Outcome::Error(error),
+/// Returns the client's address and protocol in the Additional section.
+#[derive(Debug)]
+pub struct Whoami;
+
+impl pharos_server::Plugin for Whoami {
+    async fn serve<N: pharos_server::Next + Send>(
+        &self,
+        context: &mut Context<'_>,
+        _next: N,
+    ) -> Outcome {
+        match response(context) {
+            Ok(()) => Outcome::Response,
+            Err(error) => Outcome::Error(error),
+        }
     }
 }
 

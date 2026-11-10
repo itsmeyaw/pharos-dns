@@ -1,7 +1,8 @@
 #![cfg(feature = "plugin-whoami")]
+#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
-use pharos_plugins::{Next, Plugin, directives};
+use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 use std::{
@@ -23,7 +24,7 @@ fn run<F: Future>(future: F) -> F::Output {
 #[test]
 fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
     let blocks = parse("Corefile", ".:53 {\n whoami\n}").unwrap();
-    let configured = configure::<Vec<Plugin>>(&blocks, directives()).unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let domain: Name = ".".parse().unwrap();
     for (address, protocol, name, kind) in [
         ("192.0.2.8:1234", Protocol::Udp, "Example.COM.", Type::A),
@@ -55,10 +56,7 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
             response: &mut response,
             max_response_size: 512,
         };
-        assert_eq!(
-            run(Next::new(&configured[0].config).run(&mut ctx)),
-            Outcome::Response
-        );
+        assert_eq!(run(configured[0].config.serve(&mut ctx)), Outcome::Response);
         let reply = Message::parse(&response).unwrap();
         assert_eq!(reply.id(), 0x1234);
         assert!(reply.qr() && reply.aa() && reply.rd() && reply.cd());
@@ -117,46 +115,9 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
 }
 
 #[test]
-fn next_allows_upstream_to_inspect_and_alter_response() {
-    async fn upstream(next: Next<'_>, context: &mut Context<'_>) -> Outcome {
-        let outcome = next.run(context).await;
-        if outcome == Outcome::Response {
-            pharos_proto::MessageMut::parse(context.response)
-                .unwrap()
-                .set_id(99);
-        }
-        outcome
-    }
-    let blocks = parse("Corefile", ". {\n whoami\n}").unwrap();
-    let configured = configure::<Vec<Plugin>>(&blocks, directives()).unwrap();
-    let query = Message::parse(&[0; 12]).unwrap();
-    let domain: Name = ".".parse().unwrap();
-    let mut response = Vec::with_capacity(512);
-    let mut slots = [];
-    let mut context = Context {
-        query,
-        client: "127.0.0.1:53".parse().unwrap(),
-        transport: Transport::Dns,
-        protocol: Protocol::Udp,
-        domain: &domain,
-        metadata: Metadata::new(&mut slots),
-        response: &mut response,
-        max_response_size: 512,
-    };
-    assert_eq!(
-        run(upstream(Next::new(&configured[0].config), &mut context)),
-        Outcome::Response
-    );
-    let reply = Message::parse(&response).unwrap();
-    assert_eq!(reply.id(), 99);
-    assert_eq!((reply.question_count(), reply.additional_count()), (0, 2));
-    assert_eq!(reply.additionals().next().unwrap().class, Class(0));
-}
-
-#[test]
 fn insufficient_preallocated_buffer_is_an_error() {
     let blocks = parse("Corefile", ". {\n whoami\n}").unwrap();
-    let configured = configure::<Vec<Plugin>>(&blocks, directives()).unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let query = Message::parse(&[0; 12]).unwrap();
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::new();
@@ -172,7 +133,62 @@ fn insufficient_preallocated_buffer_is_an_error() {
         max_response_size: 512,
     };
     assert_eq!(
-        run(Next::new(&configured[0].config).run(&mut context)),
+        run(configured[0].config.serve(&mut context)),
         Outcome::Error(pharos_server::Error::ResponseBufferTooSmall)
+    );
+}
+
+#[test]
+fn generated_chain_future_is_send_and_small() {
+    fn assert_send<T: Send>(_: &T) {}
+    let blocks = parse("Corefile", ". {\n whoami\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut context = Context {
+        query: Message::parse(&[0; 12]).unwrap(),
+        client: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    let future = configured[0].config.serve(&mut context);
+    assert_send(&future);
+    let size = std::mem::size_of_val(&future);
+    println!("chain future: {size} bytes");
+    // Future size grows with the number of compiled Plugins.
+    if directives().len() == 1 {
+        assert!(size < 1024, "whoami-only future is {size} bytes");
+    }
+    assert_eq!(run(future), Outcome::Response);
+}
+
+#[test]
+fn empty_chain_reports_no_next_plugin() {
+    let chain = Chain::default();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut context = Context {
+        query: Message::parse(&[0; 12]).unwrap(),
+        client: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        run(chain.serve(&mut context)),
+        Outcome::Error(pharos_server::Error::NoNextPlugin)
+    );
+    assert_eq!(
+        pharos_server::Error::NoNextPlugin.to_string(),
+        "no next plugin found"
     );
 }

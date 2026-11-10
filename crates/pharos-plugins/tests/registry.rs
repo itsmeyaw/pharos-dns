@@ -1,12 +1,14 @@
 use pharos_corefile::{configure, parse};
-use pharos_plugins::{Plugin, directives, plugins_listing};
+use pharos_plugins::{Chain, directives, plugins_listing};
 
 #[test]
 fn whoami_feature_controls_registration() {
     let blocks = parse("Corefile", ".:53 {\n whoami\n}").unwrap();
-    let result = configure::<Vec<Plugin>>(&blocks, directives());
+    let result = configure::<Chain>(&blocks, directives());
     if cfg!(feature = "plugin-whoami") {
-        assert_eq!(result.unwrap()[0].config.len(), 1);
+        assert!(result.is_ok());
+        #[cfg(feature = "plugin-whoami")]
+        assert!(result.unwrap()[0].config.whoami.is_some());
         assert!(plugins_listing().lines().any(|name| name == "whoami"));
     } else {
         assert!(
@@ -23,5 +25,5 @@ fn whoami_feature_controls_registration() {
 #[test]
 fn whoami_rejects_arguments() {
     let blocks = parse("Corefile", ". {\n whoami extra\n}").unwrap();
-    assert!(configure::<Vec<Plugin>>(&blocks, directives()).is_err());
+    assert!(configure::<Chain>(&blocks, directives()).is_err());
 }

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::{env, fs, path::PathBuf};
+use std::{env, fmt::Write, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=plugin.cfg");
@@ -16,30 +16,28 @@ fn main() {
             env::var_os(feature).map(|_| name)
         })
         .collect();
-    let variant = |name: &str| -> String {
-        name.split('_')
-            .map(|part| {
-                let mut chars = part.chars();
-                chars.next().unwrap().to_ascii_uppercase().to_string() + chars.as_str()
-            })
-            .collect()
-    };
-    let mut code = String::from("#[derive(Clone, Copy, Debug)]\npub enum Plugin {\n");
+
+    let mut code = String::from("#[derive(Debug, Default)]\npub struct Chain {\n");
     for name in &enabled {
-        code.push_str(&format!("{},\n", variant(name)));
+        let ty = if *name == "whoami" {
+            "whoami::Whoami"
+        } else {
+            "Unimplemented"
+        };
+        writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
     }
-    code.push_str(
-        "}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Vec<Plugin>>] = &[\n",
-    );
+    code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = if *name == "whoami" {
             "setup_whoami"
         } else {
             "setup_unimplemented"
         };
-        code.push_str(&format!(
-            "pharos_corefile::Directive {{ name: {name:?}, once: false, setup: {setup} }},\n"
-        ));
+        writeln!(
+            code,
+            "pharos_corefile::Directive {{ name: {name:?}, once: false, setup: {setup} }},"
+        )
+        .unwrap();
     }
     code.push_str("];\n");
     let mut sorted = enabled.clone();
@@ -49,17 +47,21 @@ fn main() {
     } else {
         sorted.join("\n") + "\n\n"
     };
-    code.push_str(&format!("pub const PLUGINS_LISTING: &str = {listing:?};\n"));
-    code.push_str("impl Plugin { async fn call(&self, _context: &mut pharos_server::Context<'_>, _next: Next<'_>) -> pharos_server::Outcome { match *self {\n");
-    for name in &enabled {
-        let body = if *name == "whoami" {
-            "whoami::serve(_context)"
-        } else {
-            "pharos_server::Outcome::Error(pharos_server::Error::NotImplemented)"
-        };
-        code.push_str(&format!("Self::{} => {body},\n", variant(name)));
+    writeln!(code, "pub const PLUGINS_LISTING: &str = {listing:?};").unwrap();
+
+    code.push_str("impl Chain {\n");
+    code.push_str("// shortcut: Self Lookup (#35) must Box::pin re-entry and cap depth at 10.\n");
+    code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
+    for (i, name) in enabled.iter().enumerate() {
+        let next = i + 1;
+        writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await, None => self.serve_{next}(cx).await, }} }}").unwrap();
     }
-    code.push_str("} } }\n");
+    writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
+    code.push_str("}\n");
+    for i in 0..enabled.len() {
+        let next = i + 1;
+        writeln!(code, "struct Next{i}<'a>(&'a Chain);\nimpl pharos_server::Next for Next{i}<'_> {{ async fn run(self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.0.serve_{next}(cx).await }} }}").unwrap();
+    }
     fs::write(
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("plugins.rs"),
         code,

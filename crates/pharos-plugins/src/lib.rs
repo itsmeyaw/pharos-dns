@@ -1,19 +1,19 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "512"]
 //! Plugins are enabled by `plugin-<directive>` Cargo features (underscores in
 //! Directive names become hyphens). Only whoami is implemented; other enabled
 //! Directives reject configuration rather than silently accepting it.
 
 use pharos_corefile::{BlockContext, Cursor, Directive, Error};
-use pharos_server::{Context, Outcome};
 
 #[cfg(feature = "plugin-whoami")]
-mod whoami;
+pub mod whoami;
 
 include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
 
 /// Directive registry in Plugin Order.
 #[must_use]
-pub fn directives() -> &'static [Directive<'static, Vec<Plugin>>] {
+pub fn directives() -> &'static [Directive<'static, Chain>] {
     DIRECTIVES
 }
 
@@ -23,43 +23,32 @@ pub const fn plugins_listing() -> &'static str {
     PLUGINS_LISTING
 }
 
-/// Remaining Plugins in Plugin Order. Awaiting Next does not allocate.
-#[derive(Clone, Copy)]
-pub struct Next<'a>(&'a [Plugin]);
+/// Placeholder for enabled but unimplemented Plugins, whose setup always fails.
+#[derive(Debug)]
+pub struct Unimplemented;
 
-impl<'a> Next<'a> {
-    #[must_use]
-    pub const fn new(plugins: &'a [Plugin]) -> Self {
-        Self(plugins)
-    }
-
-    pub async fn run(self, context: &mut Context<'_>) -> Outcome {
-        // shortcut: Plugins cannot await this recursively; replace dispatch before adding middleware.
-        match self.0.split_first() {
-            Some((plugin, remaining)) => plugin.call(context, Self(remaining)).await,
-            None => Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL),
-        }
+impl pharos_server::Plugin for Unimplemented {
+    async fn serve<N: pharos_server::Next + Send>(
+        &self,
+        _cx: &mut pharos_server::Context<'_>,
+        _next: N,
+    ) -> pharos_server::Outcome {
+        pharos_server::Outcome::Error(pharos_server::Error::NotImplemented)
     }
 }
 
 #[cfg(feature = "plugin-whoami")]
-fn setup_whoami(
-    cursor: &mut Cursor<'_>,
-    block: &mut BlockContext<Vec<Plugin>>,
-) -> Result<(), Error> {
+fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     cursor.next();
     if cursor.next_arg() {
         return Err(cursor.arg_err());
     }
-    block.config.push(Plugin::Whoami);
+    block.config.whoami = Some(whoami::Whoami);
     Ok(())
 }
 
 #[allow(dead_code)]
-fn setup_unimplemented(
-    cursor: &mut Cursor<'_>,
-    _: &mut BlockContext<Vec<Plugin>>,
-) -> Result<(), Error> {
+fn setup_unimplemented(cursor: &mut Cursor<'_>, _: &mut BlockContext<Chain>) -> Result<(), Error> {
     cursor.next();
     Err(cursor.error(format!("{}: plugin is not implemented", cursor.val())))
 }
