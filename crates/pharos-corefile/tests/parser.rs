@@ -82,3 +82,21 @@ fn key_normalization_reports_source_location() {
     assert_eq!(keys[0].domain, "example.org.");
     assert_eq!(keys[1].domain, "10.in-addr.arpa.");
 }
+
+#[test]
+fn dns_default_port_preserves_explicit_and_other_transport_ports() {
+    let mut blocks = pharos_corefile::parse(
+        "Corefile",
+        ". dns://example.org explicit.test:53 tls://secure.test\n",
+    )
+    .unwrap();
+    blocks[0].set_default_dns_port(1053);
+    let keys = blocks[0].normalize_keys().unwrap();
+    assert_eq!(
+        keys.iter().map(|key| key.port.as_str()).collect::<Vec<_>>(),
+        ["1053", "1053", "53", "853"]
+    );
+    let mut invalid = pharos_corefile::parse("Corefile", "example:\n").unwrap();
+    invalid[0].set_default_dns_port(1053);
+    assert!(invalid[0].normalize_keys().is_err());
+}
