@@ -268,3 +268,25 @@ async fn exchange_error_starts_health_check() {
     );
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn signed_query_preserves_its_id_on_the_wire() {
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+        assert_eq!(&wire[..2], &[0x12, 0x34]);
+        wire[2] |= 0x80;
+        server.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let mut query = QUERY.to_vec();
+    query[11] = 1;
+    query.extend_from_slice(&[0, 0, 250, 0, 255, 0, 0, 0, 0, 0, 0]);
+    let mut response = [0; 512];
+    proxy
+        .exchange(&query, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap();
+    task.await.unwrap();
+}

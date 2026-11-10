@@ -5,7 +5,7 @@
 pub mod health;
 pub use health::{Health, HealthConfig};
 
-use pharos_proto::{Message, Rcode};
+use pharos_proto::{Message, Rcode, Type};
 use pharos_server::metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry};
 use std::{
     collections::VecDeque,
@@ -251,8 +251,15 @@ impl Proxy {
             Socket::Udp(socket)
         };
         let mut id = [0; 2];
-        getrandom::getrandom(&mut id)
-            .map_err(|_| Error::Io(io::Error::other("random ID generation failed")))?;
+        if request
+            .additionals()
+            .any(|record| record.rtype == Type::TSIG)
+        {
+            id.copy_from_slice(&query[..2]);
+        } else {
+            getrandom::getrandom(&mut id)
+                .map_err(|_| Error::Io(io::Error::other("random ID generation failed")))?;
+        }
         response[..query.len()].copy_from_slice(query);
         response[..2].copy_from_slice(&id);
         let local_addr = socket.local_addr()?;
