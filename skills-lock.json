@@ -1,11 +1,11 @@
 {
   "version": 1,
   "skills": {
-    "git-commit": {
-      "source": "github/awesome-copilot",
+    "caveman-commit": {
+      "source": "juliusbrussee/caveman",
       "sourceType": "github",
-      "skillPath": "skills/git-commit/SKILL.md",
-      "computedHash": "8f5a47c99951ec09853abf3231c76f48caac5d6b84ea912dd4997e6996885c0b"
+      "skillPath": "skills/caveman-commit/SKILL.md",
+      "computedHash": "b416cf134b0f33ddadeca7977aebdbb2d3db79a166d0fce2e1aabeec98132766"
     },
     "rust-async-patterns": {
       "source": "wshobson/agents",

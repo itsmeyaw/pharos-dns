@@ -1,3 +1,8 @@
+## Development
+
+- Use `caveman-commit` skill for commit message.
+- Commit in small functional changes.
+
 ## Agent skills
 
 ### Issue tracker
