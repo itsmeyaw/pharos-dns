@@ -4,18 +4,111 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
+    time::Duration,
 };
 
 const FORBID_UNSAFE: &str = "#![forbid(unsafe_code)]";
+const FUZZ_TARGETS: &[&str] = &["message", "name", "roundtrip", "differential"];
 
 fn main() -> ExitCode {
-    match env::args().nth(1).as_deref() {
-        Some("check") => check(),
+    let args: Vec<_> = env::args().skip(1).collect();
+    match args.as_slice() {
+        [command] if command == "check" => check(),
+        [command] if command == "fuzz" => fuzz(false),
+        [command, flag] if command == "fuzz" && flag == "--short" => fuzz(true),
         _ => {
-            eprintln!("usage: cargo xtask check");
+            eprintln!("usage: cargo xtask check | fuzz [--short]");
             ExitCode::FAILURE
         }
     }
+}
+
+fn fuzz_args(target: &str, short: bool) -> Vec<&str> {
+    let mut args = vec!["+nightly", "fuzz", "run"];
+    // The installed macOS nightly's ASan runtime hangs before starting libFuzzer.
+    if cfg!(target_os = "macos") {
+        args.extend(["--sanitizer", "none"]);
+    }
+    args.push(target);
+    args.extend(["--", "-timeout=10"]);
+    if short {
+        args.push("-max_total_time=60");
+    }
+    args
+}
+
+fn fuzz(short: bool) -> ExitCode {
+    if Command::new("cargo-fuzz")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("cargo-fuzz is required; install it with: cargo install cargo-fuzz");
+        return ExitCode::FAILURE;
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for target in FUZZ_TARGETS {
+        if let Err(error) = seed_corpus(root, target) {
+            eprintln!("could not seed {target} corpus: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    let mut children = Vec::new();
+    for target in FUZZ_TARGETS {
+        match Command::new("cargo")
+            .args(fuzz_args(target, short))
+            .current_dir(root.join("crates/pharos-proto"))
+            .spawn()
+        {
+            Ok(child) => children.push((*target, child)),
+            Err(error) => {
+                eprintln!("could not start {target}: {error}");
+                for (_, mut child) in children {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    while !children.is_empty() {
+        for index in (0..children.len()).rev() {
+            match children[index].1.try_wait() {
+                Ok(Some(status)) if status.success() => {
+                    children.swap_remove(index);
+                }
+                Ok(None) => {}
+                result => {
+                    eprintln!("fuzz target {} failed: {result:?}", children[index].0);
+                    for (_, mut child) in children {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        if !children.is_empty() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn seed_corpus(root: &Path, target: &str) -> std::io::Result<()> {
+    let destination = root.join("crates/pharos-proto/fuzz/corpus").join(target);
+    fs::create_dir_all(&destination)?;
+    for entry in fs::read_dir(root.join("crates/pharos-proto/tests/corpus"))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "bin") {
+            let target = destination.join(path.file_name().unwrap());
+            if !target.exists() {
+                fs::copy(path, target)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check() -> ExitCode {
@@ -103,7 +196,16 @@ fn unsafe_gate(crates: &[PathBuf]) -> Result<(), String> {
             ));
         }
 
-        for source_file in rust_sources(crate_root)? {
+        // The separate fuzz workspace contains generated libFuzzer code and build artifacts.
+        let excluded = if crate_root
+            .file_name()
+            .is_some_and(|name| name == "pharos-proto")
+        {
+            Some(crate_root.join("fuzz"))
+        } else {
+            None
+        };
+        for source_file in rust_sources(crate_root, excluded.as_deref())? {
             let source = fs::read_to_string(&source_file)
                 .map_err(|error| format!("{}: {error}", source_file.display()))?;
             if contains_unsafe_code(&source) {
@@ -114,14 +216,14 @@ fn unsafe_gate(crates: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-fn rust_sources(directory: &Path) -> Result<Vec<PathBuf>, String> {
+fn rust_sources(directory: &Path, excluded: Option<&Path>) -> Result<Vec<PathBuf>, String> {
     let mut sources = Vec::new();
     for entry in
         fs::read_dir(directory).map_err(|error| format!("{}: {error}", directory.display()))?
     {
         let path = entry.map_err(|error| error.to_string())?.path();
-        if path.is_dir() {
-            sources.extend(rust_sources(&path)?);
+        if path.is_dir() && Some(path.as_path()) != excluded {
+            sources.extend(rust_sources(&path, excluded)?);
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             sources.push(path);
         }
@@ -275,9 +377,52 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use super::unsafe_gate;
+    use super::{fuzz_args, pharos_crates, seed_corpus, unsafe_gate};
 
     static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn fuzz_commands_limit_only_short_runs() {
+        let mut expected = vec!["+nightly", "fuzz", "run"];
+        if cfg!(target_os = "macos") {
+            expected.extend(["--sanitizer", "none"]);
+        }
+        expected.extend(["message", "--", "-timeout=10"]);
+        assert_eq!(fuzz_args("message", false), expected);
+        expected.push("-max_total_time=60");
+        assert_eq!(fuzz_args("message", true), expected);
+    }
+
+    #[test]
+    fn unsafe_gate_scans_pharos_but_not_separate_fuzz_workspace() {
+        let fixture = TempFixture::new();
+        fixture.crate_with_source("crates/pharos-proto", "#![forbid(unsafe_code)]\n");
+        fixture.crate_with_source("xtask", "#![forbid(unsafe_code)]\n");
+        fixture.crate_with_source("crates/pharos-proto/fuzz/target/generated", "unsafe {}\n");
+        let crates = pharos_crates(fixture.path()).unwrap();
+        assert!(unsafe_gate(&crates).is_ok());
+        fixture.crate_with_source("crates/pharos-proto/tests/other", "unsafe {}\n");
+        assert!(unsafe_gate(&crates).is_err());
+    }
+
+    #[test]
+    fn seeds_are_copied_without_overwriting_corpus_or_fixtures() {
+        let fixture = TempFixture::new();
+        let source = fixture.path().join("crates/pharos-proto/tests/corpus");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("seed.bin"), b"message").unwrap();
+        fs::write(source.join("README.md"), b"not a seed").unwrap();
+        seed_corpus(fixture.path(), "message").unwrap();
+        let target = fixture
+            .path()
+            .join("crates/pharos-proto/fuzz/corpus/message");
+        assert_eq!(fs::read(target.join("seed.bin")).unwrap(), b"message");
+        assert!(!target.join("README.md").exists());
+        fs::write(target.join("seed.bin"), b"existing").unwrap();
+        seed_corpus(fixture.path(), "message").unwrap();
+        assert_eq!(fs::read(target.join("seed.bin")).unwrap(), b"existing");
+        assert_eq!(fs::read(source.join("seed.bin")).unwrap(), b"message");
+    }
 
     #[test]
     fn unsafe_gate_rejects_code_but_ignores_comments_and_strings() {
