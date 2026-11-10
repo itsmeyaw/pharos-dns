@@ -1,0 +1,6 @@
+.:{port} {
+    ready localhost:{metrics_port} {
+        monitor continuously
+    }
+    whoami
+}

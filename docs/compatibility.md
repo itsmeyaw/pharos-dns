@@ -68,7 +68,7 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `log`, `prometheus` and `whoami` are implemented. Other built-in Directives are
+Only `log`, `prometheus`, `ready` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
 
@@ -84,6 +84,14 @@ return 404. Pharos requires a numeric metrics port at startup; CoreDNS can
 also resolve service names supported by the host.
 Bind and startup errors are reported, whereas CoreDNS's shared Listener setup
 currently discards errors from its `uniq.ForEach` callback.
+
+The `ready` endpoint serves GET only; CoreDNS also accepts other methods.
+HTTP connections use the same five-second total lifetime and 1,024-connection
+limit as the metrics endpoint. Pharos requires numeric ports at startup and
+reports bind errors; CoreDNS supports service names and currently discards
+errors from shared Listener startup. Pharos does not log unready Plugin names
+on every readiness request. Reload is not implemented, so readiness state is
+not reset by SIGUSR1.
 
 Whoami reports an error if adding the protocol label would make its SRV owner
 name exceed the DNS name length limit. CoreDNS ignores the resulting write
