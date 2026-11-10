@@ -157,6 +157,9 @@ valid weights when parsing fails. Weight file Domains that cannot be parsed as
 DNS names cannot match Responses. Negative reload durations are accepted as
 zero; CoreDNS's negative ticker interval panics when started. Random choices
 use a thread-local xorshift generator rather than CoreDNS's generators.
+Equivalent escaped Domain spellings can match in Pharos, while CoreDNS
+compares presentation strings exactly. Weight file reads and parsing run on a
+Tokio worker and can delay other tasks. Successful reloads are not logged.
 
 ## Reload
 

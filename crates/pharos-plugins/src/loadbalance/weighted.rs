@@ -148,6 +148,9 @@ fn parse(bytes: &[u8]) -> io::Result<Vec<Entry>> {
                     .parse::<IpAddr>()
                     .map_err(io::Error::other)?
                     .to_canonical();
+                if !weight.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(io::Error::other("invalid weight"));
+                }
                 let value = weight.parse::<u8>().map_err(io::Error::other)?;
                 if value == 0 {
                     return Err(io::Error::other("zero weight"));

@@ -96,6 +96,7 @@ async fn coredns_weight_file_errors_are_reported_at_startup() {
         ("example.org\n192.0.2.1\n", false),
         ("example.org\n192.0.2.999 1\n", false),
         ("example.org\n192.0.2.1 0\n", false),
+        ("example.org\n192.0.2.1 +1\n", false),
         ("example.org\n192.0.2.1 256\n", false),
     ] {
         std::fs::write(&path, content).unwrap();
