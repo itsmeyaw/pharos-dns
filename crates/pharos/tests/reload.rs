@@ -355,7 +355,7 @@ fn reload_directive_polls_for_changed_corefile() {
     socket
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
-    let query = [
+    let mut query = [
         0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1,
     ];
     let mut tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -363,17 +363,26 @@ fn reload_directive_polls_for_changed_corefile() {
     assert_eq!(tcp_query(&mut tcp, &query)[3] & 15, 0);
     fs::write(&backend, "errors\n").unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
+    let mut old_responses = 0u16;
     loop {
+        query[..2].copy_from_slice(&old_responses.to_be_bytes());
         socket.send_to(&query, ("127.0.0.1", port)).unwrap();
         let mut response = [0; 1024];
-        let (_, peer) = socket.recv_from(&mut response).unwrap();
+        let (length, peer) = socket
+            .recv_from(&mut response)
+            .expect("unanswered UDP Query during Reload");
         assert_eq!(peer.port(), port);
+        assert!(length >= 12 && response[2] & 0x80 != 0);
+        assert_eq!(response[..2], query[..2]);
         if response[3] & 15 == 2 {
             break;
         }
+        assert_eq!(response[3] & 15, 0);
+        old_responses += 1;
         assert!(Instant::now() < deadline, "polling did not reload");
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(1));
     }
+    assert!(old_responses > 0, "no Queries were sent before Reload");
     assert_eq!(tcp_query(&mut tcp, &query)[3] & 15, 2);
     fs::write(&file, format!(".:{port} {{\n errors\n}}\n")).unwrap();
     thread::sleep(Duration::from_millis(2500));
