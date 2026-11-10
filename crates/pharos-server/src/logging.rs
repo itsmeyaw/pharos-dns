@@ -14,6 +14,7 @@ pub enum LogFormat {
 }
 
 static JSON: AtomicBool = AtomicBool::new(false);
+pub const PLUGIN_METADATA: &str = "logging/plugin";
 
 /// Select the format used by subsequent log entries.
 pub fn init(format: LogFormat) {

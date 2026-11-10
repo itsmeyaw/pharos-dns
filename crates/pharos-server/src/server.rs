@@ -78,7 +78,11 @@ impl<C: Chain> Server<C> {
 }
 
 fn log_error(error: Error) {
-    crate::logging::log("ERROR", "server", &format!("Plugin error: {error}"));
+    log_plugin_error("server", error);
+}
+
+fn log_plugin_error(plugin: &str, error: Error) {
+    crate::logging::log("ERROR", plugin, &format!("Plugin error: {error}"));
 }
 
 impl<C: Chain> Handler for Server<C> {
@@ -116,10 +120,12 @@ impl<C: Chain> Handler for Server<C> {
         let block = self.router.route(&self.key, query, peer, protocol);
         let chain_start = Instant::now();
         let mut producer = None;
+        let mut error_plugin = None;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
-                let mut slots = [None; 17];
-                slots[0] = Some(("prometheus/writer", ""));
+                let mut slots = [None; 18];
+                slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
+                slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
                 let mut context = Context {
                     query,
                     client: peer,
@@ -133,8 +139,12 @@ impl<C: Chain> Handler for Server<C> {
                 let outcome = contain_panic(chain.serve(&mut context), self.debug).await;
                 producer = context
                     .metadata
-                    .get("prometheus/writer")
+                    .get(crate::metrics::WRITER_METADATA)
                     .and_then(|name| block.plugin_metrics(name));
+                error_plugin = context
+                    .metadata
+                    .get(crate::logging::PLUGIN_METADATA)
+                    .and_then(|name| block.plugin_name(name));
                 outcome
             } else {
                 Outcome::Unanswered(Rcode::REFUSED)
@@ -156,7 +166,15 @@ impl<C: Chain> Handler for Server<C> {
             Outcome::Drop | Outcome::Stream(_) => 0,
         };
         let duration = chain_start.elapsed().as_secs_f64();
-        let action = finish_outcome(query, protocol, outcome, response, self.logger);
+        let action = finish_outcome(query, protocol, outcome, response, |error| {
+            if let Some(plugin) =
+                error_plugin.filter(|_| std::ptr::fn_addr_eq(self.logger, log_error as fn(Error)))
+            {
+                log_plugin_error(plugin, error);
+            } else {
+                (self.logger)(error);
+            }
+        });
         let code = if (block.is_none() || outcome == Outcome::Error(Error::PluginPanic))
             && action == Action::Respond
         {
@@ -164,6 +182,7 @@ impl<C: Chain> Handler for Server<C> {
         } else {
             recorded_code
         };
+        // shortcut: compressed Query lengths differ until decoded Message lengths are available.
         let qtype = query.questions().next().map_or(0, |q| q.qtype.0);
         let dnssec = query.opt().is_some_and(|opt| opt.dnssec_ok());
         let response_len = if (block.is_none() || outcome == Outcome::Error(Error::PluginPanic))

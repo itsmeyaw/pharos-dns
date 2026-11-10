@@ -48,6 +48,59 @@ async fn listeners_share_metrics_and_attribute_whoami_responses() {
 }
 
 #[tokio::test]
+async fn plugin_error_log_names_plugin() {
+    if std::env::var_os("PHAROS_TEST_PLUGIN_ERROR").is_some() {
+        let blocks = parse("Corefile", ".:1053 {\n whoami\n}").unwrap();
+        let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+        servers
+            .values()
+            .next()
+            .unwrap()
+            .handle(
+                &query("a."),
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut Vec::new(),
+            )
+            .await;
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "plugin_error_log_names_plugin", "--nocapture"])
+        .env("PHAROS_TEST_PLUGIN_ERROR", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains(" ERROR whoami: Plugin error: Response buffer too small\n"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[tokio::test]
+async fn custom_error_logger_is_preserved_for_named_plugin() {
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    fn log(_: pharos_server::Error) {
+        COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    let blocks = parse("Corefile", ".:1053 {\n whoami\n}").unwrap();
+    let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let server = servers.values_mut().next().unwrap();
+    server.logger = log;
+    server
+        .handle(
+            &query("a."),
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut Vec::new(),
+        )
+        .await;
+    assert_eq!(COUNT.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn lifecycle_runs_once_for_a_block_with_multiple_listeners() {
     let blocks = parse("Corefile", ".:1053 dns://.:1054 {\n whoami\n}").unwrap();
     let mut configs = configure::<Chain>(&blocks, directives()).unwrap();

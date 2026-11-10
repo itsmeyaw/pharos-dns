@@ -37,6 +37,12 @@ impl<C> ServerBlock<C> {
             .find(|(candidate, _)| *candidate == name)
             .map(|(_, metrics)| metrics)
     }
+    pub(crate) fn plugin_name(&self, name: &str) -> Option<&'static str> {
+        self.plugin_metrics
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(name, _)| *name)
+    }
 }
 
 /// Server Blocks grouped by their Listener and ordered by Domain specificity.

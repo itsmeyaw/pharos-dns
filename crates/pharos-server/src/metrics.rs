@@ -30,6 +30,8 @@ const TYPES: &[(u16, &str)] = &[
     (252, "AXFR"),
     (255, "ANY"),
 ];
+const RESPONSE_CODES: usize = 4096;
+pub const WRITER_METADATA: &str = "prometheus/writer";
 const TIME_BUCKETS: &[f64] = &[
     0.00025, 0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128, 0.256, 0.512, 1.024,
     2.048, 4.096, 8.192,
@@ -143,7 +145,7 @@ impl Registry {
         let key = (server.to_owned(), zone.to_owned(), view.to_owned());
         let mut blocks = self.0.blocks.lock().unwrap();
         BlockMetrics(Arc::clone(blocks.entry(key).or_insert_with(|| {
-            let default_responses = Arc::new(counters(4096));
+            let default_responses = Arc::new(counters(RESPONSE_CODES));
             let mut plugins = BTreeMap::new();
             plugins.insert(String::new(), Arc::clone(&default_responses));
             Arc::new(Block {
@@ -434,7 +436,7 @@ impl BlockMetrics {
         let responses = Arc::clone(
             plugins
                 .entry(name.into())
-                .or_insert_with(|| Arc::new(counters(4096))),
+                .or_insert_with(|| Arc::new(counters(RESPONSE_CODES))),
         );
         PluginMetrics {
             block: Arc::clone(&self.0),
@@ -515,7 +517,10 @@ fn record(
     rcode: u16,
     duration: f64,
 ) {
-    assert!(rcode < 4096, "DNS RCODE must fit in 12 bits");
+    assert!(
+        usize::from(rcode) < RESPONSE_CODES,
+        "DNS RCODE must fit in 12 bits"
+    );
     let typ = TYPES
         .iter()
         .position(|(code, _)| *code == qtype)

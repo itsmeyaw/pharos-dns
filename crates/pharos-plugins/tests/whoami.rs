@@ -121,7 +121,7 @@ fn insufficient_preallocated_buffer_is_an_error() {
     let query = Message::parse(&[0; 12]).unwrap();
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::new();
-    let mut slots = [];
+    let mut slots = [None; 1];
     let mut context = Context {
         query,
         client: "127.0.0.1:53".parse().unwrap(),
@@ -136,6 +136,7 @@ fn insufficient_preallocated_buffer_is_an_error() {
         run(configured[0].config.serve(&mut context)),
         Outcome::Error(pharos_server::Error::ResponseBufferTooSmall)
     );
+    assert_eq!(context.metadata.get("logging/plugin"), Some("whoami"));
 }
 
 #[test]
