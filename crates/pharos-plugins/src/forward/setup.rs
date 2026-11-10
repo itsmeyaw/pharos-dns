@@ -52,9 +52,6 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
         .into_iter()
         .next()
         .ok_or_else(|| cursor.error(format!("unable to normalize '{}'", args[0])))?;
-    if args.len() - 1 > 15 {
-        return Err(cursor.error("more than 15 Upstreams configured"));
-    }
     let mut config = Config {
         from,
         upstreams: Vec::new(),
@@ -229,6 +226,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
     if !config.max_age.is_zero() && config.max_age < config.expire {
         return Err(cursor.error("max_age must not be less than expire"));
     }
+    let mut entries = 0;
     for to in &args[1..] {
         if let Some((scheme, _)) = to.split_once("://")
             && scheme != "dns"
@@ -239,12 +237,14 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
         }
         let address = to.strip_prefix("dns://").unwrap_or(to);
         if let Some(address) = socket_address(address) {
+            entries += 1;
             if !config.upstreams.contains(&address) {
                 config.upstreams.push(address);
             }
         } else if std::path::Path::new(address).exists() || address.contains('/') {
             let file = std::fs::read_to_string(address)
                 .map_err(|error| cursor.error(format!("cannot read {address}: {error}")))?;
+            let mut has_nameservers = false;
             for line in file.lines() {
                 let mut words = line.split_whitespace();
                 if words.next() == Some("nameserver")
@@ -252,6 +252,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
                 {
                     let ip = ip.split('%').next().unwrap_or(ip);
                     if let Ok(ip) = ip.parse::<IpAddr>() {
+                        has_nameservers = true;
                         let address = SocketAddr::new(ip, 53);
                         if !config.upstreams.contains(&address) {
                             config.upstreams.push(address);
@@ -259,6 +260,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
                     }
                 }
             }
+            entries += usize::from(has_nameservers);
         } else {
             return Err(cursor.error(format!(
                 "Upstream must be a numeric IP address or resolv.conf file: {to}"
@@ -268,8 +270,8 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
     if config.upstreams.is_empty() {
         return Err(cursor.error("no valid Upstream addresses found"));
     }
-    if config.upstreams.len() > 15 {
-        return Err(cursor.error("more than 15 expanded Upstreams configured"));
+    if entries > 15 {
+        return Err(cursor.error("more than 15 Upstream entries configured"));
     }
     Ok(config)
 }
@@ -512,5 +514,26 @@ mod tests {
             config.upstreams,
             ["192.0.2.1:53".parse().unwrap(), "[::1]:53".parse().unwrap()]
         );
+    }
+
+    #[test]
+    fn upstream_limit_counts_nonempty_entries_not_expanded_addresses() {
+        let path =
+            std::env::temp_dir().join(format!("pharos-forward-many-{}.conf", std::process::id()));
+        let nameservers = (1..=16)
+            .map(|i| format!("nameserver 192.0.2.{i}\n"))
+            .collect::<String>();
+        std::fs::write(&path, nameservers).unwrap();
+        let config = parse_text(&format!("forward . {}", path.display())).unwrap();
+        assert_eq!(config.upstreams.len(), 16);
+        std::fs::write(&path, "# empty\n").unwrap();
+        let empty_files = vec![path.to_string_lossy().to_string(); 16].join(" ");
+        assert!(parse_text(&format!("forward . {empty_files} 192.0.2.1")).is_ok());
+        let addresses = (1..=16)
+            .map(|i| format!("192.0.2.{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(parse_text(&format!("forward . {addresses}")).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 }

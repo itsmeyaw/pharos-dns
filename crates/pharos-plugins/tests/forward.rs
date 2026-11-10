@@ -97,6 +97,23 @@ async fn forwards_query_and_restores_client_id() {
 }
 
 #[tokio::test]
+async fn forwards_with_more_than_fifteen_expanded_upstreams() {
+    let (address, task) = fake(0, false).await;
+    let path = std::env::temp_dir().join(format!("pharos-forward-expanded-{}", std::process::id()));
+    let nameservers = (1..=16)
+        .map(|i| format!("nameserver 192.0.2.{i}\n"))
+        .collect::<String>();
+    std::fs::write(&path, nameservers).unwrap();
+    let chain = chain(&format!(
+        ".:0 {{\n forward . {address} {} {{\n policy sequential\n }}\n}}",
+        path.display()
+    ));
+    assert_eq!(run(&chain).await.0, Outcome::Response);
+    task.await.unwrap();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn next_rcode_passes_to_following_forward_and_records_upstream() {
     let (first, task1) = fake(3, false).await;
     let (second, task2) = fake(0, false).await;

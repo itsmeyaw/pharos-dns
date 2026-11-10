@@ -45,31 +45,35 @@ pub struct Forward {
 }
 
 #[derive(Default)]
-struct BufferPool(Mutex<Vec<Vec<u8>>>);
+struct BufferPool(Mutex<Vec<Scratch>>);
+
+struct Scratch {
+    bytes: Vec<u8>,
+    order: Vec<usize>,
+}
 
 struct Buffer<'a> {
     pool: &'a BufferPool,
-    bytes: Option<Vec<u8>>,
+    scratch: Option<Scratch>,
 }
 
 impl BufferPool {
     fn get(&self) -> Buffer<'_> {
-        let bytes = self
-            .0
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or_else(|| vec![0; 65535]);
+        let scratch = self.0.lock().unwrap().pop().unwrap_or_else(|| Scratch {
+            bytes: vec![0; 65535],
+            order: Vec::new(),
+        });
         Buffer {
             pool: self,
-            bytes: Some(bytes),
+            scratch: Some(scratch),
         }
     }
 }
 
 impl Buffer<'_> {
-    fn bytes(&mut self) -> &mut [u8] {
-        self.bytes.as_mut().expect("buffer returned only on drop")
+    fn parts(&mut self) -> (&mut Vec<usize>, &mut [u8]) {
+        let scratch = self.scratch.as_mut().expect("buffer returned only on drop");
+        (&mut scratch.order, &mut scratch.bytes)
     }
 }
 
@@ -79,7 +83,7 @@ impl Drop for Buffer<'_> {
             .0
             .lock()
             .unwrap()
-            .push(self.bytes.take().expect("buffer exists"));
+            .push(self.scratch.take().expect("buffer exists"));
     }
 }
 
@@ -225,10 +229,10 @@ impl Plugin for Forward {
             };
 
             let count = stanza.proxies.len();
-            let mut order = [0_usize; 15];
-            for (i, entry) in order[..count].iter_mut().enumerate() {
-                *entry = i;
-            }
+            let mut buffer = self.buffers.get();
+            let (order, wire) = buffer.parts();
+            order.clear();
+            order.extend(0..count);
             match stanza.policy {
                 Policy::Random => {
                     for i in (1..count).rev() {
@@ -262,7 +266,6 @@ impl Plugin for Forward {
             } else {
                 proxy::Transport::Udp
             };
-            let mut buffer = self.buffers.get();
             while Instant::now() < deadline && (max_attempts == 0 || attempts < max_attempts) {
                 if i == count {
                     i = 0;
@@ -288,12 +291,9 @@ impl Plugin for Forward {
                 let result = loop {
                     let result = timeout_at(
                         deadline,
-                        upstream.proxy.exchange(
-                            cx.query.as_wire(),
-                            buffer.bytes(),
-                            protocol,
-                            stanza.options,
-                        ),
+                        upstream
+                            .proxy
+                            .exchange(cx.query.as_wire(), wire, protocol, stanza.options),
                     )
                     .await;
                     if matches!(result, Ok(Err(proxy::Error::CachedClosed))) {
@@ -317,8 +317,8 @@ impl Plugin for Forward {
                         continue;
                     }
                 };
-                let wire = &buffer.bytes()[..exchange.len];
-                let response = Message::parse(wire).expect("proxy validated Response");
+                let answer = &wire[..exchange.len];
+                let response = Message::parse(answer).expect("proxy validated Response");
                 if stanza.failover.contains(&response.rcode()) {
                     failovers += 1;
                     if failovers < count {
@@ -335,7 +335,7 @@ impl Plugin for Forward {
                     break;
                 }
                 cx.response.clear();
-                cx.response.extend_from_slice(wire);
+                cx.response.extend_from_slice(answer);
                 return Outcome::Response;
             }
             if !try_next {
@@ -355,9 +355,9 @@ mod tests {
         let pool = BufferPool::default();
         {
             let mut buffer = pool.get();
-            buffer.bytes()[65534] = 123;
+            buffer.parts().1[65534] = 123;
         }
         let mut buffer = pool.get();
-        assert_eq!(buffer.bytes()[65534], 123);
+        assert_eq!(buffer.parts().1[65534], 123);
     }
 }

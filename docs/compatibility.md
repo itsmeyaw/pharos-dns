@@ -237,8 +237,7 @@ Encrypted Upstreams (`tls://`, `quic://` and `https://`) and `tls` or
 `tls_servername` options fail setup rather than silently downgrade; TLS is
 deferred to M3. Hostname Upstreams and IPv6 scoped addresses are not yet
 supported. `resolver` and `doh_method` are accepted but have no effect on
-numeric plain-DNS Upstreams. The expanded Upstream list is limited to 15;
-CoreDNS limits configured entries rather than addresses expanded from files.
+numeric plain-DNS Upstreams.
 Invalid nameservers in resolv.conf are skipped. Some option argument and
 Domain edge cases remain more restrictive than CoreDNS. Upstream Metadata
 uses the normalized numeric socket address, which may differ from CoreDNS's
