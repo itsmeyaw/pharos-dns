@@ -1,0 +1,242 @@
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use bytes::Bytes;
+use futures::stream;
+use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
+use hyper::{
+    Request, Response,
+    body::{Frame, Incoming},
+    server::conn::http1,
+    service::service_fn,
+};
+use hyper_util::rt::TokioIo;
+use pharos_kubernetes::{Controller, WatchConfig};
+use serde_json::{Value, json};
+use tokio::{net::TcpListener, sync::mpsc};
+
+type Watches = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>;
+type Requests = Arc<Mutex<Vec<String>>>;
+
+struct FakeServer {
+    url: String,
+    watches: Watches,
+    requests: Requests,
+    lists: Arc<Mutex<HashMap<String, Value>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeServer {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let watches: Watches = Arc::default();
+        let requests: Requests = Arc::default();
+        let lists: Arc<Mutex<HashMap<String, Value>>> = Arc::default();
+        let task_watches = watches.clone();
+        let task_requests = requests.clone();
+        let task_lists = lists.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let watches = task_watches.clone();
+                let requests = task_requests.clone();
+                let lists = task_lists.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let watches = watches.clone();
+                        let requests = requests.clone();
+                        let lists = lists.clone();
+                        async move {
+                            requests.lock().unwrap().push(request.uri().to_string());
+                            let path = request.uri().path().to_owned();
+                            let body: BoxBody<Bytes, Infallible> = if request
+                                .uri()
+                                .query()
+                                .is_some_and(|query| query.contains("watch=true"))
+                            {
+                                let (sender, receiver) = mpsc::unbounded_channel::<String>();
+                                watches.lock().unwrap().insert(path, sender);
+                                let stream = stream::unfold(receiver, |mut receiver| async move {
+                                    receiver.recv().await.map(|line| {
+                                        (
+                                            Ok::<_, Infallible>(Frame::data(Bytes::from(line))),
+                                            receiver,
+                                        )
+                                    })
+                                });
+                                StreamBody::new(stream).boxed()
+                            } else {
+                                let (api, kind, items) = match path.as_str() {
+                                    "/api/v1/services" => (
+                                        "v1",
+                                        "ServiceList",
+                                        json!([{"metadata":{"name":"web","namespace":"prod","resourceVersion":"1"},"spec":{"clusterIP":"10.0.0.1"}}]),
+                                    ),
+                                    "/api/v1/namespaces" => (
+                                        "v1",
+                                        "NamespaceList",
+                                        json!([{"metadata":{"name":"prod","resourceVersion":"1"}}]),
+                                    ),
+                                    "/apis/discovery.k8s.io/v1/endpointslices" => (
+                                        "discovery.k8s.io/v1",
+                                        "EndpointSliceList",
+                                        json!([{"metadata":{"name":"slice","namespace":"prod","resourceVersion":"1","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.1"]}]}]),
+                                    ),
+                                    _ => ("v1", "PodList", json!([])),
+                                };
+                                let items =
+                                    lists.lock().unwrap().get(&path).cloned().unwrap_or(items);
+                                let body = json!({"apiVersion":api, "kind":kind, "metadata":{"resourceVersion":"1"}, "items":items}).to_string();
+                                Full::new(Bytes::from(body)).boxed()
+                            };
+                            Ok::<_, Infallible>(Response::new(body))
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(socket), service)
+                        .await;
+                });
+            }
+        });
+        Self {
+            url,
+            watches,
+            requests,
+            lists,
+            task,
+        }
+    }
+
+    fn send(&self, path: &str, typ: &str, object: Value) {
+        self.watches
+            .lock()
+            .unwrap()
+            .get(path)
+            .unwrap()
+            .send(format!("{}\n", json!({"type":typ, "object":object})))
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn expired_watch_relist_removes_missing_services() {
+    let server = FakeServer::start().await;
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(client, WatchConfig::default());
+    let store = controller.store();
+    until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
+    assert!(store.with_read(|index| index.service("prod", "web").is_some()));
+    server
+        .lists
+        .lock()
+        .unwrap()
+        .insert("/api/v1/services".into(), json!([]));
+    server.send("/api/v1/services", "ERROR", json!({"apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":"Expired", "message":"resource version too old", "code":410}));
+    until(|| store.with_read(|index| index.service("prod", "web").is_none())).await;
+    controller.stop().await;
+}
+
+impl Drop for FakeServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn until(mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn controller_applies_list_watch_updates_and_deletions() {
+    let server = FakeServer::start().await;
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(client, WatchConfig::default());
+    let store = controller.store();
+    until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
+    store.with_read(|index| {
+        assert_eq!(
+            index.service("prod", "web").unwrap().cluster_ips,
+            ["10.0.0.1"]
+        );
+        assert_eq!(index.endpoints("prod", "web").count(), 1);
+        assert!(index.namespace("prod").is_some());
+    });
+    server.send("/api/v1/services", "MODIFIED", json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"web","namespace":"prod","resourceVersion":"2"},"spec":{"clusterIP":"10.0.0.2"}}));
+    server.send("/apis/discovery.k8s.io/v1/endpointslices", "DELETED", json!({"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"slice","namespace":"prod","resourceVersion":"2"},"addressType":"IPv4"}));
+    server.send("/api/v1/namespaces", "DELETED", json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"prod","resourceVersion":"2"}}));
+    until(|| {
+        store.with_read(|index| {
+            index.services_by_ip("10.0.0.2").count() == 1
+                && index.endpoints("prod", "web").count() == 0
+                && index.namespace("prod").is_none()
+        })
+    })
+    .await;
+    server.send("/api/v1/services", "ADDED", json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"new","namespace":"prod","resourceVersion":"3"},"spec":{"clusterIP":"10.0.0.3"}}));
+    server.send("/apis/discovery.k8s.io/v1/endpointslices", "ADDED", json!({"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"new-slice","namespace":"prod","resourceVersion":"3","labels":{"kubernetes.io/service-name":"new"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.3"]}]}));
+    server.send("/api/v1/namespaces", "ADDED", json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"new-ns","resourceVersion":"3"}}));
+    until(|| {
+        store.with_read(|index| {
+            index.service("prod", "new").is_some()
+                && index.endpoints_by_ip("10.0.1.3").count() == 1
+                && index.namespace("new-ns").is_some()
+        })
+    })
+    .await;
+    server.send("/api/v1/services", "DELETED", json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"new","namespace":"prod","resourceVersion":"4"}}));
+    server.send("/apis/discovery.k8s.io/v1/endpointslices", "MODIFIED", json!({"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"new-slice","namespace":"prod","resourceVersion":"4","labels":{"kubernetes.io/service-name":"new"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"]}]}));
+    server.send("/api/v1/namespaces", "MODIFIED", json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"new-ns","resourceVersion":"4"}}));
+    until(|| {
+        store.with_read(|index| {
+            index.service("prod", "new").is_none()
+                && index.endpoints_by_ip("10.0.1.4").count() == 1
+                && index
+                    .namespace("new-ns")
+                    .is_some_and(|ns| ns.version == "4")
+        })
+    })
+    .await;
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn controller_only_watches_verified_pods_and_sends_selectors() {
+    let server = FakeServer::start().await;
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(
+        client,
+        WatchConfig {
+            label_selector: Some("app=web".into()),
+            namespace_label_selector: Some("team=dns".into()),
+            pods_verified: true,
+            endpoints: false,
+            ..Default::default()
+        },
+    );
+    until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
+    {
+        let requests = server.requests.lock().unwrap();
+        assert!(requests.iter().any(|uri| uri.starts_with("/api/v1/pods?")
+            && uri.contains("fieldSelector=")
+            && uri.contains("labelSelector=app%3Dweb")));
+        assert!(
+            requests
+                .iter()
+                .any(|uri| uri.starts_with("/api/v1/namespaces?")
+                    && uri.contains("labelSelector=team%3Ddns"))
+        );
+        assert!(!requests.iter().any(|uri| uri.contains("endpointslices")));
+    }
+    controller.stop().await;
+}

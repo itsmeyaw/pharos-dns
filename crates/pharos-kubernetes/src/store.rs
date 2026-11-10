@@ -263,7 +263,6 @@ impl Index {
 #[derive(Clone, Default)]
 pub struct Store(Arc<RwLock<Index>>);
 
-#[allow(dead_code)]
 impl Store {
     pub fn with_read<R>(&self, read: impl FnOnce(&Index) -> R) -> R {
         read(&self.0.read().unwrap())
