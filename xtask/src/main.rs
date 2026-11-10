@@ -25,8 +25,8 @@ fn main() -> ExitCode {
 
 fn fuzz_args(target: &str, short: bool) -> Vec<&str> {
     let mut args = vec!["+nightly", "fuzz", "run"];
-    // The installed macOS nightly's ASan runtime hangs before starting libFuzzer.
-    if cfg!(target_os = "macos") {
+    // The installed Apple Silicon nightly's ASan runtime hangs before libFuzzer starts.
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         args.extend(["--sanitizer", "none"]);
     }
     args.push(target);
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn fuzz_commands_limit_only_short_runs() {
         let mut expected = vec!["+nightly", "fuzz", "run"];
-        if cfg!(target_os = "macos") {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             expected.extend(["--sanitizer", "none"]);
         }
         expected.extend(["message", "--", "-timeout=10"]);
