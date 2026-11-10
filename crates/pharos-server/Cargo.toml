@@ -7,6 +7,14 @@ repository.workspace = true
 
 [dependencies]
 pharos-proto = { path = "../pharos-proto" }
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31", features = ["socket", "uio", "net"] }
+
+[dev-dependencies]
+stats_alloc = "0.1.10"
 
 [lints]
 workspace = true
