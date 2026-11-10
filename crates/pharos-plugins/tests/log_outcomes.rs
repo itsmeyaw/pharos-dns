@@ -13,6 +13,92 @@ impl Next for Answer<'_> {
     }
 }
 
+#[test]
+fn classes_and_first_matching_rule_control_emission() {
+    for (case, expected) in [
+        ("denial", Some("DENIAL NXDOMAIN")),
+        ("error", None),
+        ("first", None),
+        ("unmatched", Some("SECOND NXDOMAIN")),
+        ("servfail-error", Some("ERROR SERVFAIL")),
+        ("servfail-denial", None),
+        ("servfail-default", Some("SERVFAIL")),
+        ("refused-default", Some("REFUSED")),
+        ("drop-default", Some(" - ")),
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "class_filter_probe", "--nocapture"])
+            .env("PHAROS_LOG_TEST", case)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let entries: Vec<_> = stdout
+            .lines()
+            .filter(|line| line.contains(" INFO log: "))
+            .collect();
+        match expected {
+            Some(value) => {
+                assert_eq!(entries.len(), 1, "{stdout}");
+                assert!(entries[0].contains(value), "{stdout}");
+            }
+            None => assert!(entries.is_empty(), "{stdout}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn class_filter_probe() {
+    let Ok(case) = std::env::var("PHAROS_LOG_TEST") else {
+        return;
+    };
+    let rules = match case.as_str() {
+        "denial" => "log example.org \"DENIAL {rcode}\" {\n class denial\n}",
+        "error" => "log example.org \"ERROR {rcode}\" {\n class error\n}",
+        "first" => "log example.org \"FIRST {rcode}\" {\n class error\n}\nlog . \"SECOND {rcode}\"",
+        "unmatched" => "log elsewhere.test \"FIRST {rcode}\"\nlog . \"SECOND {rcode}\"",
+        "servfail-error" => "log . \"ERROR {rcode}\" {\n class error\n}",
+        "servfail-denial" => "log . \"DENIAL {rcode}\" {\n class denial\n}",
+        "servfail-default" | "refused-default" | "drop-default" => "log",
+        _ => panic!("unexpected case"),
+    };
+    let blocks = parse("Corefile", &format!(". {{\n{rules}\n}}")).unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [None; 4];
+    let query = b"\x00\x01\x01\x00\x00\x01\0\0\0\0\0\0\x03www\x07example\x03org\0\0\x01\0\x01";
+    let mut cx = Context {
+        query: Message::parse(query).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    let (outcome, wire): (Outcome, &[u8]) = match case.as_str() {
+        "servfail-error" | "servfail-denial" | "servfail-default" => {
+            (Outcome::Error(pharos_server::Error::NoNextPlugin), &[])
+        }
+        "refused-default" => (Outcome::Unanswered(Rcode::REFUSED), &[]),
+        "drop-default" => (Outcome::Drop, &[]),
+        _ => (Outcome::Response, b"\0\x01\x80\x03\0\0\0\0\0\0\0\0"),
+    };
+    assert_eq!(
+        configured[0]
+            .config
+            .log
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, Answer(outcome, wire),)
+            .await,
+        outcome
+    );
+}
+
 #[tokio::test]
 async fn expired_dnssec_signature_is_an_error_class() {
     let blocks = parse("Corefile", ". {\n log {\n class denial\n }\n}").unwrap();

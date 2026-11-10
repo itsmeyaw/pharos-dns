@@ -154,7 +154,7 @@ impl Format {
                 Part::Port => {
                     let _ = write!(output, "{}", cx.client.port());
                 }
-                // shortcut: wildcard Listeners lack a per-Query destination address.
+                // shortcut: wildcard addresses lack a destination IP, until Listener tracking is added.
                 Part::Local => match cx.local {
                     SocketAddr::V4(addr) => {
                         let _ = write!(output, "{}", addr.ip());
