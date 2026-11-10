@@ -122,9 +122,8 @@ otherwise Pharos reports an error instead of allocating on the UDP Query path.
 
 ## Hosts
 
-Hosts file paths relative to a Corefile resolve against that file's directory.
-CoreDNS instead resolves them against its configured `root`, or the process
-working directory if no root is set. Pharos discards names that are not valid
+Relative hosts file paths resolve against the working directory; `root` is not
+implemented yet, so CoreDNS's join with a configured `root` is not applied. Pharos discards names that are not valid
 DNS names or UTF-8; CoreDNS retains arbitrary fields in its hosts maps. Pharos
 lowercases ASCII name bytes, while CoreDNS applies Go's Unicode lowercasing.
 Configured Domains that cannot be represented as DNS names are ignored for

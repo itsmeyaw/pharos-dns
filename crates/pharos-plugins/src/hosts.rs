@@ -88,15 +88,9 @@ impl Hosts {
 
     pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Self, Error> {
         cursor.next();
-        let source = cursor.file().to_owned();
         let args = cursor.remaining_args();
-        let mut path = PathBuf::from(args.first().map_or("/etc/hosts", String::as_str));
-        if !args.is_empty() && path.is_relative() {
-            path = Path::new(&source)
-                .parent()
-                .unwrap_or(Path::new(""))
-                .join(path);
-        }
+        // shortcut: relative paths use the working directory; join with `root` once that Plugin exists.
+        let path = PathBuf::from(args.first().map_or("/etc/hosts", String::as_str));
         if !args.is_empty() {
             match std::fs::metadata(&path) {
                 Ok(metadata) if metadata.is_dir() => pharos_server::logging::log(

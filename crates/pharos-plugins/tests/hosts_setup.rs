@@ -51,7 +51,7 @@ fn setup_keeps_defaults_domains_and_nodehosts_options() {
     let blocks = parse("/etc/coredns/Corefile", text).unwrap();
     let blocks = configure::<Chain>(&blocks, directives()).unwrap();
     let hosts = blocks[0].config.hosts.as_ref().unwrap();
-    assert_eq!(hosts.path, std::path::Path::new("/etc/coredns/NodeHosts"));
+    assert_eq!(hosts.path, std::path::Path::new("NodeHosts"));
     assert_eq!(hosts.domains, ["example.org."]);
     assert_eq!(hosts.ttl, 60);
     assert_eq!(hosts.reload, std::time::Duration::from_secs(15));
