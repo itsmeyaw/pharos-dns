@@ -87,3 +87,8 @@ workspace = true
 name = "log"
 harness = false
 required-features = ["plugin-log"]
+
+[[bench]]
+name = "chain"
+harness = false
+required-features = ["plugin-whoami"]

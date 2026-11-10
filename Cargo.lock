@@ -864,6 +864,7 @@ dependencies = [
 name = "pharos-server"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "nix",
  "pharos-proto",
  "socket2",

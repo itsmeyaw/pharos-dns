@@ -14,7 +14,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 nix = { version = "0.31", features = ["socket", "uio", "net"] }
 
 [dev-dependencies]
+criterion = "0.5"
 stats_alloc = "0.1.10"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "outcome"
+harness = false
