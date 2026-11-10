@@ -2,7 +2,12 @@ use pharos_corefile::parse;
 use std::{fs, path::PathBuf};
 
 fn fixture_dir() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("pharos-imports-{}", std::process::id()));
+    let thread = std::thread::current();
+    let path = std::env::temp_dir().join(format!(
+        "pharos-imports-{}-{}",
+        std::process::id(),
+        thread.name().unwrap_or("test")
+    ));
     fs::create_dir_all(&path).unwrap();
     path
 }
