@@ -12,7 +12,7 @@ use std::{
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{
-    Method, Request, Response, StatusCode,
+    Request, Response, StatusCode,
     body::Incoming,
     header::{CONTENT_TYPE, HeaderValue},
     server::conn::http1,
@@ -53,6 +53,17 @@ impl Listener {
     pub async fn bind_with_status<F>(address: &str, route: F) -> io::Result<Self>
     where
         F: Fn(&str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
+    {
+        Self::bind_with_methods(address, move |method, path| {
+            (method == "GET").then(|| route(path)).flatten()
+        })
+        .await
+    }
+
+    /// Bind an endpoint that can route all HTTP methods.
+    pub async fn bind_with_methods<F>(address: &str, route: F) -> io::Result<Self>
+    where
+        F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
     {
         let address = if address.ends_with(':') {
             Cow::Owned(format!("{address}0"))
@@ -103,11 +114,7 @@ impl Listener {
                         let mut stop = receiver.clone();
                         connections.spawn(async move {
                             let service = service_fn(move |request: Request<Incoming>| {
-                                let response = if request.method() == Method::GET {
-                                    route(request.uri().path())
-                                } else {
-                                    None
-                                };
+                                let response = route(request.method().as_str(), request.uri().path());
                                 async move {
                                     let mut result = Response::new(Full::default());
                                     match response {

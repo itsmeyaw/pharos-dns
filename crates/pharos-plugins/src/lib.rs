@@ -74,6 +74,8 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     let ready_state = Arc::new(ready::State::default());
     #[cfg(feature = "plugin-ready")]
     let mut ready_addresses = std::collections::BTreeSet::new();
+    #[cfg(feature = "plugin-health")]
+    let mut health_addresses = std::collections::BTreeSet::new();
     #[cfg(feature = "plugin-ready")]
     {
         let state = Arc::clone(&ready_state);
@@ -84,6 +86,10 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         });
     }
     for block in blocks {
+        #[cfg(feature = "plugin-health")]
+        if let Some(health) = &block.config.health {
+            health_addresses.insert(health.address.clone());
+        }
         #[cfg(feature = "plugin-ready")]
         if let Some(ready) = &block.config.ready {
             ready_addresses.insert(ready.address.clone());
@@ -151,6 +157,41 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         .into_iter()
         .map(|(key, router)| (key, Server::with_registry(router, key, metrics.clone())))
         .collect();
+    #[cfg(feature = "plugin-health")]
+    for address in health_addresses {
+        let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
+        let startup_listener = Arc::clone(&listener);
+        lifecycle.register(pharos_server::Phase::Startup, move || {
+            let address = address.clone();
+            let listener = Arc::clone(&startup_listener);
+            async move {
+                let server =
+                    pharos_server::http::Listener::bind_with_methods(&address, |_, path| {
+                        Some(if path == "/health" {
+                            (200, "text/plain; charset=utf-8", "OK".into())
+                        } else {
+                            (
+                                404,
+                                "text/plain; charset=utf-8",
+                                "404 page not found\n".into(),
+                            )
+                        })
+                    })
+                    .await?;
+                *listener.lock().unwrap() = Some(server);
+                Ok(())
+            }
+        });
+        lifecycle.register(pharos_server::Phase::Shutdown, move || {
+            let server = listener.lock().unwrap().take();
+            async move {
+                if let Some(server) = server {
+                    server.shutdown().await?;
+                }
+                Ok(())
+            }
+        });
+    }
     #[cfg(feature = "plugin-ready")]
     for address in ready_addresses {
         let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
