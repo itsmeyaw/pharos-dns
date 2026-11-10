@@ -63,7 +63,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-fn new_line(previous: &Token, current: &Token) -> bool {
+pub(crate) fn new_line(previous: &Token, current: &Token) -> bool {
     previous.file != current.file
         || previous.line + previous.text.matches('\n').count() < current.line
 }

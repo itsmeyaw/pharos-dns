@@ -60,9 +60,7 @@ impl<'a> Cursor<'a> {
                     return false;
                 };
                 let current = &self.tokens[position];
-                if current.file != next.file
-                    || current.line + current.text.matches('\n').count() < next.line
-                {
+                if crate::parser::new_line(current, next) {
                     self.next()
                 } else {
                     false

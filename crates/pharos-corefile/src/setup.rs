@@ -5,7 +5,7 @@
 //! Parser tokens are visible only through the temporary setup cursor, never in
 //! the returned configuration. One context is shared by every key of a block.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{Cursor, Error, ServerBlock, ServerBlockKey, Token};
 
@@ -93,17 +93,17 @@ fn validate_overlaps<C>(
     blocks: &[ServerBlock],
     configured: &[BlockContext<C>],
 ) -> Result<(), Error> {
-    let mut registered: HashMap<(ServerBlockKey, String), ()> = HashMap::new();
+    let mut registered: HashSet<(ServerBlockKey, String)> = HashSet::new();
     let mut unbound: HashMap<ServerBlockKey, String> = HashMap::new();
     for (block, context) in blocks.iter().zip(configured) {
         for (key, source) in block.normalized_key_sources()? {
             for address in &context.listen_addresses {
-                let exact = registered.contains_key(&(key.clone(), address.clone()));
+                let exact = registered.contains(&(key.clone(), address.clone()));
                 let overlap = if exact {
                     None
                 } else if address.is_empty() {
                     unbound.get(&key).map(String::as_str)
-                } else if registered.contains_key(&(key.clone(), String::new())) {
+                } else if registered.contains(&(key.clone(), String::new())) {
                     Some("")
                 } else {
                     None
@@ -127,7 +127,7 @@ fn validate_overlaps<C>(
                     });
                 }
                 if !context.view {
-                    registered.insert((key.clone(), address.clone()), ());
+                    registered.insert((key.clone(), address.clone()));
                     unbound.insert(key.clone(), address.clone());
                 }
             }
@@ -149,9 +149,7 @@ fn second_occurrence(tokens: &[Token]) -> Option<&Token> {
     for (index, token) in tokens.iter().enumerate() {
         if index > 0 && nesting == 0 {
             let previous = &tokens[index - 1];
-            if previous.file != token.file
-                || previous.line + previous.text.matches('\n').count() < token.line
-            {
+            if crate::parser::new_line(previous, token) {
                 return Some(token);
             }
         }
