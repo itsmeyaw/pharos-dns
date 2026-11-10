@@ -10,6 +10,8 @@ workspace = true
 
 [dev-dependencies]
 criterion = "0.5"
+domain = { version = "0.12.3", default-features = false, features = ["std"] }
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 proptest = "1"
 stats_alloc = "0.1.10"
 
