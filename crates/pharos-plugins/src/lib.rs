@@ -34,6 +34,7 @@ impl<'a> Next<'a> {
     }
 
     pub async fn run(self, context: &mut Context<'_>) -> Outcome {
+        // shortcut: Plugins cannot await this recursively; replace dispatch before adding middleware.
         match self.0.split_first() {
             Some((plugin, remaining)) => plugin.call(context, Self(remaining)).await,
             None => Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL),
