@@ -20,6 +20,7 @@ fn accepts_coredns_loadbalance_setup_cases() {
         "loadbalance weighted wfile",
         "loadbalance weighted wf {\n reload 10s\n}",
         "loadbalance weighted wf {\n reload 0s\n}",
+        "loadbalance round_robin\n loadbalance weighted wf",
     ] {
         assert!(accepts(text), "rejected {text}");
     }
@@ -35,6 +36,7 @@ fn rejects_coredns_invalid_loadbalance_setup_cases() {
         "loadbalance weighted wfile {\n susu\n}",
         "loadbalance weighted wfile {\n reload a\n}",
         "loadbalance weighted wfile {\n reload 30s a\n}",
+        "loadbalance\n loadbalance fleeb",
     ] {
         assert!(!accepts(text), "accepted {text}");
     }

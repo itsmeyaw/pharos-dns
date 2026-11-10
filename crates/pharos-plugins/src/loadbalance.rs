@@ -13,45 +13,51 @@ pub struct LoadBalance {
     pub weight_file: Option<PathBuf>,
     pub reload: Duration,
     weights: Option<weighted::Weights>,
+    weighted_policy: bool,
     prefer: Vec<Subnet>,
 }
 
 impl LoadBalance {
     pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Self, Error> {
-        cursor.next();
-        let args = cursor.remaining_args();
         let mut lb = Self {
             weight_file: None,
             reload: Duration::from_secs(30),
             weights: None,
+            weighted_policy: false,
             prefer: Vec::new(),
         };
-        match args.first().map(String::as_str) {
-            None | Some("round_robin") if args.len() <= 1 => {}
-            Some("weighted") if args.len() == 2 => {
-                // shortcut: relative paths use the working directory; join with `root` once that Plugin exists.
-                lb.weight_file = Some(PathBuf::from(&args[1]));
-                while cursor.next_block() {
-                    if cursor.val() != "reload" {
-                        return Err(cursor.error("unknown weighted property"));
+        while cursor.next() {
+            let args = cursor.remaining_args();
+            match args.first().map(String::as_str) {
+                None | Some("round_robin") if args.len() <= 1 => lb.weighted_policy = false,
+                Some("weighted") if args.len() == 2 => {
+                    lb.weighted_policy = true;
+                    lb.prefer.clear();
+                    lb.reload = Duration::from_secs(30);
+                    // shortcut: relative paths use the working directory; join with `root` once that Plugin exists.
+                    lb.weight_file = Some(PathBuf::from(&args[1]));
+                    while cursor.next_block() {
+                        if cursor.val() != "reload" {
+                            return Err(cursor.error("unknown weighted property"));
+                        }
+                        let args = cursor.remaining_args();
+                        if args.len() != 1 {
+                            return Err(cursor.arg_err());
+                        }
+                        lb.reload = crate::health::parse_duration(&args[0])
+                            .ok_or_else(|| cursor.error("invalid reload duration"))?;
                     }
-                    let args = cursor.remaining_args();
-                    if args.len() != 1 {
-                        return Err(cursor.arg_err());
-                    }
-                    lb.reload = crate::health::parse_duration(&args[0])
-                        .ok_or_else(|| cursor.error("invalid reload duration"))?;
                 }
+                _ => return Err(cursor.arg_err()),
             }
-            _ => return Err(cursor.arg_err()),
-        }
-        while cursor.next_block() {
-            if cursor.val() != "prefer" {
-                return Err(cursor.error("unknown loadbalance property"));
-            }
-            for cidr in cursor.remaining_args() {
-                lb.prefer
-                    .push(Subnet::parse(&cidr).ok_or_else(|| cursor.error("invalid CIDR"))?);
+            while cursor.next_block() {
+                if cursor.val() != "prefer" {
+                    return Err(cursor.error("unknown loadbalance property"));
+                }
+                for cidr in cursor.remaining_args() {
+                    lb.prefer
+                        .push(Subnet::parse(&cidr).ok_or_else(|| cursor.error("invalid CIDR"))?);
+                }
             }
         }
         lb.weights = lb
@@ -72,7 +78,11 @@ impl Plugin for LoadBalance {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
         let outcome = next.run(cx).await;
         if outcome == Outcome::Response {
-            shuffle(cx.response, self.weights.as_ref(), &self.prefer);
+            shuffle(
+                cx.response,
+                self.weights.as_ref().filter(|_| self.weighted_policy),
+                &self.prefer,
+            );
         }
         outcome
     }
@@ -96,24 +106,38 @@ struct Subnet {
 impl Subnet {
     fn parse(value: &str) -> Option<Self> {
         let (address, prefix) = value.split_once('/')?;
-        let address: IpAddr = address.parse().ok()?;
-        let prefix: u32 = prefix.parse().ok()?;
+        let mut address: IpAddr = address.parse().ok()?;
+        let mut prefix: u32 = prefix.parse().ok()?;
         if prefix > if address.is_ipv4() { 32 } else { 128 } {
             return None;
+        }
+        if let IpAddr::V6(ip) = address
+            && prefix >= 96
+            && let Some(ip) = ip.to_ipv4_mapped()
+        {
+            address = IpAddr::V4(ip);
+            prefix -= 96;
         }
         Some(Self { address, prefix })
     }
 
     fn contains(&self, rr: &pharos_proto::Record<'_>) -> bool {
-        match (self.address, rr.rtype, rr.rdata) {
-            (IpAddr::V4(network), Type::A, [a, b, c, d]) => {
+        let address = match (rr.rtype, rr.rdata) {
+            (Type::A, [a, b, c, d]) => IpAddr::V4(std::net::Ipv4Addr::new(*a, *b, *c, *d)),
+            (Type::AAAA, bytes) if bytes.len() == 16 => IpAddr::V6(std::net::Ipv6Addr::from(
+                <[u8; 16]>::try_from(bytes).unwrap(),
+            ))
+            .to_canonical(),
+            _ => return false,
+        };
+        match (self.address, address) {
+            (IpAddr::V4(network), IpAddr::V4(ip)) => {
                 let mask = u32::MAX.checked_shl(32 - self.prefix).unwrap_or(0);
-                u32::from(network) & mask
-                    == u32::from(std::net::Ipv4Addr::new(*a, *b, *c, *d)) & mask
+                u32::from(network) & mask == u32::from(ip) & mask
             }
-            (IpAddr::V6(network), Type::AAAA, bytes) if bytes.len() == 16 => {
+            (IpAddr::V6(network), IpAddr::V6(ip)) => {
                 let mask = u128::MAX.checked_shl(128 - self.prefix).unwrap_or(0);
-                u128::from(network) & mask == u128::from_be_bytes(bytes.try_into().unwrap()) & mask
+                u128::from(network) & mask == u128::from(ip) & mask
             }
             _ => false,
         }
