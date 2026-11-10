@@ -66,6 +66,9 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
+The Kubernetes data crate ignores addresses in EndpointSlices with address
+types other than IPv4 or IPv6; CoreDNS retains them.
+
 Only `cache`, `errors`, `forward`, `health`, `hosts`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
