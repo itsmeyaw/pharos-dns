@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-health")]
+pub mod health;
 #[cfg(feature = "plugin-log")]
 pub mod log;
 #[cfg(feature = "plugin-log")]
@@ -26,7 +28,11 @@ pub mod whoami;
 
 include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
 
-#[cfg(any(feature = "plugin-prometheus", feature = "plugin-ready"))]
+#[cfg(any(
+    feature = "plugin-health",
+    feature = "plugin-prometheus",
+    feature = "plugin-ready"
+))]
 fn valid_http_address(address: &str) -> bool {
     let Some((host, port)) = address.rsplit_once(':') else {
         return false;
@@ -260,6 +266,12 @@ fn setup_prometheus(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
 #[cfg(feature = "plugin-ready")]
 fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.ready = Some(ready::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-health")]
+fn setup_health(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.health = Some(health::parse(cursor)?);
     Ok(())
 }
 

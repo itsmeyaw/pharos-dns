@@ -26,6 +26,7 @@ fn main() {
             "log" => "log::Log",
             "prometheus" => "prometheus::Prometheus",
             "ready" => "ready::Ready",
+            "health" => "health::Health",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -37,6 +38,7 @@ fn main() {
             "log" => "setup_log",
             "prometheus" => "setup_prometheus",
             "ready" => "setup_ready",
+            "health" => "setup_health",
             _ => "setup_unimplemented",
         };
         let once = *name == "prometheus" || *name == "ready";
@@ -62,7 +64,7 @@ fn main() {
             "fn collect_readiness(self: &std::sync::Arc<Self>, state: &ready::State) {\nlet _ = state;\n",
         );
         for name in &enabled {
-            if *name == "ready" {
+            if matches!(*name, "ready" | "health") {
                 continue;
             }
             writeln!(code, "if self.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some() {{ let chain = std::sync::Arc::clone(self); state.append({name:?}, move || chain.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some_and(pharos_server::Readiness::ready)); }}").unwrap();
@@ -73,7 +75,7 @@ fn main() {
     code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
     for (i, name) in enabled.iter().enumerate() {
         let next = i + 1;
-        if *name == "ready" {
+        if matches!(*name, "ready" | "health") {
             writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.serve_{next}(cx).await }}").unwrap();
             continue;
         }
@@ -83,7 +85,7 @@ fn main() {
     code.push_str("}\n");
     code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
-        if *name != "ready" {
+        if !matches!(*name, "ready" | "health") {
             write!(code, " && self.r#{name}.is_none()").unwrap();
         }
     }
@@ -91,7 +93,7 @@ fn main() {
         " }\nfn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {\nlet _ = &visit;\n",
     );
     for name in &enabled {
-        if *name != "ready" {
+        if !matches!(*name, "ready" | "health") {
             writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
         }
     }
@@ -103,7 +105,7 @@ fn main() {
     }
     code.push_str("}\n");
     for (i, name) in enabled.iter().enumerate() {
-        if *name == "ready" {
+        if matches!(*name, "ready" | "health") {
             continue;
         }
         let next = i + 1;
