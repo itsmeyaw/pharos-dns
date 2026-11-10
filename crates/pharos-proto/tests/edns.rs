@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use pharos_proto::{
     Class, EdnsOptions, Message, MessageBuilder, MessageError, Name, NameRef, Opt, Rcode, Section,
     Type, normalized_udp_size,

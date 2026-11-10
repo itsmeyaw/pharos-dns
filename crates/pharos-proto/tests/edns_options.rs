@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use pharos_proto::{ClientSubnet, EdnsOption, EdnsOptions};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
