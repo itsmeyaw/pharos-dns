@@ -128,6 +128,7 @@ impl Drop for Server {
     }
 }
 
+// shortcut: another process can take the port before a server binds; the scenario then fails at startup, add a retry if it gets flaky.
 fn free_port() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
