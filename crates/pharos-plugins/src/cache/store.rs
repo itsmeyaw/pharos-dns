@@ -151,7 +151,7 @@ impl Item {
             return None;
         }
         let question = response.questions().next()?;
-        // A compressed Question cannot be recased without moving compression targets.
+        // shortcut: compressed Questions and non-final OPTs need safe re-encoding before caching.
         let raw_len: usize = question
             .name
             .labels()

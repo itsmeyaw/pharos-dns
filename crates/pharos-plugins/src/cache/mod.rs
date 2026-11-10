@@ -5,7 +5,9 @@ mod store;
 
 use std::{fmt::Write, net::SocketAddr, time::SystemTime};
 
-use pharos_proto::{Message, MessageMut, Name, NameRef, Opcode, Rdata, ResponseType, Type};
+use pharos_proto::{
+    Message, MessageBuilder, MessageMut, Name, NameRef, Opcode, Rcode, Rdata, ResponseType, Type,
+};
 use pharos_server::{Context, Next, Outcome, Plugin};
 
 /// Configuration for the cache Plugin.
@@ -108,8 +110,45 @@ impl Plugin for Cache {
         if let Some(metrics) = metrics {
             metrics.miss();
         }
+        // shortcut: downstream AD is not forced; separate Query and Metadata lifetimes to refresh authentication.
         let outcome = next.run(cx).await;
         if outcome != Outcome::Response {
+            if matches!(
+                outcome,
+                Outcome::Unanswered(Rcode::SERVFAIL) | Outcome::Error(_)
+            ) && !self.config.fail_ttl.is_zero()
+                && !self
+                    .config
+                    .disable_denial
+                    .iter()
+                    .any(|zone| contains(question.name, zone))
+            {
+                let ttl = self.config.fail_ttl.as_secs() as u32;
+                if ttl > 0
+                    && let Ok(mut builder) = MessageBuilder::new(
+                        cx.response,
+                        65535,
+                        query.id(),
+                        0x8002 | (query.flags() & 0x0110),
+                    )
+                    && matches!(
+                        builder.question(question.name, question.qtype, question.qclass),
+                        Ok(true)
+                    )
+                {
+                    let _ = builder.finish();
+                    if let Ok(response) = Message::parse(cx.response)
+                        && let Some(evicted) = self.denial.insert(key, &response, ttl)
+                        && let Some(metrics) = metrics
+                    {
+                        if evicted {
+                            metrics.evict(true);
+                        }
+                        metrics.entries(false, self.success.len());
+                        metrics.entries(true, self.denial.len());
+                    }
+                }
+            }
             return outcome;
         }
         let Ok(response) = Message::parse(cx.response) else {
@@ -118,8 +157,18 @@ impl Plugin for Cache {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64);
-        let response_type = pharos_proto::typify_response(Some(&response), now);
-        let denial = matches!(response_type, ResponseType::NxDomain | ResponseType::NoData);
+        let mut response_type = pharos_proto::typify_response(Some(&response), now);
+        let has_soa = response.authorities().any(|rr| rr.rtype == Type::SOA);
+        let incomplete = response_type == ResponseType::Positive
+            && response.answer_count() > 0
+            && !answers_question(&response);
+        if incomplete && has_soa {
+            response_type = ResponseType::NoData;
+        }
+        let denial = matches!(
+            response_type,
+            ResponseType::NxDomain | ResponseType::NoData | ResponseType::ServerError
+        );
         let (minimum, maximum) = if denial {
             (self.config.denial_min_ttl, self.config.denial_max_ttl)
         } else {
@@ -147,15 +196,21 @@ impl Plugin for Cache {
             ttl = 5;
         }
         ttl = ttl.max(minimum).min(maximum);
+        if response_type == ResponseType::ServerError {
+            ttl = self.config.fail_ttl.as_secs() as u32;
+        }
         let matches = response.questions().next().is_some_and(|q| {
             q.name == question.name && q.qtype == question.qtype && q.qclass == question.qclass
         });
-        let has_soa = response.authorities().any(|rr| rr.rtype == Type::SOA);
         let eligible = !response.tc()
             && ttl > 0
+            && (!incomplete || has_soa)
             && (matches!(
                 response_type,
-                ResponseType::Positive | ResponseType::Referral | ResponseType::NoData
+                ResponseType::Positive
+                    | ResponseType::Referral
+                    | ResponseType::NoData
+                    | ResponseType::ServerError
             ) || (response_type == ResponseType::NxDomain && has_soa));
         if eligible
             && !matches
@@ -192,7 +247,73 @@ impl Plugin for Cache {
         if !query.ad() && !query.opt().is_some_and(|opt| opt.dnssec_ok()) {
             cx.response[3] &= !0x20;
         }
+        strip_trailing_opt(cx.response);
         outcome
+    }
+}
+
+fn strip_trailing_opt(wire: &mut Vec<u8>) {
+    let Ok(message) = Message::parse(wire) else {
+        return;
+    };
+    if message.rcode().0 > 15 {
+        return;
+    }
+    let Some(opt) = message
+        .additionals()
+        .last()
+        .filter(|record| record.rtype == Type::OPT)
+    else {
+        return;
+    };
+    let start = opt.ttl_offset - 4 - opt.name.wire_len();
+    let count = message.additional_count() - 1;
+    wire.truncate(start);
+    wire[10..12].copy_from_slice(&count.to_be_bytes());
+}
+
+fn answers_question(message: &Message<'_>) -> bool {
+    let Some(question) = message.questions().next() else {
+        return false;
+    };
+    let matches_class =
+        |class| question.qclass == pharos_proto::Class::ANY || question.qclass == class;
+    if question.qtype == Type::ANY {
+        return message
+            .answers()
+            .any(|rr| rr.name == question.name && matches_class(rr.class));
+    }
+    let mut name = question.name.to_name();
+    let mut visited = Vec::new();
+    loop {
+        if visited.contains(&name) {
+            return false;
+        }
+        visited.push(name.clone());
+        let mut target: Option<Name> = None;
+        for rr in message.answers() {
+            if rr.rtype != Type::CNAME || rr.name != name || !matches_class(rr.class) {
+                continue;
+            }
+            let Ok(Rdata::Cname(alias)) = rr.data() else {
+                return false;
+            };
+            if target.as_ref().is_some_and(|existing| alias != *existing) {
+                return false;
+            }
+            target = Some(alias.to_name());
+        }
+        if question.qtype == Type::CNAME {
+            return target.is_some();
+        }
+        match target {
+            Some(alias) => name = alias,
+            None => {
+                return message.answers().any(|rr| {
+                    rr.rtype == question.qtype && rr.name == name && matches_class(rr.class)
+                });
+            }
+        }
     }
 }
 
