@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use crate::{Cursor, Error, ServerBlock, ServerBlockKey, Token};
 
 /// A known Directive and its setup function, in Plugin Order.
-pub struct Directive<C> {
-    pub name: &'static str,
+pub struct Directive<'a, C> {
+    pub name: &'a str,
     pub once: bool,
     pub setup: fn(&mut Cursor<'_>, &mut BlockContext<C>) -> Result<(), Error>,
 }
@@ -37,7 +37,7 @@ impl<C> BlockContext<C> {
 /// Run known Directive setup functions in caller-supplied Plugin Order.
 pub fn configure<C: Default>(
     blocks: &[ServerBlock],
-    registry: &[Directive<C>],
+    registry: &[Directive<'_, C>],
 ) -> Result<Vec<BlockContext<C>>, Error> {
     let mut configured = Vec::with_capacity(blocks.len());
     for block in blocks {

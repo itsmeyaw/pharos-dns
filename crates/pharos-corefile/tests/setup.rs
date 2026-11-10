@@ -53,6 +53,21 @@ fn setup_runs_in_plugin_order_and_shares_configuration() {
 }
 
 #[test]
+fn directive_registry_can_be_borrowed_from_the_caller() {
+    let name = String::from("first");
+    let registry = [Directive {
+        name: &name,
+        once: false,
+        setup: record,
+    }];
+    let blocks = parse("Corefile", ". {\n first value\n}").unwrap();
+    assert_eq!(
+        configure(&blocks, &registry).unwrap()[0].config,
+        ["first:value"]
+    );
+}
+
+#[test]
 fn unknown_and_once_only_directives_report_locations() {
     let registry = [Directive {
         name: "first",
