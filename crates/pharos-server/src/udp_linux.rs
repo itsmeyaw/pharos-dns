@@ -87,7 +87,7 @@ pub(crate) fn spawn<H: Handler>(
                 received = socket.async_io(Interest::READABLE, || receive(&socket, &mut buffers, &mut peers)) => match received {
                     Ok(count) => count,
                     Err(error) => {
-                        eprintln!("UDP receive failed: {error}");
+                        crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
                         tokio::select! {
                             _ = shutdown.changed() => return Ok(()),
                             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
@@ -112,7 +112,11 @@ pub(crate) fn spawn<H: Handler>(
                             .async_io(Interest::WRITABLE, || send(&socket, &response, peer))
                             .await
                     {
-                        eprintln!("UDP Response to {peer} failed: {error}");
+                        crate::logging::log(
+                            "ERROR",
+                            "server",
+                            &format!("UDP Response to {peer} failed: {error}"),
+                        );
                     }
                 }
             }

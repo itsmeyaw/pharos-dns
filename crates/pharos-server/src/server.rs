@@ -43,8 +43,7 @@ impl<C> Server<C> {
 }
 
 fn log_error(error: Error) {
-    // shortcut: structured Plugin logging is tracked in #18.
-    eprintln!("Plugin error: {error}");
+    crate::logging::log("ERROR", "server", &format!("Plugin error: {error}"));
 }
 
 impl<C: Chain> Handler for Server<C> {

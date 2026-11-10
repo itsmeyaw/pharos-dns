@@ -43,7 +43,7 @@ pub(crate) fn spawn<H: Handler>(
                     let (length, peer) = match received {
                         Ok(message) => message,
                         Err(error) => {
-                            eprintln!("UDP receive failed: {error}");
+                            crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
                             tokio::select! {
                                 _ = shutdown.changed() => return Ok(()),
                                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
@@ -54,7 +54,7 @@ pub(crate) fn spawn<H: Handler>(
                     response.clear();
                     if handler.handle(&query[..length], peer, Protocol::Udp, &mut response).await == Action::Respond
                         && let Err(error) = socket.send_to(&response, peer).await {
-                        eprintln!("UDP Response to {peer} failed: {error}");
+                        crate::logging::log("ERROR", "server", &format!("UDP Response to {peer} failed: {error}"));
                     }
                 }
             }

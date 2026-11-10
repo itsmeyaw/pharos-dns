@@ -1,5 +1,11 @@
 # CoreDNS compatibility
 
+## Logging
+
+Pharos writes UTC RFC3339 timestamps, unbracketed levels and Plugin names to
+stdout; CoreDNS uses the Go logger's date and time and bracketed levels such
+as `[INFO] plugin/x:`. Pharos also supports JSON lines selected at startup.
+
 ## Plugins
 
 Only `whoami` is implemented. Other built-in Directives are disabled by

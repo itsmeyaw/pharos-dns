@@ -42,7 +42,7 @@ pub(crate) fn spawn<H: Handler>(
                             ));
                         }
                         Err(error) => {
-                            eprintln!("TCP accept failed: {error}");
+                            crate::logging::log("ERROR", "server", &format!("TCP accept failed: {error}"));
                             tokio::select! {
                                 _ = shutdown.changed() => break Ok(()),
                                 _ = tokio::time::sleep(Duration::from_millis(100)) => {},

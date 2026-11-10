@@ -16,6 +16,7 @@ use tokio::{
 
 mod admission;
 mod lifecycle;
+pub mod logging;
 mod outcome;
 mod panic;
 mod quota;
