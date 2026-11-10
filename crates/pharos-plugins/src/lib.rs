@@ -67,6 +67,8 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     let metrics = pharos_server::metrics::Registry::default();
+    #[cfg(feature = "plugin-forward")]
+    let _ = metrics.forward();
     #[cfg(feature = "plugin-prometheus")]
     let mut exporters = std::collections::BTreeMap::new();
     #[cfg(feature = "plugin-ready")]
