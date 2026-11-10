@@ -114,9 +114,10 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
         }
         crate::version();
     }
-    if let Some(path) = &options.pidfile {
-        fs::write(path, format!("{}\n", std::process::id()))
-            .map_err(|e| (1, format!("{path}: {e}")))?;
+    if let Some(path) = &options.pidfile
+        && let Err(error) = fs::write(path, format!("{}\n", std::process::id()))
+    {
+        eprintln!("[ERROR] Could not write pidfile: {path}: {error}");
     }
     let terminate = loop {
         tokio::select! {

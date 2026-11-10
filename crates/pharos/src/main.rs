@@ -7,12 +7,12 @@
 //! | Code | Meaning |
 //! | --- | --- |
 //! | 0 | Version, Plugin listing, SIGQUIT, or successful shutdown |
-//! | 1 | Configuration, startup, log-format, or pidfile error |
+//! | 1 | Configuration, startup, or log-format error |
 //! | 2 | Invalid flag or second SIGINT during shutdown |
 //! | 3 | Listener stop failure after SIGTERM |
 //! | 4 | Shutdown hook failure |
 //!
-//! Unlike Caddy, a pidfile write failure is fatal. See `docs/compatibility.md`.
+//! See `docs/compatibility.md` for remaining differences.
 
 mod app;
 

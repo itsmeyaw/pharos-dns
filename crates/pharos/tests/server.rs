@@ -288,7 +288,7 @@ fn explicit_port_overrides_flag_and_interrupt_exits_cleanly() {
 }
 
 #[test]
-fn pidfile_write_failure_exits_with_error() {
+fn pidfile_write_failure_is_logged_and_server_keeps_running() {
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -317,7 +317,25 @@ fn pidfile_write_failure_exits_with_error() {
         .unwrap()
         .write_all(b". {\nwhoami\n}\n")
         .unwrap();
-    assert_eq!(process.0.wait().unwrap().code(), Some(1));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "server exited early"
+        );
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(20));
+    }
+    thread::sleep(Duration::from_millis(100));
+    assert!(process.0.try_wait().unwrap().is_none());
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &process.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(process.0.wait().unwrap().code(), Some(0));
     let mut stderr = String::new();
     process
         .0
@@ -326,7 +344,10 @@ fn pidfile_write_failure_exits_with_error() {
         .unwrap()
         .read_to_string(&mut stderr)
         .unwrap();
-    assert!(stderr.contains("/no-such-pharos-directory/pid"));
+    assert!(
+        stderr.contains("[ERROR] Could not write pidfile:"),
+        "{stderr}"
+    );
 }
 
 #[test]
