@@ -31,3 +31,9 @@ fn expands_environment_values_that_contain_more_references() {
     .unwrap();
     assert_eq!(blocks[0].keys, ["example.org"]);
 }
+
+#[test]
+fn recursive_environment_values_do_not_grow_without_bound() {
+    let blocks = parse_with_env("Corefile", "{$LOOP}", |_| Some("{$LOOP}{$LOOP}".into())).unwrap();
+    assert_eq!(blocks[0].keys, ["{$LOOP}{$LOOP}"]);
+}

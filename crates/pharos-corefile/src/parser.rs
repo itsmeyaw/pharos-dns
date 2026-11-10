@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::Path,
+};
 
 use crate::{Token, lex};
 
@@ -67,7 +71,8 @@ impl Parser<'_> {
     fn substitute(&self, text: &str) -> String {
         let mut result = text.to_owned();
         for (start, end) in [("{%", "%}"), ("{$", "}")] {
-            // shortcut: cap recursive environment expansion to avoid nonterminating values.
+            let mut seen = BTreeSet::new();
+            // shortcut: cap recursive environment expansion; upgrade if larger chains are needed.
             for _ in 0..10_000 {
                 let Some(index) = result.find(start) else {
                     break;
@@ -82,7 +87,7 @@ impl Parser<'_> {
                 let name = &result[index + start.len()..end_index];
                 let value = (self.lookup)(name).unwrap_or_default();
                 let reference = &result[index..end_index + end.len()];
-                if value == reference {
+                if !seen.insert(reference.to_owned()) || value == reference {
                     break;
                 }
                 result = result.replace(reference, &value);
