@@ -32,12 +32,17 @@ them when its header-count policy allows them, and selects the last OPT in
 Additional. CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC
 report transport errors. Pharos returns a header-only FORMERR
 for malformed Messages, whereas CoreDNS may retain a partially decoded Question.
+For a header-only Message claiming one Question, Pharos returns FORMERR;
+CoreDNS returns SERVFAIL.
 
 For pass-through Responses, Pharos truncates the encoded Message without
 recompression; CoreDNS may fit more records by recompressing first.
+If an OPT precedes other Additional records, Pharos drops the following
+records and sets TC rather than shifting their compression pointers.
 Pharos removes OPT from a Response to a non-EDNS Query, as RFC 6891 requires;
 CoreDNS may preserve a Plugin-supplied OPT in that case.
 Pharos logs Plugin errors and answers SERVFAIL; CoreDNS ignores returned errors.
+Zone Transfer streams are not yet served by the Listener.
 
 Pharos also rejects Client Subnet address lengths that do not match the prefix
 and non-zero host bits, which miekg/dns accepts. It validates the supported

@@ -4,6 +4,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
+use pharos_proto::{Message, Rcode};
 use pharos_server::{Action, Handler, Listener, Protocol, Server};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Stats, StatsAlloc};
 use std::{
@@ -78,7 +79,9 @@ async fn routed_udp_queries_do_not_allocate() {
         for _ in 0..201 {
             socket.send_to(&query, address).unwrap();
             let (n, _) = socket.recv_from(&mut buf).unwrap();
-            assert!(n > 12 && buf[2] & 0x80 != 0);
+            let response = Message::parse(&buf[..n]).unwrap();
+            assert!(response.qr());
+            assert_eq!(response.rcode(), Rcode::NOERROR);
         }
         let _ = done.send(());
     });
