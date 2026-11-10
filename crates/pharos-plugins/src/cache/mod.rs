@@ -3,7 +3,7 @@
 mod setup;
 mod store;
 
-use std::{fmt::Write, time::SystemTime};
+use std::{fmt::Write, net::SocketAddr, time::SystemTime};
 
 use pharos_proto::{Message, MessageMut, Name, NameRef, Opcode, Rdata, ResponseType, Type};
 use pharos_server::{Context, Next, Outcome, Plugin};
@@ -13,6 +13,7 @@ pub struct Cache {
     config: setup::Config,
     success: store::Store,
     denial: store::Store,
+    metrics: Vec<(SocketAddr, pharos_server::metrics::CacheMetrics)>,
 }
 
 impl std::fmt::Debug for Cache {
@@ -33,8 +34,33 @@ impl Cache {
         Ok(Self {
             success: store::Store::new(config.success_capacity),
             denial: store::Store::new(config.denial_capacity),
+            metrics: Vec::new(),
             config,
         })
+    }
+
+    pub(crate) fn set_metrics(
+        &mut self,
+        registry: &pharos_server::metrics::Registry,
+        listeners: &[pharos_server::ListenerKey],
+    ) {
+        let zones = self
+            .config
+            .zones
+            .iter()
+            .map(Name::canonical)
+            .collect::<Vec<_>>()
+            .join(",");
+        for listener in listeners {
+            let address = listener.address;
+            let server = if address.ip().is_unspecified() {
+                format!("dns://:{}", address.port())
+            } else {
+                format!("dns://{address}")
+            };
+            self.metrics
+                .push((address, registry.cache(&server, &zones, "")));
+        }
     }
 }
 
@@ -53,15 +79,34 @@ impl Plugin for Cache {
         {
             return next.run(cx).await;
         }
+        let metrics = self
+            .metrics
+            .iter()
+            .find_map(|(address, metrics)| (*address == cx.local).then_some(metrics));
+        if let Some(metrics) = metrics {
+            metrics.request();
+        }
         let key = key(&query);
         if self
             .denial
             .serve(key, &query, cx.response, self.config.keepttl)
-            || self
-                .success
-                .serve(key, &query, cx.response, self.config.keepttl)
         {
+            if let Some(metrics) = metrics {
+                metrics.hit(true);
+            }
             return Outcome::Response;
+        }
+        if self
+            .success
+            .serve(key, &query, cx.response, self.config.keepttl)
+        {
+            if let Some(metrics) = metrics {
+                metrics.hit(false);
+            }
+            return Outcome::Response;
+        }
+        if let Some(metrics) = metrics {
+            metrics.miss();
         }
         let outcome = next.run(cx).await;
         if outcome != Outcome::Response {
@@ -106,13 +151,19 @@ impl Plugin for Cache {
             q.name == question.name && q.qtype == question.qtype && q.qclass == question.qclass
         });
         let has_soa = response.authorities().any(|rr| rr.rtype == Type::SOA);
-        let cacheable = !response.tc()
-            && matches
+        let eligible = !response.tc()
             && ttl > 0
             && (matches!(
                 response_type,
                 ResponseType::Positive | ResponseType::Referral | ResponseType::NoData
             ) || (response_type == ResponseType::NxDomain && has_soa));
+        if eligible
+            && !matches
+            && let Some(metrics) = metrics
+        {
+            metrics.drop_response();
+        }
+        let cacheable = eligible && matches;
         let disabled = if denial {
             &self.config.disable_denial
         } else {
@@ -123,10 +174,19 @@ impl Plugin for Cache {
             mutable.rewrite_ttls(|_| ttl);
         }
         if cacheable && let Ok(response) = Message::parse(cx.response) {
-            if denial {
-                self.denial.insert(key, &response, ttl);
+            let inserted = if denial {
+                self.denial.insert(key, &response, ttl)
             } else {
-                self.success.insert(key, &response, ttl);
+                self.success.insert(key, &response, ttl)
+            };
+            if let Some(evicted) = inserted
+                && let Some(metrics) = metrics
+            {
+                if evicted {
+                    metrics.evict(denial);
+                }
+                metrics.entries(false, self.success.len());
+                metrics.entries(true, self.denial.len());
             }
         }
         if !query.ad() && !query.opt().is_some_and(|opt| opt.dnssec_ok()) {

@@ -99,7 +99,7 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         });
     }
     for block in blocks {
-        #[cfg(feature = "plugin-forward")]
+        #[cfg(any(feature = "plugin-forward", feature = "plugin-cache"))]
         let mut block = block;
         #[cfg(feature = "plugin-forward")]
         if let Some(forward) = &mut block.config.forward {
@@ -137,21 +137,7 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         let addresses = block.listen_addresses.clone();
         let empty = pharos_server::Chain::is_empty(&block.config);
         lifecycle.extend(&block.config.lifecycle);
-        let chain = Arc::new(block.config);
-        #[cfg(feature = "plugin-forward")]
-        if chain.forward.is_some() {
-            let chain = Arc::clone(&chain);
-            lifecycle.register_sync(pharos_server::Phase::Shutdown, move || {
-                if let Some(forward) = &chain.forward {
-                    forward.stop();
-                }
-                Ok(())
-            });
-        }
-        #[cfg(feature = "plugin-ready")]
-        if chain.ready.is_some() {
-            chain.collect_readiness(&ready_state);
-        }
+        let mut routes = Vec::new();
         for key in keys {
             if key.transport != "dns" {
                 return Err(io::Error::new(
@@ -173,17 +159,42 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
                     })?
                 };
-                let listener = ListenerKey {
-                    transport: Transport::Dns,
-                    address: SocketAddr::new(ip, port),
-                };
-                groups.entry(listener).or_default().add(
-                    listener,
+                routes.push((
+                    ListenerKey {
+                        transport: Transport::Dns,
+                        address: SocketAddr::new(ip, port),
+                    },
                     domain.clone(),
-                    (!empty).then(|| Arc::clone(&chain)),
-                    vec![],
-                );
+                ));
             }
+        }
+        #[cfg(feature = "plugin-cache")]
+        if let Some(cache) = &mut block.config.cache {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            cache.set_metrics(&metrics, &listeners);
+        }
+        let chain = Arc::new(block.config);
+        #[cfg(feature = "plugin-forward")]
+        if chain.forward.is_some() {
+            let chain = Arc::clone(&chain);
+            lifecycle.register_sync(pharos_server::Phase::Shutdown, move || {
+                if let Some(forward) = &chain.forward {
+                    forward.stop();
+                }
+                Ok(())
+            });
+        }
+        #[cfg(feature = "plugin-ready")]
+        if chain.ready.is_some() {
+            chain.collect_readiness(&ready_state);
+        }
+        for (listener, domain) in routes {
+            groups.entry(listener).or_default().add(
+                listener,
+                domain,
+                (!empty).then(|| Arc::clone(&chain)),
+                vec![],
+            );
         }
     }
     let servers = groups

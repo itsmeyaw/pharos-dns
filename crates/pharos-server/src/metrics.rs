@@ -54,6 +54,7 @@ struct RegistryInner {
     blocks: Mutex<BTreeMap<Key, Arc<Block>>>,
     statuses: Mutex<BTreeMap<StatusKey, Arc<AtomicU64>>>,
     proxies: Mutex<BTreeMap<(String, String), Arc<Proxy>>>,
+    caches: Mutex<BTreeMap<Key, Arc<Cache>>>,
     forward: Arc<ForwardCounters>,
     forward_enabled: AtomicBool,
     process: AtomicBool,
@@ -71,6 +72,56 @@ struct ForwardCounters {
 /// Process-wide forward counters, resolved once during setup.
 #[derive(Clone)]
 pub struct ForwardMetrics(Arc<ForwardCounters>);
+
+/// Cache metrics with labels resolved once during setup.
+#[derive(Clone)]
+pub struct CacheMetrics(Arc<Cache>);
+
+#[derive(Default)]
+struct Cache {
+    entries: [AtomicU64; 2],
+    hits: [AtomicU64; 2],
+    evictions: [AtomicU64; 2],
+    requests: AtomicU64,
+    misses: AtomicU64,
+    prefetches: AtomicU64,
+    drops: AtomicU64,
+    served_stale: AtomicU64,
+}
+
+impl CacheMetrics {
+    pub fn request(&self) {
+        self.0.requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn hit(&self, denial: bool) {
+        self.0.hits[usize::from(denial)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn miss(&self) {
+        self.0.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn prefetch(&self) {
+        self.0.prefetches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn drop_response(&self) {
+        self.0.drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn served_stale(&self) {
+        self.0.served_stale.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn evict(&self, denial: bool) {
+        self.0.evictions[usize::from(denial)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn entries(&self, denial: bool, count: usize) {
+        self.0.entries[usize::from(denial)].store(count as u64, Ordering::Relaxed);
+    }
+}
 
 impl ForwardMetrics {
     pub fn healthcheck_broken(&self) {
@@ -237,6 +288,7 @@ impl Registry {
             blocks: Mutex::new(BTreeMap::new()),
             statuses: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
+            caches: Mutex::new(BTreeMap::new()),
             forward: Arc::new(ForwardCounters::default()),
             forward_enabled: AtomicBool::new(false),
             process: AtomicBool::new(false),
@@ -267,6 +319,16 @@ impl Registry {
                 enabled: Mutex::new(BTreeMap::new()),
             })
         })))
+    }
+
+    /// Resolve cache series once before recording events.
+    pub fn cache(&self, server: &str, zones: &str, view: &str) -> CacheMetrics {
+        let mut caches = self.0.caches.lock().unwrap();
+        CacheMetrics(Arc::clone(
+            caches
+                .entry((server.into(), zones.into(), view.into()))
+                .or_default(),
+        ))
     }
 
     /// Resolve metrics for a proxy and Upstream address before recording events.
@@ -383,6 +445,8 @@ impl Registry {
             ],
         );
         out.push_str("} 1\n");
+
+        self.encode_caches(out);
 
         let blocks = self.0.blocks.lock().unwrap();
         let status = self.0.statuses.lock().unwrap();
@@ -604,6 +668,97 @@ impl Registry {
         }
         if self.0.process.load(Ordering::Relaxed) {
             crate::process_metrics::encode_process(out);
+        }
+    }
+
+    fn encode_caches(&self, out: &mut String) {
+        let caches = self.0.caches.lock().unwrap();
+        if caches.is_empty() {
+            return;
+        }
+        for (name, help, kind, typed, get) in [
+            (
+                "cache_drops_total",
+                "The number responses that are not cached, because the reply is malformed.",
+                "counter",
+                false,
+                (|c: &Cache| std::slice::from_ref(&c.drops)) as fn(&Cache) -> &[AtomicU64],
+            ),
+            (
+                "cache_entries",
+                "The number of elements in the cache.",
+                "gauge",
+                true,
+                |c: &Cache| &c.entries,
+            ),
+            (
+                "cache_evictions_total",
+                "The count of cache evictions.",
+                "counter",
+                true,
+                |c: &Cache| &c.evictions,
+            ),
+            (
+                "cache_hits_total",
+                "The count of cache hits.",
+                "counter",
+                true,
+                |c: &Cache| &c.hits,
+            ),
+            (
+                "cache_misses_total",
+                "The count of cache misses. Deprecated, derive misses from cache hits/requests counters.",
+                "counter",
+                false,
+                |c: &Cache| std::slice::from_ref(&c.misses),
+            ),
+            (
+                "cache_prefetch_total",
+                "The number of times the cache has prefetched a cached item.",
+                "counter",
+                false,
+                |c: &Cache| std::slice::from_ref(&c.prefetches),
+            ),
+            (
+                "cache_requests_total",
+                "The count of cache requests.",
+                "counter",
+                false,
+                |c: &Cache| std::slice::from_ref(&c.requests),
+            ),
+            (
+                "cache_served_stale_total",
+                "The number of requests served from stale cache entries.",
+                "counter",
+                false,
+                |c: &Cache| std::slice::from_ref(&c.served_stale),
+            ),
+        ] {
+            header(out, name, help, kind);
+            let mut sorted = SortedSamples::default();
+            for ((server, zones, view), cache) in caches.iter() {
+                if typed {
+                    for (index, typ) in ["success", "denial"].iter().enumerate() {
+                        sorted.sample(
+                            name,
+                            &[
+                                ("server", server),
+                                ("type", typ),
+                                ("view", view),
+                                ("zones", zones),
+                            ],
+                            get(cache)[index].load(Ordering::Relaxed),
+                        );
+                    }
+                } else {
+                    sorted.sample(
+                        name,
+                        &[("server", server), ("view", view), ("zones", zones)],
+                        get(cache)[0].load(Ordering::Relaxed),
+                    );
+                }
+            }
+            sorted.write(out);
         }
     }
 

@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     hash::{BuildHasherDefault, Hasher},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 
@@ -33,6 +36,7 @@ struct Shard {
 pub(super) struct Store {
     shards: [Mutex<Shard>; 256],
     capacity: usize,
+    len: AtomicUsize,
 }
 
 struct Item {
@@ -56,15 +60,22 @@ impl Store {
                 })
             }),
             capacity,
+            len: AtomicUsize::new(0),
         }
     }
 
-    pub(super) fn insert(&self, key: u64, response: &Message<'_>, ttl: u32) {
+    pub(super) fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn insert(&self, key: u64, response: &Message<'_>, ttl: u32) -> Option<bool> {
         let Some(item) = Item::new(response, ttl) else {
-            return;
+            return None;
         };
         let mut shard = self.shards[key as usize & 255].lock().unwrap();
-        if shard.items.len() >= self.capacity && !shard.items.contains_key(&key) {
+        let exists = shard.items.contains_key(&key);
+        let mut evicted = false;
+        if shard.items.len() >= self.capacity && !exists {
             let mut random = shard.random;
             random ^= random << 13;
             random ^= random >> 7;
@@ -73,9 +84,14 @@ impl Store {
             let index = (random as usize) % shard.items.len();
             if let Some(old) = shard.items.keys().nth(index).copied() {
                 shard.items.remove(&old);
+                evicted = true;
             }
         }
         shard.items.insert(key, item);
+        if !exists && !evicted {
+            self.len.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(evicted)
     }
 
     pub(super) fn serve(
