@@ -13,7 +13,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{net::UdpSocket, time::timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UdpSocket},
+    time::timeout,
+};
 
 const SHARDS: usize = 32;
 const EXPIRE: Duration = Duration::from_secs(10);
@@ -35,6 +39,7 @@ pub struct Options {
 pub enum Error {
     InvalidRequest,
     Mismatch,
+    CachedClosed,
     Io(io::Error),
 }
 impl From<io::Error> for Error {
@@ -51,13 +56,52 @@ pub struct Exchange {
 }
 
 struct Cached {
-    socket: UdpSocket,
+    socket: Socket,
     used: Instant,
+}
+
+enum Socket {
+    Udp(UdpSocket),
+    Tcp(TcpStream),
+}
+
+impl Socket {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            Self::Udp(s) => s.local_addr(),
+            Self::Tcp(s) => s.local_addr(),
+        }
+    }
+    async fn send(&mut self, wire: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Udp(s) => {
+                s.send(wire).await?;
+                Ok(())
+            }
+            Self::Tcp(s) => {
+                s.write_all(&(wire.len() as u16).to_be_bytes()).await?;
+                s.write_all(wire).await
+            }
+        }
+    }
+    async fn receive(&mut self, wire: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Udp(s) => s.recv(wire).await,
+            Self::Tcp(s) => {
+                let len = usize::from(s.read_u16().await?);
+                if len > wire.len() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                s.read_exact(&mut wire[..len]).await?;
+                Ok(len)
+            }
+        }
+    }
 }
 
 pub struct Proxy {
     address: SocketAddr,
-    shards: [Mutex<VecDeque<Cached>>; SHARDS],
+    shards: [[Mutex<VecDeque<Cached>>; SHARDS]; 2],
     next: AtomicUsize,
     expire: Duration,
 }
@@ -67,7 +111,7 @@ impl Proxy {
     pub fn new(address: SocketAddr) -> Self {
         Self {
             address,
-            shards: std::array::from_fn(|_| Mutex::new(VecDeque::new())),
+            shards: std::array::from_fn(|_| std::array::from_fn(|_| Mutex::new(VecDeque::new()))),
             next: AtomicUsize::new(0),
             expire: EXPIRE,
         }
@@ -80,7 +124,7 @@ impl Proxy {
         options: Options,
     ) -> Result<Exchange, Error> {
         let request = Message::parse(query).map_err(|_| Error::InvalidRequest)?;
-        if query.len() > response.len() {
+        if query.len() > response.len() || query.len() > u16::MAX as usize {
             return Err(Error::InvalidRequest);
         }
         let transport = if options.force_tcp {
@@ -90,12 +134,10 @@ impl Proxy {
         } else {
             transport
         };
-        if transport != Transport::Udp {
-            return Err(Error::Io(io::ErrorKind::Unsupported.into()));
-        }
+        let protocol = usize::from(transport == Transport::Tcp);
         let shard = self.next.fetch_add(1, Ordering::Relaxed) % SHARDS;
         let cached = {
-            let mut queue = self.shards[shard].lock().unwrap();
+            let mut queue = self.shards[protocol][shard].lock().unwrap();
             loop {
                 match queue.pop_front() {
                     Some(cached) if cached.used.elapsed() <= self.expire => break Some(cached),
@@ -104,8 +146,15 @@ impl Proxy {
                 }
             }
         };
-        let socket = if let Some(cached) = cached {
+        let reused = cached.is_some();
+        let mut socket = if let Some(cached) = cached {
             cached.socket
+        } else if transport == Transport::Tcp {
+            Socket::Tcp(
+                timeout(Duration::from_secs(30), TcpStream::connect(self.address))
+                    .await
+                    .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))??,
+            )
         } else {
             let ip = if self.address.is_ipv4() {
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED)
@@ -114,7 +163,7 @@ impl Proxy {
             };
             let socket = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
             socket.connect(self.address).await?;
-            socket
+            Socket::Udp(socket)
         };
         let mut id = [0; 2];
         getrandom::getrandom(&mut id)
@@ -122,19 +171,33 @@ impl Proxy {
         response[..query.len()].copy_from_slice(query);
         response[..2].copy_from_slice(&id);
         let local_addr = socket.local_addr()?;
-        timeout(READ_TIMEOUT, socket.send(&response[..query.len()]))
+        let sent = timeout(READ_TIMEOUT, socket.send(&response[..query.len()]))
             .await
-            .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))??;
-        let length = timeout(READ_TIMEOUT, async {
+            .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))?;
+        if let Err(err) = sent {
+            return Err(if reused && err.kind() == io::ErrorKind::UnexpectedEof {
+                Error::CachedClosed
+            } else {
+                Error::Io(err)
+            });
+        }
+        let received = timeout(READ_TIMEOUT, async {
             loop {
-                let len = socket.recv(response).await?;
+                let len = socket.receive(response).await?;
                 if len >= 2 && response[..2] == id {
                     return Ok::<_, io::Error>(len);
                 }
             }
         })
         .await
-        .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))??;
+        .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))?;
+        let length = received.map_err(|err| {
+            if reused && err.kind() == io::ErrorKind::UnexpectedEof {
+                Error::CachedClosed
+            } else {
+                Error::Io(err)
+            }
+        })?;
         let answer = Message::parse(&response[..length]).map_err(|_| Error::Mismatch)?;
         let same_questions = request.question_count() == answer.question_count()
             && request
@@ -145,10 +208,13 @@ impl Proxy {
             return Err(Error::Mismatch);
         }
         response[..2].copy_from_slice(&query[..2]);
-        self.shards[shard].lock().unwrap().push_back(Cached {
-            socket,
-            used: Instant::now(),
-        });
+        self.shards[protocol][shard]
+            .lock()
+            .unwrap()
+            .push_back(Cached {
+                socket,
+                used: Instant::now(),
+            });
         Ok(Exchange {
             len: length,
             local_addr,
