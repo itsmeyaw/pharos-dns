@@ -74,7 +74,9 @@ Kubeconfig proxy URLs are not supported; CoreDNS can connect through them.
 An unreadable or invalid in-cluster CA file fails client creation; client-go
 logs the CA error and proceeds without that CA file.
 DNS programming latency excludes the initial list; CoreDNS records annotated
-EndpointSlices during that operation too. Kubernetes REST request
+EndpointSlices during that operation too. Relist observations occur after the
+whole resource batch is installed, rather than after each individual slice.
+Kubernetes REST request
 duration ends when response headers arrive, rather than after processing the
 response body. Kube's internal retries are counted once per request rather
 than once per attempt as in client-go.
