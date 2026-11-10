@@ -1,0 +1,10 @@
+.:{port} {
+    hosts empty.hosts example.org {
+        192.0.2.10 one.example.org alias.example.org
+        2001:db8::10 dual.example.org
+        192.0.2.11 dual.example.org
+        ttl 60
+        reload 0
+    }
+    whoami
+}
