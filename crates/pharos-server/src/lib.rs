@@ -340,6 +340,19 @@ impl ListenerRegistry {
         self.listeners.get(key)
     }
 
+    /// Stop and drain every Listener.
+    pub async fn shutdown(mut self) -> io::Result<()> {
+        let mut result = Ok(());
+        for (_, listener) in self.listeners.drain() {
+            if let Err(error) = listener.shutdown().await
+                && result.is_ok()
+            {
+                result = Err(error);
+            }
+        }
+        result
+    }
+
     /// Bind new Listeners before changing any existing Listener's handler.
     pub async fn apply<H: Handler>(
         &mut self,

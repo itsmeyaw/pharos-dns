@@ -78,9 +78,16 @@ pub type Servers = HashMap<ListenerKey, Server<Arc<Chain>>>;
 /// Group Server Blocks by Listener and collect their hooks in block order.
 /// The caller runs Startup before serving and Shutdown before Listeners drain.
 pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecycle)> {
+    servers_with_registry(blocks, pharos_server::metrics::Registry::default())
+}
+
+/// Build servers using a process-wide metrics registry.
+pub fn servers_with_registry(
+    blocks: Vec<BlockContext<Chain>>,
+    metrics: pharos_server::metrics::Registry,
+) -> io::Result<(Servers, Lifecycle)> {
     let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
-    let metrics = pharos_server::metrics::Registry::default();
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
     #[cfg(feature = "plugin-health")]
@@ -204,11 +211,14 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         ));
         let startup_listener = Arc::clone(&listener);
         let registry = metrics.clone();
-        lifecycle.register(pharos_server::Phase::Startup, move || {
+        let start = move || {
             let address = address.clone();
             let listener = Arc::clone(&startup_listener);
             let registry = registry.clone();
             async move {
+                if listener.lock().unwrap().is_some() {
+                    return Ok(());
+                }
                 let server =
                     pharos_server::http::Listener::bind_with_methods(&address, |_, path| {
                         Some(if path == "/health" {
@@ -224,6 +234,19 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
                     .await?;
                 let probe = pharos_server::http::HealthProbe::start(&address, registry);
                 *listener.lock().unwrap() = Some((server, probe));
+                Ok(())
+            }
+        };
+        lifecycle.register(pharos_server::Phase::Startup, start.clone());
+        lifecycle.register(pharos_server::Phase::RestartFailed, start);
+        let restart_listener = Arc::clone(&listener);
+        lifecycle.register(pharos_server::Phase::Restart, move || {
+            let server = restart_listener.lock().unwrap().take();
+            async move {
+                if let Some((server, probe)) = server {
+                    drop(probe);
+                    server.shutdown().await?;
+                }
                 Ok(())
             }
         });
@@ -244,11 +267,14 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
         let startup_listener = Arc::clone(&listener);
         let state = Arc::clone(&ready_state);
-        lifecycle.register(pharos_server::Phase::Startup, move || {
+        let start = move || {
             let address = address.clone();
             let state = Arc::clone(&state);
             let listener = Arc::clone(&startup_listener);
             async move {
+                if listener.lock().unwrap().is_some() {
+                    return Ok(());
+                }
                 let server =
                     pharos_server::http::Listener::bind_with_status(&address, move |path| {
                         (path == "/ready").then(|| {
@@ -260,8 +286,10 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
                 *listener.lock().unwrap() = Some(server);
                 Ok(())
             }
-        });
-        lifecycle.register(pharos_server::Phase::Shutdown, move || {
+        };
+        lifecycle.register(pharos_server::Phase::Startup, start.clone());
+        lifecycle.register(pharos_server::Phase::RestartFailed, start);
+        let stop = move || {
             let server = listener.lock().unwrap().take();
             async move {
                 if let Some(server) = server {
@@ -269,19 +297,24 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
                 }
                 Ok(())
             }
-        });
+        };
+        lifecycle.register(pharos_server::Phase::Restart, stop.clone());
+        lifecycle.register(pharos_server::Phase::Shutdown, stop);
     }
     #[cfg(feature = "plugin-prometheus")]
     for (address, tls_config) in exporters {
         let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
         let startup_listener = Arc::clone(&listener);
         let registry = metrics.clone();
-        lifecycle.register(pharos_server::Phase::Startup, move || {
+        let start = move || {
             let address = address.clone();
             let tls_config = tls_config.clone();
             let registry = registry.clone();
             let listener = Arc::clone(&startup_listener);
             async move {
+                if listener.lock().unwrap().is_some() {
+                    return Ok(());
+                }
                 if tls_config.is_some() {
                     // shortcut: exporter-toolkit TLS and authentication require a compatible configuration implementation.
                     return Err(io::Error::new(
@@ -301,8 +334,10 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
                 *listener.lock().unwrap() = Some(server);
                 Ok(())
             }
-        });
-        lifecycle.register(pharos_server::Phase::Shutdown, move || {
+        };
+        lifecycle.register(pharos_server::Phase::Startup, start.clone());
+        lifecycle.register(pharos_server::Phase::RestartFailed, start);
+        let stop = move || {
             let server = listener.lock().unwrap().take();
             async move {
                 if let Some(server) = server {
@@ -310,7 +345,9 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
                 }
                 Ok(())
             }
-        });
+        };
+        lifecycle.register(pharos_server::Phase::Restart, stop.clone());
+        lifecycle.register(pharos_server::Phase::Shutdown, stop);
     }
     Ok((servers, lifecycle))
 }

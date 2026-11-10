@@ -1,6 +1,6 @@
 use crate::Options;
 use pharos_server::{
-    Listener, Phase,
+    Lifecycle, ListenerRegistry, Phase,
     logging::{self, LogFormat},
     startup_domains,
 };
@@ -47,6 +47,84 @@ fn init_logging(format: &str) {
     });
 }
 
+type Domains = BTreeMap<String, Vec<String>>;
+
+fn prepare(
+    options: &Options,
+    file: &str,
+    input: &str,
+    metrics: &pharos_server::metrics::Registry,
+) -> Result<(pharos_plugins::Servers, Lifecycle, Domains), String> {
+    let mut blocks = pharos_corefile::parse(file, input).map_err(|e| e.to_string())?;
+    if blocks.is_empty() {
+        blocks = pharos_corefile::parse("<default>", &default_corefile(options))
+            .map_err(|e| e.to_string())?;
+    }
+    for block in &mut blocks {
+        block.set_default_dns_port(options.port.unwrap_or(53));
+    }
+    let blocks = pharos_corefile::configure(&blocks, pharos_plugins::directives())
+        .map_err(|e| e.to_string())?;
+    let mut domains = Domains::new();
+    for block in &blocks {
+        for key in block.keys() {
+            for address in &block.listen_addresses {
+                domains
+                    .entry(format!("{address}:{}", key.port))
+                    .or_default()
+                    .push(key.domain.clone());
+            }
+        }
+    }
+    let (servers, lifecycle) = pharos_plugins::servers_with_registry(blocks, metrics.clone())
+        .map_err(|e| e.to_string())?;
+    Ok((servers, lifecycle, domains))
+}
+
+async fn reload(
+    options: &Options,
+    initial: &str,
+    listeners: &mut ListenerRegistry,
+    lifecycle: &mut Lifecycle,
+    metrics: &pharos_server::metrics::Registry,
+) {
+    let result = async {
+        lifecycle
+            .run(Phase::Restart)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (file, input) = if options.conf.as_deref() == Some("stdin") {
+            ("stdin".to_owned(), initial.to_owned())
+        } else {
+            configuration(options)?
+        };
+        let (servers, next, _) = prepare(options, &file, &input, metrics)?;
+        if let Err(error) = next.run(Phase::Startup).await {
+            let _ = next.run(Phase::Restart).await;
+            let _ = next.run(Phase::Shutdown).await;
+            return Err(error.to_string());
+        }
+        if let Err(error) = listeners.apply(servers).await {
+            let _ = next.run(Phase::Restart).await;
+            let _ = next.run(Phase::Shutdown).await;
+            return Err(error.to_string());
+        }
+        if let Err(error) = lifecycle.run(Phase::Shutdown).await {
+            logging::log("ERROR", "", &format!("Reload shutdown: {error}"));
+        }
+        *lifecycle = next;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        metrics.reload_failed();
+        logging::log("ERROR", "", &format!("Reload failed: {error}"));
+        if let Err(error) = lifecycle.run(Phase::RestartFailed).await {
+            logging::log("ERROR", "", &format!("Reload recovery failed: {error}"));
+        }
+    }
+}
+
 struct Signals {
     interrupt: Signal,
     terminate: Signal,
@@ -70,36 +148,14 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     init_logging(options.log_format.as_deref().unwrap_or("text"));
     let mut signals = Signals::new().map_err(|e| (1, e.to_string()))?;
     let (file, input) = configuration(&options).map_err(|e| (1, e))?;
-    let mut blocks = pharos_corefile::parse(&file, &input).map_err(|e| (1, e.to_string()))?;
-    if blocks.is_empty() {
-        blocks = pharos_corefile::parse("<default>", &default_corefile(&options))
-            .map_err(|e| (1, e.to_string()))?;
-    }
-    for block in &mut blocks {
-        block.set_default_dns_port(options.port.unwrap_or(53));
-    }
-    let blocks = pharos_corefile::configure(&blocks, pharos_plugins::directives())
+    let metrics = pharos_server::metrics::Registry::default();
+    let (servers, mut lifecycle, domains) =
+        prepare(&options, &file, &input, &metrics).map_err(|e| (1, e))?;
+    let mut listeners = ListenerRegistry::default();
+    listeners
+        .apply(servers)
+        .await
         .map_err(|e| (1, e.to_string()))?;
-    let mut domains = BTreeMap::<String, Vec<String>>::new();
-    for block in &blocks {
-        for key in block.keys() {
-            for address in &block.listen_addresses {
-                domains
-                    .entry(format!("{address}:{}", key.port))
-                    .or_default()
-                    .push(key.domain.clone());
-            }
-        }
-    }
-    let (servers, lifecycle) = pharos_plugins::servers(blocks).map_err(|e| (1, e.to_string()))?;
-    let mut listeners = Vec::new();
-    for (key, server) in servers {
-        listeners.push(
-            Listener::bind(key.address, server)
-                .await
-                .map_err(|e| (1, format!("{}: {e}", key.address)))?,
-        );
-    }
     lifecycle
         .run(Phase::Startup)
         .await
@@ -133,22 +189,12 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
             _ = signals.quit.recv() => { remove_pidfile(&options); return Ok(0); },
             _ = signals.hangup.recv() => {},
             _ = signals.reload.recv() => {
-                // shortcut: wire Reload to configuration replacement in M1.
                 logging::log("INFO", "", "SIGUSR1: Reloading");
+                reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await;
             },
         }
     };
-    let stop = async {
-        let mut result = Ok(());
-        for listener in listeners {
-            if let Err(error) = listener.shutdown().await
-                && result.is_ok()
-            {
-                result = Err(error);
-            }
-        }
-        result
-    };
+    let stop = listeners.shutdown();
     let shutdown = shutdown(
         terminate,
         lifecycle.run(Phase::Shutdown),

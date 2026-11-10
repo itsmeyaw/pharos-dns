@@ -60,6 +60,8 @@ struct RegistryInner {
     health_enabled: AtomicBool,
     health_duration: Histogram,
     health_failures: AtomicU64,
+    reload_enabled: AtomicBool,
+    reload_failures: AtomicU64,
 }
 
 #[derive(Default)]
@@ -243,6 +245,8 @@ impl Registry {
             health_enabled: AtomicBool::new(false),
             health_duration: Histogram::new(HEALTH_BUCKETS),
             health_failures: AtomicU64::new(0),
+            reload_enabled: AtomicBool::new(false),
+            reload_failures: AtomicU64::new(0),
         }))
     }
 
@@ -302,6 +306,11 @@ impl Registry {
         self.0.health_enabled.store(true, Ordering::Relaxed);
     }
 
+    pub fn reload_failed(&self) {
+        self.0.reload_enabled.store(true, Ordering::Relaxed);
+        self.0.reload_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn observe_health(&self, seconds: f64, failed: bool) {
         self.0.health_duration.observe(HEALTH_BUCKETS, seconds);
         if failed {
@@ -325,6 +334,20 @@ impl Registry {
 
     /// Append text to `out`; callers can append process metrics to the same buffer.
     pub fn encode(&self, out: &mut String) {
+        if self.0.reload_enabled.load(Ordering::Relaxed) {
+            header(
+                out,
+                "reload_failed_total",
+                "Counter of the number of failed reload attempts.",
+                "counter",
+            );
+            writeln!(
+                out,
+                "pharos_reload_failed_total {}",
+                self.0.reload_failures.load(Ordering::Relaxed)
+            )
+            .unwrap();
+        }
         if self.0.health_enabled.load(Ordering::Relaxed) {
             let name = "health_request_duration_seconds";
             header(
