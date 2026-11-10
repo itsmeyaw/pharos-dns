@@ -1658,6 +1658,7 @@ dependencies = [
  "kube",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
