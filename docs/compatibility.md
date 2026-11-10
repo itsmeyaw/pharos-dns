@@ -21,6 +21,20 @@ miekg/dns permits 126.
 Pharos also rejects decimal name escapes above 255 instead of wrapping them
 to an octet as miekg/dns does.
 
+## EDNS
+
+Pharos rejects duplicate OPT records, OPT records outside Additional, and
+non-root OPT owners as invalid Messages (FORMERR). CoreDNS v1.15.0 accepts
+these when its header-count policy allows them, and selects the last OPT in
+Additional. CoreDNS's UDP/TCP Listener returns FORMERR on option unpacking
+errors; short headers are dropped. HTTP and QUIC report transport errors.
+
+Pharos also rejects Client Subnet address lengths that do not match the prefix
+and non-zero host bits, which miekg/dns accepts. It validates the supported
+typed options and framing; other option codes are passed through without the
+additional type-specific validation miekg/dns applies to some of them. Invalid
+UTF-8 in Extended DNS Error text is rendered with replacement characters.
+
 ## Environment substitution
 
 CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each

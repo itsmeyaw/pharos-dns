@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Class, NameRef, Type};
+use crate::{Class, NameRef, ResponseOpt, Type};
 
 const MIN_MESSAGE_SIZE: usize = 512;
 const COMPRESSION_SLOTS: usize = 128;
@@ -112,6 +112,33 @@ impl<'a> MessageBuilder<'a> {
         }
         self.reserved += size;
         Ok(())
+    }
+
+    /// Reserves the exact space needed for a Response OPT before adding records.
+    pub fn reserve_response_opt(&mut self, opt: &ResponseOpt<'_, '_>) -> Result<(), BuildError> {
+        self.reserve(opt.wire_len())
+    }
+
+    /// Appends the reserved Response OPT even if earlier records were truncated.
+    pub fn finish_with_response_opt(
+        mut self,
+        opt: &ResponseOpt<'_, '_>,
+    ) -> Result<&'a mut Vec<u8>, BuildError> {
+        let error = if opt.wire_len() > self.reserved {
+            Some(BuildError::SizeLimit)
+        } else {
+            self.check_count(3).err()
+        };
+        if let Some(error) = error {
+            let _ = self.finish();
+            return Err(error);
+        }
+        if let Err(error) = opt.encode(self.wire) {
+            let _ = self.finish();
+            return Err(error);
+        }
+        self.counts[3] += 1;
+        Ok(self.finish())
     }
 
     /// Adds a Question. If it cannot fit, it is rolled back, TC is set, and writing stops.

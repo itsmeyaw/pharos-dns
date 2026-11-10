@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Class, NameError, NameRef, Opcode, Rcode, Type};
+use crate::{Class, EdnsOptions, NameError, NameRef, Opcode, Opt, Rcode, Type};
 
 const HEADER_LEN: usize = 12;
 
@@ -11,6 +11,8 @@ pub enum MessageError {
     Truncated,
     /// A domain name is invalid.
     Name(NameError),
+    /// Invalid OPT placement, owner, multiplicity or option data (FORMERR).
+    InvalidOpt,
 }
 
 impl fmt::Display for MessageError {
@@ -18,6 +20,7 @@ impl fmt::Display for MessageError {
         match self {
             Self::Truncated => f.write_str("truncated DNS Message"),
             Self::Name(err) => write!(f, "invalid name: {err}"),
+            Self::InvalidOpt => f.write_str("invalid EDNS OPT record"),
         }
     }
 }
@@ -119,13 +122,25 @@ impl<'a> Message<'a> {
         ];
         let mut starts = [0; 4];
         let mut offset = HEADER_LEN;
+        let mut has_opt = false;
         for section in 0..4 {
             starts[section] = offset;
             for _ in 0..counts[section] {
                 offset = if section == 0 {
                     question(wire, offset)?.1
                 } else {
-                    record(wire, offset)?.1
+                    let (rr, next) = record(wire, offset)?;
+                    if rr.rtype == Type::OPT {
+                        if section != 3
+                            || has_opt
+                            || rr.name.labels().next().is_some()
+                            || EdnsOptions::parse(rr.rdata).is_err()
+                        {
+                            return Err(MessageError::InvalidOpt);
+                        }
+                        has_opt = true;
+                    }
+                    next
                 };
             }
         }
@@ -181,7 +196,17 @@ impl<'a> Message<'a> {
     }
     #[must_use]
     pub fn rcode(&self) -> Rcode {
-        Rcode(self.flags() & 15)
+        Rcode::from_parts(
+            (self.flags() & 15) as u8,
+            self.opt().map_or(0, |opt| opt.extended_rcode()),
+        )
+    }
+    /// Returns the validated OPT from the Additional section, if present.
+    #[must_use]
+    pub fn opt(&self) -> Option<Opt<'a>> {
+        self.additionals()
+            .find(|rr| rr.rtype == Type::OPT)
+            .map(Opt::from_record)
     }
     #[must_use]
     pub const fn question_count(&self) -> u16 {
