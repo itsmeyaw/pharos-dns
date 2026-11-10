@@ -71,9 +71,7 @@ disabled by default; explicitly enabling their Cargo features makes setup fail w
 not-implemented error rather than accepting their configuration.
 
 The `loop` Plugin probes only the first Domain in a Server Block at startup
-and after Reload. Following the requested two-second grace period, Pharos
-disables detection two seconds after a successful exchange. CoreDNS v1.15.0
-also schedules that delay but disables immediately on exiting its probe loop.
+and after Reload, as CoreDNS does.
 Fatal loop detection logs and exits immediately with status 1, without running
 Shutdown hooks or removing the pidfile, as CoreDNS's fatal logger does. Probe
 Queries may allocate while running concurrently with UDP reception; ordinary

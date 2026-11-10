@@ -145,8 +145,6 @@ impl State {
                 .await
                 .is_ok_and(|result| result.is_ok())
             {
-                self.complete.store(true, Ordering::Release);
-                tokio::time::sleep(Duration::from_secs(2)).await;
                 break;
             }
             self.seen.store(0, Ordering::Relaxed);
@@ -312,7 +310,7 @@ mod tests {
             .unwrap();
         wire[2] |= 0x80;
         socket.send_to(&wire[..len], peer).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(2200)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(plugin.state.disabled.load(Ordering::Acquire));
         assert!(plugin.state.complete.load(Ordering::Acquire));
         lifecycle.run(Phase::Shutdown).await.unwrap();
