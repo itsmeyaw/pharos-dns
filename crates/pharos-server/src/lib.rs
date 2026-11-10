@@ -3,9 +3,23 @@
 //! Listener; earlier Plugins may inspect and modify the caller-owned Response
 //! buffer after awaiting Next. The Listener handles unanswered codes and errors.
 
-use std::net::SocketAddr;
+use std::{fmt, future::Future, net::SocketAddr};
 
 use pharos_proto::{BuildError, Message, Name, Rcode};
+
+/// A statically dispatched continuation of the Plugin Chain.
+pub trait Next {
+    fn run(self, cx: &mut Context<'_>) -> impl Future<Output = Outcome> + Send;
+}
+
+/// A Plugin may await Next and inspect or modify its outcome and Response.
+pub trait Plugin {
+    fn serve<N: Next + Send>(
+        &self,
+        cx: &mut Context<'_>,
+        next: N,
+    ) -> impl Future<Output = Outcome> + Send;
+}
 
 /// Transport named by a Server Block Key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,7 +60,22 @@ pub enum Error {
     InvalidQuery,
     ResponseBufferTooSmall,
     NotImplemented,
+    NoNextPlugin,
 }
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Build(error) => write!(f, "{error}"),
+            Self::InvalidQuery => f.write_str("invalid Query"),
+            Self::ResponseBufferTooSmall => f.write_str("Response buffer too small"),
+            Self::NotImplemented => f.write_str("plugin is not implemented"),
+            Self::NoNextPlugin => f.write_str("no next plugin found"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 /// Caller-provided, fixed-capacity Metadata slots.
 pub struct Metadata<'a> {
