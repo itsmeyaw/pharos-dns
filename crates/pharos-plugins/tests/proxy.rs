@@ -386,3 +386,28 @@ async fn short_tcp_response_is_a_transport_error() {
     );
     upstream.await.unwrap();
 }
+
+#[tokio::test]
+async fn malformed_upstream_response_starts_health_check() {
+    use pharos_plugins::proxy::Error;
+    use std::{io, time::Duration};
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (_, peer) = server.recv_from(&mut wire).await.unwrap();
+        wire[2] |= 0x80;
+        server.send_to(&wire[..12], peer).await.unwrap();
+        let (len, peer) = tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        wire[2] |= 0x80;
+        server.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let mut response = [0; 512];
+    assert!(
+        matches!(proxy.exchange(QUERY, &mut response, Transport::Udp, Options::default()).await, Err(Error::Io(e)) if e.kind() == io::ErrorKind::InvalidData)
+    );
+    upstream.await.unwrap();
+}

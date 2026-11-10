@@ -317,7 +317,8 @@ impl Proxy {
                 Error::Io(err)
             }
         })?;
-        let answer = Message::parse(&response[..length]).map_err(|_| Error::Mismatch)?;
+        let answer = Message::parse(&response[..length])
+            .map_err(|_| Error::Io(io::ErrorKind::InvalidData.into()))?;
         if let Some(metrics) = &self.metrics {
             let code = answer.rcode().0;
             // shortcut: first observation of an RCODE allocates; pre-register codes if cold traffic matters.
