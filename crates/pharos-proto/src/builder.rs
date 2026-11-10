@@ -66,6 +66,7 @@ impl Section {
 pub struct MessageBuilder<'a> {
     wire: &'a mut Vec<u8>,
     max_size: usize,
+    reserved: usize,
     counts: [u16; 4],
     section: usize,
     stopped: bool,
@@ -94,12 +95,23 @@ impl<'a> MessageBuilder<'a> {
         Ok(Self {
             wire,
             max_size: max_size.max(MIN_MESSAGE_SIZE),
+            reserved: 0,
             counts: [0; 4],
             section: 0,
             stopped: false,
             offsets: [0; COMPRESSION_SLOTS],
             offset_count: 0,
         })
+    }
+
+    /// Reserves space for an already encoded OPT record appended by `finish_with_opt`.
+    /// Returns an error without changing the reservation if the remaining space is too small.
+    pub fn reserve(&mut self, size: usize) -> Result<(), BuildError> {
+        if size > self.max_size - self.reserved - self.wire.len() {
+            return Err(BuildError::SizeLimit);
+        }
+        self.reserved += size;
+        Ok(())
     }
 
     /// Adds a Question. If it cannot fit, it is rolled back, TC is set, and writing stops.
@@ -185,6 +197,24 @@ impl<'a> MessageBuilder<'a> {
         self.finish_entry(index, start, slots, result)
     }
 
+    /// Appends one pre-encoded OPT record from the reserved space and finishes.
+    /// The record must have an uncompressed root owner and a complete RDATA field.
+    pub fn finish_with_opt(mut self, opt: &[u8]) -> Result<&'a mut Vec<u8>, BuildError> {
+        if opt.len() > self.reserved {
+            return Err(BuildError::SizeLimit);
+        }
+        if opt.len() < 11
+            || opt[0..3] != [0, 0, 41]
+            || usize::from(u16::from_be_bytes([opt[9], opt[10]])) != opt.len() - 11
+        {
+            return Err(BuildError::InvalidRdata);
+        }
+        self.check_count(3)?;
+        self.wire.extend_from_slice(opt);
+        self.counts[3] += 1;
+        Ok(self.finish())
+    }
+
     /// Completes the header and returns the caller's buffer.
     #[must_use]
     pub fn finish(self) -> &'a mut Vec<u8> {
@@ -229,7 +259,7 @@ impl<'a> MessageBuilder<'a> {
     }
 
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), BuildError> {
-        if bytes.len() > self.max_size - self.wire.len() {
+        if bytes.len() > self.max_size - self.reserved - self.wire.len() {
             return Err(BuildError::SizeLimit);
         }
         self.wire.extend_from_slice(bytes);

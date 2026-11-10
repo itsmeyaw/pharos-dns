@@ -18,6 +18,8 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
     let parsed = Message::parse(query).unwrap();
     std::hint::black_box(parsed.questions().next().unwrap());
     let mut builder = MessageBuilder::new(&mut wire, 512, 0x1234, 0x8180).unwrap();
+    let opt = b"\0\0\x29\x02\x00\0\0\0\0\0\0";
+    builder.reserve(opt.len()).unwrap();
     builder.question(name, Type(1), Class(1)).unwrap();
     for i in 0..5 {
         builder
@@ -31,7 +33,7 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
             )
             .unwrap();
     }
-    std::hint::black_box(builder.finish());
+    std::hint::black_box(builder.finish_with_opt(opt).unwrap());
     let allocations = region.change();
     assert_eq!(allocations.allocations, 0);
     assert_eq!(allocations.reallocations, 0);

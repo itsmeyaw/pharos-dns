@@ -295,3 +295,95 @@ fn question_and_rdata_overflow_are_rolled_back() {
     assert_eq!(wire.len(), 12);
     assert!(Message::parse(wire).unwrap().tc());
 }
+
+#[test]
+fn reserves_space_for_opt_even_after_truncation() {
+    let root = name(".");
+    let opt = b"\0\0\x29\x02\x00\0\0\0\0\0\0";
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 7, 0x8000).unwrap();
+    builder.reserve(opt.len()).unwrap();
+    assert!(
+        builder
+            .record(
+                Section::Answer,
+                borrowed(&root),
+                Type::A,
+                Class::IN,
+                0,
+                &[1; 478]
+            )
+            .unwrap()
+    );
+    assert!(
+        !builder
+            .record(
+                Section::Additional,
+                borrowed(&root),
+                Type::A,
+                Class::IN,
+                0,
+                &[]
+            )
+            .unwrap()
+    );
+    assert!(
+        !builder
+            .record(
+                Section::Additional,
+                borrowed(&root),
+                Type::A,
+                Class::IN,
+                0,
+                &[]
+            )
+            .unwrap()
+    );
+    let wire = builder.finish_with_opt(opt).unwrap();
+    assert_eq!(wire.len(), 512);
+    let message = Message::parse(wire).unwrap();
+    assert!(message.tc());
+    assert_eq!(message.answer_count(), 1);
+    assert_eq!(message.additional_count(), 1);
+    assert_eq!(message.additionals().next().unwrap().rtype, Type::OPT);
+}
+
+#[test]
+fn reserved_opt_is_bounded_and_validated() {
+    let opt = b"\0\0\x29\x02\x00\0\0\0\0\0\0";
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
+    assert_eq!(builder.reserve(501), Err(BuildError::SizeLimit));
+    builder.reserve(opt.len()).unwrap();
+    assert!(builder.finish_with_opt(&opt[..10]).is_err());
+
+    let mut builder = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
+    builder.reserve(opt.len() - 1).unwrap();
+    assert!(builder.finish_with_opt(opt).is_err());
+
+    let mut builder = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
+    builder.reserve(opt.len()).unwrap();
+    let mut bad = *opt;
+    bad[2] = 1;
+    assert!(builder.finish_with_opt(&bad).is_err());
+}
+
+#[test]
+fn reserved_opt_can_finish_without_truncation() {
+    let opt = b"\0\0\x29\x02\x00\0\0\0\0\0\0";
+    let root = name(".");
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+    builder.reserve(5).unwrap();
+    builder.reserve(6).unwrap();
+    assert!(
+        builder
+            .question(borrowed(&root), Type::A, Class::IN)
+            .unwrap()
+    );
+    let message = Message::parse(builder.finish_with_opt(opt).unwrap()).unwrap();
+    assert!(!message.tc());
+    assert_eq!(message.question_count(), 1);
+    assert_eq!(message.additional_count(), 1);
+    assert_eq!(message.additionals().next().unwrap().rtype, Type::OPT);
+}
