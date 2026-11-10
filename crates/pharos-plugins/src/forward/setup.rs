@@ -106,7 +106,11 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
                 }
             }
             "max_fails" | "max_connect_attempts" => {
-                let value = one_arg(cursor, &args)?
+                let argument = one_arg(cursor, &args)?;
+                if argument.starts_with('+') {
+                    return Err(cursor.error(format!("invalid {option}")));
+                }
+                let value = argument
                     .parse::<u32>()
                     .map_err(|_| cursor.error(format!("invalid {option}")))?;
                 if option == "max_fails" {
@@ -445,6 +449,8 @@ mod tests {
             "forward . 1.1.1.1 {\nhealth_check 1s domain a..b\n}",
             "forward . 1.1.1.1 {\nhealth_check 1s nonsense\n}",
             "forward . 1.1.1.1 {\nmax_fails -1\n}",
+            "forward . 1.1.1.1 {\nmax_fails +1\n}",
+            "forward . 1.1.1.1 {\nmax_connect_attempts +1\n}",
             "forward . 1.1.1.1 {\nmax_concurrent -1\n}",
             "forward . 1.1.1.1 {\nfailover NOERROR\n}",
             "forward . 1.1.1.1 {\nnext INVALID\n}",
