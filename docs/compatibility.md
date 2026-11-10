@@ -274,6 +274,10 @@ Negative Responses use the SOA MINIMUM as well as the record TTLs to bound the
 cache lifetime, following RFC 2308; CoreDNS's `MinimalTTLWithMaximum` checks
 only record TTLs. The cache hashes the same Query fields with FNV-1a rather
 than CoreDNS's FNV-1, so shard placement and eviction choices differ.
+Configured Domains must be representable as DNS names; CoreDNS can normalize
+some malformed `disable` names without validating them. Very large TTLs are
+bounded to the DNS TTL range during use rather than reproducing Go duration
+overflow.
 
 Queries with compressed Questions, and Responses with compressed or multiple
 Questions or an OPT before other Additional records, are not cached: removing
