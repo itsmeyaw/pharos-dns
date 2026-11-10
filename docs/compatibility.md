@@ -179,3 +179,19 @@ The default TCP read, write, and idle timeouts are 3, 5, and 10 seconds,
 respectively, matching CoreDNS v1.15.0 `core/dnsserver/server.go`.
 
 On Linux, each `sendmmsg` sends one Response (nix-rust/nix#2797).
+
+## Upstream proxy
+
+Plain UDP and TCP Upstream exchange is available for a future `forward`
+Plugin; `forward` configuration is not yet implemented. DNS-over-TLS is
+reserved for M3. The proxy retries a truncated UDP Response over TCP only
+when `prefer_udp` is set, as CoreDNS's `forward` does.
+
+Idle sockets are checked for expiration when their worker shard is next used;
+CoreDNS also cleans idle sockets periodically, so inactive Pharos shards may
+retain expired sockets until reuse or Proxy destruction. Pharos does not yet
+adapt its TCP dial timeout (fixed at 30 seconds), enable Linux UDP error-queue
+socket options, or synthesize a truncated Response for an oversized malformed
+UDP Response. Upstream TSIG Messages retain their original ID rather than
+rewriting the signed Message. Proxy metric RCODE series are initialized on
+first observation, which allocates once per distinct RCODE.
