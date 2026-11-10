@@ -38,3 +38,13 @@ fn ready_corefile_syntax() {
         );
     }
 }
+
+#[test]
+fn ready_defaults_and_last_monitor_value() {
+    let input = ".:53 {\n ready {\n monitor continuously\n monitor until-ready\n }\n}";
+    let blocks = parse("Corefile", input).unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let ready = configured[0].config.ready.as_ref().unwrap();
+    assert_eq!(ready.address, ":8181");
+    assert!(!ready.continuous);
+}
