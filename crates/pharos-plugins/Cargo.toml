@@ -11,7 +11,6 @@ tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt"] }
 pharos-corefile = { path = "../pharos-corefile" }
 pharos-proto = { path = "../pharos-proto" }
 pharos-server = { path = "../pharos-server" }
-tokio = { version = "1", features = ["time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", features = ["socket"] }
