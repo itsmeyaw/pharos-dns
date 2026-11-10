@@ -8,8 +8,8 @@ fn parses_server_blocks_and_nested_directives() {
     )
     .unwrap();
     assert_eq!(blocks.len(), 2);
-    assert_eq!(blocks[0].keys, ["a", "b"]);
-    assert_eq!(blocks[1].keys, ["c"]);
+    assert_eq!(blocks[0].keys(), ["a", "b"]);
+    assert_eq!(blocks[1].keys(), ["c"]);
     let texts: Vec<_> = blocks[0].directives["foo"]
         .iter()
         .map(|t| t.text.as_str())
@@ -31,7 +31,7 @@ fn rejects_unclosed_blocks_and_dangling_commas() {
 fn unbraced_server_block_and_repeated_directives() {
     let blocks = parse("Corefile", "a\n foo one\n foo two").unwrap();
     assert_eq!(blocks[0].directives["foo"].len(), 4);
-    assert_eq!(parse("Corefile", "a").unwrap()[0].keys, ["a"]);
+    assert_eq!(parse("Corefile", "a").unwrap()[0].keys(), ["a"]);
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn caddy_server_block_cases() {
         let blocks = parse("Corefile", input).unwrap();
         let actual: Vec<Vec<&str>> = blocks
             .iter()
-            .map(|b| b.keys.iter().map(String::as_str).collect())
+            .map(|b| b.keys().iter().map(String::as_str).collect())
             .collect();
         assert_eq!(actual, *expected, "{input:?}");
     }
@@ -69,4 +69,16 @@ fn caddy_server_block_cases() {
     ] {
         assert!(parse("Corefile", input).is_err(), "{input:?}");
     }
+}
+
+#[test]
+fn key_normalization_reports_source_location() {
+    let blocks = parse("named.Corefile", ".bad {\n}\n").unwrap();
+    let error = blocks[0].normalize_keys().unwrap_err();
+    assert_eq!(error.file, "named.Corefile");
+    assert_eq!(error.line, 1);
+    let blocks = parse("Corefile", "example.org,\n 10.0.0.0/8 {\n}\n").unwrap();
+    let keys = blocks[0].normalize_keys().unwrap();
+    assert_eq!(keys[0].domain, "example.org.");
+    assert_eq!(keys[1].domain, "10.in-addr.arpa.");
 }

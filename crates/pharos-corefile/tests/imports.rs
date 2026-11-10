@@ -18,7 +18,7 @@ fn imports_snippets_and_files_in_both_scopes() {
     assert_eq!(blocks.len(), 2);
     assert_eq!(blocks[0].directives["one"][1].text, "1");
     assert_eq!(blocks[0].directives["two"][1].text, "2");
-    assert_eq!(blocks[1].keys, ["second"]);
+    assert_eq!(blocks[1].keys(), ["second"]);
     assert_eq!(
         blocks[0].directives["two"][0].file,
         dir.join("inner.conf").to_string_lossy()

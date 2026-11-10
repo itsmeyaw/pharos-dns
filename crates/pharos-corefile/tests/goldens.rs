@@ -15,7 +15,7 @@ fn parses_upstream_default_corefiles() {
     for (name, source, count) in fixtures {
         let blocks = parse(name, source).unwrap();
         assert_eq!(blocks.len(), 1, "{name}");
-        assert_eq!(blocks[0].keys, [".:53"], "{name}");
+        assert_eq!(blocks[0].keys(), [".:53"], "{name}");
         assert_eq!(blocks[0].directives.len(), count, "{name}");
         assert_eq!(blocks[0].directives["kubernetes"][1].text, "cluster.local");
         assert_eq!(blocks[0].directives["forward"][2].text, "/etc/resolv.conf");
@@ -32,9 +32,9 @@ fn k3s_loads_custom_overrides_and_server_blocks() {
         .replace("/etc/coredns/custom", &dir.to_string_lossy());
     let blocks = parse("k3s", &source).unwrap();
     assert_eq!(blocks.len(), 2);
-    assert_eq!(blocks[0].keys, [".:53"]);
+    assert_eq!(blocks[0].keys(), [".:53"]);
     assert!(blocks[0].directives.contains_key("hosts"));
     assert!(blocks[0].directives.contains_key("log"));
-    assert_eq!(blocks[1].keys, ["custom.local"]);
+    assert_eq!(blocks[1].keys(), ["custom.local"]);
     fs::remove_dir_all(dir).unwrap();
 }

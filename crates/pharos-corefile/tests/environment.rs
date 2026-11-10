@@ -13,7 +13,7 @@ fn replaces_both_environment_syntaxes_in_keys_and_arguments() {
         },
     )
     .unwrap();
-    assert_eq!(blocks[0].keys, ["example.org:53"]);
+    assert_eq!(blocks[0].keys(), ["example.org:53"]);
     let args = &blocks[0].directives["diworld"];
     assert_eq!(
         args.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
@@ -29,11 +29,11 @@ fn expands_environment_values_that_contain_more_references() {
         _ => None,
     })
     .unwrap();
-    assert_eq!(blocks[0].keys, ["example.org"]);
+    assert_eq!(blocks[0].keys(), ["example.org"]);
 }
 
 #[test]
 fn recursive_environment_values_do_not_grow_without_bound() {
     let blocks = parse_with_env("Corefile", "{$LOOP}", |_| Some("{$LOOP}{$LOOP}".into())).unwrap();
-    assert_eq!(blocks[0].keys, ["{$LOOP}{$LOOP}"]);
+    assert_eq!(blocks[0].keys(), ["{$LOOP}{$LOOP}"]);
 }

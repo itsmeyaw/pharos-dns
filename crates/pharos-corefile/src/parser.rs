@@ -4,13 +4,34 @@ use std::{
     path::Path,
 };
 
-use crate::{Token, lex};
+use crate::{ServerBlockKey, Token, lex, normalize_key};
 
 /// Parsed Server Block keys and Directive tokens, grouped by Directive name.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ServerBlock {
-    pub keys: Vec<String>,
+    keys: Vec<String>,
+    key_sources: Vec<Token>,
     pub directives: BTreeMap<String, Vec<Token>>,
+}
+
+impl ServerBlock {
+    /// The Server Block's original, environment-expanded keys.
+    pub fn keys(&self) -> &[String] {
+        &self.keys
+    }
+
+    /// Validate and normalize keys, retaining source locations for errors.
+    pub fn normalize_keys(&self) -> Result<Vec<ServerBlockKey>, Error> {
+        let mut normalized = Vec::new();
+        for (key, source) in self.keys.iter().zip(&self.key_sources) {
+            normalized.extend(normalize_key(key).map_err(|message| Error {
+                file: source.file.clone(),
+                line: source.line,
+                message,
+            })?);
+        }
+        Ok(normalized)
+    }
 }
 
 /// A Corefile error with the source location of the offending token.
@@ -137,6 +158,7 @@ impl Parser<'_> {
                 block
                     .keys
                     .push(text.strip_suffix(',').unwrap_or(&text).into());
+                block.key_sources.push(self.tokens[self.pos].clone());
             }
             self.pos += 1;
             if self.pos == self.tokens.len() {
