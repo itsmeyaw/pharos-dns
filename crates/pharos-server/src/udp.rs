@@ -5,7 +5,9 @@ use std::{
 
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::sync::Arc;
-use tokio::{net::UdpSocket, sync::watch, task::JoinHandle};
+#[cfg(not(target_os = "linux"))]
+use tokio::task::JoinHandle;
+use tokio::{net::UdpSocket, sync::watch};
 
 use crate::{Action, Handler, Protocol};
 
