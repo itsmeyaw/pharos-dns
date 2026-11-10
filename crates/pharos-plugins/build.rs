@@ -22,6 +22,7 @@ fn main() {
     );
     for name in &enabled {
         let ty = match *name {
+            "cache" => "cache::Cache",
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
             "prometheus" => "prometheus::Prometheus",
@@ -37,6 +38,7 @@ fn main() {
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
+            "cache" => "setup_cache",
             "whoami" => "setup_whoami",
             "log" => "setup_log",
             "prometheus" => "setup_prometheus",
@@ -47,7 +49,7 @@ fn main() {
             "errors" => "setup_errors",
             _ => "setup_unimplemented",
         };
-        let once = matches!(*name, "prometheus" | "ready" | "errors" | "reload");
+        let once = matches!(*name, "cache" | "prometheus" | "ready" | "errors" | "reload");
         writeln!(
             code,
             "pharos_corefile::Directive {{ name: {name:?}, once: {once}, setup: {setup} }},"
@@ -79,6 +81,9 @@ fn main() {
     }
     code.push_str("// shortcut: Self Lookup (#35) must Box::pin re-entry and cap depth at 10.\n");
     code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
+    if let Some(index) = enabled.iter().position(|name| *name == "cache") {
+        writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.serve_{}(cx).await }}", index + 1).unwrap();
+    }
     for (i, name) in enabled.iter().enumerate() {
         let next = i + 1;
         if matches!(*name, "ready" | "health" | "reload") {

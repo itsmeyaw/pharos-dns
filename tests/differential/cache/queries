@@ -1,0 +1,10 @@
+# Repeated Queries exercise cache misses and hits; whoami reports TTL 0.
+www.example.org. A IN udp
+www.example.org. A IN udp
+www.example.org. A IN tcp
+www.example.org. AAAA IN udp
+www.example.org. AAAA IN udp
+www.example.org. A IN udp +dnssec
+www.example.org. A IN udp +dnssec
+outside.example.net. A IN udp
+outside.example.net. A IN udp

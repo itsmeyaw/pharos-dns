@@ -66,7 +66,7 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `errors`, `forward`, `health`, `log`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
+Only `cache`, `errors`, `forward`, `health`, `log`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
 
@@ -282,3 +282,44 @@ connections and checks are stopped on Shutdown.
 Forward reuses Upstream Response buffers from a pool; a new buffer is allocated
 when concurrent Queries exceed the pool's previous high-water mark, and the pool
 retains that peak allocation until the Plugin is dropped.
+
+## Cache
+
+Negative Responses use the SOA MINIMUM as well as the record TTLs to bound the
+cache lifetime, following RFC 2308; CoreDNS's `MinimalTTLWithMaximum` checks
+only record TTLs. The cache hashes the same Query fields with FNV-1a rather
+than CoreDNS's FNV-1, so shard placement and eviction choices differ.
+Configured Domains must be representable as DNS names; CoreDNS can normalize
+some malformed `disable` names without validating them. Very large TTLs are
+bounded to the DNS TTL range during use rather than reproducing Go duration
+overflow.
+
+Queries with compressed Questions, and Responses with compressed or multiple
+Questions or an OPT before other Additional records, are not cached: removing
+those encodings could invalidate compression pointers. CoreDNS re-encodes them.
+On a miss, Queries whose encoded names point into the header, or whose non-OPT
+RDATA might contain a compression pointer, also bypass the cache rather than changing
+AD. Opaque EDNS option data is not treated as name compression.
+On a hit, Pharos rewrites the
+Question's case in the stored wire Message; record names compressed against it
+therefore acquire the current Query's case, whereas CoreDNS rebuilds records
+from the cached Response. If a UDP caller's Response buffer is too small for a
+cached Message, Pharos falls through to Next instead of growing it on the hit;
+TCP buffers are grown as needed.
+
+TSIG-signed Queries and Responses bypass caching so that ID, flags and TTL
+rewrites cannot invalidate their signatures. Wildcard source Metadata is not
+saved with cache entries.
+
+Background refreshes use a fresh Metadata map. A `verify` refresh on a routed
+Server Block runs as a background task, even without a verify timeout, and
+concurrent verifies are coalesced. Direct use of an unbound Plugin cannot
+launch a background refresh; its verify mode does not enforce the configured
+timeout. Stale age is evaluated in whole seconds, but fractional configured
+windows are not truncated as they are in CoreDNS. A refresh is not stored if
+a newer cache entry was installed while it was in flight. A hit that launches
+a background refresh allocates for the task and its Query and Response buffers;
+ordinary warmed hits do not allocate.
+
+Cache metric series are initialized at setup, including zero-valued series;
+CoreDNS initializes individual labelled series on first use.

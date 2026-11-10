@@ -97,6 +97,32 @@ async fn forwards_query_and_restores_client_id() {
 }
 
 #[tokio::test]
+async fn refuses_unsafe_modified_query_view() {
+    let chain = chain(".:0 {\n forward . 127.0.0.1:53\n}");
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\xc0\x03\0\x01\0\x01";
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(wire).unwrap().with_ad(),
+        client: "127.0.0.1:1000".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), chain.serve(&mut cx))
+            .await
+            .unwrap(),
+        Outcome::Unanswered(pharos_proto::Rcode::FORMERR)
+    );
+}
+
+#[tokio::test]
 async fn forwards_with_more_than_fifteen_expanded_upstreams() {
     let (address, task) = fake(0, false).await;
     let path = std::env::temp_dir().join(format!("pharos-forward-expanded-{}", std::process::id()));

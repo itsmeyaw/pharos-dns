@@ -1,6 +1,31 @@
 use pharos_proto::Message;
 
 #[test]
+fn authenticated_query_view_does_not_mutate_wire() {
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let original = Message::parse(wire).unwrap();
+    let authenticated = original.with_ad();
+    assert!(!original.ad());
+    assert!(authenticated.ad());
+    assert_eq!(authenticated.as_wire(), wire);
+}
+
+#[test]
+fn ad_wire_safety_checks_names_without_treating_edns_data_as_pointers() {
+    let header_pointer = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\xc0\x03\0\x01\0\x01";
+    let label_data = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x02\xc0\x03\0\0\x01\0\x01";
+    let option_data = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\x01x\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\0\0\0\x06\xfd\xe9\0\x02\xc0\x01";
+    let indirect = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\x02\xc0\x03\0\0\x01\0\x01\0\0\x05\0\x01\0\0\0\0\0\x02\xc0\x0d";
+    let qclass_pointer =
+        b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\0\0\x01\xc0\x03\0\0\x05\0\x01\0\0\0\0\0\x02\xc0\x0f";
+    assert!(!Message::parse(header_pointer).unwrap().can_set_ad_in_wire());
+    assert!(Message::parse(label_data).unwrap().can_set_ad_in_wire());
+    assert!(Message::parse(option_data).unwrap().can_set_ad_in_wire());
+    assert!(!Message::parse(indirect).unwrap().can_set_ad_in_wire());
+    assert!(!Message::parse(qclass_pointer).unwrap().can_set_ad_in_wire());
+}
+
+#[test]
 fn reads_a_query_and_rejects_truncation() {
     let wire = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x07example\x03com\0\x00\x01\x00\x01";
     let message = Message::parse(wire).unwrap();
@@ -88,6 +113,7 @@ proptest::proptest! {
     #[test]
     fn arbitrary_messages_never_panic(wire in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512)) {
         if let Ok(message) = Message::parse(&wire) {
+            let _ = message.can_set_ad_in_wire();
             for q in message.questions() { for _ in q.name.labels() {} }
             for r in message.answers().chain(message.authorities()).chain(message.additionals()) {
                 for _ in r.name.labels() {}

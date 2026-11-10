@@ -52,6 +52,7 @@ struct BufferPool(Mutex<Vec<Scratch>>);
 struct Scratch {
     bytes: Vec<u8>,
     order: Vec<usize>,
+    query: Vec<u8>,
 }
 
 struct Buffer<'a> {
@@ -64,6 +65,7 @@ impl BufferPool {
         let scratch = self.0.lock().unwrap().pop().unwrap_or_else(|| Scratch {
             bytes: vec![0; 65535],
             order: Vec::new(),
+            query: Vec::new(),
         });
         Buffer {
             pool: self,
@@ -73,9 +75,9 @@ impl BufferPool {
 }
 
 impl Buffer<'_> {
-    fn parts(&mut self) -> (&mut Vec<usize>, &mut [u8]) {
+    fn parts(&mut self) -> (&mut Vec<usize>, &mut [u8], &mut Vec<u8>) {
         let scratch = self.scratch.as_mut().expect("buffer returned only on drop");
-        (&mut scratch.order, &mut scratch.bytes)
+        (&mut scratch.order, &mut scratch.bytes, &mut scratch.query)
     }
 }
 
@@ -246,7 +248,20 @@ impl Plugin for Forward {
 
             let count = stanza.proxies.len();
             let mut buffer = self.buffers.get();
-            let (order, wire) = buffer.parts();
+            let (order, wire, query_buffer) = buffer.parts();
+            let original_query = cx.query.as_wire();
+            let query_wire =
+                if cx.query.flags() != u16::from_be_bytes([original_query[2], original_query[3]]) {
+                    if !cx.query.can_set_ad_in_wire() {
+                        return Outcome::Unanswered(Rcode::FORMERR);
+                    }
+                    query_buffer.clear();
+                    query_buffer.extend_from_slice(original_query);
+                    query_buffer[2..4].copy_from_slice(&cx.query.flags().to_be_bytes());
+                    query_buffer.as_slice()
+                } else {
+                    original_query
+                };
             order.clear();
             order.extend(0..count);
             match stanza.policy {
@@ -315,7 +330,7 @@ impl Plugin for Forward {
                 let result = loop {
                     let result = timeout_at(
                         deadline,
-                        proxy.exchange(cx.query.as_wire(), wire, protocol, stanza.options),
+                        proxy.exchange(query_wire, wire, protocol, stanza.options),
                     )
                     .await;
                     if matches!(result, Ok(Err(proxy::Error::CachedClosed))) {

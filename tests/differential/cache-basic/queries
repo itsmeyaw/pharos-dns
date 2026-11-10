@@ -1,0 +1,5 @@
+cached.example. A IN udp
+cached.example. A IN udp
+cached.example. A IN tcp
+cached.example. TXT IN udp +norec
+cached.example. TXT IN udp +norec
