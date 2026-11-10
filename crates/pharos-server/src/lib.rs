@@ -50,6 +50,16 @@ pub trait Plugin {
         cx: &mut Context<'_>,
         next: N,
     ) -> impl Future<Output = Outcome> + Send;
+
+    /// Return a readiness check when this Plugin participates in readiness.
+    fn readiness(&self) -> Option<&dyn Readiness> {
+        None
+    }
+}
+
+/// A Plugin's readiness, evaluated outside the Query hot path.
+pub trait Readiness: Send + Sync {
+    fn ready(&self) -> bool;
 }
 
 /// Transport named by a Server Block Key.

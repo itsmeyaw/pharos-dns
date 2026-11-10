@@ -25,6 +25,7 @@ fn main() {
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
             "prometheus" => "prometheus::Prometheus",
+            "ready" => "ready::Ready",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -35,9 +36,10 @@ fn main() {
             "whoami" => "setup_whoami",
             "log" => "setup_log",
             "prometheus" => "setup_prometheus",
+            "ready" => "setup_ready",
             _ => "setup_unimplemented",
         };
-        let once = *name == "prometheus";
+        let once = *name == "prometheus" || *name == "ready";
         writeln!(
             code,
             "pharos_corefile::Directive {{ name: {name:?}, once: {once}, setup: {setup} }},"
@@ -55,6 +57,15 @@ fn main() {
     writeln!(code, "pub const PLUGINS_LISTING: &str = {listing:?};").unwrap();
 
     code.push_str("impl Chain {\n");
+    if enabled.contains(&"ready") {
+        code.push_str(
+            "fn collect_readiness(self: &std::sync::Arc<Self>, state: &ready::State) {\n",
+        );
+        for name in &enabled {
+            writeln!(code, "if self.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some() {{ let chain = std::sync::Arc::clone(self); state.append({name:?}, move || chain.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some_and(pharos_server::Readiness::ready)); }}").unwrap();
+        }
+        code.push_str("}\n");
+    }
     code.push_str("// shortcut: Self Lookup (#35) must Box::pin re-entry and cap depth at 10.\n");
     code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
     for (i, name) in enabled.iter().enumerate() {

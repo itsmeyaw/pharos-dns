@@ -19,6 +19,8 @@ pub mod log;
 pub mod log_format;
 #[cfg(feature = "plugin-prometheus")]
 pub mod prometheus;
+#[cfg(feature = "plugin-ready")]
+pub mod ready;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -47,7 +49,25 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     let metrics = pharos_server::metrics::Registry::default();
     #[cfg(feature = "plugin-prometheus")]
     let mut exporters = std::collections::BTreeMap::new();
+    #[cfg(feature = "plugin-ready")]
+    let ready_state = Arc::new(ready::State::default());
+    #[cfg(feature = "plugin-ready")]
+    let mut ready_addresses = std::collections::BTreeSet::new();
+    #[cfg(feature = "plugin-ready")]
+    {
+        let state = Arc::clone(&ready_state);
+        // This hook precedes all block shutdown hooks, including a future lameduck delay.
+        lifecycle.register_sync(pharos_server::Phase::Shutdown, move || {
+            state.begin_shutdown();
+            Ok(())
+        });
+    }
     for block in blocks {
+        #[cfg(feature = "plugin-ready")]
+        if let Some(ready) = &block.config.ready {
+            ready_addresses.insert(ready.address.clone());
+            ready_state.set_continuous(ready.continuous);
+        }
         #[cfg(feature = "plugin-prometheus")]
         if let Some(prometheus) = &block.config.prometheus {
             if exporters
@@ -68,6 +88,10 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         let empty = pharos_server::Chain::is_empty(&block.config);
         lifecycle.extend(&block.config.lifecycle);
         let chain = Arc::new(block.config);
+        #[cfg(feature = "plugin-ready")]
+        if chain.ready.is_some() {
+            chain.collect_readiness(&ready_state);
+        }
         for key in keys {
             if key.transport != "dns" {
                 return Err(io::Error::new(
@@ -106,6 +130,38 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         .into_iter()
         .map(|(key, router)| (key, Server::with_registry(router, key, metrics.clone())))
         .collect();
+    #[cfg(feature = "plugin-ready")]
+    for address in ready_addresses {
+        let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
+        let startup_listener = Arc::clone(&listener);
+        let state = Arc::clone(&ready_state);
+        lifecycle.register(pharos_server::Phase::Startup, move || {
+            let address = address.clone();
+            let state = Arc::clone(&state);
+            let listener = Arc::clone(&startup_listener);
+            async move {
+                let server =
+                    pharos_server::http::Listener::bind_with_status(&address, move |path| {
+                        (path == "/ready").then(|| {
+                            let (status, body) = state.response();
+                            (status, "text/plain; charset=utf-8", body)
+                        })
+                    })
+                    .await?;
+                *listener.lock().unwrap() = Some(server);
+                Ok(())
+            }
+        });
+        lifecycle.register(pharos_server::Phase::Shutdown, move || {
+            let server = listener.lock().unwrap().take();
+            async move {
+                if let Some(server) = server {
+                    server.shutdown().await?;
+                }
+                Ok(())
+            }
+        });
+    }
     #[cfg(feature = "plugin-prometheus")]
     for (address, tls_config) in exporters {
         let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
@@ -183,6 +239,12 @@ fn setup_log(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result
 #[cfg(feature = "plugin-prometheus")]
 fn setup_prometheus(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.prometheus = Some(prometheus::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-ready")]
+fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.ready = Some(ready::parse(cursor)?);
     Ok(())
 }
 
