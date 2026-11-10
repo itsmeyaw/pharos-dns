@@ -70,10 +70,11 @@ async fn swappable_listener_does_not_allocate_per_query() {
     });
     finished.await.unwrap();
     client.join().unwrap();
-    let counts = counts.lock().unwrap();
-    let (before, after) = (counts.before.unwrap(), counts.after.unwrap());
+    let (before, after) = {
+        let counts = counts.lock().unwrap();
+        (counts.before.unwrap(), counts.after.unwrap())
+    };
     assert_eq!(after.allocations - before.allocations, 0);
     assert_eq!(after.reallocations - before.reallocations, 0);
-    drop(counts);
     listeners.shutdown().await.unwrap();
 }
