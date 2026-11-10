@@ -145,11 +145,13 @@ other tasks on that worker.
 
 ## Loadbalance
 
-Pharos permutes encoded records without re-encoding names. If any bytes could
-be a compression pointer into a section that could move, it leaves the entire
-Response unchanged to avoid invalidating pointers. This conservative check can
-also match ordinary RDATA bytes. Signed TSIG Responses are not reordered.
+Pharos permutes encoded records and relocates compression pointers without
+re-encoding names. It leaves a Response unchanged if relocation would create
+a forward or overlapping pointer, exceed the 14-bit pointer range, or if name
+encodings cannot be safely relocated. Signed TSIG Responses are not reordered.
 CoreDNS re-encodes its records and does not have these restrictions.
+Other RDATA is opaque, so pointers in types outside the compression-receiving
+list are not relocated even if a sender encodes them contrary to the RFCs.
 Relative weight file paths use the working directory until `root` is implemented.
 Weight files must be UTF-8; CoreDNS accepts arbitrary bytes. Pharos compares
 file contents directly instead of CoreDNS's MD5 checksum and keeps the last
