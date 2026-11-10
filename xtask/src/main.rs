@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod bench;
 mod compare;
 mod coredns;
 mod differential;
@@ -33,8 +34,17 @@ fn main() -> ExitCode {
         [command, flag] if command == "diff" && flag == "--self-test" => diff(true),
         [command] if command == "fuzz" => fuzz(false),
         [command, flag] if command == "fuzz" && flag == "--short" => fuzz(true),
+        [command, rest @ ..] if command == "bench" => match bench::run(root(), rest) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
         _ => {
-            eprintln!("usage: cargo xtask check | coredns | diff [--self-test] | fuzz [--short]");
+            eprintln!(
+                "usage: cargo xtask check | coredns | diff [--self-test] | fuzz [--short] | bench [--corefile <path>] [--save-baseline <name> | --baseline <name>]"
+            );
             ExitCode::FAILURE
         }
     }

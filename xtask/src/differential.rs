@@ -108,7 +108,12 @@ impl Drop for TempDir {
     }
 }
 
-struct Server(Child);
+pub(crate) struct Server(Child);
+impl Server {
+    pub(crate) fn id(&self) -> u32 {
+        self.0.id()
+    }
+}
 impl Drop for Server {
     fn drop(&mut self) {
         if matches!(self.0.try_wait(), Ok(None)) {
@@ -129,7 +134,7 @@ impl Drop for Server {
 }
 
 // shortcut: another process can take the port before a server binds; the scenario then fails at startup, add a retry if it gets flaky.
-fn free_port() -> Result<u16, String> {
+pub(crate) fn free_port() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     // Check both Transports; sockets are released before the Listener starts.
@@ -168,16 +173,39 @@ fn start(
     corefile: Option<&str>,
     pharos: bool,
 ) -> Result<Server, String> {
-    let log = fs::File::create(cwd.with_extension("server.log")).map_err(|e| e.to_string())?;
+    let conf = if let Some(corefile) = corefile {
+        let conf = cwd.join("Corefile");
+        fs::write(&conf, corefile.replace("{port}", &port.to_string()))
+            .map_err(|e| e.to_string())?;
+        Some(conf)
+    } else {
+        None
+    };
+    start_with_config(
+        binary,
+        cwd,
+        port,
+        conf.as_deref(),
+        &cwd.with_extension("server.log"),
+        pharos,
+    )
+}
+
+pub(crate) fn start_with_config(
+    binary: &Path,
+    cwd: &Path,
+    port: u16,
+    conf: Option<&Path>,
+    log_path: &Path,
+    pharos: bool,
+) -> Result<Server, String> {
+    let log = fs::File::create(log_path).map_err(|e| e.to_string())?;
     let mut command = Command::new(binary);
     command
         .current_dir(cwd)
         .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
         .stderr(Stdio::from(log));
-    if let Some(corefile) = corefile {
-        let conf = cwd.join("Corefile");
-        fs::write(&conf, corefile.replace("{port}", &port.to_string()))
-            .map_err(|e| e.to_string())?;
+    if let Some(conf) = conf {
         command
             .arg(if pharos { "--conf" } else { "-conf" })
             .arg(conf);
@@ -230,7 +258,7 @@ fn exchange(port: u16, transport: Transport, wire: &[u8]) -> Result<Vec<u8>, Str
     }
 }
 
-fn ready(server: &mut Server, cwd: &Path, port: u16) -> Result<(), String> {
+pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(), String> {
     let wire = query::parse("ready. A IN udp")?.wire()?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -238,7 +266,7 @@ fn ready(server: &mut Server, cwd: &Path, port: u16) -> Result<(), String> {
         if server.0.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
             return Err(format!(
                 "server on {port} did not start:\n{}",
-                fs::read_to_string(cwd.with_extension("server.log")).unwrap_or_default()
+                fs::read_to_string(log_path).unwrap_or_default()
             ));
         }
         if answered {
@@ -276,8 +304,8 @@ fn scenario(
     }
     let mut p = start(pharos, &pcwd, pp, corefile.as_deref(), true)?;
     let mut c = start(coredns, &ccwd, cp, corefile.as_deref(), false)?;
-    ready(&mut p, &pcwd, pp)?;
-    ready(&mut c, &ccwd, cp)?;
+    ready(&mut p, &pcwd.with_extension("server.log"), pp)?;
+    ready(&mut c, &ccwd.with_extension("server.log"), cp)?;
     let mut count = 0;
     for line in input
         .lines()
