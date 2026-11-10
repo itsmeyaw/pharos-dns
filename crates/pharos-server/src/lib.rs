@@ -15,10 +15,12 @@ use tokio::{
 };
 
 mod admission;
+mod lifecycle;
 mod outcome;
 mod panic;
 mod quota;
 pub use admission::{Admission, admit};
+pub use lifecycle::{Lifecycle, Phase};
 pub use outcome::{finish_outcome, response_limit};
 pub use panic::{contain_panic, panics_total};
 mod router;
