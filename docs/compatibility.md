@@ -203,3 +203,18 @@ The default TCP read, write, and idle timeouts are 3, 5, and 10 seconds,
 respectively, matching CoreDNS v1.15.0 `core/dnsserver/server.go`.
 
 On Linux, each `sendmmsg` sends one Response (nix-rust/nix#2797).
+
+## Upstream proxy
+
+Plain UDP and TCP Upstream exchange is available for a future `forward`
+Plugin; `forward` configuration is not yet implemented. DNS-over-TLS is
+reserved for M3. The proxy retries a truncated UDP Response over TCP only
+when `prefer_udp` is set, as CoreDNS's `forward` does.
+
+Idle sockets are swept across shards at most once per expiry interval on Query
+traffic. Unlike CoreDNS’s periodic cleanup, an idle Proxy retains expired
+sockets until another Query or shutdown. Upstream TSIG Messages retain their
+original ID rather than rewriting the signed Message. Proxy metric RCODE
+series are initialized on first observation, allocating once per distinct RCODE.
+Connections rotate FIFO within each worker shard rather than in
+one global FIFO.

@@ -8,12 +8,13 @@
 - DNS wire fixture in `crates/pharos-proto/tests/corpus` is from CoreDNS test source; see the corpus README for the revision and original test.
 - `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
 - The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
+- Upstream proxy exchange and tests follow CoreDNS v1.15.0's `plugin/pkg/proxy`.
 - The log Plugin, formatter and tests follow CoreDNS v1.15.0's `plugin/log`, `plugin/pkg/replacer` and `plugin/pkg/response`.
 - The prometheus Plugin and tests follow CoreDNS v1.15.0's `plugin/metrics`.
 - The ready Plugin and tests follow CoreDNS v1.15.0's `plugin/ready`.
 - EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
 - Server routing, startup formatting, and tests in `crates/pharos-server` follow CoreDNS v1.15.0's `core/dnsserver/server.go`, `server_test.go`, and `onstartup.go`.
-- Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics`.
+- Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics` and `plugin/pkg/proxy/metrics.go`.
 - The CLI layout and lifecycle in `crates/pharos` follow CoreDNS v1.15.0's `coremain/run.go` and `core/dnsserver/onstartup.go`.
 
 ## Prometheus Go client, common, and procfs

@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+pub mod proxy;
+
 #[cfg(feature = "plugin-log")]
 pub mod log;
 #[cfg(feature = "plugin-log")]
