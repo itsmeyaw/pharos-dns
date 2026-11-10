@@ -450,6 +450,13 @@ async fn controller_only_watches_verified_pods_and_sends_selectors() {
         },
     );
     until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
+    server.send("/api/v1/pods", "ADDED", json!({"apiVersion":"v1", "kind":"Pod", "metadata":{"name":"pod","namespace":"prod","resourceVersion":"2"}, "status":{"podIPs":[{"ip":"10.0.2.1"}]}}));
+    until(|| {
+        controller
+            .store()
+            .with_read(|index| index.pods_by_ip("10.0.2.1").count() == 1)
+    })
+    .await;
     {
         let requests = server.requests.lock().unwrap();
         assert!(requests.iter().any(|uri| uri.starts_with("/api/v1/pods?")
