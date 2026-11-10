@@ -381,7 +381,7 @@ impl ListenerRegistry {
                 ));
             }
         }
-        let mut added = Vec::new();
+        let mut added: Vec<(ListenerKey, Listener, Arc<ArcSwap<H>>)> = Vec::new();
         let new_keys: Vec<_> = servers
             .keys()
             .filter(|key| !self.listeners.contains_key(key))
@@ -391,7 +391,19 @@ impl ListenerRegistry {
             let handler = Arc::new(ArcSwap::from_pointee(
                 servers.remove(&key).expect("new Listener"),
             ));
-            let listener = Listener::bind(key.address, Swappable(Arc::clone(&handler))).await?;
+            let listener = match Listener::bind(key.address, Swappable(Arc::clone(&handler))).await
+            {
+                Ok(listener) => listener,
+                Err(error) => {
+                    for (_, listener, _) in added {
+                        let _: io::Result<()> = listener.shutdown().await;
+                    }
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("{}: {error}", key.address),
+                    ));
+                }
+            };
             added.push((key, listener, handler));
         }
         let mut retired = Vec::new();

@@ -9,6 +9,7 @@ use tokio::{
     sync::Notify,
 };
 
+#[derive(Debug)]
 struct Answer(u8);
 
 impl Handler for Answer {
@@ -72,12 +73,11 @@ async fn failed_new_bind_keeps_existing_handler() {
         transport: Transport::Dns,
         address: occupied.local_addr().unwrap(),
     };
-    assert!(
-        listeners
-            .apply(HashMap::from([(key, Answer(2)), (blocked, Answer(3))]))
-            .await
-            .is_err()
-    );
+    let error = listeners
+        .apply(HashMap::from([(key, Answer(2)), (blocked, Answer(3))]))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(&blocked.address.to_string()));
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     assert_eq!(query(&client, address).await, Some(1));
     listeners.apply::<Answer>(HashMap::new()).await.unwrap();
