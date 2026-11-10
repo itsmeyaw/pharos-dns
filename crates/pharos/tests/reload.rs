@@ -17,6 +17,18 @@ impl Drop for Process {
     }
 }
 
+fn tcp_query(stream: &mut TcpStream, query: &[u8]) -> Vec<u8> {
+    stream
+        .write_all(&(query.len() as u16).to_be_bytes())
+        .unwrap();
+    stream.write_all(query).unwrap();
+    let mut length = [0; 2];
+    stream.read_exact(&mut length).unwrap();
+    let mut response = vec![0; u16::from_be_bytes(length) as usize];
+    stream.read_exact(&mut response).unwrap();
+    response
+}
+
 #[test]
 fn sigusr1_reloads_without_reload_directive() {
     let dir = std::env::temp_dir().join(format!("pharos-reload-{}", std::process::id()));
@@ -89,7 +101,7 @@ fn invalid_reload_restores_http_and_keeps_dns() {
     let file = dir.join("Corefile");
     fs::write(
         &file,
-        format!(".:{dns} {{\n prometheus 127.0.0.1:{metrics}\n whoami\n}}\n"),
+        format!(".:{dns} {{\n reload 2s 0\n prometheus 127.0.0.1:{metrics}\n whoami\n}}\n"),
     )
     .unwrap();
     let pidfile = dir.join("pid");
@@ -110,22 +122,18 @@ fn invalid_reload_restores_http_and_keeps_dns() {
         thread::sleep(Duration::from_millis(10));
     }
     fs::write(&file, format!(".:{dns} {{\n unknown\n}}\n")).unwrap();
-    assert!(
-        Command::new("kill")
-            .args(["-USR1", &process.0.id().to_string()])
-            .status()
-            .unwrap()
-            .success()
-    );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", metrics)) {
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
-            stream
+            if stream
                 .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .unwrap();
+                .is_err()
+            {
+                continue;
+            }
             let mut response = String::new();
             let _ = stream.read_to_string(&mut response);
             if response.contains("pharos_reload_failed_total 1\n") {
@@ -182,7 +190,6 @@ fn reload_directive_polls_for_changed_corefile() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
     }
-    fs::write(&file, format!(".:{port} {{\n reload 2s 0\n errors\n}}\n")).unwrap();
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -190,17 +197,33 @@ fn reload_directive_polls_for_changed_corefile() {
     let query = [
         0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1,
     ];
+    let mut tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    assert_eq!(tcp_query(&mut tcp, &query)[3] & 15, 0);
+    fs::write(&file, format!(".:{port} {{\n errors\n}}\n")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         socket.send_to(&query, ("127.0.0.1", port)).unwrap();
         let mut response = [0; 1024];
-        socket.recv(&mut response).unwrap();
+        let (_, peer) = socket.recv_from(&mut response).unwrap();
+        assert_eq!(peer.port(), port);
         if response[3] & 15 == 2 {
             break;
         }
         assert!(Instant::now() < deadline, "polling did not reload");
         thread::sleep(Duration::from_millis(20));
     }
+    assert_eq!(tcp_query(&mut tcp, &query)[3] & 15, 2);
+    fs::write(&file, format!(".:{port} {{\n whoami\n}}\n")).unwrap();
+    thread::sleep(Duration::from_millis(2500));
+    socket.send_to(&query, ("127.0.0.1", port)).unwrap();
+    let mut response = [0; 1024];
+    socket.recv(&mut response).unwrap();
+    assert_eq!(
+        response[3] & 15,
+        2,
+        "polling continued after reload removal"
+    );
     drop(process);
     fs::remove_dir_all(dir).unwrap();
 }

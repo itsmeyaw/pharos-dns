@@ -353,11 +353,11 @@ impl ListenerRegistry {
         result
     }
 
-    /// Bind new Listeners before changing any existing Listener's handler.
+    /// Bind new Listeners before changing handlers; return replaced states for draining.
     pub async fn apply<H: Handler>(
         &mut self,
         mut servers: HashMap<ListenerKey, H>,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<Arc<H>>> {
         let desired: HashSet<_> = servers.keys().copied().collect();
         if desired.iter().any(|key| key.transport != Transport::Dns) {
             return Err(io::Error::new(
@@ -394,11 +394,14 @@ impl ListenerRegistry {
             let listener = Listener::bind(key.address, Swappable(Arc::clone(&handler))).await?;
             added.push((key, listener, handler));
         }
+        let mut retired = Vec::new();
         for (key, server) in servers {
-            self.handlers[&key]
-                .downcast_ref::<Arc<ArcSwap<H>>>()
-                .expect("validated handler")
-                .store(Arc::new(server));
+            retired.push(
+                self.handlers[&key]
+                    .downcast_ref::<Arc<ArcSwap<H>>>()
+                    .expect("validated handler")
+                    .swap(Arc::new(server)),
+            );
         }
         let removed: Vec<_> = self
             .listeners
@@ -411,13 +414,20 @@ impl ListenerRegistry {
             self.handlers.insert(key, Box::new(handler));
         }
         for key in removed {
+            if let Some(handler) = self
+                .handlers
+                .get(&key)
+                .and_then(|handler| handler.downcast_ref::<Arc<ArcSwap<H>>>())
+            {
+                retired.push(handler.load_full());
+            }
             if let Some(listener) = self.remove(&key)
                 && let Err(error) = listener.shutdown().await
             {
                 logging::log("ERROR", "", &format!("Listener shutdown: {error}"));
             }
         }
-        Ok(())
+        Ok(retired)
     }
 }
 

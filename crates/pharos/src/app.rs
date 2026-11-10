@@ -135,10 +135,19 @@ async fn reload(
             let _ = next.run(Phase::Shutdown).await;
             return Err(error.to_string());
         }
-        if let Err(error) = listeners.apply(servers).await {
-            let _ = next.run(Phase::Restart).await;
-            let _ = next.run(Phase::Shutdown).await;
-            return Err(error.to_string());
+        let retired = match listeners.apply(servers).await {
+            Ok(retired) => retired,
+            Err(error) => {
+                let _ = next.run(Phase::Restart).await;
+                let _ = next.run(Phase::Shutdown).await;
+                return Err(error.to_string());
+            }
+        };
+        while retired
+            .iter()
+            .any(|state| std::sync::Arc::strong_count(state) > 1)
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         if let Err(error) = lifecycle.run(Phase::Shutdown).await {
             logging::log("ERROR", "", &format!("Reload shutdown: {error}"));
