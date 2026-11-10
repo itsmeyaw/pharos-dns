@@ -2,7 +2,7 @@
 
 mod weighted;
 
-use std::{path::PathBuf, time::Duration};
+use std::{net::IpAddr, path::PathBuf, time::Duration};
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{Message, Rcode, Type};
@@ -13,6 +13,7 @@ pub struct LoadBalance {
     pub weight_file: Option<PathBuf>,
     pub reload: Duration,
     weights: Option<weighted::Weights>,
+    prefer: Vec<Subnet>,
 }
 
 impl LoadBalance {
@@ -23,6 +24,7 @@ impl LoadBalance {
             weight_file: None,
             reload: Duration::from_secs(30),
             weights: None,
+            prefer: Vec::new(),
         };
         match args.first().map(String::as_str) {
             None | Some("round_robin") if args.len() <= 1 => {}
@@ -43,8 +45,14 @@ impl LoadBalance {
             }
             _ => return Err(cursor.arg_err()),
         }
-        if cursor.next_block() {
-            return Err(cursor.error("unknown loadbalance property"));
+        while cursor.next_block() {
+            if cursor.val() != "prefer" {
+                return Err(cursor.error("unknown loadbalance property"));
+            }
+            for cidr in cursor.remaining_args() {
+                lb.prefer
+                    .push(Subnet::parse(&cidr).ok_or_else(|| cursor.error("invalid CIDR"))?);
+            }
         }
         lb.weights = lb
             .weight_file
@@ -64,7 +72,7 @@ impl Plugin for LoadBalance {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
         let outcome = next.run(cx).await;
         if outcome == Outcome::Response {
-            shuffle(cx.response, self.weights.as_ref());
+            shuffle(cx.response, self.weights.as_ref(), &self.prefer);
         }
         outcome
     }
@@ -76,6 +84,40 @@ struct Record {
     end: u16,
     group: u8,
     weight: u8,
+    priority: usize,
+}
+
+#[derive(Debug)]
+struct Subnet {
+    address: IpAddr,
+    prefix: u32,
+}
+
+impl Subnet {
+    fn parse(value: &str) -> Option<Self> {
+        let (address, prefix) = value.split_once('/')?;
+        let address: IpAddr = address.parse().ok()?;
+        let prefix: u32 = prefix.parse().ok()?;
+        if prefix > if address.is_ipv4() { 32 } else { 128 } {
+            return None;
+        }
+        Some(Self { address, prefix })
+    }
+
+    fn contains(&self, rr: &pharos_proto::Record<'_>) -> bool {
+        match (self.address, rr.rtype, rr.rdata) {
+            (IpAddr::V4(network), Type::A, [a, b, c, d]) => {
+                let mask = u32::MAX.checked_shl(32 - self.prefix).unwrap_or(0);
+                u32::from(network) & mask
+                    == u32::from(std::net::Ipv4Addr::new(*a, *b, *c, *d)) & mask
+            }
+            (IpAddr::V6(network), Type::AAAA, bytes) if bytes.len() == 16 => {
+                let mask = u128::MAX.checked_shl(128 - self.prefix).unwrap_or(0);
+                u128::from(network) & mask == u128::from_be_bytes(bytes.try_into().unwrap()) & mask
+            }
+            _ => false,
+        }
+    }
 }
 
 thread_local! {
@@ -97,7 +139,7 @@ fn random(limit: usize) -> usize {
     })
 }
 
-fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>) {
+fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subnet]) {
     if wire.len() > usize::from(u16::MAX) {
         return;
     }
@@ -151,6 +193,10 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>) {
                 weight: weight_data
                     .as_ref()
                     .map_or(1, |data| weighted::weight(data, &rr)),
+                priority: prefer
+                    .iter()
+                    .position(|subnet| subnet.contains(&rr))
+                    .unwrap_or(prefer.len()),
             };
             count += 1;
         }
@@ -217,6 +263,24 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>) {
             } else {
                 for i in first..end.saturating_sub(1) {
                     items.swap(i, i + random(end - i));
+                }
+            }
+        }
+        if !prefer.is_empty() && section != 1 {
+            let key = |record: &Record| {
+                let group = match record.group {
+                    0 => 0,
+                    2 => 1,
+                    3 => 2,
+                    _ => 3,
+                };
+                (group, if group == 1 { record.priority } else { 0 })
+            };
+            for i in 1..items.len() {
+                let mut j = i;
+                while j > 0 && key(&items[j - 1]) > key(&items[j]) {
+                    items.swap(j - 1, j);
+                    j -= 1;
                 }
             }
         }
