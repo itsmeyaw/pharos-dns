@@ -2,7 +2,7 @@ use std::{
     fmt::Debug,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -47,6 +47,7 @@ pub struct Controller {
     store: Store,
     synced: Vec<Arc<AtomicBool>>,
     tasks: Vec<JoinHandle<()>>,
+    pending: Arc<AtomicUsize>,
     client: Client,
     config: WatchConfig,
     metrics: Option<KubernetesMetrics>,
@@ -83,6 +84,9 @@ impl Controller {
             store,
             synced: Vec::new(),
             tasks: Vec::new(),
+            pending: Arc::new(AtomicUsize::new(
+                2 + usize::from(config.endpoints) + usize::from(config.pods_verified),
+            )),
             client: client.clone(),
             config: config.clone(),
             metrics,
@@ -195,6 +199,7 @@ impl Controller {
     {
         let store = self.store.clone();
         let metrics = self.metrics.clone();
+        let pending = self.pending.clone();
         let synced = Arc::new(AtomicBool::new(false));
         self.synced.push(synced.clone());
         self.tasks.push(tokio::spawn(async move {
@@ -207,19 +212,21 @@ impl Controller {
                     Ok(Event::InitApply(object)) => initial.push(object.into()),
                     Ok(Event::InitDone) => {
                         replace(&store, std::mem::take(&mut initial));
-                        synced.store(true, Ordering::Release);
+                        if !synced.swap(true, Ordering::AcqRel) {
+                            pending.fetch_sub(1, Ordering::AcqRel);
+                        }
                     }
                     Ok(Event::Apply(object)) => {
-                        let latency = synced
-                            .load(Ordering::Acquire)
+                        let latency = (synced.load(Ordering::Acquire)
+                            && pending.load(Ordering::Acquire) == 0)
                             .then(|| observe(&store, &object))
                             .flatten();
                         apply(&store, object.into());
                         record_latency(metrics.as_ref(), latency);
                     }
                     Ok(Event::Delete(object)) => {
-                        let latency = synced
-                            .load(Ordering::Acquire)
+                        let latency = (synced.load(Ordering::Acquire)
+                            && pending.load(Ordering::Acquire) == 0)
                             .then(|| observe(&store, &object))
                             .flatten();
                         delete(

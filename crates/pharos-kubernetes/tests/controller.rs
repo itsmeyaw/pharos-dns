@@ -28,6 +28,7 @@ struct FakeServer {
     requests: Requests,
     lists: Arc<Mutex<HashMap<String, Value>>>,
     list_delay: Arc<std::sync::atomic::AtomicU64>,
+    path_delays: Arc<Mutex<HashMap<String, u64>>>,
     active: Arc<std::sync::atomic::AtomicUsize>,
     peak: Arc<std::sync::atomic::AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
@@ -41,12 +42,14 @@ impl FakeServer {
         let requests: Requests = Arc::default();
         let lists: Arc<Mutex<HashMap<String, Value>>> = Arc::default();
         let list_delay = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let path_delays: Arc<Mutex<HashMap<String, u64>>> = Arc::default();
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let task_watches = watches.clone();
         let task_requests = requests.clone();
         let task_lists = lists.clone();
         let task_delay = list_delay.clone();
+        let task_path_delays = path_delays.clone();
         let task_active = active.clone();
         let task_peak = peak.clone();
         let task = tokio::spawn(async move {
@@ -56,6 +59,7 @@ impl FakeServer {
                 let requests = task_requests.clone();
                 let lists = task_lists.clone();
                 let delay = task_delay.clone();
+                let path_delays = task_path_delays.clone();
                 let active = task_active.clone();
                 let peak = task_peak.clone();
                 tokio::spawn(async move {
@@ -64,6 +68,7 @@ impl FakeServer {
                         let requests = requests.clone();
                         let lists = lists.clone();
                         let delay = delay.clone();
+                        let path_delays = path_delays.clone();
                         let active = active.clone();
                         let peak = peak.clone();
                         async move {
@@ -89,10 +94,15 @@ impl FakeServer {
                                 let current =
                                     active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                                 peak.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
-                                tokio::time::sleep(Duration::from_millis(
-                                    delay.load(std::sync::atomic::Ordering::Relaxed),
-                                ))
-                                .await;
+                                let delay_ms = path_delays
+                                    .lock()
+                                    .unwrap()
+                                    .get(&path)
+                                    .copied()
+                                    .unwrap_or_else(|| {
+                                        delay.load(std::sync::atomic::Ordering::Relaxed)
+                                    });
+                                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                                 active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                                 let (api, kind, items) = match path.as_str() {
                                     "/api/v1/services" => (
@@ -132,6 +142,7 @@ impl FakeServer {
             requests,
             lists,
             list_delay,
+            path_delays,
             active,
             peak,
             task,
@@ -147,6 +158,45 @@ impl FakeServer {
             .send(format!("{}\n", json!({"type":typ, "object":object})))
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn programming_metrics_wait_for_all_initial_watchers() {
+    let server = FakeServer::start().await;
+    server
+        .path_delays
+        .lock()
+        .unwrap()
+        .insert("/api/v1/namespaces".into(), 400);
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    let config = pharos_kubernetes::ClientConfig {
+        endpoint: Some(server.url.clone()),
+        ..Default::default()
+    };
+    let client = config.client(&registry).await.unwrap();
+    let mut controller =
+        Controller::start_with_metrics(client, WatchConfig::default(), registry.kubernetes());
+    let store = controller.store();
+    until(|| {
+        server.watches.lock().unwrap().len() >= 2
+            && store.with_read(|index| index.service("prod", "web").is_some())
+    })
+    .await;
+    assert!(!controller.has_synced());
+    let endpoint = json!({"apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice", "metadata":{
+        "name":"slice", "namespace":"prod", "resourceVersion":"2", "labels":{"kubernetes.io/service-name":"web"},
+        "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}},
+        "addressType":"IPv4", "endpoints":[{"addresses":["10.0.1.9"]}]});
+    server.send(
+        "/apis/discovery.k8s.io/v1/endpointslices",
+        "MODIFIED",
+        endpoint,
+    );
+    until(|| store.with_read(|index| index.endpoints_by_ip("10.0.1.9").count() == 1)).await;
+    let mut out = String::new();
+    registry.encode(&mut out);
+    assert!(!out.contains("pharos_kubernetes_dns_programming_duration_seconds_count"));
+    controller.stop().await;
 }
 
 #[tokio::test]
