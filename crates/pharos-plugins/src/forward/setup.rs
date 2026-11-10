@@ -313,6 +313,8 @@ fn strip_scope(value: &str) -> String {
     let mut host = value[..percent].to_owned();
     if let Some(close) = value[percent..].find(']') {
         host.push_str(&value[percent + close..]);
+    } else if let Some(colon) = value[percent..].rfind(':') {
+        host.push_str(&value[percent + colon..]);
     }
     host
 }
@@ -601,6 +603,11 @@ mod tests {
         assert_eq!(
             config.upstreams,
             [Target::Address("[fe80::1]:5300".parse().unwrap())]
+        );
+        let config = parse_text("forward . 127.0.0.1%eth0:5300").unwrap();
+        assert_eq!(
+            config.upstreams,
+            [Target::Address("127.0.0.1:5300".parse().unwrap())]
         );
         std::fs::remove_file(path).unwrap();
     }
