@@ -20,6 +20,22 @@ impl ServerBlock {
         &self.keys
     }
 
+    /// Apply the DNS default port without changing explicitly specified ports.
+    pub fn set_default_dns_port(&mut self, port: u16) {
+        for key in &mut self.keys {
+            let host = key.strip_prefix("dns://").unwrap_or(key);
+            if host.ends_with(':')
+                || host.contains("://")
+                || host
+                    .rsplit_once(':')
+                    .is_some_and(|(_, port)| port.parse::<i64>().is_ok())
+            {
+                continue;
+            }
+            key.push_str(&format!(":{port}"));
+        }
+    }
+
     /// Validate and normalize keys, retaining source locations for errors.
     pub fn normalize_keys(&self) -> Result<Vec<ServerBlockKey>, Error> {
         Ok(self

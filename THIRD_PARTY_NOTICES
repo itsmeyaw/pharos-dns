@@ -11,6 +11,7 @@
 - EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
 - Server routing, startup formatting, and tests in `crates/pharos-server` follow CoreDNS v1.15.0's `core/dnsserver/server.go`, `server_test.go`, and `onstartup.go`.
 - Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics`.
+- The CLI layout and lifecycle in `crates/pharos` follow CoreDNS v1.15.0's `coremain/run.go` and `core/dnsserver/onstartup.go`.
 
 ## Prometheus Go client, common, and procfs
 
@@ -24,6 +25,7 @@
 - Source: https://github.com/coredns/caddy
 - License: Apache-2.0
 - Copyright 2015 Light Code Labs, LLC
+- The signal and exit-code behavior in `crates/pharos` follows coredns/caddy v1.1.4's `sigtrap.go`, `sigtrap_posix.go`, and `caddy.go`.
 
 ## miekg/dns
 
