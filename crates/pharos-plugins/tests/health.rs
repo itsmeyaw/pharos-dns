@@ -63,6 +63,31 @@ async fn server_blocks_share_a_health_address() {
     lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 
+#[tokio::test]
+async fn health_shutdown_follows_server_block_order() {
+    let sockets: Vec<_> = (0..2)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let mut addresses: Vec<_> = sockets.iter().map(|s| s.local_addr().unwrap()).collect();
+    addresses.sort_by_key(|address| address.to_string());
+    let (second, first) = (addresses[0], addresses[1]);
+    drop(sockets);
+    let input = format!(
+        "a.:0 {{\n health {first} {{\n lameduck 500ms\n }}\n}}\nb.:0 {{\n health {second}\n}}\n"
+    );
+    let blocks = parse("Corefile", &input).unwrap();
+    let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    let shutdown = tokio::spawn(async move { lifecycle.run(Phase::Shutdown).await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        request(second, "GET", "/health")
+            .await
+            .starts_with("HTTP/1.1 200")
+    );
+    shutdown.await.unwrap().unwrap();
+}
+
 #[cfg(feature = "plugin-prometheus")]
 #[tokio::test]
 async fn health_self_probes_export_unlabelled_histogram_and_failures() {

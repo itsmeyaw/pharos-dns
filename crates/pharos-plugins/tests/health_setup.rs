@@ -30,3 +30,12 @@ fn health_corefile_syntax() {
         );
     }
 }
+
+#[test]
+fn health_defaults_to_port_8080_without_lameduck() {
+    let blocks = parse("Corefile", ".:53 {\n health\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let health = configured[0].config.health.as_ref().unwrap();
+    assert_eq!(health.address, ":8080");
+    assert_eq!(health.lameduck, std::time::Duration::ZERO);
+}

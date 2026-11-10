@@ -77,7 +77,7 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     #[cfg(feature = "plugin-ready")]
     let mut ready_addresses = std::collections::BTreeSet::new();
     #[cfg(feature = "plugin-health")]
-    let mut health_addresses = std::collections::BTreeMap::new();
+    let mut health_addresses: Vec<(String, std::time::Duration)> = Vec::new();
     #[cfg(feature = "plugin-ready")]
     {
         let state = Arc::clone(&ready_state);
@@ -89,10 +89,12 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     }
     for block in blocks {
         #[cfg(feature = "plugin-health")]
-        if let Some(health) = &block.config.health {
-            health_addresses
-                .entry(health.address.clone())
-                .or_insert(health.lameduck);
+        if let Some(health) = &block.config.health
+            && !health_addresses
+                .iter()
+                .any(|(address, _)| *address == health.address)
+        {
+            health_addresses.push((health.address.clone(), health.lameduck));
         }
         #[cfg(feature = "plugin-ready")]
         if let Some(ready) = &block.config.ready {
