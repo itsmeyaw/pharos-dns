@@ -83,9 +83,15 @@ async fn serve<H: Handler>(
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(Some(writer)));
     let (failed, mut write_failed) = watch::channel(false);
-    let mut queries = JoinSet::new();
+    let mut queries: JoinSet<Vec<u8>> = JoinSet::new();
+    let mut responses = Vec::with_capacity(MAX_IN_FLIGHT_PER_CONNECTION);
 
     'read: loop {
+        while let Some(result) = queries.try_join_next() {
+            if let Ok(response) = result {
+                responses.push(response);
+            }
+        }
         if *shutdown.borrow() || *write_failed.borrow() {
             break;
         }
@@ -94,7 +100,11 @@ async fn serve<H: Handler>(
                 biased;
                 _ = shutdown.changed() => break 'read,
                 _ = write_failed.changed() => break 'read,
-                _ = queries.join_next() => {},
+                result = queries.join_next() => {
+                    if let Some(Ok(response)) = result {
+                        responses.push(response);
+                    }
+                },
             }
         }
         let query = tokio::select! {
@@ -107,34 +117,39 @@ async fn serve<H: Handler>(
             },
         };
 
+        while let Some(result) = queries.try_join_next() {
+            if let Ok(response) = result {
+                responses.push(response);
+            }
+        }
+
         // A complete frame is accepted work and must finish even during shutdown.
         let handler = Arc::clone(&handler);
         let writer = Arc::clone(&writer);
         let failed = failed.clone();
+        let mut response = responses.pop().unwrap_or_default();
+        response.clear();
         queries.spawn(async move {
-            let mut response = Vec::new();
             if handler
                 .handle(&query, peer, Protocol::Tcp, &mut response)
                 .await
-                != Action::Respond
+                == Action::Respond
+                && let Ok(length) = u16::try_from(response.len())
             {
-                return;
-            }
-            let Ok(length) = u16::try_from(response.len()) else {
-                return;
-            };
-            let mut writer = writer.lock().await;
-            if let Some(stream) = writer.as_mut() {
-                let result = timeout(WRITE_TIMEOUT, async {
-                    stream.write_all(&length.to_be_bytes()).await?;
-                    stream.write_all(&response).await
-                })
-                .await;
-                if !matches!(result, Ok(Ok(()))) {
-                    *writer = None;
-                    let _ = failed.send(true);
+                let mut writer = writer.lock().await;
+                if let Some(stream) = writer.as_mut() {
+                    let result = timeout(WRITE_TIMEOUT, async {
+                        stream.write_all(&length.to_be_bytes()).await?;
+                        stream.write_all(&response).await
+                    })
+                    .await;
+                    if !matches!(result, Ok(Ok(()))) {
+                        *writer = None;
+                        let _ = failed.send(true);
+                    }
                 }
             }
+            response
         });
     }
     while queries.join_next().await.is_some() {}

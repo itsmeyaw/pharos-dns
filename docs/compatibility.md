@@ -10,7 +10,6 @@ Whoami reports an error if adding the protocol label would make its SRV owner
 name exceed the DNS name length limit. CoreDNS ignores the resulting write
 error. The UDP caller must supply a Response buffer with enough capacity;
 otherwise Pharos reports an error instead of allocating on the UDP Query path.
-TCP allocates the buffer when whoami runs, not while earlier Plugins await.
 
 ## Domain names
 

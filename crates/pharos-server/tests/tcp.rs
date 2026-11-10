@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use pharos_server::{Action, Handler, Listener, Protocol};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{Mutex, mpsc as async_mpsc},
+    sync::{Mutex, Semaphore, mpsc as async_mpsc},
     time::timeout,
 };
 
@@ -34,6 +34,123 @@ struct Slow {
 }
 
 struct Conditional;
+
+struct BufferProbe {
+    started: async_mpsc::UnboundedSender<usize>,
+    release: Arc<Semaphore>,
+}
+
+struct RejectedBufferProbe {
+    capacities: async_mpsc::UnboundedSender<usize>,
+}
+
+impl Handler for RejectedBufferProbe {
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        match query {
+            b"drop" => {
+                response.resize(1024, 0);
+                self.capacities.send(0).unwrap();
+                Action::Drop
+            }
+            b"oversized" => {
+                response.resize(65536, 0);
+                self.capacities.send(0).unwrap();
+                Action::Respond
+            }
+            _ => {
+                assert!(response.is_empty());
+                self.capacities.send(response.capacity()).unwrap();
+                response.extend_from_slice(b"ok");
+                Action::Respond
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropped_and_oversized_responses_return_their_buffers() {
+    let (capacities, mut observed) = async_mpsc::unbounded_channel();
+    let (listener, mut stream) = connect(RejectedBufferProbe { capacities }).await;
+    for (query, minimum) in [(b"drop".as_slice(), 1024), (b"oversized".as_slice(), 65536)] {
+        send(&mut stream, query).await;
+        timeout(TEST_TIMEOUT, observed.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        send(&mut stream, b"probe").await;
+        assert!(
+            timeout(TEST_TIMEOUT, observed.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                >= minimum
+        );
+        assert_eq!(receive(&mut stream).await, b"ok");
+    }
+    listener.shutdown().await.unwrap();
+}
+
+impl Handler for BufferProbe {
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        assert!(response.is_empty());
+        self.started.send(response.capacity()).unwrap();
+        response.resize(1024, query[0]);
+        if query == b"warm" {
+            self.release.acquire().await.unwrap().forget();
+        }
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn pipelined_tcp_queries_reuse_response_buffers() {
+    let (started, mut capacities) = async_mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    let (listener, mut stream) = connect(BufferProbe {
+        started,
+        release: Arc::clone(&release),
+    })
+    .await;
+    for _ in 0..16 {
+        send(&mut stream, b"warm").await;
+    }
+    for _ in 0..16 {
+        timeout(TEST_TIMEOUT, capacities.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    release.add_permits(16);
+    for _ in 0..16 {
+        assert_eq!(receive(&mut stream).await, vec![b'w'; 1024]);
+    }
+    for _ in 0..16 {
+        send(&mut stream, b"reuse").await;
+    }
+    for _ in 0..16 {
+        let capacity = timeout(TEST_TIMEOUT, capacities.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(capacity >= 1024, "Response buffer was not reused");
+    }
+    for _ in 0..16 {
+        assert_eq!(receive(&mut stream).await, vec![b'r'; 1024]);
+    }
+    listener.shutdown().await.unwrap();
+}
 
 struct NeverFinishes {
     started: async_mpsc::UnboundedSender<()>,
