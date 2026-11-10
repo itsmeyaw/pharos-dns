@@ -58,7 +58,8 @@ fn help_flags_print_usage_and_exit_successfully() {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(0));
-        let usage = String::from_utf8(output.stdout).unwrap();
+        assert!(output.stdout.is_empty());
+        let usage = String::from_utf8(output.stderr).unwrap();
         assert!(
             usage.lines().skip(1).all(|line| line.starts_with("  ")),
             "{usage}"

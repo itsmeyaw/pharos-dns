@@ -102,7 +102,7 @@ async fn main() -> ExitCode {
         }
     };
     if options.help {
-        print!(concat!(
+        eprint!(concat!(
             "Usage: pharos [OPTIONS]\n",
             "  -h, --help                    Print help\n",
             "  -c, --conf <path|stdin>       Corefile path or stdin\n",
