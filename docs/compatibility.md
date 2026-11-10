@@ -40,7 +40,7 @@ UTF-8 in Extended DNS Error text is rendered with replacement characters.
 
 The typed RDATA parser currently supports A, AAAA, NS, CNAME, PTR, MX,
 SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG,
-NSEC, NSEC3 and NSEC3PARAM. Unsupported name-bearing types are rejected by the typed parser;
+NSEC, NSEC3, NSEC3PARAM, SVCB and HTTPS. Unsupported name-bearing types are rejected by the typed parser;
 other types remain opaque and print in RFC 3597 form rather than using their
 CoreDNS presentation. Presentation parsing is not yet implemented. Unlike
 miekg/dns, incomplete typed records are rejected rather than accepted as
@@ -56,6 +56,18 @@ SRV targets and NAPTR replacements may be decoded from compressed names, but
 are always written uncompressed. RRSIG signer names and NSEC next names have
 the same behavior.
 
+SVCB and HTTPS targets likewise accept compressed names on decode and are
+written uncompressed. Their parameters must be ordered with no duplicate or
+reserved keys. As required by RFC 9460 and ADR-0002, mandatory lists must be
+nonempty, strictly ordered, and contain neither mandatory itself nor the
+reserved key; ALPN IDs must be present and nonempty. miekg/dns v1.1.73
+unpacking accepts these malformed mandatory and ALPN values. Domain 0.12.3
+wire decoding checks parameter framing and order but not individual values or
+the reserved key, so it also accepts empty hints and IPv4-mapped IPv6 hints
+that miekg/dns and Pharos reject. Neither cross-key dependencies nor AliasMode
+semantics are enforced by this wire codec; consumers must ignore AliasMode
+parameters.
+
 NSEC and NSEC3 bitmap windows must be ordered, nonempty, at most 32 octets,
 complete, and have a nonzero final octet (RFC 4034 section 4.1.2; ADR-0002).
 miekg/dns and domain 0.12.3 accept trailing zero octets and all-zero windows;
@@ -69,6 +81,8 @@ are adapted from miekg/dns v1.1.73 `parse_test.go` and `dns_test.go`
 copyright 2009 The Go Authors; extensions copyright 2011 Miek Gieben).
 DNSSEC fixtures in `crates/pharos-proto/tests/rdata_dnssec.rs` are adapted from
 miekg/dns v1.1.73 `parse_test.go` and `msg_helpers_test.go` under the same license.
+SVCB/HTTPS fixtures in `crates/pharos-proto/tests/rdata_svcb.rs` adapt its
+`parse_test.go` and `svcb_test.go` under the same license.
 
 ## Environment substitution
 

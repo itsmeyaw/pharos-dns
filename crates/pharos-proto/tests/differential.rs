@@ -579,6 +579,15 @@ fn supported_typed_rdata_agrees_with_domain() {
             vec![1, 0, 0, 10, 2, 10, 11, 1, 0x66, 0, 1, 0x40],
         ),
         (Type::NSEC3PARAM, vec![1, 0, 0, 10, 2, 10, 11]),
+        (
+            Type::SVCB,
+            b"\x00\x10\x00\x00\x01\x00\x03\x02h2\x00\x03\x00\x02\x01\xbb\xfd\xe8\x00\x02hi"
+                .to_vec(),
+        ),
+        (
+            Type::HTTPS,
+            b"\x00\x01\x03dns\x07example\x00\x00\x07\x00\x10/dns-query{?dns}".to_vec(),
+        ),
         (Type(65000), vec![0, 255, 42]),
     ] {
         builder
@@ -658,6 +667,13 @@ fn supported_typed_rdata_agrees_with_domain() {
             assert_eq!($key, *$b.public_key());
         }};
     }
+    macro_rules! compare_svcb {
+        ($priority:expr, $target:expr, $params:expr, $b:expr) => {{
+            assert_eq!($priority, $b.priority());
+            compare_name!($target, $b.target());
+            assert_eq!($params, $b.params().as_slice());
+        }};
+    }
     for (actual, expected) in pharos.answers().zip(domain_answers) {
         let actual = actual.data().unwrap();
         let expected = expected
@@ -666,6 +682,22 @@ fn supported_typed_rdata_agrees_with_domain() {
             .unwrap()
             .into_data();
         match (actual, expected) {
+            (
+                pharos_proto::Rdata::Svcb {
+                    priority,
+                    target,
+                    params,
+                },
+                AllRecordData::Svcb(b),
+            ) => compare_svcb!(priority, target, params, b),
+            (
+                pharos_proto::Rdata::Https {
+                    priority,
+                    target,
+                    params,
+                },
+                AllRecordData::Https(b),
+            ) => compare_svcb!(priority, target, params, b),
             (
                 pharos_proto::Rdata::Ds {
                     key_tag,
@@ -895,6 +927,35 @@ fn supported_typed_rdata_agrees_with_domain() {
             }
             pair => panic!("typed RDATA mismatch: {pair:?}"),
         }
+    }
+}
+
+#[test]
+fn domain_checks_svcb_framing_but_not_parameter_values_or_reserved_keys() {
+    let root: Name = ".".parse().unwrap();
+    let root = NameRef::parse(root.as_wire(), 0).unwrap();
+    for params in [
+        &b"\x00\x00\x00\x00"[..],                 // empty mandatory
+        &b"\x00\x00\x00\x04\x00\x03\x00\x01"[..], // unordered mandatory
+        &b"\x00\x01\x00\x01\x00"[..],             // empty ALPN ID
+        &b"\x00\x03\x00\x01\x00"[..],             // short port
+        &b"\xff\xff\x00\x00"[..],                 // reserved key
+    ] {
+        let mut data = vec![0, 1, 0];
+        data.extend_from_slice(params);
+        assert!(pharos_proto::Rdata::parse(Type::SVCB, &data).is_err());
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
+        builder
+            .record(Section::Answer, root, Type::SVCB, Class::IN, 0, &data)
+            .unwrap();
+        let msg = DomainMessage::from_octets(&builder.finish()[..]).unwrap();
+        let record = msg.question().answer().unwrap().next().unwrap().unwrap();
+        assert!(
+            record
+                .to_any_record::<AllRecordData<_, ParsedName<_>>>()
+                .is_ok()
+        );
     }
 }
 

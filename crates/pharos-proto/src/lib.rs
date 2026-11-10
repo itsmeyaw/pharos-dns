@@ -20,4 +20,4 @@ mod edns;
 pub use edns::{Opt, ResponseOpt, normalized_udp_size};
 
 mod rdata;
-pub use rdata::{Rdata, RdataError};
+pub use rdata::{Rdata, RdataError, SvcParams};

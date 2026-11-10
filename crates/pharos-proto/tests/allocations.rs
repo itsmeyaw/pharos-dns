@@ -57,8 +57,19 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
         (Type::NSEC, &b"\0\0\x01\x40"[..]),
         (Type::NSEC3, &b"\x01\0\0\0\0\0\0\x01\x40"[..]),
         (Type::NSEC3PARAM, &b"\x01\0\0\0\0"[..]),
+        (
+            Type::SVCB,
+            &b"\0\x01\0\0\x01\0\x03\x02h2\0\x03\0\x02\x01\xbb"[..],
+        ),
+        (Type::HTTPS, &b"\0\x01\0\0\x07\0\x02/x"[..]),
     ] {
-        std::hint::black_box(Rdata::parse(rtype, bytes).unwrap());
+        let data = Rdata::parse(rtype, bytes).unwrap();
+        if let Some(params) = data.svc_params() {
+            for pair in params.iter() {
+                std::hint::black_box(pair);
+            }
+        }
+        std::hint::black_box(data);
     }
     let allocations = region.change();
     assert_eq!(allocations.allocations, 0);

@@ -27,8 +27,6 @@ fn unsupported_name_type(rtype: Type) -> bool {
             | Type::IPSECKEY
             | Type::HIP
             | Type::TALINK
-            | Type::SVCB
-            | Type::HTTPS
             | Type::LP
             | Type::TKEY
             | Type::TSIG
@@ -39,6 +37,98 @@ fn unsupported_name_type(rtype: Type) -> bool {
 /// Malformed or unsupported typed record data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RdataError;
+
+/// Validated, borrowed SVCB parameter sequence in wire order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SvcParams<'a>(&'a [u8]);
+
+impl<'a> SvcParams<'a> {
+    /// Validates framing, key order, and each parameter's wire value.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, RdataError> {
+        let mut rest = bytes;
+        let mut previous = None;
+        while !rest.is_empty() {
+            let header = rest.get(..4).ok_or(RdataError)?;
+            let key = u16::from_be_bytes([header[0], header[1]]);
+            let len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+            let value = rest.get(4..4 + len).ok_or(RdataError)?;
+            if key == u16::MAX || previous.is_some_and(|p| key <= p) {
+                return Err(RdataError);
+            }
+            valid_svc_param(key, value)?;
+            previous = Some(key);
+            rest = &rest[4 + len..];
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Returns the original parameter encoding.
+    #[must_use]
+    pub fn as_bytes(self) -> &'a [u8] {
+        self.0
+    }
+
+    /// Iterates over parameter keys and their borrowed wire values.
+    pub fn iter(self) -> impl Iterator<Item = (u16, &'a [u8])> {
+        let mut rest = self.0;
+        std::iter::from_fn(move || {
+            if rest.is_empty() {
+                return None;
+            }
+            let key = u16::from_be_bytes([rest[0], rest[1]]);
+            let len = usize::from(u16::from_be_bytes([rest[2], rest[3]]));
+            let value = &rest[4..4 + len];
+            rest = &rest[4 + len..];
+            Some((key, value))
+        })
+    }
+}
+
+fn valid_svc_param(key: u16, value: &[u8]) -> Result<(), RdataError> {
+    match key {
+        0 => {
+            if value.is_empty() || !value.len().is_multiple_of(2) {
+                return Err(RdataError);
+            }
+            let mut previous = 0;
+            for pair in value.chunks(2) {
+                let key = u16::from_be_bytes([pair[0], pair[1]]);
+                if key <= previous || key == u16::MAX {
+                    return Err(RdataError);
+                }
+                previous = key;
+            }
+        }
+        1 => {
+            if value.is_empty() {
+                return Err(RdataError);
+            }
+            let mut rest = value;
+            while !rest.is_empty() {
+                let (id, next) = character_string(rest)?;
+                if id.is_empty() {
+                    return Err(RdataError);
+                }
+                rest = next;
+            }
+        }
+        2 | 8 if !value.is_empty() => return Err(RdataError),
+        3 if value.len() != 2 => return Err(RdataError),
+        4 if value.is_empty() || !value.len().is_multiple_of(4) => return Err(RdataError),
+        6 => {
+            if value.is_empty() || !value.len().is_multiple_of(16) {
+                return Err(RdataError);
+            }
+            for ip in value.chunks(16) {
+                if ip[..10] == [0; 10] && ip[10..12] == [255, 255] {
+                    return Err(RdataError);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
 fn character_string(bytes: &[u8]) -> Result<(&[u8], &[u8]), RdataError> {
     let (&len, rest) = bytes.split_first().ok_or(RdataError)?;
@@ -218,6 +308,94 @@ fn display_octets(f: &mut fmt::Formatter<'_>, mut bytes: &[u8]) -> fmt::Result {
     f.write_str("\"")
 }
 
+fn display_svc_key(f: &mut fmt::Formatter<'_>, key: u16) -> fmt::Result {
+    match key {
+        0 => f.write_str("mandatory"),
+        1 => f.write_str("alpn"),
+        2 => f.write_str("no-default-alpn"),
+        3 => f.write_str("port"),
+        4 => f.write_str("ipv4hint"),
+        5 => f.write_str("ech"),
+        6 => f.write_str("ipv6hint"),
+        7 => f.write_str("dohpath"),
+        8 => f.write_str("ohttp"),
+        _ => write!(f, "key{key}"),
+    }
+}
+
+fn display_svc_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8], alpn: bool) -> fmt::Result {
+    for &byte in bytes {
+        match byte {
+            b',' if alpn => f.write_str(r"\\\044")?,
+            b'\\' if alpn => f.write_str(r"\\\092")?,
+            b'"' | b';' | b' ' | b'\\' => write!(f, "\\{}", char::from(byte))?,
+            32..=126 => write!(f, "{}", char::from(byte))?,
+            _ => write!(f, "\\{byte:03}")?,
+        }
+    }
+    Ok(())
+}
+
+fn display_svc_params(f: &mut fmt::Formatter<'_>, params: SvcParams<'_>) -> fmt::Result {
+    for (key, value) in params.iter() {
+        f.write_str(" ")?;
+        display_svc_key(f, key)?;
+        f.write_str("=\"")?;
+        match key {
+            0 => {
+                for (i, pair) in value.chunks(2).enumerate() {
+                    if i != 0 {
+                        f.write_str(",")?;
+                    }
+                    display_svc_key(f, u16::from_be_bytes([pair[0], pair[1]]))?;
+                }
+            }
+            1 => {
+                let mut rest = value;
+                let mut first = true;
+                while !rest.is_empty() {
+                    let (id, next) = character_string(rest).map_err(|_| fmt::Error)?;
+                    if !first {
+                        f.write_str(",")?;
+                    }
+                    display_svc_bytes(f, id, true)?;
+                    first = false;
+                    rest = next;
+                }
+            }
+            2 | 8 => {}
+            3 => write!(f, "{}", u16::from_be_bytes([value[0], value[1]]))?,
+            4 => {
+                for (i, ip) in value.chunks(4).enumerate() {
+                    if i != 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{}", Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]))?;
+                }
+            }
+            5 => display_base(
+                f,
+                value,
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+                6,
+                true,
+            )?,
+            6 => {
+                for (i, ip) in value.chunks(16).enumerate() {
+                    if i != 0 {
+                        f.write_str(",")?;
+                    }
+                    let octets: [u8; 16] = ip.try_into().map_err(|_| fmt::Error)?;
+                    write!(f, "{}", Ipv6Addr::from(octets))?;
+                }
+            }
+            _ => display_svc_bytes(f, value, false)?,
+        }
+        f.write_str("\"")?;
+    }
+    Ok(())
+}
+
 impl fmt::Display for RdataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("invalid or unsupported RDATA")
@@ -276,6 +454,18 @@ pub enum Rdata<'a> {
         services: &'a [u8],
         regexp: &'a [u8],
         replacement: NameRef<'a>,
+    },
+    /// Service binding with raw, ordered wire-format parameters.
+    Svcb {
+        priority: u16,
+        target: NameRef<'a>,
+        params: &'a [u8],
+    },
+    /// HTTPS service binding with raw, ordered wire-format parameters.
+    Https {
+        priority: u16,
+        target: NameRef<'a>,
+        params: &'a [u8],
     },
     Ds {
         key_tag: u16,
@@ -352,6 +542,14 @@ impl<'a> Rdata<'a> {
             bytes = rest;
             Some(text)
         }))
+    }
+
+    /// Returns validated service parameters, or `None` for other or malformed data.
+    pub fn svc_params(&self) -> Option<SvcParams<'a>> {
+        match *self {
+            Self::Svcb { params, .. } | Self::Https { params, .. } => SvcParams::parse(params).ok(),
+            _ => None,
+        }
     }
 
     pub(crate) fn parse_in_message(
@@ -490,6 +688,26 @@ impl<'a> Rdata<'a> {
                     replacement,
                 })
             }
+            Type::SVCB | Type::HTTPS => {
+                let header = bytes.get(..2).ok_or(RdataError)?;
+                let priority = u16::from_be_bytes([header[0], header[1]]);
+                let target = NameRef::parse(wire, offset + 2).map_err(|_| RdataError)?;
+                let params = bytes.get(2 + target.wire_len()..).ok_or(RdataError)?;
+                SvcParams::parse(params)?;
+                Ok(if rtype == Type::SVCB {
+                    Self::Svcb {
+                        priority,
+                        target,
+                        params,
+                    }
+                } else {
+                    Self::Https {
+                        priority,
+                        target,
+                        params,
+                    }
+                })
+            }
             Type::DS | Type::CDS => {
                 let h = bytes.get(..4).ok_or(RdataError)?;
                 let (key_tag, algorithm, digest_type, digest) =
@@ -603,6 +821,8 @@ impl<'a> Rdata<'a> {
             Self::Uri { .. } => Type::URI,
             Self::Srv { .. } => Type::SRV,
             Self::Naptr { .. } => Type::NAPTR,
+            Self::Svcb { .. } => Type::SVCB,
+            Self::Https { .. } => Type::HTTPS,
             Self::Ds { .. } => Type::DS,
             Self::Cds { .. } => Type::CDS,
             Self::Dnskey { .. } => Type::DNSKEY,
@@ -694,6 +914,21 @@ impl<'a> Rdata<'a> {
                 write_character_string(writer, services)?;
                 write_character_string(writer, regexp)?;
                 writer.write_uncompressed_name(*replacement)
+            }
+            Self::Svcb {
+                priority,
+                target,
+                params,
+            }
+            | Self::Https {
+                priority,
+                target,
+                params,
+            } => {
+                SvcParams::parse(params).map_err(|_| BuildError::InvalidRdata)?;
+                writer.write_bytes(&priority.to_be_bytes())?;
+                writer.write_uncompressed_name(*target)?;
+                writer.write_bytes(params)
             }
             Self::Ds {
                 key_tag,
@@ -794,6 +1029,8 @@ impl<'a> Rdata<'a> {
                             | Type::URI
                             | Type::SRV
                             | Type::NAPTR
+                            | Type::SVCB
+                            | Type::HTTPS
                             | Type::DS
                             | Type::CDS
                             | Type::DNSKEY
@@ -892,6 +1129,22 @@ impl fmt::Display for Rdata<'_> {
                 f.write_str(" ")?;
                 display_quoted(f, regexp)?;
                 write!(f, " {replacement}")
+            }
+            Self::Svcb {
+                priority,
+                target,
+                params,
+            }
+            | Self::Https {
+                priority,
+                target,
+                params,
+            } => {
+                write!(f, "{priority} {target}")?;
+                match SvcParams::parse(params) {
+                    Ok(params) => display_svc_params(f, params),
+                    Err(_) => write!(f, " {}", Self::Unknown(self.rtype(), params)),
+                }
             }
             Self::Ds {
                 key_tag,
