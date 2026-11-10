@@ -2,6 +2,9 @@
 //! no lock or manager task is held while a Query waits for its Response.
 //! DNS-over-TLS is deferred to M3.
 
+pub mod health;
+pub use health::{Health, HealthConfig};
+
 use pharos_proto::{Message, Rcode};
 use pharos_server::metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry};
 use std::{
@@ -108,6 +111,7 @@ pub struct Proxy {
     expire: Duration,
     read_timeout: Duration,
     metrics: Option<Metrics>,
+    health: Health,
 }
 
 struct Metrics {
@@ -125,6 +129,7 @@ impl Proxy {
             expire: EXPIRE,
             read_timeout: READ_TIMEOUT,
             metrics: None,
+            health: Health::new(address, 2),
         }
     }
 
@@ -141,11 +146,28 @@ impl Proxy {
     /// Register the Upstream's metrics with the server's exporter.
     pub fn set_metrics(&mut self, registry: &Registry, name: &str) {
         let proxy = registry.proxy(name, &self.address.to_string());
+        let mut config = self.health.config();
+        config.metrics = Some(proxy.clone());
+        self.health = Health::with_config(config);
         self.metrics = Some(Metrics {
             cache: [proxy.connection_cache("udp"), proxy.connection_cache("tcp")],
             durations: (0..4096).map(|_| OnceLock::new()).collect(),
             proxy,
         });
+    }
+
+    /// Configure health checks before starting exchanges.
+    pub fn set_health_config(&mut self, mut config: HealthConfig) {
+        assert_eq!(config.address, self.address);
+        if let Some(metrics) = &self.metrics {
+            config.metrics = Some(metrics.proxy.clone());
+        }
+        self.health = Health::with_config(config);
+    }
+
+    #[must_use]
+    pub fn down(&self) -> bool {
+        self.health.down()
     }
     pub async fn exchange(
         &self,
@@ -161,15 +183,22 @@ impl Proxy {
         } else {
             transport
         };
-        let result = self.exchange_once(query, response, selected).await?;
-        if selected == Transport::Udp
-            && options.prefer_udp
-            && !options.force_tcp
-            && response[2] & 0x02 != 0
-        {
-            return self.exchange_once(query, response, Transport::Tcp).await;
+        let result = self.exchange_once(query, response, selected).await;
+        let result = match result {
+            Ok(_result)
+                if selected == Transport::Udp
+                    && options.prefer_udp
+                    && !options.force_tcp
+                    && response[2] & 0x02 != 0 =>
+            {
+                self.exchange_once(query, response, Transport::Tcp).await
+            }
+            other => other,
+        };
+        if matches!(result, Err(Error::Io(_))) {
+            self.health.start();
         }
-        Ok(result)
+        result
     }
 
     async fn exchange_once(

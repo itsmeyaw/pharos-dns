@@ -236,3 +236,35 @@ async fn read_timeout_is_configurable() {
         .unwrap_err();
     assert!(matches!(error, Error::Io(err) if err.kind() == io::ErrorKind::TimedOut));
 }
+
+#[tokio::test]
+async fn exchange_error_starts_health_check() {
+    use std::time::Duration;
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut proxy = Proxy::new(server.local_addr().unwrap());
+    proxy.set_read_timeout(Duration::from_millis(20));
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let _query = server.recv_from(&mut wire).await.unwrap();
+        let (len, peer) = tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        let check = pharos_proto::Message::parse(&wire[..len]).unwrap();
+        assert!(check.rd());
+        assert_eq!(
+            check.questions().next().unwrap().qtype,
+            pharos_proto::Type::NS
+        );
+        wire[2] |= 0x80;
+        server.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let mut response = [0; 512];
+    assert!(
+        proxy
+            .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+            .await
+            .is_err()
+    );
+    task.await.unwrap();
+}
