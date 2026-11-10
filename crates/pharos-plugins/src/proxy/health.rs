@@ -212,6 +212,7 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
         let socket = timeout(DIAL_TIMEOUT, async {
             let socket =
                 UdpSocket::bind(SocketAddr::new(config.source_address.unwrap_or(ip), 0)).await?;
+            super::enable_recv_err(&socket, config.address);
             socket.connect(config.address).await?;
             Ok::<_, io::Error>(socket)
         })

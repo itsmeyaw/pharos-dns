@@ -12,6 +12,9 @@ pharos-corefile = { path = "../pharos-corefile" }
 pharos-proto = { path = "../pharos-proto" }
 pharos-server = { path = "../pharos-server" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31", features = ["socket"] }
+
 [dev-dependencies]
 criterion = "0.5"
 stats_alloc = "0.1.10"

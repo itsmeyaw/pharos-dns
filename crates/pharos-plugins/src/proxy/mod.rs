@@ -29,6 +29,29 @@ thread_local! { static SHARD: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed)
 const EXPIRE: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[cfg(target_os = "linux")]
+fn enable_recv_err(socket: &UdpSocket, address: SocketAddr) {
+    use nix::sys::socket::{
+        setsockopt,
+        sockopt::{Ipv4RecvErr, Ipv6RecvErr},
+    };
+    let result = if address.is_ipv4() {
+        setsockopt(socket, Ipv4RecvErr, &true)
+    } else {
+        setsockopt(socket, Ipv6RecvErr, &true)
+    };
+    if let Err(error) = result {
+        pharos_server::logging::log(
+            "WARN",
+            "proxy",
+            &format!("failed to enable UDP error queue: {error}"),
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn enable_recv_err(_: &UdpSocket, _: SocketAddr) {}
+
 async fn connect_tcp(address: SocketAddr, source: Option<IpAddr>) -> io::Result<TcpStream> {
     let socket = if address.is_ipv4() {
         TcpSocket::new_v4()?
@@ -297,6 +320,7 @@ impl Proxy {
                 };
                 let socket =
                     UdpSocket::bind(SocketAddr::new(self.source_address.unwrap_or(ip), 0)).await?;
+                enable_recv_err(&socket, self.address);
                 socket.connect(self.address).await?;
                 Ok(Socket::Udp(socket))
             }
@@ -546,6 +570,21 @@ impl Drop for Proxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn udp_sockets_enable_error_queues_for_both_families() {
+        use nix::sys::socket::{
+            getsockopt,
+            sockopt::{Ipv4RecvErr, Ipv6RecvErr},
+        };
+        let v4 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        enable_recv_err(&v4, v4.local_addr().unwrap());
+        assert!(getsockopt(&v4, Ipv4RecvErr).unwrap());
+        let v6 = UdpSocket::bind("[::1]:0").await.unwrap();
+        enable_recv_err(&v6, v6.local_addr().unwrap());
+        assert!(getsockopt(&v6, Ipv6RecvErr).unwrap());
+    }
 
     #[test]
     fn adaptive_dial_timeout_uses_weighted_average_and_bounds() {

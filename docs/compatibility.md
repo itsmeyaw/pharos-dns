@@ -189,8 +189,8 @@ when `prefer_udp` is set, as CoreDNS's `forward` does.
 
 Idle sockets are swept across shards at most once per expiry interval on Query
 traffic. Unlike CoreDNS’s periodic cleanup, an idle Proxy retains expired
-sockets until another Query or shutdown. Pharos does not yet enable Linux UDP error-queue socket options. Upstream TSIG Messages retain their original ID rather than
-rewriting the signed Message. Proxy metric RCODE series are initialized on
+sockets until another Query or shutdown. Upstream TSIG Messages retain their
+original ID rather than rewriting the signed Message. Proxy metric RCODE series are initialized on
 first observation, which allocates once per distinct RCODE.
 The idle-connection cap applies across UDP and TCP combined; CoreDNS applies it
 per protocol. Connections rotate FIFO within each worker shard rather than in
