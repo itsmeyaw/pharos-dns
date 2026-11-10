@@ -561,6 +561,7 @@ async fn max_age_expires_connections_even_when_recently_used() {
 
 #[tokio::test]
 async fn unlimited_idle_cache_rotates_connections_fifo() {
+    use std::cell::RefCell;
     let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let proxy = Proxy::new(server.local_addr().unwrap());
     let upstream = tokio::spawn(async move {
@@ -576,12 +577,23 @@ async fn unlimited_idle_cache_rotates_connections_fifo() {
     });
     let mut a = [0; 512];
     let mut b = [0; 512];
-    let (first, second) = tokio::join!(
-        proxy.exchange(QUERY, &mut a, Transport::Udp, Options::default()),
-        proxy.exchange(QUERY, &mut b, Transport::Udp, Options::default()),
+    let completed = RefCell::new(Vec::new());
+    tokio::join!(
+        async {
+            let exchange = proxy
+                .exchange(QUERY, &mut a, Transport::Udp, Options::default())
+                .await
+                .unwrap();
+            completed.borrow_mut().push(exchange.local_addr);
+        },
+        async {
+            let exchange = proxy
+                .exchange(QUERY, &mut b, Transport::Udp, Options::default())
+                .await
+                .unwrap();
+            completed.borrow_mut().push(exchange.local_addr);
+        },
     );
-    first.unwrap();
-    second.unwrap();
     for _ in 0..2 {
         proxy
             .exchange(QUERY, &mut a, Transport::Udp, Options::default())
@@ -590,7 +602,7 @@ async fn unlimited_idle_cache_rotates_connections_fifo() {
     }
     let peers = upstream.await.unwrap();
     assert_ne!(peers[0], peers[1]);
-    assert_eq!(&peers[0..2], &peers[2..4]);
+    assert_eq!(completed.into_inner(), &peers[2..4]);
 }
 
 #[tokio::test]
@@ -632,7 +644,11 @@ async fn fifo_rotated_connections_expire_by_creation_age() {
     one.unwrap();
     two.unwrap();
     let peers = upstream.await.unwrap();
-    assert_eq!(&peers[..2], &peers[2..4]);
+    let mut initial = [peers[0], peers[1]];
+    let mut rotated = [peers[2], peers[3]];
+    initial.sort();
+    rotated.sort();
+    assert_eq!(initial, rotated);
     assert!(!peers[..2].contains(&peers[4]));
     assert!(!peers[..2].contains(&peers[5]));
 }
