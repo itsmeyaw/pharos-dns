@@ -11,8 +11,8 @@ use std::{
 use pharos_proto::{Class, Message, Name, Type};
 
 #[derive(Default)]
-struct IdentityHasher(u64);
-impl Hasher for IdentityHasher {
+struct ShardHasher(u64);
+impl Hasher for ShardHasher {
     fn finish(&self) -> u64 {
         self.0
     }
@@ -22,11 +22,12 @@ impl Hasher for IdentityHasher {
         }
     }
     fn write_u64(&mut self, value: u64) {
-        self.0 = value;
+        // Keys in a shard share their low byte, so mix it before bucket selection.
+        self.0 = value.rotate_right(8).wrapping_mul(0x9e3779b97f4a7c15);
     }
 }
 
-type Items = HashMap<u64, Item, BuildHasherDefault<IdentityHasher>>;
+type Items = HashMap<u64, Item, BuildHasherDefault<ShardHasher>>;
 
 struct Shard {
     items: Items,
@@ -337,5 +338,23 @@ impl Item {
             answering: super::answers_question(response),
             last_known_good: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShardHasher;
+    use std::{collections::HashSet, hash::Hasher};
+
+    #[test]
+    fn map_hash_keeps_bucket_entropy_within_one_shard() {
+        let buckets = (0..256_u64)
+            .map(|index| {
+                let mut hash = ShardHasher::default();
+                hash.write_u64((index << 8) | 7);
+                hash.finish() & 255
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(buckets.len(), 256);
     }
 }
