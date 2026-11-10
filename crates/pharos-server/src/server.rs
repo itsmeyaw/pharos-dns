@@ -1,8 +1,10 @@
-use std::{future::Future, net::SocketAddr, sync::Arc};
+use std::{future::Future, net::SocketAddr, sync::Arc, time::Instant};
 
 use crate::{
     Action, Admission, Context, Error, Handler, ListenerKey, Metadata, Outcome, Protocol, Router,
-    admit, contain_panic, finish_outcome, response_limit,
+    admit, contain_panic, finish_outcome,
+    metrics::{BlockMetrics, Registry},
+    response_limit,
 };
 use pharos_proto::Rcode;
 
@@ -10,6 +12,7 @@ use pharos_proto::Rcode;
 pub trait Chain: Send + Sync + 'static {
     fn serve(&self, context: &mut Context<'_>) -> impl Future<Output = Outcome> + Send;
     fn is_empty(&self) -> bool;
+    fn visit_enabled(&self, _visit: &mut dyn FnMut(&'static str)) {}
 }
 
 impl<C: Chain> Chain for Arc<C> {
@@ -18,6 +21,9 @@ impl<C: Chain> Chain for Arc<C> {
     }
     fn is_empty(&self) -> bool {
         self.as_ref().is_empty()
+    }
+    fn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {
+        self.as_ref().visit_enabled(visit);
     }
 }
 
@@ -28,17 +34,46 @@ pub struct Server<C> {
     pub allow_non_in: bool,
     pub debug: bool,
     pub logger: fn(Error),
+    metrics: Registry,
+    dropped: BlockMetrics,
 }
 
-impl<C> Server<C> {
+impl<C: Chain> Server<C> {
     pub fn new(router: Router<C>, key: ListenerKey) -> Self {
+        let metrics = Registry::default();
+        Self::with_registry(router, key, metrics)
+    }
+
+    pub fn with_registry(mut router: Router<C>, key: ListenerKey, metrics: Registry) -> Self {
+        let scheme = match key.transport {
+            crate::Transport::Dns => "dns",
+            crate::Transport::Tls => "tls",
+            crate::Transport::Quic => "quic",
+            crate::Transport::Grpc => "grpc",
+            crate::Transport::Https => "https",
+            crate::Transport::Https3 => "https3",
+        };
+        let address = if key.address.ip().is_unspecified() {
+            format!(":{}", key.address.port())
+        } else {
+            key.address.to_string()
+        };
+        let server = format!("{scheme}://{address}");
+        router.prepare_metrics(&key, &metrics, &server);
+        let dropped = metrics.block(&server, "dropped", "");
         Self {
             router,
             key,
             allow_non_in: false,
             debug: false,
             logger: log_error,
+            metrics,
+            dropped,
         }
+    }
+
+    pub fn metrics(&self) -> &Registry {
+        &self.metrics
     }
 }
 
@@ -54,14 +89,37 @@ impl<C: Chain> Handler for Server<C> {
         protocol: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
+        let start = Instant::now();
         let query = match admit(wire, self.allow_non_in, response) {
             Admission::Query(query) => query,
-            Admission::Respond => return Action::Respond,
+            Admission::Respond => {
+                if let Ok(query) = pharos_proto::Message::parse(wire) {
+                    let rcode = pharos_proto::Message::parse(response)
+                        .map_or(0, |message| message.rcode().0);
+                    if rcode != Rcode::BADVERS.0 {
+                        self.dropped.record(
+                            query.questions().next().map_or(0, |q| q.qtype.0),
+                            protocol == Protocol::Tcp,
+                            peer_is_ipv6(peer),
+                            query.opt().is_some_and(|opt| opt.dnssec_ok()),
+                            wire.len(),
+                            response.len(),
+                            rcode,
+                            start.elapsed().as_secs_f64(),
+                        );
+                    }
+                }
+                return Action::Respond;
+            }
             Admission::Drop => return Action::Drop,
         };
-        let outcome = if let Some(block) = self.router.route(&self.key, query, peer, protocol) {
+        let block = self.router.route(&self.key, query, peer, protocol);
+        let chain_start = Instant::now();
+        let mut producer = None;
+        let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
-                let mut slots = [None; 16];
+                let mut slots = [None; 17];
+                slots[0] = Some(("prometheus/writer", ""));
                 let mut context = Context {
                     query,
                     client: peer,
@@ -72,13 +130,84 @@ impl<C: Chain> Handler for Server<C> {
                     response,
                     max_response_size: response_limit(query, protocol),
                 };
-                contain_panic(chain.serve(&mut context), self.debug).await
+                let outcome = contain_panic(chain.serve(&mut context), self.debug).await;
+                producer = context
+                    .metadata
+                    .get("prometheus/writer")
+                    .and_then(|name| block.plugin_metrics(name));
+                outcome
             } else {
                 Outcome::Unanswered(Rcode::REFUSED)
             }
         } else {
             Outcome::Unanswered(Rcode::REFUSED)
         };
-        finish_outcome(query, protocol, outcome, response, self.logger)
+        let recorded_size = if outcome == Outcome::Response {
+            response.len()
+        } else {
+            0
+        };
+        let recorded_code = match outcome {
+            Outcome::Response => {
+                pharos_proto::Message::parse(response).map_or(0, |message| message.rcode().0)
+            }
+            Outcome::Unanswered(code) => code.0,
+            Outcome::Error(_) => Rcode::SERVFAIL.0,
+            Outcome::Drop | Outcome::Stream(_) => 0,
+        };
+        let duration = chain_start.elapsed().as_secs_f64();
+        let action = finish_outcome(query, protocol, outcome, response, self.logger);
+        let code = if (block.is_none() || outcome == Outcome::Error(Error::PluginPanic))
+            && action == Action::Respond
+        {
+            pharos_proto::Message::parse(response).map_or(0, |message| message.rcode().0)
+        } else {
+            recorded_code
+        };
+        let qtype = query.questions().next().map_or(0, |q| q.qtype.0);
+        let dnssec = query.opt().is_some_and(|opt| opt.dnssec_ok());
+        let response_len = if (block.is_none() || outcome == Outcome::Error(Error::PluginPanic))
+            && action == Action::Respond
+        {
+            response.len()
+        } else {
+            recorded_size
+        };
+        if let Some(producer) = producer {
+            producer.record(
+                qtype,
+                protocol == Protocol::Tcp,
+                peer_is_ipv6(peer),
+                dnssec,
+                wire.len(),
+                response_len,
+                code,
+                duration,
+            );
+        } else {
+            let metrics = if outcome == Outcome::Error(Error::PluginPanic) {
+                &self.dropped
+            } else {
+                block.map_or(&self.dropped, |block| block.metrics())
+            };
+            metrics.record(
+                qtype,
+                protocol == Protocol::Tcp,
+                peer_is_ipv6(peer),
+                dnssec,
+                wire.len(),
+                response_len,
+                code,
+                duration,
+            );
+        }
+        action
+    }
+}
+
+fn peer_is_ipv6(peer: SocketAddr) -> bool {
+    match peer.ip() {
+        std::net::IpAddr::V4(_) => false,
+        std::net::IpAddr::V6(ip) => ip.to_ipv4_mapped().is_none(),
     }
 }

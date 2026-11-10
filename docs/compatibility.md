@@ -6,6 +6,25 @@ Pharos writes UTC RFC3339 timestamps, unbracketed levels and Plugin names to
 stdout; CoreDNS uses the Go logger's date and time and bracketed levels such
 as `[INFO] plugin/x:`. Pharos also supports JSON lines selected at startup.
 
+## Process metrics
+
+Pharos exports the six core process metrics on Linux when their `/proc` data
+is available. On macOS it exports the open-file count; other process metrics
+are omitted. CoreDNS's Prometheus Go client also collects process metrics on
+macOS. Pharos does not export Go runtime metrics.
+
+## DNS metrics
+
+The current Listener reports the encoded Query size; CoreDNS's metrics Plugin
+reports the decoded Message length. Malformed Messages that cannot be parsed
+are not counted. View names
+are currently empty, and a wildcard Listener is labelled as an unbound address
+even when explicitly bound to an unspecified IP. Plugin attribution identifies
+the Plugin that returned the Response; CoreDNS's nested writers can attribute
+the outer Plugin instead.
+Concurrent scrapes can observe histogram buckets and sums at slightly different
+instants, unlike the Go client's synchronized histogram snapshot.
+
 ## Plugins
 
 Only `whoami` is implemented. Other built-in Directives are disabled by

@@ -17,8 +17,10 @@ use tokio::{
 mod admission;
 mod lifecycle;
 pub mod logging;
+pub mod metrics;
 mod outcome;
 mod panic;
+mod process_metrics;
 mod quota;
 pub use admission::{Admission, admit};
 pub use lifecycle::{Lifecycle, Phase};

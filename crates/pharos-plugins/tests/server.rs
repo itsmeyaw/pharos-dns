@@ -5,7 +5,7 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::{Message, Name, Rcode};
-use pharos_server::{Listener, Phase};
+use pharos_server::{Handler, Listener, Phase, Protocol};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -22,6 +22,29 @@ fn query(name: &str) -> Vec<u8> {
     wire.extend_from_slice(name.as_wire());
     wire.extend_from_slice(&[0, 1, 0, 1]);
     wire
+}
+
+#[tokio::test]
+async fn listeners_share_metrics_and_attribute_whoami_responses() {
+    let blocks = parse("Corefile", ".:1053 dns://.:1054 {\n whoami\n}").unwrap();
+    let configs = configure::<Chain>(&blocks, directives()).unwrap();
+    let (servers, _) = servers(configs).unwrap();
+    for server in servers.values() {
+        server
+            .handle(
+                &query("a."),
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut Vec::with_capacity(512),
+            )
+            .await;
+    }
+    let mut text = String::new();
+    servers.values().next().unwrap().metrics().encode(&mut text);
+    for port in [1053, 1054] {
+        assert!(text.contains(&format!("pharos_plugin_enabled{{name=\"whoami\",server=\"dns://:{port}\",view=\"\",zone=\".\"}} 1")), "{text}");
+        assert!(text.contains(&format!("pharos_dns_responses_total{{plugin=\"whoami\",rcode=\"NOERROR\",server=\"dns://:{port}\",view=\"\",zone=\".\"}} 1")), "{text}");
+    }
 }
 
 #[tokio::test]

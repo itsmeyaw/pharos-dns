@@ -2,7 +2,10 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use pharos_proto::{Message, Name, NameRef, Opcode, Type};
 
-use crate::{ListenerKey, Protocol};
+use crate::{
+    Chain, ListenerKey, Protocol,
+    metrics::{BlockMetrics, PluginMetrics, Registry},
+};
 
 /// A View filter receives the Query and client information without allocating.
 pub type ViewFilter = fn(&Message<'_>, SocketAddr, Protocol) -> bool;
@@ -12,6 +15,8 @@ pub struct ServerBlock<C> {
     domain: Name,
     chain: Option<C>,
     filters: Vec<ViewFilter>,
+    metrics: Option<BlockMetrics>,
+    plugin_metrics: Vec<(&'static str, PluginMetrics)>,
 }
 
 impl<C> ServerBlock<C> {
@@ -21,17 +26,36 @@ impl<C> ServerBlock<C> {
     pub fn chain(&self) -> Option<&C> {
         self.chain.as_ref()
     }
+    pub(crate) fn metrics(&self) -> &BlockMetrics {
+        self.metrics
+            .as_ref()
+            .expect("Server Block metrics initialized")
+    }
+    pub(crate) fn plugin_metrics(&self, name: &str) -> Option<&PluginMetrics> {
+        self.plugin_metrics
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, metrics)| metrics)
+    }
 }
 
 /// Server Blocks grouped by their Listener and ordered by Domain specificity.
 pub struct Router<C> {
     listeners: HashMap<ListenerKey, Vec<ServerBlock<C>>>,
+    metric_contexts: HashMap<ListenerKey, MetricContext<C>>,
+}
+
+struct MetricContext<C> {
+    registry: Registry,
+    server: String,
+    prepare: fn(&mut ServerBlock<C>, &Registry, &str),
 }
 
 impl<C> Default for Router<C> {
     fn default() -> Self {
         Self {
             listeners: HashMap::new(),
+            metric_contexts: HashMap::new(),
         }
     }
 }
@@ -44,12 +68,18 @@ impl<C> Router<C> {
         chain: Option<C>,
         filters: Vec<ViewFilter>,
     ) {
-        let blocks = self.listeners.entry(key).or_default();
-        blocks.push(ServerBlock {
+        let mut block = ServerBlock {
             domain,
             chain,
             filters,
-        });
+            metrics: None,
+            plugin_metrics: Vec::new(),
+        };
+        if let Some(context) = self.metric_contexts.get(&key) {
+            (context.prepare)(&mut block, &context.registry, &context.server);
+        }
+        let blocks = self.listeners.entry(key).or_default();
+        blocks.push(block);
         blocks.sort_by_key(|block| std::cmp::Reverse(block.domain.label_count()));
     }
 
@@ -109,4 +139,35 @@ impl<C> Router<C> {
                     .all(|filter| filter(&query, peer, protocol))
             })
     }
+}
+
+impl<C: Chain> Router<C> {
+    pub(crate) fn prepare_metrics(&mut self, key: &ListenerKey, registry: &Registry, server: &str) {
+        self.metric_contexts.insert(
+            *key,
+            MetricContext {
+                registry: registry.clone(),
+                server: server.to_owned(),
+                prepare: prepare_block::<C>,
+            },
+        );
+        if let Some(blocks) = self.listeners.get_mut(key) {
+            for block in blocks {
+                prepare_block(block, registry, server);
+            }
+        }
+    }
+}
+
+fn prepare_block<C: Chain>(block: &mut ServerBlock<C>, registry: &Registry, server: &str) {
+    // shortcut: View names are unavailable until named View filters are implemented.
+    let metrics = registry.block(server, &block.domain.to_string(), "");
+    block.plugin_metrics.clear();
+    if let Some(chain) = &block.chain {
+        chain.visit_enabled(&mut |name| {
+            metrics.plugin_enabled(name);
+            block.plugin_metrics.push((name, metrics.plugin(name)));
+        });
+    }
+    block.metrics = Some(metrics);
 }

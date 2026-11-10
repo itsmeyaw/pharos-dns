@@ -38,6 +38,7 @@ pub type Servers = HashMap<ListenerKey, Server<Arc<Chain>>>;
 pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecycle)> {
     let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
+    let metrics = pharos_server::metrics::Registry::default();
     for block in blocks {
         let keys = block.keys().to_vec();
         let addresses = block.listen_addresses.clone();
@@ -81,7 +82,7 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     Ok((
         groups
             .into_iter()
-            .map(|(key, router)| (key, Server::new(router, key)))
+            .map(|(key, router)| (key, Server::with_registry(router, key, metrics.clone())))
             .collect(),
         lifecycle,
     ))

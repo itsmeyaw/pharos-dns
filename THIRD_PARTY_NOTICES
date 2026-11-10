@@ -10,6 +10,14 @@
 - The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
 - EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
 - Server routing, startup formatting, and tests in `crates/pharos-server` follow CoreDNS v1.15.0's `core/dnsserver/server.go`, `server_test.go`, and `onstartup.go`.
+- Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics`.
+
+## Prometheus Go client, common, and procfs
+
+- Source: https://github.com/prometheus/client_golang, https://github.com/prometheus/common, and https://github.com/prometheus/procfs
+- License: Apache-2.0
+- Copyright The Prometheus Authors
+- Text exposition, process metric descriptions and Linux `/proc` fields in `crates/pharos-server` follow the Go client, common, and procfs.
 
 ## coredns/caddy
 

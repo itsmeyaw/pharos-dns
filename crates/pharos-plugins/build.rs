@@ -56,7 +56,7 @@ fn main() {
     code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
     for (i, name) in enabled.iter().enumerate() {
         let next = i + 1;
-        writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await, None => self.serve_{next}(cx).await, }} }}").unwrap();
+        writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => {{ let outcome = pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await; if outcome == pharos_server::Outcome::Response && cx.metadata.get(\"prometheus/writer\").is_none_or(str::is_empty) {{ cx.metadata.insert(\"prometheus/writer\", {name:?}); }} outcome }}, None => self.serve_{next}(cx).await, }} }}").unwrap();
     }
     writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
     code.push_str("}\n");
@@ -64,7 +64,13 @@ fn main() {
     for name in &enabled {
         write!(code, " && self.r#{name}.is_none()").unwrap();
     }
-    code.push_str(" }\n}\n");
+    code.push_str(
+        " }\nfn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {\nlet _ = &visit;\n",
+    );
+    for name in &enabled {
+        writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
+    }
+    code.push_str("}\n}\n");
     for i in 0..enabled.len() {
         let next = i + 1;
         writeln!(code, "struct Next{i}<'a>(&'a Chain);\nimpl pharos_server::Next for Next{i}<'_> {{ async fn run(self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.0.serve_{next}(cx).await }} }}").unwrap();

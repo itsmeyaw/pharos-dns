@@ -1,0 +1,74 @@
+# HELP pharos_build_info A metric with a constant '1' value labeled by version, revision, and rustc from which Pharos was built.
+# TYPE pharos_build_info gauge
+pharos_build_info{revision="rev",rustc="rustc",version="1\"\\\n"} 1
+# HELP pharos_dns_do_requests_total Counter of DNS requests with DO bit set per zone.
+# TYPE pharos_dns_do_requests_total counter
+pharos_dns_do_requests_total{server="dns://:53",view="",zone="example.\n"} 1
+# HELP pharos_dns_request_duration_seconds Histogram of the time (in seconds) each request took per zone.
+# TYPE pharos_dns_request_duration_seconds histogram
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.00025"} 0
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.0005"} 0
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.001"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.002"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.004"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.008"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.016"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.032"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.064"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.128"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.256"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="0.512"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="1.024"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="2.048"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="4.096"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="8.192"} 1
+pharos_dns_request_duration_seconds_bucket{server="dns://:53",view="",zone="example.\n",le="+Inf"} 1
+pharos_dns_request_duration_seconds_sum{server="dns://:53",view="",zone="example.\n"} 0.001
+pharos_dns_request_duration_seconds_count{server="dns://:53",view="",zone="example.\n"} 1
+# HELP pharos_dns_request_size_bytes Size of the EDNS0 UDP buffer in bytes (64K for TCP) per zone and protocol.
+# TYPE pharos_dns_request_size_bytes histogram
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="0"} 0
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="100"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="200"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="300"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="400"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="511"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="1023"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="2047"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="4095"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="8291"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="16000"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="32000"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="48000"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="64000"} 1
+pharos_dns_request_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="+Inf"} 1
+pharos_dns_request_size_bytes_sum{proto="udp",server="dns://:53",view="",zone="example.\n"} 100
+pharos_dns_request_size_bytes_count{proto="udp",server="dns://:53",view="",zone="example.\n"} 1
+# HELP pharos_dns_requests_total Counter of DNS requests made per zone, protocol and family.
+# TYPE pharos_dns_requests_total counter
+pharos_dns_requests_total{family="1",proto="udp",server="dns://:53",type="A",view="",zone="example.\n"} 1
+# HELP pharos_dns_response_size_bytes Size of the returned response in bytes.
+# TYPE pharos_dns_response_size_bytes histogram
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="0"} 0
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="100"} 0
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="200"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="300"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="400"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="511"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="1023"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="2047"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="4095"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="8291"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="16000"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="32000"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="48000"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="64000"} 1
+pharos_dns_response_size_bytes_bucket{proto="udp",server="dns://:53",view="",zone="example.\n",le="+Inf"} 1
+pharos_dns_response_size_bytes_sum{proto="udp",server="dns://:53",view="",zone="example.\n"} 200
+pharos_dns_response_size_bytes_count{proto="udp",server="dns://:53",view="",zone="example.\n"} 1
+# HELP pharos_dns_responses_total Counter of response status codes.
+# TYPE pharos_dns_responses_total counter
+pharos_dns_responses_total{plugin="",rcode="NOERROR",server="dns://:53",view="",zone="example.\n"} 1
+# HELP pharos_panics_total A metrics that counts the number of panics.
+# TYPE pharos_panics_total counter
+pharos_panics_total 0
