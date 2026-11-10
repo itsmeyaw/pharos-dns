@@ -279,7 +279,7 @@ Queries with compressed Questions, and Responses with compressed or multiple
 Questions or an OPT before other Additional records, are not cached: removing
 those encodings could invalidate compression pointers. CoreDNS re-encodes them.
 On a miss, Queries whose encoded names point into the header, or whose non-OPT
-RDATA might contain such a pointer, also bypass the cache rather than changing
+RDATA might contain a compression pointer, also bypass the cache rather than changing
 AD. Opaque EDNS option data is not treated as name compression.
 On a hit, Pharos rewrites the
 Question's case in the stored wire Message; record names compressed against it

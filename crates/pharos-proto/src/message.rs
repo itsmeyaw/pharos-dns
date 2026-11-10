@@ -203,7 +203,7 @@ impl<'a> Message<'a> {
         self
     }
     /// Whether setting AD in the wire header preserves encoded names.
-    /// Non-OPT RDATA with a possible pointer into the header is conservatively rejected.
+    /// Non-OPT RDATA with possible compression pointers is conservatively rejected.
     #[must_use]
     pub fn can_set_ad_in_wire(&self) -> bool {
         if self.wire[3] & 0x20 != 0 {
@@ -224,10 +224,7 @@ impl<'a> Message<'a> {
             let name_offset = record.ttl_offset - 4 - record.name.wire_len();
             if name_references_header(self.wire, name_offset)
                 || (record.rtype != Type::OPT
-                    && record
-                        .rdata
-                        .windows(2)
-                        .any(|pair| pair[0] == 0xc0 && pair[1] < 12))
+                    && record.rdata.windows(2).any(|pair| pair[0] & 0xc0 == 0xc0))
             {
                 return false;
             }

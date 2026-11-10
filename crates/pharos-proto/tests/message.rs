@@ -15,9 +15,11 @@ fn ad_wire_safety_checks_names_without_treating_edns_data_as_pointers() {
     let header_pointer = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\xc0\x03\0\x01\0\x01";
     let label_data = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x02\xc0\x03\0\0\x01\0\x01";
     let option_data = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\x01x\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\0\0\0\x06\xfd\xe9\0\x02\xc0\x01";
+    let indirect = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\x02\xc0\x03\0\0\x01\0\x01\0\0\x05\0\x01\0\0\0\0\0\x02\xc0\x0d";
     assert!(!Message::parse(header_pointer).unwrap().can_set_ad_in_wire());
     assert!(Message::parse(label_data).unwrap().can_set_ad_in_wire());
     assert!(Message::parse(option_data).unwrap().can_set_ad_in_wire());
+    assert!(!Message::parse(indirect).unwrap().can_set_ad_in_wire());
 }
 
 #[test]
