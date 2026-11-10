@@ -335,7 +335,11 @@ impl Store {
     pub(crate) fn delete_endpoints(&self, namespace: &str, name: &str) {
         self.0.write().unwrap().delete_endpoints(namespace, name);
     }
-    pub(crate) fn replace_endpoints(&self, objects: Vec<Endpoints>) {
+    pub(crate) fn replace_endpoints<R>(
+        &self,
+        objects: Vec<Endpoints>,
+        read: impl FnOnce(&Index) -> R,
+    ) -> R {
         let mut index = self.0.write().unwrap();
         index.slices.clear();
         index.endpoints.clear();
@@ -343,6 +347,7 @@ impl Store {
         for object in objects {
             index.apply_endpoints(object);
         }
+        read(&index)
     }
     pub(crate) fn apply_pod(&self, object: Pod) {
         self.0.write().unwrap().apply_pod(object);

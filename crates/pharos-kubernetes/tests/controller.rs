@@ -17,7 +17,10 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use pharos_kubernetes::{Controller, WatchConfig};
 use serde_json::{Value, json};
-use tokio::{net::TcpListener, sync::mpsc};
+use tokio::{
+    net::TcpListener,
+    sync::{Semaphore, mpsc},
+};
 
 type Watches = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>;
 type Requests = Arc<Mutex<Vec<String>>>;
@@ -28,7 +31,8 @@ struct FakeServer {
     requests: Requests,
     lists: Arc<Mutex<HashMap<String, Value>>>,
     list_delay: Arc<std::sync::atomic::AtomicU64>,
-    path_delays: Arc<Mutex<HashMap<String, u64>>>,
+    path_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    endpoint_page_gate: Arc<Mutex<Option<Arc<Semaphore>>>>,
     active: Arc<std::sync::atomic::AtomicUsize>,
     peak: Arc<std::sync::atomic::AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
@@ -42,14 +46,16 @@ impl FakeServer {
         let requests: Requests = Arc::default();
         let lists: Arc<Mutex<HashMap<String, Value>>> = Arc::default();
         let list_delay = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let path_delays: Arc<Mutex<HashMap<String, u64>>> = Arc::default();
+        let path_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>> = Arc::default();
+        let endpoint_page_gate: Arc<Mutex<Option<Arc<Semaphore>>>> = Arc::default();
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let task_watches = watches.clone();
         let task_requests = requests.clone();
         let task_lists = lists.clone();
         let task_delay = list_delay.clone();
-        let task_path_delays = path_delays.clone();
+        let task_path_gates = path_gates.clone();
+        let task_page_gate = endpoint_page_gate.clone();
         let task_active = active.clone();
         let task_peak = peak.clone();
         let task = tokio::spawn(async move {
@@ -59,7 +65,8 @@ impl FakeServer {
                 let requests = task_requests.clone();
                 let lists = task_lists.clone();
                 let delay = task_delay.clone();
-                let path_delays = task_path_delays.clone();
+                let path_gates = task_path_gates.clone();
+                let page_gate = task_page_gate.clone();
                 let active = task_active.clone();
                 let peak = task_peak.clone();
                 tokio::spawn(async move {
@@ -68,7 +75,8 @@ impl FakeServer {
                         let requests = requests.clone();
                         let lists = lists.clone();
                         let delay = delay.clone();
-                        let path_delays = path_delays.clone();
+                        let path_gates = path_gates.clone();
+                        let page_gate = page_gate.clone();
                         let active = active.clone();
                         let peak = peak.clone();
                         async move {
@@ -94,15 +102,25 @@ impl FakeServer {
                                 let current =
                                     active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                                 peak.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
-                                let delay_ms = path_delays
-                                    .lock()
-                                    .unwrap()
-                                    .get(&path)
-                                    .copied()
-                                    .unwrap_or_else(|| {
-                                        delay.load(std::sync::atomic::Ordering::Relaxed)
-                                    });
+                                let delay_ms = delay.load(std::sync::atomic::Ordering::Relaxed);
                                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                                let gate = path_gates.lock().unwrap().get(&path).cloned();
+                                if let Some(gate) = gate {
+                                    gate.acquire().await.unwrap().forget();
+                                }
+                                let page_gate =
+                                    if path == "/apis/discovery.k8s.io/v1/endpointslices" {
+                                        page_gate.lock().unwrap().clone()
+                                    } else {
+                                        None
+                                    };
+                                let next_page = request
+                                    .uri()
+                                    .query()
+                                    .is_some_and(|query| query.contains("continue=next"));
+                                if next_page && let Some(gate) = &page_gate {
+                                    gate.acquire().await.unwrap().forget();
+                                }
                                 active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                                 let (api, kind, items) = match path.as_str() {
                                     "/api/v1/services" => (
@@ -122,9 +140,17 @@ impl FakeServer {
                                     ),
                                     _ => ("v1", "PodList", json!([])),
                                 };
-                                let items =
-                                    lists.lock().unwrap().get(&path).cloned().unwrap_or(items);
-                                let body = json!({"apiVersion":api, "kind":kind, "metadata":{"resourceVersion":"1"}, "items":items}).to_string();
+                                let items = if next_page && page_gate.is_some() {
+                                    json!([])
+                                } else {
+                                    lists.lock().unwrap().get(&path).cloned().unwrap_or(items)
+                                };
+                                let metadata = if page_gate.is_some() && !next_page {
+                                    json!({"resourceVersion":"1", "continue":"next"})
+                                } else {
+                                    json!({"resourceVersion":"1"})
+                                };
+                                let body = json!({"apiVersion":api, "kind":kind, "metadata":metadata, "items":items}).to_string();
                                 Full::new(Bytes::from(body)).boxed()
                             };
                             Ok::<_, Infallible>(Response::new(body))
@@ -142,7 +168,8 @@ impl FakeServer {
             requests,
             lists,
             list_delay,
-            path_delays,
+            path_gates,
+            endpoint_page_gate,
             active,
             peak,
             task,
@@ -161,13 +188,14 @@ impl FakeServer {
 }
 
 #[tokio::test]
-async fn programming_metrics_wait_for_all_initial_watchers() {
+async fn programming_metrics_record_before_all_initial_watchers_sync() {
     let server = FakeServer::start().await;
+    let gate = Arc::new(Semaphore::new(0));
     server
-        .path_delays
+        .path_gates
         .lock()
         .unwrap()
-        .insert("/api/v1/namespaces".into(), 400);
+        .insert("/api/v1/namespaces".into(), gate);
     let registry = pharos_server::metrics::Registry::new("test", "test", "test");
     let config = pharos_kubernetes::ClientConfig {
         endpoint: Some(server.url.clone()),
@@ -192,10 +220,42 @@ async fn programming_metrics_wait_for_all_initial_watchers() {
         "MODIFIED",
         endpoint,
     );
-    until(|| store.with_read(|index| index.endpoints_by_ip("10.0.1.9").count() == 1)).await;
+    until(|| {
+        let mut out = String::new();
+        registry.encode(&mut out);
+        out.contains("pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 1")
+            && store.with_read(|index| index.endpoints_by_ip("10.0.1.9").count() == 1)
+    }).await;
     let mut out = String::new();
     registry.encode(&mut out);
-    assert!(!out.contains("pharos_kubernetes_dns_programming_duration_seconds_count"));
+    assert!(out.contains(
+        "pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 1"
+    ));
+    server.send("/apis/discovery.k8s.io/v1/endpointslices", "ADDED", json!({
+        "apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice", "metadata":{
+            "name":"slice2", "namespace":"prod", "resourceVersion":"3", "labels":{"kubernetes.io/service-name":"web"},
+            "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}}, "addressType":"IPv4"
+    }));
+    until(|| {
+        let mut out = String::new();
+        registry.encode(&mut out);
+        out.contains("pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 2")
+    }).await;
+    server.send("/apis/discovery.k8s.io/v1/endpointslices", "DELETED", json!({
+        "apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice", "metadata":{
+            "name":"slice", "namespace":"prod", "resourceVersion":"4", "labels":{"kubernetes.io/service-name":"web"},
+            "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}}, "addressType":"IPv4"
+    }));
+    until(|| {
+        let mut out = String::new();
+        registry.encode(&mut out);
+        out.contains("pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 3")
+    }).await;
+    assert!(!controller.has_synced());
+    assert_eq!(
+        store.with_read(|index| index.endpoints("prod", "web").count()),
+        1
+    );
     controller.stop().await;
 }
 
@@ -216,6 +276,17 @@ async fn startup_timeout_allows_unsynced_then_becomes_ready() {
 #[tokio::test]
 async fn watch_events_record_client_and_programming_metrics() {
     let server = FakeServer::start().await;
+    let gate = Arc::new(Semaphore::new(0));
+    server.path_gates.lock().unwrap().insert(
+        "/apis/discovery.k8s.io/v1/endpointslices".into(),
+        gate.clone(),
+    );
+    let namespace_gate = Arc::new(Semaphore::new(0));
+    server
+        .path_gates
+        .lock()
+        .unwrap()
+        .insert("/api/v1/namespaces".into(), namespace_gate.clone());
     server.lists.lock().unwrap().insert("/apis/discovery.k8s.io/v1/endpointslices".into(), json!([{
         "metadata":{"name":"slice","namespace":"prod","resourceVersion":"1",
             "labels":{"kubernetes.io/service-name":"web"},
@@ -230,10 +301,29 @@ async fn watch_events_record_client_and_programming_metrics() {
     let client = config.client(&registry).await.unwrap();
     let mut controller =
         Controller::start_with_metrics(client, WatchConfig::default(), registry.kubernetes());
-    until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
+    until(|| {
+        controller
+            .store()
+            .with_read(|index| index.service("prod", "web").is_some())
+    })
+    .await;
+    gate.add_permits(1);
+    until(|| {
+        server
+            .watches
+            .lock()
+            .unwrap()
+            .contains_key("/apis/discovery.k8s.io/v1/endpointslices")
+    })
+    .await;
+    assert!(!controller.has_synced());
     let mut before = String::new();
     registry.encode(&mut before);
-    assert!(!before.contains("pharos_kubernetes_dns_programming_duration_seconds_count"));
+    assert!(before.contains(
+        "pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 1"
+    ));
+    namespace_gate.add_permits(1);
+    until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
     server.send("/apis/discovery.k8s.io/v1/endpointslices", "MODIFIED", json!({
         "apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice", "metadata":{
             "name":"slice", "namespace":"prod", "resourceVersion":"2",
@@ -241,7 +331,7 @@ async fn watch_events_record_client_and_programming_metrics() {
             "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}
         }, "addressType":"IPv4", "endpoints":[{"addresses":["10.0.1.9"]}]
     }));
-    until(|| { let mut out = String::new(); registry.encode(&mut out); out.contains("pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 1") }).await;
+    until(|| { let mut out = String::new(); registry.encode(&mut out); out.contains("pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 2") }).await;
     let mut out = String::new();
     registry.encode(&mut out);
     assert!(out.contains("pharos_kubernetes_rest_client_requests_total{code=\"200\""));
@@ -259,6 +349,92 @@ async fn watch_events_record_client_and_programming_metrics() {
         "name":"slice", "namespace":"prod", "resourceVersion":"3", "labels":{"kubernetes.io/service-name":"web"},
         "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}}, "addressType":"IPv4"}));
     until(|| { let mut out = String::new(); registry.encode(&mut out); out.contains("pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"headless_with_selector\"} 1") }).await;
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn initial_slice_without_backing_service_is_not_recorded_later() {
+    let server = FakeServer::start().await;
+    let gate = Arc::new(Semaphore::new(0));
+    server
+        .path_gates
+        .lock()
+        .unwrap()
+        .insert("/api/v1/services".into(), gate.clone());
+    server.lists.lock().unwrap().insert("/apis/discovery.k8s.io/v1/endpointslices".into(), json!([{
+        "metadata":{"name":"slice","namespace":"prod","resourceVersion":"1",
+            "labels":{"kubernetes.io/service-name":"web"},
+            "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}},
+        "addressType":"IPv4","endpoints":[{"addresses":["10.0.1.1"]}]
+    }]));
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller =
+        Controller::start_with_metrics(client, WatchConfig::default(), registry.kubernetes());
+    until(|| {
+        server
+            .watches
+            .lock()
+            .unwrap()
+            .contains_key("/apis/discovery.k8s.io/v1/endpointslices")
+    })
+    .await;
+    assert!(!controller.has_synced());
+    gate.add_permits(1);
+    until(|| controller.has_synced()).await;
+    let mut out = String::new();
+    registry.encode(&mut out);
+    assert!(!out.contains("pharos_kubernetes_dns_programming_duration_seconds_count"));
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn initial_slice_uses_service_available_when_list_batch_is_installed() {
+    let server = FakeServer::start().await;
+    let service_gate = Arc::new(Semaphore::new(0));
+    let page_gate = Arc::new(Semaphore::new(0));
+    server
+        .path_gates
+        .lock()
+        .unwrap()
+        .insert("/api/v1/services".into(), service_gate.clone());
+    *server.endpoint_page_gate.lock().unwrap() = Some(page_gate.clone());
+    server.lists.lock().unwrap().insert("/apis/discovery.k8s.io/v1/endpointslices".into(), json!([{
+        "metadata":{"name":"slice","namespace":"prod","resourceVersion":"1",
+            "labels":{"kubernetes.io/service-name":"web"},
+            "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}},
+        "addressType":"IPv4","endpoints":[{"addresses":["10.0.1.1"]}]
+    }]));
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller =
+        Controller::start_with_metrics(client, WatchConfig::default(), registry.kubernetes());
+    until(|| {
+        server.requests.lock().unwrap().iter().any(|uri| {
+            uri.starts_with("/apis/discovery.k8s.io/v1/endpointslices?")
+                && uri.contains("continue=next")
+        })
+    })
+    .await;
+    assert!(
+        controller
+            .store()
+            .with_read(|index| index.service("prod", "web").is_none())
+    );
+    service_gate.add_permits(1);
+    until(|| {
+        controller
+            .store()
+            .with_read(|index| index.service("prod", "web").is_some())
+    })
+    .await;
+    page_gate.add_permits(1);
+    until(|| controller.has_synced()).await;
+    let mut out = String::new();
+    registry.encode(&mut out);
+    assert!(out.contains(
+        "pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 1"
+    ));
     controller.stop().await;
 }
 

@@ -2,7 +2,7 @@ use std::{
     fmt::Debug,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -19,7 +19,7 @@ use kube::{
 use serde::de::DeserializeOwned;
 use tokio::task::JoinHandle;
 
-use crate::store::Store;
+use crate::store::{Index, Store};
 use pharos_server::metrics::KubernetesMetrics;
 
 pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -50,7 +50,6 @@ pub struct Controller {
     store: Store,
     synced: Vec<Arc<AtomicBool>>,
     tasks: Vec<JoinHandle<()>>,
-    pending: Arc<AtomicUsize>,
     client: Client,
     config: WatchConfig,
     metrics: Option<KubernetesMetrics>,
@@ -87,9 +86,6 @@ impl Controller {
             store,
             synced: Vec::new(),
             tasks: Vec::new(),
-            pending: Arc::new(AtomicUsize::new(
-                2 + usize::from(config.endpoints) + usize::from(config.pods_verified),
-            )),
             client: client.clone(),
             config: config.clone(),
             metrics,
@@ -103,8 +99,8 @@ impl Controller {
             labels.clone(),
             Store::apply_service,
             Store::delete_service,
-            Store::replace_services,
-            |_, _| None,
+            |store, objects, _, _| store.replace_services(objects),
+            |_| None,
         );
         if config.endpoints {
             this.watch(
@@ -112,8 +108,8 @@ impl Controller {
                 labels.clone(),
                 Store::apply_endpoints,
                 Store::delete_endpoints,
-                Store::replace_endpoints,
-                record_endpoint_latency,
+                replace_endpoint_batch,
+                endpoint_latency,
             );
         }
         if config.pods_verified {
@@ -128,8 +124,8 @@ impl Controller {
                 pod_config,
                 Store::apply_pod,
                 Store::delete_pod,
-                Store::replace_pods,
-                |_, _| None,
+                |store, objects, _, _| store.replace_pods(objects),
+                |_| None,
             );
         }
         let ns_config = watcher::Config {
@@ -141,8 +137,8 @@ impl Controller {
             ns_config,
             Store::apply_namespace,
             |store, _, name| store.delete_namespace(name),
-            Store::replace_namespaces,
-            |_, _| None,
+            |store, objects, _, _| store.replace_namespaces(objects),
+            |_| None,
         );
         this
     }
@@ -194,66 +190,57 @@ impl Controller {
         config: watcher::Config,
         apply: fn(&Store, T),
         delete: fn(&Store, &str, &str),
-        replace: fn(&Store, Vec<T>),
-        observe: fn(&Store, &K) -> Option<(jiff::Timestamp, &'static str)>,
+        replace: fn(&Store, Vec<T>, Vec<SliceLatency>, Option<&KubernetesMetrics>),
+        observe: fn(&K) -> Option<SliceLatency>,
     ) where
         K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
         T: From<K> + Send + 'static,
     {
         let store = self.store.clone();
         let metrics = self.metrics.clone();
-        let pending = self.pending.clone();
         let synced = Arc::new(AtomicBool::new(false));
         self.synced.push(synced.clone());
         self.tasks.push(tokio::spawn(async move {
             let stream = watcher::watcher(api, config).default_backoff();
             pin_mut!(stream);
             let mut initial = Vec::new();
-            let mut relist_latencies = Vec::new();
+            let mut list_latencies = Vec::new();
             while let Some(event) = stream.next().await {
                 match event {
                     Ok(Event::Init) => {
                         initial.clear();
-                        relist_latencies.clear();
+                        list_latencies.clear();
                     }
                     Ok(Event::InitApply(object)) => {
                         if metrics.is_some()
-                            && synced.load(Ordering::Acquire)
-                            && pending.load(Ordering::Acquire) == 0
-                            && let Some(latency) = observe(&store, &object)
+                            && let Some(latency) = observe(&object)
                         {
-                            relist_latencies.push(latency);
+                            list_latencies.push(latency);
                         }
                         initial.push(object.into());
                     }
                     Ok(Event::InitDone) => {
-                        replace(&store, std::mem::take(&mut initial));
-                        for latency in relist_latencies.drain(..) {
-                            record_latency(metrics.as_ref(), Some(latency));
-                        }
-                        if !synced.swap(true, Ordering::AcqRel) {
-                            pending.fetch_sub(1, Ordering::AcqRel);
-                        }
+                        replace(
+                            &store,
+                            std::mem::take(&mut initial),
+                            std::mem::take(&mut list_latencies),
+                            metrics.as_ref(),
+                        );
+                        synced.store(true, Ordering::Release);
                     }
                     Ok(Event::Apply(object)) => {
-                        let latency = (synced.load(Ordering::Acquire)
-                            && pending.load(Ordering::Acquire) == 0)
-                            .then(|| observe(&store, &object))
-                            .flatten();
+                        let latency = metrics.is_some().then(|| observe(&object)).flatten();
                         apply(&store, object.into());
-                        record_latency(metrics.as_ref(), latency);
+                        record_latency(&store, metrics.as_ref(), latency);
                     }
                     Ok(Event::Delete(object)) => {
-                        let latency = (synced.load(Ordering::Acquire)
-                            && pending.load(Ordering::Acquire) == 0)
-                            .then(|| observe(&store, &object))
-                            .flatten();
+                        let latency = metrics.is_some().then(|| observe(&object)).flatten();
                         delete(
                             &store,
                             object.namespace().as_deref().unwrap_or(""),
                             &object.name_any(),
                         );
-                        record_latency(metrics.as_ref(), latency);
+                        record_latency(&store, metrics.as_ref(), latency);
                     }
                     Err(error) => {
                         pharos_server::logging::log(
@@ -305,10 +292,13 @@ impl Controller {
     }
 }
 
-fn record_endpoint_latency(
-    store: &Store,
-    slice: &EndpointSlice,
-) -> Option<(jiff::Timestamp, &'static str)> {
+struct SliceLatency {
+    timestamp: jiff::Timestamp,
+    namespace: String,
+    service: String,
+}
+
+fn endpoint_latency(slice: &EndpointSlice) -> Option<SliceLatency> {
     let metadata = slice
         .metadata
         .annotations
@@ -324,30 +314,62 @@ fn record_endpoint_latency(
         .labels
         .as_ref()
         .and_then(|labels| labels.get("kubernetes.io/service-name"))?;
-    let namespace = slice.metadata.namespace.as_deref().unwrap_or("");
-    store.with_read(|index| {
-        index.service_unfiltered(namespace, service).map(|service| {
-            let kind = if service.headless() {
-                "headless_with_selector"
-            } else {
-                "cluster_ip"
-            };
-            (timestamp, kind)
-        })
+    Some(SliceLatency {
+        timestamp,
+        namespace: slice.metadata.namespace.clone().unwrap_or_default(),
+        service: service.clone(),
     })
 }
 
-fn record_latency(
+fn service_kind(index: &Index, latency: &SliceLatency) -> Option<&'static str> {
+    index
+        .service_unfiltered(&latency.namespace, &latency.service)
+        .map(|service| {
+            if service.headless() {
+                "headless_with_selector"
+            } else {
+                "cluster_ip"
+            }
+        })
+}
+
+fn replace_endpoint_batch(
+    store: &Store,
+    objects: Vec<crate::object::Endpoints>,
+    latencies: Vec<SliceLatency>,
     metrics: Option<&KubernetesMetrics>,
-    value: Option<(jiff::Timestamp, &'static str)>,
 ) {
-    if let (Some(metrics), Some((timestamp, kind))) = (metrics, value) {
-        metrics.programming_duration(
-            kind,
-            jiff::Timestamp::now()
-                .duration_since(timestamp)
-                .as_secs_f64(),
-        );
+    let matched = store.replace_endpoints(objects, |index| {
+        latencies
+            .into_iter()
+            .filter_map(|latency| {
+                service_kind(index, &latency).map(|kind| (latency.timestamp, kind))
+            })
+            .collect::<Vec<_>>()
+    });
+    if let Some(metrics) = metrics {
+        for (timestamp, kind) in matched {
+            metrics.programming_duration(
+                kind,
+                jiff::Timestamp::now()
+                    .duration_since(timestamp)
+                    .as_secs_f64(),
+            );
+        }
+    }
+}
+
+fn record_latency(store: &Store, metrics: Option<&KubernetesMetrics>, value: Option<SliceLatency>) {
+    if let (Some(metrics), Some(latency)) = (metrics, value) {
+        let kind = store.with_read(|index| service_kind(index, &latency));
+        if let Some(kind) = kind {
+            metrics.programming_duration(
+                kind,
+                jiff::Timestamp::now()
+                    .duration_since(latency.timestamp)
+                    .as_secs_f64(),
+            );
+        }
     }
 }
 
