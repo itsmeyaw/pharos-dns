@@ -176,10 +176,11 @@ async fn shutdown(
     if let Err(error) = &stopped {
         eprintln!("{error}");
     }
-    if hooks.is_err() {
-        4
-    } else if terminate && stopped.is_err() {
+    // Caddy's SIGTERM path sets 3 after the hooks' 4, so a stop failure wins.
+    if terminate && stopped.is_err() {
         3
+    } else if hooks.is_err() {
+        4
     } else {
         0
     }
@@ -203,7 +204,7 @@ mod tests {
             (true, false, false, 0),
             (true, true, false, 4),
             (true, false, true, 3),
-            (true, true, true, 4),
+            (true, true, true, 3),
             (false, false, true, 0),
             (false, true, true, 4),
         ] {
