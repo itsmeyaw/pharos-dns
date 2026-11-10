@@ -1,0 +1,6 @@
+example.org:{port} {
+    whoami
+}
+example.net:{port} {
+    whoami
+}

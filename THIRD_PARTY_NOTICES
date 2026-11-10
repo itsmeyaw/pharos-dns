@@ -1,0 +1,78 @@
+# Third-party notices
+
+## CoreDNS
+
+- Source: https://github.com/coredns/coredns
+- License: Apache-2.0
+- Copyright 2016-2020 The CoreDNS authors and contributors
+- DNS wire fixture in `crates/pharos-proto/tests/corpus` is from CoreDNS test source; see the corpus README for the revision and original test.
+- `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
+- The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
+- The log Plugin, formatter and tests follow CoreDNS v1.15.0's `plugin/log`, `plugin/pkg/replacer` and `plugin/pkg/response`.
+- EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
+- Server routing, startup formatting, and tests in `crates/pharos-server` follow CoreDNS v1.15.0's `core/dnsserver/server.go`, `server_test.go`, and `onstartup.go`.
+- Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics`.
+- The CLI layout and lifecycle in `crates/pharos` follow CoreDNS v1.15.0's `coremain/run.go` and `core/dnsserver/onstartup.go`.
+
+## Prometheus Go client, common, and procfs
+
+- Source: https://github.com/prometheus/client_golang, https://github.com/prometheus/common, and https://github.com/prometheus/procfs
+- License: Apache-2.0
+- Copyright The Prometheus Authors
+- Text exposition, process metric descriptions and Linux `/proc` fields in `crates/pharos-server` follow the Go client, common, and procfs.
+
+## coredns/caddy
+
+- Source: https://github.com/coredns/caddy
+- License: Apache-2.0
+- Copyright 2015 Light Code Labs, LLC
+- The signal and exit-code behavior in `crates/pharos` follows coredns/caddy v1.1.4's `sigtrap.go`, `sigtrap_posix.go`, and `caddy.go`.
+
+## miekg/dns
+
+- Source: https://github.com/miekg/dns
+- License: BSD-3-Clause
+- Copyright (c) 2009, The Go Authors. Extensions copyright (c) 2011, Miek Gieben.
+- DNS code presentation names in `crates/pharos-proto/src/codes.rs` follow miekg/dns v1.1.73.
+- DNS wire fixtures in `crates/pharos-proto/tests/corpus` are from miekg/dns tests; see the corpus README for the revision and original tests.
+- EDNS option formatting and tests in `crates/pharos-proto` follow miekg/dns v1.1.73's `edns.go` and `edns_test.go`.
+- RDATA presentation in `crates/pharos-proto/src/rdata.rs` follows miekg/dns v1.1.73; fixtures in `crates/pharos-proto/tests/rdata_*.rs` adapt its `parse_test.go`, `dns_test.go`, `msg_helpers_test.go`, `svcb_test.go` and `tsig_test.go`.
+- Response truncation in `crates/pharos-server` follows miekg/dns v1.1.73's `msg_truncate.go`, without recompression.
+
+BSD 3-Clause License
+
+Copyright (c) 2009, The Go Authors. Extensions copyright (c) 2011, Miek Gieben.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## NLnet Labs domain
+
+- Source: https://github.com/NLnetLabs/domain
+- License: BSD-3-Clause
+- Copyright (c) 2018-2025, NLnet Labs. All rights reserved.
+- The fixed-size name compression table follows the StaticCompressor reference design.
+- EDNS differential tests in `crates/pharos-proto` use domain as a reference.

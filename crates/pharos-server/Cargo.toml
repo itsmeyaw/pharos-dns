@@ -1,0 +1,25 @@
+[package]
+name = "pharos-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pharos-proto = { path = "../pharos-proto" }
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31", features = ["socket", "uio", "net"] }
+
+[dev-dependencies]
+criterion = "0.5"
+stats_alloc = "0.1.10"
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "outcome"
+harness = false

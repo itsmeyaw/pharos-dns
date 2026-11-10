@@ -1,0 +1,94 @@
+[package]
+name = "pharos-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pharos-corefile = { path = "../pharos-corefile" }
+pharos-proto = { path = "../pharos-proto" }
+pharos-server = { path = "../pharos-server" }
+
+[dev-dependencies]
+criterion = "0.5"
+stats_alloc = "0.1.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+
+[features]
+default = ["plugin-log", "plugin-whoami"]
+plugin-root = []
+plugin-metadata = []
+plugin-geoip = []
+plugin-cancel = []
+plugin-proxyproto = []
+plugin-quic = []
+plugin-grpc-server = []
+plugin-https = []
+plugin-https3 = []
+plugin-timeouts = []
+plugin-multisocket = []
+plugin-reload = []
+plugin-nsid = []
+plugin-bufsize = []
+plugin-bind = []
+plugin-debug = []
+plugin-trace = []
+plugin-ready = []
+plugin-health = []
+plugin-pprof = []
+plugin-shed = []
+plugin-prometheus = []
+plugin-errors = []
+plugin-log = []
+plugin-dnstap = []
+plugin-local = []
+plugin-dns64 = []
+plugin-siit = []
+plugin-any = []
+plugin-chaos = []
+plugin-loadbalance = []
+plugin-tsig = []
+plugin-rewrite = []
+plugin-autopath = []
+plugin-acl = []
+plugin-cache = []
+plugin-header = []
+plugin-dnssec = []
+plugin-tls = []
+plugin-minimal = []
+plugin-template = []
+plugin-transfer = []
+plugin-dynupdate = []
+plugin-hosts = []
+plugin-route53 = []
+plugin-azure = []
+plugin-clouddns = []
+plugin-k8s-external = []
+plugin-kubernetes = []
+plugin-file = []
+plugin-auto = []
+plugin-secondary = []
+plugin-etcd = []
+plugin-loop = []
+plugin-forward = []
+plugin-grpc = []
+plugin-erratic = []
+plugin-whoami = []
+plugin-on = []
+plugin-sign = []
+plugin-view = []
+plugin-nomad = []
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "log"
+harness = false
+required-features = ["plugin-log"]
+
+[[bench]]
+name = "chain"
+harness = false
+required-features = ["plugin-whoami"]

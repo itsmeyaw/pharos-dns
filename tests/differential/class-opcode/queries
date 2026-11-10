@@ -1,0 +1,4 @@
+example.org. A CH udp
+example.org. A CH tcp
+example.org. A IN udp +opcode=STATUS
+example.org. A IN tcp +opcode=STATUS

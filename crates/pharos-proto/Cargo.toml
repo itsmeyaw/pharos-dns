@@ -1,0 +1,24 @@
+[package]
+name = "pharos-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+domain = { version = "0.12.3", default-features = false, features = ["std"] }
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
+proptest = "1"
+stats_alloc = "0.1.10"
+
+[[bench]]
+name = "name"
+harness = false
+
+[[bench]]
+name = "message"
+harness = false
