@@ -9,7 +9,7 @@ use pharos_proto::{Message, Rcode, Type};
 use pharos_server::metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry};
 use std::{
     collections::VecDeque,
-    io,
+    fmt, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Mutex, OnceLock,
@@ -44,9 +44,33 @@ pub struct Options {
 #[derive(Debug)]
 pub enum Error {
     InvalidRequest,
+    UnsupportedRequest,
+    NoHealthy,
+    NoForward,
     Mismatch,
     CachedClosed,
     Io(io::Error),
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRequest => f.write_str("invalid Query"),
+            Self::UnsupportedRequest => f.write_str("unsupported Query"),
+            Self::NoHealthy => f.write_str("no healthy Upstreams"),
+            Self::NoForward => f.write_str("no Upstream configured"),
+            Self::Mismatch => f.write_str("Upstream Response does not match Query"),
+            Self::CachedClosed => f.write_str("cached connection was closed by peer"),
+            Self::Io(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
