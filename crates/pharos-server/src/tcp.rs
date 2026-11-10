@@ -3,7 +3,7 @@ use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, tcp::OwnedReadHalf},
-    sync::{Mutex, Semaphore, watch},
+    sync::{Mutex, watch},
     task::{JoinHandle, JoinSet},
     time::timeout,
 };
@@ -13,7 +13,6 @@ use crate::{Action, Handler, Protocol};
 // CoreDNS has no default connection limit; cap ours to bound resource use.
 const MAX_CONNECTIONS: usize = 1024;
 const MAX_IN_FLIGHT_PER_CONNECTION: usize = 16;
-const MAX_IN_FLIGHT: usize = 256;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -25,7 +24,6 @@ pub(crate) fn spawn<H: Handler>(
 ) -> JoinHandle<io::Result<()>> {
     tokio::spawn(async move {
         let mut connections = JoinSet::new();
-        let permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
         let (stop, connections_stop) = watch::channel(false);
         let result = loop {
             if *shutdown.borrow() {
@@ -40,7 +38,7 @@ pub(crate) fn spawn<H: Handler>(
                         Ok((stream, peer)) => {
                             connections.spawn(serve(
                                 stream, peer, Arc::clone(&handler),
-                                connections_stop.clone(), Arc::clone(&permits),
+                                connections_stop.clone(),
                             ));
                         }
                         Err(error) => {
@@ -81,7 +79,6 @@ async fn serve<H: Handler>(
     peer: SocketAddr,
     handler: Arc<H>,
     mut shutdown: watch::Receiver<bool>,
-    permits: Arc<Semaphore>,
 ) {
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(Some(writer)));
@@ -111,14 +108,10 @@ async fn serve<H: Handler>(
         };
 
         // A complete frame is accepted work and must finish even during shutdown.
-        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
-            break;
-        };
         let handler = Arc::clone(&handler);
         let writer = Arc::clone(&writer);
         let failed = failed.clone();
         queries.spawn(async move {
-            let _permit = permit;
             let mut response = Vec::new();
             if handler
                 .handle(&query, peer, Protocol::Tcp, &mut response)

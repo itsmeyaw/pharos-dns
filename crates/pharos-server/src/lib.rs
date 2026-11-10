@@ -150,6 +150,8 @@ pub enum Action {
 
 /// Async, statically dispatched Query handling. Clear and reuse the supplied
 /// Response buffer; return `Drop` to suppress a Response.
+/// Handlers must not block the runtime; TCP Queries on a connection may run
+/// concurrently.
 pub trait Handler: Send + Sync + 'static {
     fn handle(
         &self,

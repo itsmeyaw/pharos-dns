@@ -146,6 +146,41 @@ async fn pipelined_queries_can_complete_out_of_order() {
 }
 
 #[tokio::test]
+async fn slow_connections_do_not_throttle_other_connections() {
+    // Fill the former global 256-Query limit across multiple connections.
+    const CONNECTIONS: usize = 16;
+    const QUERIES_PER_CONNECTION: usize = 16;
+    const QUERIES: usize = CONNECTIONS * QUERIES_PER_CONNECTION;
+    let (handler, mut started, release) = slow_handler();
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), handler)
+        .await
+        .unwrap();
+    let mut slow = Vec::new();
+    for _ in 0..CONNECTIONS {
+        let mut stream = TcpStream::connect(listener.local_addr()).await.unwrap();
+        for _ in 0..QUERIES_PER_CONNECTION {
+            send(&mut stream, b"slow").await;
+        }
+        slow.push(stream);
+    }
+    for _ in 0..QUERIES {
+        timeout(TEST_TIMEOUT, started.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let mut fast = TcpStream::connect(listener.local_addr()).await.unwrap();
+    send(&mut fast, b"fast").await;
+    let result = timeout(TEST_TIMEOUT, receive(&mut fast)).await;
+    for _ in 0..QUERIES {
+        release.send(()).unwrap();
+    }
+    assert_eq!(result.expect("fast Query was throttled"), b"fast");
+    drop(slow);
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn shutdown_drains_queries_already_being_handled() {
     let (handler, mut started, release) = slow_handler();
     let (listener, mut stream) = connect(handler).await;
