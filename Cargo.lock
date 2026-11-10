@@ -994,6 +994,7 @@ dependencies = [
 name = "pharos-plugins"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "criterion",
  "getrandom 0.2.17",
  "nix",

@@ -2,6 +2,7 @@
 
 use std::{
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -10,6 +11,15 @@ use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Rcode, Section,
 use pharos_server::{Context, Next, Outcome, Protocol};
 
 mod data;
+
+#[derive(Debug, Default)]
+struct State {
+    entries: arc_swap::ArcSwap<data::Map>,
+    modified: Mutex<Option<(std::time::SystemTime, u64)>>,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    metrics: Mutex<Option<pharos_server::metrics::HostsMetrics>>,
+    inline_len: Mutex<usize>,
+}
 
 #[derive(Debug)]
 pub struct Hosts {
@@ -23,11 +33,59 @@ pub struct Hosts {
     pub inline: Vec<String>,
     domain_names: Vec<Name>,
     fallthrough_names: Vec<Name>,
-    entries: data::Map,
+    state: Arc<State>,
     inline_entries: data::Map,
 }
 
 impl Hosts {
+    pub(crate) fn set_metrics(&self, registry: &pharos_server::metrics::Registry) {
+        *self.state.metrics.lock().unwrap() = Some(registry.hosts(&self.path.to_string_lossy()));
+        *self.state.inline_len.lock().unwrap() = self.inline_entries.len();
+    }
+    pub(crate) fn register_hooks(&self, lifecycle: &mut pharos_server::Lifecycle) {
+        let state = Arc::clone(&self.state);
+        let path = self.path.clone();
+        let domains = self.domain_names.clone();
+        let auto_reverse = self.auto_reverse;
+        let interval = self.reload;
+        let start = move || {
+            let state = Arc::clone(&state);
+            let path = path.clone();
+            let domains = domains.clone();
+            async move {
+                state.read(&path, &domains, auto_reverse);
+                if !interval.is_zero() {
+                    let task_state = Arc::clone(&state);
+                    let task = tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(interval).await;
+                            task_state.read(&path, &domains, auto_reverse);
+                        }
+                    });
+                    if let Some(old) = state.task.lock().unwrap().replace(task) {
+                        old.abort();
+                    }
+                }
+                Ok(())
+            }
+        };
+        lifecycle.register(pharos_server::Phase::Startup, start.clone());
+        lifecycle.register(pharos_server::Phase::RestartFailed, start);
+        let state = Arc::clone(&self.state);
+        let stop = move || {
+            let task = state.task.lock().unwrap().take();
+            async move {
+                if let Some(task) = task {
+                    task.abort();
+                    let _ = task.await;
+                }
+                Ok(())
+            }
+        };
+        lifecycle.register(pharos_server::Phase::Restart, stop.clone());
+        lifecycle.register(pharos_server::Phase::Shutdown, stop);
+    }
+
     pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Self, Error> {
         cursor.next();
         let source = cursor.file().to_owned();
@@ -79,7 +137,7 @@ impl Hosts {
             inline: Vec::new(),
             domain_names: Vec::new(),
             fallthrough_names: Vec::new(),
-            entries: data::Map::default(),
+            state: Arc::new(State::default()),
             inline_entries: data::Map::default(),
         };
         while cursor.next_block() {
@@ -152,14 +210,42 @@ impl Hosts {
             "Inline hosts entries",
         );
         if let Ok(file) = std::fs::File::open(&hosts.path) {
-            hosts.entries = data::Map::parse(
+            hosts.state.entries.store(Arc::new(data::Map::parse(
                 file,
                 &hosts.domain_names,
                 hosts.auto_reverse,
                 &format!("Hosts file {:?}", hosts.path),
-            );
+            )));
         }
         Ok(hosts)
+    }
+}
+
+impl State {
+    fn read(&self, path: &Path, domains: &[Name], auto_reverse: bool) {
+        let Ok(file) = std::fs::File::open(path) else {
+            return;
+        };
+        let Ok(metadata) = file.metadata() else {
+            return;
+        };
+        let Ok(modified) = metadata.modified() else {
+            return;
+        };
+        let stamp = (modified, metadata.len());
+        let mut previous = self.modified.lock().unwrap();
+        if *previous == Some(stamp) {
+            return;
+        }
+        let map = data::Map::parse(file, domains, auto_reverse, &format!("Hosts file {path:?}"));
+        if let Some(metrics) = self.metrics.lock().unwrap().as_ref() {
+            let timestamp = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |duration| duration.as_secs_f64());
+            metrics.update(map.len() + *self.inline_len.lock().unwrap(), timestamp);
+        }
+        self.entries.store(Arc::new(map));
+        *previous = Some(stamp);
     }
 }
 
@@ -184,12 +270,13 @@ impl pharos_server::Plugin for Hosts {
             return next.run(cx).await;
         }
         let fallthrough = contains(key, &self.fallthrough_names);
+        let entries = self.state.entries.load_full();
         let ptr = if question.qtype == Type::PTR {
             reverse_address(question.name)
         } else {
             None
         };
-        let names1 = ptr.and_then(|ip| self.entries.reverse.get(&ip));
+        let names1 = ptr.and_then(|ip| entries.reverse.get(&ip));
         let names2 = ptr.and_then(|ip| self.inline_entries.reverse.get(&ip));
         if question.qtype == Type::PTR && names1.is_none() && names2.is_none() {
             return next.run(cx).await;
@@ -202,8 +289,8 @@ impl pharos_server::Plugin for Hosts {
         {
             return next.run(cx).await;
         }
-        let v4 = self.entries.lookup_key(key, true);
-        let v6 = self.entries.lookup_key(key, false);
+        let v4 = entries.lookup_key(key, true);
+        let v6 = entries.lookup_key(key, false);
         let inline4 = self.inline_entries.lookup_key(key, true);
         let inline6 = self.inline_entries.lookup_key(key, false);
         let ips = if question.qtype == Type::A {

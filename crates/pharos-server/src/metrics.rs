@@ -55,6 +55,8 @@ struct RegistryInner {
     statuses: Mutex<BTreeMap<StatusKey, Arc<AtomicU64>>>,
     proxies: Mutex<BTreeMap<(String, String), Arc<Proxy>>>,
     caches: Mutex<BTreeMap<Key, Arc<Cache>>>,
+    hosts: Mutex<BTreeMap<String, Arc<HostsGauge>>>,
+    hosts_timestamp: Arc<AtomicU64>,
     forward: Arc<ForwardCounters>,
     forward_enabled: AtomicBool,
     process: AtomicBool,
@@ -79,6 +81,27 @@ pub struct ForwardMetrics(Arc<ForwardCounters>);
 /// Cache metrics with labels resolved once during setup.
 #[derive(Clone)]
 pub struct CacheMetrics(Arc<Cache>);
+
+#[derive(Debug, Default)]
+struct HostsGauge {
+    entries: AtomicU64,
+    initialized: AtomicBool,
+}
+
+/// Hosts metrics resolved once for a hosts file.
+#[derive(Clone, Debug)]
+pub struct HostsMetrics {
+    gauge: Arc<HostsGauge>,
+    timestamp: Arc<AtomicU64>,
+}
+
+impl HostsMetrics {
+    pub fn update(&self, entries: usize, timestamp: f64) {
+        self.gauge.entries.store(entries as u64, Ordering::Relaxed);
+        self.gauge.initialized.store(true, Ordering::Relaxed);
+        self.timestamp.store(timestamp.to_bits(), Ordering::Relaxed);
+    }
+}
 
 #[derive(Default)]
 struct Cache {
@@ -292,6 +315,8 @@ impl Registry {
             statuses: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             caches: Mutex::new(BTreeMap::new()),
+            hosts: Mutex::new(BTreeMap::new()),
+            hosts_timestamp: Arc::new(AtomicU64::new(0)),
             forward: Arc::new(ForwardCounters::default()),
             forward_enabled: AtomicBool::new(false),
             process: AtomicBool::new(false),
@@ -335,6 +360,14 @@ impl Registry {
                 .entry((server.into(), zones.into(), view.into()))
                 .or_default(),
         ))
+    }
+
+    pub fn hosts(&self, path: &str) -> HostsMetrics {
+        let gauge = Arc::clone(self.0.hosts.lock().unwrap().entry(path.into()).or_default());
+        HostsMetrics {
+            gauge,
+            timestamp: Arc::clone(&self.0.hosts_timestamp),
+        }
     }
 
     /// Resolve metrics for a proxy and Upstream address before recording events.
@@ -494,6 +527,46 @@ impl Registry {
         out.push_str("} 1\n");
 
         self.encode_caches(out);
+        let hosts = self.0.hosts.lock().unwrap();
+        if !hosts.is_empty() {
+            if hosts
+                .values()
+                .any(|gauge| gauge.initialized.load(Ordering::Relaxed))
+            {
+                header(
+                    out,
+                    "hosts_entries",
+                    "The combined number of entries in hosts and Corefile.",
+                    "gauge",
+                );
+                for (path, gauge) in hosts
+                    .iter()
+                    .filter(|(_, gauge)| gauge.initialized.load(Ordering::Relaxed))
+                {
+                    sample(
+                        out,
+                        "hosts_entries",
+                        &[("hostsfile", path)],
+                        gauge.entries.load(Ordering::Relaxed),
+                    );
+                }
+            }
+            header(
+                out,
+                "hosts_reload_timestamp_seconds",
+                "The timestamp of the last reload of hosts file.",
+                "gauge",
+            );
+            writeln!(
+                out,
+                "pharos_hosts_reload_timestamp_seconds {}",
+                float(f64::from_bits(
+                    self.0.hosts_timestamp.load(Ordering::Relaxed)
+                ))
+            )
+            .unwrap();
+        }
+        drop(hosts);
 
         let blocks = self.0.blocks.lock().unwrap();
         let status = self.0.statuses.lock().unwrap();

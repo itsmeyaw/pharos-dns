@@ -12,6 +12,7 @@ pharos-corefile = { path = "../pharos-corefile" }
 pharos-proto = { path = "../pharos-proto" }
 pharos-server = { path = "../pharos-server" }
 regex = { version = "1", optional = true }
+arc-swap = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", features = ["socket"] }

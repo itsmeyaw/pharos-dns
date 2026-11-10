@@ -121,6 +121,10 @@ pub fn servers_with_registry(
         if let Some(forward) = &mut block.config.forward {
             forward.set_metrics(&metrics);
         }
+        #[cfg(feature = "plugin-hosts")]
+        if let Some(hosts) = &block.config.hosts {
+            hosts.set_metrics(&metrics);
+        }
         #[cfg(feature = "plugin-health")]
         if let Some(health) = &block.config.health
             && !health_addresses
@@ -450,7 +454,9 @@ fn setup_hosts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
         .iter()
         .map(|key| key.domain.as_str())
         .collect::<Vec<_>>();
-    block.config.hosts = Some(hosts::Hosts::parse(cursor, &domains)?);
+    let hosts = hosts::Hosts::parse(cursor, &domains)?;
+    hosts.register_hooks(&mut block.config.lifecycle);
+    block.config.hosts = Some(hosts);
     Ok(())
 }
 

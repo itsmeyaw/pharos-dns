@@ -14,6 +14,14 @@ pub(super) struct Map {
 }
 
 impl Map {
+    pub(super) fn len(&self) -> usize {
+        self.v4
+            .values()
+            .chain(self.v6.values())
+            .map(Vec::len)
+            .sum::<usize>()
+            + self.reverse.values().map(Vec::len).sum::<usize>()
+    }
     pub(super) fn parse(
         input: impl Read,
         domains: &[Name],
