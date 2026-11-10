@@ -46,6 +46,7 @@ pub struct Forward {
 }
 
 #[derive(Default)]
+// shortcut: the pool retains peak concurrency, cap it if idle memory becomes costly.
 struct BufferPool(Mutex<Vec<Scratch>>);
 
 struct Scratch {
