@@ -34,6 +34,16 @@ fn expands_environment_values_that_contain_more_references() {
 
 #[test]
 fn recursive_environment_values_do_not_grow_without_bound() {
-    let blocks = parse_with_env("Corefile", "{$LOOP}", |_| Some("{$LOOP}{$LOOP}".into())).unwrap();
-    assert_eq!(blocks[0].keys(), ["{$LOOP}{$LOOP}"]);
+    assert!(parse_with_env("Corefile", "{$LOOP}", |_| Some("{$LOOP}{$LOOP}".into())).is_err());
+}
+
+#[test]
+fn expands_reference_reintroduced_by_a_later_value() {
+    let blocks = parse_with_env("Corefile", "{$B}{$A}", |name| match name {
+        "A" => Some("{$B}".into()),
+        "B" => Some("q".into()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(blocks[0].keys(), ["qq"]);
 }

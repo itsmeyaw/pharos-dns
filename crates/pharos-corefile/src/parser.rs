@@ -89,15 +89,11 @@ struct Parser<'a> {
 }
 
 impl Parser<'_> {
-    fn substitute(&self, text: &str) -> String {
+    fn substitute(&self, text: &str) -> Result<String, Error> {
         let mut result = text.to_owned();
         for (start, end) in [("{%", "%}"), ("{$", "}")] {
             let mut seen = BTreeSet::new();
-            // shortcut: cap recursive environment expansion; upgrade if larger chains are needed.
-            for _ in 0..10_000 {
-                let Some(index) = result.find(start) else {
-                    break;
-                };
+            while let Some(index) = result.find(start) {
                 let Some(end_offset) = result[index..].find(end) else {
                     break;
                 };
@@ -108,13 +104,23 @@ impl Parser<'_> {
                 let name = &result[index + start.len()..end_index];
                 let value = (self.lookup)(name).unwrap_or_default();
                 let reference = &result[index..end_index + end.len()];
-                if !seen.insert(reference.to_owned()) || value == reference {
-                    break;
+                // shortcut: bound expansion to 10,000 steps and 16 MiB; upgrade for larger configurations.
+                let occurrences = result.matches(reference).count();
+                let size = result.len() - occurrences * reference.len();
+                if seen.len() >= 10_000
+                    || !seen.insert(result.clone())
+                    || value
+                        .len()
+                        .checked_mul(occurrences)
+                        .and_then(|n| n.checked_add(size))
+                        .is_none_or(|n| n > 16 * 1024 * 1024)
+                {
+                    return Err(self.error("environment expansion limit or cycle"));
                 }
                 result = result.replace(reference, &value);
             }
         }
-        result
+        Ok(result)
     }
     fn error(&self, message: &str) -> Error {
         let token = self.tokens.get(self.pos).or_else(|| self.tokens.last());
@@ -140,7 +146,7 @@ impl Parser<'_> {
         let mut block = ServerBlock::default();
         let mut expecting = false;
         while self.pos < self.tokens.len() {
-            let text = self.substitute(&self.tokens[self.pos].text);
+            let text = self.substitute(&self.tokens[self.pos].text)?;
             if text == "import"
                 && (self.pos == 0 || new_line(&self.tokens[self.pos - 1], &self.tokens[self.pos]))
             {
@@ -200,9 +206,8 @@ impl Parser<'_> {
             for (i, token) in tokens.iter().enumerate() {
                 if token.text == "import"
                     && (i == 0 || new_line(&tokens[i - 1], token))
-                    && tokens
-                        .get(i + 1)
-                        .is_some_and(|t| self.substitute(&t.text) == name)
+                    && let Some(next) = tokens.get(i + 1)
+                    && self.substitute(&next.text)? == name
                 {
                     return Err(self.error("recursive snippet"));
                 }
@@ -233,7 +238,7 @@ impl Parser<'_> {
     }
 
     fn directive(&mut self, block: &mut ServerBlock) -> Result<(), Error> {
-        let name = self.substitute(&self.tokens[self.pos].text);
+        let name = self.substitute(&self.tokens[self.pos].text)?;
         let mut items = vec![self.tokens[self.pos].clone()];
         self.pos += 1;
         let mut nesting = 0usize;
@@ -253,7 +258,7 @@ impl Parser<'_> {
                 continue;
             }
             let mut token = token.clone();
-            token.text = self.substitute(&token.text);
+            token.text = self.substitute(&token.text)?;
             items.push(token);
             self.pos += 1;
         }
@@ -274,7 +279,7 @@ impl Parser<'_> {
         {
             return Err(self.error("import requires an argument"));
         }
-        let pattern = self.substitute(&arg.text);
+        let pattern = self.substitute(&arg.text)?;
         if pattern.is_empty() {
             return Err(self.error("import requires a non-empty path"));
         }
