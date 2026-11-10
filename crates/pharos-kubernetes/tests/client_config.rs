@@ -67,3 +67,50 @@ async fn endpoint_uses_configured_certificate_paths() {
     );
     assert_eq!(config.auth_info.client_key.as_deref(), key.to_str());
 }
+
+#[tokio::test]
+async fn endpoint_does_not_load_ambient_kubeconfig() {
+    if std::env::var_os("PHAROS_TEST_KUBECONFIG_CHILD").is_some() {
+        let config = ClientConfig {
+            endpoint: Some("https://api.example".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .await
+        .unwrap();
+        assert!(config.auth_info.token.is_none());
+        assert_eq!(config.cluster_url.to_string(), "https://api.example/");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config");
+    fs::write(
+        &file,
+        r#"
+apiVersion: v1
+kind: Config
+clusters:
+- name: cluster
+  cluster: { server: "https://ambient.example" }
+contexts:
+- name: ctx
+  context: { cluster: cluster, user: user }
+current-context: ctx
+users:
+- name: user
+  user: { token: unexpected }
+"#,
+    )
+    .unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "endpoint_does_not_load_ambient_kubeconfig"])
+        .env("KUBECONFIG", file)
+        .env("PHAROS_TEST_KUBECONFIG_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
