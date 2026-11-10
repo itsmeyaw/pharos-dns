@@ -56,6 +56,49 @@ impl Next for SignedBackend<'_> {
     }
 }
 
+struct ExpiredSignature<'a>(&'a AtomicUsize);
+impl Next for ExpiredSignature<'_> {
+    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let q = cx.query.questions().next().unwrap();
+        let root = pharos_proto::NameRef::parse(&[0], 0).unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        builder
+            .record(
+                Section::Answer,
+                q.name,
+                Type::A,
+                q.qclass,
+                30,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                q.name,
+                Type::RRSIG,
+                q.qclass,
+                30,
+                b"\0\x01\x08\0\0\0\0\x1e\0\0\0\x02\0\0\0\x01\0\x01\0",
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Additional,
+                root,
+                Type::OPT,
+                Class(1232),
+                0x8000,
+                &[],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
 struct AuthenticatedBackend<'a>(&'a AtomicUsize);
 impl Next for AuthenticatedBackend<'_> {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {
@@ -107,7 +150,7 @@ impl Next for Backend<'_> {
                     Section::Authority,
                     question.name,
                     Type::SOA,
-                    Class::IN,
+                    question.qclass,
                     30,
                     b"\0\0\0\0\0\x01\0\0\0\x02\0\0\0\x03\0\0\0\x04\0\0\0\x03",
                 )
@@ -118,7 +161,7 @@ impl Next for Backend<'_> {
                     Section::Answer,
                     question.name,
                     Type::A,
-                    Class::IN,
+                    question.qclass,
                     30,
                     &[192, 0, 2, 1],
                 )
@@ -176,6 +219,52 @@ async fn ad_is_per_request_and_do_and_cd_use_separate_keys() {
     wire.extend_from_slice(b"\0\0\x29\x04\xd0\0\0\x80\0\0\0");
     let _ = query(&chain, &wire, &calls, 0, false).await;
     assert_eq!(calls.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn query_class_uses_separate_cache_entries() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let mut wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01".to_vec();
+    let _ = query(&chain, &wire, &calls, 0, false).await;
+    *wire.last_mut().unwrap() = 3;
+    let _ = query(&chain, &wire, &calls, 0, false).await;
+    *wire.last_mut().unwrap() = 1;
+    let _ = query(&chain, &wire, &calls, 0, false).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn expired_dnssec_signature_is_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\x01x\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\x80\0\0\0";
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    for _ in 0..2 {
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(wire).unwrap(),
+            client: "127.0.0.1:1000".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .cache
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, ExpiredSignature(&calls))
+                .await,
+            Outcome::Response
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
