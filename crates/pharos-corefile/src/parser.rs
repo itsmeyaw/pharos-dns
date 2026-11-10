@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    path::Path,
+    path::{Component, Path, PathBuf},
 };
 
 use crate::{ServerBlockKey, Token, lex, normalize_key};
@@ -53,6 +53,18 @@ impl std::error::Error for Error {}
 fn new_line(previous: &Token, current: &Token) -> bool {
     previous.file != current.file
         || previous.line + previous.text.matches('\n').count() < current.line
+}
+
+fn clean_path(path: &Path) -> PathBuf {
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        if component == Component::ParentDir {
+            clean.pop();
+        } else {
+            clean.push(component);
+        }
+    }
+    clean
 }
 
 /// Parse a Corefile without validating Plugin-specific Directive names or arguments.
@@ -308,10 +320,11 @@ impl Parser<'_> {
                     .map_err(|e| self.error(&e.to_string()))?
                     .join(base)
             };
+            let base = clean_path(&base);
             let path = if Path::new(&pattern).is_absolute() {
                 pattern.clone().into()
             } else {
-                base.parent().unwrap_or(Path::new("/")).join(&pattern)
+                clean_path(&base.parent().unwrap_or(Path::new("/")).join(&pattern))
             };
             let glob_pattern = path.to_string_lossy();
             if glob_pattern.matches('*').count() > 1
@@ -339,7 +352,7 @@ impl Parser<'_> {
                 count += 1;
                 let contents = std::fs::read(&path).map_err(|e| self.error(&e.to_string()))?;
                 imported.extend(lex(
-                    &path.to_string_lossy(),
+                    &clean_path(&path).to_string_lossy(),
                     &crate::lexer::decode(&contents),
                 ));
             }

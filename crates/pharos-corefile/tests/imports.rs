@@ -89,3 +89,15 @@ fn imports_replace_invalid_utf8_bytes_like_caddy() {
     let blocks = parse(&dir.join("Corefile").to_string_lossy(), "import invalid").unwrap();
     assert_eq!(blocks[0].directives["foo"][1].text, "\u{fffd}\u{fffd}");
 }
+
+#[test]
+fn import_paths_are_cleaned_before_opening() {
+    let dir = fixture_dir();
+    fs::write(dir.join("shared"), "a {\n errors\n}\n").unwrap();
+    let source = "import missing/../shared";
+    let blocks = parse(&dir.join("Corefile").to_string_lossy(), source).unwrap();
+    assert_eq!(
+        blocks[0].directives["errors"][0].file,
+        dir.join("shared").to_string_lossy()
+    );
+}
