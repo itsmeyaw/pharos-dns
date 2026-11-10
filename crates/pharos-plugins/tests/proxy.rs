@@ -873,3 +873,93 @@ async fn udp_health_probe_has_one_second_read_timeout() {
     assert!(started.elapsed() < Duration::from_secs(2));
     health.stop();
 }
+
+#[tokio::test]
+async fn proxy_honors_explicit_health_source_configuration() {
+    use pharos_plugins::proxy::HealthConfig;
+    use std::{
+        net::{IpAddr, Ipv6Addr},
+        time::Duration,
+    };
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let registry = pharos_server::metrics::Registry::new("v", "r", "rust");
+    let mut proxy = Proxy::new(server.local_addr().unwrap());
+    proxy.set_metrics(&registry, "forward");
+    let mut config = HealthConfig::new(server.local_addr().unwrap(), 2);
+    config.source_address = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
+    proxy.set_health_config(config);
+    let upstream = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (_, peer) = server.recv_from(&mut wire).await.unwrap();
+        wire[2] |= 0x80;
+        server.send_to(&wire[..12], peer).await.unwrap();
+        while let Ok((len, peer)) = server.recv_from(&mut wire).await {
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+    });
+    assert!(
+        proxy
+            .exchange(QUERY, &mut [0; 512], Transport::Udp, Options::default())
+            .await
+            .is_err()
+    );
+    tokio::time::timeout(Duration::from_millis(800), async {
+        loop {
+            let mut out = String::new();
+            registry.encode(&mut out);
+            if out.contains("pharos_proxy_healthcheck_failures_total{") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn health_probes_bind_requested_loopback_source() {
+    use pharos_plugins::proxy::{Health, HealthConfig};
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        time::Duration,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let udp = UdpSocket::bind(tcp.local_addr().unwrap()).await.unwrap();
+    let mut wire = [0; 512];
+    for force_tcp in [false, true] {
+        let mut config = HealthConfig::new(tcp.local_addr().unwrap(), 2);
+        config.force_tcp = force_tcp;
+        config.source_address = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let health = Health::with_config(config);
+        health.start();
+        if force_tcp {
+            let (mut stream, peer) = tokio::time::timeout(Duration::from_secs(1), tcp.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+            let len = usize::from(stream.read_u16().await.unwrap());
+            stream.read_exact(&mut wire[..len]).await.unwrap();
+            wire[2] |= 0x80;
+            stream.write_u16(len as u16).await.unwrap();
+            stream.write_all(&wire[..len]).await.unwrap();
+        } else {
+            let (len, peer) =
+                tokio::time::timeout(Duration::from_secs(1), udp.recv_from(&mut wire))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+            wire[2] |= 0x80;
+            udp.send_to(&wire[..len], peer).await.unwrap();
+        }
+        health.stop();
+    }
+}

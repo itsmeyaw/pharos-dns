@@ -334,12 +334,13 @@ impl Proxy {
 
     /// Bind new Upstream and health-check connections to this local IP.
     pub fn set_source_address(&mut self, source: Option<IpAddr>) {
-        if source != self.source_address {
-            for shard in self.shards.iter_mut().flatten() {
-                shard.get_mut().unwrap().clear();
-            }
-            self.idle.store(0, Ordering::Relaxed);
+        if source == self.source_address {
+            return;
         }
+        for shard in self.shards.iter_mut().flatten() {
+            shard.get_mut().unwrap().clear();
+        }
+        self.idle.store(0, Ordering::Relaxed);
         self.source_address = source;
         let mut config = self.health.config();
         config.source_address = source;
@@ -362,7 +363,9 @@ impl Proxy {
     /// Configure health checks before starting exchanges.
     pub fn set_health_config(&mut self, mut config: HealthConfig) {
         assert_eq!(config.address, self.address);
-        config.source_address = self.source_address;
+        if config.source_address.is_none() {
+            config.source_address = self.source_address;
+        }
         if let Some(metrics) = &self.metrics {
             config.metrics = Some(metrics.proxy.clone());
         }
