@@ -114,3 +114,24 @@ users:
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[tokio::test]
+async fn in_cluster_reads_service_environment() {
+    if std::env::var_os("PHAROS_TEST_CLUSTER_CHILD").is_some() {
+        let error = ClientConfig::default().resolve().await.unwrap_err();
+        assert_eq!(error.to_string(), "KUBERNETES_SERVICE_HOST is empty");
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "in_cluster_reads_service_environment"])
+        .env("KUBERNETES_SERVICE_HOST", "")
+        .env("KUBERNETES_SERVICE_PORT", "6443")
+        .env("PHAROS_TEST_CLUSTER_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
