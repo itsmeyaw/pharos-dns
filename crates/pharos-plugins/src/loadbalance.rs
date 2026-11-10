@@ -92,9 +92,25 @@ impl Plugin for LoadBalance {
 struct Record {
     start: u16,
     end: u16,
+    sequence: u16,
     group: u8,
     weight: u8,
     priority: usize,
+}
+
+const EMPTY_RECORD: Record = Record {
+    start: 0,
+    end: 0,
+    sequence: 0,
+    group: 0,
+    weight: 0,
+    priority: 0,
+};
+
+struct Scratch {
+    records: [Record; 5957],
+    order: [Record; 5957],
+    original: [u8; 65535],
 }
 
 #[derive(Debug)]
@@ -145,6 +161,11 @@ impl Subnet {
 }
 
 thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> = const { std::cell::RefCell::new(Scratch {
+        records: [EMPTY_RECORD; 5957],
+        order: [EMPTY_RECORD; 5957],
+        original: [0; 65535],
+    }) };
     static RANDOM: std::cell::Cell<u64> = {
         let mut seed = [0; 8];
         let _ = getrandom::getrandom(&mut seed);
@@ -167,162 +188,155 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
     if wire.len() > usize::from(u16::MAX) {
         return;
     }
-    let Ok(message) = Message::parse(wire) else {
-        return;
-    };
-    if message.rcode() != Rcode::NOERROR
-        || message
-            .questions()
-            .next()
-            .is_none_or(|q| matches!(q.qtype, Type::AXFR | Type::IXFR))
-        || message.additionals().any(|rr| rr.rtype == Type::TSIG)
-    {
-        return;
-    }
-    if weights.is_some()
-        && message
-            .questions()
-            .next()
-            .is_none_or(|q| !matches!(q.qtype, Type::A | Type::AAAA | Type::SRV))
-    {
-        return;
-    }
     let weight_data = weights.map(weighted::Weights::load);
-    // Every RR occupies at least 11 bytes; no valid DNS Message can exceed this bound.
-    let mut records = [Record::default(); 5957];
-    let mut sections = [(0usize, 0usize); 3];
-    let mut count = 0;
-    for (section, iter) in [
-        message.answers(),
-        message.authorities(),
-        message.additionals(),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let first = count;
-        for rr in iter {
-            if count == records.len() {
-                return;
-            }
-            records[count] = Record {
-                start: (rr.ttl_offset - 4 - rr.name.wire_len()) as u16,
-                end: (rr.rdata_offset + rr.rdata.len()) as u16,
-                group: match rr.rtype {
-                    Type::CNAME => 0,
-                    Type::A | Type::AAAA => 2,
-                    Type::MX => 3,
-                    _ => 1,
-                },
-                weight: weight_data
-                    .as_ref()
-                    .map_or(1, |data| weighted::weight(data, &rr)),
-                priority: prefer
-                    .iter()
-                    .position(|subnet| subnet.contains(&rr))
-                    .unwrap_or(prefer.len()),
-            };
-            count += 1;
-        }
-        sections[section] = (first, count);
-    }
-    // Opaque RDATA can contain names too: conservatively treat pointer-shaped bytes as pointers.
-    for pair in wire.windows(2) {
-        if pair[0] & 0xc0 != 0xc0 {
-            continue;
-        }
-        let target = usize::from(u16::from_be_bytes([pair[0] & 0x3f, pair[1]]));
-        if sections.iter().any(|&(first, end)| {
-            end > first + 1
-                && target >= usize::from(records[first].start)
-                && target < usize::from(records[end - 1].end)
-        }) {
+    SCRATCH.with(|scratch| {
+        let Ok(message) = Message::parse(wire) else {
+            return;
+        };
+        if message.rcode() != Rcode::NOERROR
+            || message
+                .questions()
+                .next()
+                .is_none_or(|q| matches!(q.qtype, Type::AXFR | Type::IXFR))
+            || message.additionals().any(|rr| rr.rtype == Type::TSIG)
+        {
             return;
         }
-    }
-    let mut order = [Record::default(); 5957];
-    for (section, (first, end)) in sections.into_iter().enumerate() {
-        if end <= first + 1 || (weights.is_some() && section == 1) {
-            continue;
+        let weighted_query = message
+            .questions()
+            .next()
+            .is_some_and(|q| matches!(q.qtype, Type::A | Type::AAAA | Type::SRV));
+        if weights.is_some() && !weighted_query && prefer.is_empty() {
+            return;
         }
-        let section_start = usize::from(records[first].start);
-        let actual = &mut records[first..end];
-        let items = &mut order[..actual.len()];
-        items.copy_from_slice(actual);
-        if weights.is_some() && !items.iter().any(|item| item.group == 2) {
-            continue;
+        let mut scratch = scratch.borrow_mut();
+        let Scratch {
+            records,
+            order,
+            original,
+        } = &mut *scratch;
+        // Every RR occupies at least 11 bytes; no valid DNS Message can exceed this bound.
+        let mut sections = [(0usize, 0usize); 3];
+        let mut count = 0;
+        for (section, iter) in [
+            message.answers(),
+            message.authorities(),
+            message.additionals(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let first = count;
+            for rr in iter {
+                if count == records.len() {
+                    return;
+                }
+                records[count] = Record {
+                    start: (rr.ttl_offset - 4 - rr.name.wire_len()) as u16,
+                    end: (rr.rdata_offset + rr.rdata.len()) as u16,
+                    sequence: 0,
+                    group: match rr.rtype {
+                        Type::CNAME => 0,
+                        Type::A | Type::AAAA => 2,
+                        Type::MX => 3,
+                        _ => 1,
+                    },
+                    weight: weight_data
+                        .as_ref()
+                        .map_or(1, |data| weighted::weight(data, &rr)),
+                    priority: prefer
+                        .iter()
+                        .position(|subnet| subnet.contains(&rr))
+                        .unwrap_or(prefer.len()),
+                };
+                count += 1;
+            }
+            sections[section] = (first, count);
         }
-        // Stable partition into CNAME, other, address and MX records.
-        for i in 1..items.len() {
-            let mut j = i;
-            while j > 0 && items[j - 1].group > items[j].group {
-                items.swap(j - 1, j);
-                j -= 1;
+        // Opaque RDATA can contain names too: conservatively treat pointer-shaped bytes as pointers.
+        for pair in wire.windows(2) {
+            if pair[0] & 0xc0 != 0xc0 {
+                continue;
+            }
+            let target = usize::from(u16::from_be_bytes([pair[0] & 0x3f, pair[1]]));
+            if sections.iter().any(|&(first, end)| {
+                end > first + 1
+                    && target >= usize::from(records[first].start)
+                    && target < usize::from(records[end - 1].end)
+            }) {
+                return;
             }
         }
-        for group in [2, 3] {
-            let first = items
-                .iter()
-                .position(|item| item.group == group)
-                .unwrap_or(items.len());
-            let end = items
-                .iter()
-                .rposition(|item| item.group == group)
-                .map_or(first, |i| i + 1);
-            if weights.is_some() {
-                if group == 2 && first < end {
-                    let total: usize = items[first..end]
-                        .iter()
-                        .map(|item| usize::from(item.weight))
-                        .sum();
-                    let mut choice = random(total);
-                    for i in first..end {
-                        if choice < usize::from(items[i].weight) {
-                            items.swap(first, i);
-                            break;
+        original[..wire.len()].copy_from_slice(wire);
+        for (section, (first, end)) in sections.into_iter().enumerate() {
+            if end <= first + 1 || (weights.is_some() && section == 1) {
+                continue;
+            }
+            let section_start = usize::from(records[first].start);
+            let actual = &records[first..end];
+            let items = &mut order[..actual.len()];
+            items.copy_from_slice(actual);
+            if weights.is_some() && prefer.is_empty() && !items.iter().any(|item| item.group == 2) {
+                continue;
+            }
+            // The original offset preserves order within each category without allocation.
+            items.sort_unstable_by_key(|item| (item.group, item.start));
+            for group in [2, 3] {
+                let first = items
+                    .iter()
+                    .position(|item| item.group == group)
+                    .unwrap_or(items.len());
+                let end = items
+                    .iter()
+                    .rposition(|item| item.group == group)
+                    .map_or(first, |i| i + 1);
+                if weights.is_some() {
+                    if weighted_query && group == 2 && first < end {
+                        let total: usize = items[first..end]
+                            .iter()
+                            .map(|item| usize::from(item.weight))
+                            .sum();
+                        let mut choice = random(total);
+                        for i in first..end {
+                            if choice < usize::from(items[i].weight) {
+                                items.swap(first, i);
+                                break;
+                            }
+                            choice -= usize::from(items[i].weight);
                         }
-                        choice -= usize::from(items[i].weight);
+                    }
+                } else {
+                    for i in first..end.saturating_sub(1) {
+                        items.swap(i, i + random(end - i));
                     }
                 }
-            } else {
-                for i in first..end.saturating_sub(1) {
-                    items.swap(i, i + random(end - i));
-                }
             }
-        }
-        if !prefer.is_empty() && section != 1 {
-            let key = |record: &Record| {
-                let group = match record.group {
-                    0 => 0,
-                    2 => 1,
-                    3 => 2,
-                    _ => 3,
+            if !prefer.is_empty() && section != 1 {
+                for (sequence, item) in items.iter_mut().enumerate() {
+                    item.sequence = sequence as u16;
+                }
+                let key = |record: &Record| {
+                    let group = match record.group {
+                        0 => 0,
+                        2 => 1,
+                        3 => 2,
+                        _ => 3,
+                    };
+                    (
+                        group,
+                        if group == 1 { record.priority } else { 0 },
+                        record.sequence,
+                    )
                 };
-                (group, if group == 1 { record.priority } else { 0 })
-            };
-            for i in 1..items.len() {
-                let mut j = i;
-                while j > 0 && key(&items[j - 1]) > key(&items[j]) {
-                    items.swap(j - 1, j);
-                    j -= 1;
-                }
+                items.sort_unstable_by_key(key);
+            }
+            let mut dest = section_start;
+            for item in items.iter() {
+                let len = usize::from(item.end - item.start);
+                wire[dest..dest + len]
+                    .copy_from_slice(&original[usize::from(item.start)..usize::from(item.end)]);
+                dest += len;
             }
         }
-        let mut dest = section_start;
-        for (index, item) in items.iter().enumerate() {
-            let selected = actual[index..]
-                .iter()
-                .position(|rr| rr.start == item.start)
-                .unwrap()
-                + index;
-            let len = usize::from(item.end - item.start);
-            let preceding: usize = actual[index..selected]
-                .iter()
-                .map(|rr| usize::from(rr.end - rr.start))
-                .sum();
-            wire[dest..dest + preceding + len].rotate_right(len);
-            actual[index..=selected].rotate_right(1);
-            dest += len;
-        }
-    }
+    });
 }

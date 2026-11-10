@@ -19,7 +19,7 @@ fn file() -> std::path::PathBuf {
 
 fn chain(path: &std::path::Path, reload: &str) -> Chain {
     let text = format!(
-        ".:53 {{\n loadbalance weighted {} {{\n reload {reload}\n }}\n hosts /nonexistent {{\n 192.0.2.1 example.org\n 192.0.2.2 example.org\n reload 0\n }}\n}}",
+        ".:53 {{\n loadbalance weighted {} {{\n reload {reload}\n }}\n hosts /nonexistent {{\n 192.0.2.1 example.org\n 192.0.2.2 example.org\n 2001:db8::1 example.org\n 2001:db8::2 example.org\n reload 0\n }}\n}}",
         path.display()
     );
     let blocks = parse("Corefile", &text).unwrap();
@@ -29,17 +29,13 @@ fn chain(path: &std::path::Path, reload: &str) -> Chain {
         .config
 }
 
-async fn top_counts(chain: &Chain) -> [usize; 2] {
+async fn top_counts(chain: &Chain, qtype: Type) -> [usize; 2] {
     let name: Name = "example.org.".parse().unwrap();
     let root: Name = ".".parse().unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
     builder
-        .question(
-            NameRef::parse(name.as_wire(), 0).unwrap(),
-            Type::A,
-            Class::IN,
-        )
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, Class::IN)
         .unwrap();
     let _ = builder.finish();
     let mut response = Vec::with_capacity(512);
@@ -59,7 +55,7 @@ async fn top_counts(chain: &Chain) -> [usize; 2] {
         };
         assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
         let message = Message::parse(&response).unwrap();
-        let last = message.answers().next().unwrap().rdata[3];
+        let last = *message.answers().next().unwrap().rdata.last().unwrap();
         counts[usize::from(last - 1)] += 1;
     }
     counts
@@ -68,22 +64,24 @@ async fn top_counts(chain: &Chain) -> [usize; 2] {
 #[tokio::test]
 async fn weighted_selection_and_reload_follow_file_contents() {
     let path = file();
-    std::fs::write(&path, "example.org\n192.0.2.1 1\n192.0.2.2 255\n").unwrap();
+    std::fs::write(&path, "example.org\n192.0.2.2 255\n2001:db8::2 255\n").unwrap();
     let chain = chain(&path, "10ms");
     chain.lifecycle.run(Phase::Startup).await.unwrap();
-    assert!(top_counts(&chain).await[1] > 90);
-    std::fs::write(&path, "example.org\n192.0.2.1 255\n192.0.2.2 1\n").unwrap();
+    assert!(top_counts(&chain, Type::A).await[1] > 90);
+    assert!(top_counts(&chain, Type::AAAA).await[1] > 90);
+    std::fs::write(&path, "example.org\n192.0.2.1 255\n2001:db8::1 255\n").unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    assert!(top_counts(&chain).await[0] > 90);
+    assert!(top_counts(&chain, Type::A).await[0] > 90);
+    assert!(top_counts(&chain, Type::AAAA).await[0] > 90);
     std::fs::write(&path, "example.org\n192.0.2.1 0\n").unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-    assert!(top_counts(&chain).await[0] > 90);
+    assert!(top_counts(&chain, Type::A).await[0] > 90);
     chain.lifecycle.run(Phase::Restart).await.unwrap();
     std::fs::write(&path, "example.org\n192.0.2.1 1\n192.0.2.2 255\n").unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-    assert!(top_counts(&chain).await[0] > 90);
+    assert!(top_counts(&chain, Type::A).await[0] > 90);
     chain.lifecycle.run(Phase::RestartFailed).await.unwrap();
-    assert!(top_counts(&chain).await[1] > 90);
+    assert!(top_counts(&chain, Type::A).await[1] > 90);
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
     std::fs::remove_file(path).unwrap();
 }

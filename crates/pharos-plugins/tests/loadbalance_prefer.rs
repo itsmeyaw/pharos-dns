@@ -22,6 +22,7 @@ fn prefer_setup_accepts_cidrs_and_rejects_invalid_networks() {
     for directive in [
         "loadbalance {\n prefer\n}",
         "loadbalance round_robin {\n prefer 10.9.20.0/24 2001:db8::/32\n prefer 10.9.30.1/24\n}",
+        "loadbalance weighted weights {\n } {\n prefer 10.9.20.0/24\n}",
     ] {
         assert!(config(directive).is_ok(), "{directive}");
     }
