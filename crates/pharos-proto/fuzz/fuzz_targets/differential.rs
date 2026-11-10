@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 #![no_main]
 
-use domain::base::Message as DomainMessage;
+use domain::base::{Message as DomainMessage, opt::UnknownOptData};
 use libfuzzer_sys::fuzz_target;
-use pharos_proto::{Message, MessageError, NameError};
+use pharos_proto::{EdnsOptions, Message, MessageError, NameError};
 
 fuzz_target!(|wire: &[u8]| {
     let pharos = Message::parse(wire);
@@ -34,16 +34,70 @@ fuzz_target!(|wire: &[u8]| {
         );
         return;
     }
+    // Domain validates record boundaries but not OPT placement, owner, or payloads.
+    let mut opt_count = 0;
+    let mut invalid_opt = false;
+    for (additional, mut records) in [
+        (false, answers.clone()),
+        (false, authorities.clone()),
+        (true, additionals.clone()),
+    ] {
+        while let Some(record) = records.next() {
+            let record = record.unwrap();
+            if record.rtype().to_int() == 41 {
+                opt_count += 1;
+                let end = records.pos();
+                let data = &wire[end - usize::from(record.rdlen())..end];
+                invalid_opt |= !additional
+                    || opt_count > 1
+                    || record
+                        .owner()
+                        .iter()
+                        .any(|label| !label.as_slice().is_empty())
+                    || EdnsOptions::parse(data).is_err();
+            }
+        }
+    }
     // Domain accepts forward/overlapping pointers and longer pointer chains.
     let pharos = match pharos {
         Err(MessageError::Name(NameError::PointerNotBackwards | NameError::PointerLimit)) => return,
+        Err(MessageError::InvalidOpt) if invalid_opt => return,
         result => result.expect("domain accepted a Message rejected by Pharos"),
     };
+    assert!(!invalid_opt, "Pharos accepted an invalid OPT");
     assert_eq!(pharos.id(), domain.header().id());
     assert_eq!(
         pharos.flags().to_be_bytes(),
         domain.header().as_slice()[2..4]
     );
+    match (pharos.opt(), domain.opt()) {
+        (Some(ours), Some(theirs)) => {
+            assert_eq!(ours.udp_payload_size(), theirs.udp_payload_size());
+            assert_eq!(ours.extended_rcode(), theirs.rcode(domain.header()).ext());
+            assert_eq!(ours.version(), theirs.version());
+            assert_eq!(ours.flags(), theirs.as_record().ttl().as_secs() as u16);
+            assert_eq!(ours.dnssec_ok(), theirs.dnssec_ok());
+            let options = ours.options();
+            let mut raw = options.as_bytes();
+            let mut ours = options.iter();
+            for option in theirs.opt().iter::<UnknownOptData<&[u8]>>() {
+                let option = option.unwrap();
+                let data = option.as_slice();
+                assert_eq!(ours.next().unwrap().code(), option.code().to_int());
+                assert_eq!(&raw[..2], &option.code().to_int().to_be_bytes());
+                assert_eq!(
+                    &raw[2..4],
+                    &u16::try_from(data.len()).unwrap().to_be_bytes()
+                );
+                assert_eq!(&raw[4..4 + data.len()], data);
+                raw = &raw[4 + data.len()..];
+            }
+            assert!(ours.next().is_none());
+            assert!(raw.is_empty());
+        }
+        (None, None) => {}
+        _ => panic!("OPT presence differs"),
+    }
     assert_eq!(
         (
             pharos.question_count(),

@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 
-use domain::base::Message as DomainMessage;
+use domain::base::{Message as DomainMessage, opt::UnknownOptData};
 use hickory_proto::{
     op::{Header, Message as HickoryMessage, Query},
     rr::{Name as HickoryName, Record as HickoryRecord},
     serialize::binary::{BinDecodable, BinDecoder},
 };
-use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
+use pharos_proto::{
+    Class, EdnsOptions, Message, MessageBuilder, MessageError, Name, NameRef, Section, Type,
+};
 use proptest::prelude::*;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -318,7 +320,68 @@ fn built_message(labels: &[String], id: u16, ttl: u32, data: &[u8]) -> Vec<u8> {
     wire
 }
 
+fn opt_message(size: u16, ttl: u32, options: &[u8]) -> Vec<u8> {
+    let mut wire = vec![0; 12];
+    wire[11] = 1;
+    wire.extend_from_slice(&[0, 0, 41]);
+    wire.extend_from_slice(&size.to_be_bytes());
+    wire.extend_from_slice(&ttl.to_be_bytes());
+    wire.extend_from_slice(&u16::try_from(options.len()).unwrap().to_be_bytes());
+    wire.extend_from_slice(options);
+    wire
+}
+
+fn compare_opt(wire: &[u8]) {
+    let message = Message::parse(wire).unwrap();
+    let domain = DomainMessage::from_octets(wire).unwrap();
+    match (message.opt(), domain.opt()) {
+        (None, None) => {}
+        (Some(ours), Some(theirs)) => {
+            assert_eq!(ours.udp_payload_size(), theirs.udp_payload_size());
+            assert_eq!(ours.extended_rcode(), theirs.rcode(domain.header()).ext());
+            assert_eq!(ours.version(), theirs.version());
+            assert_eq!(ours.flags(), theirs.as_record().ttl().as_secs() as u16);
+            assert_eq!(ours.dnssec_ok(), theirs.dnssec_ok());
+
+            let options = ours.options();
+            let mut raw = options.as_bytes();
+            let mut ours = options.iter();
+            for option in theirs.opt().iter::<UnknownOptData<&[u8]>>() {
+                let option = option.unwrap();
+                let data = option.as_slice();
+                assert_eq!(ours.next().unwrap().code(), option.code().to_int());
+                assert_eq!(&raw[..2], &option.code().to_int().to_be_bytes());
+                assert_eq!(
+                    &raw[2..4],
+                    &u16::try_from(data.len()).unwrap().to_be_bytes()
+                );
+                assert_eq!(&raw[4..4 + data.len()], data);
+                raw = &raw[4 + data.len()..];
+            }
+            assert!(ours.next().is_none());
+            assert!(raw.is_empty());
+        }
+        _ => panic!("OPT presence differs: {wire:02x?}"),
+    }
+}
+
 proptest! {
+    #[test]
+    fn generated_opt_fields_and_raw_options(
+        size in any::<u16>(), ttl in any::<u32>(),
+        options in prop::collection::vec((any::<u16>(), prop::collection::vec(any::<u8>(), 0..20)), 0..8),
+    ) {
+        let mut raw = Vec::new();
+        for (code, data) in options {
+            // Use unknown codes: domain validates framing, not known option payloads.
+            let code = 65000 + code % 500;
+            raw.extend_from_slice(&code.to_be_bytes());
+            raw.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            raw.extend_from_slice(&data);
+        }
+        compare_opt(&opt_message(size, ttl, &raw));
+    }
+
     #[test]
     fn generated_messages_and_truncations(
         labels in prop::collection::vec("[a-zA-Z0-9]{1,10}", 0..5),
@@ -353,6 +416,59 @@ proptest! {
         }
         let result = compare(&wire);
         prop_assert!(result.is_ok(), "{}", result.unwrap_err());
+    }
+}
+
+#[test]
+fn opt_reference_fields_and_options() {
+    compare_opt(&[0; 12]);
+    compare_opt(&opt_message(0, 0x7f02_c055, &[]));
+    compare_opt(&opt_message(
+        1232,
+        0x0100_8055,
+        &[
+            0, 3, 0, 2, 0xaa, 0xbb, // NSID
+            0, 10, 0, 0, // empty cookie
+            0, 11, 0, 2, 0, 42, // TCP keepalive
+            0, 12, 0, 2, 0, 0, // padding
+            0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2, // client subnet
+            0, 15, 0, 3, 0, 1, b'x', // EDE
+            0xfd, 0xe8, 0, 1, 0xff, // unknown
+            0xfd, 0xe8, 0, 0, // duplicate, empty unknown
+        ],
+    ));
+}
+
+#[test]
+fn domain_only_checks_opt_framing_not_payload_or_placement() {
+    for (options, domain_accepts) in [
+        (&[0][..], false),
+        (&[0, 3, 0][..], false),
+        (&[0, 3, 0, 2, 1][..], false),
+        (&[0, 15, 0, 1, 0][..], true),
+        (&[0, 11, 0, 1, 0][..], true),
+        (&[0, 8, 0, 1, 0][..], true),
+    ] {
+        let wire = opt_message(512, 0, options);
+        assert_eq!(Message::parse(&wire).unwrap_err(), MessageError::InvalidOpt);
+        assert!(EdnsOptions::parse(options).is_err());
+        assert_eq!(
+            DomainMessage::from_octets(&wire).unwrap().opt().is_some(),
+            domain_accepts
+        );
+    }
+    let valid = opt_message(512, 0, &[]);
+    let mut misplaced = valid.clone();
+    misplaced[7] = 1;
+    misplaced[11] = 0;
+    let mut duplicate = valid.clone();
+    duplicate[11] = 2;
+    duplicate.extend_from_slice(&valid[12..]);
+    let mut non_root = valid.clone();
+    non_root.splice(12..13, [1, b'x', 0]);
+    for wire in [misplaced, duplicate, non_root] {
+        assert_eq!(Message::parse(&wire).unwrap_err(), MessageError::InvalidOpt);
+        assert!(domain(&wire).is_ok());
     }
 }
 

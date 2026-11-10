@@ -43,6 +43,31 @@ fuzz_target!(|input: &[u8]| {
         (rebuilt.id(), rebuilt.flags()),
         (original.id(), original.flags())
     );
+    match (original.opt(), rebuilt.opt()) {
+        (Some(left), Some(right)) => {
+            assert_eq!(
+                (
+                    left.udp_payload_size(),
+                    left.extended_rcode(),
+                    left.version(),
+                    left.flags(),
+                    left.dnssec_ok(),
+                    left.options().as_bytes()
+                ),
+                (
+                    right.udp_payload_size(),
+                    right.extended_rcode(),
+                    right.version(),
+                    right.flags(),
+                    right.dnssec_ok(),
+                    right.options().as_bytes()
+                )
+            );
+            assert!(left.options().iter().eq(right.options().iter()));
+        }
+        (None, None) => {}
+        _ => panic!("OPT presence changed"),
+    }
     assert_eq!(
         (
             rebuilt.question_count(),

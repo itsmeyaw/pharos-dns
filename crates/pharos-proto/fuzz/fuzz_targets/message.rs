@@ -2,9 +2,20 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pharos_proto::{Message, MessageMut};
+use pharos_proto::{EdnsOptions, Message, MessageMut};
 
 fuzz_target!(|wire: &[u8]| {
+    if let Ok(options) = EdnsOptions::parse(wire) {
+        assert_eq!(options.as_bytes(), wire);
+        assert!(options.iter().eq(options.iter()));
+        let mut raw = wire;
+        for option in options.iter() {
+            assert_eq!(option.code(), u16::from_be_bytes([raw[0], raw[1]]));
+            let len = usize::from(u16::from_be_bytes([raw[2], raw[3]]));
+            raw = &raw[4 + len..];
+        }
+        assert!(raw.is_empty());
+    }
     if let Ok(message) = Message::parse(wire) {
         assert_eq!(
             message.questions().count(),
@@ -20,6 +31,14 @@ fuzz_target!(|wire: &[u8]| {
                 record.rdata
             );
             let _ = record.name.to_name();
+        }
+        if let Some(opt) = message.opt() {
+            let options = opt.options();
+            assert!(
+                options
+                    .iter()
+                    .eq(EdnsOptions::parse(options.as_bytes()).unwrap().iter())
+            );
         }
         let mut copy = wire.to_vec();
         MessageMut::parse(&mut copy)
