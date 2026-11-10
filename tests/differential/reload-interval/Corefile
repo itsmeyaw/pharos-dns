@@ -1,0 +1,4 @@
+.:{port} {
+    reload 10s
+    whoami
+}

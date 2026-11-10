@@ -8,9 +8,7 @@ legacy spellings report their replacements. The Corefile lookup also checks
 identify Pharos and include Rust rather than Go build information.
 
 `--log-format json` switches log lines to JSON; the startup banner stays text.
-SIGUSR1 logs `SIGUSR1: Reloading` but does not replace the configuration
-until M1. SIGUSR2 upgrades are not yet
-implemented. After SIGINT's Shutdown hooks, Pharos drains Listeners before
+SIGUSR2 upgrades are not yet implemented. After SIGINT's Shutdown hooks, Pharos drains Listeners before
 exiting; Caddy exits without calling `Stop()` on SIGINT.
 
 Exit codes, compared with CoreDNS v1.15.0's `coremain/run.go` and
@@ -68,7 +66,7 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `errors`, `forward`, `health`, `log`, `prometheus`, `ready` and `whoami` are implemented. Other built-in Directives are
+Only `errors`, `forward`, `health`, `log`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
 
@@ -102,8 +100,7 @@ HTTP connections use the same five-second total lifetime and 1,024-connection
 limit as the metrics endpoint. Pharos requires numeric ports at startup and
 reports bind errors; CoreDNS supports service names and currently discards
 errors from shared Listener startup. Pharos does not log unready Plugin names
-on every readiness request. Reload is not implemented, so readiness state is
-not reset by SIGUSR1.
+on every readiness request. Readiness state is reset on Reload.
 
 During Lameduck Pharos keeps `/ready` available with 503 `Shutting down`.
 CoreDNS v1.15.0 normally closes the readiness Listener before the health
@@ -122,6 +119,24 @@ Whoami reports an error if adding the protocol label would make its SRV owner
 name exceed the DNS name length limit. CoreDNS ignores the resulting write
 error. The UDP caller must supply a Response buffer with enough capacity;
 otherwise Pharos reports an error instead of allocating on the UDP Query path.
+
+## Reload
+
+Like CoreDNS, HTTP Listeners close and reopen on Reload; probes and scrapes can
+briefly fail, and re-opening an old Listener can fail if another process takes
+its port. DNS Listeners with unchanged keys keep their sockets. New Listeners
+are bound before existing handlers are swapped; separate Listeners are swapped
+individually rather than in one process-wide atomic operation.
+
+Pharos hashes the raw Corefile, not CoreDNS's JSON-encoded parsed Server Blocks:
+the hash values differ, comments and whitespace can trigger Reload, and edits
+to imported files alone are not detected. Pharos exposes the initial hash before
+the first change. Failed SIGUSR1 attempts and Corefile parse errors increment
+`pharos_reload_failed_total`; CoreDNS's counter is updated by its polling
+restart path, not these cases. The last attempted hash is reported even when a
+Reload fails. Candidate setup can register metric series before a failed Reload
+is rolled back. Shutdown waits for Queries on replaced states to finish, so a
+stuck Query can delay processing subsequent signals.
 
 ## Domain names
 

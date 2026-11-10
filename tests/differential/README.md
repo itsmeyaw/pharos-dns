@@ -30,6 +30,8 @@ The `whoami-log` scenario compares Responses, not log output. The current whoami
 Responses cannot exceed the 512-octet UDP minimum for these short Queries, so
 truncation is not covered.
 The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
+The Reload README scenarios use `whoami` instead of the unimplemented `erratic`
+backend and compare DNS Responses rather than reload timing.
 No `errors`-specific differential scenario is included: the implemented
 Plugins cannot deterministically return the same error in both servers, and
 `forward` is not implemented. Error logging and consolidation are tested in Rust.
