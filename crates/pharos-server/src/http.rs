@@ -12,7 +12,7 @@ use std::{
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{
-    Method, Request, Response, StatusCode,
+    Request, Response, StatusCode,
     body::Incoming,
     header::{CONTENT_TYPE, HeaderValue},
     server::conn::http1,
@@ -37,6 +37,73 @@ pub struct Listener {
     task: Option<JoinHandle<io::Result<()>>>,
 }
 
+/// Periodic health self-probe, cancelled on drop.
+pub struct HealthProbe(JoinHandle<()>);
+
+impl HealthProbe {
+    pub fn start(address: &str, registry: crate::metrics::Registry) -> Self {
+        let address = if address.starts_with(':') {
+            format!("localhost{address}")
+        } else {
+            address.to_owned()
+        };
+        Self(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let start = std::time::Instant::now();
+                let result =
+                    tokio::time::timeout(Duration::from_secs(3), health_request(&address)).await;
+                let failed = !matches!(result, Ok(Ok(())));
+                let elapsed = start.elapsed();
+                registry.observe_health(elapsed.as_secs_f64(), failed);
+                if failed {
+                    crate::logging::log(
+                        "WARN",
+                        "health",
+                        &format!("Local health request to http://{address}/health failed"),
+                    );
+                } else if elapsed > Duration::from_secs(1) {
+                    crate::logging::log(
+                        "WARN",
+                        "health",
+                        &format!(
+                            "Local health request to http://{address}/health took more than 1s: {elapsed:?}"
+                        ),
+                    );
+                }
+            }
+        }))
+    }
+}
+
+impl Drop for HealthProbe {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn health_request(address: &str) -> io::Result<()> {
+    let stream = tokio::net::TcpStream::connect(address).await?;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(io::Error::other)?;
+    let request = Request::builder()
+        .uri("/health")
+        .header("host", address)
+        .body(Full::<Bytes>::default())
+        .map_err(io::Error::other)?;
+    let response = sender.send_request(request);
+    tokio::pin!(connection, response);
+    tokio::select! {
+        biased;
+        result = &mut response => result.map(|_| ()).map_err(io::Error::other),
+        result = &mut connection => result.map_err(io::Error::other).and_then(|()| Err(io::Error::other("health connection closed"))),
+    }
+}
+
 impl Listener {
     /// Bind an IP address or DNS hostname, then start accepting connections.
     pub async fn bind<F>(address: &str, route: F) -> io::Result<Self>
@@ -53,6 +120,17 @@ impl Listener {
     pub async fn bind_with_status<F>(address: &str, route: F) -> io::Result<Self>
     where
         F: Fn(&str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
+    {
+        Self::bind_with_methods(address, move |method, path| {
+            (method == "GET").then(|| route(path)).flatten()
+        })
+        .await
+    }
+
+    /// Bind an endpoint that can route all HTTP methods.
+    pub async fn bind_with_methods<F>(address: &str, route: F) -> io::Result<Self>
+    where
+        F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
     {
         let address = if address.ends_with(':') {
             Cow::Owned(format!("{address}0"))
@@ -103,11 +181,7 @@ impl Listener {
                         let mut stop = receiver.clone();
                         connections.spawn(async move {
                             let service = service_fn(move |request: Request<Incoming>| {
-                                let response = if request.method() == Method::GET {
-                                    route(request.uri().path())
-                                } else {
-                                    None
-                                };
+                                let response = route(request.method().as_str(), request.uri().path());
                                 async move {
                                     let mut result = Response::new(Full::default());
                                     match response {

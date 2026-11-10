@@ -68,7 +68,7 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `log`, `prometheus`, `ready` and `whoami` are implemented. Other built-in Directives are
+Only `health`, `log`, `prometheus`, `ready` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
 
@@ -92,6 +92,19 @@ reports bind errors; CoreDNS supports service names and currently discards
 errors from shared Listener startup. Pharos does not log unready Plugin names
 on every readiness request. Reload is not implemented, so readiness state is
 not reset by SIGUSR1.
+
+During Lameduck Pharos keeps `/ready` available with 503 `Shutting down`.
+CoreDNS v1.15.0 normally closes the readiness Listener before the health
+Lameduck delay, so subsequent requests fail to connect instead.
+
+Health addresses are shared once per exact configured address, using the
+first Lameduck duration; CoreDNS creates one Listener and probe per Server
+Block and can share ports using SO_REUSEPORT. Pharos reports bind errors,
+requires numeric ports, and uses the HTTP connection limits described above.
+Unlike Go's ServeMux, it does not redirect unclean paths or decode escaped path
+segments, and its 404 responses omit Go's `X-Content-Type-Options` header. The
+self-probe opens a fresh connection for every check and exports classic
+histogram buckets, not Prometheus native histogram samples.
 
 Whoami reports an error if adding the protocol label would make its SRV owner
 name exceed the DNS name length limit. CoreDNS ignores the resulting write
