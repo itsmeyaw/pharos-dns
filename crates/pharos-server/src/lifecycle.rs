@@ -2,15 +2,13 @@ use std::{future::Future, io, pin::Pin, sync::Arc};
 
 type Hook = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = io::Result<()>> + Send>> + Send + Sync>;
 
-/// Hook phase. OnStartup maps to Startup, OnRestart to Reload, and
-/// OnFinalShutdown to Shutdown. OnShutdown hooks needed for both reload and
-/// final shutdown must be registered for both; reload orchestration invokes
-/// Startup again after replacing the configuration.
+/// Hook phases in the configuration lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
     Startup,
     Shutdown,
-    Reload,
+    Restart,
+    RestartFailed,
 }
 
 /// Setup-time registration of ordered synchronous or asynchronous hooks.
