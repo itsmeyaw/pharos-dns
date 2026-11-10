@@ -341,3 +341,24 @@ async fn force_tcp_takes_precedence_in_protocol_selection() {
         upstream.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn ignores_short_udp_responses_before_valid_response() {
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+        server.send_to(&wire[..2], peer).await.unwrap();
+        wire[2] |= 0x80;
+        server.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let mut response = [0; 512];
+    assert!(
+        proxy
+            .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+            .await
+            .is_ok()
+    );
+    upstream.await.unwrap();
+}

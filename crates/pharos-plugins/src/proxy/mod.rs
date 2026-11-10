@@ -276,7 +276,7 @@ impl Proxy {
         let received = timeout(self.read_timeout, async {
             loop {
                 let len = socket.receive(response).await?;
-                if len >= 2 && response[..2] == id {
+                if len >= 12 && response[..2] == id {
                     return Ok::<_, io::Error>(len);
                 }
             }
