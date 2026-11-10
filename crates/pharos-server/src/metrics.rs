@@ -53,7 +53,29 @@ struct RegistryInner {
     blocks: Mutex<BTreeMap<Key, Arc<Block>>>,
     statuses: Mutex<BTreeMap<StatusKey, Arc<AtomicU64>>>,
     proxies: Mutex<BTreeMap<(String, String), Arc<Proxy>>>,
+    forward: Arc<ForwardCounters>,
+    forward_enabled: AtomicBool,
     process: AtomicBool,
+}
+
+#[derive(Default)]
+struct ForwardCounters {
+    healthcheck_broken: AtomicU64,
+    concurrent_rejects: AtomicU64,
+}
+
+/// Process-wide forward counters, resolved once during setup.
+#[derive(Clone)]
+pub struct ForwardMetrics(Arc<ForwardCounters>);
+
+impl ForwardMetrics {
+    pub fn healthcheck_broken(&self) {
+        self.0.healthcheck_broken.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn concurrent_reject(&self) {
+        self.0.concurrent_rejects.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
@@ -211,6 +233,8 @@ impl Registry {
             blocks: Mutex::new(BTreeMap::new()),
             statuses: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
+            forward: Arc::new(ForwardCounters::default()),
+            forward_enabled: AtomicBool::new(false),
             process: AtomicBool::new(false),
         }))
     }
@@ -254,6 +278,12 @@ impl Registry {
                     })
                 }),
         ))
+    }
+
+    /// Register and share forward's unlabelled counters.
+    pub fn forward(&self) -> ForwardMetrics {
+        self.0.forward_enabled.store(true, Ordering::Relaxed);
+        ForwardMetrics(Arc::clone(&self.0.forward))
     }
 
     /// Include process metrics from the operating system at scrape time.
@@ -495,6 +525,23 @@ impl Registry {
             sorted.write(out);
         }
         self.encode_proxies(out);
+        if self.0.forward_enabled.load(Ordering::Relaxed) {
+            for (name, help, counter) in [
+                (
+                    "forward_healthcheck_broken_total",
+                    "Counter of the number of complete failures of the healthchecks.",
+                    &self.0.forward.healthcheck_broken,
+                ),
+                (
+                    "forward_max_concurrent_rejects_total",
+                    "Counter of the number of queries rejected because the concurrent queries were at maximum.",
+                    &self.0.forward.concurrent_rejects,
+                ),
+            ] {
+                header(out, name, help, "counter");
+                writeln!(out, "pharos_{name} {}", counter.load(Ordering::Relaxed)).unwrap();
+            }
+        }
         if self.0.process.load(Ordering::Relaxed) {
             crate::process_metrics::encode_process(out);
         }
@@ -932,6 +979,19 @@ mod tests {
         let mut out = String::new();
         registry.encode(&mut out);
         assert!(!out.contains("pharos_proxy_"));
+    }
+
+    #[test]
+    fn forward_counters_are_shared_and_exported() {
+        let registry = super::Registry::new("test", "test", "test");
+        let counters = registry.forward();
+        let same = registry.forward();
+        counters.healthcheck_broken();
+        same.concurrent_reject();
+        let mut out = String::new();
+        registry.encode(&mut out);
+        assert!(out.contains("pharos_forward_healthcheck_broken_total 1\n"));
+        assert!(out.contains("pharos_forward_max_concurrent_rejects_total 1\n"));
     }
 
     #[test]
