@@ -592,6 +592,17 @@ fn supported_typed_rdata_agrees_with_domain() {
             Ok(())
         })
         .unwrap();
+    for (rtype, prefix) in [
+        (Type::SRV, &b"\x00\x0a\x00\x05\x21\x24"[..]),
+        (Type::NAPTR, &b"\x00\x64\x00\x32\x01s\x07SIP+D2U\x00"[..]),
+    ] {
+        builder
+            .record_with(Section::Answer, owner, rtype, Class::IN, 0, |w| {
+                w.write_bytes(prefix)?;
+                w.write_uncompressed_name(owner)
+            })
+            .unwrap();
+    }
     let _ = builder.finish();
     let pharos = Message::parse(&wire).unwrap();
     let domain = DomainMessage::from_octets(wire.as_slice()).unwrap();
@@ -665,6 +676,38 @@ fn supported_typed_rdata_agrees_with_domain() {
             }
             (pharos_proto::Rdata::Ptr(a), AllRecordData::Ptr(b)) => {
                 compare_name!(a, b.ptrdname())
+            }
+            (
+                pharos_proto::Rdata::Srv {
+                    priority,
+                    weight,
+                    port,
+                    target,
+                },
+                AllRecordData::Srv(b),
+            ) => {
+                assert_eq!(
+                    (priority, weight, port),
+                    (b.priority(), b.weight(), b.port())
+                );
+                compare_name!(target, b.target());
+            }
+            (
+                pharos_proto::Rdata::Naptr {
+                    order,
+                    preference,
+                    flags,
+                    services,
+                    regexp,
+                    replacement,
+                },
+                AllRecordData::Naptr(b),
+            ) => {
+                assert_eq!((order, preference), (b.order(), b.preference()));
+                assert_eq!(flags, b.flags().as_slice());
+                assert_eq!(services, b.services().as_slice());
+                assert_eq!(regexp, b.regexp().as_slice());
+                compare_name!(replacement, b.replacement());
             }
             (
                 pharos_proto::Rdata::Mx {

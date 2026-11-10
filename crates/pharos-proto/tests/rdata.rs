@@ -500,7 +500,7 @@ fn mx_and_soa_reject_truncated_fields_and_extra_bytes() {
 
 #[test]
 fn unsupported_name_bearing_rdata_cannot_be_relocated_as_opaque_bytes() {
-    for rtype in [Type::MB, Type::SRV, Type::RRSIG, Type::SVCB, Type::TSIG] {
+    for rtype in [Type::MB, Type::RRSIG, Type::SVCB, Type::TSIG] {
         let wire = message(rtype, &[0xc0, 12]);
         assert!(
             Message::parse(&wire)
@@ -526,7 +526,15 @@ fn unsupported_name_bearing_rdata_cannot_be_relocated_as_opaque_bytes() {
 
 #[test]
 fn opaque_data_cannot_impersonate_supported_name_records() {
-    for rtype in [Type::NS, Type::CNAME, Type::PTR, Type::MX, Type::SOA] {
+    for rtype in [
+        Type::NS,
+        Type::CNAME,
+        Type::PTR,
+        Type::MX,
+        Type::SOA,
+        Type::SRV,
+        Type::NAPTR,
+    ] {
         let root: Name = ".".parse().unwrap();
         let root = NameRef::parse(root.as_wire(), 0).unwrap();
         let mut out = Vec::new();

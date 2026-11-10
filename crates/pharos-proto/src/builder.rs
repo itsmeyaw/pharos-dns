@@ -299,6 +299,14 @@ impl<'a> MessageBuilder<'a> {
     }
 
     fn write_name(&mut self, name: NameRef<'_>) -> Result<(), BuildError> {
+        self.write_name_with_compression(name, true)
+    }
+
+    fn write_name_with_compression(
+        &mut self,
+        name: NameRef<'_>,
+        compress: bool,
+    ) -> Result<(), BuildError> {
         for (index, label) in name.labels().enumerate() {
             let pointer = self.offsets[..self.offset_count]
                 .iter()
@@ -309,10 +317,13 @@ impl<'a> MessageBuilder<'a> {
                         && NameRef::parse(self.wire, offset)
                             .is_ok_and(|stored| stored.labels().eq(name.labels().skip(index)))
                 });
-            if let Some(offset) = pointer {
+            if compress && let Some(offset) = pointer {
                 return self.write_bytes(&(0xc000 | offset).to_be_bytes());
             }
-            if self.wire.len() < 0x4000 && self.offset_count < COMPRESSION_SLOTS {
+            if pointer.is_none()
+                && self.wire.len() < 0x4000
+                && self.offset_count < COMPRESSION_SLOTS
+            {
                 self.offsets[self.offset_count] = self.wire.len() as u16;
                 self.offset_count += 1;
             }
@@ -337,5 +348,10 @@ impl RdataWriter<'_, '_> {
     /// Writes a name, compressing against earlier Message names when possible.
     pub fn write_name(&mut self, name: NameRef<'_>) -> Result<(), BuildError> {
         self.builder.write_name(name)
+    }
+
+    /// Writes literal labels while registering them as future compression targets.
+    pub fn write_uncompressed_name(&mut self, name: NameRef<'_>) -> Result<(), BuildError> {
+        self.builder.write_name_with_compression(name, false)
     }
 }

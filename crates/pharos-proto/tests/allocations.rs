@@ -33,6 +33,17 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
             )
             .unwrap();
     }
+    for (rtype, prefix) in [
+        (Type::SRV, &[0, 1, 0, 2, 0, 53][..]),
+        (Type::NAPTR, &b"\x00\x01\x00\x02\x01s\x01u\x00"[..]),
+    ] {
+        builder
+            .record_with(Section::Answer, name, rtype, Class::IN, 60, |writer| {
+                writer.write_bytes(prefix)?;
+                writer.write_name(name)
+            })
+            .unwrap();
+    }
     let response = builder.finish_with_opt(opt).unwrap();
     for record in Message::parse(response).unwrap().answers() {
         std::hint::black_box(record.data().unwrap());

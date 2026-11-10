@@ -22,8 +22,6 @@ fn unsupported_name_type(rtype: Type) -> bool {
             | Type::SIG
             | Type::PX
             | Type::NXT
-            | Type::SRV
-            | Type::NAPTR
             | Type::KX
             | Type::DNAME
             | Type::IPSECKEY
@@ -159,6 +157,20 @@ pub enum Rdata<'a> {
         weight: u16,
         target: &'a [u8],
     },
+    Srv {
+        priority: u16,
+        weight: u16,
+        port: u16,
+        target: NameRef<'a>,
+    },
+    Naptr {
+        order: u16,
+        preference: u16,
+        flags: &'a [u8],
+        services: &'a [u8],
+        regexp: &'a [u8],
+        replacement: NameRef<'a>,
+    },
     /// Opaque data in RFC 3597 format. Re-encoding preserves the original bytes,
     /// so it is only safe to relocate data that contains no compression pointers.
     Unknown(Type, &'a [u8]),
@@ -286,6 +298,39 @@ impl<'a> Rdata<'a> {
                     target: &bytes[4..],
                 })
             }
+            Type::SRV => {
+                let header = bytes.get(..6).ok_or(RdataError)?;
+                let target = NameRef::parse(wire, offset + 6).map_err(|_| RdataError)?;
+                if 6 + target.wire_len() != len {
+                    return Err(RdataError);
+                }
+                Ok(Self::Srv {
+                    priority: u16::from_be_bytes([header[0], header[1]]),
+                    weight: u16::from_be_bytes([header[2], header[3]]),
+                    port: u16::from_be_bytes([header[4], header[5]]),
+                    target,
+                })
+            }
+            Type::NAPTR => {
+                let header = bytes.get(..4).ok_or(RdataError)?;
+                let (flags, rest) = character_string(&bytes[4..])?;
+                let (services, rest) = character_string(rest)?;
+                let (regexp, rest) = character_string(rest)?;
+                let name_start = len - rest.len();
+                let replacement =
+                    NameRef::parse(wire, offset + name_start).map_err(|_| RdataError)?;
+                if replacement.wire_len() != rest.len() {
+                    return Err(RdataError);
+                }
+                Ok(Self::Naptr {
+                    order: u16::from_be_bytes([header[0], header[1]]),
+                    preference: u16::from_be_bytes([header[2], header[3]]),
+                    flags,
+                    services,
+                    regexp,
+                    replacement,
+                })
+            }
             _ if unsupported_name_type(rtype) => Err(RdataError),
             // shortcut: other record types stay opaque, add typed formats before zone parsing.
             _ => Ok(Self::Unknown(rtype, bytes)),
@@ -307,6 +352,8 @@ impl<'a> Rdata<'a> {
             Self::Hinfo { .. } => Type::HINFO,
             Self::Caa { .. } => Type::CAA,
             Self::Uri { .. } => Type::URI,
+            Self::Srv { .. } => Type::SRV,
+            Self::Naptr { .. } => Type::NAPTR,
             Self::Unknown(rtype, _) => *rtype,
         }
     }
@@ -365,6 +412,32 @@ impl<'a> Rdata<'a> {
                 writer.write_bytes(&weight.to_be_bytes())?;
                 writer.write_bytes(target)
             }
+            Self::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            } => {
+                writer.write_bytes(&priority.to_be_bytes())?;
+                writer.write_bytes(&weight.to_be_bytes())?;
+                writer.write_bytes(&port.to_be_bytes())?;
+                writer.write_uncompressed_name(*target)
+            }
+            Self::Naptr {
+                order,
+                preference,
+                flags,
+                services,
+                regexp,
+                replacement,
+            } => {
+                writer.write_bytes(&order.to_be_bytes())?;
+                writer.write_bytes(&preference.to_be_bytes())?;
+                write_character_string(writer, flags)?;
+                write_character_string(writer, services)?;
+                write_character_string(writer, regexp)?;
+                writer.write_uncompressed_name(*replacement)
+            }
             Self::Unknown(rtype, _)
                 if unsupported_name_type(*rtype)
                     || matches!(
@@ -380,6 +453,8 @@ impl<'a> Rdata<'a> {
                             | Type::HINFO
                             | Type::CAA
                             | Type::URI
+                            | Type::SRV
+                            | Type::NAPTR
                     ) =>
             {
                 Err(BuildError::InvalidRdata)
@@ -446,6 +521,30 @@ impl fmt::Display for Rdata<'_> {
             } => {
                 write!(f, "{priority} {weight} ")?;
                 display_octets(f, target)
+            }
+            Self::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            } => {
+                write!(f, "{priority} {weight} {port} {target}")
+            }
+            Self::Naptr {
+                order,
+                preference,
+                flags,
+                services,
+                regexp,
+                replacement,
+            } => {
+                write!(f, "{order} {preference} ")?;
+                display_quoted(f, flags)?;
+                f.write_str(" ")?;
+                display_quoted(f, services)?;
+                f.write_str(" ")?;
+                display_quoted(f, regexp)?;
+                write!(f, " {replacement}")
             }
             Self::Unknown(_, bytes) => {
                 write!(f, "\\# {} ", bytes.len())?;
