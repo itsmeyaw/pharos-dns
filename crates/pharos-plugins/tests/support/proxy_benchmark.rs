@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-// Run with: cargo test --release -p pharos-plugins --bench proxy -- --nocapture
+// Run with: cargo test --release -p pharos-plugins --test proxy_throughput -- --nocapture
 // The fake upstream delays every response asynchronously by 10 ms. The results
 // measure concurrency under upstream latency, not maximum loopback throughput.
 
