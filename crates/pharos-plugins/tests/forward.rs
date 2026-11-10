@@ -163,3 +163,35 @@ async fn max_concurrent_rejects_without_leaking_a_slot() {
     assert_eq!(first.await.unwrap().0, Outcome::Response);
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn shutdown_stops_upstream_proxy() {
+    use pharos_server::{Action, Handler, Phase};
+    let (upstream, task) = fake(0, false).await;
+    let text = format!(".:0 {{\n forward . {upstream}\n}}");
+    let blocks = parse("Corefile", &text).unwrap();
+    let (mut servers, lifecycle) =
+        pharos_plugins::servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (_, server) = servers.drain().next().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    let peer = "127.0.0.1:1000".parse().unwrap();
+    assert_eq!(
+        server
+            .handle(QUERY, peer, Protocol::Udp, &mut response)
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode().0, 0);
+    task.await.unwrap();
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    assert_eq!(
+        server
+            .handle(QUERY, peer, Protocol::Udp, &mut response)
+            .await,
+        Action::Respond
+    );
+    assert_eq!(
+        Message::parse(&response).unwrap().rcode(),
+        pharos_proto::Rcode::SERVFAIL
+    );
+}
