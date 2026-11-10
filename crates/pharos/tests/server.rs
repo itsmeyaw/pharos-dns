@@ -328,3 +328,68 @@ fn pidfile_write_failure_exits_with_error() {
         .unwrap();
     assert!(stderr.contains("/no-such-pharos-directory/pid"));
 }
+
+#[test]
+fn empty_corefiles_use_the_default_server() {
+    let dir = std::env::temp_dir().join(format!("pharos-empty-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    for (file, content) in [
+        ("config", ""),
+        ("config", "# comment only\n"),
+        ("stdin", ""),
+        ("Corefile", "# comment only\n"),
+    ] {
+        if file == "Corefile" && std::path::Path::new("/etc/pharos/pharos.conf").exists() {
+            continue;
+        }
+        if file != "stdin" {
+            fs::write(dir.join(file), content).unwrap();
+        }
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pharos"));
+        command
+            .current_dir(&dir)
+            .args(["-p", &port.to_string(), "--pidfile", "pid", "-q"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::inherit());
+        if file != "Corefile" {
+            command.args(["--conf", file]);
+        }
+        let mut process = Process(command.spawn().unwrap());
+        process
+            .0
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+        let pid = dir.join("pid");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !pid.exists() {
+            assert!(
+                process.0.try_wait().unwrap().is_none(),
+                "server exited for {file}"
+            );
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            TcpStream::connect(("127.0.0.1", port)).is_ok(),
+            "default not listening for {file}"
+        );
+        assert!(
+            Command::new("kill")
+                .args(["-TERM", &process.0.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(process.0.wait().unwrap().code(), Some(0));
+        assert!(!pid.exists());
+    }
+    fs::remove_dir_all(dir).unwrap();
+}

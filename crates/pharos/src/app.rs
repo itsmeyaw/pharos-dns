@@ -27,17 +27,18 @@ fn configuration(options: &Options) -> Result<(String, String), String> {
         let contents = fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
         Ok((path, contents))
     } else {
-        // shortcut: omit log when disabled; remove this fallback when #18 lands.
-        let log = if pharos_plugins::directives().iter().any(|d| d.name == "log") {
-            "log\n"
-        } else {
-            ""
-        };
-        Ok((
-            "<default>".into(),
-            format!(".:{} {{\nwhoami\n{log}}}\n", options.port.unwrap_or(53)),
-        ))
+        Ok(("<default>".into(), default_corefile(options)))
     }
+}
+
+fn default_corefile(options: &Options) -> String {
+    // shortcut: omit log when disabled; remove this fallback when #18 lands.
+    let log = if pharos_plugins::directives().iter().any(|d| d.name == "log") {
+        "log\n"
+    } else {
+        ""
+    };
+    format!(".:{} {{\nwhoami\n{log}}}\n", options.port.unwrap_or(53))
 }
 
 // shortcut: initialize logging when the logging infrastructure from #17 lands.
@@ -67,6 +68,10 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     let mut signals = Signals::new().map_err(|e| (1, e.to_string()))?;
     let (file, input) = configuration(&options).map_err(|e| (1, e))?;
     let mut blocks = pharos_corefile::parse(&file, &input).map_err(|e| (1, e.to_string()))?;
+    if blocks.is_empty() {
+        blocks = pharos_corefile::parse("<default>", &default_corefile(&options))
+            .map_err(|e| (1, e.to_string()))?;
+    }
     for block in &mut blocks {
         block.set_default_dns_port(options.port.unwrap_or(53));
     }
