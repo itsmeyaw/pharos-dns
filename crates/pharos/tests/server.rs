@@ -19,13 +19,6 @@ impl Drop for Process {
 
 #[test]
 fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
-    fn port() -> u16 {
-        TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
     fn http(port: u16, path: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream
@@ -42,9 +35,17 @@ fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
     }
     let dir = std::env::temp_dir().join(format!("pharos-health-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let (dns, ready, health) = (port(), port(), port());
+    let sockets: Vec<_> = (0..3)
+        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let ports: Vec<_> = sockets
+        .iter()
+        .map(|socket| socket.local_addr().unwrap().port())
+        .collect();
+    let (dns, ready, health) = (ports[0], ports[1], ports[2]);
+    drop(sockets);
     let config = format!(
-        ".:{dns} {{\n ready 127.0.0.1:{ready}\n health 127.0.0.1:{health} {{\n lameduck 2s\n }}\n whoami\n}}\n"
+        ".:{dns} {{\n ready 127.0.0.1:{ready}\n health 127.0.0.1:{health} {{\n lameduck 3s\n }}\n whoami\n}}\n"
     );
     fs::write(dir.join("Corefile"), config).unwrap();
     let pidfile = dir.join("pid");
@@ -97,6 +98,11 @@ fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
     let len = udp.recv(&mut response).unwrap();
     assert!(len > 12 && response[2] & 0x80 != 0);
     assert!(pidfile.exists());
+    thread::sleep(Duration::from_secs(1));
+    let response = http(ready, "/ready");
+    assert!(response.starts_with("HTTP/1.1 503") && response.ends_with("\r\n\r\nShutting down"));
+    let response = http(health, "/health");
+    assert!(response.starts_with("HTTP/1.1 200") && response.ends_with("\r\n\r\nOK"));
     assert_eq!(process.0.wait().unwrap().code(), Some(0));
     assert!(!pidfile.exists());
     fs::remove_dir_all(dir).unwrap();

@@ -63,7 +63,7 @@ pub const fn plugins_listing() -> &'static str {
 pub type Servers = HashMap<ListenerKey, Server<Arc<Chain>>>;
 
 /// Group Server Blocks by Listener and collect their hooks in block order.
-/// The caller runs Startup before serving and Shutdown after all Listeners drain.
+/// The caller runs Startup before serving and Shutdown before Listeners drain.
 pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecycle)> {
     let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
