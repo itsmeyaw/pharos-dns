@@ -583,6 +583,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(parse_text(&format!("forward . {addresses}")).is_err());
+        let fifteen = (1..=15)
+            .map(|i| format!("192.0.2.{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(parse_text(&format!("forward . {fifteen}")).is_ok());
+        std::fs::write(&path, "nameserver 192.0.2.20\n").unwrap();
+        assert!(parse_text(&format!("forward . {} {fifteen}", path.display())).is_err());
         std::fs::remove_file(path).unwrap();
     }
 
