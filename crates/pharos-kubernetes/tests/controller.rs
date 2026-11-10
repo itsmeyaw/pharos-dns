@@ -406,8 +406,10 @@ async fn expired_watch_relist_removes_missing_services() {
         .lock()
         .unwrap()
         .insert("/api/v1/services".into(), json!([]));
+    let started = std::time::Instant::now();
     server.send("/api/v1/services", "ERROR", json!({"apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":"Expired", "message":"resource version too old", "code":410}));
     until(|| store.with_read(|index| index.service("prod", "web").is_none())).await;
+    assert!(started.elapsed() >= Duration::from_millis(700));
     controller.stop().await;
 }
 

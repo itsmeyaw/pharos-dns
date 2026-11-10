@@ -11,7 +11,10 @@ use futures::{StreamExt, pin_mut};
 use k8s_openapi::api::{core::v1, discovery::v1::EndpointSlice};
 use kube::{
     Api, Client, Resource, ResourceExt,
-    runtime::watcher::{self, Event},
+    runtime::{
+        WatchStreamExt,
+        watcher::{self, Event},
+    },
 };
 use serde::de::DeserializeOwned;
 use tokio::task::JoinHandle;
@@ -203,7 +206,7 @@ impl Controller {
         let synced = Arc::new(AtomicBool::new(false));
         self.synced.push(synced.clone());
         self.tasks.push(tokio::spawn(async move {
-            let stream = watcher::watcher(api, config);
+            let stream = watcher::watcher(api, config).default_backoff();
             pin_mut!(stream);
             let mut initial = Vec::new();
             let mut relist_latencies = Vec::new();
@@ -258,7 +261,6 @@ impl Controller {
                             "kubernetes",
                             &format!("Kubernetes watch error: {error}"),
                         );
-                        tokio::time::sleep(Duration::from_millis(250)).await;
                     }
                 }
             }
