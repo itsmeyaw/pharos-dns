@@ -20,6 +20,8 @@ use tokio::{
 };
 
 const SHARDS: usize = 32;
+static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
+thread_local! { static SHARD: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS; }
 const EXPIRE: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -102,7 +104,6 @@ impl Socket {
 pub struct Proxy {
     address: SocketAddr,
     shards: [[Mutex<VecDeque<Cached>>; SHARDS]; 2],
-    next: AtomicUsize,
     expire: Duration,
 }
 
@@ -112,7 +113,6 @@ impl Proxy {
         Self {
             address,
             shards: std::array::from_fn(|_| std::array::from_fn(|_| Mutex::new(VecDeque::new()))),
-            next: AtomicUsize::new(0),
             expire: EXPIRE,
         }
     }
@@ -135,7 +135,7 @@ impl Proxy {
             transport
         };
         let protocol = usize::from(transport == Transport::Tcp);
-        let shard = self.next.fetch_add(1, Ordering::Relaxed) % SHARDS;
+        let shard = SHARD.with(|index| *index);
         let cached = {
             let mut queue = self.shards[protocol][shard].lock().unwrap();
             loop {

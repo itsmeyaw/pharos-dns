@@ -52,3 +52,30 @@ async fn exchanges_a_query_with_a_tcp_upstream() {
     assert_eq!(&response[..2], &QUERY[..2]);
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn reuses_udp_connection_for_sequential_queries() {
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = server.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let mut peers = Vec::new();
+        for _ in 0..2 {
+            let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+            peers.push(peer);
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+        peers
+    });
+    let proxy = Proxy::new(address);
+    let mut response = [0; 512];
+    for _ in 0..2 {
+        proxy
+            .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+            .await
+            .unwrap();
+    }
+    let peers = task.await.unwrap();
+    assert_eq!(peers[0], peers[1]);
+}
