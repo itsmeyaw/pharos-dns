@@ -108,3 +108,11 @@ fn rewriting_ttl_does_not_panic_when_compression_points_into_a_ttl() {
     let mut message = pharos_proto::MessageMut::parse(&mut wire).unwrap();
     message.rewrite_ttls(|_| 0xff000000);
 }
+
+#[test]
+fn accepts_trailing_bytes_like_coredns() {
+    let wire = b"\0\0\0\0\0\0\0\0\0\0\0\0\xff";
+    let message = Message::parse(wire).unwrap();
+    assert_eq!(message.question_count(), 0);
+    assert_eq!(message.answer_count(), 0);
+}

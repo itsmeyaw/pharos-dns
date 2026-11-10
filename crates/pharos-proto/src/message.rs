@@ -106,6 +106,7 @@ fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageErro
 
 impl<'a> Message<'a> {
     /// Validates all section boundaries and names before exposing the view.
+    /// Bytes after the declared sections are ignored, as in CoreDNS.
     pub fn parse(wire: &'a [u8]) -> Result<Self, MessageError> {
         if wire.len() < HEADER_LEN {
             return Err(MessageError::Truncated);
