@@ -71,8 +71,8 @@ types other than IPv4 or IPv6; CoreDNS retains them.
 Kubeconfig OIDC credentials use the configured ID token without refreshing it;
 CoreDNS includes the client-go OIDC authentication provider.
 Kubeconfig proxy URLs are not supported; CoreDNS can connect through them.
-DNS programming latency excludes initial lists and relists; CoreDNS records
-annotated EndpointSlices during those operations too. Kubernetes REST request
+DNS programming latency excludes the initial list; CoreDNS records annotated
+EndpointSlices during that operation too. Kubernetes REST request
 duration ends when response headers arrive, rather than after processing the
 response body. Kube's internal retries are counted once per request rather
 than once per attempt as in client-go.

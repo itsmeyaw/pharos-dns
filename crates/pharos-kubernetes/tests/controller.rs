@@ -411,6 +411,28 @@ async fn expired_watch_relist_removes_missing_services() {
     controller.stop().await;
 }
 
+#[tokio::test]
+async fn annotated_relist_records_programming_latency_after_initial_sync() {
+    let server = FakeServer::start().await;
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    let config = pharos_kubernetes::ClientConfig {
+        endpoint: Some(server.url.clone()),
+        ..Default::default()
+    };
+    let client = config.client(&registry).await.unwrap();
+    let mut controller =
+        Controller::start_with_metrics(client, WatchConfig::default(), registry.kubernetes());
+    until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
+    server.lists.lock().unwrap().insert("/apis/discovery.k8s.io/v1/endpointslices".into(), json!([{
+        "metadata":{"name":"slice","namespace":"prod","resourceVersion":"2", "labels":{"kubernetes.io/service-name":"web"},
+            "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}},
+        "addressType":"IPv4","endpoints":[{"addresses":["10.0.1.7"]}]
+    }]));
+    server.send("/apis/discovery.k8s.io/v1/endpointslices", "ERROR", json!({"apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":"Expired", "message":"resource version too old", "code":410}));
+    until(|| { let mut out = String::new(); registry.encode(&mut out); out.contains("pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 1") }).await;
+    controller.stop().await;
+}
+
 impl Drop for FakeServer {
     fn drop(&mut self) {
         self.task.abort();

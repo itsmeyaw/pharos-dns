@@ -206,12 +206,28 @@ impl Controller {
             let stream = watcher::watcher(api, config);
             pin_mut!(stream);
             let mut initial = Vec::new();
+            let mut relist_latencies = Vec::new();
             while let Some(event) = stream.next().await {
                 match event {
-                    Ok(Event::Init) => initial.clear(),
-                    Ok(Event::InitApply(object)) => initial.push(object.into()),
+                    Ok(Event::Init) => {
+                        initial.clear();
+                        relist_latencies.clear();
+                    }
+                    Ok(Event::InitApply(object)) => {
+                        if metrics.is_some()
+                            && synced.load(Ordering::Acquire)
+                            && pending.load(Ordering::Acquire) == 0
+                            && let Some(latency) = observe(&store, &object)
+                        {
+                            relist_latencies.push(latency);
+                        }
+                        initial.push(object.into());
+                    }
                     Ok(Event::InitDone) => {
                         replace(&store, std::mem::take(&mut initial));
+                        for latency in relist_latencies.drain(..) {
+                            record_latency(metrics.as_ref(), Some(latency));
+                        }
                         if !synced.swap(true, Ordering::AcqRel) {
                             pending.fetch_sub(1, Ordering::AcqRel);
                         }
