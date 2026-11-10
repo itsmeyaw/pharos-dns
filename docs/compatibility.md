@@ -160,6 +160,8 @@ use a thread-local xorshift generator rather than CoreDNS's generators.
 Equivalent escaped Domain spellings can match in Pharos, while CoreDNS
 compares presentation strings exactly. Weight file reads and parsing run on a
 Tokio worker and can delay other tasks. Successful reloads are not logged.
+When both policies are configured, subnet preference runs after weighted
+selection, as in CoreDNS, and can change which address appears first.
 
 ## Reload
 
