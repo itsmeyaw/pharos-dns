@@ -1656,6 +1656,7 @@ dependencies = [
  "hyper-util",
  "k8s-openapi",
  "kube",
+ "pharos-server",
  "serde",
  "serde_json",
  "tempfile",

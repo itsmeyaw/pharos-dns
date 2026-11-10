@@ -18,6 +18,8 @@ use tokio::task::JoinHandle;
 
 use crate::store::Store;
 
+pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Values supplied by the kubernetes Plugin's Corefile configuration.
 #[derive(Clone, Debug)]
 pub struct WatchConfig {
@@ -44,15 +46,22 @@ pub struct Controller {
     store: Store,
     synced: Vec<Arc<AtomicBool>>,
     tasks: Vec<JoinHandle<()>>,
+    client: Client,
+    config: WatchConfig,
 }
 
 impl Controller {
     pub fn start(client: Client, config: WatchConfig) -> Self {
-        let store = Store::default();
+        Self::start_with_store(client, config, Store::default())
+    }
+
+    fn start_with_store(client: Client, config: WatchConfig, store: Store) -> Self {
         let mut this = Self {
             store,
             synced: Vec::new(),
             tasks: Vec::new(),
+            client: client.clone(),
+            config: config.clone(),
         };
         let labels = watcher::Config {
             label_selector: config.label_selector,
@@ -103,6 +112,46 @@ impl Controller {
         this
     }
 
+    /// Register the controller with the server configuration lifecycle.
+    pub fn register_hooks(
+        controller: &Arc<tokio::sync::Mutex<Self>>,
+        lifecycle: &mut pharos_server::Lifecycle,
+        startup_timeout: Duration,
+    ) {
+        let start = controller.clone();
+        lifecycle.register(pharos_server::Phase::Startup, move || {
+            let controller = start.clone();
+            async move {
+                controller.lock().await.wait_for_sync(startup_timeout).await;
+                Ok(())
+            }
+        });
+        let restart = controller.clone();
+        lifecycle.register(pharos_server::Phase::RestartFailed, move || {
+            let controller = restart.clone();
+            async move {
+                let mut current = controller.lock().await;
+                *current = Self::start_with_store(
+                    current.client.clone(),
+                    current.config.clone(),
+                    current.store.clone(),
+                );
+                current.wait_for_sync(startup_timeout).await;
+                Ok(())
+            }
+        });
+        let stop = controller.clone();
+        let stop = move || {
+            let controller = stop.clone();
+            async move {
+                controller.lock().await.stop().await;
+                Ok(())
+            }
+        };
+        lifecycle.register(pharos_server::Phase::Restart, stop.clone());
+        lifecycle.register(pharos_server::Phase::Shutdown, stop);
+    }
+
     fn watch<K, T>(
         &mut self,
         api: Api<K>,
@@ -149,11 +198,39 @@ impl Controller {
             .iter()
             .all(|synced| synced.load(Ordering::Acquire))
     }
+    pub async fn wait_for_sync(&self, timeout: Duration) {
+        let mut check = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(100),
+            Duration::from_millis(100),
+        );
+        let mut log = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(500),
+            Duration::from_millis(500),
+        );
+        let deadline = tokio::time::sleep(timeout);
+        pin_mut!(deadline);
+        loop {
+            tokio::select! {
+                _ = check.tick() => if self.has_synced() { return; },
+                _ = log.tick() => pharos_server::logging::log("INFO", "kubernetes", "waiting for Kubernetes API before starting server"),
+                _ = &mut deadline => {
+                    pharos_server::logging::log("WARN", "kubernetes", "starting server with unsynced Kubernetes API");
+                    return;
+                }
+            }
+        }
+    }
     pub async fn stop(&mut self) {
         for task in self.tasks.drain(..) {
             task.abort();
             let _ = task.await;
         }
+    }
+}
+
+impl pharos_server::Readiness for Controller {
+    fn ready(&self) -> bool {
+        self.has_synced()
     }
 }
 

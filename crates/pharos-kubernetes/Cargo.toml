@@ -11,6 +11,7 @@ kube = { version = "5", default-features = false, features = ["client", "runtime
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 serde = "1"
+pharos-server = { path = "../pharos-server" }
 
 [dev-dependencies]
 serde_json = "1"

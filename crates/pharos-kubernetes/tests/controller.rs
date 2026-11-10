@@ -27,6 +27,7 @@ struct FakeServer {
     watches: Watches,
     requests: Requests,
     lists: Arc<Mutex<HashMap<String, Value>>>,
+    list_delay: Arc<std::sync::atomic::AtomicU64>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -37,20 +38,24 @@ impl FakeServer {
         let watches: Watches = Arc::default();
         let requests: Requests = Arc::default();
         let lists: Arc<Mutex<HashMap<String, Value>>> = Arc::default();
+        let list_delay = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let task_watches = watches.clone();
         let task_requests = requests.clone();
         let task_lists = lists.clone();
+        let task_delay = list_delay.clone();
         let task = tokio::spawn(async move {
             loop {
                 let (socket, _) = listener.accept().await.unwrap();
                 let watches = task_watches.clone();
                 let requests = task_requests.clone();
                 let lists = task_lists.clone();
+                let delay = task_delay.clone();
                 tokio::spawn(async move {
                     let service = service_fn(move |request: Request<Incoming>| {
                         let watches = watches.clone();
                         let requests = requests.clone();
                         let lists = lists.clone();
+                        let delay = delay.clone();
                         async move {
                             requests.lock().unwrap().push(request.uri().to_string());
                             let path = request.uri().path().to_owned();
@@ -71,6 +76,10 @@ impl FakeServer {
                                 });
                                 StreamBody::new(stream).boxed()
                             } else {
+                                tokio::time::sleep(Duration::from_millis(
+                                    delay.load(std::sync::atomic::Ordering::Relaxed),
+                                ))
+                                .await;
                                 let (api, kind, items) = match path.as_str() {
                                     "/api/v1/services" => (
                                         "v1",
@@ -108,6 +117,7 @@ impl FakeServer {
             watches,
             requests,
             lists,
+            list_delay,
             task,
         }
     }
@@ -121,6 +131,47 @@ impl FakeServer {
             .send(format!("{}\n", json!({"type":typ, "object":object})))
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn startup_timeout_allows_unsynced_then_becomes_ready() {
+    let server = FakeServer::start().await;
+    server
+        .list_delay
+        .store(200, std::sync::atomic::Ordering::Relaxed);
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(client, WatchConfig::default());
+    controller.wait_for_sync(Duration::from_millis(20)).await;
+    assert!(!controller.has_synced());
+    until(|| controller.has_synced()).await;
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn lifecycle_restart_failure_restarts_watchers_on_same_store() {
+    let server = FakeServer::start().await;
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let controller = Arc::new(tokio::sync::Mutex::new(Controller::start(
+        client,
+        WatchConfig::default(),
+    )));
+    let store = controller.lock().await.store();
+    let mut lifecycle = pharos_server::Lifecycle::default();
+    Controller::register_hooks(&controller, &mut lifecycle, Duration::from_secs(1));
+    lifecycle.run(pharos_server::Phase::Startup).await.unwrap();
+    assert!(store.with_read(|index| index.service("prod", "web").is_some()));
+    lifecycle.run(pharos_server::Phase::Restart).await.unwrap();
+    server
+        .lists
+        .lock()
+        .unwrap()
+        .insert("/api/v1/services".into(), json!([]));
+    lifecycle
+        .run(pharos_server::Phase::RestartFailed)
+        .await
+        .unwrap();
+    assert!(store.with_read(|index| index.service("prod", "web").is_none()));
+    lifecycle.run(pharos_server::Phase::Shutdown).await.unwrap();
 }
 
 #[tokio::test]
