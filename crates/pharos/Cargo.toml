@@ -10,3 +10,6 @@ workspace = true
 
 [dependencies]
 pharos-plugins = { path = "../pharos-plugins" }
+pharos-corefile = { path = "../pharos-corefile" }
+pharos-server = { path = "../pharos-server" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }

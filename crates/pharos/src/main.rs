@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod app;
+
 use std::process::ExitCode;
 
 #[derive(Default)]
@@ -70,7 +72,8 @@ fn options() -> Result<Options, (u8, String)> {
     Ok(options)
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let options = match options() {
         Ok(options) => options,
         Err((code, error)) => {
@@ -79,12 +82,24 @@ fn main() -> ExitCode {
         }
     };
     if options.version {
-        println!(
-            "Pharos-{}\nCoreDNS-1.15.0 compatible",
-            env!("CARGO_PKG_VERSION")
-        );
+        version();
     } else if options.plugins {
         print!("{}", pharos_plugins::plugins_listing());
+    } else {
+        match app::run(options).await {
+            Ok(code) => return ExitCode::from(code),
+            Err((code, error)) => {
+                eprintln!("{error}");
+                return ExitCode::from(code);
+            }
+        }
     }
     ExitCode::SUCCESS
+}
+
+fn version() {
+    println!(
+        "Pharos-{}\nCoreDNS-1.15.0 compatible",
+        env!("CARGO_PKG_VERSION")
+    );
 }
