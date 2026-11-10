@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod coredns;
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -14,10 +16,23 @@ fn main() -> ExitCode {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
         [command] if command == "check" => check(),
+        [command] if command == "coredns" => {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+            match coredns::build(root) {
+                Ok(path) => {
+                    println!("{}", path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         [command] if command == "fuzz" => fuzz(false),
         [command, flag] if command == "fuzz" && flag == "--short" => fuzz(true),
         _ => {
-            eprintln!("usage: cargo xtask check | fuzz [--short]");
+            eprintln!("usage: cargo xtask check | coredns | fuzz [--short]");
             ExitCode::FAILURE
         }
     }
