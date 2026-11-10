@@ -187,9 +187,9 @@ Plugin; `forward` configuration is not yet implemented. DNS-over-TLS is
 reserved for M3. The proxy retries a truncated UDP Response over TCP only
 when `prefer_udp` is set, as CoreDNS's `forward` does.
 
-Idle sockets are checked for expiration when their worker shard is next used;
-CoreDNS also cleans idle sockets periodically, so inactive Pharos shards may
-retain expired sockets until reuse or Proxy destruction. Pharos does not yet
+Idle sockets are swept across shards at most once per expiry interval on Query
+traffic. Unlike CoreDNS’s periodic cleanup, an idle Proxy retains expired
+sockets until another Query or shutdown. Pharos does not yet
 adapt its TCP dial timeout (fixed at 30 seconds), enable Linux UDP error-queue
 socket options. Upstream TSIG Messages retain their original ID rather than
 rewriting the signed Message. Proxy metric RCODE series are initialized on

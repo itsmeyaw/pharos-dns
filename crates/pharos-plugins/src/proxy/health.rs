@@ -54,6 +54,7 @@ impl HealthConfig {
 #[derive(Default)]
 struct State {
     running: bool,
+    shutdown: bool,
     generation: u64,
     task: Option<JoinHandle<()>>,
 }
@@ -96,6 +97,9 @@ impl Health {
             return;
         }
         let mut state = self.shared.state.lock().unwrap();
+        if state.shutdown {
+            return;
+        }
         if state.running && state.task.as_ref().is_some_and(|task| !task.is_finished()) {
             return;
         }
@@ -146,6 +150,16 @@ impl Health {
     /// Cancels any current probe and closes its socket on cancellation.
     pub fn stop(&self) {
         let mut state = self.shared.state.lock().unwrap();
+        if let Some(task) = state.task.take() {
+            task.abort();
+        }
+        state.running = false;
+        state.generation = state.generation.wrapping_add(1);
+    }
+
+    pub(super) fn shutdown(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.shutdown = true;
         if let Some(task) = state.task.take() {
             task.abort();
         }

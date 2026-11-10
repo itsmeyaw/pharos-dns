@@ -13,7 +13,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -66,6 +66,7 @@ pub enum Error {
     UnsupportedRequest,
     NoHealthy,
     NoForward,
+    Stopped,
     Mismatch,
     CachedClosed,
     Io(io::Error),
@@ -77,6 +78,7 @@ impl fmt::Display for Error {
             Self::UnsupportedRequest => f.write_str("unsupported Query"),
             Self::NoHealthy => f.write_str("no healthy Upstreams"),
             Self::NoForward => f.write_str("no Upstream configured"),
+            Self::Stopped => f.write_str("proxy: transport stopped"),
             Self::Mismatch => f.write_str("Upstream Response does not match Query"),
             Self::CachedClosed => f.write_str("cached connection was closed by peer"),
             Self::Io(error) => write!(f, "{error}"),
@@ -156,6 +158,9 @@ pub struct Proxy {
     max_age: Duration,
     max_idle_conns: usize,
     idle: AtomicUsize,
+    stopped: AtomicBool,
+    started: Instant,
+    next_sweep: AtomicU64,
     read_timeout: Duration,
     source_address: Option<IpAddr>,
     metrics: Option<Metrics>,
@@ -178,6 +183,9 @@ impl Proxy {
             max_age: Duration::ZERO,
             max_idle_conns: 0,
             idle: AtomicUsize::new(0),
+            stopped: AtomicBool::new(false),
+            started: Instant::now(),
+            next_sweep: AtomicU64::new(EXPIRE.as_nanos() as u64),
             read_timeout: READ_TIMEOUT,
             source_address: None,
             metrics: None,
@@ -188,6 +196,55 @@ impl Proxy {
     /// Set the maximum idle time before an Upstream connection is discarded.
     pub fn set_expire(&mut self, expire: Duration) {
         self.expire = expire;
+        self.next_sweep
+            .store(self.sweep_deadline(), Ordering::Relaxed);
+    }
+
+    fn sweep_deadline(&self) -> u64 {
+        self.started
+            .elapsed()
+            .as_nanos()
+            .saturating_add(self.expire.as_nanos())
+            .min(u128::from(u64::MAX)) as u64
+    }
+
+    fn sweep(&self) {
+        let now = self.started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        let next = self.next_sweep.load(Ordering::Relaxed);
+        if now < next
+            || self
+                .next_sweep
+                .compare_exchange(
+                    next,
+                    self.sweep_deadline(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return;
+        }
+        // shortcut: without traffic expired sockets remain until stop; add a timer if idle cleanup is required.
+        for shard in self.shards.iter().flatten() {
+            let mut queue = shard.lock().unwrap();
+            let before = queue.len();
+            queue.retain(|conn| {
+                conn.used.elapsed() <= self.expire
+                    && (self.max_age.is_zero() || conn.created.elapsed() <= self.max_age)
+            });
+            self.idle.fetch_sub(before - queue.len(), Ordering::Relaxed);
+        }
+    }
+
+    /// Stop probes and close all idle Upstream connections.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        self.health.shutdown();
+        for shard in self.shards.iter().flatten() {
+            let mut queue = shard.lock().unwrap();
+            self.idle.fetch_sub(queue.len(), Ordering::Relaxed);
+            queue.clear();
+        }
     }
 
     /// Limit idle connections across this Upstream; zero means unlimited.
@@ -253,6 +310,10 @@ impl Proxy {
         transport: Transport,
         options: Options,
     ) -> Result<Exchange, Error> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Error::Stopped);
+        }
+        self.sweep();
         let selected = if options.force_tcp {
             Transport::Tcp
         } else if options.prefer_udp {
@@ -427,27 +488,34 @@ impl Proxy {
             return Err(Error::Mismatch);
         }
         response[..2].copy_from_slice(&query[..2]);
-        if self
-            .idle
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                (self.max_idle_conns == 0 || count < self.max_idle_conns).then(|| count + 1)
-            })
-            .is_ok()
         {
-            self.shards[protocol][shard]
-                .lock()
-                .unwrap()
-                .push_back(Cached {
+            let mut queue = self.shards[protocol][shard].lock().unwrap();
+            if !self.stopped.load(Ordering::Acquire)
+                && self
+                    .idle
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                        (self.max_idle_conns == 0 || count < self.max_idle_conns).then(|| count + 1)
+                    })
+                    .is_ok()
+            {
+                queue.push_back(Cached {
                     socket,
                     created,
                     used: Instant::now(),
                 });
+            }
         }
         Ok(Exchange {
             len: length,
             local_addr,
             transport,
         })
+    }
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

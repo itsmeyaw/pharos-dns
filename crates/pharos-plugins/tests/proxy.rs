@@ -701,3 +701,131 @@ async fn health_check_uses_configured_source_address() {
         health.stop();
     }
 }
+
+#[tokio::test]
+async fn stop_closes_idle_connections_and_rejects_queries() {
+    use pharos_plugins::proxy::Error;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::{Duration, timeout},
+    };
+    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let (mut stream, _) = server.accept().await.unwrap();
+        let mut wire = [0; 512];
+        let len = usize::from(stream.read_u16().await.unwrap());
+        stream.read_exact(&mut wire[..len]).await.unwrap();
+        wire[2] |= 0x80;
+        stream.write_u16(len as u16).await.unwrap();
+        stream.write_all(&wire[..len]).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), stream.read(&mut wire))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    });
+    let mut response = [0; 512];
+    proxy
+        .exchange(QUERY, &mut response, Transport::Tcp, Options::default())
+        .await
+        .unwrap();
+    proxy.stop();
+    assert!(matches!(
+        proxy
+            .exchange(QUERY, &mut response, Transport::Tcp, Options::default())
+            .await,
+        Err(Error::Stopped)
+    ));
+    upstream.await.unwrap();
+}
+
+#[test]
+fn activity_on_another_worker_sweeps_expired_sockets() {
+    use std::{
+        net::UdpSocket as StdUdp,
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
+    let server = StdUdp::bind("127.0.0.1:0").unwrap();
+    server
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut proxy = Proxy::new(server.local_addr().unwrap());
+    proxy.set_expire(Duration::from_millis(40));
+    let proxy = Arc::new(proxy);
+    let (peers_tx, peers_rx) = mpsc::channel();
+    let upstream = std::thread::spawn(move || {
+        let mut wire = [0; 512];
+        for _ in 0..2 {
+            let (len, peer) = server.recv_from(&mut wire).unwrap();
+            peers_tx.send(peer).unwrap();
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).unwrap();
+        }
+    });
+    let exchange = |proxy: Arc<Proxy>| {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                proxy
+                    .exchange(QUERY, &mut [0; 512], Transport::Udp, Options::default())
+                    .await
+                    .unwrap();
+            });
+        })
+    };
+    exchange(Arc::clone(&proxy)).join().unwrap();
+    let first = peers_rx.recv().unwrap();
+    assert!(StdUdp::bind(first).is_err());
+    std::thread::sleep(Duration::from_millis(70));
+    exchange(Arc::clone(&proxy)).join().unwrap();
+    let second = peers_rx.recv().unwrap();
+    assert_ne!(first, second);
+    assert!(
+        StdUdp::bind(first).is_ok(),
+        "inactive worker's expired socket stayed open"
+    );
+    upstream.join().unwrap();
+}
+
+#[tokio::test]
+async fn stop_closes_connections_returned_by_in_flight_exchanges() {
+    use std::sync::Arc;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::{Duration, timeout},
+    };
+    let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Arc::new(Proxy::new(server.local_addr().unwrap()));
+    let exchange_proxy = Arc::clone(&proxy);
+    let task = tokio::spawn(async move {
+        exchange_proxy
+            .exchange(QUERY, &mut [0; 512], Transport::Tcp, Options::default())
+            .await
+            .unwrap();
+    });
+    let (mut stream, _) = server.accept().await.unwrap();
+    let len = usize::from(stream.read_u16().await.unwrap());
+    let mut wire = [0; 512];
+    stream.read_exact(&mut wire[..len]).await.unwrap();
+    proxy.stop();
+    wire[2] |= 0x80;
+    stream.write_u16(len as u16).await.unwrap();
+    stream.write_all(&wire[..len]).await.unwrap();
+    task.await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(1), stream.read(&mut wire))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+}
