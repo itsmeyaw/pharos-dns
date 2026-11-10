@@ -9,7 +9,7 @@ use pharos_server::{Lifecycle, ListenerKey, Router, Server, Transport};
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6},
     sync::Arc,
 };
 
@@ -182,17 +182,25 @@ pub fn servers_with_registry(
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener Domain")
             })?;
             for address in &addresses {
-                let ip: IpAddr = if address.is_empty() {
-                    Ipv4Addr::UNSPECIFIED.into()
-                } else {
-                    address.parse().map_err(|_| {
+                let socket = if address.is_empty() {
+                    SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port)
+                } else if let Some((ip, interface)) = address.split_once('%') {
+                    let ip: Ipv6Addr = ip.parse().map_err(|_| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
-                    })?
+                    })?;
+                    let scope = nix::net::if_::if_nametoindex(interface)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                    SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope))
+                } else {
+                    let ip: IpAddr = address.parse().map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
+                    })?;
+                    SocketAddr::new(ip, port)
                 };
                 routes.push((
                     ListenerKey {
                         transport: Transport::Dns,
-                        address: SocketAddr::new(ip, port),
+                        address: socket,
                     },
                     domain.clone(),
                 ));
