@@ -99,7 +99,10 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    struct Blocking(Arc<AtomicBool>);
+    struct Blocking {
+        started: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
     struct Guard(Arc<AtomicBool>);
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -108,7 +111,8 @@ mod tests {
     }
     impl Handler for Blocking {
         async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
-            let _guard = Guard(Arc::clone(&self.0));
+            let _guard = Guard(Arc::clone(&self.dropped));
+            self.started.store(true, Ordering::SeqCst);
             std::future::pending().await
         }
     }
@@ -117,17 +121,27 @@ mod tests {
     async fn parallel_query_is_cancelled_when_configuration_restarts() {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
         let (shutdown, receiver) = watch::channel(false);
         let (restart, cancelled) = watch::channel(false);
         spawn_parallel(
             socket,
-            Arc::new(Blocking(Arc::clone(&dropped))),
+            Arc::new(Blocking {
+                started: Arc::clone(&started),
+                dropped: Arc::clone(&dropped),
+            }),
             &[0],
             "127.0.0.1:1234".parse().unwrap(),
             receiver,
             cancelled,
         );
-        tokio::task::yield_now().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         restart.send_replace(true);
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while !dropped.load(Ordering::SeqCst) {
