@@ -15,6 +15,9 @@ use std::{
 
 pub mod proxy;
 
+#[cfg(feature = "plugin-forward")]
+pub mod forward;
+
 #[cfg(feature = "plugin-log")]
 pub mod log;
 #[cfg(feature = "plugin-log")]
@@ -79,7 +82,11 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
             Ok(())
         });
     }
-    for block in blocks {
+    for mut block in blocks {
+        #[cfg(feature = "plugin-forward")]
+        if let Some(forward) = &mut block.config.forward {
+            forward.set_metrics(&metrics);
+        }
         #[cfg(feature = "plugin-ready")]
         if let Some(ready) = &block.config.ready {
             ready_addresses.insert(ready.address.clone());
@@ -105,6 +112,16 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         let empty = pharos_server::Chain::is_empty(&block.config);
         lifecycle.extend(&block.config.lifecycle);
         let chain = Arc::new(block.config);
+        #[cfg(feature = "plugin-forward")]
+        if chain.forward.is_some() {
+            let chain = Arc::clone(&chain);
+            lifecycle.register_sync(pharos_server::Phase::Shutdown, move || {
+                if let Some(forward) = &chain.forward {
+                    forward.stop();
+                }
+                Ok(())
+            });
+        }
         #[cfg(feature = "plugin-ready")]
         if chain.ready.is_some() {
             chain.collect_readiness(&ready_state);
@@ -262,6 +279,12 @@ fn setup_prometheus(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
 #[cfg(feature = "plugin-ready")]
 fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.ready = Some(ready::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-forward")]
+fn setup_forward(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.forward = Some(forward::Forward::parse(cursor)?);
     Ok(())
 }
 

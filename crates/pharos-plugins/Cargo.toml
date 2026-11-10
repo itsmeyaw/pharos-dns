@@ -21,7 +21,7 @@ stats_alloc = "0.1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [features]
-default = ["plugin-log", "plugin-prometheus", "plugin-ready", "plugin-whoami"]
+default = ["plugin-log", "plugin-prometheus", "plugin-ready", "plugin-whoami", "plugin-forward"]
 plugin-root = []
 plugin-metadata = []
 plugin-geoip = []

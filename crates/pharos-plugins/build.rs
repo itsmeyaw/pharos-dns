@@ -26,6 +26,7 @@ fn main() {
             "log" => "log::Log",
             "prometheus" => "prometheus::Prometheus",
             "ready" => "ready::Ready",
+            "forward" => "forward::Forward",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -37,6 +38,7 @@ fn main() {
             "log" => "setup_log",
             "prometheus" => "setup_prometheus",
             "ready" => "setup_ready",
+            "forward" => "setup_forward",
             _ => "setup_unimplemented",
         };
         let once = *name == "prometheus" || *name == "ready";

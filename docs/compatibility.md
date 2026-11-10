@@ -68,7 +68,7 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `log`, `prometheus`, `ready` and `whoami` are implemented. Other built-in Directives are
+Only `forward`, `log`, `prometheus`, `ready` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
 
@@ -206,9 +206,8 @@ On Linux, each `sendmmsg` sends one Response (nix-rust/nix#2797).
 
 ## Upstream proxy
 
-Plain UDP and TCP Upstream exchange is available for a future `forward`
-Plugin; `forward` configuration is not yet implemented. DNS-over-TLS is
-reserved for M3. The proxy retries a truncated UDP Response over TCP only
+Plain UDP and TCP Upstream exchange is available for `forward`.
+DNS-over-TLS is reserved for M3. The proxy retries a truncated UDP Response over TCP only
 when `prefer_udp` is set, as CoreDNS's `forward` does.
 
 Idle sockets are swept across shards at most once per expiry interval on Query
@@ -218,3 +217,17 @@ original ID rather than rewriting the signed Message. Proxy metric RCODE
 series are initialized on first observation, allocating once per distinct RCODE.
 Connections rotate FIFO within each worker shard rather than in
 one global FIFO.
+
+## Forward
+
+Encrypted Upstreams (`tls://`, `quic://` and `https://`) and `tls` or
+`tls_servername` options fail setup rather than silently downgrade; TLS is
+deferred to M3. Hostname Upstreams and IPv6 scoped addresses are not yet
+supported. `resolver` and `doh_method` are accepted but have no effect on
+numeric plain-DNS Upstreams. The expanded Upstream list is limited to 15;
+CoreDNS limits configured entries rather than addresses expanded from files.
+Invalid nameservers in resolv.conf are skipped. Some option argument and
+Domain edge cases remain more restrictive than CoreDNS. Upstream Metadata
+uses the normalized numeric socket address, which may differ from CoreDNS's
+configured address text. Health checks start on exchange failure, and proxy
+connections and checks are stopped on Shutdown.
