@@ -22,8 +22,8 @@ macro_rules! dns_code {
 }
 
 dns_code! {
-    /// A DNS Message operation code. Unknown values display as `OPCODE` and a decimal number.
-    Opcode, u8, "OPCODE", {
+    /// A DNS Message operation code. Unknown values display as a decimal number.
+    Opcode, u8, "", {
         QUERY = 0 => "QUERY",
         IQUERY = 1 => "IQUERY",
         STATUS = 2 => "STATUS",
@@ -38,9 +38,8 @@ impl Opcode {
 }
 
 dns_code! {
-    /// A DNS Response code, including extended RCODEs. Unknown values display as `RCODE`
-    /// and a decimal number.
-    Rcode, u16, "RCODE", {
+    /// A DNS Response code, including extended RCODEs. Unknown values display as a decimal number.
+    Rcode, u16, "", {
         NOERROR = 0 => "NOERROR",
         FORMERR = 1 => "FORMERR",
         SERVFAIL = 2 => "SERVFAIL",

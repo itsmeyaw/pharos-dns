@@ -21,9 +21,9 @@ fn presentation_matches_miekg_special_cases() {
 
 #[test]
 fn unknown_values_are_preserved_and_printed_numerically() {
-    assert_eq!(Opcode(15).to_string(), "OPCODE15");
-    assert_eq!(Opcode::STATEFUL.to_string(), "OPCODE6");
-    assert_eq!(Rcode(4095).to_string(), "RCODE4095");
+    assert_eq!(Opcode(15).to_string(), "15");
+    assert_eq!(Opcode::STATEFUL.to_string(), "6");
+    assert_eq!(Rcode(4095).to_string(), "4095");
     assert_eq!(Class(65535).to_string(), "CLASS65535");
     assert_eq!(Type(65534).to_string(), "TYPE65534");
     assert_eq!(Type(11).to_string(), "TYPE11");
