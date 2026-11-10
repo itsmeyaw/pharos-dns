@@ -5,8 +5,8 @@ Pharos is a Rust rewrite of CoreDNS: a DNS name server whose behaviour is assemb
 ## Configuration
 
 **Corefile**:
-The configuration file that declares every Server Block Pharos runs.
-_Avoid_: Caddyfile, config file
+Configuration written in CoreDNS's Corefile syntax, declaring every Server Block Pharos runs, whatever the file holding it is named.
+_Avoid_: Caddyfile, config file, pharos.conf (that is a file name, not a format)
 
 **Server Block**:
 A stanza in the Corefile made of one or more Server Block Keys followed by the Directives that apply to them.
