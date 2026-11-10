@@ -567,6 +567,20 @@ fn supported_typed_rdata_agrees_with_domain() {
         (Type::CDS, vec![0x12, 0x34, 8, 2, 0xab, 0xcd]),
         (Type::DNSKEY, vec![1, 0, 3, 8, 1, 2, 3]),
         (Type::CDNSKEY, vec![1, 0, 3, 8, 1, 2, 3]),
+        (Type::TLSA, vec![3, 1, 1, 0xab, 0xcd]),
+        (Type::TLSA, vec![3, 1, 1]),
+        (Type::SSHFP, vec![1, 2, 0xab, 0xcd]),
+        (Type::SSHFP, vec![1, 2]),
+        (
+            Type::ZONEMD,
+            [vec![0, 0, 0, 1, 1, 1], vec![0xab; 12]].concat(),
+        ),
+        (
+            Type::TSIG,
+            vec![
+                0, 0, 0, 0, 0, 0, 1, 0, 10, 0, 2, 0xab, 0xcd, 0x12, 0x34, 0, 18, 0, 1, 0xef,
+            ],
+        ),
         (
             Type::RRSIG,
             vec![
@@ -682,6 +696,83 @@ fn supported_typed_rdata_agrees_with_domain() {
             .unwrap()
             .into_data();
         match (actual, expected) {
+            (
+                pharos_proto::Rdata::Tlsa {
+                    usage,
+                    selector,
+                    matching_type,
+                    certificate,
+                },
+                AllRecordData::Tlsa(b),
+            ) => {
+                assert_eq!(
+                    (usage, selector, matching_type),
+                    (
+                        b.usage().to_int(),
+                        b.selector().to_int(),
+                        b.matching_type().to_int()
+                    )
+                );
+                assert_eq!(certificate, *b.data());
+            }
+            (
+                pharos_proto::Rdata::Sshfp {
+                    algorithm,
+                    fingerprint_type,
+                    fingerprint,
+                },
+                AllRecordData::Sshfp(b),
+            ) => {
+                assert_eq!(
+                    (algorithm, fingerprint_type),
+                    (b.algorithm().to_int(), b.fingerprint_type().to_int())
+                );
+                assert_eq!(fingerprint, *b.fingerprint());
+            }
+            (
+                pharos_proto::Rdata::Zonemd {
+                    serial,
+                    scheme,
+                    hash_algorithm,
+                    digest,
+                },
+                AllRecordData::Zonemd(b),
+            ) => {
+                assert_eq!(
+                    (serial, scheme, hash_algorithm),
+                    (
+                        b.serial().into_int(),
+                        b.scheme().to_int(),
+                        b.algorithm().to_int()
+                    )
+                );
+                assert_eq!(digest, *b.digest());
+            }
+            (
+                pharos_proto::Rdata::Tsig {
+                    algorithm,
+                    time_signed,
+                    fudge,
+                    mac,
+                    original_id,
+                    error,
+                    other,
+                },
+                AllRecordData::Tsig(b),
+            ) => {
+                compare_name!(algorithm, b.algorithm());
+                assert_eq!(
+                    (time_signed, fudge, original_id, error),
+                    (
+                        u64::from(b.time_signed()),
+                        b.fudge(),
+                        b.original_id(),
+                        b.error().to_int()
+                    )
+                );
+                assert_eq!(mac, *b.mac());
+                assert_eq!(other, *b.other());
+            }
             (
                 pharos_proto::Rdata::Svcb {
                     priority,
@@ -984,6 +1075,33 @@ fn domain_accepts_noncanonical_and_disordered_bitmap_windows() {
             record
                 .to_any_record::<AllRecordData<_, ParsedName<_>>>()
                 .is_ok()
+        );
+    }
+}
+
+#[test]
+fn domain_requires_at_least_twelve_zonemd_digest_octets() {
+    let root: Name = ".".parse().unwrap();
+    let root = NameRef::parse(root.as_wire(), 0).unwrap();
+    for len in 0..=12 {
+        let mut data = vec![0; 6];
+        data.extend(vec![0xab; len]);
+        assert_eq!(
+            pharos_proto::Rdata::parse(Type::ZONEMD, &data).is_ok(),
+            len >= 12
+        );
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
+        builder
+            .record(Section::Answer, root, Type::ZONEMD, Class::IN, 0, &data)
+            .unwrap();
+        let msg = DomainMessage::from_octets(&builder.finish()[..]).unwrap();
+        let record = msg.question().answer().unwrap().next().unwrap().unwrap();
+        assert_eq!(
+            record
+                .to_any_record::<AllRecordData<_, ParsedName<_>>>()
+                .is_ok(),
+            len >= 12
         );
     }
 }

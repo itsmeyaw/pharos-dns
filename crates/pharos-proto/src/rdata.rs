@@ -29,7 +29,6 @@ fn unsupported_name_type(rtype: Type) -> bool {
             | Type::TALINK
             | Type::LP
             | Type::TKEY
-            | Type::TSIG
             | Type::AMTRELAY
     )
 }
@@ -234,9 +233,9 @@ fn display_base(
     Ok(())
 }
 
-fn display_date(f: &mut fmt::Formatter<'_>, seconds: u32) -> fmt::Result {
+fn display_date(f: &mut fmt::Formatter<'_>, seconds: u64) -> fmt::Result {
     // Gregorian civil date from days since the Unix epoch.
-    let days = i64::from(seconds / 86400) + 719468;
+    let days = (seconds / 86400) as i64 + 719468;
     let era = days / 146097;
     let day_of_era = days - era * 146097;
     let year_of_era =
@@ -520,6 +519,32 @@ pub enum Rdata<'a> {
         iterations: u16,
         salt: &'a [u8],
     },
+    Tlsa {
+        usage: u8,
+        selector: u8,
+        matching_type: u8,
+        certificate: &'a [u8],
+    },
+    Sshfp {
+        algorithm: u8,
+        fingerprint_type: u8,
+        fingerprint: &'a [u8],
+    },
+    Zonemd {
+        serial: u32,
+        scheme: u8,
+        hash_algorithm: u8,
+        digest: &'a [u8],
+    },
+    Tsig {
+        algorithm: NameRef<'a>,
+        time_signed: u64,
+        fudge: u16,
+        mac: &'a [u8],
+        original_id: u16,
+        error: u16,
+        other: &'a [u8],
+    },
     /// Opaque data in RFC 3597 format. Re-encoding preserves the original bytes,
     /// so it is only safe to relocate data that contains no compression pointers.
     Unknown(Type, &'a [u8]),
@@ -561,6 +586,11 @@ impl<'a> Rdata<'a> {
         let bytes = wire
             .get(offset..offset.checked_add(len).ok_or(RdataError)?)
             .ok_or(RdataError)?;
+        if matches!(rtype, Type::TLSA | Type::SSHFP | Type::ZONEMD | Type::TSIG)
+            && len > usize::from(u16::MAX)
+        {
+            return Err(RdataError);
+        }
         match rtype {
             Type::A => Ok(Self::A(Ipv4Addr::from(
                 <[u8; 4]>::try_from(bytes).map_err(|_| RdataError)?,
@@ -798,6 +828,57 @@ impl<'a> Rdata<'a> {
                     })
                 }
             }
+            Type::TLSA => {
+                let h = bytes.get(..3).ok_or(RdataError)?;
+                Ok(Self::Tlsa {
+                    usage: h[0],
+                    selector: h[1],
+                    matching_type: h[2],
+                    certificate: &bytes[3..],
+                })
+            }
+            Type::SSHFP => {
+                let h = bytes.get(..2).ok_or(RdataError)?;
+                Ok(Self::Sshfp {
+                    algorithm: h[0],
+                    fingerprint_type: h[1],
+                    fingerprint: &bytes[2..],
+                })
+            }
+            Type::ZONEMD => {
+                let h = bytes.get(..18).ok_or(RdataError)?;
+                Ok(Self::Zonemd {
+                    serial: u32::from_be_bytes([h[0], h[1], h[2], h[3]]),
+                    scheme: h[4],
+                    hash_algorithm: h[5],
+                    digest: &bytes[6..],
+                })
+            }
+            Type::TSIG => {
+                let algorithm = NameRef::parse(wire, offset).map_err(|_| RdataError)?;
+                let rest = bytes.get(algorithm.wire_len()..).ok_or(RdataError)?;
+                let h = rest.get(..10).ok_or(RdataError)?;
+                let time_signed = u64::from_be_bytes([0, 0, h[0], h[1], h[2], h[3], h[4], h[5]]);
+                let fudge = u16::from_be_bytes([h[6], h[7]]);
+                let mac_len = usize::from(u16::from_be_bytes([h[8], h[9]]));
+                let mac = rest.get(10..10 + mac_len).ok_or(RdataError)?;
+                let rest = rest.get(10 + mac_len..).ok_or(RdataError)?;
+                let h = rest.get(..6).ok_or(RdataError)?;
+                let other_len = usize::from(u16::from_be_bytes([h[4], h[5]]));
+                let other = rest.get(6..).ok_or(RdataError)?;
+                if other.len() != other_len {
+                    return Err(RdataError);
+                }
+                Ok(Self::Tsig {
+                    algorithm,
+                    time_signed,
+                    fudge,
+                    mac,
+                    original_id: u16::from_be_bytes([h[0], h[1]]),
+                    error: u16::from_be_bytes([h[2], h[3]]),
+                    other,
+                })
+            }
             _ if unsupported_name_type(rtype) => Err(RdataError),
             // shortcut: other record types stay opaque, add typed formats before zone parsing.
             _ => Ok(Self::Unknown(rtype, bytes)),
@@ -831,6 +912,10 @@ impl<'a> Rdata<'a> {
             Self::Nsec { .. } => Type::NSEC,
             Self::Nsec3 { .. } => Type::NSEC3,
             Self::Nsec3param { .. } => Type::NSEC3PARAM,
+            Self::Tlsa { .. } => Type::TLSA,
+            Self::Sshfp { .. } => Type::SSHFP,
+            Self::Zonemd { .. } => Type::ZONEMD,
+            Self::Tsig { .. } => Type::TSIG,
             Self::Unknown(rtype, _) => *rtype,
         }
     }
@@ -1012,6 +1097,73 @@ impl<'a> Rdata<'a> {
                 writer.write_bytes(&iterations.to_be_bytes())?;
                 write_character_string(writer, salt)
             }
+            Self::Tlsa {
+                usage,
+                selector,
+                matching_type,
+                certificate,
+            } => {
+                if certificate.len() > usize::from(u16::MAX) - 3 {
+                    return Err(BuildError::InvalidRdata);
+                }
+                writer.write_bytes(&[*usage, *selector, *matching_type])?;
+                writer.write_bytes(certificate)
+            }
+            Self::Sshfp {
+                algorithm,
+                fingerprint_type,
+                fingerprint,
+            } => {
+                if fingerprint.len() > usize::from(u16::MAX) - 2 {
+                    return Err(BuildError::InvalidRdata);
+                }
+                writer.write_bytes(&[*algorithm, *fingerprint_type])?;
+                writer.write_bytes(fingerprint)
+            }
+            Self::Zonemd {
+                serial,
+                scheme,
+                hash_algorithm,
+                digest,
+            } => {
+                if !(12..=usize::from(u16::MAX) - 6).contains(&digest.len()) {
+                    return Err(BuildError::InvalidRdata);
+                }
+                writer.write_bytes(&serial.to_be_bytes())?;
+                writer.write_bytes(&[*scheme, *hash_algorithm])?;
+                writer.write_bytes(digest)
+            }
+            Self::Tsig {
+                algorithm,
+                time_signed,
+                fudge,
+                mac,
+                original_id,
+                error,
+                other,
+            } => {
+                if *time_signed > 0xffff_ffff_ffff {
+                    return Err(BuildError::InvalidRdata);
+                }
+                let mac_len = u16::try_from(mac.len()).map_err(|_| BuildError::InvalidRdata)?;
+                let other_len = u16::try_from(other.len()).map_err(|_| BuildError::InvalidRdata)?;
+                let name_len = 1 + algorithm
+                    .labels()
+                    .map(|label| label.len() + 1)
+                    .sum::<usize>();
+                if name_len + 16 + mac.len() + other.len() > usize::from(u16::MAX) {
+                    return Err(BuildError::InvalidRdata);
+                }
+                writer.write_uncompressed_name(*algorithm)?;
+                writer.write_bytes(&time_signed.to_be_bytes()[2..])?;
+                writer.write_bytes(&fudge.to_be_bytes())?;
+                writer.write_bytes(&mac_len.to_be_bytes())?;
+                writer.write_bytes(mac)?;
+                writer.write_bytes(&original_id.to_be_bytes())?;
+                writer.write_bytes(&error.to_be_bytes())?;
+                writer.write_bytes(&other_len.to_be_bytes())?;
+                writer.write_bytes(other)
+            }
             Self::Unknown(rtype, _)
                 if unsupported_name_type(*rtype)
                     || matches!(
@@ -1039,6 +1191,10 @@ impl<'a> Rdata<'a> {
                             | Type::NSEC
                             | Type::NSEC3
                             | Type::NSEC3PARAM
+                            | Type::TLSA
+                            | Type::SSHFP
+                            | Type::ZONEMD
+                            | Type::TSIG
                     ) =>
             {
                 Err(BuildError::InvalidRdata)
@@ -1194,9 +1350,9 @@ impl fmt::Display for Rdata<'_> {
                 signature,
             } => {
                 write!(f, "{type_covered} {algorithm} {labels} {original_ttl} ")?;
-                display_date(f, *expiration)?;
+                display_date(f, u64::from(*expiration))?;
                 f.write_str(" ")?;
-                display_date(f, *inception)?;
+                display_date(f, u64::from(*inception))?;
                 write!(f, " {key_tag} {signer} ")?;
                 display_base(
                     f,
@@ -1244,6 +1400,57 @@ impl fmt::Display for Rdata<'_> {
                 } else {
                     display_hex(f, salt)
                 }
+            }
+            Self::Tlsa {
+                usage,
+                selector,
+                matching_type,
+                certificate,
+            } => {
+                write!(f, "{usage} {selector} {matching_type} ")?;
+                for byte in *certificate {
+                    write!(f, "{byte:02x}")?;
+                }
+                Ok(())
+            }
+            Self::Sshfp {
+                algorithm,
+                fingerprint_type,
+                fingerprint,
+            } => {
+                write!(f, "{algorithm} {fingerprint_type} ")?;
+                display_hex(f, fingerprint)
+            }
+            Self::Zonemd {
+                serial,
+                scheme,
+                hash_algorithm,
+                digest,
+            } => {
+                write!(f, "{serial} {scheme} {hash_algorithm} ")?;
+                for byte in *digest {
+                    write!(f, "{byte:02x}")?;
+                }
+                Ok(())
+            }
+            Self::Tsig {
+                algorithm,
+                time_signed,
+                fudge,
+                mac,
+                original_id,
+                error,
+                other,
+            } => {
+                write!(f, "{algorithm} ")?;
+                display_date(f, *time_signed)?;
+                write!(f, " {fudge} {} ", mac.len())?;
+                display_hex(f, mac)?;
+                write!(f, " {original_id} {error} {} ", other.len())?;
+                for byte in *other {
+                    write!(f, "{byte:02x}")?;
+                }
+                Ok(())
             }
             Self::Unknown(_, bytes) => {
                 write!(f, "\\# {} ", bytes.len())?;

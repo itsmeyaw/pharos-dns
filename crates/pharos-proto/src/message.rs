@@ -78,6 +78,26 @@ impl<'a> Record<'a> {
     pub fn data(&self) -> Result<crate::Rdata<'a>, crate::RdataError> {
         crate::Rdata::parse_in_message(self.rtype, self.wire, self.rdata_offset, self.rdata.len())
     }
+
+    /// Formats a valid TSIG as a complete miekg/dns pseudo-section.
+    pub fn display_tsig(&self) -> Result<impl fmt::Display + 'a, crate::RdataError> {
+        let data = self.data()?;
+        if !matches!(data, crate::Rdata::Tsig { .. }) {
+            return Err(crate::RdataError);
+        }
+        let (name, ttl, class) = (self.name, self.ttl, self.class);
+        struct TsigDisplay<'a>(NameRef<'a>, u32, Class, crate::Rdata<'a>);
+        impl fmt::Display for TsigDisplay<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    f,
+                    "\n;; TSIG PSEUDOSECTION:\n; {}\t{}\t{}\tTSIG\t {}",
+                    self.0, self.1, self.2, self.3
+                )
+            }
+        }
+        Ok(TsigDisplay(name, ttl, class, data))
+    }
 }
 
 fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), MessageError> {

@@ -40,7 +40,8 @@ UTF-8 in Extended DNS Error text is rendered with replacement characters.
 
 The typed RDATA parser currently supports A, AAAA, NS, CNAME, PTR, MX,
 SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG,
-NSEC, NSEC3, NSEC3PARAM, SVCB and HTTPS. Unsupported name-bearing types are rejected by the typed parser;
+NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SSHFP, ZONEMD and TSIG.
+Unsupported name-bearing types are rejected by the typed parser;
 other types remain opaque and print in RFC 3597 form rather than using their
 CoreDNS presentation. Presentation parsing is not yet implemented. Unlike
 miekg/dns, incomplete typed records are rejected rather than accepted as
@@ -55,6 +56,13 @@ values, which can make the displayed value differ from the original octets.
 SRV targets and NAPTR replacements may be decoded from compressed names, but
 are always written uncompressed. RRSIG signer names and NSEC next names have
 the same behavior.
+
+TLSA and SSHFP accept empty tails like miekg/dns's wire decoder and domain
+0.12.3. ZONEMD digests shorter than 12 octets are rejected as required by RFC
+8976; miekg/dns v1.1.73's `zmsg.go` unpacker accepts them, while domain also
+rejects them. TSIG algorithm names accept compression on decode but are written
+literally. `Record::display_tsig()` renders the full miekg/dns pseudo-section;
+`Rdata` display contains only its data fields.
 
 SVCB and HTTPS targets likewise accept compressed names on decode and are
 written uncompressed. Their parameters must be ordered with no duplicate or
@@ -83,6 +91,8 @@ DNSSEC fixtures in `crates/pharos-proto/tests/rdata_dnssec.rs` are adapted from
 miekg/dns v1.1.73 `parse_test.go` and `msg_helpers_test.go` under the same license.
 SVCB/HTTPS fixtures in `crates/pharos-proto/tests/rdata_svcb.rs` adapt its
 `parse_test.go` and `svcb_test.go` under the same license.
+Security record fixtures in `crates/pharos-proto/tests/rdata_security.rs`
+adapt its `parse_test.go` and `tsig_test.go` under the same license.
 
 ## Environment substitution
 

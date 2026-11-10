@@ -11,5 +11,8 @@ is BSD-3-Clause, copyright 2009 The Go Authors; extensions copyright 2011 Miek
 Gieben.
 SVCB and HTTPS fixtures in `rdata_svcb.rs` adapt miekg/dns v1.1.73
 `parse_test.go` (`TestParseSVCB`) and `svcb_test.go` under the same license.
+Security fixtures in `rdata_security.rs` adapt miekg/dns v1.1.73
+`parse_test.go` (`TestParseTLSA`, `TestParseSSHFP`, `TestParseZONEMD`)
+and `tsig_test.go` under the same license.
 Differential RDATA tests use NLnet Labs' domain as a reference. Licenses are
 listed in the repository's `THIRD_PARTY_NOTICES`.
