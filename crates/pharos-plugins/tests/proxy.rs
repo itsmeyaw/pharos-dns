@@ -169,3 +169,33 @@ async fn expired_connections_are_not_reused() {
     let peers = task.await.unwrap();
     assert_ne!(peers[0], peers[1]);
 }
+
+#[tokio::test]
+async fn records_exchange_metrics_in_registry() {
+    use pharos_server::metrics::Registry;
+    let registry = Registry::new("v", "r", "rust");
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut proxy = Proxy::new(server.local_addr().unwrap());
+    proxy.set_metrics(&registry, "forward");
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        for _ in 0..2 {
+            let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+    });
+    let mut response = [0; 512];
+    for _ in 0..2 {
+        proxy
+            .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+            .await
+            .unwrap();
+    }
+    task.await.unwrap();
+    let mut metrics = String::new();
+    registry.encode(&mut metrics);
+    assert!(metrics.contains("pharos_proxy_conn_cache_hits_total"));
+    assert!(metrics.contains("pharos_proxy_conn_cache_misses_total"));
+    assert!(metrics.contains("pharos_proxy_request_duration_seconds_count"));
+}

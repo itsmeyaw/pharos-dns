@@ -2,13 +2,14 @@
 //! no lock or manager task is held while a Query waits for its Response.
 //! DNS-over-TLS is deferred to M3.
 
-use pharos_proto::Message;
+use pharos_proto::{Message, Rcode};
+use pharos_server::metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry};
 use std::{
     collections::VecDeque,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
-        Mutex,
+        Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -105,6 +106,13 @@ pub struct Proxy {
     address: SocketAddr,
     shards: [[Mutex<VecDeque<Cached>>; SHARDS]; 2],
     expire: Duration,
+    metrics: Option<Metrics>,
+}
+
+struct Metrics {
+    proxy: ProxyMetrics,
+    cache: [ProxyConnectionCache; 2],
+    durations: Box<[OnceLock<ProxyRequestDuration>]>,
 }
 
 impl Proxy {
@@ -114,12 +122,23 @@ impl Proxy {
             address,
             shards: std::array::from_fn(|_| std::array::from_fn(|_| Mutex::new(VecDeque::new()))),
             expire: EXPIRE,
+            metrics: None,
         }
     }
 
     /// Set the maximum idle time before an Upstream connection is discarded.
     pub fn set_expire(&mut self, expire: Duration) {
         self.expire = expire;
+    }
+
+    /// Register the Upstream's metrics with the server's exporter.
+    pub fn set_metrics(&mut self, registry: &Registry, name: &str) {
+        let proxy = registry.proxy(name, &self.address.to_string());
+        self.metrics = Some(Metrics {
+            cache: [proxy.connection_cache("udp"), proxy.connection_cache("tcp")],
+            durations: (0..4096).map(|_| OnceLock::new()).collect(),
+            proxy,
+        });
     }
     pub async fn exchange(
         &self,
@@ -152,6 +171,7 @@ impl Proxy {
         response: &mut [u8],
         transport: Transport,
     ) -> Result<Exchange, Error> {
+        let start = Instant::now();
         let request = Message::parse(query).map_err(|_| Error::InvalidRequest)?;
         if query.len() > response.len() || query.len() > u16::MAX as usize {
             return Err(Error::InvalidRequest);
@@ -169,6 +189,13 @@ impl Proxy {
             }
         };
         let reused = cached.is_some();
+        if let Some(metrics) = &self.metrics {
+            if reused {
+                metrics.cache[protocol].hit();
+            } else {
+                metrics.cache[protocol].miss();
+            }
+        }
         let mut socket = if let Some(cached) = cached {
             cached.socket
         } else if transport == Transport::Tcp {
@@ -221,6 +248,13 @@ impl Proxy {
             }
         })?;
         let answer = Message::parse(&response[..length]).map_err(|_| Error::Mismatch)?;
+        if let Some(metrics) = &self.metrics {
+            let code = answer.rcode().0;
+            // shortcut: first observation of an RCODE allocates; pre-register codes if cold traffic matters.
+            metrics.durations[usize::from(code)]
+                .get_or_init(|| metrics.proxy.request_duration(&Rcode(code).to_string()))
+                .observe(start.elapsed().as_secs_f64());
+        }
         let same_questions = request.question_count() == answer.question_count()
             && request
                 .questions()
