@@ -563,6 +563,22 @@ fn supported_typed_rdata_agrees_with_domain() {
         (Type::HINFO, b"\x03CPU\x02OS".to_vec()),
         (Type::CAA, b"\x80\x05issueexample.org".to_vec()),
         (Type::URI, b"\x00\x0a\x00\x01https://example.org/".to_vec()),
+        (Type::DS, vec![0x12, 0x34, 8, 2, 0xab, 0xcd]),
+        (Type::CDS, vec![0x12, 0x34, 8, 2, 0xab, 0xcd]),
+        (Type::DNSKEY, vec![1, 0, 3, 8, 1, 2, 3]),
+        (Type::CDNSKEY, vec![1, 0, 3, 8, 1, 2, 3]),
+        (
+            Type::RRSIG,
+            vec![
+                0, 1, 8, 2, 0, 0, 0x0e, 0x10, 0, 0, 0, 2, 0, 0, 0, 1, 0x12, 0x34, 0, 1, 2, 3,
+            ],
+        ),
+        (Type::NSEC, vec![0, 0, 1, 0x40, 1, 1, 0x80]),
+        (
+            Type::NSEC3,
+            vec![1, 0, 0, 10, 2, 10, 11, 1, 0x66, 0, 1, 0x40],
+        ),
+        (Type::NSEC3PARAM, vec![1, 0, 0, 10, 2, 10, 11]),
         (Type(65000), vec![0, 255, 42]),
     ] {
         builder
@@ -620,6 +636,28 @@ fn supported_typed_rdata_agrees_with_domain() {
             )
         };
     }
+    macro_rules! compare_ds {
+        ($key:expr, $alg:expr, $kind:expr, $digest:expr, $b:expr) => {{
+            assert_eq!(
+                ($key, $alg, $kind),
+                (
+                    $b.key_tag(),
+                    $b.algorithm().to_int(),
+                    $b.digest_type().to_int()
+                )
+            );
+            assert_eq!($digest, *$b.digest());
+        }};
+    }
+    macro_rules! compare_key {
+        ($flags:expr, $protocol:expr, $alg:expr, $key:expr, $b:expr) => {{
+            assert_eq!(
+                ($flags, $protocol, $alg),
+                ($b.flags(), $b.protocol(), $b.algorithm().to_int())
+            );
+            assert_eq!($key, *$b.public_key());
+        }};
+    }
     for (actual, expected) in pharos.answers().zip(domain_answers) {
         let actual = actual.data().unwrap();
         let expected = expected
@@ -628,6 +666,117 @@ fn supported_typed_rdata_agrees_with_domain() {
             .unwrap()
             .into_data();
         match (actual, expected) {
+            (
+                pharos_proto::Rdata::Ds {
+                    key_tag,
+                    algorithm,
+                    digest_type,
+                    digest,
+                },
+                AllRecordData::Ds(b),
+            ) => compare_ds!(key_tag, algorithm, digest_type, digest, b),
+            (
+                pharos_proto::Rdata::Cds {
+                    key_tag,
+                    algorithm,
+                    digest_type,
+                    digest,
+                },
+                AllRecordData::Cds(b),
+            ) => compare_ds!(key_tag, algorithm, digest_type, digest, b),
+            (
+                pharos_proto::Rdata::Dnskey {
+                    flags,
+                    protocol,
+                    algorithm,
+                    public_key,
+                },
+                AllRecordData::Dnskey(b),
+            ) => compare_key!(flags, protocol, algorithm, public_key, b),
+            (
+                pharos_proto::Rdata::Cdnskey {
+                    flags,
+                    protocol,
+                    algorithm,
+                    public_key,
+                },
+                AllRecordData::Cdnskey(b),
+            ) => compare_key!(flags, protocol, algorithm, public_key, b),
+            (
+                pharos_proto::Rdata::Rrsig {
+                    type_covered,
+                    algorithm,
+                    labels,
+                    original_ttl,
+                    expiration,
+                    inception,
+                    key_tag,
+                    signer,
+                    signature,
+                },
+                AllRecordData::Rrsig(b),
+            ) => {
+                assert_eq!(
+                    (
+                        type_covered.0,
+                        algorithm,
+                        labels,
+                        original_ttl,
+                        expiration,
+                        inception,
+                        key_tag
+                    ),
+                    (
+                        b.type_covered().to_int(),
+                        b.algorithm().to_int(),
+                        b.labels(),
+                        b.original_ttl().as_secs(),
+                        b.expiration().into_int(),
+                        b.inception().into_int(),
+                        b.key_tag()
+                    )
+                );
+                compare_name!(signer, b.signer_name());
+                assert_eq!(signature, *b.signature());
+            }
+            (pharos_proto::Rdata::Nsec { next, bitmap }, AllRecordData::Nsec(b)) => {
+                compare_name!(next, b.next_name());
+                assert_eq!(bitmap, b.types().as_slice());
+            }
+            (
+                pharos_proto::Rdata::Nsec3 {
+                    hash_algorithm,
+                    flags,
+                    iterations,
+                    salt,
+                    next_owner,
+                    bitmap,
+                },
+                AllRecordData::Nsec3(b),
+            ) => {
+                assert_eq!(
+                    (hash_algorithm, flags, iterations),
+                    (b.hash_algorithm().to_int(), b.flags(), b.iterations())
+                );
+                assert_eq!(salt, b.salt().as_slice());
+                assert_eq!(next_owner, b.next_owner().as_slice());
+                assert_eq!(bitmap, b.types().as_slice());
+            }
+            (
+                pharos_proto::Rdata::Nsec3param {
+                    hash_algorithm,
+                    flags,
+                    iterations,
+                    salt,
+                },
+                AllRecordData::Nsec3param(b),
+            ) => {
+                assert_eq!(
+                    (hash_algorithm, flags, iterations),
+                    (b.hash_algorithm().to_int(), b.flags(), b.iterations())
+                );
+                assert_eq!(salt, b.salt().as_slice());
+            }
             (pharos_proto::Rdata::A(a), AllRecordData::A(b)) => assert_eq!(a, b.addr()),
             (pharos_proto::Rdata::Aaaa(a), AllRecordData::Aaaa(b)) => assert_eq!(a, b.addr()),
             (pharos_proto::Rdata::Txt(a), AllRecordData::Txt(b)) => {
@@ -746,5 +895,34 @@ fn supported_typed_rdata_agrees_with_domain() {
             }
             pair => panic!("typed RDATA mismatch: {pair:?}"),
         }
+    }
+}
+
+#[test]
+fn domain_accepts_noncanonical_and_disordered_bitmap_windows() {
+    let root: Name = ".".parse().unwrap();
+    let root = NameRef::parse(root.as_wire(), 0).unwrap();
+    for bitmap in [
+        &[0, 1, 0][..],
+        &[0, 2, 0x40, 0][..],
+        &[1, 1, 0x80, 0, 1, 0x40][..],
+        &[0, 1, 0x40, 0, 1, 0x80][..],
+    ] {
+        let mut rdata = vec![0];
+        rdata.extend_from_slice(bitmap);
+        assert!(pharos_proto::Rdata::parse(Type::NSEC, &rdata).is_err());
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
+        builder
+            .record(Section::Answer, root, Type::NSEC, Class::IN, 0, &rdata)
+            .unwrap();
+        let _ = builder.finish();
+        let msg = DomainMessage::from_octets(wire.as_slice()).unwrap();
+        let record = msg.question().answer().unwrap().next().unwrap().unwrap();
+        assert!(
+            record
+                .to_any_record::<AllRecordData<_, ParsedName<_>>>()
+                .is_ok()
+        );
     }
 }

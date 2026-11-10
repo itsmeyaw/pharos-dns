@@ -39,7 +39,8 @@ UTF-8 in Extended DNS Error text is rendered with replacement characters.
 ## Record data
 
 The typed RDATA parser currently supports A, AAAA, NS, CNAME, PTR, MX,
-SOA, TXT, HINFO, CAA, URI, SRV and NAPTR. Unsupported name-bearing types are rejected by the typed parser;
+SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG,
+NSEC, NSEC3 and NSEC3PARAM. Unsupported name-bearing types are rejected by the typed parser;
 other types remain opaque and print in RFC 3597 form rather than using their
 CoreDNS presentation. Presentation parsing is not yet implemented. Unlike
 miekg/dns, incomplete typed records are rejected rather than accepted as
@@ -52,12 +53,22 @@ miekg/dns accepts them. CAA and URI presentation follows miekg/dns's
 octet-string escaping, including its interpretation of backslashes in wire
 values, which can make the displayed value differ from the original octets.
 SRV targets and NAPTR replacements may be decoded from compressed names, but
-are always written uncompressed.
+are always written uncompressed. RRSIG signer names and NSEC next names have
+the same behavior.
+
+NSEC and NSEC3 bitmap windows must be ordered, nonempty, at most 32 octets,
+complete, and have a nonzero final octet (RFC 4034 section 4.1.2; ADR-0002).
+miekg/dns and domain 0.12.3 accept trailing zero octets and all-zero windows;
+domain also accepts duplicate or disordered windows. Both accept empty NSEC
+bitmaps; Pharos rejects them but accepts empty NSEC3 bitmaps (RFC 6840 section
+6.4).
 
 The SRV and NAPTR fixtures in `crates/pharos-proto/tests/rdata_service.rs`
 are adapted from miekg/dns v1.1.73 `parse_test.go` and `dns_test.go`
 ([BSD-3-Clause](https://github.com/miekg/dns/blob/v1.1.73/LICENSE),
 copyright 2009 The Go Authors; extensions copyright 2011 Miek Gieben).
+DNSSEC fixtures in `crates/pharos-proto/tests/rdata_dnssec.rs` are adapted from
+miekg/dns v1.1.73 `parse_test.go` and `msg_helpers_test.go` under the same license.
 
 ## Environment substitution
 

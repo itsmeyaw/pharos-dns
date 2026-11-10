@@ -2,7 +2,7 @@
 
 use std::alloc::System;
 
-use pharos_proto::{Class, Message, MessageBuilder, NameRef, Section, Type};
+use pharos_proto::{Class, Message, MessageBuilder, NameRef, Rdata, Section, Type};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
 #[global_allocator]
@@ -47,6 +47,18 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
     let response = builder.finish_with_opt(opt).unwrap();
     for record in Message::parse(response).unwrap().answers() {
         std::hint::black_box(record.data().unwrap());
+    }
+    for (rtype, bytes) in [
+        (Type::DS, &b"\0\0\x08\x02\xff"[..]),
+        (Type::CDS, &b"\0\0\x08\x02\xff"[..]),
+        (Type::DNSKEY, &b"\x01\0\x03\x08\xff"[..]),
+        (Type::CDNSKEY, &b"\x01\0\x03\x08\xff"[..]),
+        (Type::RRSIG, &[0; 19][..]),
+        (Type::NSEC, &b"\0\0\x01\x40"[..]),
+        (Type::NSEC3, &b"\x01\0\0\0\0\0\0\x01\x40"[..]),
+        (Type::NSEC3PARAM, &b"\x01\0\0\0\0"[..]),
+    ] {
+        std::hint::black_box(Rdata::parse(rtype, bytes).unwrap());
     }
     let allocations = region.change();
     assert_eq!(allocations.allocations, 0);

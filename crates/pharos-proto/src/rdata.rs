@@ -25,8 +25,6 @@ fn unsupported_name_type(rtype: Type) -> bool {
             | Type::KX
             | Type::DNAME
             | Type::IPSECKEY
-            | Type::RRSIG
-            | Type::NSEC
             | Type::HIP
             | Type::TALINK
             | Type::SVCB
@@ -59,6 +57,114 @@ fn valid_txt(mut bytes: &[u8]) -> Result<(), RdataError> {
         bytes = character_string(bytes)?.1;
     }
     Ok(())
+}
+
+fn valid_bitmap(mut bytes: &[u8]) -> Result<(), RdataError> {
+    let mut previous = None;
+    while !bytes.is_empty() {
+        let header = bytes.get(..2).ok_or(RdataError)?;
+        let (window, len) = (header[0], usize::from(header[1]));
+        if previous.is_some_and(|p| window <= p) || !(1..=32).contains(&len) {
+            return Err(RdataError);
+        }
+        let block = bytes.get(2..2 + len).ok_or(RdataError)?;
+        if block.last() == Some(&0) {
+            return Err(RdataError);
+        }
+        previous = Some(window);
+        bytes = &bytes[2 + len..];
+    }
+    Ok(())
+}
+
+fn valid_nsec_bitmap(bytes: &[u8]) -> Result<(), RdataError> {
+    if bytes.is_empty() {
+        return Err(RdataError);
+    }
+    valid_bitmap(bytes)
+}
+
+fn display_bitmap(f: &mut fmt::Formatter<'_>, mut bytes: &[u8]) -> fmt::Result {
+    if valid_bitmap(bytes).is_err() {
+        return f.write_str(" <invalid bitmap>");
+    }
+    while !bytes.is_empty() {
+        let window = u16::from(bytes[0]);
+        let len = usize::from(bytes[1]);
+        for (index, byte) in bytes[2..2 + len].iter().enumerate() {
+            for bit in 0..8 {
+                if byte & (0x80 >> bit) != 0 {
+                    write!(f, " {}", Type(window * 256 + (index * 8 + bit) as u16))?;
+                }
+            }
+        }
+        bytes = &bytes[2 + len..];
+    }
+    Ok(())
+}
+
+fn display_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    for byte in bytes {
+        write!(f, "{byte:02X}")?;
+    }
+    Ok(())
+}
+
+fn display_base(
+    f: &mut fmt::Formatter<'_>,
+    bytes: &[u8],
+    alphabet: &[u8],
+    bits: u32,
+    pad: bool,
+) -> fmt::Result {
+    let mut buffer = 0u32;
+    let mut available = 0u32;
+    let mut count = 0usize;
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        available += 8;
+        while available >= bits {
+            available -= bits;
+            let index = ((buffer >> available) & ((1 << bits) - 1)) as usize;
+            write!(f, "{}", char::from(alphabet[index]))?;
+            count += 1;
+        }
+    }
+    if available != 0 {
+        let index = ((buffer << (bits - available)) & ((1 << bits) - 1)) as usize;
+        write!(f, "{}", char::from(alphabet[index]))?;
+        count += 1;
+    }
+    if pad {
+        while !count.is_multiple_of(4) {
+            f.write_str("=")?;
+            count += 1;
+        }
+    }
+    Ok(())
+}
+
+fn display_date(f: &mut fmt::Formatter<'_>, seconds: u32) -> fmt::Result {
+    // Gregorian civil date from days since the Unix epoch.
+    let days = i64::from(seconds / 86400) + 719468;
+    let era = days / 146097;
+    let day_of_era = days - era * 146097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    let time = seconds % 86400;
+    write!(
+        f,
+        "{year:04}{month:02}{day:02}{:02}{:02}{:02}",
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    )
 }
 
 fn display_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
@@ -170,6 +276,59 @@ pub enum Rdata<'a> {
         services: &'a [u8],
         regexp: &'a [u8],
         replacement: NameRef<'a>,
+    },
+    Ds {
+        key_tag: u16,
+        algorithm: u8,
+        digest_type: u8,
+        digest: &'a [u8],
+    },
+    Cds {
+        key_tag: u16,
+        algorithm: u8,
+        digest_type: u8,
+        digest: &'a [u8],
+    },
+    Dnskey {
+        flags: u16,
+        protocol: u8,
+        algorithm: u8,
+        public_key: &'a [u8],
+    },
+    Cdnskey {
+        flags: u16,
+        protocol: u8,
+        algorithm: u8,
+        public_key: &'a [u8],
+    },
+    Rrsig {
+        type_covered: Type,
+        algorithm: u8,
+        labels: u8,
+        original_ttl: u32,
+        expiration: u32,
+        inception: u32,
+        key_tag: u16,
+        signer: NameRef<'a>,
+        signature: &'a [u8],
+    },
+    Nsec {
+        next: NameRef<'a>,
+        bitmap: &'a [u8],
+    },
+    Nsec3 {
+        hash_algorithm: u8,
+        flags: u8,
+        iterations: u16,
+        salt: &'a [u8],
+        next_owner: &'a [u8],
+        bitmap: &'a [u8],
+    },
+    Nsec3param {
+        hash_algorithm: u8,
+        flags: u8,
+        iterations: u16,
+        salt: &'a [u8],
     },
     /// Opaque data in RFC 3597 format. Re-encoding preserves the original bytes,
     /// so it is only safe to relocate data that contains no compression pointers.
@@ -331,6 +490,96 @@ impl<'a> Rdata<'a> {
                     replacement,
                 })
             }
+            Type::DS | Type::CDS => {
+                let h = bytes.get(..4).ok_or(RdataError)?;
+                let (key_tag, algorithm, digest_type, digest) =
+                    (u16::from_be_bytes([h[0], h[1]]), h[2], h[3], &bytes[4..]);
+                Ok(if rtype == Type::DS {
+                    Self::Ds {
+                        key_tag,
+                        algorithm,
+                        digest_type,
+                        digest,
+                    }
+                } else {
+                    Self::Cds {
+                        key_tag,
+                        algorithm,
+                        digest_type,
+                        digest,
+                    }
+                })
+            }
+            Type::DNSKEY | Type::CDNSKEY => {
+                let h = bytes.get(..4).ok_or(RdataError)?;
+                let (flags, protocol, algorithm, public_key) =
+                    (u16::from_be_bytes([h[0], h[1]]), h[2], h[3], &bytes[4..]);
+                Ok(if rtype == Type::DNSKEY {
+                    Self::Dnskey {
+                        flags,
+                        protocol,
+                        algorithm,
+                        public_key,
+                    }
+                } else {
+                    Self::Cdnskey {
+                        flags,
+                        protocol,
+                        algorithm,
+                        public_key,
+                    }
+                })
+            }
+            Type::RRSIG => {
+                let h = bytes.get(..18).ok_or(RdataError)?;
+                let signer = NameRef::parse(wire, offset + 18).map_err(|_| RdataError)?;
+                let signature = bytes.get(18 + signer.wire_len()..).ok_or(RdataError)?;
+                Ok(Self::Rrsig {
+                    type_covered: Type(u16::from_be_bytes([h[0], h[1]])),
+                    algorithm: h[2],
+                    labels: h[3],
+                    original_ttl: u32::from_be_bytes([h[4], h[5], h[6], h[7]]),
+                    expiration: u32::from_be_bytes([h[8], h[9], h[10], h[11]]),
+                    inception: u32::from_be_bytes([h[12], h[13], h[14], h[15]]),
+                    key_tag: u16::from_be_bytes([h[16], h[17]]),
+                    signer,
+                    signature,
+                })
+            }
+            Type::NSEC => {
+                let next = NameRef::parse(wire, offset).map_err(|_| RdataError)?;
+                let bitmap = bytes.get(next.wire_len()..).ok_or(RdataError)?;
+                valid_nsec_bitmap(bitmap)?;
+                Ok(Self::Nsec { next, bitmap })
+            }
+            Type::NSEC3 | Type::NSEC3PARAM => {
+                let h = bytes.get(..4).ok_or(RdataError)?;
+                let (salt, rest) = character_string(&bytes[4..])?;
+                let (hash_algorithm, flags, iterations) =
+                    (h[0], h[1], u16::from_be_bytes([h[2], h[3]]));
+                if rtype == Type::NSEC3PARAM {
+                    if !rest.is_empty() {
+                        return Err(RdataError);
+                    }
+                    Ok(Self::Nsec3param {
+                        hash_algorithm,
+                        flags,
+                        iterations,
+                        salt,
+                    })
+                } else {
+                    let (next_owner, bitmap) = character_string(rest)?;
+                    valid_bitmap(bitmap)?;
+                    Ok(Self::Nsec3 {
+                        hash_algorithm,
+                        flags,
+                        iterations,
+                        salt,
+                        next_owner,
+                        bitmap,
+                    })
+                }
+            }
             _ if unsupported_name_type(rtype) => Err(RdataError),
             // shortcut: other record types stay opaque, add typed formats before zone parsing.
             _ => Ok(Self::Unknown(rtype, bytes)),
@@ -354,6 +603,14 @@ impl<'a> Rdata<'a> {
             Self::Uri { .. } => Type::URI,
             Self::Srv { .. } => Type::SRV,
             Self::Naptr { .. } => Type::NAPTR,
+            Self::Ds { .. } => Type::DS,
+            Self::Cds { .. } => Type::CDS,
+            Self::Dnskey { .. } => Type::DNSKEY,
+            Self::Cdnskey { .. } => Type::CDNSKEY,
+            Self::Rrsig { .. } => Type::RRSIG,
+            Self::Nsec { .. } => Type::NSEC,
+            Self::Nsec3 { .. } => Type::NSEC3,
+            Self::Nsec3param { .. } => Type::NSEC3PARAM,
             Self::Unknown(rtype, _) => *rtype,
         }
     }
@@ -438,6 +695,88 @@ impl<'a> Rdata<'a> {
                 write_character_string(writer, regexp)?;
                 writer.write_uncompressed_name(*replacement)
             }
+            Self::Ds {
+                key_tag,
+                algorithm,
+                digest_type,
+                digest,
+            }
+            | Self::Cds {
+                key_tag,
+                algorithm,
+                digest_type,
+                digest,
+            } => {
+                writer.write_bytes(&key_tag.to_be_bytes())?;
+                writer.write_bytes(&[*algorithm, *digest_type])?;
+                writer.write_bytes(digest)
+            }
+            Self::Dnskey {
+                flags,
+                protocol,
+                algorithm,
+                public_key,
+            }
+            | Self::Cdnskey {
+                flags,
+                protocol,
+                algorithm,
+                public_key,
+            } => {
+                writer.write_bytes(&flags.to_be_bytes())?;
+                writer.write_bytes(&[*protocol, *algorithm])?;
+                writer.write_bytes(public_key)
+            }
+            Self::Rrsig {
+                type_covered,
+                algorithm,
+                labels,
+                original_ttl,
+                expiration,
+                inception,
+                key_tag,
+                signer,
+                signature,
+            } => {
+                writer.write_bytes(&type_covered.0.to_be_bytes())?;
+                writer.write_bytes(&[*algorithm, *labels])?;
+                for value in [original_ttl, expiration, inception] {
+                    writer.write_bytes(&value.to_be_bytes())?;
+                }
+                writer.write_bytes(&key_tag.to_be_bytes())?;
+                writer.write_uncompressed_name(*signer)?;
+                writer.write_bytes(signature)
+            }
+            Self::Nsec { next, bitmap } => {
+                valid_nsec_bitmap(bitmap).map_err(|_| BuildError::InvalidRdata)?;
+                writer.write_uncompressed_name(*next)?;
+                writer.write_bytes(bitmap)
+            }
+            Self::Nsec3 {
+                hash_algorithm,
+                flags,
+                iterations,
+                salt,
+                next_owner,
+                bitmap,
+            } => {
+                valid_bitmap(bitmap).map_err(|_| BuildError::InvalidRdata)?;
+                writer.write_bytes(&[*hash_algorithm, *flags])?;
+                writer.write_bytes(&iterations.to_be_bytes())?;
+                write_character_string(writer, salt)?;
+                write_character_string(writer, next_owner)?;
+                writer.write_bytes(bitmap)
+            }
+            Self::Nsec3param {
+                hash_algorithm,
+                flags,
+                iterations,
+                salt,
+            } => {
+                writer.write_bytes(&[*hash_algorithm, *flags])?;
+                writer.write_bytes(&iterations.to_be_bytes())?;
+                write_character_string(writer, salt)
+            }
             Self::Unknown(rtype, _)
                 if unsupported_name_type(*rtype)
                     || matches!(
@@ -455,6 +794,14 @@ impl<'a> Rdata<'a> {
                             | Type::URI
                             | Type::SRV
                             | Type::NAPTR
+                            | Type::DS
+                            | Type::CDS
+                            | Type::DNSKEY
+                            | Type::CDNSKEY
+                            | Type::RRSIG
+                            | Type::NSEC
+                            | Type::NSEC3
+                            | Type::NSEC3PARAM
                     ) =>
             {
                 Err(BuildError::InvalidRdata)
@@ -545,6 +892,105 @@ impl fmt::Display for Rdata<'_> {
                 f.write_str(" ")?;
                 display_quoted(f, regexp)?;
                 write!(f, " {replacement}")
+            }
+            Self::Ds {
+                key_tag,
+                algorithm,
+                digest_type,
+                digest,
+            }
+            | Self::Cds {
+                key_tag,
+                algorithm,
+                digest_type,
+                digest,
+            } => {
+                write!(f, "{key_tag} {algorithm} {digest_type} ")?;
+                display_hex(f, digest)
+            }
+            Self::Dnskey {
+                flags,
+                protocol,
+                algorithm,
+                public_key,
+            }
+            | Self::Cdnskey {
+                flags,
+                protocol,
+                algorithm,
+                public_key,
+            } => {
+                write!(f, "{flags} {protocol} {algorithm} ")?;
+                display_base(
+                    f,
+                    public_key,
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+                    6,
+                    true,
+                )
+            }
+            Self::Rrsig {
+                type_covered,
+                algorithm,
+                labels,
+                original_ttl,
+                expiration,
+                inception,
+                key_tag,
+                signer,
+                signature,
+            } => {
+                write!(f, "{type_covered} {algorithm} {labels} {original_ttl} ")?;
+                display_date(f, *expiration)?;
+                f.write_str(" ")?;
+                display_date(f, *inception)?;
+                write!(f, " {key_tag} {signer} ")?;
+                display_base(
+                    f,
+                    signature,
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+                    6,
+                    true,
+                )
+            }
+            Self::Nsec { next, bitmap } => {
+                write!(f, "{next}")?;
+                if bitmap.is_empty() {
+                    f.write_str(" <invalid bitmap>")
+                } else {
+                    display_bitmap(f, bitmap)
+                }
+            }
+            Self::Nsec3 {
+                hash_algorithm,
+                flags,
+                iterations,
+                salt,
+                next_owner,
+                bitmap,
+            } => {
+                write!(f, "{hash_algorithm} {flags} {iterations} ")?;
+                if salt.is_empty() {
+                    f.write_str("-")?;
+                } else {
+                    display_hex(f, salt)?;
+                }
+                f.write_str(" ")?;
+                display_base(f, next_owner, b"0123456789ABCDEFGHIJKLMNOPQRSTUV", 5, false)?;
+                display_bitmap(f, bitmap)
+            }
+            Self::Nsec3param {
+                hash_algorithm,
+                flags,
+                iterations,
+                salt,
+            } => {
+                write!(f, "{hash_algorithm} {flags} {iterations} ")?;
+                if salt.is_empty() {
+                    f.write_str("-")
+                } else {
+                    display_hex(f, salt)
+                }
             }
             Self::Unknown(_, bytes) => {
                 write!(f, "\\# {} ", bytes.len())?;
