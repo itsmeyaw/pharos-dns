@@ -242,7 +242,7 @@ also accept service names and out-of-range ports at setup.
 Like CoreDNS, IPv6 scopes are stripped from numeric Upstreams, including
 resolv.conf entries. Non-IP nameservers from resolv.conf are retained, but
 currently fail without health probes rather than being resolved at dial time as
-in CoreDNS. Numeric Upstreams are deduplicated by normalized socket address;
+in CoreDNS; retries of such entries pause for 1 ms to avoid a busy loop. Numeric Upstreams are deduplicated by normalized socket address;
 CoreDNS preserves textual address spelling and distinct scopes in its keys.
 Some option argument and
 Domain edge cases remain more restrictive than CoreDNS. Upstream Metadata
