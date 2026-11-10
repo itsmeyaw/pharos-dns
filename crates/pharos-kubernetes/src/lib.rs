@@ -2,6 +2,7 @@
 
 mod client_config;
 mod controller;
+mod metrics;
 pub mod object;
 pub mod store;
 

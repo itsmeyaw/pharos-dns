@@ -148,6 +148,51 @@ async fn startup_timeout_allows_unsynced_then_becomes_ready() {
 }
 
 #[tokio::test]
+async fn watch_events_record_client_and_programming_metrics() {
+    let server = FakeServer::start().await;
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    let config = pharos_kubernetes::ClientConfig {
+        endpoint: Some(server.url.clone()),
+        ..Default::default()
+    };
+    let client = config.client(&registry).await.unwrap();
+    let mut controller =
+        Controller::start_with_metrics(client, WatchConfig::default(), registry.kubernetes());
+    until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
+    server.send("/apis/discovery.k8s.io/v1/endpointslices", "MODIFIED", json!({
+        "apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice", "metadata":{
+            "name":"slice", "namespace":"prod", "resourceVersion":"2",
+            "labels":{"kubernetes.io/service-name":"web"},
+            "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}
+        }, "addressType":"IPv4", "endpoints":[{"addresses":["10.0.1.9"]}]
+    }));
+    until(|| { let mut out = String::new(); registry.encode(&mut out); out.contains("pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"cluster_ip\"} 1") }).await;
+    let mut out = String::new();
+    registry.encode(&mut out);
+    assert!(out.contains("pharos_kubernetes_rest_client_requests_total{code=\"200\""));
+    assert!(out.contains("pharos_kubernetes_rest_client_request_duration_seconds_count{"));
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn client_records_throttled_requests() {
+    let server = FakeServer::start().await;
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    let config = pharos_kubernetes::ClientConfig {
+        endpoint: Some(server.url.clone()),
+        ..Default::default()
+    };
+    let client = config.client(&registry).await.unwrap();
+    let services = kube::Api::<k8s_openapi::api::core::v1::Service>::all(client);
+    for _ in 0..12 {
+        services.list(&Default::default()).await.unwrap();
+    }
+    let mut out = String::new();
+    registry.encode(&mut out);
+    assert!(out.contains("pharos_kubernetes_rest_client_rate_limiter_duration_seconds_count{"));
+}
+
+#[tokio::test]
 async fn lifecycle_restart_failure_restarts_watchers_on_same_store() {
     let server = FakeServer::start().await;
     let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();

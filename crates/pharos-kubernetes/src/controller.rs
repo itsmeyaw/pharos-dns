@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 use tokio::task::JoinHandle;
 
 use crate::store::Store;
+use pharos_server::metrics::KubernetesMetrics;
 
 pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -48,20 +49,35 @@ pub struct Controller {
     tasks: Vec<JoinHandle<()>>,
     client: Client,
     config: WatchConfig,
+    metrics: Option<KubernetesMetrics>,
 }
 
 impl Controller {
     pub fn start(client: Client, config: WatchConfig) -> Self {
-        Self::start_with_store(client, config, Store::default())
+        Self::start_with_store(client, config, Store::default(), None)
     }
 
-    fn start_with_store(client: Client, config: WatchConfig, store: Store) -> Self {
+    pub fn start_with_metrics(
+        client: Client,
+        config: WatchConfig,
+        metrics: KubernetesMetrics,
+    ) -> Self {
+        Self::start_with_store(client, config, Store::default(), Some(metrics))
+    }
+
+    fn start_with_store(
+        client: Client,
+        config: WatchConfig,
+        store: Store,
+        metrics: Option<KubernetesMetrics>,
+    ) -> Self {
         let mut this = Self {
             store,
             synced: Vec::new(),
             tasks: Vec::new(),
             client: client.clone(),
             config: config.clone(),
+            metrics,
         };
         let labels = watcher::Config {
             label_selector: config.label_selector,
@@ -73,6 +89,7 @@ impl Controller {
             Store::apply_service,
             Store::delete_service,
             Store::replace_services,
+            |_, _| None,
         );
         if config.endpoints {
             this.watch(
@@ -81,6 +98,7 @@ impl Controller {
                 Store::apply_endpoints,
                 Store::delete_endpoints,
                 Store::replace_endpoints,
+                record_endpoint_latency,
             );
         }
         if config.pods_verified {
@@ -96,6 +114,7 @@ impl Controller {
                 Store::apply_pod,
                 Store::delete_pod,
                 Store::replace_pods,
+                |_, _| None,
             );
         }
         let ns_config = watcher::Config {
@@ -108,6 +127,7 @@ impl Controller {
             Store::apply_namespace,
             |store, _, name| store.delete_namespace(name),
             Store::replace_namespaces,
+            |_, _| None,
         );
         this
     }
@@ -135,6 +155,7 @@ impl Controller {
                     current.client.clone(),
                     current.config.clone(),
                     current.store.clone(),
+                    current.metrics.clone(),
                 );
                 current.wait_for_sync(startup_timeout).await;
                 Ok(())
@@ -159,11 +180,13 @@ impl Controller {
         apply: fn(&Store, T),
         delete: fn(&Store, &str, &str),
         replace: fn(&Store, Vec<T>),
+        observe: fn(&Store, &K) -> Option<(jiff::Timestamp, &'static str)>,
     ) where
         K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
         T: From<K> + Send + 'static,
     {
         let store = self.store.clone();
+        let metrics = self.metrics.clone();
         let synced = Arc::new(AtomicBool::new(false));
         self.synced.push(synced.clone());
         self.tasks.push(tokio::spawn(async move {
@@ -178,12 +201,26 @@ impl Controller {
                         replace(&store, std::mem::take(&mut initial));
                         synced.store(true, Ordering::Release);
                     }
-                    Ok(Event::Apply(object)) => apply(&store, object.into()),
-                    Ok(Event::Delete(object)) => delete(
-                        &store,
-                        object.namespace().as_deref().unwrap_or(""),
-                        &object.name_any(),
-                    ),
+                    Ok(Event::Apply(object)) => {
+                        let latency = synced
+                            .load(Ordering::Acquire)
+                            .then(|| observe(&store, &object))
+                            .flatten();
+                        apply(&store, object.into());
+                        record_latency(metrics.as_ref(), latency);
+                    }
+                    Ok(Event::Delete(object)) => {
+                        let latency = synced
+                            .load(Ordering::Acquire)
+                            .then(|| observe(&store, &object))
+                            .flatten();
+                        delete(
+                            &store,
+                            object.namespace().as_deref().unwrap_or(""),
+                            &object.name_any(),
+                        );
+                        record_latency(metrics.as_ref(), latency);
+                    }
                     Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
                 }
             }
@@ -225,6 +262,52 @@ impl Controller {
             task.abort();
             let _ = task.await;
         }
+    }
+}
+
+fn record_endpoint_latency(
+    store: &Store,
+    slice: &EndpointSlice,
+) -> Option<(jiff::Timestamp, &'static str)> {
+    let metadata = slice
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| {
+            annotations.get("endpoints.kubernetes.io/last-change-trigger-time")
+        })?;
+    let Ok(timestamp) = metadata.parse::<jiff::Timestamp>() else {
+        return None;
+    };
+    let service = slice
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get("kubernetes.io/service-name"))?;
+    let namespace = slice.metadata.namespace.as_deref().unwrap_or("");
+    store.with_read(|index| {
+        index.service(namespace, service).map(|service| {
+            let kind = if service.headless() {
+                "headless_with_selector"
+            } else {
+                "cluster_ip"
+            };
+            (timestamp, kind)
+        })
+    })
+}
+
+fn record_latency(
+    metrics: Option<&KubernetesMetrics>,
+    value: Option<(jiff::Timestamp, &'static str)>,
+) {
+    if let (Some(metrics), Some((timestamp, kind))) = (metrics, value) {
+        metrics.programming_duration(
+            kind,
+            jiff::Timestamp::now()
+                .duration_since(timestamp)
+                .as_secs_f64(),
+        );
     }
 }
 

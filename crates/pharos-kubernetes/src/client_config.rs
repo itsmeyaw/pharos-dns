@@ -24,6 +24,22 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
+    pub async fn client(
+        &self,
+        registry: &pharos_server::metrics::Registry,
+    ) -> Result<kube::Client, Box<dyn Error + Send + Sync>> {
+        let config = self.resolve().await?;
+        let host = config
+            .cluster_url
+            .authority()
+            .map_or("", |authority| authority.as_str())
+            .to_owned();
+        let layer = crate::metrics::Layer::new(registry.kubernetes(), host);
+        Ok(kube::client::ClientBuilder::try_from(config)?
+            .with_layer(&layer)
+            .build())
+    }
+
     pub async fn resolve(&self) -> Result<Config, Box<dyn Error + Send + Sync>> {
         if let Some((path, context)) = &self.kubeconfig {
             let file = Kubeconfig::read_from(path)?;
