@@ -139,23 +139,24 @@ impl Plugin for Cache {
             metrics.request();
         }
         let key = key(&query);
+        let can_grow = cx.protocol == pharos_server::Protocol::Tcp;
         let positive_first = self.config.prefer_positive && !self.config.stale.is_zero();
         let positive = positive_first
             .then(|| {
                 self.success
-                    .serve(key, &query, cx.response, &self.config, true)
+                    .serve(key, &query, cx.response, &self.config, true, can_grow)
             })
             .flatten();
         let hit = if let Some(hit) = positive {
             Some((false, hit))
         } else if let Some(denial) =
             self.denial
-                .serve(key, &query, cx.response, &self.config, false)
+                .serve(key, &query, cx.response, &self.config, false, can_grow)
         {
             if cx.response[3] & 15 == 2 {
                 if let Some(positive) =
                     self.success
-                        .serve(key, &query, cx.response, &self.config, false)
+                        .serve(key, &query, cx.response, &self.config, false, can_grow)
                 {
                     if let Some(stored) = denial.refresh {
                         self.denial
@@ -170,7 +171,7 @@ impl Plugin for Cache {
             }
         } else {
             self.success
-                .serve(key, &query, cx.response, &self.config, false)
+                .serve(key, &query, cx.response, &self.config, false, can_grow)
                 .map(|hit| (false, hit))
         };
         if let Some((denial, hit)) = hit {

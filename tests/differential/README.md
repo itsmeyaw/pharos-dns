@@ -30,6 +30,10 @@ The `whoami-log` scenario compares Responses, not log output. The current whoami
 Responses cannot exceed the 512-octet UDP minimum for these short Queries, so
 truncation is not covered.
 The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
+The `cache` scenario repeats Queries through `forward` to a local `whoami`
+Server Block. Its records have TTL 0, which cache raises to the configured
+minimum; SRV ports are masked because each forwarded connection uses an
+ephemeral port. This exercises miss/hit Responses, not upstream call counts.
 No `errors`-specific differential scenario is included: the implemented
 Plugins cannot deterministically return the same error in both servers, and
 `forward` is not implemented. Error logging and consolidation are tested in Rust.

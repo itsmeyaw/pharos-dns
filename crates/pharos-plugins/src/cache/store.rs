@@ -139,6 +139,7 @@ impl Store {
         output: &mut Vec<u8>,
         config: &super::setup::Config,
         answering_only: bool,
+        can_grow: bool,
     ) -> Option<Hit> {
         let mut shard = self.shards[key as usize & 255].lock().unwrap();
         let item = shard.items.get_mut(&key)?;
@@ -158,12 +159,17 @@ impl Store {
         let now = Instant::now();
         let elapsed = now.duration_since(item.stored).as_secs();
         let stale = elapsed >= u64::from(item.ttl);
-        if (stale
+        if stale
             && (config.stale.is_zero()
-                || Duration::from_secs(elapsed - u64::from(item.ttl)) >= config.stale))
-            || output.capacity() < item.wire.len()
+                || Duration::from_secs(elapsed - u64::from(item.ttl)) >= config.stale)
         {
             return None;
+        }
+        if output.capacity() < item.wire.len() {
+            if !can_grow {
+                return None;
+            }
+            output.reserve(item.wire.len().saturating_sub(output.len()));
         }
         let ttl = if stale && !config.stale_ttl.is_zero() {
             config.stale_ttl.as_secs() as u32
