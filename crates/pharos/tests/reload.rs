@@ -29,18 +29,19 @@ fn tcp_query(stream: &mut TcpStream, query: &[u8]) -> Vec<u8> {
     response
 }
 
-fn scrape(port: u16) -> String {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+fn try_scrape(port: u16) -> Option<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     stream
         .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
+        .ok()?;
     let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    assert!(response.starts_with("HTTP/1.1 200"));
-    response
+    stream.read_to_string(&mut response).ok()?;
+    response.starts_with("HTTP/1.1 200").then_some(response)
+}
+
+fn scrape(port: u16) -> String {
+    try_scrape(port).expect("metrics endpoint unavailable")
 }
 
 fn reload_version(port: u16) -> Option<String> {
@@ -93,6 +94,21 @@ fn comments_and_whitespace_do_not_trigger_reload() {
         before,
         "comment-only edit caused reload"
     );
+    fs::write(&file, body.replace("whoami", "errors")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if try_scrape(metrics).is_some_and(|text| {
+            text.lines()
+                .any(|line| line.starts_with("pharos_reload_version_info{"))
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher did not observe real edit"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     drop(process);
     fs::remove_dir_all(dir).unwrap();
 }

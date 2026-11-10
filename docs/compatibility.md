@@ -131,7 +131,8 @@ individually rather than in one process-wide atomic operation.
 Pharos hashes a canonical representation of parsed, import-expanded Server
 Blocks instead of CoreDNS's JSON encoding, so the hash values differ. Pharos
 omits source paths and absolute line numbers from the hash; CoreDNS includes
-them, so adding comment lines can trigger Reload in CoreDNS but not Pharos. The last
+them, so adding comment lines can trigger Reload in CoreDNS but not Pharos.
+Line boundaries that affect Directive argument grouping are retained. The last
 attempted hash is reported even when a Reload fails, as in CoreDNS. Candidate
 setup can register metric series before a failed Reload
 is rolled back. Shutdown waits for Queries on replaced states to finish, so a

@@ -372,7 +372,36 @@ fn remove_pidfile(options: &Options) {
 mod tests {
     use std::{cell::RefCell, io};
 
-    use super::{digest_hex, interval, shutdown};
+    use super::{corefile_hash, digest_hex, interval, shutdown};
+
+    #[test]
+    fn hash_preserves_line_boundaries_that_change_directive_arguments() {
+        let same_line = pharos_corefile::parse(
+            "Corefile",
+            ". {\n errors {\n consolidate 3s pattern warning\n }\n}",
+        )
+        .unwrap();
+        let new_line = pharos_corefile::parse(
+            "Corefile",
+            ". {\n errors {\n consolidate 3s pattern\n warning\n }\n}",
+        )
+        .unwrap();
+        assert_ne!(corefile_hash(&same_line), corefile_hash(&new_line));
+        assert!(
+            pharos_corefile::configure::<pharos_plugins::Chain>(
+                &same_line,
+                pharos_plugins::directives()
+            )
+            .is_ok()
+        );
+        assert!(
+            pharos_corefile::configure::<pharos_plugins::Chain>(
+                &new_line,
+                pharos_plugins::directives()
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn sha512_and_jitter_match_reload_contract() {
