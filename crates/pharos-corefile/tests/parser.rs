@@ -33,3 +33,40 @@ fn unbraced_server_block_and_repeated_directives() {
     assert_eq!(blocks[0].directives["foo"].len(), 4);
     assert_eq!(parse("Corefile", "a").unwrap()[0].keys, ["a"]);
 }
+
+#[test]
+fn caddy_server_block_cases() {
+    let cases: &[(&str, &[&[&str]])] = &[
+        ("localhost", &[&["localhost"]]),
+        ("localhost:1234\n dir1 foo bar", &[&["localhost:1234"]]),
+        (
+            "host1:80, http://host2.com\n dir1 foo bar\n dir2 baz",
+            &[&["host1:80", "http://host2.com"]],
+        ),
+        (
+            "http://host1.com,\n http://host2.com,\n https://host3.com",
+            &[&["http://host1.com", "http://host2.com", "https://host3.com"]],
+        ),
+        (
+            "localhost:1234 {\n}\n localhost:2015 {\n}",
+            &[&["localhost:1234"], &["localhost:2015"]],
+        ),
+        ("", &[]),
+        ("\"\"", &[]),
+    ];
+    for (input, expected) in cases {
+        let blocks = parse("Corefile", input).unwrap();
+        let actual: Vec<Vec<&str>> = blocks
+            .iter()
+            .map(|b| b.keys.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(actual, *expected, "{input:?}");
+    }
+    for input in [
+        "localhost:1234, http://host2,",
+        "localhost\n dir1 {\n foo",
+        "localhost\n dir1 {\n } }",
+    ] {
+        assert!(parse("Corefile", input).is_err(), "{input:?}");
+    }
+}
