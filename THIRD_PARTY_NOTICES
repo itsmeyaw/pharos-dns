@@ -49,6 +49,7 @@
 - EDNS option formatting and tests in `crates/pharos-proto` follow miekg/dns v1.1.73's `edns.go` and `edns_test.go`.
 - RDATA presentation in `crates/pharos-proto/src/rdata.rs` follows miekg/dns v1.1.73; fixtures in `crates/pharos-proto/tests/rdata_*.rs` adapt its `parse_test.go`, `dns_test.go`, `msg_helpers_test.go`, `svcb_test.go` and `tsig_test.go`.
 - Response truncation in `crates/pharos-server` follows miekg/dns v1.1.73's `msg_truncate.go`, without recompression.
+- The hosts file parser follows CoreDNS's adaptation of Go's `net/hosts.go` (Copyright 2009 The Go Authors).
 
 BSD 3-Clause License
 

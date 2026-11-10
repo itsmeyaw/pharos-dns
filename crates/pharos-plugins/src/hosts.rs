@@ -8,6 +8,8 @@ use std::{
 use pharos_corefile::{Cursor, Error, Fallthrough, origins_from_args_or_server_block};
 use pharos_server::{Context, Next, Outcome};
 
+mod data;
+
 #[derive(Debug)]
 pub struct Hosts {
     pub path: PathBuf,
