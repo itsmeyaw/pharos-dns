@@ -23,6 +23,13 @@ output, the Query list and server logs are retained under `target/bench/`;
 inspect the output for Query loss. The installed dnsperf must support
 `-O latency-histogram`.
 
+dnsperf runs with 16 clients (source ports), 4 threads and 256 Queries in
+flight. On macOS, `SO_REUSEPORT` sends every Datagram on a port to a single
+socket, so one Pharos worker serves the whole UDP load and UDP QPS stops at what
+one worker can do (about 50k QPS on an M-series laptop, about the same as
+CoreDNS). On Linux the kernel spreads Queries across sockets by source port.
+Compare UDP throughput on Linux.
+
 Save a baseline on the reference revision and compare on the branch:
 
 ```sh

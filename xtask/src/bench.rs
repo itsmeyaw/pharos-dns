@@ -151,6 +151,9 @@ fn measure(
         .args(["-s", "127.0.0.1", "-p", &port.to_string(), "-d"])
         .arg(queries)
         .args(["-l", "10", "-O", "latency-histogram"])
+        // dnsperf defaults to one socket and 100 Queries in flight; 16 source ports
+        // let Linux SO_REUSEPORT spread Queries across Pharos UDP sockets.
+        .args(["-c", "16", "-T", "4", "-q", "256"])
         .stdout(fs::File::create(&out).map_err(|e| e.to_string())?)
         .stderr(fs::File::create(&err).map_err(|e| e.to_string())?)
         .spawn()
