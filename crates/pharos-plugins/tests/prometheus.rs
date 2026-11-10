@@ -45,10 +45,15 @@ async fn scrape_counts_only_blocks_with_prometheus() {
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("pharos_dns_requests_total{family=\"1\",proto=\"udp\",server=\"dns://:0\",type=\"A\",view=\"\",zone=\"example.org.\"} 1"), "{response}");
+    assert!(response.contains("pharos_dns_responses_total{plugin=\"whoami\",rcode=\"NOERROR\",server=\"dns://:0\",view=\"\",zone=\"example.org.\"} 1"), "{response}");
     assert!(
-        response.contains("pharos_dns_requests_total{"),
+        response.contains("pharos_plugin_enabled{name=\"prometheus\","),
         "{response}"
     );
+    assert!(response.contains("pharos_build_info{"), "{response}");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    assert!(response.contains("process_open_fds "), "{response}");
     assert!(response.contains("zone=\"example.org.\""), "{response}");
     assert!(response.contains("zone=\"second.org.\""), "{response}");
     assert!(!response.contains("zone=\"other.org.\""), "{response}");
@@ -82,4 +87,24 @@ async fn unsupported_tls_never_starts_plain_http() {
         lifecycle.run(Phase::Startup).await.unwrap_err().kind(),
         std::io::ErrorKind::Unsupported
     );
+}
+
+#[tokio::test]
+async fn empty_metrics_port_uses_ephemeral_port() {
+    let input = ".:0 {\n prometheus localhost:\n whoami\n}";
+    let blocks = parse("Corefile", input).unwrap();
+    let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+}
+
+#[test]
+fn conflicting_tls_configs_are_rejected_for_a_shared_address() {
+    let input = "a.:0 {\n prometheus 127.0.0.1:0\n whoami\n}\nb.:0 {\n prometheus 127.0.0.1:0 {\n tls config.yml\n}\n whoami\n}";
+    let blocks = parse("Corefile", input).unwrap();
+    let error = match servers(configure::<Chain>(&blocks, directives()).unwrap()) {
+        Ok(_) => panic!("conflicting TLS configurations accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }

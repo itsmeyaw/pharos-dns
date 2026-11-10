@@ -1,5 +1,7 @@
 example.org:{port} {
-    prometheus localhost:{metrics_port}
+    prometheus localhost:{metrics_port} {
+        runtime_metrics
+    }
     whoami
 }
 example.net:{port} {

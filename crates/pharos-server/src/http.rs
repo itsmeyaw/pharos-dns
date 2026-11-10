@@ -18,6 +18,9 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
+const MAX_CONNECTIONS: usize = 1024;
+const TIMEOUT: Duration = Duration::from_secs(5);
+
 /// HTTP listener whose callback maps GET paths to `(content_type, body)`.
 /// The callback runs on a Tokio worker and must not block it.
 pub struct Listener {
@@ -41,11 +44,22 @@ impl Listener {
             let result = loop {
                 tokio::select! {
                     _ = receiver.changed() => break Ok(()),
-                    Some(_) = connections.join_next(), if !connections.is_empty() => {},
-                    accepted = listener.accept() => {
+                    Some(result) = connections.join_next(), if !connections.is_empty() => {
+                        if let Err(error) = result {
+                            crate::logging::log("ERROR", "http", &format!("HTTP connection failed: {error}"));
+                        }
+                    },
+                    accepted = listener.accept(), if connections.len() < MAX_CONNECTIONS => {
                         let (stream, _) = match accepted {
                             Ok(value) => value,
-                            Err(error) => break Err(error),
+                            Err(error) => {
+                                crate::logging::log("ERROR", "http", &format!("HTTP accept failed: {error}"));
+                                tokio::select! {
+                                    _ = receiver.changed() => break Ok(()),
+                                    _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+                                }
+                                continue;
+                            }
                         };
                         let route = Arc::clone(&route);
                         let mut stop = receiver.clone();
@@ -76,7 +90,7 @@ impl Listener {
                             tokio::select! {
                                 _ = &mut connection => {},
                                 // shortcut: cap the connection lifetime until per-request read, write and idle deadlines are supported.
-                                _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+                                _ = tokio::time::sleep(TIMEOUT) => {},
                                 _ = stop.changed() => {
                                     connection.as_mut().graceful_shutdown();
                                     let _ = connection.await;
@@ -87,7 +101,7 @@ impl Listener {
                 }
             };
             drop(listener);
-            if tokio::time::timeout(Duration::from_secs(5), async {
+            if tokio::time::timeout(TIMEOUT, async {
                 while connections.join_next().await.is_some() {}
             })
             .await

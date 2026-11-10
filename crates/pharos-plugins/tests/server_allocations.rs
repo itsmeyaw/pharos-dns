@@ -51,7 +51,13 @@ impl Handler for Counting {
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_udp_queries_do_not_allocate() {
-    let blocks = parse("Corefile", ".:0 {\n whoami\n}").unwrap();
+    check_routed_udp_queries_do_not_allocate(".:0 {\n whoami\n}").await;
+    #[cfg(feature = "plugin-prometheus")]
+    check_routed_udp_queries_do_not_allocate(".:0 {\n prometheus\n whoami\n}").await;
+}
+
+async fn check_routed_udp_queries_do_not_allocate(corefile: &str) {
+    let blocks = parse("Corefile", corefile).unwrap();
     let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let (key, server) = servers.drain().next().unwrap();
     let counts = Arc::new(Mutex::new(Counts::default()));

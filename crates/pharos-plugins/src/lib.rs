@@ -124,6 +124,11 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
                         "prometheus TLS configuration is not supported",
                     ));
                 }
+                let address = if address.ends_with(':') {
+                    format!("{address}0")
+                } else {
+                    address
+                };
                 let address = if address.starts_with(':') {
                     format!("0.0.0.0{address}")
                 } else {

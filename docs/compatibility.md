@@ -50,6 +50,7 @@ Pharos exports the six core process metrics on Linux when their `/proc` data
 is available. On macOS it exports the open-file count; other process metrics
 are omitted. CoreDNS's Prometheus Go client also collects process metrics on
 macOS. Pharos does not export Go runtime metrics.
+The build information label `goversion` is named `rustc` in Pharos.
 
 ## DNS metrics
 
@@ -60,6 +61,8 @@ are currently empty, and a wildcard Listener is labelled as an unbound address
 even when explicitly bound to an unspecified IP. Plugin attribution identifies
 the Plugin that returned the Response; CoreDNS's nested writers can attribute
 the outer Plugin instead.
+Pharos counts dropped Queries only on a Listener with at least one `prometheus`
+Server Block; CoreDNS's server-level error reporting counts them unconditionally.
 Concurrent scrapes can observe histogram buckets and sums at slightly different
 instants, unlike the Go client's synchronized histogram snapshot.
 
@@ -75,8 +78,11 @@ TLS configuration fails startup rather than silently serving unprotected HTTP;
 Prometheus exporter-toolkit TLS and authentication are not implemented.
 Blocks sharing a metrics address must use the same TLS configuration. Metrics
 HTTP connections are capped at five seconds total, rather than CoreDNS's
-separate per-request read, write and idle deadlines. The wildcard metrics
-address `:port` listens on IPv4 rather than CoreDNS's dual-stack Listener.
+separate per-request read, write and idle deadlines, and at 1,024 simultaneous
+connections. Only GET requests are served at `/metrics`; other HTTP methods
+return 404. The wildcard metrics address `:port` listens on IPv4 rather than
+CoreDNS's dual-stack Listener. Pharos requires a numeric metrics port at
+startup; CoreDNS can also resolve service names supported by the host.
 Bind and startup errors are reported, whereas CoreDNS's shared Listener setup
 currently discards errors from its `uniq.ForEach` callback.
 
