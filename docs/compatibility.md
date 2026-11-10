@@ -32,6 +32,10 @@ Additional. CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC
 report transport errors. Pharos's admission seam returns a header-only FORMERR
 for malformed Messages, whereas CoreDNS may retain a partially decoded Question.
 
+For pass-through Responses, Pharos truncates the encoded Message without
+recompression; CoreDNS may fit more records by recompressing first.
+Pharos logs Plugin errors and answers SERVFAIL; CoreDNS ignores returned errors.
+
 Pharos also rejects Client Subnet address lengths that do not match the prefix
 and non-zero host bits, which miekg/dns accepts. It validates the supported
 typed options and framing; other option codes are passed through without the

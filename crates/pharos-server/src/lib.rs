@@ -15,8 +15,10 @@ use tokio::{
 };
 
 mod admission;
+mod outcome;
 mod quota;
 pub use admission::{Admission, admit};
+pub use outcome::{finish_outcome, response_limit};
 mod router;
 pub use router::{Router, ServerBlock, ViewFilter};
 mod tcp;
