@@ -58,6 +58,8 @@ async fn routed_udp_queries_do_not_allocate() {
     check_routed_udp_queries_do_not_allocate(".:0 {\n prometheus\n whoami\n}").await;
     #[cfg(feature = "plugin-health")]
     check_routed_udp_queries_do_not_allocate(".:0 {\n health 127.0.0.1:0\n whoami\n}").await;
+    #[cfg(feature = "plugin-loop")]
+    check_routed_udp_queries_do_not_allocate(".:0 {\n loop\n whoami\n}").await;
 }
 
 async fn check_routed_udp_queries_do_not_allocate(corefile: &str) {
