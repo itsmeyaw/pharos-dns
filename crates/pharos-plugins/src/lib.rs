@@ -490,7 +490,9 @@ fn setup_loadbalance(
     cursor: &mut Cursor<'_>,
     block: &mut BlockContext<Chain>,
 ) -> Result<(), Error> {
-    block.config.loadbalance = Some(loadbalance::LoadBalance::parse(cursor)?);
+    let plugin = loadbalance::LoadBalance::parse(cursor)?;
+    plugin.register_hooks(&mut block.config.lifecycle);
+    block.config.loadbalance = Some(plugin);
     Ok(())
 }
 

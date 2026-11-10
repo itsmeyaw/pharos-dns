@@ -1,5 +1,7 @@
 //! Loadbalance Directive configuration.
 
+mod weighted;
+
 use std::{path::PathBuf, time::Duration};
 
 use pharos_corefile::{Cursor, Error};
@@ -10,6 +12,7 @@ use pharos_server::{Context, Next, Outcome, Plugin};
 pub struct LoadBalance {
     pub weight_file: Option<PathBuf>,
     pub reload: Duration,
+    weights: Option<weighted::Weights>,
 }
 
 impl LoadBalance {
@@ -19,6 +22,7 @@ impl LoadBalance {
         let mut lb = Self {
             weight_file: None,
             reload: Duration::from_secs(30),
+            weights: None,
         };
         match args.first().map(String::as_str) {
             None | Some("round_robin") if args.len() <= 1 => {}
@@ -42,15 +46,25 @@ impl LoadBalance {
         if cursor.next_block() {
             return Err(cursor.error("unknown loadbalance property"));
         }
+        lb.weights = lb
+            .weight_file
+            .as_ref()
+            .map(|path| weighted::Weights::new(path.clone(), lb.reload));
         Ok(lb)
+    }
+
+    pub(crate) fn register_hooks(&self, lifecycle: &mut pharos_server::Lifecycle) {
+        if let Some(weights) = &self.weights {
+            weights.register_hooks(lifecycle);
+        }
     }
 }
 
 impl Plugin for LoadBalance {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
         let outcome = next.run(cx).await;
-        if outcome == Outcome::Response && self.weight_file.is_none() {
-            shuffle(cx.response);
+        if outcome == Outcome::Response {
+            shuffle(cx.response, self.weights.as_ref());
         }
         outcome
     }
@@ -61,6 +75,7 @@ struct Record {
     start: u16,
     end: u16,
     group: u8,
+    weight: u8,
 }
 
 thread_local! {
@@ -82,7 +97,7 @@ fn random(limit: usize) -> usize {
     })
 }
 
-fn shuffle(wire: &mut [u8]) {
+fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>) {
     if wire.len() > usize::from(u16::MAX) {
         return;
     }
@@ -98,6 +113,15 @@ fn shuffle(wire: &mut [u8]) {
     {
         return;
     }
+    if weights.is_some()
+        && message
+            .questions()
+            .next()
+            .is_none_or(|q| !matches!(q.qtype, Type::A | Type::AAAA | Type::SRV))
+    {
+        return;
+    }
+    let weight_data = weights.map(weighted::Weights::load);
     // Every RR occupies at least 11 bytes; no valid DNS Message can exceed this bound.
     let mut records = [Record::default(); 5957];
     let mut sections = [(0usize, 0usize); 3];
@@ -124,6 +148,9 @@ fn shuffle(wire: &mut [u8]) {
                     Type::MX => 3,
                     _ => 1,
                 },
+                weight: weight_data
+                    .as_ref()
+                    .map_or(1, |data| weighted::weight(data, &rr)),
             };
             count += 1;
         }
@@ -144,14 +171,17 @@ fn shuffle(wire: &mut [u8]) {
         }
     }
     let mut order = [Record::default(); 5957];
-    for (first, end) in sections {
-        if end <= first + 1 {
+    for (section, (first, end)) in sections.into_iter().enumerate() {
+        if end <= first + 1 || (weights.is_some() && section == 1) {
             continue;
         }
         let section_start = usize::from(records[first].start);
         let actual = &mut records[first..end];
         let items = &mut order[..actual.len()];
         items.copy_from_slice(actual);
+        if weights.is_some() && !items.iter().any(|item| item.group == 2) {
+            continue;
+        }
         // Stable partition into CNAME, other, address and MX records.
         for i in 1..items.len() {
             let mut j = i;
@@ -169,8 +199,25 @@ fn shuffle(wire: &mut [u8]) {
                 .iter()
                 .rposition(|item| item.group == group)
                 .map_or(first, |i| i + 1);
-            for i in first..end.saturating_sub(1) {
-                items.swap(i, i + random(end - i));
+            if weights.is_some() {
+                if group == 2 && first < end {
+                    let total: usize = items[first..end]
+                        .iter()
+                        .map(|item| usize::from(item.weight))
+                        .sum();
+                    let mut choice = random(total);
+                    for i in first..end {
+                        if choice < usize::from(items[i].weight) {
+                            items.swap(first, i);
+                            break;
+                        }
+                        choice -= usize::from(items[i].weight);
+                    }
+                }
+            } else {
+                for i in first..end.saturating_sub(1) {
+                    items.swap(i, i + random(end - i));
+                }
             }
         }
         let mut dest = section_start;
