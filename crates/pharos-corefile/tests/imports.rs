@@ -81,3 +81,11 @@ fn glob_backslash_escapes_metacharacters() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].keys(), ["literal"]);
 }
+
+#[test]
+fn imports_replace_invalid_utf8_bytes_like_caddy() {
+    let dir = fixture_dir();
+    fs::write(dir.join("invalid"), b"a {\n foo \xf0\x9f\n}\n").unwrap();
+    let blocks = parse(&dir.join("Corefile").to_string_lossy(), "import invalid").unwrap();
+    assert_eq!(blocks[0].directives["foo"][1].text, "\u{fffd}\u{fffd}");
+}

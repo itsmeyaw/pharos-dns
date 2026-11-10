@@ -332,9 +332,11 @@ impl Parser<'_> {
             let mut count = 0;
             for path in paths.flatten() {
                 count += 1;
-                let contents =
-                    std::fs::read_to_string(&path).map_err(|e| self.error(&e.to_string()))?;
-                imported.extend(lex(&path.to_string_lossy(), &contents));
+                let contents = std::fs::read(&path).map_err(|e| self.error(&e.to_string()))?;
+                imported.extend(lex(
+                    &path.to_string_lossy(),
+                    &crate::lexer::decode(&contents),
+                ));
             }
             if count == 0 && !glob_pattern.contains(['*', '?', '[', ']']) {
                 return Err(self.error("import file not found"));
