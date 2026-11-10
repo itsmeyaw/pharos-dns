@@ -12,6 +12,8 @@ CoreDNS is informational. Both receive the same Corefile and Query list.
 Use `cargo xtask bench --corefile path/to/Corefile` to override the default.
 Use `{port}` in explicit Listener ports so each server gets a free port; relative
 paths inside the Corefile are resolved from the Corefile's directory.
+The harness temporarily writes a private Corefile copy in that directory,
+so it must be writable.
 
 The table reports completed Queries per second, p50 and p99 latency in ms, and
 peak process RSS in KiB. Latencies are nearest-rank estimates using the upper

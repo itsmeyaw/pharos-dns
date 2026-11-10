@@ -1,12 +1,15 @@
 use std::{
     fs,
-    io::ErrorKind,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 
 use crate::differential;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let options = Options::parse(args)?;
@@ -137,10 +140,10 @@ fn measure(
     queries: &Path,
 ) -> Result<Metrics, String> {
     let port = differential::free_port()?;
-    let conf = directory.join(format!("{name}.Corefile"));
+    let conf = TemporaryCorefile::new(cwd, corefile, port)?;
     let log = directory.join(format!("{name}.server.log"));
-    fs::write(&conf, corefile.replace("{port}", &port.to_string())).map_err(|e| e.to_string())?;
-    let mut server = differential::start_with_config(binary, cwd, port, Some(&conf), &log, pharos)?;
+    let mut server =
+        differential::start_with_config(binary, cwd, port, Some(&conf.0), &log, pharos)?;
     differential::ready(&mut server, &log, port)?;
     let out = directory.join(format!("{name}.dnsperf.out"));
     let err = directory.join(format!("{name}.dnsperf.err"));
@@ -194,6 +197,47 @@ fn measure(
         return Err(format!("dnsperf ended before RSS was sampled for {name}"));
     }
     parse_dnsperf(&fs::read_to_string(out).map_err(|e| e.to_string())?, peak)
+}
+
+static NEXT_COREFILE: AtomicUsize = AtomicUsize::new(0);
+
+struct TemporaryCorefile(PathBuf);
+
+impl TemporaryCorefile {
+    fn new(directory: &Path, corefile: &str, port: u16) -> Result<Self, String> {
+        loop {
+            let path = directory.join(format!(
+                ".pharos-bench-{}-{}",
+                std::process::id(),
+                NEXT_COREFILE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            match options.open(&path) {
+                Ok(mut file) => {
+                    let temporary = Self(path);
+                    file.write_all(corefile.replace("{port}", &port.to_string()).as_bytes())
+                        .map_err(|e| e.to_string())?;
+                    return Ok(temporary);
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(format!(
+                        "creating temporary Corefile in {}: {e}",
+                        directory.display()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for TemporaryCorefile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 #[derive(Default)]
@@ -259,6 +303,7 @@ fn table(rows: &[(&str, Metrics)]) -> String {
 
 fn regressions(baseline: &Metrics, current: &Metrics) -> Vec<&'static str> {
     let mut result = Vec::new();
+    // One ULP avoids classifying an exactly 5% decimal change as a regression.
     if current.qps < (baseline.qps * 0.95).next_down() {
         result.push("QPS");
     }
@@ -396,8 +441,8 @@ fn parse_dnsperf(output: &str, rss: u64) -> Result<Metrics, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Metrics, Options, baseline_name, decode_baseline, encode_baseline, parse_dnsperf,
-        regressions, table,
+        Metrics, Options, TemporaryCorefile, baseline_name, decode_baseline, encode_baseline,
+        parse_dnsperf, regressions, table,
     };
 
     fn reference() -> Metrics {
@@ -538,5 +583,35 @@ mod tests {
                 Options::parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err()
             );
         }
+    }
+
+    #[test]
+    fn corefile_copy_preserves_relative_imports_without_overwriting() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../target/bench-corefile-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let original = dir.join("Corefile");
+        std::fs::write(&original, "original").unwrap();
+        let path;
+        {
+            let conf =
+                TemporaryCorefile::new(&dir, ".:{port} {\n import sibling\n}\n", 1234).unwrap();
+            path = conf.0.clone();
+            assert_eq!(path.parent().unwrap(), dir);
+            assert!(std::fs::read_to_string(&path).unwrap().contains(":1234"));
+            assert_eq!(std::fs::read_to_string(&original).unwrap(), "original");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o077,
+                    0
+                );
+            }
+        }
+        assert!(!path.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
