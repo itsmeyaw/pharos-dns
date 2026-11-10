@@ -1,11 +1,18 @@
 #![forbid(unsafe_code)]
 
 mod quota;
+mod tcp;
 mod udp;
+#[cfg(target_os = "linux")]
+mod udp_linux;
 
 use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
 
-use tokio::{net::UdpSocket, sync::watch, task::JoinHandle};
+use tokio::{
+    net::{TcpListener, UdpSocket},
+    sync::watch,
+    task::JoinHandle,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Transport {
@@ -30,6 +37,11 @@ pub enum Action {
     Drop,
 }
 
+/// Synchronous, statically dispatched Query handling. Clear and reuse the
+/// supplied Response buffer; return `Drop` to suppress a Response.
+///
+/// UDP handlers must not block the runtime worker. TCP handlers run on Tokio's
+/// blocking pool and may execute concurrently for a single connection.
 pub trait Handler: Send + Sync + 'static {
     fn handle(
         &self,
@@ -40,6 +52,7 @@ pub trait Handler: Send + Sync + 'static {
     ) -> Action;
 }
 
+/// A DNS Listener serving UDP and TCP on the same address.
 pub struct Listener {
     address: SocketAddr,
     stop: watch::Sender<bool>,
@@ -48,22 +61,24 @@ pub struct Listener {
 
 impl Listener {
     pub async fn bind<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
+        let tcp = TcpListener::bind(address).await?;
+        let address = tcp.local_addr()?;
         let mut sockets = Vec::new();
         let first = udp::bind(address)?;
-        let address = first.local_addr()?;
         sockets.push(first);
         for _ in 1..quota::worker_count() {
             sockets.push(udp::bind(address)?);
         }
         let (stop, receiver) = watch::channel(false);
         let handler = Arc::new(handler);
-        let tasks = sockets
+        let mut tasks = sockets
             .into_iter()
             .map(|socket| {
                 let socket = UdpSocket::from_std(socket)?;
                 Ok(udp::spawn(socket, Arc::clone(&handler), receiver.clone()))
             })
             .collect::<io::Result<Vec<_>>>()?;
+        tasks.push(tcp::spawn(tcp, handler, receiver));
         Ok(Self {
             address,
             stop,
@@ -75,6 +90,7 @@ impl Listener {
         self.address
     }
 
+    /// Stop accepting Queries and wait for accepted Queries to finish.
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.stop.send_replace(true);
         let mut result = Ok(());

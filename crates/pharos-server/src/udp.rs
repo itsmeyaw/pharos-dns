@@ -1,12 +1,15 @@
 use std::{
     io,
     net::{SocketAddr, UdpSocket as StdUdpSocket},
-    sync::Arc,
 };
 
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
+#[cfg(not(target_os = "linux"))]
+use std::sync::Arc;
+#[cfg(not(target_os = "linux"))]
 use tokio::{net::UdpSocket, sync::watch, task::JoinHandle};
 
+#[cfg(not(target_os = "linux"))]
 use crate::{Action, Handler, Protocol};
 
 pub(crate) fn bind(address: SocketAddr) -> io::Result<StdUdpSocket> {
@@ -23,6 +26,7 @@ pub(crate) fn bind(address: SocketAddr) -> io::Result<StdUdpSocket> {
     Ok(socket.into())
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn spawn<H: Handler>(
     socket: UdpSocket,
     handler: Arc<H>,
@@ -36,13 +40,27 @@ pub(crate) fn spawn<H: Handler>(
                 biased;
                 _ = shutdown.changed() => return Ok(()),
                 received = socket.recv_from(&mut query) => {
-                    let (length, peer) = received?;
+                    let (length, peer) = match received {
+                        Ok(message) => message,
+                        Err(error) => {
+                            eprintln!("UDP receive failed: {error}");
+                            tokio::select! {
+                                _ = shutdown.changed() => return Ok(()),
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                            }
+                            continue;
+                        }
+                    };
                     response.clear();
-                    if handler.handle(&query[..length], peer, Protocol::Udp, &mut response) == Action::Respond {
-                        socket.send_to(&response, peer).await?;
+                    if handler.handle(&query[..length], peer, Protocol::Udp, &mut response) == Action::Respond
+                        && let Err(error) = socket.send_to(&response, peer).await {
+                        eprintln!("UDP Response to {peer} failed: {error}");
                     }
                 }
             }
         }
     })
 }
+
+#[cfg(target_os = "linux")]
+pub(crate) use crate::udp_linux::spawn;

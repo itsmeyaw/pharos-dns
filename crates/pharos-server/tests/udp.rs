@@ -39,3 +39,34 @@ async fn udp_queries_receive_responses() {
     assert_eq!(&buf[..n], b"query");
     listener.shutdown().await.unwrap();
 }
+
+struct Oversized;
+
+impl Handler for Oversized {
+    fn handle(&self, query: &[u8], _: SocketAddr, _: Protocol, response: &mut Vec<u8>) -> Action {
+        if query == b"large" {
+            response.resize(65536, 0);
+        } else {
+            response.extend_from_slice(query);
+        }
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn oversized_response_does_not_stop_worker() {
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Oversized)
+        .await
+        .unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(listener.local_addr()).await.unwrap();
+    socket.send(b"large").await.unwrap();
+    socket.send(b"valid").await.unwrap();
+    let mut buf = [0; 32];
+    let n = tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf[..n], b"valid");
+    listener.shutdown().await.unwrap();
+}
