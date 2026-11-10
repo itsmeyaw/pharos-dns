@@ -170,13 +170,19 @@ fn start(
     binary: &Path,
     cwd: &Path,
     port: u16,
+    metrics_port: u16,
     corefile: Option<&str>,
     pharos: bool,
 ) -> Result<Server, String> {
     let conf = if let Some(corefile) = corefile {
         let conf = cwd.join("Corefile");
-        fs::write(&conf, corefile.replace("{port}", &port.to_string()))
-            .map_err(|e| e.to_string())?;
+        fs::write(
+            &conf,
+            corefile
+                .replace("{port}", &port.to_string())
+                .replace("{metrics_port}", &metrics_port.to_string()),
+        )
+        .map_err(|e| e.to_string())?;
         Some(conf)
     } else {
         None
@@ -302,8 +308,20 @@ fn scenario(
     if pp == cp {
         return Err("port collision; retry differential run".into());
     }
-    let mut p = start(pharos, &pcwd, pp, corefile.as_deref(), true)?;
-    let mut c = start(coredns, &ccwd, cp, corefile.as_deref(), false)?;
+    let (pm, cm) = if corefile
+        .as_deref()
+        .is_some_and(|s| s.contains("{metrics_port}"))
+    {
+        let (pm, cm) = (free_port()?, free_port()?);
+        if pm == cm || [pp, cp].contains(&pm) || [pp, cp].contains(&cm) {
+            return Err("port collision; retry differential run".into());
+        }
+        (pm, cm)
+    } else {
+        (0, 0)
+    };
+    let mut p = start(pharos, &pcwd, pp, pm, corefile.as_deref(), true)?;
+    let mut c = start(coredns, &ccwd, cp, cm, corefile.as_deref(), false)?;
     ready(&mut p, &pcwd.with_extension("server.log"), pp)?;
     ready(&mut c, &ccwd.with_extension("server.log"), cp)?;
     let mut count = 0;
@@ -382,7 +400,43 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
-    use super::{TempDir, apply_deviation, copy_fixtures, parse_expect};
+    use super::{TempDir, apply_deviation, copy_fixtures, parse_expect, start};
+
+    #[test]
+    fn substitutes_dns_and_metrics_ports_for_each_server() {
+        let temp = TempDir::new().unwrap();
+        let config = ".:{port} {\n    prometheus localhost:{metrics_port}\n}\n";
+        let pharos = temp.0.join("pharos");
+        let coredns = temp.0.join("coredns");
+        std::fs::create_dir(&pharos).unwrap();
+        std::fs::create_dir(&coredns).unwrap();
+        let _p = start(
+            std::path::Path::new("/usr/bin/true"),
+            &pharos,
+            1001,
+            1002,
+            Some(config),
+            true,
+        )
+        .unwrap();
+        let _c = start(
+            std::path::Path::new("/usr/bin/true"),
+            &coredns,
+            2001,
+            2002,
+            Some(config),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pharos.join("Corefile")).unwrap(),
+            ".:1001 {\n    prometheus localhost:1002\n}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(coredns.join("Corefile")).unwrap(),
+            ".:2001 {\n    prometheus localhost:2002\n}\n"
+        );
+    }
 
     #[test]
     fn rejects_deviation_without_documented_heading() {
