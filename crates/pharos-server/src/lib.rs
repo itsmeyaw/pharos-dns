@@ -24,7 +24,9 @@ pub use lifecycle::{Lifecycle, Phase};
 pub use outcome::{finish_outcome, response_limit};
 pub use panic::{contain_panic, panics_total};
 mod router;
+mod startup;
 pub use router::{Router, ServerBlock, ViewFilter};
+pub use startup::startup_domains;
 mod tcp;
 mod udp;
 #[cfg(target_os = "linux")]
