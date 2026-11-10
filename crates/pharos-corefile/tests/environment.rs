@@ -20,3 +20,14 @@ fn replaces_both_environment_syntaxes_in_keys_and_arguments() {
         ["di{$NAME}", "hello world", "", "{%EMPTY}", "{$}"]
     );
 }
+
+#[test]
+fn expands_environment_values_that_contain_more_references() {
+    let blocks = parse_with_env("Corefile", "{$OUTER}", |name| match name {
+        "OUTER" => Some("{$INNER}".into()),
+        "INNER" => Some("example.org".into()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(blocks[0].keys, ["example.org"]);
+}

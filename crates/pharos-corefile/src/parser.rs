@@ -67,9 +67,11 @@ impl Parser<'_> {
     fn substitute(&self, text: &str) -> String {
         let mut result = text.to_owned();
         for (start, end) in [("{%", "%}"), ("{$", "}")] {
-            let mut remaining = 0;
-            while let Some(relative) = result[remaining..].find(start) {
-                let index = remaining + relative;
+            // shortcut: cap recursive environment expansion to avoid nonterminating values.
+            for _ in 0..10_000 {
+                let Some(index) = result.find(start) else {
+                    break;
+                };
                 let Some(end_offset) = result[index..].find(end) else {
                     break;
                 };
@@ -79,8 +81,11 @@ impl Parser<'_> {
                 }
                 let name = &result[index + start.len()..end_index];
                 let value = (self.lookup)(name).unwrap_or_default();
-                result.replace_range(index..end_index + end.len(), &value);
-                remaining = index + value.len();
+                let reference = &result[index..end_index + end.len()];
+                if value == reference {
+                    break;
+                }
+                result = result.replace(reference, &value);
             }
         }
         result
