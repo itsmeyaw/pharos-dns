@@ -287,13 +287,23 @@ impl PointerCollector<'_> {
         true
     }
 
-    fn safe(&self) -> bool {
-        // A pointer reached through opaque data or literal labels must not alter those bytes.
-        self.pointers[..self.count].iter().all(|pointer| {
+    fn safe(&mut self) -> bool {
+        // Rewriting must not alter opaque data, literal labels, or overlapping pointers.
+        if !self.pointers[..self.count].iter().all(|pointer| {
+            let source = usize::from(pointer.source);
             pointer.target == pointer.original_target
-                || (bit(self.direct, usize::from(pointer.source))
-                    && !bit(self.labels, usize::from(pointer.source))
-                    && !bit(self.labels, usize::from(pointer.source) + 1))
+                || (bit(self.direct, source)
+                    && !bit(self.labels, source)
+                    && !bit(self.labels, source + 1))
+        }) {
+            return false;
+        }
+        let pointers = &mut self.pointers[..self.count];
+        pointers.sort_unstable_by_key(|pointer| pointer.source);
+        pointers.windows(2).all(|pair| {
+            usize::from(pair[0].source) + 1 != usize::from(pair[1].source)
+                || pair[0].target.to_be_bytes()[1]
+                    == 0xc0 | (pair[1].target.to_be_bytes()[0] & 0x3f)
         })
     }
 }

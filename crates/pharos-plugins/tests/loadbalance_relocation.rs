@@ -147,6 +147,49 @@ async fn forward_pointer_after_partition_keeps_original_response() {
 }
 
 #[tokio::test]
+async fn overlapping_pointer_bytes_cannot_be_rewritten_inconsistently() {
+    let mut wire = vec![0, 1, 0x81, 0x80, 0, 1, 0, 5, 0, 0, 0, 0];
+    wire.extend_from_slice(b"\x07example\x03org\0\0\x01\0\x01");
+    wire.extend_from_slice(&[0xc0, 12, 0, 16, 0, 1, 0, 0, 0, 30, 0, 160]);
+    wire.extend_from_slice(&[0; 160]);
+    wire.extend_from_slice(&[0xc0, 12, 0, 5, 0, 1, 0, 0, 0, 30, 0, 2, 0xc0, 12]);
+    wire.extend_from_slice(&[0xc0, 12, 0, 15, 0, 1, 0, 0, 0, 30, 0, 4, 0, 10, 0xc0, 192]);
+    let overlapping = wire.len() - 1;
+    wire.push(12);
+    wire.extend_from_slice(b"xxxxxxxxxxxx\0");
+    wire.extend_from_slice(&[0, 15, 0, 1, 0, 0, 0, 30, 0, 4, 0, 20, 0xc0, 12]);
+    wire.extend_from_slice(&[
+        0xc0,
+        overlapping as u8,
+        0,
+        15,
+        0,
+        1,
+        0,
+        0,
+        0,
+        30,
+        0,
+        4,
+        0,
+        30,
+        0xc0,
+        12,
+    ]);
+    let message = Message::parse(&wire).unwrap();
+    assert!(message.answers().all(|rr| rr.data().is_ok()));
+    let chain = chain();
+    let mut output = Vec::with_capacity(512);
+    for _ in 0..200 {
+        response(&chain, &wire, &mut output).await;
+        assert_eq!(
+            output, wire,
+            "overlapping pointers must not be rewritten inconsistently"
+        );
+    }
+}
+
+#[tokio::test]
 async fn pointer_shaped_ipv4_bytes_do_not_prevent_shuffle() {
     let mut wire = vec![0, 1, 0x81, 0x80, 0, 1, 0, 10, 0, 0, 0, 0];
     wire.extend_from_slice(b"\x07example\x03org\0\0\x01\0\x01");
