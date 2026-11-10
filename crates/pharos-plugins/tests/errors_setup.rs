@@ -2,6 +2,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
+use pharos_server::Chain as _;
 
 // Derived from CoreDNS v1.15.0 plugin/errors/setup_test.go.
 #[test]
@@ -50,4 +51,14 @@ fn corefile_errors_rules() {
     );
     let blocks = parse("Corefile", &corefile).unwrap();
     assert!(configure::<Chain>(&blocks, directives()).is_err());
+}
+
+#[test]
+fn stacktrace_option_reaches_chain() {
+    for (option, expected) in [("", false), (" {\n stacktrace\n}", true)] {
+        let corefile = format!(".:53 {{\n errors{option}\n}}");
+        let blocks = parse("Corefile", &corefile).unwrap();
+        let configured = configure::<Chain>(&blocks, directives()).unwrap();
+        assert_eq!(configured[0].config.stacktrace(), expected);
+    }
 }

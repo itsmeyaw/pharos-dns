@@ -115,6 +115,7 @@ impl Plugin for Errors {
                                 (count != STOPPED).then(|| count.saturating_add(1).min(STOPPED - 1))
                             })
                     else {
+                        level = pattern.level;
                         break;
                     };
                     if previous == 0 {

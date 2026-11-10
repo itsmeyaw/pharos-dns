@@ -79,7 +79,10 @@ Rust's regex compiler also imposes its own compiled-size limit. Pharos emits
 `debug` consolidation messages without CoreDNS's separate debug switch.
 The Plugin contract represents an error as SERVFAIL without an independent
 RCODE, so error logs always report `2`. Rust panic traces and Pharos's
-text/JSON logging format differ from CoreDNS's Go stack and log format.
+text/JSON logging format differ from CoreDNS's Go stack and log format. Pharos
+selects `stacktrace` per routed Server Block; CoreDNS's last Server Block
+setting applies to the whole Listener. Replacing Rust's process-wide panic
+hook after Listener setup disables Pharos's stacktrace capture.
 
 The `prometheus` Directive accepts `runtime_metrics`, but has no effect: Go
 runtime metrics do not exist in Pharos. The `tls` option is parsed, but any

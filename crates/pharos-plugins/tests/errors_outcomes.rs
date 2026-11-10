@@ -52,6 +52,21 @@ fn errors_are_logged_and_consolidated() {
             " ERROR errors: 2 example.org. A: no next plugin found",
             "errors like",
         ),
+        (
+            "debug",
+            " DEBUG errors: 3 errors like '^no next' occurred in last 2s",
+            "example.org.",
+        ),
+        (
+            "explicit_error",
+            " ERROR errors: 3 errors like '^no next' occurred in last 2s",
+            "example.org.",
+        ),
+        (
+            "stopped",
+            " WARNING errors: 2 example.org. A: no next plugin found",
+            "errors like",
+        ),
     ] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "errors_probe", "--nocapture"])
@@ -78,6 +93,9 @@ async fn errors_probe() {
             "errors {\n consolidate 2s \"^no next\" warning\n consolidate 2s .* info\n}"
         }
         "unmatched" => "errors {\n consolidate 2s ^other warning\n}",
+        "debug" => "errors {\n consolidate 2s \"^no next\" debug\n}",
+        "explicit_error" => "errors {\n consolidate 2s \"^no next\" error\n}",
+        "stopped" => "errors {\n consolidate 2s \"^no next\" warning\n}",
         _ => "errors",
     };
     let blocks = parse("Corefile", &format!(". {{\n{rule}\n}} ")).unwrap();
@@ -102,9 +120,17 @@ async fn errors_probe() {
     } else {
         Outcome::Error(Error::NoNextPlugin)
     };
+    if case == "stopped" {
+        configured[0]
+            .config
+            .lifecycle
+            .run(Phase::Shutdown)
+            .await
+            .unwrap();
+    }
     let count = if matches!(
         case.as_str(),
-        "consolidate" | "show_many" | "timer" | "first_match"
+        "consolidate" | "show_many" | "timer" | "first_match" | "debug" | "explicit_error"
     ) {
         3
     } else {
