@@ -54,7 +54,8 @@ pub struct Controller {
 
 impl Controller {
     pub fn start(client: Client, config: WatchConfig) -> Self {
-        Self::start_with_store(client, config, Store::default(), None)
+        let store = Store::new(&config.namespaces);
+        Self::start_with_store(client, config, store, None)
     }
 
     pub fn start_with_metrics(
@@ -62,7 +63,8 @@ impl Controller {
         config: WatchConfig,
         metrics: KubernetesMetrics,
     ) -> Self {
-        Self::start_with_store(client, config, Store::default(), Some(metrics))
+        let store = Store::new(&config.namespaces);
+        Self::start_with_store(client, config, store, Some(metrics))
     }
 
     fn start_with_store(
@@ -286,7 +288,7 @@ fn record_endpoint_latency(
         .and_then(|labels| labels.get("kubernetes.io/service-name"))?;
     let namespace = slice.metadata.namespace.as_deref().unwrap_or("");
     store.with_read(|index| {
-        index.service(namespace, service).map(|service| {
+        index.service_unfiltered(namespace, service).map(|service| {
             let kind = if service.headless() {
                 "headless_with_selector"
             } else {

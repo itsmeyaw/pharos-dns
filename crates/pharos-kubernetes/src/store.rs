@@ -91,7 +91,7 @@ mod tests {
 
 use crate::object::{Endpoints, Namespace, Pod, Service};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
 
@@ -101,6 +101,7 @@ type Grouped<T> = HashMap<Arc<str>, Reverse<T>>;
 
 #[derive(Default)]
 pub struct Index {
+    allowed_namespaces: HashSet<Arc<str>>,
     services: Names<Service>,
     service_ips: Reverse<Service>,
     service_external_ips: Reverse<Service>,
@@ -150,6 +151,9 @@ fn lookup_reverse<'a, T>(map: &'a Reverse<T>, key: &str) -> impl Iterator<Item =
 }
 
 impl Index {
+    fn namespace_allowed(&self, name: &str) -> bool {
+        self.allowed_namespaces.is_empty() || self.allowed_namespaces.contains(name)
+    }
     /// Service, EndpointSlice, endpoint-address, Pod and Namespace counts.
     pub fn counts(&self) -> (usize, usize, usize, usize, usize) {
         let services = self.services.values().map(HashMap::len).sum();
@@ -164,13 +168,22 @@ impl Index {
         (services, slices, addresses, pods, self.namespaces.len())
     }
     pub fn service(&self, namespace: &str, name: &str) -> Option<&Service> {
+        if self.namespace_allowed(namespace) {
+            self.service_unfiltered(namespace, name)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn service_unfiltered(&self, namespace: &str, name: &str) -> Option<&Service> {
         by_name(&self.services, namespace, name).map(Arc::as_ref)
     }
     pub fn services_by_ip(&self, ip: &str) -> impl Iterator<Item = &Service> {
         lookup_reverse(&self.service_ips, ip)
+            .filter(|service| self.namespace_allowed(&service.namespace))
     }
     pub fn services_by_external_ip(&self, ip: &str) -> impl Iterator<Item = &Service> {
         lookup_reverse(&self.service_external_ips, ip)
+            .filter(|service| self.namespace_allowed(&service.namespace))
     }
     pub fn endpoints(&self, namespace: &str, service: &str) -> impl Iterator<Item = &Endpoints> {
         self.endpoints
@@ -179,15 +192,21 @@ impl Index {
             .into_iter()
             .flatten()
             .map(Arc::as_ref)
+            .filter(|slice| self.namespace_allowed(&slice.namespace))
     }
     pub fn endpoints_by_ip(&self, ip: &str) -> impl Iterator<Item = &Endpoints> {
         lookup_reverse(&self.endpoint_ips, ip)
+            .filter(|slice| self.namespace_allowed(&slice.namespace))
     }
     pub fn pods_by_ip(&self, ip: &str) -> impl Iterator<Item = &Pod> {
-        lookup_reverse(&self.pod_ips, ip)
+        lookup_reverse(&self.pod_ips, ip).filter(|pod| self.namespace_allowed(&pod.namespace))
     }
     pub fn namespace(&self, name: &str) -> Option<&Namespace> {
-        self.namespaces.get(name)
+        if self.namespace_allowed(name) {
+            self.namespaces.get(name)
+        } else {
+            None
+        }
     }
 
     fn delete_service(&mut self, namespace: &str, name: &str) {
@@ -278,6 +297,16 @@ impl Index {
 pub struct Store(Arc<RwLock<Index>>);
 
 impl Store {
+    pub(crate) fn new(namespaces: &[String]) -> Self {
+        let index = Index {
+            allowed_namespaces: namespaces
+                .iter()
+                .map(|name| Arc::from(name.as_str()))
+                .collect(),
+            ..Default::default()
+        };
+        Self(Arc::new(RwLock::new(index)))
+    }
     pub fn with_read<R>(&self, read: impl FnOnce(&Index) -> R) -> R {
         read(&self.0.read().unwrap())
     }
