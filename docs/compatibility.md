@@ -9,9 +9,9 @@ enabled, the built-in Corefile has only `whoami`; CoreDNS's default also
 enables `log`. Version and startup banners identify Pharos and include Rust
 rather than Go build information.
 
-`--log-format` is validated but logging is not yet initialized (#17); JSON
-startup output is therefore not implemented. SIGUSR1 reports `Reload` but
-does not replace the configuration until M1. SIGUSR2 upgrades are not yet
+`--log-format json` switches log lines to JSON; the startup banner stays text.
+SIGUSR1 logs `SIGUSR1: Reloading` but does not replace the configuration
+until M1. SIGUSR2 upgrades are not yet
 implemented. After SIGINT's Shutdown hooks, Pharos drains Listeners before
 exiting; Caddy exits without calling `Stop()` on SIGINT.
 

@@ -150,16 +150,12 @@ fn explicit_corefile_uses_default_port_quiet_and_signals() {
         .unwrap()
         .read_to_string(&mut stdout)
         .unwrap();
-    let mut stderr = String::new();
-    process
-        .0
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
-    assert!(stdout.is_empty());
-    assert!(stderr.contains("Reload"));
+    // --quiet hides the startup banner, not log lines.
+    assert!(!stdout.contains("Pharos-"), "{stdout}");
+    assert!(
+        stdout.contains(r#""message":"SIGUSR1: Reloading""#),
+        "{stdout}"
+    );
     assert!(!pidfile.exists());
     fs::remove_dir_all(dir).unwrap();
 }
@@ -306,7 +302,7 @@ fn pidfile_write_failure_is_logged_and_server_keeps_running() {
                 "-q",
             ])
             .stdin(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap(),
     );
@@ -336,17 +332,17 @@ fn pidfile_write_failure_is_logged_and_server_keeps_running() {
             .success()
     );
     assert_eq!(process.0.wait().unwrap().code(), Some(0));
-    let mut stderr = String::new();
+    let mut stdout = String::new();
     process
         .0
-        .stderr
+        .stdout
         .take()
         .unwrap()
-        .read_to_string(&mut stderr)
+        .read_to_string(&mut stdout)
         .unwrap();
     assert!(
-        stderr.contains("[ERROR] Could not write pidfile:"),
-        "{stderr}"
+        stdout.contains("ERROR Could not write pidfile:"),
+        "{stdout}"
     );
 }
 

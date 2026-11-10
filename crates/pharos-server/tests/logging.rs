@@ -12,6 +12,20 @@ fn text_log_uses_utc_rfc3339_and_plugin_name() {
 }
 
 #[test]
+fn text_log_without_plugin_omits_prefix() {
+    assert_eq!(
+        format_line(
+            LogFormat::Text,
+            UNIX_EPOCH,
+            "INFO",
+            "",
+            "SIGUSR1: Reloading"
+        ),
+        "1970-01-01T00:00:00Z INFO SIGUSR1: Reloading\n"
+    );
+}
+
+#[test]
 fn json_log_is_one_line_and_escapes_control_characters() {
     assert_eq!(
         format_line(LogFormat::Json, UNIX_EPOCH, "INFO", "x\"y", "a\n\t\\b"),

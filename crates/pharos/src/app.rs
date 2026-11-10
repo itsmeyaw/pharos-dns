@@ -1,5 +1,9 @@
 use crate::Options;
-use pharos_server::{Listener, Phase, startup_domains};
+use pharos_server::{
+    Listener, Phase,
+    logging::{self, LogFormat},
+    startup_domains,
+};
 use std::{
     collections::BTreeMap,
     fs,
@@ -41,8 +45,13 @@ fn default_corefile(options: &Options) -> String {
     format!(".:{} {{\nwhoami\n{log}}}\n", options.port.unwrap_or(53))
 }
 
-// shortcut: initialize logging when the logging infrastructure from #17 lands.
-fn init_logging(_format: &str) {}
+fn init_logging(format: &str) {
+    logging::init(if format == "json" {
+        LogFormat::Json
+    } else {
+        LogFormat::Text
+    });
+}
 
 struct Signals {
     interrupt: Signal,
@@ -117,7 +126,11 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     if let Some(path) = &options.pidfile
         && let Err(error) = fs::write(path, format!("{}\n", std::process::id()))
     {
-        eprintln!("[ERROR] Could not write pidfile: {path}: {error}");
+        logging::log(
+            "ERROR",
+            "",
+            &format!("Could not write pidfile: {path}: {error}"),
+        );
     }
     let terminate = loop {
         tokio::select! {
@@ -127,7 +140,7 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
             _ = signals.hangup.recv() => {},
             _ = signals.reload.recv() => {
                 // shortcut: wire Reload to configuration replacement in M1.
-                eprintln!("Reload");
+                logging::log("INFO", "", "SIGUSR1: Reloading");
             },
         }
     };
@@ -156,7 +169,7 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
             _ = signals.quit.recv() => { remove_pidfile(&options); return Ok(0); },
             _ = signals.hangup.recv() => {},
             _ = signals.terminate.recv() => {},
-            _ = signals.reload.recv() => { eprintln!("Reload"); },
+            _ = signals.reload.recv() => logging::log("INFO", "", "SIGUSR1: Reloading"),
         }
     }
 }
@@ -169,12 +182,12 @@ async fn shutdown(
 ) -> u8 {
     let hooks = hooks.await;
     if let Err(error) = &hooks {
-        eprintln!("{error}");
+        logging::log("ERROR", "", &error.to_string());
     }
     remove();
     let stopped = stop.await;
     if let Err(error) = &stopped {
-        eprintln!("{error}");
+        logging::log("ERROR", "", &error.to_string());
     }
     // Caddy's SIGTERM path sets 3 after the hooks' 4, so a stop failure wins.
     if terminate && stopped.is_err() {

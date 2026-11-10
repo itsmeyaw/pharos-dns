@@ -42,6 +42,7 @@ pub fn format_line(
 ) -> String {
     let timestamp = timestamp(time);
     match format {
+        LogFormat::Text if plugin.is_empty() => format!("{timestamp} {level} {message}\n"),
         LogFormat::Text => format!("{timestamp} {level} {plugin}: {message}\n"),
         LogFormat::Json => {
             let mut line = String::new();
