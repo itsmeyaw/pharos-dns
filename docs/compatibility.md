@@ -3,34 +3,28 @@
 ## Binary
 
 Pharos uses POSIX-style flags rather than CoreDNS's single-dash long flags;
-legacy spellings report their replacements. It looks for an explicit `--conf`
-first, then `/etc/pharos/pharos.conf`, `./Corefile`, and finally a built-in
-Corefile. Until the `log` Directive is enabled, the built-in Corefile has only
-`whoami`; CoreDNS's default also enables `log`. Unlike CoreDNS, an explicitly
-empty Corefile is not replaced by the default. Version and startup banners
-identify Pharos and include Rust rather than Go build information.
+legacy spellings report their replacements. The Corefile lookup also checks
+`/etc/pharos/pharos.conf` before `./Corefile`. Until the `log` Directive is
+enabled, the built-in Corefile has only `whoami`; CoreDNS's default also
+enables `log`. Version and startup banners identify Pharos and include Rust
+rather than Go build information.
 
 `--log-format` is validated but logging is not yet initialized (#17); JSON
 startup output is therefore not implemented. SIGUSR1 reports `Reload` but
 does not replace the configuration until M1. SIGUSR2 upgrades are not yet
-implemented. Pharos stops Listeners before Shutdown hooks for either SIGINT
-or SIGTERM; Caddy runs shutdown callbacks first and does not call `Stop()`
-on SIGINT. Pharos treats a pidfile write failure as fatal and removes a
-successfully written pidfile on SIGQUIT and normal shutdown; Caddy only logs
-write failures. Pidfile removal errors are ignored in both.
+implemented. After SIGINT's Shutdown hooks, Pharos drains Listeners before
+exiting; Caddy exits without calling `Stop()` on SIGINT.
 
 Exit codes, compared with CoreDNS v1.15.0's `coremain/run.go` and
 coredns/caddy v1.1.4's `sigtrap.go`, `sigtrap_posix.go` and `caddy.go`:
 
-| Code | Pharos | CoreDNS / Caddy |
-| --- | --- | --- |
-| 0 | Version, Plugin listing, SIGQUIT, successful shutdown | Same (also help) |
-| 1 | Configuration, startup, log-format, or pidfile error | Same except pidfile write only logs |
-| 2 | Invalid flag or second SIGINT during shutdown | Same |
-| 3 | Listener stop failure on SIGINT or SIGTERM | SIGTERM `Stop()` failure (currently always nil) |
-| 4 | Shutdown hook failure | Shutdown callback failure |
-
-Pharos does not yet implement the CoreDNS help flag.
+| Code | Meaning |
+| --- | --- |
+| 0 | Help, version, Plugin listing, SIGQUIT, or successful shutdown |
+| 1 | Configuration, startup, or log-format error |
+| 2 | Invalid flag or second SIGINT during shutdown |
+| 3 | Listener stop failure on SIGTERM (Caddy's `Stop()` currently always returns nil) |
+| 4 | Shutdown hook failure |
 
 ## Plugins
 
