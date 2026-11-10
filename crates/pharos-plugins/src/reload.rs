@@ -19,6 +19,9 @@ pub fn parse(cursor: &mut Cursor<'_>) -> Result<Reload, Error> {
     }
     let duration = |value: &str| {
         if let Some(magnitude) = value.strip_prefix('-') {
+            if magnitude.starts_with(['-', '+']) {
+                return None;
+            }
             let parsed = crate::health::parse_duration(magnitude)?;
             return parsed.is_zero().then_some(parsed);
         }

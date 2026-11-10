@@ -41,6 +41,7 @@ fn setup_accepts_and_rejects_coredns_examples() {
         "reload 0s",
         "reload 3s 0.5s",
         "reload 3s -1s",
+        "reload 3s -+0",
         "reload\nreload",
     ] {
         assert!(
