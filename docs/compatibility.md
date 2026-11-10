@@ -194,3 +194,6 @@ adapt its TCP dial timeout (fixed at 30 seconds), enable Linux UDP error-queue
 socket options. Upstream TSIG Messages retain their original ID rather than
 rewriting the signed Message. Proxy metric RCODE series are initialized on
 first observation, which allocates once per distinct RCODE.
+The idle-connection cap applies across UDP and TCP combined; CoreDNS applies it
+per protocol. Connections rotate FIFO within each worker shard rather than in
+one global FIFO.

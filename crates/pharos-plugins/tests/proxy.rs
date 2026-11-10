@@ -477,3 +477,156 @@ async fn malformed_udp_wrong_id_is_ignored_before_valid_response() {
         .unwrap();
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn idle_cap_is_shared_across_udp_and_tcp() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let udp = UdpSocket::bind(tcp.local_addr().unwrap()).await.unwrap();
+    let mut proxy = Proxy::new(tcp.local_addr().unwrap());
+    proxy.set_max_idle_conns(1);
+    let upstream = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = udp.recv_from(&mut wire).await.unwrap();
+        wire[2] |= 0x80;
+        udp.send_to(&wire[..len], peer).await.unwrap();
+        let mut peers = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, peer) = tcp.accept().await.unwrap();
+            peers.push(peer);
+            let len = usize::from(stream.read_u16().await.unwrap());
+            stream.read_exact(&mut wire[..len]).await.unwrap();
+            wire[2] |= 0x80;
+            stream.write_u16(len as u16).await.unwrap();
+            stream.write_all(&wire[..len]).await.unwrap();
+        }
+        peers
+    });
+    let mut response = [0; 512];
+    for protocol in [Transport::Udp, Transport::Tcp, Transport::Tcp] {
+        proxy
+            .exchange(QUERY, &mut response, protocol, Options::default())
+            .await
+            .unwrap();
+    }
+    let peers = upstream.await.unwrap();
+    assert_ne!(peers[0], peers[1]);
+}
+
+#[tokio::test]
+async fn max_age_expires_connections_even_when_recently_used() {
+    use std::time::Duration;
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut proxy = Proxy::new(server.local_addr().unwrap());
+    proxy.set_max_age(Duration::from_millis(300));
+    let upstream = tokio::spawn(async move {
+        let mut peers = Vec::new();
+        let mut wire = [0; 512];
+        for _ in 0..3 {
+            let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+            peers.push(peer);
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+        peers
+    });
+    let mut response = [0; 512];
+    proxy
+        .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    proxy
+        .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(320)).await;
+    proxy
+        .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap();
+    let peers = upstream.await.unwrap();
+    assert_eq!(peers[0], peers[1]);
+    assert_ne!(peers[1], peers[2]);
+}
+
+#[tokio::test]
+async fn unlimited_idle_cache_rotates_connections_fifo() {
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let mut peers = Vec::new();
+        for _ in 0..4 {
+            let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+            peers.push(peer);
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+        peers
+    });
+    let mut a = [0; 512];
+    let mut b = [0; 512];
+    let (first, second) = tokio::join!(
+        proxy.exchange(QUERY, &mut a, Transport::Udp, Options::default()),
+        proxy.exchange(QUERY, &mut b, Transport::Udp, Options::default()),
+    );
+    first.unwrap();
+    second.unwrap();
+    for _ in 0..2 {
+        proxy
+            .exchange(QUERY, &mut a, Transport::Udp, Options::default())
+            .await
+            .unwrap();
+    }
+    let peers = upstream.await.unwrap();
+    assert_ne!(peers[0], peers[1]);
+    assert_eq!(&peers[0..2], &peers[2..4]);
+}
+
+#[tokio::test]
+async fn fifo_rotated_connections_expire_by_creation_age() {
+    use std::time::Duration;
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut proxy = Proxy::new(server.local_addr().unwrap());
+    proxy.set_max_age(Duration::from_millis(300));
+    let upstream = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let mut peers = Vec::new();
+        for _ in 0..6 {
+            let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+            peers.push(peer);
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+        peers
+    });
+    let mut a = [0; 512];
+    let mut b = [0; 512];
+    let (one, two) = tokio::join!(
+        proxy.exchange(QUERY, &mut a, Transport::Udp, Options::default()),
+        proxy.exchange(QUERY, &mut b, Transport::Udp, Options::default())
+    );
+    one.unwrap();
+    two.unwrap();
+    for _ in 0..2 {
+        proxy
+            .exchange(QUERY, &mut a, Transport::Udp, Options::default())
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(320)).await;
+    let (one, two) = tokio::join!(
+        proxy.exchange(QUERY, &mut a, Transport::Udp, Options::default()),
+        proxy.exchange(QUERY, &mut b, Transport::Udp, Options::default())
+    );
+    one.unwrap();
+    two.unwrap();
+    let peers = upstream.await.unwrap();
+    assert_eq!(&peers[..2], &peers[2..4]);
+    assert!(!peers[..2].contains(&peers[4]));
+    assert!(!peers[..2].contains(&peers[5]));
+}

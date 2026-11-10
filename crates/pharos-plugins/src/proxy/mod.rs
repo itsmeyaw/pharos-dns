@@ -94,6 +94,7 @@ pub struct Exchange {
 
 struct Cached {
     socket: Socket,
+    created: Instant,
     used: Instant,
 }
 
@@ -140,6 +141,9 @@ pub struct Proxy {
     address: SocketAddr,
     shards: [[Mutex<VecDeque<Cached>>; SHARDS]; 2],
     expire: Duration,
+    max_age: Duration,
+    max_idle_conns: usize,
+    idle: AtomicUsize,
     read_timeout: Duration,
     metrics: Option<Metrics>,
     health: Health,
@@ -158,6 +162,9 @@ impl Proxy {
             address,
             shards: std::array::from_fn(|_| std::array::from_fn(|_| Mutex::new(VecDeque::new()))),
             expire: EXPIRE,
+            max_age: Duration::ZERO,
+            max_idle_conns: 0,
+            idle: AtomicUsize::new(0),
             read_timeout: READ_TIMEOUT,
             metrics: None,
             health: Health::new(address, 2),
@@ -167,6 +174,16 @@ impl Proxy {
     /// Set the maximum idle time before an Upstream connection is discarded.
     pub fn set_expire(&mut self, expire: Duration) {
         self.expire = expire;
+    }
+
+    /// Limit idle connections across this Upstream; zero means unlimited.
+    pub fn set_max_idle_conns(&mut self, max: usize) {
+        self.max_idle_conns = max;
+    }
+
+    /// Set maximum connection age from creation; zero means unlimited.
+    pub fn set_max_age(&mut self, max_age: Duration) {
+        self.max_age = max_age;
     }
 
     /// Set the Response read timeout (two seconds by default).
@@ -249,8 +266,14 @@ impl Proxy {
             let mut queue = self.shards[protocol][shard].lock().unwrap();
             loop {
                 match queue.pop_front() {
-                    Some(cached) if cached.used.elapsed() <= self.expire => break Some(cached),
-                    Some(_) => continue,
+                    Some(cached) => {
+                        self.idle.fetch_sub(1, Ordering::Relaxed);
+                        if cached.used.elapsed() <= self.expire
+                            && (self.max_age.is_zero() || cached.created.elapsed() <= self.max_age)
+                        {
+                            break Some(cached);
+                        }
+                    }
                     None => break None,
                 }
             }
@@ -263,13 +286,16 @@ impl Proxy {
                 metrics.cache[protocol].miss();
             }
         }
-        let mut socket = if let Some(cached) = cached {
-            cached.socket
+        let (mut socket, created) = if let Some(cached) = cached {
+            (cached.socket, cached.created)
         } else if transport == Transport::Tcp {
-            Socket::Tcp(
-                timeout(Duration::from_secs(30), TcpStream::connect(self.address))
-                    .await
-                    .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))??,
+            (
+                Socket::Tcp(
+                    timeout(Duration::from_secs(30), TcpStream::connect(self.address))
+                        .await
+                        .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))??,
+                ),
+                Instant::now(),
             )
         } else {
             let ip = if self.address.is_ipv4() {
@@ -279,7 +305,7 @@ impl Proxy {
             };
             let socket = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
             socket.connect(self.address).await?;
-            Socket::Udp(socket)
+            (Socket::Udp(socket), Instant::now())
         };
         let mut id = [0; 2];
         if request
@@ -368,13 +394,22 @@ impl Proxy {
             return Err(Error::Mismatch);
         }
         response[..2].copy_from_slice(&query[..2]);
-        self.shards[protocol][shard]
-            .lock()
-            .unwrap()
-            .push_back(Cached {
-                socket,
-                used: Instant::now(),
-            });
+        if self
+            .idle
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (self.max_idle_conns == 0 || count < self.max_idle_conns).then(|| count + 1)
+            })
+            .is_ok()
+        {
+            self.shards[protocol][shard]
+                .lock()
+                .unwrap()
+                .push_back(Cached {
+                    socket,
+                    created,
+                    used: Instant::now(),
+                });
+        }
         Ok(Exchange {
             len: length,
             local_addr,
