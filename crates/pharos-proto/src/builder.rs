@@ -104,7 +104,7 @@ impl<'a> MessageBuilder<'a> {
         })
     }
 
-    /// Reserves additional space for an encoded OPT record appended by `finish_with_opt`.
+    /// Reserves additional space for an OPT appended when finishing.
     /// Returns an error without changing the reservation if the remaining space is too small.
     pub fn reserve(&mut self, size: usize) -> Result<(), BuildError> {
         if size > self.max_size - self.reserved - self.wire.len() {

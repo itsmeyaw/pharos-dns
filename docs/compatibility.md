@@ -23,8 +23,9 @@ to an octet as miekg/dns does.
 
 ## EDNS
 
-Pharos rejects duplicate OPT records, OPT records outside Additional, and
-non-root OPT owners as invalid Messages (FORMERR). CoreDNS v1.15.0 accepts
+The protocol parser rejects duplicate OPT records, OPT records outside
+Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
+Listener-side FORMERR handling is not implemented yet. CoreDNS v1.15.0 accepts
 these when its header-count policy allows them, and selects the last OPT in
 Additional. CoreDNS's UDP/TCP Listener returns FORMERR on option unpacking
 errors; short headers are dropped. HTTP and QUIC report transport errors.

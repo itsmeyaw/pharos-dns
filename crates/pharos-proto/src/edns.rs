@@ -41,7 +41,7 @@ pub struct Opt<'a> {
 }
 
 impl<'a> Opt<'a> {
-    /// The fresh OPT CoreDNS uses for a BADVERS Response.
+    /// The fresh OPT CoreDNS uses for a BADVERS Response, including its zero UDP size.
     #[must_use]
     pub fn badvers() -> Opt<'static> {
         Opt::new(0, 1, 0, 0, EdnsOptions::parse(&[]).expect("empty options"))
@@ -120,6 +120,7 @@ impl<'a> Opt<'a> {
 
     /// Applies CoreDNS SizeAndDo to an optional existing Response OPT.
     /// Only registered option codes are copied when the Response had no OPT.
+    /// The Response version is reset to zero, even for an existing OPT.
     #[must_use]
     pub fn response<'b>(
         self,
