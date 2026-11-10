@@ -142,3 +142,37 @@ fn validates_duplicate_keys_and_listener_overlaps() {
         }
     }
 }
+
+#[test]
+fn coredns_overlap_checker_reports_conflicting_addresses() {
+    let registry = [Directive {
+        name: "bind",
+        once: true,
+        setup: bind,
+    }];
+    for (input, expected) in [
+        (
+            ". {\n}\n. {\n}",
+            "cannot serve dns://.:53 - it is already defined",
+        ),
+        (
+            ". {\n}\n.:54 {\n}\n. {\n bind 127.0.0.1\n}",
+            "cannot serve dns://.:53 on 127.0.0.1 - zone overlap listener capacity with dns://.:53",
+        ),
+        (
+            ". {\n bind 127.0.0.1\n}\n.:54 {\n}\n. {\n bind 127.0.0.1\n}",
+            "cannot serve dns://.:53 on 127.0.0.1 - it is already defined",
+        ),
+        (
+            ". {\n bind 127.0.0.1 128.0.0.1 129.0.0.1\n}\n.:54 {\n}\n. {\n}",
+            "cannot serve dns://.:53 - zone overlap listener capacity with dns://.:53 on 129.0.0.1",
+        ),
+        (
+            ". {\n bind 127.0.0.1\n}\ncom {\n bind 127.0.0.1\n}\ncom {\n}",
+            "cannot serve dns://com.:53 - zone overlap listener capacity with dns://com.:53 on 127.0.0.1",
+        ),
+    ] {
+        let error = configure(&parse("Corefile", input).unwrap(), &registry).unwrap_err();
+        assert_eq!(error.message, expected);
+    }
+}
