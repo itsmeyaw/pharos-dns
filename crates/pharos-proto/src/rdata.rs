@@ -138,6 +138,58 @@ fn character_string(bytes: &[u8]) -> Result<(&[u8], &[u8]), RdataError> {
     Ok(rest.split_at(len))
 }
 
+pub(crate) fn compressible_names(
+    rtype: Type,
+    wire: &[u8],
+    offset: usize,
+    len: usize,
+) -> Result<[Option<NameRef<'_>>; 2], RdataError> {
+    let end = offset.checked_add(len).ok_or(RdataError)?;
+    let bytes = wire.get(offset..end).ok_or(RdataError)?;
+    let (prefix, count, trailing) = match rtype {
+        Type::NS
+        | Type::CNAME
+        | Type::PTR
+        | Type::MD
+        | Type::MF
+        | Type::MB
+        | Type::MG
+        | Type::MR => (0, 1, Some(0)),
+        Type::MINFO | Type::RP => (0, 2, Some(0)),
+        Type::SOA => (0, 2, Some(20)),
+        Type::MX | Type::AFSDB | Type::RT => (2, 1, Some(0)),
+        Type::PX => (2, 2, Some(0)),
+        Type::SIG => (18, 1, None),
+        Type::NXT => (0, 1, None),
+        Type::SRV => (6, 1, Some(0)),
+        Type::NAPTR => {
+            let mut rest = bytes.get(4..).ok_or(RdataError)?;
+            for _ in 0..3 {
+                rest = character_string(rest)?.1;
+            }
+            (len - rest.len(), 1, Some(0))
+        }
+        _ => return Ok([None, None]),
+    };
+    let mut cursor = offset.checked_add(prefix).ok_or(RdataError)?;
+    let mut names = [None, None];
+    for slot in names.iter_mut().take(count) {
+        if cursor >= end {
+            return Err(RdataError);
+        }
+        let name = NameRef::parse(wire, cursor).map_err(|_| RdataError)?;
+        cursor = cursor.checked_add(name.wire_len()).ok_or(RdataError)?;
+        if cursor > end {
+            return Err(RdataError);
+        }
+        *slot = Some(name);
+    }
+    if trailing.is_some_and(|trailing| end - cursor != trailing) {
+        return Err(RdataError);
+    }
+    Ok(names)
+}
+
 fn valid_txt(mut bytes: &[u8]) -> Result<(), RdataError> {
     if bytes.is_empty() {
         return Err(RdataError);

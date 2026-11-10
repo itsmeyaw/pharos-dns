@@ -21,11 +21,14 @@ pub mod errors;
     feature = "plugin-health",
     feature = "plugin-errors",
     feature = "plugin-reload",
-    feature = "plugin-hosts"
+    feature = "plugin-hosts",
+    feature = "plugin-loadbalance"
 ))]
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
 pub mod hosts;
+#[cfg(feature = "plugin-loadbalance")]
+pub mod loadbalance;
 pub mod proxy;
 
 #[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]
@@ -479,6 +482,17 @@ fn setup_hosts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
     let hosts = hosts::Hosts::parse(cursor, &domains)?;
     hosts.register_hooks(&mut block.config.lifecycle);
     block.config.hosts = Some(hosts);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-loadbalance")]
+fn setup_loadbalance(
+    cursor: &mut Cursor<'_>,
+    block: &mut BlockContext<Chain>,
+) -> Result<(), Error> {
+    let plugin = loadbalance::LoadBalance::parse(cursor)?;
+    plugin.register_hooks(&mut block.config.lifecycle);
+    block.config.loadbalance = Some(plugin);
     Ok(())
 }
 

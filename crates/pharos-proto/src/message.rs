@@ -83,6 +83,11 @@ impl<'a> Record<'a> {
         crate::Rdata::parse_in_message(self.rtype, self.wire, self.rdata_offset, self.rdata.len())
     }
 
+    /// Returns up to two compressible name fields; other RDATA is opaque.
+    pub fn compressible_names(&self) -> Result<[Option<NameRef<'a>>; 2], crate::RdataError> {
+        crate::rdata::compressible_names(self.rtype, self.wire, self.rdata_offset, self.rdata.len())
+    }
+
     /// Formats a valid TSIG as a complete miekg/dns pseudo-section.
     pub fn display_tsig(&self) -> Result<impl fmt::Display + 'a, crate::RdataError> {
         let data = self.data()?;
