@@ -123,17 +123,34 @@ impl Proxy {
         transport: Transport,
         options: Options,
     ) -> Result<Exchange, Error> {
-        let request = Message::parse(query).map_err(|_| Error::InvalidRequest)?;
-        if query.len() > response.len() || query.len() > u16::MAX as usize {
-            return Err(Error::InvalidRequest);
-        }
-        let transport = if options.force_tcp {
+        let selected = if options.force_tcp {
             Transport::Tcp
         } else if options.prefer_udp {
             Transport::Udp
         } else {
             transport
         };
+        let result = self.exchange_once(query, response, selected).await?;
+        if selected == Transport::Udp
+            && options.prefer_udp
+            && !options.force_tcp
+            && response[2] & 0x02 != 0
+        {
+            return self.exchange_once(query, response, Transport::Tcp).await;
+        }
+        Ok(result)
+    }
+
+    async fn exchange_once(
+        &self,
+        query: &[u8],
+        response: &mut [u8],
+        transport: Transport,
+    ) -> Result<Exchange, Error> {
+        let request = Message::parse(query).map_err(|_| Error::InvalidRequest)?;
+        if query.len() > response.len() || query.len() > u16::MAX as usize {
+            return Err(Error::InvalidRequest);
+        }
         let protocol = usize::from(transport == Transport::Tcp);
         let shard = SHARD.with(|index| *index);
         let cached = {
