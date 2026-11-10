@@ -12,8 +12,11 @@ use pharos_proto::Rcode;
 pub trait Chain: Send + Sync + 'static {
     fn serve(&self, context: &mut Context<'_>) -> impl Future<Output = Outcome> + Send;
     fn is_empty(&self) -> bool;
-    fn needs_parallel(&self, _query: &pharos_proto::Message<'_>) -> bool {
-        false
+    fn parallel_query(
+        &self,
+        _query: &pharos_proto::Message<'_>,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        None
     }
     fn visit_enabled(&self, _visit: &mut dyn FnMut(&'static str)) {}
     fn metrics_enabled(&self) -> bool {
@@ -32,8 +35,11 @@ impl<C: Chain> Chain for Arc<C> {
     fn is_empty(&self) -> bool {
         self.as_ref().is_empty()
     }
-    fn needs_parallel(&self, query: &pharos_proto::Message<'_>) -> bool {
-        self.as_ref().needs_parallel(query)
+    fn parallel_query(
+        &self,
+        query: &pharos_proto::Message<'_>,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.as_ref().parallel_query(query)
     }
     fn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {
         self.as_ref().visit_enabled(visit);
@@ -107,9 +113,13 @@ fn log_plugin_error(plugin: &str, error: Error) {
 }
 
 impl<C: Chain> Handler for Server<C> {
-    fn needs_parallel(&self, wire: &[u8], peer: SocketAddr) -> bool {
+    fn parallel_query(
+        &self,
+        wire: &[u8],
+        peer: SocketAddr,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
         let Ok(query) = pharos_proto::Message::parse(wire) else {
-            return false;
+            return None;
         };
         // shortcut: only loop probes require parallel dispatch; extend for other self-queries.
         if query
@@ -117,12 +127,12 @@ impl<C: Chain> Handler for Server<C> {
             .next()
             .is_none_or(|question| question.qtype != pharos_proto::Type::HINFO)
         {
-            return false;
+            return None;
         }
         self.router
             .route(&self.key, query, peer, Protocol::Udp)
             .and_then(|block| block.chain())
-            .is_some_and(|chain| chain.needs_parallel(&query))
+            .and_then(|chain| chain.parallel_query(&query))
     }
     async fn handle(
         &self,

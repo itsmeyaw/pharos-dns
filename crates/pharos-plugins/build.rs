@@ -115,7 +115,7 @@ fn main() {
     }
     code.push_str("}\n");
     if enabled.contains(&"loop") {
-        code.push_str("fn needs_parallel(&self, query: &pharos_proto::Message<'_>) -> bool { self.r#loop.as_ref().is_some_and(|plugin| plugin.is_probe(query)) }\n");
+        code.push_str("fn parallel_query(&self, query: &pharos_proto::Message<'_>) -> Option<tokio::sync::watch::Receiver<bool>> { self.r#loop.as_ref().and_then(|plugin| plugin.parallel_query(query)) }\n");
     }
     if enabled.contains(&"prometheus") {
         code.push_str("fn metrics_enabled(&self) -> bool { self.prometheus.is_some() }\n");

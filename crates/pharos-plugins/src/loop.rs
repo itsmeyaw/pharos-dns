@@ -13,6 +13,7 @@ use std::{
 };
 use tokio::{
     net::UdpSocket,
+    sync::watch,
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
@@ -34,9 +35,13 @@ struct State {
     resume: AtomicBool,
     address: Mutex<SocketAddr>,
     task: Mutex<Option<JoinHandle<()>>>,
+    cancel: watch::Sender<bool>,
 }
 
 impl Loop {
+    pub(crate) fn parallel_query(&self, query: &Message<'_>) -> Option<watch::Receiver<bool>> {
+        self.is_probe(query).then(|| self.state.cancel.subscribe())
+    }
     pub(crate) fn is_probe(&self, query: &Message<'_>) -> bool {
         !self.state.disabled.load(Ordering::Acquire)
             && query.questions().next().is_some_and(|question| {
@@ -77,6 +82,7 @@ impl Loop {
                 resume: AtomicBool::new(false),
                 address: Mutex::new(SocketAddr::from(([127, 0, 0, 1], 0))),
                 task: Mutex::new(None),
+                cancel: watch::channel(false).0,
             }),
         }
     }
@@ -110,6 +116,7 @@ impl Loop {
 
 impl State {
     fn start(self: &Arc<Self>) {
+        self.cancel.send_replace(false);
         self.disabled.store(false, Ordering::Release);
         self.seen.store(0, Ordering::Relaxed);
         let state = Arc::clone(self);
@@ -119,6 +126,7 @@ impl State {
     }
 
     fn stop(&self) {
+        self.cancel.send_replace(true);
         let active = !self.disabled.swap(true, Ordering::AcqRel);
         if let Some(task) = self.task.lock().unwrap().take() {
             self.resume.store(
@@ -137,6 +145,7 @@ impl State {
                 .await
                 .is_ok_and(|result| result.is_ok())
             {
+                self.complete.store(true, Ordering::Release);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 break;
             }
@@ -306,6 +315,35 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2200)).await;
         assert!(plugin.state.disabled.load(Ordering::Acquire));
         assert!(plugin.state.complete.load(Ordering::Acquire));
+        lifecycle.run(Phase::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_reload_does_not_repeat_a_successful_probe() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let plugin = Loop::new(".");
+        let mut lifecycle = Lifecycle::default();
+        plugin.register(&mut lifecycle, socket.local_addr().unwrap());
+        lifecycle.run(Phase::Started).await.unwrap();
+        let mut wire = [0; 512];
+        let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+        wire[2] |= 0x80;
+        socket.send_to(&wire[..len], peer).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !plugin.state.complete.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        lifecycle.run(Phase::Restart).await.unwrap();
+        lifecycle.run(Phase::RestartFailed).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), socket.recv_from(&mut wire))
+                .await
+                .is_err()
+        );
+        assert!(plugin.state.disabled.load(Ordering::Acquire));
         lifecycle.run(Phase::Shutdown).await.unwrap();
     }
 }

@@ -16,12 +16,17 @@ pub(crate) fn spawn_parallel<H: Handler>(
     query: &[u8],
     peer: SocketAddr,
     mut shutdown: watch::Receiver<bool>,
+    mut cancelled: watch::Receiver<bool>,
 ) {
     let query = query.to_vec();
     tokio::spawn(async move {
+        if *cancelled.borrow() {
+            return;
+        }
         let mut response = Vec::with_capacity(65535);
         tokio::select! {
             _ = shutdown.changed() => {},
+            _ = cancelled.changed() => {},
             action = handler.handle(&query, peer, Protocol::Udp, &mut response) => {
                 if action == Action::Respond && let Err(error) = socket.send_to(&response, peer).await {
                     crate::logging::log("ERROR", "server", &format!("UDP Response to {peer} failed: {error}"));
@@ -71,8 +76,8 @@ pub(crate) fn spawn<H: Handler>(
                             continue;
                         }
                     };
-                    if handler.needs_parallel(&query[..length], peer) {
-                        spawn_parallel(Arc::clone(&socket), Arc::clone(&handler), &query[..length], peer, shutdown.clone());
+                    if let Some(cancelled) = handler.parallel_query(&query[..length], peer) {
+                        spawn_parallel(Arc::clone(&socket), Arc::clone(&handler), &query[..length], peer, shutdown.clone(), cancelled);
                         continue;
                     }
                     response.clear();
@@ -88,3 +93,49 @@ pub(crate) fn spawn<H: Handler>(
 
 #[cfg(target_os = "linux")]
 pub(crate) use crate::udp_linux::spawn;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Blocking(Arc<AtomicBool>);
+    struct Guard(Arc<AtomicBool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    impl Handler for Blocking {
+        async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+            let _guard = Guard(Arc::clone(&self.0));
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_query_is_cancelled_when_configuration_restarts() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (shutdown, receiver) = watch::channel(false);
+        let (restart, cancelled) = watch::channel(false);
+        spawn_parallel(
+            socket,
+            Arc::new(Blocking(Arc::clone(&dropped))),
+            &[0],
+            "127.0.0.1:1234".parse().unwrap(),
+            receiver,
+            cancelled,
+        );
+        tokio::task::yield_now().await;
+        restart.send_replace(true);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(shutdown);
+    }
+}

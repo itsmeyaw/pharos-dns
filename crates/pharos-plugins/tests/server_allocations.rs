@@ -28,8 +28,12 @@ struct Counting {
 }
 
 impl Handler for Counting {
-    fn needs_parallel(&self, query: &[u8], peer: SocketAddr) -> bool {
-        self.server.needs_parallel(query, peer)
+    fn parallel_query(
+        &self,
+        query: &[u8],
+        peer: SocketAddr,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.server.parallel_query(query, peer)
     }
 
     async fn handle(

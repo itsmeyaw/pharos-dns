@@ -99,13 +99,15 @@ pub(crate) fn spawn<H: Handler>(
             };
             for index in 0..count {
                 if let Some((length, peer)) = peers[index] {
-                    if handler.needs_parallel(&buffers[index][..length], peer) {
+                    if let Some(cancelled) = handler.parallel_query(&buffers[index][..length], peer)
+                    {
                         crate::udp::spawn_parallel(
                             Arc::clone(&socket),
                             Arc::clone(&handler),
                             &buffers[index][..length],
                             peer,
                             shutdown.clone(),
+                            cancelled,
                         );
                         continue;
                     }
