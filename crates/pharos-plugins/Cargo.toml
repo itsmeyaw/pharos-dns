@@ -10,6 +10,9 @@ pharos-corefile = { path = "../pharos-corefile" }
 pharos-proto = { path = "../pharos-proto" }
 pharos-server = { path = "../pharos-server" }
 
+[dev-dependencies]
+stats_alloc = "0.1.10"
+
 [features]
 default = ["plugin-whoami"]
 plugin-root = []
