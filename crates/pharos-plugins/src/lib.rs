@@ -174,6 +174,10 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
             cache.set_metrics(&metrics, &listeners);
         }
         let chain = Arc::new(block.config);
+        #[cfg(feature = "plugin-cache")]
+        if let Some(cache) = &chain.cache {
+            cache.bind(&chain);
+        }
         #[cfg(feature = "plugin-forward")]
         if chain.forward.is_some() {
             let chain = Arc::clone(&chain);

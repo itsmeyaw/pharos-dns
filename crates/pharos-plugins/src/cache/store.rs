@@ -5,7 +5,7 @@ use std::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use pharos_proto::{Class, Message, Name, Type};
@@ -47,6 +47,19 @@ struct Item {
     ttl_offsets: Box<[usize]>,
     ttl: u32,
     stored: Instant,
+    hits: i64,
+    last_hit: Option<Instant>,
+    refreshing: bool,
+    retry_after: Option<Instant>,
+    answering: bool,
+    last_known_good: Option<Box<Item>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Hit {
+    pub stale: bool,
+    pub refresh: Option<Instant>,
+    pub generation: Instant,
 }
 
 impl Store {
@@ -68,12 +81,37 @@ impl Store {
         self.len.load(Ordering::Relaxed)
     }
 
-    pub(super) fn insert(&self, key: u64, response: &Message<'_>, ttl: u32) -> Option<bool> {
-        let Some(item) = Item::new(response, ttl) else {
-            return None;
-        };
+    pub(super) fn is_current(&self, key: u64, stored: Instant) -> bool {
+        self.shards[key as usize & 255]
+            .lock()
+            .unwrap()
+            .items
+            .get(&key)
+            .is_some_and(|item| item.stored == stored)
+    }
+
+    pub(super) fn insert(
+        &self,
+        key: u64,
+        response: &Message<'_>,
+        ttl: u32,
+        preserve_positive: bool,
+    ) -> Option<bool> {
+        let mut item = Item::new(response, ttl)?;
         let mut shard = self.shards[key as usize & 255].lock().unwrap();
-        let exists = shard.items.contains_key(&key);
+        let previous = shard.items.remove(&key);
+        let exists = previous.is_some();
+        if let Some(mut previous) = previous {
+            item.hits = previous.hits;
+            item.last_hit = previous.last_hit;
+            if preserve_positive && !item.answering {
+                item.last_known_good = if previous.answering {
+                    Some(Box::new(previous))
+                } else {
+                    previous.last_known_good.take()
+                };
+            }
+        }
         let mut evicted = false;
         if shard.items.len() >= self.capacity && !exists {
             let mut random = shard.random;
@@ -99,27 +137,40 @@ impl Store {
         key: u64,
         query: &Message<'_>,
         output: &mut Vec<u8>,
-        keep_ttl: bool,
-    ) -> bool {
-        let shard = self.shards[key as usize & 255].lock().unwrap();
-        let Some(item) = shard.items.get(&key) else {
-            return false;
-        };
-        let Some(question) = query.questions().next() else {
-            return false;
+        config: &super::setup::Config,
+        answering_only: bool,
+    ) -> Option<Hit> {
+        let mut shard = self.shards[key as usize & 255].lock().unwrap();
+        let item = shard.items.get_mut(&key)?;
+        let generation = item.stored;
+        let question = query.questions().next()?;
+        let item = if answering_only && !item.answering {
+            item.last_known_good.as_deref_mut()?
+        } else {
+            item
         };
         if question.name != item.name
             || question.qtype != item.qtype
             || question.qclass != item.qclass
         {
-            return false;
+            return None;
         }
-        let elapsed = item.stored.elapsed().as_secs();
-        if elapsed >= u64::from(item.ttl) || output.capacity() < item.wire.len() {
-            return false;
+        let now = Instant::now();
+        let elapsed = now.duration_since(item.stored).as_secs();
+        let stale = elapsed >= u64::from(item.ttl);
+        if (stale
+            && (config.stale.is_zero()
+                || Duration::from_secs(elapsed - u64::from(item.ttl)) >= config.stale))
+            || output.capacity() < item.wire.len()
+        {
+            return None;
         }
-        let ttl = if keep_ttl {
+        let ttl = if stale && !config.stale_ttl.is_zero() {
+            config.stale_ttl.as_secs() as u32
+        } else if config.keepttl {
             item.ttl
+        } else if stale {
+            0
         } else {
             item.ttl - elapsed as u32
         };
@@ -141,7 +192,80 @@ impl Store {
         for &offset in &item.ttl_offsets {
             output[offset..offset + 4].copy_from_slice(&ttl.to_be_bytes());
         }
-        true
+        if !stale && config.prefetch_amount > 0 {
+            let window = Duration::from_nanos(config.prefetch_duration.max(0) as u64);
+            item.hits = if config.prefetch_duration < 0
+                || item
+                    .last_hit
+                    .is_none_or(|last| now.duration_since(last) > window)
+            {
+                1
+            } else {
+                item.hits.saturating_add(1)
+            };
+            item.last_hit = Some(now);
+        }
+        let threshold = (u64::from(item.ttl) * config.prefetch_percentage as u64).div_ceil(100);
+        let wanted = stale
+            || (config.prefetch_amount > 0
+                && item.hits >= config.prefetch_amount
+                && u64::from(item.ttl) - elapsed <= threshold);
+        let refresh =
+            if wanted && !item.refreshing && item.retry_after.is_none_or(|retry| now >= retry) {
+                item.refreshing = true;
+                Some(item.stored)
+            } else {
+                None
+            };
+        Some(Hit {
+            stale,
+            refresh,
+            generation,
+        })
+    }
+
+    pub(super) fn finish_refresh(
+        &self,
+        key: u64,
+        stored: Instant,
+        recheck: Duration,
+        success: bool,
+    ) {
+        let mut shard = self.shards[key as usize & 255]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let item = shard.items.get_mut(&key).and_then(|item| {
+            if item.stored == stored {
+                Some(item)
+            } else {
+                item.last_known_good
+                    .as_deref_mut()
+                    .filter(|old| old.stored == stored)
+            }
+        });
+        if let Some(item) = item {
+            item.refreshing = false;
+            item.retry_after = if success || recheck.is_zero() {
+                None
+            } else {
+                Instant::now().checked_add(recheck)
+            };
+        }
+    }
+
+    pub(super) fn remove_if_stored(&self, key: u64, stored: Instant) -> bool {
+        let mut shard = self.shards[key as usize & 255].lock().unwrap();
+        if shard
+            .items
+            .get(&key)
+            .is_some_and(|item| item.stored == stored)
+        {
+            shard.items.remove(&key);
+            self.len.fetch_sub(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -197,6 +321,12 @@ impl Item {
             ttl_offsets,
             ttl,
             stored: Instant::now(),
+            hits: 0,
+            last_hit: None,
+            refreshing: false,
+            retry_after: None,
+            answering: super::answers_question(response),
+            last_known_good: None,
         })
     }
 }

@@ -55,7 +55,7 @@ impl Next for Backend<'_> {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let question = cx.query.questions().next().unwrap();
-        let flags = 0x80a0 | self.rcode | u16::from(self.truncated) * 0x0200;
+        let flags = 0x80a0 | self.rcode | (u16::from(self.truncated) * 0x0200);
         let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), flags).unwrap();
         builder
             .question(question.name, question.qtype, question.qclass)

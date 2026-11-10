@@ -3,7 +3,12 @@
 mod setup;
 mod store;
 
-use std::{fmt::Write, net::SocketAddr, time::SystemTime};
+use std::{
+    fmt::Write,
+    net::SocketAddr,
+    sync::{Arc, Mutex, OnceLock, Weak},
+    time::{Instant, SystemTime},
+};
 
 use pharos_proto::{
     Message, MessageBuilder, MessageMut, Name, NameRef, Opcode, Rcode, Rdata, ResponseType, Type,
@@ -16,6 +21,45 @@ pub struct Cache {
     success: store::Store,
     denial: store::Store,
     metrics: Vec<(SocketAddr, pharos_server::metrics::CacheMetrics)>,
+    chain: OnceLock<Weak<crate::Chain>>,
+    writes: Mutex<()>,
+}
+
+struct RefreshGuard {
+    chain: Arc<crate::Chain>,
+    key: u64,
+    stored: Instant,
+    denial: bool,
+    recheck: std::time::Duration,
+    success: bool,
+}
+
+struct LocalRefreshGuard<'a> {
+    store: &'a store::Store,
+    key: u64,
+    stored: Instant,
+    recheck: std::time::Duration,
+    success: bool,
+}
+
+impl Drop for LocalRefreshGuard<'_> {
+    fn drop(&mut self) {
+        self.store
+            .finish_refresh(self.key, self.stored, self.recheck, self.success);
+    }
+}
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        if let Some(cache) = &self.chain.cache {
+            let store = if self.denial {
+                &cache.denial
+            } else {
+                &cache.success
+            };
+            store.finish_refresh(self.key, self.stored, self.recheck, self.success);
+        }
+    }
 }
 
 impl std::fmt::Debug for Cache {
@@ -37,8 +81,14 @@ impl Cache {
             success: store::Store::new(config.success_capacity),
             denial: store::Store::new(config.denial_capacity),
             metrics: Vec::new(),
+            chain: OnceLock::new(),
+            writes: Mutex::new(()),
             config,
         })
+    }
+
+    pub(crate) fn bind(&self, chain: &Arc<crate::Chain>) {
+        let _ = self.chain.set(Arc::downgrade(chain));
     }
 
     pub(crate) fn set_metrics(
@@ -89,21 +139,105 @@ impl Plugin for Cache {
             metrics.request();
         }
         let key = key(&query);
-        if self
-            .denial
-            .serve(key, &query, cx.response, self.config.keepttl)
+        let positive_first = self.config.prefer_positive && !self.config.stale.is_zero();
+        let positive = positive_first
+            .then(|| {
+                self.success
+                    .serve(key, &query, cx.response, &self.config, true)
+            })
+            .flatten();
+        let hit = if let Some(hit) = positive {
+            Some((false, hit))
+        } else if let Some(denial) =
+            self.denial
+                .serve(key, &query, cx.response, &self.config, false)
         {
-            if let Some(metrics) = metrics {
-                metrics.hit(true);
+            if cx.response[3] & 15 == 2 {
+                if let Some(positive) =
+                    self.success
+                        .serve(key, &query, cx.response, &self.config, false)
+                {
+                    if let Some(stored) = denial.refresh {
+                        self.denial
+                            .finish_refresh(key, stored, std::time::Duration::ZERO, true);
+                    }
+                    Some((false, positive))
+                } else {
+                    Some((true, denial))
+                }
+            } else {
+                Some((true, denial))
             }
-            return Outcome::Response;
-        }
-        if self
-            .success
-            .serve(key, &query, cx.response, self.config.keepttl)
-        {
+        } else {
+            self.success
+                .serve(key, &query, cx.response, &self.config, false)
+                .map(|hit| (false, hit))
+        };
+        if let Some((denial, hit)) = hit {
             if let Some(metrics) = metrics {
-                metrics.hit(false);
+                metrics.hit(denial);
+            }
+            if let Some(stored) = hit.refresh {
+                let store = if denial { &self.denial } else { &self.success };
+                if let Some(chain) = self.chain.get().and_then(Weak::upgrade) {
+                    if (!hit.stale || !self.config.verify)
+                        && let Some(metrics) = metrics
+                    {
+                        metrics.prefetch();
+                    }
+                    let task = self.spawn_refresh(chain, cx, key, denial, hit);
+                    if hit.stale && self.config.verify {
+                        let result = if self.config.verify_timeout.is_zero() {
+                            task.await.ok()
+                        } else {
+                            tokio::time::timeout(self.config.verify_timeout, task)
+                                .await
+                                .ok()
+                                .and_then(Result::ok)
+                        };
+                        if let Some(Some(mut response)) = result {
+                            if !query.ad() && !query.opt().is_some_and(|opt| opt.dnssec_ok()) {
+                                response[3] &= !0x20;
+                            }
+                            *cx.response = response;
+                            return Outcome::Response;
+                        }
+                    }
+                } else if hit.stale && self.config.verify {
+                    let mut guard = LocalRefreshGuard {
+                        store,
+                        key,
+                        stored,
+                        recheck: self.config.stale_recheck,
+                        success: false,
+                    };
+                    let stale = cx.response.clone();
+                    let outcome = next.run(cx).await;
+                    let valid =
+                        outcome == Outcome::Response && self.accept_refresh(&query, cx.response);
+                    if valid
+                        || (self.config.prefer_positive
+                            && outcome == Outcome::Response
+                            && Self::matches_refresh(&query, cx.response))
+                    {
+                        self.process_response(cx, outcome, Some((denial, hit.generation)));
+                    }
+                    if !valid {
+                        cx.response.clear();
+                        cx.response.extend_from_slice(&stale);
+                    }
+                    guard.success = valid;
+                    if valid {
+                        return Outcome::Response;
+                    }
+                } else {
+                    store.finish_refresh(key, stored, self.config.stale_recheck, false);
+                }
+            }
+            if hit.stale
+                && let Some(metrics) = metrics
+            {
+                metrics.served_stale();
             }
             return Outcome::Response;
         }
@@ -112,6 +246,201 @@ impl Plugin for Cache {
         }
         // shortcut: downstream AD is not forced; separate Query and Metadata lifetimes to refresh authentication.
         let outcome = next.run(cx).await;
+        self.process_response(cx, outcome, None)
+    }
+}
+
+impl Cache {
+    fn matches_refresh(query: &Message<'_>, wire: &[u8]) -> bool {
+        let Ok(response) = Message::parse(wire) else {
+            return false;
+        };
+        let (Some(expected), Some(actual)) =
+            (query.questions().next(), response.questions().next())
+        else {
+            return false;
+        };
+        if response.tc()
+            || !response.qr()
+            || response.question_count() != 1
+            || expected.name != actual.name
+            || expected.qtype != actual.qtype
+            || expected.qclass != actual.qclass
+        {
+            return false;
+        }
+        true
+    }
+
+    fn accept_refresh(&self, query: &Message<'_>, wire: &[u8]) -> bool {
+        if !Self::matches_refresh(query, wire) {
+            return false;
+        }
+        let Ok(response) = Message::parse(wire) else {
+            return false;
+        };
+        if !matches!(response.rcode(), Rcode::NOERROR | Rcode::NXDOMAIN) {
+            return false;
+        }
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64);
+        let kind = pharos_proto::typify_response(Some(&response), now);
+        if !matches!(
+            kind,
+            ResponseType::Positive
+                | ResponseType::Referral
+                | ResponseType::NoData
+                | ResponseType::NxDomain
+        ) {
+            return false;
+        }
+        !self.config.prefer_positive
+            || (response.rcode() == Rcode::NOERROR && answers_question(&response))
+    }
+
+    fn spawn_refresh(
+        &self,
+        chain: Arc<crate::Chain>,
+        cx: &Context<'_>,
+        key: u64,
+        denial: bool,
+        hit: store::Hit,
+    ) -> tokio::task::JoinHandle<Option<Vec<u8>>> {
+        let stored = hit.refresh.expect("refresh requested");
+        let generation = hit.generation;
+        let stale = hit.stale;
+        let mut wire = cx.query.as_wire().to_vec();
+        wire[3] |= 0x20;
+        let domain = cx.domain.clone();
+        let synthetic = !stale || !self.config.verify;
+        let client = if synthetic {
+            ([0, 0, 0, 0], 0).into()
+        } else {
+            cx.client
+        };
+        let local = cx.local;
+        let transport = cx.transport;
+        let protocol = if synthetic {
+            pharos_server::Protocol::Tcp
+        } else {
+            cx.protocol
+        };
+        let max_response_size = if synthetic {
+            65535
+        } else {
+            cx.max_response_size
+        };
+        let guard = RefreshGuard {
+            chain,
+            key,
+            stored,
+            denial,
+            recheck: if stale {
+                self.config.stale_recheck
+            } else {
+                std::time::Duration::ZERO
+            },
+            success: false,
+        };
+        tokio::spawn(async move {
+            let mut guard = guard;
+            let Some(cache) = &guard.chain.cache else {
+                return None;
+            };
+            let Ok(query) = Message::parse(&wire) else {
+                return None;
+            };
+            let mut response = Vec::with_capacity(65535);
+            let mut slots = [None; 16];
+            let mut context = Context {
+                query,
+                client,
+                local,
+                transport,
+                protocol,
+                domain: &domain,
+                metadata: pharos_server::Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size,
+            };
+            let outcome = guard.chain.cache_refresh_next(&mut context).await;
+            let valid = outcome == Outcome::Response
+                && cache.accept_refresh(&context.query, context.response);
+            if valid
+                || (!stale && outcome == Outcome::Response)
+                || (stale
+                    && cache.config.prefer_positive
+                    && outcome == Outcome::Response
+                    && Self::matches_refresh(&context.query, context.response))
+            {
+                cache.process_response(&mut context, outcome, Some((denial, generation)));
+                if valid
+                    && denial
+                    && Message::parse(context.response).is_ok_and(|message| {
+                        message.rcode() == Rcode::NOERROR
+                            && message.answer_count() > 0
+                            && answers_question(&message)
+                    })
+                {
+                    let _write = cache.writes.lock().unwrap();
+                    if cache.denial.remove_if_stored(key, stored)
+                        && let Some(metrics) = cache
+                            .metrics
+                            .iter()
+                            .find_map(|(address, metrics)| (*address == local).then_some(metrics))
+                    {
+                        metrics.entries(true, cache.denial.len());
+                    }
+                }
+            }
+            guard.success = valid;
+            valid.then_some(response)
+        })
+    }
+
+    fn insert_response(
+        &self,
+        key: u64,
+        response: &Message<'_>,
+        ttl: u32,
+        denial: bool,
+        expected: Option<(bool, Instant)>,
+    ) -> Option<bool> {
+        let _write = self.writes.lock().unwrap();
+        if let Some((old_denial, stored)) = expected {
+            let old = if old_denial {
+                &self.denial
+            } else {
+                &self.success
+            };
+            if !old.is_current(key, stored) {
+                return None;
+            }
+        }
+        if denial {
+            self.denial.insert(key, response, ttl, false)
+        } else {
+            self.success
+                .insert(key, response, ttl, self.config.prefer_positive)
+        }
+    }
+
+    fn process_response(
+        &self,
+        cx: &mut Context<'_>,
+        outcome: Outcome,
+        expected: Option<(bool, Instant)>,
+    ) -> Outcome {
+        let query = cx.query;
+        let Some(question) = query.questions().next() else {
+            return outcome;
+        };
+        let key = key(&query);
+        let metrics = self
+            .metrics
+            .iter()
+            .find_map(|(address, metrics)| (*address == cx.local).then_some(metrics));
         if outcome != Outcome::Response {
             if matches!(
                 outcome,
@@ -138,7 +467,8 @@ impl Plugin for Cache {
                 {
                     let _ = builder.finish();
                     if let Ok(response) = Message::parse(cx.response)
-                        && let Some(evicted) = self.denial.insert(key, &response, ttl)
+                        && let Some(evicted) =
+                            self.insert_response(key, &response, ttl, true, expected)
                         && let Some(metrics) = metrics
                     {
                         if evicted {
@@ -229,11 +559,7 @@ impl Plugin for Cache {
             mutable.rewrite_ttls(|_| ttl);
         }
         if cacheable && let Ok(response) = Message::parse(cx.response) {
-            let inserted = if denial {
-                self.denial.insert(key, &response, ttl)
-            } else {
-                self.success.insert(key, &response, ttl)
-            };
+            let inserted = self.insert_response(key, &response, ttl, denial, expected);
             if let Some(evicted) = inserted
                 && let Some(metrics) = metrics
             {
