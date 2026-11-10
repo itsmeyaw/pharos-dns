@@ -2,7 +2,9 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-use pharos_server::{Action, Handler, Listener, Protocol};
+use pharos_server::{
+    Action, Handler, Listener, ListenerKey, ListenerRegistry, Protocol, Transport,
+};
 use tokio::net::UdpSocket;
 
 struct Echo;
@@ -37,6 +39,58 @@ async fn udp_queries_receive_responses() {
         .unwrap()
         .unwrap();
     assert_eq!(&buf[..n], b"query");
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_queries_return_to_their_own_clients() {
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Echo)
+        .await
+        .unwrap();
+    let mut clients = Vec::new();
+    for id in 0..32_u8 {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.set_nonblocking(true).unwrap();
+        for sequence in 0..2_u8 {
+            socket
+                .send_to(&[id, sequence], listener.local_addr())
+                .unwrap();
+        }
+        clients.push(UdpSocket::from_std(socket).unwrap());
+    }
+    for (id, client) in clients.iter().enumerate() {
+        let mut seen = [false; 2];
+        for _ in 0..2 {
+            let mut response = [0; 2];
+            let (length, peer) =
+                tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(peer, listener.local_addr());
+            assert_eq!(length, 2);
+            assert_eq!(response[0], id as u8);
+            seen[usize::from(response[1])] = true;
+        }
+        assert_eq!(seen, [true, true]);
+    }
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn registry_keeps_a_listener_by_transport_and_address() {
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Echo)
+        .await
+        .unwrap();
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: listener.local_addr(),
+    };
+    let mut registry = ListenerRegistry::default();
+    assert!(registry.insert(key, listener).is_none());
+    assert_eq!(registry.get(&key).unwrap().local_addr(), key.address);
+    let listener = registry.remove(&key).unwrap();
+    assert!(registry.get(&key).is_none());
     listener.shutdown().await.unwrap();
 }
 

@@ -75,7 +75,7 @@ pub(crate) fn worker_count() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{cgroup_path, parse_quota};
+    use super::{cgroup_path, hierarchy_quota, parse_quota};
 
     #[test]
     fn finds_the_current_cpu_cgroup() {
@@ -83,6 +83,24 @@ mod tests {
         assert_eq!(cgroup_path(groups, true), Some("/user.slice/service"));
         assert_eq!(cgroup_path(groups, false), Some("/team/service"));
         assert_eq!(cgroup_path("4:memory:/other\n", false), None);
+    }
+
+    #[test]
+    fn nested_cgroups_inherit_the_tightest_quota() {
+        let root = std::env::temp_dir().join(format!("pharos-quota-test-{}", std::process::id()));
+        let child = root.join("team/service");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(root.join("cpu.max"), "max 100000").unwrap();
+        std::fs::write(root.join("team/cpu.max"), "150000 100000").unwrap();
+        std::fs::write(child.join("cpu.max"), "400000 100000").unwrap();
+        assert_eq!(hierarchy_quota(&root, "/team/service", true), Some(2));
+
+        std::fs::write(root.join("cpu.cfs_quota_us"), "-1").unwrap();
+        std::fs::write(root.join("cpu.cfs_period_us"), "100000").unwrap();
+        std::fs::write(root.join("team/cpu.cfs_quota_us"), "50000").unwrap();
+        std::fs::write(root.join("team/cpu.cfs_period_us"), "100000").unwrap();
+        assert_eq!(hierarchy_quota(&root, "/team/service", false), Some(1));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
