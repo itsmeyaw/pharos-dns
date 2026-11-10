@@ -18,3 +18,4 @@
 - Source: https://github.com/NLnetLabs/domain
 - License: BSD-3-Clause
 - Copyright (c) 2018-2025, NLnet Labs. All rights reserved.
+- The fixed-size name compression table follows the StaticCompressor reference design.

@@ -9,3 +9,6 @@ pub use message::{Message, MessageError, MessageMut, Question, Questions, Record
 
 mod codes;
 pub use codes::{Class, Opcode, Rcode, Type};
+
+mod builder;
+pub use builder::{BuildError, MessageBuilder, RdataWriter, Section};
