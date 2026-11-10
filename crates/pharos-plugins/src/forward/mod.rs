@@ -1,5 +1,6 @@
 //! Forward Queries to configured Upstreams.
 
+mod resolve;
 mod setup;
 
 use std::sync::{

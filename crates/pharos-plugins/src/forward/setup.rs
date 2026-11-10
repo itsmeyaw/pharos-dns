@@ -277,9 +277,24 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
             }
             entries += usize::from(has_nameservers);
         } else {
-            return Err(cursor.error(format!(
-                "Upstream must be a numeric IP address or resolv.conf file: {to}"
-            )));
+            let (host, port) = match unscoped.rsplit_once(':') {
+                Some((host, port)) if !host.contains(':') => {
+                    let port = port
+                        .parse::<u16>()
+                        .map_err(|_| cursor.error("invalid Upstream port"))?;
+                    (host, port)
+                }
+                _ => (unscoped.as_str(), 53),
+            };
+            let ips = super::resolve::resolve(host, &config.resolver)
+                .map_err(|error| cursor.error(format!("failed to resolve {host}: {error}")))?;
+            entries += 1;
+            for ip in ips {
+                let target = Target::Address(SocketAddr::new(ip, port));
+                if !config.upstreams.contains(&target) {
+                    config.upstreams.push(target);
+                }
+            }
         }
     }
     if config.upstreams.is_empty() {
@@ -465,7 +480,7 @@ mod tests {
     fn rejects_invalid_options_and_encrypted_transports() {
         for text in [
             "forward .",
-            "forward . host.invalid",
+            "forward . invalid..domain",
             "forward . tls://1.1.1.1",
             "forward . https://1.1.1.1",
             "forward . quic://1.1.1.1",
@@ -588,5 +603,43 @@ mod tests {
             [Target::Address("[fe80::1]:5300".parse().unwrap())]
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hostname_upstream_uses_configured_resolver_at_setup() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let address = socket.local_addr().unwrap();
+        let resolver = std::thread::spawn(move || {
+            let mut wire = [0; 512];
+            for expected_type in [1, 28] {
+                let (len, peer) = socket.recv_from(&mut wire).unwrap();
+                let query = pharos_proto::Message::parse(&wire[..len]).unwrap();
+                let question = query.questions().next().unwrap();
+                assert_eq!(question.name.to_string(), "upstream.example.");
+                assert_eq!(question.qtype.0, expected_type);
+                assert!(query.rd());
+                wire[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+                let mut response = wire[..len].to_vec();
+                if expected_type == 1 {
+                    response[6..8].copy_from_slice(&1_u16.to_be_bytes());
+                    response.extend_from_slice(&[
+                        0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 127, 0, 0, 42,
+                    ]);
+                }
+                socket.send_to(&response, peer).unwrap();
+            }
+        });
+        let config = parse_text(&format!(
+            "forward . upstream.example:5300 {{\n resolver {address}\n}}"
+        ))
+        .unwrap();
+        assert_eq!(
+            config.upstreams,
+            [Target::Address("127.0.0.42:5300".parse().unwrap())]
+        );
+        resolver.join().unwrap();
     }
 }
