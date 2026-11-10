@@ -183,6 +183,12 @@ pub fn servers_with_registry(
                 ));
             }
         }
+        #[cfg(feature = "plugin-loop")]
+        if let Some(plugin) = &block.config.r#loop
+            && let Some((listener, _)) = routes.first()
+        {
+            plugin.register(&mut lifecycle, listener.address);
+        }
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &mut block.config.cache {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();

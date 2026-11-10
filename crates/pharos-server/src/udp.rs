@@ -4,13 +4,32 @@ use std::{
 };
 
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
-#[cfg(not(target_os = "linux"))]
 use std::sync::Arc;
-#[cfg(not(target_os = "linux"))]
 use tokio::{net::UdpSocket, sync::watch, task::JoinHandle};
 
-#[cfg(not(target_os = "linux"))]
 use crate::{Action, Handler, Protocol};
+
+// A forwarding-loop probe must not hold the receive worker while it returns to us.
+pub(crate) fn spawn_parallel<H: Handler>(
+    socket: Arc<UdpSocket>,
+    handler: Arc<H>,
+    query: &[u8],
+    peer: SocketAddr,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let query = query.to_vec();
+    tokio::spawn(async move {
+        let mut response = Vec::with_capacity(65535);
+        tokio::select! {
+            _ = shutdown.changed() => {},
+            action = handler.handle(&query, peer, Protocol::Udp, &mut response) => {
+                if action == Action::Respond && let Err(error) = socket.send_to(&response, peer).await {
+                    crate::logging::log("ERROR", "server", &format!("UDP Response to {peer} failed: {error}"));
+                }
+            }
+        }
+    });
+}
 
 pub(crate) fn bind(address: SocketAddr) -> io::Result<StdUdpSocket> {
     let socket = Socket::new(
@@ -33,6 +52,7 @@ pub(crate) fn spawn<H: Handler>(
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<io::Result<()>> {
     tokio::spawn(async move {
+        let socket = Arc::new(socket);
         let mut query = vec![0; 65535];
         let mut response = Vec::with_capacity(65535);
         loop {
@@ -51,6 +71,10 @@ pub(crate) fn spawn<H: Handler>(
                             continue;
                         }
                     };
+                    if handler.needs_parallel(&query[..length], peer) {
+                        spawn_parallel(Arc::clone(&socket), Arc::clone(&handler), &query[..length], peer, shutdown.clone());
+                        continue;
+                    }
                     response.clear();
                     if handler.handle(&query[..length], peer, Protocol::Udp, &mut response).await == Action::Respond
                         && let Err(error) = socket.send_to(&response, peer).await {

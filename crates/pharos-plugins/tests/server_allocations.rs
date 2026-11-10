@@ -28,6 +28,10 @@ struct Counting {
 }
 
 impl Handler for Counting {
+    fn needs_parallel(&self, query: &[u8], peer: SocketAddr) -> bool {
+        self.server.needs_parallel(query, peer)
+    }
+
     async fn handle(
         &self,
         query: &[u8],
@@ -59,10 +63,17 @@ async fn routed_udp_queries_do_not_allocate() {
     #[cfg(feature = "plugin-health")]
     check_routed_udp_queries_do_not_allocate(".:0 {\n health 127.0.0.1:0\n whoami\n}").await;
     #[cfg(feature = "plugin-loop")]
-    check_routed_udp_queries_do_not_allocate(".:0 {\n loop\n whoami\n}").await;
+    {
+        check_routed_udp_queries_do_not_allocate(".:0 {\n loop\n whoami\n}").await;
+        check_routed_udp_queries_of_type(".:0 {\n loop\n whoami\n}", 13).await;
+    }
 }
 
 async fn check_routed_udp_queries_do_not_allocate(corefile: &str) {
+    check_routed_udp_queries_of_type(corefile, 1).await;
+}
+
+async fn check_routed_udp_queries_of_type(corefile: &str, qtype: u8) {
     let blocks = parse("Corefile", corefile).unwrap();
     let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let (key, server) = servers.drain().next().unwrap();
@@ -84,8 +95,8 @@ async fn check_routed_udp_queries_do_not_allocate(corefile: &str) {
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
         let query = [
-            0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, b'a', 0, 0, 1, 0, 1, 0, 0, 41, 2, 0, 0, 0, 0x80,
-            0, 0, 0,
+            0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, b'a', 0, 0, qtype, 0, 1, 0, 0, 41, 2, 0, 0, 0,
+            0x80, 0, 0, 0,
         ];
         let mut buf = [0; 512];
         for _ in 0..201 {

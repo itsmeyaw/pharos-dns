@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "512"]
 //! Pharos command-line binary.
 //!
 //! Exit codes follow CoreDNS v1.15.0 and coredns/caddy v1.1.4's

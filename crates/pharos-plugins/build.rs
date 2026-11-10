@@ -114,6 +114,9 @@ fn main() {
         }
     }
     code.push_str("}\n");
+    if enabled.contains(&"loop") {
+        code.push_str("fn needs_parallel(&self, query: &pharos_proto::Message<'_>) -> bool { self.r#loop.as_ref().is_some_and(|plugin| plugin.is_probe(query)) }\n");
+    }
     if enabled.contains(&"prometheus") {
         code.push_str("fn metrics_enabled(&self) -> bool { self.prometheus.is_some() }\n");
     } else {
