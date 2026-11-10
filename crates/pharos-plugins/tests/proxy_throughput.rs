@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-// Also runs the measurement with: cargo test --release -p pharos-plugins --test proxy_throughput -- --nocapture
-#[path = "../benches/proxy.rs"]
+// Run the measurement with: cargo test --release -p pharos-plugins --test proxy_throughput -- --nocapture
+#[path = "support/proxy_benchmark.rs"]
 mod benchmark;
 
 use pharos_plugins::proxy::{Options, Proxy, Transport};

@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-health")]
+pub mod health;
 pub mod proxy;
 
 #[cfg(feature = "plugin-forward")]
@@ -31,7 +33,11 @@ pub mod whoami;
 
 include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
 
-#[cfg(any(feature = "plugin-prometheus", feature = "plugin-ready"))]
+#[cfg(any(
+    feature = "plugin-health",
+    feature = "plugin-prometheus",
+    feature = "plugin-ready"
+))]
 fn valid_http_address(address: &str) -> bool {
     let Some((host, port)) = address.rsplit_once(':') else {
         return false;
@@ -62,19 +68,23 @@ pub const fn plugins_listing() -> &'static str {
 pub type Servers = HashMap<ListenerKey, Server<Arc<Chain>>>;
 
 /// Group Server Blocks by Listener and collect their hooks in block order.
-/// The caller runs Startup before serving and Shutdown after all Listeners drain.
+/// The caller runs Startup before serving and Shutdown before Listeners drain.
 pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecycle)> {
     let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     let metrics = pharos_server::metrics::Registry::default();
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
+    #[cfg(feature = "plugin-health")]
+    metrics.enable_health_metrics();
     #[cfg(feature = "plugin-prometheus")]
     let mut exporters = std::collections::BTreeMap::new();
     #[cfg(feature = "plugin-ready")]
     let ready_state = Arc::new(ready::State::default());
     #[cfg(feature = "plugin-ready")]
     let mut ready_addresses = std::collections::BTreeSet::new();
+    #[cfg(feature = "plugin-health")]
+    let mut health_addresses: Vec<(String, std::time::Duration)> = Vec::new();
     #[cfg(feature = "plugin-ready")]
     {
         let state = Arc::clone(&ready_state);
@@ -90,6 +100,14 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         #[cfg(feature = "plugin-forward")]
         if let Some(forward) = &mut block.config.forward {
             forward.set_metrics(&metrics);
+        }
+        #[cfg(feature = "plugin-health")]
+        if let Some(health) = &block.config.health
+            && !health_addresses
+                .iter()
+                .any(|(address, _)| *address == health.address)
+        {
+            health_addresses.push((health.address.clone(), health.lameduck));
         }
         #[cfg(feature = "plugin-ready")]
         if let Some(ready) = &block.config.ready {
@@ -168,6 +186,51 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         .into_iter()
         .map(|(key, router)| (key, Server::with_registry(router, key, metrics.clone())))
         .collect();
+    #[cfg(feature = "plugin-health")]
+    for (address, lameduck) in health_addresses {
+        let listener = Arc::new(std::sync::Mutex::new(
+            None::<(
+                pharos_server::http::Listener,
+                pharos_server::http::HealthProbe,
+            )>,
+        ));
+        let startup_listener = Arc::clone(&listener);
+        let registry = metrics.clone();
+        lifecycle.register(pharos_server::Phase::Startup, move || {
+            let address = address.clone();
+            let listener = Arc::clone(&startup_listener);
+            let registry = registry.clone();
+            async move {
+                let server =
+                    pharos_server::http::Listener::bind_with_methods(&address, |_, path| {
+                        Some(if path == "/health" {
+                            (200, "text/plain; charset=utf-8", "OK".into())
+                        } else {
+                            (
+                                404,
+                                "text/plain; charset=utf-8",
+                                "404 page not found\n".into(),
+                            )
+                        })
+                    })
+                    .await?;
+                let probe = pharos_server::http::HealthProbe::start(&address, registry);
+                *listener.lock().unwrap() = Some((server, probe));
+                Ok(())
+            }
+        });
+        lifecycle.register(pharos_server::Phase::Shutdown, move || {
+            let server = listener.lock().unwrap().take();
+            async move {
+                if let Some((server, probe)) = server {
+                    tokio::time::sleep(lameduck).await;
+                    drop(probe);
+                    server.shutdown().await?;
+                }
+                Ok(())
+            }
+        });
+    }
     #[cfg(feature = "plugin-ready")]
     for address in ready_addresses {
         let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
@@ -289,6 +352,12 @@ fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
 #[cfg(feature = "plugin-forward")]
 fn setup_forward(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.forward = Some(forward::Forward::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-health")]
+fn setup_health(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.health = Some(health::parse(cursor)?);
     Ok(())
 }
 

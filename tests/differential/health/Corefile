@@ -1,0 +1,3 @@
+.:{port} {
+    health localhost:{metrics_port}
+}
