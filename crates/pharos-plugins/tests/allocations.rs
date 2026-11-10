@@ -29,6 +29,7 @@ fn whoami_does_not_allocate_per_query() {
     let mut context = Context {
         query,
         client: "127.0.0.1:53".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
         transport: Transport::Dns,
         protocol: Protocol::Udp,
         domain: &domain,

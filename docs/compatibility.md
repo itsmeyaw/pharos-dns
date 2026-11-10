@@ -4,10 +4,8 @@
 
 Pharos uses POSIX-style flags rather than CoreDNS's single-dash long flags;
 legacy spellings report their replacements. The Corefile lookup also checks
-`/etc/pharos/pharos.conf` before `./Corefile`. Until the `log` Directive is
-enabled, the built-in Corefile has only `whoami`; CoreDNS's default also
-enables `log`. Version and startup banners identify Pharos and include Rust
-rather than Go build information.
+`/etc/pharos/pharos.conf` before `./Corefile`. Version and startup banners
+identify Pharos and include Rust rather than Go build information.
 
 `--log-format json` switches log lines to JSON; the startup banner stays text.
 SIGUSR1 logs `SIGUSR1: Reloading` but does not replace the configuration
@@ -31,6 +29,20 @@ coredns/caddy v1.1.4's `sigtrap.go`, `sigtrap_posix.go` and `caddy.go`:
 Pharos writes UTC RFC3339 timestamps, unbracketed levels and Plugin names to
 stdout; CoreDNS uses the Go logger's date and time and bracketed levels such
 as `[INFO] plugin/x:`. Pharos also supports JSON lines selected at startup.
+The `log` Plugin's body uses CoreDNS's common format by default, preceded by
+Pharos's timestamp and `INFO log:` rather than CoreDNS's `[INFO]` prefix.
+JSON entries use Pharos's generic log fields rather than CoreDNS's access-log
+fields.
+`{local}` reports the configured Listener address; for wildcard Listeners it
+does not report the connection's actual local address. For unanswered errors,
+the logged Response size includes the Listener's synthesized EDNS OPT, whereas
+CoreDNS's logging-only synthetic Message has no OPT. For a returned Response,
+`{rsize}` is the size before truncation, as in CoreDNS. `{rflags}` also
+describes the Message before truncation; CoreDNS scrubs its recorded Message
+in place, so its `{rflags}` shows `tc` when the Listener truncates. A Drop is logged with `-` RCODE and flags and zero size; a
+Plugin error is logged as a synthesized SERVFAIL. Zone Transfer streams are
+not yet served and are logged as a Message-less outcome. The formatter cannot
+expand compressed names in unsupported RDATA when calculating Message size.
 
 ## Process metrics
 
@@ -53,8 +65,8 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `whoami` is implemented. Other built-in Directives are disabled by
-default; explicitly enabling their Cargo features makes setup fail with a
+Only `log` and `whoami` are implemented. Other built-in Directives are
+disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
 
 Whoami reports an error if adding the protocol label would make its SRV owner

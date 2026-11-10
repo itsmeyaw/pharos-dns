@@ -32,7 +32,7 @@ fn default_server_answers_udp_and_tcp_then_removes_pidfile() {
             .current_dir(&dir)
             .args(["-p", &port.to_string(), "--pidfile"])
             .arg(&pidfile)
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap(),
@@ -78,6 +78,29 @@ fn default_server_answers_udp_and_tcp_then_removes_pidfile() {
             .success()
     );
     assert_eq!(process.0.wait().unwrap().code(), Some(0));
+    let mut stdout = String::new();
+    process
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    let logs: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.contains(" INFO log: "))
+        .collect();
+    assert_eq!(logs.len(), 2, "{stdout}");
+    assert!(
+        logs.iter()
+            .any(|line| line.contains("\"A IN example.org. udp ")),
+        "{stdout}"
+    );
+    assert!(
+        logs.iter()
+            .any(|line| line.contains("\"A IN example.org. tcp ")),
+        "{stdout}"
+    );
     assert!(!pidfile.exists());
     fs::remove_dir_all(dir).unwrap();
 }

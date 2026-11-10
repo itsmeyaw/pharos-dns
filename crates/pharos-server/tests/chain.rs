@@ -62,6 +62,7 @@ fn middleware_awaits_next_and_alters_its_response() {
     let mut cx = Context {
         query: Message::parse(&[0; 12]).unwrap(),
         client: "127.0.0.1:53".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
         transport: Transport::Dns,
         protocol: Protocol::Udp,
         domain: &domain,

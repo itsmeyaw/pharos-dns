@@ -49,6 +49,7 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
         let mut ctx = Context {
             query,
             client: address.parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
             transport: Transport::Dns,
             protocol,
             domain: &domain,
@@ -125,6 +126,7 @@ fn insufficient_preallocated_buffer_is_an_error() {
     let mut context = Context {
         query,
         client: "127.0.0.1:53".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
         transport: Transport::Dns,
         protocol: Protocol::Udp,
         domain: &domain,
@@ -150,6 +152,7 @@ fn tcp_response_allocates_only_when_the_plugin_runs() {
     let mut context = Context {
         query: Message::parse(&wire).unwrap(),
         client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
         transport: Transport::Dns,
         protocol: Protocol::Tcp,
         domain: &domain,
@@ -175,6 +178,7 @@ fn generated_chain_future_is_send_and_small() {
     let mut context = Context {
         query: Message::parse(&[0; 12]).unwrap(),
         client: "127.0.0.1:53".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
         transport: Transport::Dns,
         protocol: Protocol::Udp,
         domain: &domain,
@@ -202,6 +206,7 @@ fn empty_chain_reports_no_next_plugin() {
     let mut context = Context {
         query: Message::parse(&[0; 12]).unwrap(),
         client: "127.0.0.1:53".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
         transport: Transport::Dns,
         protocol: Protocol::Udp,
         domain: &domain,

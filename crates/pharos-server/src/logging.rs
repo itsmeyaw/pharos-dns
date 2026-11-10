@@ -40,14 +40,20 @@ pub fn format_line(
     plugin: &str,
     message: &str,
 ) -> String {
-    let timestamp = timestamp(time);
+    let mut line = String::with_capacity(128 + 6 * (level.len() + plugin.len() + message.len()));
     match format {
-        LogFormat::Text if plugin.is_empty() => format!("{timestamp} {level} {message}\n"),
-        LogFormat::Text => format!("{timestamp} {level} {plugin}: {message}\n"),
+        LogFormat::Text => {
+            write_timestamp(&mut line, time);
+            let _ = write!(line, " {level} ");
+            if !plugin.is_empty() {
+                let _ = write!(line, "{plugin}: ");
+            }
+            let _ = writeln!(line, "{message}");
+        }
         LogFormat::Json => {
-            let mut line = String::new();
-            line.push_str("{\"timestamp\":");
-            json_string(&mut line, &timestamp);
+            line.push_str("{\"timestamp\":\"");
+            write_timestamp(&mut line, time);
+            line.push('"');
             line.push_str(",\"level\":");
             json_string(&mut line, level);
             line.push_str(",\"plugin\":");
@@ -55,9 +61,9 @@ pub fn format_line(
             line.push_str(",\"message\":");
             json_string(&mut line, message);
             line.push_str("}\n");
-            line
         }
     }
+    line
 }
 
 fn json_string(out: &mut String, value: &str) {
@@ -78,7 +84,7 @@ fn json_string(out: &mut String, value: &str) {
     out.push('"');
 }
 
-fn timestamp(time: SystemTime) -> String {
+fn write_timestamp(out: &mut String, time: SystemTime) {
     let seconds = match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs() as i64,
         Err(error) => {
@@ -98,10 +104,11 @@ fn timestamp(time: SystemTime) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
-    format!(
+    let _ = write!(
+        out,
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
         day_seconds / 3600,
         day_seconds % 3600 / 60,
         day_seconds % 60
-    )
+    );
 }
