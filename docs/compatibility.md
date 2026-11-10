@@ -129,11 +129,9 @@ are bound before existing handlers are swapped; separate Listeners are swapped
 individually rather than in one process-wide atomic operation.
 
 Pharos hashes a canonical representation of parsed, import-expanded Server
-Blocks instead of CoreDNS's JSON encoding, so the hash values differ. Pharos exposes the initial hash before
-the first change. Failed SIGUSR1 attempts and Corefile parse errors increment
-`pharos_reload_failed_total`; CoreDNS's counter is updated by its polling
-restart path, not these cases. The last attempted hash is reported even when a
-Reload fails. Candidate setup can register metric series before a failed Reload
+Blocks instead of CoreDNS's JSON encoding, so the hash values differ. The last
+attempted hash is reported even when a Reload fails, as in CoreDNS. Candidate
+setup can register metric series before a failed Reload
 is rolled back. Shutdown waits for Queries on replaced states to finish, so a
 stuck Query can delay processing subsequent signals.
 

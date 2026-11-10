@@ -313,6 +313,10 @@ impl Registry {
         self.0.reload_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn enable_reload_metrics(&self) {
+        self.0.reload_enabled.store(true, Ordering::Relaxed);
+    }
+
     pub fn reload_version(&self, hash: String) {
         self.0.reload_enabled.store(true, Ordering::Relaxed);
         *self.0.reload_hash.lock().unwrap() = Some(hash);

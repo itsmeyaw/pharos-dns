@@ -210,7 +210,6 @@ async fn reload(
     match result {
         Ok(config) => Some(config),
         Err(error) => {
-            metrics.reload_failed();
             logging::log("ERROR", "", &format!("Reload failed: {error}"));
             if let Err(error) = lifecycle.run(Phase::RestartFailed).await {
                 logging::log("ERROR", "", &format!("Reload recovery failed: {error}"));
@@ -244,6 +243,7 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     let mut signals = Signals::new().map_err(|e| (1, e.to_string()))?;
     let (file, input) = configuration(&options).map_err(|e| (1, e))?;
     let metrics = pharos_server::metrics::Registry::default();
+    metrics.enable_reload_metrics();
     let (servers, mut lifecycle, domains, reload_config, mut current_hash) =
         prepare(&options, &file, &input, &metrics).map_err(|e| (1, e))?;
     let mut listeners = ListenerRegistry::default();
@@ -279,9 +279,6 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     }
     let mut poll_interval = reload_config.map(interval);
     let mut poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
-    if poll_at.is_some() {
-        metrics.reload_version(current_hash.clone());
-    }
     let terminate = loop {
         tokio::select! {
             _ = signals.interrupt.recv() => break false,
@@ -294,22 +291,27 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
                     current_hash = loaded_hash;
                     poll_interval = config.map(interval);
                     poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
-                    if poll_at.is_some() { metrics.reload_version(current_hash.clone()); }
                 }
             },
             _ = async { match poll_at { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending().await } } => {
                 poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
-                if let Ok((file, observed)) = reread(&options, &input)
-                    && let Ok(blocks) = parse_blocks(&options, &file, &observed) {
-                    let observed_hash = corefile_hash(&blocks);
-                    if observed_hash != current_hash {
-                        current_hash = observed_hash;
-                        if let Some((config, loaded_hash)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
-                            current_hash = loaded_hash;
-                            poll_interval = config.map(interval);
-                            poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
+                if let Ok((file, observed)) = reread(&options, &input) {
+                    match parse_blocks(&options, &file, &observed) {
+                        Ok(blocks) => {
+                            let observed_hash = corefile_hash(&blocks);
+                            if observed_hash != current_hash {
+                                current_hash = observed_hash;
+                                if let Some((config, loaded_hash)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
+                                    current_hash = loaded_hash;
+                                    poll_interval = config.map(interval);
+                                    poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
+                                } else {
+                                    metrics.reload_failed();
+                                }
+                                metrics.reload_version(current_hash.clone());
+                            }
                         }
-                        metrics.reload_version(current_hash.clone());
+                        Err(error) => logging::log("WARNING", "reload", &format!("Corefile parse failed: {error}")),
                     }
                 }
             },

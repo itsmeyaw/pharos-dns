@@ -29,7 +29,7 @@ fn tcp_query(stream: &mut TcpStream, query: &[u8]) -> Vec<u8> {
     response
 }
 
-fn reload_version(port: u16) -> Option<String> {
+fn scrape(port: u16) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -41,6 +41,10 @@ fn reload_version(port: u16) -> Option<String> {
     stream.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200"));
     response
+}
+
+fn reload_version(port: u16) -> Option<String> {
+    scrape(port)
         .lines()
         .find(|line| line.starts_with("pharos_reload_version_info{"))
         .map(str::to_owned)
@@ -185,6 +189,13 @@ fn invalid_reload_restores_http_and_keeps_dns() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
     }
+    let initial = scrape(metrics);
+    assert!(initial.contains("pharos_reload_failed_total 0\n"));
+    assert!(reload_version(metrics).is_none());
+    fs::write(&file, format!(".:{dns} {{\n unknown\n")).unwrap();
+    thread::sleep(Duration::from_millis(2500));
+    assert!(scrape(metrics).contains("pharos_reload_failed_total 0\n"));
+    assert!(reload_version(metrics).is_none());
     fs::write(&file, format!(".:{dns} {{\n unknown\n}}\n")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
@@ -222,6 +233,86 @@ fn invalid_reload_restores_http_and_keeps_dns() {
     let mut response = [0; 1024];
     let len = socket.recv(&mut response).unwrap();
     assert!(len > 12 && response[3] & 15 == 0);
+    assert!(reload_version(metrics).is_some());
+    thread::sleep(Duration::from_millis(2500));
+    assert!(scrape(metrics).contains("pharos_reload_failed_total 1\n"));
+    drop(process);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn failed_sigusr1_does_not_increment_reload_metrics() {
+    let dir = std::env::temp_dir().join(format!(
+        "pharos-reload-signal-metric-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let sockets: Vec<_> = (0..2)
+        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let dns = sockets[0].local_addr().unwrap().port();
+    let metrics = sockets[1].local_addr().unwrap().port();
+    drop(sockets);
+    let file = dir.join("Corefile");
+    fs::write(
+        &file,
+        format!(".:{dns} {{\n prometheus 127.0.0.1:{metrics}\n whoami\n}}\n"),
+    )
+    .unwrap();
+    let pidfile = dir.join("pid");
+    let logfile = dir.join("log");
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .current_dir(&dir)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .stdout(fs::File::create(&logfile).unwrap())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pidfile.exists() {
+        assert!(process.0.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(scrape(metrics).contains("pharos_reload_failed_total 0\n"));
+    assert!(reload_version(metrics).is_none());
+    fs::write(&file, format!(".:{dns} {{\n unknown\n}}\n")).unwrap();
+    assert!(
+        Command::new("kill")
+            .args(["-USR1", &process.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fs::read_to_string(&logfile)
+        .unwrap()
+        .contains("Reload failed")
+    {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", metrics))
+            && stream
+                .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .is_ok()
+        {
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response);
+            if response.contains("pharos_reload_failed_total 0\n") {
+                break;
+            }
+            assert!(!response.contains("pharos_reload_failed_total 1\n"));
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(reload_version(metrics).is_none());
     drop(process);
     fs::remove_dir_all(dir).unwrap();
 }
