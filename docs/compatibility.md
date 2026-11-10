@@ -70,6 +70,7 @@ The Kubernetes data crate ignores addresses in EndpointSlices with address
 types other than IPv4 or IPv6; CoreDNS retains them.
 Kubeconfig OIDC credentials use the configured ID token without refreshing it;
 CoreDNS includes the client-go OIDC authentication provider.
+Kubeconfig proxy URLs are not supported; CoreDNS can connect through them.
 DNS programming latency excludes initial lists and relists; CoreDNS records
 annotated EndpointSlices during those operations too. Kubernetes REST request
 duration ends when response headers arrive, rather than after processing the
