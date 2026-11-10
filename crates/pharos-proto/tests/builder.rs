@@ -73,10 +73,10 @@ fn mandatory_overflow_rolls_back_sets_tc_and_stops() {
     for section in [Section::Answer, Section::Authority] {
         let n = name("example.com.");
         let mut wire = Vec::new();
-        let mut b = MessageBuilder::new(&mut wire, 40, 7, 0x8000).unwrap();
+        let mut b = MessageBuilder::new(&mut wire, 512, 7, 0x8000).unwrap();
         assert!(b.question(borrowed(&n), Type(1), Class(1)).unwrap());
         assert!(
-            !b.record(section, borrowed(&n), Type(1), Class(1), 0, &[1, 2, 3, 4])
+            !b.record(section, borrowed(&n), Type(1), Class(1), 0, &[1; 480])
                 .unwrap()
         );
         assert!(
@@ -97,13 +97,20 @@ fn mandatory_overflow_rolls_back_sets_tc_and_stops() {
 }
 
 #[test]
-fn optional_overflow_discards_all_additionals_without_tc() {
+fn additional_overflow_keeps_previous_records_sets_tc_and_stops() {
     let n = name(".");
     let mut wire = Vec::new();
-    let mut b = MessageBuilder::new(&mut wire, 35, 0, 0x8000).unwrap();
+    let mut b = MessageBuilder::new(&mut wire, 512, 0, 0x8000).unwrap();
     assert!(
-        b.record(Section::Additional, borrowed(&n), Type(1), Class(1), 0, &[])
-            .unwrap()
+        b.record(
+            Section::Additional,
+            borrowed(&n),
+            Type(1),
+            Class(1),
+            0,
+            &[1; 478]
+        )
+        .unwrap()
     );
     assert!(
         !b.record(
@@ -112,15 +119,47 @@ fn optional_overflow_discards_all_additionals_without_tc() {
             Type(1),
             Class(1),
             0,
-            &[0; 5]
+            &[2]
         )
         .unwrap()
     );
+    assert!(
+        !b.record(Section::Additional, borrowed(&n), Type(1), Class(1), 0, &[])
+            .unwrap()
+    );
     let wire = b.finish();
     let message = Message::parse(wire).unwrap();
-    assert_eq!(wire.len(), 12);
-    assert_eq!(message.additional_count(), 0);
-    assert!(!message.tc());
+    assert_eq!(wire.len(), 501);
+    assert_eq!(message.additional_count(), 1);
+    assert_eq!(message.additionals().next().unwrap().rdata, &[1; 478]);
+    assert!(message.tc());
+}
+
+#[test]
+fn maximum_below_512_is_clamped() {
+    let n = name(".");
+    for max_size in [0, 11, 511] {
+        let mut wire = Vec::new();
+        let mut b = MessageBuilder::new(&mut wire, max_size, 0, 0).unwrap();
+        assert!(
+            b.record(
+                Section::Answer,
+                borrowed(&n),
+                Type(1),
+                Class(1),
+                0,
+                &[0; 489]
+            )
+            .unwrap()
+        );
+        assert!(
+            !b.record(Section::Additional, borrowed(&n), Type(1), Class(1), 0, &[])
+                .unwrap()
+        );
+        let wire = b.finish();
+        assert_eq!(wire.len(), 512);
+        assert!(Message::parse(wire).unwrap().tc());
+    }
 }
 
 #[test]
@@ -166,10 +205,6 @@ fn rdata_writer_compresses_names_and_rolls_back_errors() {
 #[test]
 fn rejects_invalid_limits_and_oversized_rdata_without_mutation() {
     let mut wire = vec![1, 2, 3];
-    assert!(matches!(
-        MessageBuilder::new(&mut wire, 11, 0, 0),
-        Err(BuildError::InvalidMaxSize)
-    ));
     assert!(matches!(
         MessageBuilder::new(&mut wire, 65_536, 0, 0),
         Err(BuildError::InvalidMaxSize)
@@ -236,18 +271,23 @@ fn compression_preserves_case_and_never_targets_offsets_above_14_bits() {
 
 #[test]
 fn question_and_rdata_overflow_are_rolled_back() {
-    let n = name("example.com.");
+    let n = name(".");
     let mut wire = Vec::new();
-    let mut b = MessageBuilder::new(&mut wire, 12, 0, 0).unwrap();
+    let mut b = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
+    for _ in 0..100 {
+        assert!(b.question(borrowed(&n), Type(1), Class(1)).unwrap());
+    }
     assert!(!b.question(borrowed(&n), Type(1), Class(1)).unwrap());
     let wire = b.finish();
-    assert_eq!(wire.len(), 12);
-    assert!(Message::parse(wire).unwrap().tc());
+    assert_eq!(wire.len(), 512);
+    let message = Message::parse(wire).unwrap();
+    assert!(message.tc());
+    assert_eq!(message.question_count(), 100);
 
-    let mut b = MessageBuilder::new(wire, 40, 0, 0).unwrap();
+    let mut b = MessageBuilder::new(wire, 512, 0, 0).unwrap();
     assert!(
         !b.record_with(Section::Answer, borrowed(&n), Type(1), Class(1), 0, |w| {
-            w.write_bytes(&[0; 20])
+            w.write_bytes(&[0; 490])
         })
         .unwrap()
     );

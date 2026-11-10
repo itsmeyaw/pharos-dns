@@ -2,13 +2,13 @@ use std::fmt;
 
 use crate::{Class, NameRef, Type};
 
-const HEADER_LEN: usize = 12;
+const MIN_MESSAGE_SIZE: usize = 512;
 const COMPRESSION_SLOTS: usize = 128;
 
 /// A failure to construct a DNS Message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuildError {
-    /// The maximum Message size is outside 12..=65535 octets.
+    /// The maximum Message size exceeds 65535 octets.
     InvalidMaxSize,
     /// A section was added after a later section.
     SectionOrder,
@@ -44,7 +44,7 @@ pub enum Section {
     Answer,
     /// The Authority section.
     Authority,
-    /// The optional Additional section.
+    /// The Additional section.
     Additional,
 }
 
@@ -62,14 +62,12 @@ impl Section {
 ///
 /// Entries must be added in Question, Answer, Authority, Additional order.
 /// A `false` result means the size limit was reached and the builder has stopped.
-/// Mandatory records are rolled back and TC is set; if an Additional record does
-/// not fit, the entire Additional section is removed without setting TC.
+/// The first entry that does not fit is rolled back and TC is set.
 pub struct MessageBuilder<'a> {
     wire: &'a mut Vec<u8>,
     max_size: usize,
     counts: [u16; 4],
     section: usize,
-    additional_start: usize,
     stopped: bool,
     offsets: [u16; COMPRESSION_SLOTS],
     offset_count: usize,
@@ -79,13 +77,14 @@ impl<'a> MessageBuilder<'a> {
     /// Clears `wire`, retaining its capacity, and writes a header with raw flags.
     /// Invalid maximum sizes leave the buffer unchanged. The caller must encode
     /// opcode, RCODE and other flags in their respective header bit positions.
+    /// Maximum sizes below 512 octets are treated as 512.
     pub fn new(
         wire: &'a mut Vec<u8>,
         max_size: usize,
         id: u16,
         flags: u16,
     ) -> Result<Self, BuildError> {
-        if !(HEADER_LEN..=usize::from(u16::MAX)).contains(&max_size) {
+        if max_size > usize::from(u16::MAX) {
             return Err(BuildError::InvalidMaxSize);
         }
         wire.clear();
@@ -94,10 +93,9 @@ impl<'a> MessageBuilder<'a> {
         wire.extend_from_slice(&[0; 8]);
         Ok(Self {
             wire,
-            max_size,
+            max_size: max_size.max(MIN_MESSAGE_SIZE),
             counts: [0; 4],
             section: 0,
-            additional_start: HEADER_LEN,
             stopped: false,
             offsets: [0; COMPRESSION_SLOTS],
             offset_count: 0,
@@ -170,9 +168,6 @@ impl<'a> MessageBuilder<'a> {
         self.check_count(index)?;
         let start = self.wire.len();
         let slots = self.offset_count;
-        if index == 3 && self.section != 3 {
-            self.additional_start = start;
-        }
         let result = (|| {
             self.write_name(name)?;
             self.write_bytes(&rtype.0.to_be_bytes())?;
@@ -226,12 +221,7 @@ impl<'a> MessageBuilder<'a> {
                 if error != BuildError::SizeLimit {
                     return Err(error);
                 }
-                if index == 3 {
-                    self.wire.truncate(self.additional_start);
-                    self.counts[3] = 0;
-                } else {
-                    self.wire[2] |= 0x02;
-                }
+                self.wire[2] |= 0x02;
                 self.stopped = true;
                 Ok(false)
             }
