@@ -59,9 +59,12 @@ fn main() {
     code.push_str("impl Chain {\n");
     if enabled.contains(&"ready") {
         code.push_str(
-            "fn collect_readiness(self: &std::sync::Arc<Self>, state: &ready::State) {\n",
+            "fn collect_readiness(self: &std::sync::Arc<Self>, state: &ready::State) {\nlet _ = state;\n",
         );
         for name in &enabled {
+            if *name == "ready" {
+                continue;
+            }
             writeln!(code, "if self.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some() {{ let chain = std::sync::Arc::clone(self); state.append({name:?}, move || chain.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some_and(pharos_server::Readiness::ready)); }}").unwrap();
         }
         code.push_str("}\n");
@@ -70,19 +73,27 @@ fn main() {
     code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
     for (i, name) in enabled.iter().enumerate() {
         let next = i + 1;
+        if *name == "ready" {
+            writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.serve_{next}(cx).await }}").unwrap();
+            continue;
+        }
         writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => {{ let outcome = pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await; if outcome == pharos_server::Outcome::Response && cx.metadata.get(pharos_server::metrics::WRITER_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::metrics::WRITER_METADATA, {name:?}); }} else if matches!(outcome, pharos_server::Outcome::Error(_)) && cx.metadata.get(pharos_server::logging::PLUGIN_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::logging::PLUGIN_METADATA, {name:?}); }} outcome }}, None => self.serve_{next}(cx).await, }} }}").unwrap();
     }
     writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
     code.push_str("}\n");
     code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
-        write!(code, " && self.r#{name}.is_none()").unwrap();
+        if *name != "ready" {
+            write!(code, " && self.r#{name}.is_none()").unwrap();
+        }
     }
     code.push_str(
         " }\nfn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {\nlet _ = &visit;\n",
     );
     for name in &enabled {
-        writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
+        if *name != "ready" {
+            writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
+        }
     }
     code.push_str("}\n");
     if enabled.contains(&"prometheus") {
@@ -91,7 +102,10 @@ fn main() {
         code.push_str("fn metrics_enabled(&self) -> bool { false }\n");
     }
     code.push_str("}\n");
-    for i in 0..enabled.len() {
+    for (i, name) in enabled.iter().enumerate() {
+        if *name == "ready" {
+            continue;
+        }
         let next = i + 1;
         writeln!(code, "struct Next{i}<'a>(&'a Chain);\nimpl pharos_server::Next for Next{i}<'_> {{ async fn run(self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.0.serve_{next}(cx).await }} }}").unwrap();
     }

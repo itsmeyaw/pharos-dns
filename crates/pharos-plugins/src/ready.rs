@@ -3,7 +3,6 @@
 use std::{collections::BTreeMap, sync::Mutex};
 
 use pharos_corefile::{Cursor, Error};
-use pharos_server::{Context, Next, Outcome, Plugin};
 
 #[derive(Debug)]
 pub struct Ready {
@@ -53,12 +52,6 @@ fn valid_address(address: &str) -> bool {
         host.ends_with(']') && !host[1..host.len() - 1].contains(['[', ']'])
     } else {
         !host.contains([':', '[', ']'])
-    }
-}
-
-impl Plugin for Ready {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
-        next.run(cx).await
     }
 }
 
