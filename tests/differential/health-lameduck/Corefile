@@ -1,0 +1,5 @@
+.:{port} {
+    health localhost:{metrics_port} {
+        lameduck 1s
+    }
+}
