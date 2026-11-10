@@ -2,7 +2,7 @@ use std::{future::Future, net::SocketAddr, sync::Arc, time::Instant};
 
 use crate::{
     Action, Admission, Context, Error, Handler, ListenerKey, Metadata, Outcome, Protocol, Router,
-    admit, contain_panic, finish_outcome,
+    admit, finish_outcome,
     metrics::{BlockMetrics, Registry},
     response_limit,
 };
@@ -15,6 +15,10 @@ pub trait Chain: Send + Sync + 'static {
     fn visit_enabled(&self, _visit: &mut dyn FnMut(&'static str)) {}
     fn metrics_enabled(&self) -> bool {
         true
+    }
+    /// Whether contained Plugin panics should include a stacktrace.
+    fn stacktrace(&self) -> bool {
+        false
     }
 }
 
@@ -30,6 +34,9 @@ impl<C: Chain> Chain for Arc<C> {
     }
     fn metrics_enabled(&self) -> bool {
         self.as_ref().metrics_enabled()
+    }
+    fn stacktrace(&self) -> bool {
+        self.as_ref().stacktrace()
     }
 }
 
@@ -131,11 +138,13 @@ impl<C: Chain> Handler for Server<C> {
         let chain_start = Instant::now();
         let mut producer = None;
         let mut error_plugin = None;
+        let mut error_logged = false;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
                 let mut slots = [None; 18];
                 slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
                 slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
+                slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
                 let mut context = Context {
                     query,
                     client: peer,
@@ -147,7 +156,12 @@ impl<C: Chain> Handler for Server<C> {
                     response,
                     max_response_size: response_limit(query, protocol),
                 };
-                let outcome = contain_panic(chain.serve(&mut context), self.debug).await;
+                let outcome = crate::panic::contain_panic_with_stacktrace(
+                    chain.serve(&mut context),
+                    self.debug,
+                    chain.stacktrace(),
+                )
+                .await;
                 producer = context
                     .metadata
                     .get(crate::metrics::WRITER_METADATA)
@@ -156,6 +170,8 @@ impl<C: Chain> Handler for Server<C> {
                     .metadata
                     .get(crate::logging::PLUGIN_METADATA)
                     .and_then(|name| block.plugin_name(name));
+                error_logged =
+                    context.metadata.get(crate::logging::ERROR_LOGGED_METADATA) == Some("true");
                 outcome
             } else {
                 Outcome::Unanswered(Rcode::REFUSED)
@@ -177,10 +193,17 @@ impl<C: Chain> Handler for Server<C> {
             Outcome::Drop | Outcome::Stream(_) => 0,
         };
         let duration = chain_start.elapsed().as_secs_f64();
+        let default_logger = std::ptr::fn_addr_eq(self.logger, log_error as fn(Error));
+        let mut first_error = true;
         let action = finish_outcome(query, protocol, outcome, response, |error| {
-            if let Some(plugin) =
-                error_plugin.filter(|_| std::ptr::fn_addr_eq(self.logger, log_error as fn(Error)))
-            {
+            let suppress = first_error
+                && (error_logged || default_logger)
+                && matches!(outcome, Outcome::Error(e) if e != Error::PluginPanic);
+            first_error = false;
+            if suppress {
+                return;
+            }
+            if let Some(plugin) = error_plugin.filter(|_| default_logger) {
                 log_plugin_error(plugin, error);
             } else {
                 (self.logger)(error);

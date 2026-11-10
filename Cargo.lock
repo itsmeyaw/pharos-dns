@@ -932,6 +932,7 @@ dependencies = [
  "pharos-corefile",
  "pharos-proto",
  "pharos-server",
+ "regex",
  "stats_alloc",
  "tokio",
 ]

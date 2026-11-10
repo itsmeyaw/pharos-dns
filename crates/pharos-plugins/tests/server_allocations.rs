@@ -52,6 +52,8 @@ impl Handler for Counting {
 #[tokio::test(flavor = "current_thread")]
 async fn routed_udp_queries_do_not_allocate() {
     check_routed_udp_queries_do_not_allocate(".:0 {\n whoami\n}").await;
+    #[cfg(feature = "plugin-errors")]
+    check_routed_udp_queries_do_not_allocate(".:0 {\n errors\n whoami\n}").await;
     #[cfg(feature = "plugin-prometheus")]
     check_routed_udp_queries_do_not_allocate(".:0 {\n prometheus\n whoami\n}").await;
     #[cfg(feature = "plugin-health")]

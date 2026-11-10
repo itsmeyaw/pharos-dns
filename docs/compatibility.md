@@ -68,9 +68,18 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `health`, `log`, `prometheus`, `ready` and `whoami` are implemented. Other built-in Directives are
+Only `errors`, `health`, `log`, `prometheus`, `ready` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
+
+The `errors` Plugin uses Rust's `regex` syntax rather than Go's RE2 syntax.
+For example, `\w`, `\d`, `\s` and word boundaries are Unicode-aware in
+Rust but ASCII-only in Go; some expressions are accepted by only one engine.
+Rust's regex compiler also imposes its own compiled-size limit. Pharos emits
+`debug` consolidation messages without CoreDNS's separate debug switch.
+The Plugin contract represents an error as SERVFAIL without an independent
+RCODE, so error logs always report `2`. Rust panic traces and Pharos's
+text/JSON logging format differ from CoreDNS's Go stack and log format.
 
 The `prometheus` Directive accepts `runtime_metrics`, but has no effect: Go
 runtime metrics do not exist in Pharos. The `tls` option is parsed, but any
@@ -140,7 +149,10 @@ If an OPT precedes other Additional records, Pharos drops the following
 records and sets TC rather than shifting their compression pointers.
 Pharos removes OPT from a Response to a non-EDNS Query, as RFC 6891 requires;
 CoreDNS may preserve a Plugin-supplied OPT in that case.
-Pharos logs Plugin errors and answers SERVFAIL; CoreDNS ignores returned errors.
+Pharos answers Plugin errors with SERVFAIL. CoreDNS ignores returned errors
+and bases the Response on the separately returned RCODE; without `errors` it
+does not log ordinary chain errors. Pharos likewise logs those errors only
+when `errors` is configured, while logging recovered panics at the Listener.
 Zone Transfer streams are not yet served by the Listener.
 
 Pharos also rejects Client Subnet address lengths that do not match the prefix

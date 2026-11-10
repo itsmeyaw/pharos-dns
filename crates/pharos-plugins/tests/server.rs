@@ -49,9 +49,14 @@ async fn listeners_share_metrics_and_attribute_whoami_responses() {
 }
 
 #[tokio::test]
-async fn plugin_error_log_names_plugin() {
-    if std::env::var_os("PHAROS_TEST_PLUGIN_ERROR").is_some() {
-        let blocks = parse("Corefile", ".:1053 {\n whoami\n}").unwrap();
+async fn plugin_errors_are_logged_only_when_enabled() {
+    if let Ok(mode) = std::env::var("PHAROS_TEST_PLUGIN_ERROR") {
+        let config = if mode == "enabled" {
+            ".:1053 {\n errors\n whoami\n}"
+        } else {
+            ".:1053 {\n whoami\n}"
+        };
+        let blocks = parse("Corefile", config).unwrap();
         let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
         servers
             .values()
@@ -66,18 +71,35 @@ async fn plugin_error_log_names_plugin() {
             .await;
         return;
     }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "plugin_error_log_names_plugin", "--nocapture"])
-        .env("PHAROS_TEST_PLUGIN_ERROR", "1")
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains(" ERROR whoami: Plugin error: Response buffer too small\n"),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    for mode in ["disabled", "enabled"] {
+        if mode == "enabled" && !cfg!(feature = "plugin-errors") {
+            continue;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "plugin_errors_are_logged_only_when_enabled",
+                "--nocapture",
+            ])
+            .env("PHAROS_TEST_PLUGIN_ERROR", mode)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<_> = stdout
+            .lines()
+            .filter(|line| line.contains(" ERROR "))
+            .collect();
+        if mode == "enabled" {
+            assert_eq!(lines.len(), 1, "{stdout}");
+            assert!(
+                lines[0].contains(" ERROR errors: 2 a. A: Response buffer too small"),
+                "{stdout}"
+            );
+        } else {
+            assert!(lines.is_empty(), "{stdout}");
+        }
+    }
 }
 
 #[tokio::test]

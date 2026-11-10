@@ -2,14 +2,17 @@
 
 use std::time::Duration;
 
+#[cfg(feature = "plugin-health")]
 use pharos_corefile::{Cursor, Error};
 
+#[cfg(feature = "plugin-health")]
 #[derive(Debug)]
 pub struct Health {
     pub address: String,
     pub lameduck: Duration,
 }
 
+#[cfg(feature = "plugin-health")]
 pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Health, Error> {
     let mut address = ":8080".to_owned();
     let mut lameduck = Duration::ZERO;
@@ -38,7 +41,7 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Health, Error> {
     Ok(Health { address, lameduck })
 }
 
-fn parse_duration(value: &str) -> Option<Duration> {
+pub(crate) fn parse_duration(value: &str) -> Option<Duration> {
     let (negative, mut rest) = match value.as_bytes().first() {
         Some(b'-') => (true, &value[1..]),
         Some(b'+') => (false, &value[1..]),

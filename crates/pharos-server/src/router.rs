@@ -177,6 +177,9 @@ fn prepare_block<C: Chain>(block: &mut ServerBlock<C>, registry: &Registry, serv
     block.plugin_metrics.clear();
     block.plugin_names.clear();
     if let Some(chain) = &block.chain {
+        if chain.stacktrace() {
+            crate::panic::prepare_stacktrace();
+        }
         let metrics = chain
             .metrics_enabled()
             .then(|| registry.block(server, &block.domain.to_string(), ""));

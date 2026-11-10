@@ -27,6 +27,7 @@ fn main() {
             "prometheus" => "prometheus::Prometheus",
             "ready" => "ready::Ready",
             "health" => "health::Health",
+            "errors" => "errors::Errors",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -39,9 +40,10 @@ fn main() {
             "prometheus" => "setup_prometheus",
             "ready" => "setup_ready",
             "health" => "setup_health",
+            "errors" => "setup_errors",
             _ => "setup_unimplemented",
         };
-        let once = *name == "prometheus" || *name == "ready";
+        let once = matches!(*name, "prometheus" | "ready" | "errors");
         writeln!(
             code,
             "pharos_corefile::Directive {{ name: {name:?}, once: {once}, setup: {setup} }},"
@@ -102,6 +104,9 @@ fn main() {
         code.push_str("fn metrics_enabled(&self) -> bool { self.prometheus.is_some() }\n");
     } else {
         code.push_str("fn metrics_enabled(&self) -> bool { false }\n");
+    }
+    if enabled.contains(&"errors") {
+        code.push_str("fn stacktrace(&self) -> bool { self.errors.as_ref().is_some_and(|plugin| plugin.stacktrace) }\n");
     }
     code.push_str("}\n");
     for (i, name) in enabled.iter().enumerate() {

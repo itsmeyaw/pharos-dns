@@ -13,7 +13,9 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(feature = "plugin-health")]
+#[cfg(feature = "plugin-errors")]
+pub mod errors;
+#[cfg(any(feature = "plugin-health", feature = "plugin-errors"))]
 pub mod health;
 pub mod proxy;
 
@@ -331,6 +333,14 @@ fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
 #[cfg(feature = "plugin-health")]
 fn setup_health(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.health = Some(health::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-errors")]
+fn setup_errors(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    let plugin = errors::parse(cursor)?;
+    plugin.register_shutdown(&mut block.config.lifecycle);
+    block.config.errors = Some(plugin);
     Ok(())
 }
 

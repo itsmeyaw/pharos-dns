@@ -7,10 +7,11 @@ repository.workspace = true
 
 [dependencies]
 getrandom = "0.2"
-tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt"] }
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
 pharos-corefile = { path = "../pharos-corefile" }
 pharos-proto = { path = "../pharos-proto" }
 pharos-server = { path = "../pharos-server" }
+regex = { version = "1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", features = ["socket"] }
@@ -21,7 +22,7 @@ stats_alloc = "0.1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [features]
-default = ["plugin-health", "plugin-log", "plugin-prometheus", "plugin-ready", "plugin-whoami"]
+default = ["plugin-errors", "plugin-health", "plugin-log", "plugin-prometheus", "plugin-ready", "plugin-whoami"]
 plugin-root = []
 plugin-metadata = []
 plugin-geoip = []
@@ -44,7 +45,7 @@ plugin-health = []
 plugin-pprof = []
 plugin-shed = []
 plugin-prometheus = []
-plugin-errors = []
+plugin-errors = ["dep:regex"]
 plugin-log = []
 plugin-dnstap = []
 plugin-local = []
