@@ -218,7 +218,12 @@ impl Registry {
                 let bound = HEALTH_BUCKETS
                     .get(index)
                     .map_or_else(|| "+Inf".into(), |v| float(*v));
-                writeln!(out, "pharos_{name}_bucket{{le=\"{bound}\"}} {count}").unwrap();
+                writeln!(
+                    out,
+                    "pharos_{name}_bucket{{le=\"{bound}\"}} {}",
+                    float(count as f64)
+                )
+                .unwrap();
             }
             writeln!(
                 out,
@@ -226,7 +231,7 @@ impl Registry {
                 float(f64::from_bits(histogram.sum.load(Ordering::Relaxed)))
             )
             .unwrap();
-            writeln!(out, "pharos_{name}_count {count}").unwrap();
+            writeln!(out, "pharos_{name}_count {}", float(count as f64)).unwrap();
             header(
                 out,
                 "health_request_failures_total",
@@ -236,7 +241,7 @@ impl Registry {
             writeln!(
                 out,
                 "pharos_health_request_failures_total {}",
-                self.0.health_failures.load(Ordering::Relaxed)
+                float(self.0.health_failures.load(Ordering::Relaxed) as f64)
             )
             .unwrap();
         }

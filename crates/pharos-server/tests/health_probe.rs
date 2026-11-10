@@ -33,3 +33,16 @@ async fn cancelling_an_in_flight_probe_does_not_record_a_failure() {
         "{metrics}"
     );
 }
+
+#[test]
+fn health_metrics_format_large_counts_like_go() {
+    let registry = Registry::default();
+    registry.enable_health_metrics();
+    for _ in 0..1_000_000 {
+        registry.observe_health(0.0, true);
+    }
+    let mut metrics = String::new();
+    registry.encode(&mut metrics);
+    assert!(metrics.contains("pharos_health_request_duration_seconds_count 1e+06\n"));
+    assert!(metrics.contains("pharos_health_request_failures_total 1e+06\n"));
+}
