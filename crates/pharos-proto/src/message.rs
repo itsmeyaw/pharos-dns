@@ -293,11 +293,25 @@ impl<'a> MessageMut<'a> {
         for section in 1..4 {
             let mut offset = self.starts[section];
             for _ in 0..self.counts[section] {
-                let (item, next) = record(self.wire, offset).expect("validated Message");
-                let ttl_offset = item.ttl_offset;
-                let ttl = item.ttl;
-                let is_opt = item.rtype == 41;
-                offset = next;
+                // The already-validated local encoding stays intact even if a
+                // pointer happens to refer to a TTL changed earlier in the pass.
+                loop {
+                    let length = self.wire[offset];
+                    offset += 1;
+                    match length {
+                        0 => break,
+                        1..=63 => offset += usize::from(length),
+                        _ => {
+                            offset += 1;
+                            break;
+                        }
+                    }
+                }
+                let is_opt = read_u16(self.wire, offset).expect("validated Message") == 41;
+                let ttl_offset = offset + 4;
+                let ttl = read_u32(self.wire, ttl_offset).expect("validated Message");
+                let len = usize::from(read_u16(self.wire, offset + 8).expect("validated Message"));
+                offset += 10 + len;
                 if !is_opt {
                     self.wire[ttl_offset..ttl_offset + 4]
                         .copy_from_slice(&rewrite(ttl).to_be_bytes());

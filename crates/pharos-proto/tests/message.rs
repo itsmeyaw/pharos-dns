@@ -99,3 +99,12 @@ proptest::proptest! {
         }
     }
 }
+
+#[test]
+fn rewriting_ttl_does_not_panic_when_compression_points_into_a_ttl() {
+    let mut wire =
+        b"\0\0\0\0\0\0\0\x02\0\0\0\0\0\0\x01\0\x01\0\0\0\x01\0\0\xc0\x11\0\x01\0\x01\0\0\0\x02\0\0"
+            .to_vec();
+    let mut message = pharos_proto::MessageMut::parse(&mut wire).unwrap();
+    message.rewrite_ttls(|_| 0xff000000);
+}
