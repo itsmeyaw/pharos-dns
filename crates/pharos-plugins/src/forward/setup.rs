@@ -12,10 +12,16 @@ pub(super) enum Policy {
     Sequential,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum Target {
+    Address(SocketAddr),
+    Invalid(String),
+}
+
 #[derive(Debug)]
 pub(super) struct Config {
     pub from: String,
-    pub upstreams: Vec<SocketAddr>,
+    pub upstreams: Vec<Target>,
     pub except: Vec<String>,
     pub force_tcp: bool,
     pub prefer_udp: bool,
@@ -236,10 +242,12 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
             )));
         }
         let address = to.strip_prefix("dns://").unwrap_or(to);
-        if let Some(address) = socket_address(address) {
+        let unscoped = strip_scope(address);
+        if let Some(address) = socket_address(&unscoped) {
             entries += 1;
-            if !config.upstreams.contains(&address) {
-                config.upstreams.push(address);
+            let target = Target::Address(address);
+            if !config.upstreams.contains(&target) {
+                config.upstreams.push(target);
             }
         } else if std::path::Path::new(address).exists() || address.contains('/') {
             let file = std::fs::read_to_string(address)
@@ -250,13 +258,20 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
                 if words.next() == Some("nameserver")
                     && let Some(ip) = words.next()
                 {
-                    let ip = ip.split('%').next().unwrap_or(ip);
-                    if let Ok(ip) = ip.parse::<IpAddr>() {
-                        has_nameservers = true;
-                        let address = SocketAddr::new(ip, 53);
-                        if !config.upstreams.contains(&address) {
-                            config.upstreams.push(address);
-                        }
+                    let ip = ip.rsplit_once('%').map_or(ip, |(host, _)| host);
+                    has_nameservers = true;
+                    let target = ip.parse::<IpAddr>().map_or_else(
+                        |_| {
+                            Target::Invalid(if ip.contains(':') {
+                                format!("[{ip}]:53")
+                            } else {
+                                format!("{ip}:53")
+                            })
+                        },
+                        |ip| Target::Address(SocketAddr::new(ip, 53)),
+                    );
+                    if !config.upstreams.contains(&target) {
+                        config.upstreams.push(target);
                     }
                 }
             }
@@ -274,6 +289,17 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
         return Err(cursor.error("more than 15 Upstream entries configured"));
     }
     Ok(config)
+}
+
+fn strip_scope(value: &str) -> String {
+    let Some(percent) = value.rfind('%') else {
+        return value.to_owned();
+    };
+    let mut host = value[..percent].to_owned();
+    if let Some(close) = value[percent..].find(']') {
+        host.push_str(&value[percent + close..]);
+    }
+    host
 }
 
 fn one_arg<'a>(cursor: &Cursor<'_>, args: &'a [String]) -> Result<&'a str, Error> {
@@ -400,8 +426,8 @@ mod tests {
         assert_eq!(
             config.upstreams,
             [
-                "127.0.0.1:53".parse().unwrap(),
-                "[::1]:5353".parse().unwrap()
+                Target::Address("127.0.0.1:53".parse().unwrap()),
+                Target::Address("[::1]:5353".parse().unwrap())
             ]
         );
         assert_eq!(config.max_fails, 2);
@@ -484,7 +510,10 @@ mod tests {
     #[test]
     fn coredns_rcodes_and_bracketed_ipv6() {
         let config = parse_text("forward . [::1] {\nnext notimpl DSOTYPENI\n}").unwrap();
-        assert_eq!(config.upstreams, ["[::1]:53".parse().unwrap()]);
+        assert_eq!(
+            config.upstreams,
+            [Target::Address("[::1]:53".parse().unwrap())]
+        );
         assert_eq!(config.next, [4, 11]);
         assert!(parse_text("forward . 1.1.1.1 {\nnext BADVERS\n}").is_err());
     }
@@ -512,7 +541,10 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert_eq!(
             config.upstreams,
-            ["192.0.2.1:53".parse().unwrap(), "[::1]:53".parse().unwrap()]
+            [
+                Target::Address("192.0.2.1:53".parse().unwrap()),
+                Target::Address("[::1]:53".parse().unwrap())
+            ]
         );
     }
 
@@ -534,6 +566,27 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(parse_text(&format!("forward . {addresses}")).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scoped_and_invalid_resolv_conf_nameservers_follow_coredns() {
+        let path =
+            std::env::temp_dir().join(format!("pharos-forward-scoped-{}.conf", std::process::id()));
+        std::fs::write(&path, "nameserver fe80::1%eth0\nnameserver #\nnameserver\n").unwrap();
+        let config = parse_text(&format!("forward . {}", path.display())).unwrap();
+        assert_eq!(
+            config.upstreams,
+            [
+                Target::Address("[fe80::1]:53".parse().unwrap()),
+                Target::Invalid("#:53".into())
+            ]
+        );
+        let config = parse_text("forward . [fe80::1%eth0]:5300").unwrap();
+        assert_eq!(
+            config.upstreams,
+            [Target::Address("[fe80::1]:5300".parse().unwrap())]
+        );
         std::fs::remove_file(path).unwrap();
     }
 }

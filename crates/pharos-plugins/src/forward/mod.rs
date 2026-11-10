@@ -16,7 +16,7 @@ use crate::proxy::{self, Options, Proxy};
 use setup::Policy;
 
 struct Upstream {
-    proxy: Proxy,
+    proxy: Option<Proxy>,
     address: String,
 }
 
@@ -141,7 +141,17 @@ impl Forward {
                 .collect::<Result<Vec<_>, _>>()?;
             let domain = parse_name(&config.health_domain)?;
             let mut proxies = Vec::new();
-            for address in config.upstreams {
+            for target in config.upstreams {
+                let address = match target {
+                    setup::Target::Address(address) => address,
+                    setup::Target::Invalid(address) => {
+                        proxies.push(Upstream {
+                            proxy: None,
+                            address,
+                        });
+                        continue;
+                    }
+                };
                 let mut proxy = Proxy::new(address);
                 proxy.set_expire(config.expire);
                 proxy.set_max_age(config.max_age);
@@ -156,7 +166,7 @@ impl Forward {
                 health.source_address = config.source_address;
                 proxy.set_health_config(health);
                 proxies.push(Upstream {
-                    proxy,
+                    proxy: Some(proxy),
                     address: address.to_string(),
                 });
             }
@@ -186,7 +196,9 @@ impl Forward {
         self.metrics = Some(registry.forward());
         for stanza in &mut self.stanzas {
             for upstream in &mut stanza.proxies {
-                upstream.proxy.set_metrics(registry, "forward");
+                if let Some(proxy) = &mut upstream.proxy {
+                    proxy.set_metrics(registry, "forward");
+                }
             }
         }
     }
@@ -194,7 +206,9 @@ impl Forward {
     pub(crate) fn stop(&self) {
         for stanza in &self.stanzas {
             for upstream in &stanza.proxies {
-                upstream.proxy.stop();
+                if let Some(proxy) = &upstream.proxy {
+                    proxy.stop();
+                }
             }
         }
     }
@@ -273,7 +287,7 @@ impl Plugin for Forward {
                 }
                 let mut upstream = &stanza.proxies[order[i]];
                 i += 1;
-                if upstream.proxy.down() {
+                if upstream.proxy.as_ref().is_some_and(Proxy::down) {
                     fails += 1;
                     if fails < count {
                         continue;
@@ -288,12 +302,17 @@ impl Plugin for Forward {
                 }
                 cx.metadata
                     .insert_inline("forward/upstream", &upstream.address);
+                let Some(proxy) = &upstream.proxy else {
+                    attempts += 1;
+                    if fails >= count {
+                        break;
+                    }
+                    continue;
+                };
                 let result = loop {
                     let result = timeout_at(
                         deadline,
-                        upstream
-                            .proxy
-                            .exchange(cx.query.as_wire(), wire, protocol, stanza.options),
+                        proxy.exchange(cx.query.as_wire(), wire, protocol, stanza.options),
                     )
                     .await;
                     if matches!(result, Ok(Err(proxy::Error::CachedClosed))) {

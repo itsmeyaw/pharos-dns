@@ -235,10 +235,12 @@ one global FIFO.
 
 Encrypted Upstreams (`tls://`, `quic://` and `https://`) and `tls` or
 `tls_servername` options fail setup rather than silently downgrade; TLS is
-deferred to M3. Hostname Upstreams and IPv6 scoped addresses are not yet
-supported. `resolver` and `doh_method` are accepted but have no effect on
+deferred to M3. Hostname Upstreams are not yet supported. `resolver` and `doh_method` are accepted but have no effect on
 numeric plain-DNS Upstreams.
-Invalid nameservers in resolv.conf are skipped. Some option argument and
+Like CoreDNS, IPv6 scopes are stripped from numeric Upstreams, including
+resolv.conf entries. Non-IP nameservers from resolv.conf are retained, but
+currently fail as Upstreams rather than being resolved at dial time as in CoreDNS.
+Some option argument and
 Domain edge cases remain more restrictive than CoreDNS. Upstream Metadata
 uses the normalized numeric socket address, which may differ from CoreDNS's
 configured address text. Health checks start on exchange failure, and proxy
