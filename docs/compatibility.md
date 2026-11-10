@@ -25,10 +25,12 @@ to an octet as miekg/dns does.
 
 The protocol parser rejects duplicate OPT records, OPT records outside
 Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
-Listener-side FORMERR handling is not implemented yet. CoreDNS v1.15.0 accepts
-these when its header-count policy allows them, and selects the last OPT in
-Additional. CoreDNS's UDP/TCP Listener returns FORMERR on option unpacking
-errors; short headers are dropped. HTTP and QUIC report transport errors.
+The DNS admission seam returns FORMERR for these malformed Messages and drops
+short headers; it is not yet wired into the Listener. CoreDNS v1.15.0 accepts
+them when its header-count policy allows them, and selects the last OPT in
+Additional. CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC
+report transport errors. Pharos's admission seam returns a header-only FORMERR
+for malformed Messages, whereas CoreDNS may retain a partially decoded Question.
 
 Pharos also rejects Client Subnet address lengths that do not match the prefix
 and non-zero host bits, which miekg/dns accepts. It validates the supported

@@ -104,3 +104,24 @@ fn views_preserve_block_order_and_empty_domains_refuse() {
         Some("visible")
     );
 }
+
+#[test]
+fn ds_search_follows_coredns_to_the_last_matching_non_root_domain() {
+    let mut router = Router::default();
+    for (domain, chain) in [
+        (".", "root"),
+        ("org.", "grandparent"),
+        ("example.org.", "parent"),
+        ("child.example.org.", "child"),
+    ] {
+        router.add(key(53), domain.parse().unwrap(), Some(chain), vec![]);
+    }
+    assert_eq!(
+        lookup(&router, &key(53), "child.example.org.", 43),
+        Some("grandparent")
+    );
+    assert_eq!(
+        lookup(&router, &key(53), "www.child.example.org.", 43),
+        Some("grandparent")
+    );
+}

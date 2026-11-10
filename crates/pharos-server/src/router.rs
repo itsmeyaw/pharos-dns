@@ -84,9 +84,7 @@ impl<C> Router<C> {
             {
                 continue;
             }
-            if block.chain.is_none() {
-                return None;
-            }
+            block.chain.as_ref()?;
             if block
                 .filters
                 .iter()
