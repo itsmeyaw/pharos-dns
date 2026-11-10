@@ -22,6 +22,7 @@ fn main() {
     );
     for name in &enabled {
         let ty = match *name {
+            "cache" => "cache::Cache",
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
             "prometheus" => "prometheus::Prometheus",
@@ -36,6 +37,7 @@ fn main() {
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
+            "cache" => "setup_cache",
             "whoami" => "setup_whoami",
             "log" => "setup_log",
             "prometheus" => "setup_prometheus",
@@ -45,7 +47,7 @@ fn main() {
             "errors" => "setup_errors",
             _ => "setup_unimplemented",
         };
-        let once = matches!(*name, "prometheus" | "ready" | "errors");
+        let once = matches!(*name, "cache" | "prometheus" | "ready" | "errors");
         writeln!(
             code,
             "pharos_corefile::Directive {{ name: {name:?}, once: {once}, setup: {setup} }},"

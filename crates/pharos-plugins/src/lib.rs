@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-cache")]
+pub mod cache;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 #[cfg(any(feature = "plugin-health", feature = "plugin-errors"))]
@@ -330,6 +332,17 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
         return Err(cursor.arg_err());
     }
     block.config.whoami = Some(whoami::Whoami);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-cache")]
+fn setup_cache(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    let zones = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.clone())
+        .collect::<Vec<_>>();
+    block.config.cache = Some(cache::Cache::parse(cursor, &zones)?);
     Ok(())
 }
 
