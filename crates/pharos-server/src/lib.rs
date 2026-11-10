@@ -3,7 +3,9 @@
 //! Listener; earlier Plugins may inspect and modify the caller-owned Response
 //! buffer after awaiting Next. The Listener handles unanswered codes and errors.
 
-use std::{collections::HashMap, fmt, future::Future, io, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap, fmt, future::Future, io, net::SocketAddr, sync::Arc, time::Duration,
+};
 
 use pharos_proto::{BuildError, Message, Name, Rcode};
 use tokio::{
@@ -200,14 +202,30 @@ impl Listener {
         self.address
     }
 
-    /// Stop accepting Queries and wait for accepted Queries to finish.
+    /// Stop accepting Queries and drain accepted Queries for at most five seconds.
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.stop.send_replace(true);
         let mut result = Ok(());
-        for task in self.tasks.drain(..) {
-            let next = task.await.map_err(io::Error::other).and_then(|v| v);
-            if result.is_ok() {
-                result = next;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while let Some(mut task) = self.tasks.pop() {
+            match tokio::time::timeout_at(deadline, &mut task).await {
+                Ok(next) => {
+                    let next = next.map_err(io::Error::other).and_then(|v| v);
+                    if result.is_ok() {
+                        result = next;
+                    }
+                }
+                Err(_) => {
+                    task.abort();
+                    for task in &self.tasks {
+                        task.abort();
+                    }
+                    let _ = task.await;
+                    for task in self.tasks.drain(..) {
+                        let _ = task.await;
+                    }
+                    break;
+                }
             }
         }
         result

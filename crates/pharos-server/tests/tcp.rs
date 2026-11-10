@@ -35,6 +35,34 @@ struct Slow {
 
 struct Conditional;
 
+struct NeverFinishes {
+    started: async_mpsc::UnboundedSender<()>,
+}
+
+impl Handler for NeverFinishes {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        self.started.send(()).unwrap();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn shutdown_closes_a_stalled_query_after_grace_period() {
+    let (started, mut received) = async_mpsc::unbounded_channel();
+    let (listener, mut stream) = connect(NeverFinishes { started }).await;
+    send(&mut stream, b"query").await;
+    timeout(TEST_TIMEOUT, received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(7), listener.shutdown())
+        .await
+        .expect("shutdown exceeded grace period")
+        .unwrap();
+    let mut byte = [0];
+    assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+}
+
 impl Handler for Conditional {
     async fn handle(
         &self,
