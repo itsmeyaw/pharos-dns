@@ -138,6 +138,29 @@ fn opt_fields_and_extended_rcode_are_borrowed_from_message() {
 }
 
 #[test]
+fn encoded_opt_roundtrips_through_reserved_builder() {
+    let options = EdnsOptions::parse(&[0, 3, 0, 1, 42]).unwrap();
+    let opt = Opt::new(1232, 2, 7, 0x8001, options);
+    let mut encoded = Vec::new();
+    opt.encode(&mut encoded).unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
+    builder.reserve(encoded.len()).unwrap();
+    let message = Message::parse(builder.finish_with_opt(&encoded).unwrap()).unwrap();
+    let roundtrip = message.opt().unwrap();
+    assert_eq!(
+        (
+            roundtrip.udp_payload_size(),
+            roundtrip.extended_rcode(),
+            roundtrip.version(),
+            roundtrip.flags()
+        ),
+        (1232, 2, 7, 0x8001)
+    );
+    assert_eq!(roundtrip.options().as_bytes(), options.as_bytes());
+}
+
+#[test]
 fn malformed_opt_requires_formerr() {
     let opt = [0, 0, 41, 2, 0, 0, 0, 0, 0, 0, 0];
     let non_root = [1, b'x', 0, 0, 41, 2, 0, 0, 0, 0, 0, 0, 0];
