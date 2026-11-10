@@ -49,7 +49,10 @@ fn main() {
             "errors" => "setup_errors",
             _ => "setup_unimplemented",
         };
-        let once = matches!(*name, "cache" | "prometheus" | "ready" | "errors" | "reload");
+        let once = matches!(
+            *name,
+            "cache" | "prometheus" | "ready" | "errors" | "reload"
+        );
         writeln!(
             code,
             "pharos_corefile::Directive {{ name: {name:?}, once: {once}, setup: {setup} }},"
