@@ -556,7 +556,15 @@ fn supported_typed_rdata_agrees_with_domain() {
     let mut wire = Vec::new();
     let mut builder = MessageBuilder::new(&mut wire, 4096, 0, 0).unwrap();
     builder.question(owner, Type::A, Class::IN).unwrap();
-    for (rtype, bytes) in [(Type::A, vec![192, 0, 2, 1]), (Type::AAAA, vec![0; 16])] {
+    for (rtype, bytes) in [
+        (Type::A, vec![192, 0, 2, 1]),
+        (Type::AAAA, vec![0; 16]),
+        (Type::TXT, b"\x03abc\x00\x02\x00\xff".to_vec()),
+        (Type::HINFO, b"\x03CPU\x02OS".to_vec()),
+        (Type::CAA, b"\x80\x05issueexample.org".to_vec()),
+        (Type::URI, b"\x00\x0a\x00\x01https://example.org/".to_vec()),
+        (Type(65000), vec![0, 255, 42]),
+    ] {
         builder
             .record(Section::Answer, owner, rtype, Class::IN, 0, &bytes)
             .unwrap();
@@ -611,6 +619,44 @@ fn supported_typed_rdata_agrees_with_domain() {
         match (actual, expected) {
             (pharos_proto::Rdata::A(a), AllRecordData::A(b)) => assert_eq!(a, b.addr()),
             (pharos_proto::Rdata::Aaaa(a), AllRecordData::Aaaa(b)) => assert_eq!(a, b.addr()),
+            (pharos_proto::Rdata::Txt(a), AllRecordData::Txt(b)) => {
+                let actual = pharos_proto::Rdata::parse(Type::TXT, a).unwrap();
+                assert_eq!(actual.to_string(), r#""abc" "" "\000\255""#);
+                assert_eq!(
+                    b.iter().collect::<Vec<_>>(),
+                    vec![&b"abc"[..], &b""[..], &b"\x00\xff"[..]]
+                );
+            }
+            (pharos_proto::Rdata::Hinfo { cpu, os }, AllRecordData::Hinfo(b)) => {
+                assert_eq!(cpu, b.cpu().as_slice());
+                assert_eq!(os, b.os().as_slice());
+            }
+            (pharos_proto::Rdata::Caa { flags, tag, value }, AllRecordData::Caa(b)) => {
+                assert_eq!(flags, b.flags().bits());
+                assert_eq!(tag, b.tag().to_string().as_bytes());
+                assert_eq!(value, *b.value());
+            }
+            (
+                pharos_proto::Rdata::Uri {
+                    priority,
+                    weight,
+                    target,
+                },
+                AllRecordData::Unknown(b),
+            ) => {
+                assert_eq!(
+                    b.data(),
+                    &b"\x00\x0a\x00\x01https://example.org/".as_slice()
+                );
+                assert_eq!(
+                    (priority, weight, target),
+                    (10, 1, &b"https://example.org/"[..])
+                );
+            }
+            (pharos_proto::Rdata::Unknown(rtype, bytes), AllRecordData::Unknown(b)) => {
+                assert_eq!(rtype, Type(65000));
+                assert_eq!(bytes, *b.data());
+            }
             (pharos_proto::Rdata::Ns(a), AllRecordData::Ns(b)) => {
                 compare_name!(a, b.nsdname())
             }

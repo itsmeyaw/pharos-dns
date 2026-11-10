@@ -38,12 +38,19 @@ UTF-8 in Extended DNS Error text is rendered with replacement characters.
 
 ## Record data
 
-The typed RDATA parser currently supports A, AAAA, NS, CNAME, PTR, MX and
-SOA. Unsupported name-bearing types are rejected by the typed parser;
+The typed RDATA parser currently supports A, AAAA, NS, CNAME, PTR, MX,
+SOA, TXT, HINFO, CAA and URI. Unsupported name-bearing types are rejected by the typed parser;
 other types remain opaque and print in RFC 3597 form rather than using their
 CoreDNS presentation. Presentation parsing is not yet implemented. Unlike
 miekg/dns, incomplete typed records are rejected rather than accepted as
 partial values.
+
+Pharos rejects a zero-length TXT RDATA, which lacks the required character
+string; miekg/dns accepts it. TXT strings of length zero are accepted. Pharos
+rejects empty and non-alphanumeric CAA tags as required by RFC 8659;
+miekg/dns accepts them. CAA and URI presentation follows miekg/dns's
+octet-string escaping, including its interpretation of backslashes in wire
+values, which can make the displayed value differ from the original octets.
 
 ## Environment substitution
 

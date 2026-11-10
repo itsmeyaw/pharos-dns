@@ -44,6 +44,76 @@ fn unsupported_name_type(rtype: Type) -> bool {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RdataError;
 
+fn character_string(bytes: &[u8]) -> Result<(&[u8], &[u8]), RdataError> {
+    let (&len, rest) = bytes.split_first().ok_or(RdataError)?;
+    let len = usize::from(len);
+    if len > rest.len() {
+        return Err(RdataError);
+    }
+    Ok(rest.split_at(len))
+}
+
+fn valid_txt(mut bytes: &[u8]) -> Result<(), RdataError> {
+    if bytes.is_empty() {
+        return Err(RdataError);
+    }
+    while !bytes.is_empty() {
+        bytes = character_string(bytes)?.1;
+    }
+    Ok(())
+}
+
+fn display_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    for &byte in bytes {
+        match byte {
+            b'"' | b'\\' => write!(f, "\\{}", char::from(byte))?,
+            32..=126 => write!(f, "{}", char::from(byte))?,
+            _ => write!(f, "\\{byte:03}")?,
+        }
+    }
+    Ok(())
+}
+
+fn write_character_string(
+    writer: &mut RdataWriter<'_, '_>,
+    bytes: &[u8],
+) -> Result<(), BuildError> {
+    let len = u8::try_from(bytes.len()).map_err(|_| BuildError::InvalidRdata)?;
+    writer.write_bytes(&[len])?;
+    writer.write_bytes(bytes)
+}
+
+fn display_quoted(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    f.write_str("\"")?;
+    display_bytes(f, bytes)?;
+    f.write_str("\"")
+}
+
+fn display_octets(f: &mut fmt::Formatter<'_>, mut bytes: &[u8]) -> fmt::Result {
+    f.write_str("\"")?;
+    while let Some((&byte, rest)) = bytes.split_first() {
+        bytes = rest;
+        if byte != b'\\' {
+            display_bytes(f, &[byte])?;
+        } else if let Some((&next, rest)) = bytes.split_first() {
+            if next == b'.' {
+                f.write_str("\\.")?;
+                bytes = rest;
+            } else if bytes.len() >= 3 && bytes[..3].iter().all(u8::is_ascii_digit) {
+                let value = u16::from(bytes[0] - b'0') * 100
+                    + u16::from(bytes[1] - b'0') * 10
+                    + u16::from(bytes[2] - b'0');
+                display_bytes(f, &[value as u8])?;
+                bytes = &bytes[3..];
+            } else {
+                display_bytes(f, &[next])?;
+                bytes = rest;
+            }
+        }
+    }
+    f.write_str("\"")
+}
+
 impl fmt::Display for RdataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("invalid or unsupported RDATA")
@@ -73,6 +143,22 @@ pub enum Rdata<'a> {
         expire: u32,
         minimum: u32,
     },
+    /// Length-prefixed character strings, including their wire length octets.
+    Txt(&'a [u8]),
+    Hinfo {
+        cpu: &'a [u8],
+        os: &'a [u8],
+    },
+    Caa {
+        flags: u8,
+        tag: &'a [u8],
+        value: &'a [u8],
+    },
+    Uri {
+        priority: u16,
+        weight: u16,
+        target: &'a [u8],
+    },
     /// Opaque data in RFC 3597 format. Re-encoding preserves the original bytes,
     /// so it is only safe to relocate data that contains no compression pointers.
     Unknown(Type, &'a [u8]),
@@ -82,6 +168,19 @@ impl<'a> Rdata<'a> {
     /// Parses standalone data. Embedded compression pointers refer to `bytes`.
     pub fn parse(rtype: Type, bytes: &'a [u8]) -> Result<Self, RdataError> {
         Self::parse_in_message(rtype, bytes, 0, bytes.len())
+    }
+
+    /// Iterates over TXT character strings without copying. Returns `None` for
+    /// other types; manually constructed malformed TXT data stops at the error.
+    pub fn txt_strings(&self) -> Option<impl Iterator<Item = &'a [u8]>> {
+        let Self::Txt(mut bytes) = *self else {
+            return None;
+        };
+        Some(std::iter::from_fn(move || {
+            let (text, rest) = character_string(bytes).ok()?;
+            bytes = rest;
+            Some(text)
+        }))
     }
 
     pub(crate) fn parse_in_message(
@@ -159,6 +258,34 @@ impl<'a> Rdata<'a> {
                     minimum: number(16),
                 })
             }
+            Type::TXT => {
+                valid_txt(bytes)?;
+                Ok(Self::Txt(bytes))
+            }
+            Type::HINFO => {
+                let (cpu, rest) = character_string(bytes)?;
+                let (os, rest) = character_string(rest)?;
+                if !rest.is_empty() {
+                    return Err(RdataError);
+                }
+                Ok(Self::Hinfo { cpu, os })
+            }
+            Type::CAA => {
+                let (&flags, rest) = bytes.split_first().ok_or(RdataError)?;
+                let (tag, value) = character_string(rest)?;
+                if tag.is_empty() || !tag.iter().all(u8::is_ascii_alphanumeric) {
+                    return Err(RdataError);
+                }
+                Ok(Self::Caa { flags, tag, value })
+            }
+            Type::URI => {
+                let header = bytes.get(..4).ok_or(RdataError)?;
+                Ok(Self::Uri {
+                    priority: u16::from_be_bytes([header[0], header[1]]),
+                    weight: u16::from_be_bytes([header[2], header[3]]),
+                    target: &bytes[4..],
+                })
+            }
             _ if unsupported_name_type(rtype) => Err(RdataError),
             // shortcut: other record types stay opaque, add typed formats before zone parsing.
             _ => Ok(Self::Unknown(rtype, bytes)),
@@ -176,6 +303,10 @@ impl<'a> Rdata<'a> {
             Self::Ptr(_) => Type::PTR,
             Self::Mx { .. } => Type::MX,
             Self::Soa { .. } => Type::SOA,
+            Self::Txt(_) => Type::TXT,
+            Self::Hinfo { .. } => Type::HINFO,
+            Self::Caa { .. } => Type::CAA,
+            Self::Uri { .. } => Type::URI,
             Self::Unknown(rtype, _) => *rtype,
         }
     }
@@ -209,6 +340,31 @@ impl<'a> Rdata<'a> {
                 }
                 Ok(())
             }
+            Self::Txt(bytes) => {
+                valid_txt(bytes).map_err(|_| BuildError::InvalidRdata)?;
+                writer.write_bytes(bytes)
+            }
+            Self::Hinfo { cpu, os } => {
+                write_character_string(writer, cpu)?;
+                write_character_string(writer, os)
+            }
+            Self::Caa { flags, tag, value } => {
+                if tag.is_empty() || !tag.iter().all(u8::is_ascii_alphanumeric) {
+                    return Err(BuildError::InvalidRdata);
+                }
+                writer.write_bytes(&[*flags])?;
+                write_character_string(writer, tag)?;
+                writer.write_bytes(value)
+            }
+            Self::Uri {
+                priority,
+                weight,
+                target,
+            } => {
+                writer.write_bytes(&priority.to_be_bytes())?;
+                writer.write_bytes(&weight.to_be_bytes())?;
+                writer.write_bytes(target)
+            }
             Self::Unknown(rtype, _)
                 if unsupported_name_type(*rtype)
                     || matches!(
@@ -220,6 +376,10 @@ impl<'a> Rdata<'a> {
                             | Type::PTR
                             | Type::MX
                             | Type::SOA
+                            | Type::TXT
+                            | Type::HINFO
+                            | Type::CAA
+                            | Type::URI
                     ) =>
             {
                 Err(BuildError::InvalidRdata)
@@ -252,6 +412,41 @@ impl fmt::Display for Rdata<'_> {
                 f,
                 "{mname} {rname} {serial} {refresh} {retry} {expire} {minimum}"
             ),
+            &Self::Txt(mut bytes) => {
+                if valid_txt(bytes).is_err() {
+                    return write!(f, "{}", Self::Unknown(Type::TXT, bytes));
+                }
+                let mut first = true;
+                while !bytes.is_empty() {
+                    let (text, rest) = character_string(bytes).map_err(|_| fmt::Error)?;
+                    if !first {
+                        f.write_str(" ")?;
+                    }
+                    display_quoted(f, text)?;
+                    bytes = rest;
+                    first = false;
+                }
+                Ok(())
+            }
+            Self::Hinfo { cpu, os } => {
+                display_quoted(f, cpu)?;
+                f.write_str(" ")?;
+                display_quoted(f, os)
+            }
+            Self::Caa { flags, tag, value } => {
+                write!(f, "{flags} ")?;
+                display_bytes(f, tag)?;
+                f.write_str(" ")?;
+                display_octets(f, value)
+            }
+            Self::Uri {
+                priority,
+                weight,
+                target,
+            } => {
+                write!(f, "{priority} {weight} ")?;
+                display_octets(f, target)
+            }
             Self::Unknown(_, bytes) => {
                 write!(f, "\\# {} ", bytes.len())?;
                 for byte in *bytes {
