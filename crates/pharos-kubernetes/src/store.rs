@@ -102,6 +102,7 @@ type Grouped<T> = HashMap<Arc<str>, Reverse<T>>;
 #[derive(Default)]
 pub struct Index {
     allowed_namespaces: HashSet<Arc<str>>,
+    require_namespace: bool,
     services: Names<Service>,
     service_ips: Reverse<Service>,
     service_external_ips: Reverse<Service>,
@@ -152,7 +153,8 @@ fn lookup_reverse<'a, T>(map: &'a Reverse<T>, key: &str) -> impl Iterator<Item =
 
 impl Index {
     fn namespace_allowed(&self, name: &str) -> bool {
-        self.allowed_namespaces.is_empty() || self.allowed_namespaces.contains(name)
+        (self.allowed_namespaces.is_empty() || self.allowed_namespaces.contains(name))
+            && (!self.require_namespace || self.namespaces.contains_key(name))
     }
     /// Service, EndpointSlice, endpoint-address, Pod and Namespace counts.
     pub fn counts(&self) -> (usize, usize, usize, usize, usize) {
@@ -298,12 +300,13 @@ impl Index {
 pub struct Store(Arc<RwLock<Index>>);
 
 impl Store {
-    pub(crate) fn new(namespaces: &[String]) -> Self {
+    pub(crate) fn new(namespaces: &[String], require_namespace: bool) -> Self {
         let index = Index {
             allowed_namespaces: namespaces
                 .iter()
                 .map(|name| Arc::from(name.as_str()))
                 .collect(),
+            require_namespace,
             ..Default::default()
         };
         Self(Arc::new(RwLock::new(index)))

@@ -385,3 +385,29 @@ async fn namespace_list_restricts_readable_store_entries() {
     });
     controller.stop().await;
 }
+
+#[tokio::test]
+async fn namespace_label_selector_restricts_service_and_endpoint_lookups() {
+    let server = FakeServer::start().await;
+    server
+        .lists
+        .lock()
+        .unwrap()
+        .insert("/api/v1/namespaces".into(), json!([]));
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(
+        client,
+        WatchConfig {
+            namespace_label_selector: Some("team=dns".into()),
+            ..Default::default()
+        },
+    );
+    until(|| controller.has_synced()).await;
+    controller.store().with_read(|index| {
+        assert!(index.service("prod", "web").is_none());
+        assert_eq!(index.services_by_ip("10.0.0.1").count(), 0);
+        assert_eq!(index.endpoints("prod", "web").count(), 0);
+        assert_eq!(index.endpoints_by_ip("10.0.1.1").count(), 0);
+    });
+    controller.stop().await;
+}

@@ -54,7 +54,10 @@ pub struct Controller {
 
 impl Controller {
     pub fn start(client: Client, config: WatchConfig) -> Self {
-        let store = Store::new(&config.namespaces);
+        let store = Store::new(
+            &config.namespaces,
+            config.namespace_label_selector.is_some(),
+        );
         Self::start_with_store(client, config, store, None)
     }
 
@@ -63,7 +66,10 @@ impl Controller {
         config: WatchConfig,
         metrics: KubernetesMetrics,
     ) -> Self {
-        let store = Store::new(&config.namespaces);
+        let store = Store::new(
+            &config.namespaces,
+            config.namespace_label_selector.is_some(),
+        );
         Self::start_with_store(client, config, store, Some(metrics))
     }
 
