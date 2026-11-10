@@ -244,3 +244,5 @@ Domain edge cases remain more restrictive than CoreDNS. Upstream Metadata
 uses the normalized numeric socket address, which may differ from CoreDNS's
 configured address text. Health checks start on exchange failure, and proxy
 connections and checks are stopped on Shutdown.
+Forward reuses Upstream Response buffers from a pool; a new buffer is allocated
+when concurrent Queries exceed the pool's previous high-water mark.

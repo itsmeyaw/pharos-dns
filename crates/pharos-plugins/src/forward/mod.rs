@@ -2,7 +2,10 @@
 
 mod setup;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use pharos_proto::{Message, Name, NameRef, Rcode};
@@ -38,6 +41,46 @@ struct Stanza {
 pub struct Forward {
     stanzas: Vec<Stanza>,
     metrics: Option<ForwardMetrics>,
+    buffers: BufferPool,
+}
+
+#[derive(Default)]
+struct BufferPool(Mutex<Vec<Vec<u8>>>);
+
+struct Buffer<'a> {
+    pool: &'a BufferPool,
+    bytes: Option<Vec<u8>>,
+}
+
+impl BufferPool {
+    fn get(&self) -> Buffer<'_> {
+        let bytes = self
+            .0
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| vec![0; 65535]);
+        Buffer {
+            pool: self,
+            bytes: Some(bytes),
+        }
+    }
+}
+
+impl Buffer<'_> {
+    fn bytes(&mut self) -> &mut [u8] {
+        self.bytes.as_mut().expect("buffer returned only on drop")
+    }
+}
+
+impl Drop for Buffer<'_> {
+    fn drop(&mut self) {
+        self.pool
+            .0
+            .lock()
+            .unwrap()
+            .push(self.bytes.take().expect("buffer exists"));
+    }
 }
 
 impl std::fmt::Debug for Forward {
@@ -219,10 +262,7 @@ impl Plugin for Forward {
             } else {
                 proxy::Transport::Udp
             };
-            if cx.response.capacity() < 65535 {
-                cx.response.reserve(65535 - cx.response.len());
-            }
-            cx.response.resize(65535, 0);
+            let mut buffer = self.buffers.get();
             while Instant::now() < deadline && (max_attempts == 0 || attempts < max_attempts) {
                 if i == count {
                     i = 0;
@@ -250,7 +290,7 @@ impl Plugin for Forward {
                         deadline,
                         upstream.proxy.exchange(
                             cx.query.as_wire(),
-                            cx.response,
+                            buffer.bytes(),
                             protocol,
                             stanza.options,
                         ),
@@ -277,12 +317,11 @@ impl Plugin for Forward {
                         continue;
                     }
                 };
-                cx.response.truncate(exchange.len);
-                let response = Message::parse(cx.response).expect("proxy validated Response");
+                let wire = &buffer.bytes()[..exchange.len];
+                let response = Message::parse(wire).expect("proxy validated Response");
                 if stanza.failover.contains(&response.rcode()) {
                     failovers += 1;
                     if failovers < count {
-                        cx.response.resize(65535, 0);
                         continue;
                     }
                 }
@@ -295,6 +334,8 @@ impl Plugin for Forward {
                     try_next = true;
                     break;
                 }
+                cx.response.clear();
+                cx.response.extend_from_slice(wire);
                 return Outcome::Response;
             }
             if !try_next {
@@ -302,5 +343,21 @@ impl Plugin for Forward {
             }
         }
         next.run(cx).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BufferPool;
+
+    #[test]
+    fn returned_buffers_keep_their_contents_and_are_reused() {
+        let pool = BufferPool::default();
+        {
+            let mut buffer = pool.get();
+            buffer.bytes()[65534] = 123;
+        }
+        let mut buffer = pool.get();
+        assert_eq!(buffer.bytes()[65534], 123);
     }
 }
