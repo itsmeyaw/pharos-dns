@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-bind")]
+pub mod bind;
 #[cfg(feature = "plugin-cache")]
 pub mod cache;
 #[cfg(feature = "plugin-errors")]
@@ -457,6 +459,13 @@ fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
 #[cfg(feature = "plugin-reload")]
 fn setup_reload(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.reload = Some(reload::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-bind")]
+fn setup_bind(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.listen_addresses = bind::parse(cursor)?;
+    block.config.bind = Some(());
     Ok(())
 }
 
