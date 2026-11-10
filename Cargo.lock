@@ -452,6 +452,11 @@ dependencies = [
 [[package]]
 name = "pharos-plugins"
 version = "0.1.0"
+dependencies = [
+ "pharos-corefile",
+ "pharos-proto",
+ "pharos-server",
+]
 
 [[package]]
 name = "pharos-proto"

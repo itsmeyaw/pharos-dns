@@ -5,6 +5,7 @@
 - Source: https://github.com/coredns/coredns
 - License: Apache-2.0
 - Copyright 2016-2020 The CoreDNS authors and contributors
+- `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
 
 ## coredns/caddy
 
