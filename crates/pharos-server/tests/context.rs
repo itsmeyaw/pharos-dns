@@ -11,6 +11,7 @@ fn context_keeps_query_and_borrowed_metadata() {
     let mut context = Context {
         query,
         client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
         transport: Transport::Dns,
         protocol: Protocol::Udp,
         domain: &domain,

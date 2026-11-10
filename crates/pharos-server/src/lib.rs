@@ -149,6 +149,8 @@ impl<'a> Metadata<'a> {
 pub struct Context<'a> {
     pub query: Message<'a>,
     pub client: SocketAddr,
+    /// Listener address; wildcard addresses are not resolved per Query.
+    pub local: SocketAddr,
     pub transport: Transport,
     pub protocol: Protocol,
     pub domain: &'a Name,

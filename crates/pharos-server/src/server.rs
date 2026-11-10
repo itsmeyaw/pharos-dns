@@ -129,6 +129,7 @@ impl<C: Chain> Handler for Server<C> {
                 let mut context = Context {
                     query,
                     client: peer,
+                    local: self.key.address,
                     transport: self.key.transport,
                     protocol,
                     domain: block.domain(),
