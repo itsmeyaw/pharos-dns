@@ -13,7 +13,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -162,6 +162,7 @@ pub struct Proxy {
     started: Instant,
     next_sweep: AtomicU64,
     read_timeout: Duration,
+    average_dial_nanos: AtomicI64,
     source_address: Option<IpAddr>,
     metrics: Option<Metrics>,
     health: Health,
@@ -187,6 +188,7 @@ impl Proxy {
             started: Instant::now(),
             next_sweep: AtomicU64::new(EXPIRE.as_nanos() as u64),
             read_timeout: READ_TIMEOUT,
+            average_dial_nanos: AtomicI64::new(15_000_000_000),
             source_address: None,
             metrics: None,
             health: Health::new(address, 2),
@@ -260,6 +262,48 @@ impl Proxy {
     /// Set the Response read timeout (two seconds by default).
     pub fn set_read_timeout(&mut self, read_timeout: Duration) {
         self.read_timeout = read_timeout;
+    }
+
+    fn dial_timeout(&self) -> Duration {
+        let average = self.average_dial_nanos.load(Ordering::Relaxed);
+        Duration::from_nanos(if average < 1_000_000_000 {
+            1_000_000_000
+        } else if average < 15_000_000_000 {
+            (2 * average) as u64
+        } else {
+            30_000_000_000
+        })
+    }
+
+    fn update_dial_timeout(&self, duration: Duration) {
+        let average = self.average_dial_nanos.load(Ordering::Relaxed);
+        let observed = duration.as_nanos().min(i64::MAX as u128) as i64;
+        self.average_dial_nanos
+            .fetch_add((observed - average) / 4, Ordering::Relaxed);
+    }
+
+    async fn dial(&self, transport: Transport) -> io::Result<Socket> {
+        let start = Instant::now();
+        let result = timeout(self.dial_timeout(), async {
+            if transport == Transport::Tcp {
+                Ok(Socket::Tcp(
+                    connect_tcp(self.address, self.source_address).await?,
+                ))
+            } else {
+                let ip = if self.address.is_ipv4() {
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+                } else {
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+                };
+                let socket =
+                    UdpSocket::bind(SocketAddr::new(self.source_address.unwrap_or(ip), 0)).await?;
+                socket.connect(self.address).await?;
+                Ok(Socket::Udp(socket))
+            }
+        })
+        .await;
+        self.update_dial_timeout(start.elapsed());
+        result.map_err(|_| io::ErrorKind::TimedOut)?
     }
 
     /// Bind new Upstream and health-check connections to this local IP.
@@ -378,28 +422,8 @@ impl Proxy {
         }
         let (mut socket, created) = if let Some(cached) = cached {
             (cached.socket, cached.created)
-        } else if transport == Transport::Tcp {
-            (
-                Socket::Tcp(
-                    timeout(
-                        Duration::from_secs(30),
-                        connect_tcp(self.address, self.source_address),
-                    )
-                    .await
-                    .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))??,
-                ),
-                Instant::now(),
-            )
         } else {
-            let ip = if self.address.is_ipv4() {
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-            } else {
-                IpAddr::V6(Ipv6Addr::UNSPECIFIED)
-            };
-            let socket =
-                UdpSocket::bind(SocketAddr::new(self.source_address.unwrap_or(ip), 0)).await?;
-            socket.connect(self.address).await?;
-            (Socket::Udp(socket), Instant::now())
+            (self.dial(transport).await?, Instant::now())
         };
         let mut id = [0; 2];
         if request
@@ -522,6 +546,20 @@ impl Drop for Proxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adaptive_dial_timeout_uses_weighted_average_and_bounds() {
+        let proxy = Proxy::new("127.0.0.1:53".parse().unwrap());
+        assert_eq!(proxy.dial_timeout(), Duration::from_secs(30));
+        proxy.update_dial_timeout(Duration::from_secs(3));
+        assert_eq!(proxy.dial_timeout(), Duration::from_secs(24));
+        for _ in 0..40 {
+            proxy.update_dial_timeout(Duration::ZERO);
+        }
+        assert_eq!(proxy.dial_timeout(), Duration::from_secs(1));
+        proxy.update_dial_timeout(Duration::from_secs(120));
+        assert_eq!(proxy.dial_timeout(), Duration::from_secs(30));
+    }
 
     #[test]
     fn only_truncated_message_and_name_errors_are_overflows() {
