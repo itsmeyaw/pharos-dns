@@ -132,6 +132,7 @@ fn opt_fields_and_extended_rcode_are_borrowed_from_message() {
     assert_eq!(opt.version(), 2);
     assert!(opt.dnssec_ok());
     assert_eq!(opt.flags(), 0x8055);
+    assert_eq!(opt.z(), 0x55);
     assert_eq!(query.rcode(), Rcode(19));
     assert_eq!(opt.options().iter().count(), 0);
 }

@@ -87,6 +87,11 @@ impl<'a> Opt<'a> {
     pub const fn flags(self) -> u16 {
         self.ttl as u16
     }
+    /// The 14 reserved EDNS flag bits, excluding DO and CO.
+    #[must_use]
+    pub const fn z(self) -> u16 {
+        self.flags() & 0x3fff
+    }
     #[must_use]
     pub const fn dnssec_ok(self) -> bool {
         self.flags() & 0x8000 != 0
