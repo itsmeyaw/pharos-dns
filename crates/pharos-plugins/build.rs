@@ -25,6 +25,7 @@ fn main() {
             "cache" => "cache::Cache",
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
+            "loop" => "r#loop::Loop",
             "prometheus" => "prometheus::Prometheus",
             "ready" => "ready::Ready",
             "forward" => "forward::Forward",
@@ -42,6 +43,7 @@ fn main() {
             "cache" => "setup_cache",
             "whoami" => "setup_whoami",
             "log" => "setup_log",
+            "loop" => "setup_loop",
             "prometheus" => "setup_prometheus",
             "ready" => "setup_ready",
             "forward" => "setup_forward",
@@ -53,7 +55,7 @@ fn main() {
         };
         let once = matches!(
             *name,
-            "cache" | "prometheus" | "ready" | "errors" | "reload" | "hosts"
+            "cache" | "prometheus" | "ready" | "errors" | "reload" | "hosts" | "loop"
         );
         writeln!(
             code,
@@ -114,6 +116,9 @@ fn main() {
         }
     }
     code.push_str("}\n");
+    if enabled.contains(&"loop") {
+        code.push_str("fn parallel_query(&self, query: &pharos_proto::Message<'_>) -> Option<tokio::sync::watch::Receiver<bool>> { self.r#loop.as_ref().and_then(|plugin| plugin.parallel_query(query)) }\n");
+    }
     if enabled.contains(&"prometheus") {
         code.push_str("fn metrics_enabled(&self) -> bool { self.prometheus.is_some() }\n");
     } else {

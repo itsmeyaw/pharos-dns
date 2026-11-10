@@ -6,6 +6,8 @@ type Hook = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = io::Result<()>> + Send>>
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
     Startup,
+    /// Listeners have been installed after Startup, including on Reload.
+    Started,
     Shutdown,
     Restart,
     RestartFailed,

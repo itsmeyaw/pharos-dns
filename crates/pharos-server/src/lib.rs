@@ -226,6 +226,10 @@ pub enum Action {
 /// Handlers must not block the runtime; TCP Queries on a connection may run
 /// concurrently.
 pub trait Handler: Send + Sync + 'static {
+    /// Whether this HINFO Query must run concurrently with UDP reception.
+    fn parallel_query(&self, _query: &[u8], _peer: SocketAddr) -> Option<watch::Receiver<bool>> {
+        None
+    }
     fn handle(
         &self,
         query: &[u8],
@@ -446,6 +450,9 @@ impl ListenerRegistry {
 struct Swappable<H>(Arc<ArcSwap<H>>);
 
 impl<H: Handler> Handler for Swappable<H> {
+    fn parallel_query(&self, query: &[u8], peer: SocketAddr) -> Option<watch::Receiver<bool>> {
+        self.0.load().parallel_query(query, peer)
+    }
     async fn handle(
         &self,
         query: &[u8],

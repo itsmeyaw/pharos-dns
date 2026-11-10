@@ -194,6 +194,7 @@ async fn reload(
                 return Err(error.to_string());
             }
         };
+        next.run(Phase::Started).await.map_err(|e| e.to_string())?;
         while retired
             .iter()
             .any(|state| std::sync::Arc::strong_count(state) > 1)
@@ -253,6 +254,10 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
         .map_err(|e| (1, e.to_string()))?;
     lifecycle
         .run(Phase::Startup)
+        .await
+        .map_err(|e| (1, e.to_string()))?;
+    lifecycle
+        .run(Phase::Started)
         .await
         .map_err(|e| (1, e.to_string()))?;
     if !options.quiet {

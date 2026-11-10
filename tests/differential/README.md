@@ -29,6 +29,9 @@ IDs and RR order within each section are ignored; all other fields are compared.
 The `whoami-log` scenario compares Responses, not log output. The current whoami
 Responses cannot exceed the 512-octet UDP minimum for these short Queries, so
 truncation is not covered.
+The `loop` scenario compares Responses for a non-looping configuration. The
+looping README example is covered by a binary exit test instead: this harness
+expects both processes to remain available and does not compare exit codes.
 The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
 The Reload README scenarios use `whoami` instead of the unimplemented `erratic`
 backend and compare DNS Responses rather than reload timing.
