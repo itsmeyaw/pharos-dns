@@ -1,6 +1,8 @@
 //! Upstream DNS exchange. Independent cache shards hold idle connections only;
 //! no lock or manager task is held while a Query waits for its Response.
 //! DNS-over-TLS is deferred to M3.
+//! Unlike CoreDNS's `forward`, this module performs the `prefer_udp` TC retry;
+//! a `forward` caller must not retry the same truncated Response again.
 
 pub mod health;
 pub use health::{Health, HealthConfig};
