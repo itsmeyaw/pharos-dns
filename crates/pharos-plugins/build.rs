@@ -28,6 +28,7 @@ fn main() {
             "ready" => "ready::Ready",
             "forward" => "forward::Forward",
             "health" => "health::Health",
+            "reload" => "reload::Reload",
             "errors" => "errors::Errors",
             _ => "Unimplemented",
         };
@@ -42,10 +43,11 @@ fn main() {
             "ready" => "setup_ready",
             "forward" => "setup_forward",
             "health" => "setup_health",
+            "reload" => "setup_reload",
             "errors" => "setup_errors",
             _ => "setup_unimplemented",
         };
-        let once = matches!(*name, "prometheus" | "ready" | "errors");
+        let once = matches!(*name, "prometheus" | "ready" | "errors" | "reload");
         writeln!(
             code,
             "pharos_corefile::Directive {{ name: {name:?}, once: {once}, setup: {setup} }},"
@@ -68,7 +70,7 @@ fn main() {
             "fn collect_readiness(self: &std::sync::Arc<Self>, state: &ready::State) {\nlet _ = state;\n",
         );
         for name in &enabled {
-            if matches!(*name, "ready" | "health") {
+            if matches!(*name, "ready" | "health" | "reload") {
                 continue;
             }
             writeln!(code, "if self.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some() {{ let chain = std::sync::Arc::clone(self); state.append({name:?}, move || chain.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some_and(pharos_server::Readiness::ready)); }}").unwrap();
@@ -79,7 +81,7 @@ fn main() {
     code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
     for (i, name) in enabled.iter().enumerate() {
         let next = i + 1;
-        if matches!(*name, "ready" | "health") {
+        if matches!(*name, "ready" | "health" | "reload") {
             writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.serve_{next}(cx).await }}").unwrap();
             continue;
         }
@@ -89,7 +91,7 @@ fn main() {
     code.push_str("}\n");
     code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
-        if !matches!(*name, "ready" | "health") {
+        if !matches!(*name, "ready" | "health" | "reload") {
             write!(code, " && self.r#{name}.is_none()").unwrap();
         }
     }
@@ -97,7 +99,7 @@ fn main() {
         " }\nfn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {\nlet _ = &visit;\n",
     );
     for name in &enabled {
-        if !matches!(*name, "ready" | "health") {
+        if !matches!(*name, "ready" | "health" | "reload") {
             writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
         }
     }
@@ -112,7 +114,7 @@ fn main() {
     }
     code.push_str("}\n");
     for (i, name) in enabled.iter().enumerate() {
-        if matches!(*name, "ready" | "health") {
+        if matches!(*name, "ready" | "health" | "reload") {
             continue;
         }
         let next = i + 1;

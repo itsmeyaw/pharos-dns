@@ -1,27 +1,12 @@
 #![cfg(feature = "plugin-reload")]
 
-use pharos_corefile::{BlockContext, Cursor, Directive, Error, configure, parse};
-use pharos_plugins::reload::{Reload, parse as parse_reload};
+use pharos_corefile::{BlockContext, Error, configure, parse};
+use pharos_plugins::{Chain, directives};
 use std::time::Duration;
 
-#[derive(Default)]
-struct Config(Option<Reload>);
-
-fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<Config>) -> Result<(), Error> {
-    block.config.0 = Some(parse_reload(cursor)?);
-    Ok(())
-}
-
-fn configure_reload(input: &str) -> Result<Vec<BlockContext<Config>>, Error> {
+fn configure_reload(input: &str) -> Result<Vec<BlockContext<Chain>>, Error> {
     let blocks = parse("Corefile", input)?;
-    configure(
-        &blocks,
-        &[Directive {
-            name: "reload",
-            once: true,
-            setup,
-        }],
-    )
+    configure(&blocks, directives())
 }
 
 // Derived from CoreDNS v1.15.0 plugin/reload/setup_test.go.
@@ -60,7 +45,7 @@ fn setup_applies_defaults_and_caps_jitter() {
         ("reload 10s 8s", 10, 5),
     ] {
         let blocks = configure_reload(&format!(".:53 {{\n{directive}\n}}")).unwrap();
-        let reload = blocks[0].config.0.as_ref().unwrap();
+        let reload = blocks[0].config.reload.as_ref().unwrap();
         assert_eq!(reload.interval, Duration::from_secs(interval));
         assert_eq!(reload.jitter, Duration::from_secs(jitter));
     }

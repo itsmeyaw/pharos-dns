@@ -153,3 +153,54 @@ fn invalid_reload_restores_http_and_keeps_dns() {
     drop(process);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn reload_directive_polls_for_changed_corefile() {
+    let dir = std::env::temp_dir().join(format!("pharos-reload-poll-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let file = dir.join("Corefile");
+    fs::write(&file, format!(".:{port} {{\n reload 2s 0\n whoami\n}}\n")).unwrap();
+    let pidfile = dir.join("pid");
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .current_dir(&dir)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pidfile.exists() {
+        assert!(process.0.try_wait().unwrap().is_none(), "startup failed");
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(&file, format!(".:{port} {{\n reload 2s 0\n errors\n}}\n")).unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let query = [
+        0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1,
+    ];
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        socket.send_to(&query, ("127.0.0.1", port)).unwrap();
+        let mut response = [0; 1024];
+        socket.recv(&mut response).unwrap();
+        if response[3] & 15 == 2 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "polling did not reload");
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(process);
+    fs::remove_dir_all(dir).unwrap();
+}

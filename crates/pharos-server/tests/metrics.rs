@@ -3,6 +3,19 @@
 use pharos_server::metrics::Registry;
 
 #[test]
+fn reload_counter_and_current_hash_are_preserved() {
+    let registry = Registry::default();
+    registry.reload_version("old".into());
+    registry.reload_failed();
+    registry.reload_version("new".into());
+    let mut text = String::new();
+    registry.encode(&mut text);
+    assert!(text.contains("pharos_reload_failed_total 1\n"));
+    assert!(text.contains("pharos_reload_version_info{hash=\"sha512\",value=\"new\"} 1\n"));
+    assert!(!text.contains("value=\"old\""));
+}
+
+#[test]
 fn fixed_registry_matches_go_client_golden() {
     let registry = Registry::new("1\"\\\n", "rev", "rustc");
     registry

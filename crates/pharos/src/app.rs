@@ -6,10 +6,12 @@ use pharos_server::{
 };
 use std::{
     collections::BTreeMap,
+    fmt::Write,
     fs,
     future::Future,
     io::{self, Read},
     path::Path,
+    time::Duration,
 };
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
@@ -48,13 +50,14 @@ fn init_logging(format: &str) {
 }
 
 type Domains = BTreeMap<String, Vec<String>>;
+type ReloadConfig = Option<pharos_plugins::reload::Reload>;
 
 fn prepare(
     options: &Options,
     file: &str,
     input: &str,
     metrics: &pharos_server::metrics::Registry,
-) -> Result<(pharos_plugins::Servers, Lifecycle, Domains), String> {
+) -> Result<(pharos_plugins::Servers, Lifecycle, Domains, ReloadConfig), String> {
     let mut blocks = pharos_corefile::parse(file, input).map_err(|e| e.to_string())?;
     if blocks.is_empty() {
         blocks = pharos_corefile::parse("<default>", &default_corefile(options))
@@ -65,6 +68,7 @@ fn prepare(
     }
     let blocks = pharos_corefile::configure(&blocks, pharos_plugins::directives())
         .map_err(|e| e.to_string())?;
+    let reload_config = blocks.iter().filter_map(|block| block.config.reload).last();
     let mut domains = Domains::new();
     for block in &blocks {
         for key in block.keys() {
@@ -78,7 +82,38 @@ fn prepare(
     }
     let (servers, lifecycle) = pharos_plugins::servers_with_registry(blocks, metrics.clone())
         .map_err(|e| e.to_string())?;
-    Ok((servers, lifecycle, domains))
+    Ok((servers, lifecycle, domains, reload_config))
+}
+
+fn hash(input: &str) -> String {
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA512, input.as_bytes());
+    let mut output = String::with_capacity(128);
+    for byte in digest.as_ref() {
+        write!(output, "{byte:02x}").unwrap();
+    }
+    output
+}
+
+fn interval(config: pharos_plugins::reload::Reload) -> Duration {
+    if config.jitter.is_zero() {
+        return config.interval;
+    }
+    let mut bytes = [0; 8];
+    if let Err(error) = getrandom::getrandom(&mut bytes) {
+        logging::log("ERROR", "reload", &format!("Jitter unavailable: {error}"));
+        return config.interval;
+    }
+    let jitter = config.jitter.as_nanos() as u64;
+    let offset = u64::from_ne_bytes(bytes) % jitter;
+    config.interval - Duration::from_nanos(jitter / 2) + Duration::from_nanos(offset)
+}
+
+fn reread(options: &Options, initial: &str) -> Result<(String, String), String> {
+    if options.conf.as_deref() == Some("stdin") {
+        Ok(("stdin".to_owned(), initial.to_owned()))
+    } else {
+        configuration(options)
+    }
 }
 
 async fn reload(
@@ -87,18 +122,14 @@ async fn reload(
     listeners: &mut ListenerRegistry,
     lifecycle: &mut Lifecycle,
     metrics: &pharos_server::metrics::Registry,
-) {
+) -> Option<(ReloadConfig, String)> {
     let result = async {
         lifecycle
             .run(Phase::Restart)
             .await
             .map_err(|e| e.to_string())?;
-        let (file, input) = if options.conf.as_deref() == Some("stdin") {
-            ("stdin".to_owned(), initial.to_owned())
-        } else {
-            configuration(options)?
-        };
-        let (servers, next, _) = prepare(options, &file, &input, metrics)?;
+        let (file, input) = reread(options, initial)?;
+        let (servers, next, _, reload_config) = prepare(options, &file, &input, metrics)?;
         if let Err(error) = next.run(Phase::Startup).await {
             let _ = next.run(Phase::Restart).await;
             let _ = next.run(Phase::Shutdown).await;
@@ -113,14 +144,18 @@ async fn reload(
             logging::log("ERROR", "", &format!("Reload shutdown: {error}"));
         }
         *lifecycle = next;
-        Ok(())
+        Ok((reload_config, input))
     }
     .await;
-    if let Err(error) = result {
-        metrics.reload_failed();
-        logging::log("ERROR", "", &format!("Reload failed: {error}"));
-        if let Err(error) = lifecycle.run(Phase::RestartFailed).await {
-            logging::log("ERROR", "", &format!("Reload recovery failed: {error}"));
+    match result {
+        Ok(config) => Some(config),
+        Err(error) => {
+            metrics.reload_failed();
+            logging::log("ERROR", "", &format!("Reload failed: {error}"));
+            if let Err(error) = lifecycle.run(Phase::RestartFailed).await {
+                logging::log("ERROR", "", &format!("Reload recovery failed: {error}"));
+            }
+            None
         }
     }
 }
@@ -149,7 +184,7 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     let mut signals = Signals::new().map_err(|e| (1, e.to_string()))?;
     let (file, input) = configuration(&options).map_err(|e| (1, e))?;
     let metrics = pharos_server::metrics::Registry::default();
-    let (servers, mut lifecycle, domains) =
+    let (servers, mut lifecycle, domains, reload_config) =
         prepare(&options, &file, &input, &metrics).map_err(|e| (1, e))?;
     let mut listeners = ListenerRegistry::default();
     listeners
@@ -182,6 +217,12 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
             &format!("Could not write pidfile: {path}: {error}"),
         );
     }
+    let mut current_hash = hash(&input);
+    let mut poll_interval = reload_config.map(interval);
+    let mut poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
+    if poll_at.is_some() {
+        metrics.reload_version(current_hash.clone());
+    }
     let terminate = loop {
         tokio::select! {
             _ = signals.interrupt.recv() => break false,
@@ -190,7 +231,27 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
             _ = signals.hangup.recv() => {},
             _ = signals.reload.recv() => {
                 logging::log("INFO", "", "SIGUSR1: Reloading");
-                reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await;
+                if let Some((config, loaded)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
+                    current_hash = hash(&loaded);
+                    poll_interval = config.map(interval);
+                    poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
+                    if poll_at.is_some() { metrics.reload_version(current_hash.clone()); }
+                }
+            },
+            _ = async { match poll_at { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending().await } } => {
+                poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
+                if let Ok((_, observed)) = reread(&options, &input) {
+                    let observed_hash = hash(&observed);
+                    if observed_hash != current_hash {
+                        current_hash = observed_hash;
+                        if let Some((config, loaded)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
+                            current_hash = hash(&loaded);
+                            poll_interval = config.map(interval);
+                            poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
+                        }
+                        metrics.reload_version(current_hash.clone());
+                    }
+                }
             },
         }
     };
@@ -249,7 +310,27 @@ fn remove_pidfile(options: &Options) {
 mod tests {
     use std::{cell::RefCell, io};
 
-    use super::shutdown;
+    use super::{hash, interval, shutdown};
+
+    #[test]
+    fn sha512_and_jitter_match_reload_contract() {
+        assert_eq!(
+            hash("abc"),
+            concat!(
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a",
+                "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+            )
+        );
+        let config = pharos_plugins::reload::Reload {
+            interval: std::time::Duration::from_secs(10),
+            jitter: std::time::Duration::from_secs(4),
+        };
+        for _ in 0..100 {
+            let duration = interval(config);
+            assert!(duration >= std::time::Duration::from_secs(8));
+            assert!(duration < std::time::Duration::from_secs(12));
+        }
+    }
 
     #[tokio::test]
     async fn shutdown_hooks_run_before_pidfile_removal_and_listener_stop() {

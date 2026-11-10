@@ -9,7 +9,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+aws-lc-rs = "1"
+getrandom = "0.2"
 pharos-plugins = { path = "../pharos-plugins" }
 pharos-corefile = { path = "../pharos-corefile" }
 pharos-server = { path = "../pharos-server" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }

@@ -62,6 +62,7 @@ struct RegistryInner {
     health_failures: AtomicU64,
     reload_enabled: AtomicBool,
     reload_failures: AtomicU64,
+    reload_hash: Mutex<Option<String>>,
 }
 
 #[derive(Default)]
@@ -247,6 +248,7 @@ impl Registry {
             health_failures: AtomicU64::new(0),
             reload_enabled: AtomicBool::new(false),
             reload_failures: AtomicU64::new(0),
+            reload_hash: Mutex::new(None),
         }))
     }
 
@@ -311,6 +313,11 @@ impl Registry {
         self.0.reload_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn reload_version(&self, hash: String) {
+        self.0.reload_enabled.store(true, Ordering::Relaxed);
+        *self.0.reload_hash.lock().unwrap() = Some(hash);
+    }
+
     pub fn observe_health(&self, seconds: f64, failed: bool) {
         self.0.health_duration.observe(HEALTH_BUCKETS, seconds);
         if failed {
@@ -347,6 +354,19 @@ impl Registry {
                 self.0.reload_failures.load(Ordering::Relaxed)
             )
             .unwrap();
+            if let Some(hash) = self.0.reload_hash.lock().unwrap().as_ref() {
+                header(
+                    out,
+                    "reload_version_info",
+                    "A metric with a constant '1' value labeled by hash, and value which type of hash generated.",
+                    "gauge",
+                );
+                writeln!(
+                    out,
+                    "pharos_reload_version_info{{hash=\"sha512\",value=\"{hash}\"}} 1"
+                )
+                .unwrap();
+            }
         }
         if self.0.health_enabled.load(Ordering::Relaxed) {
             let name = "health_request_duration_seconds";

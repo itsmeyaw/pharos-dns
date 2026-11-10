@@ -1,10 +1,10 @@
-//! Reload Directive configuration. Runtime orchestration is not yet implemented.
+//! Reload Directive configuration.
 
 use std::time::Duration;
 
 use pharos_corefile::{Cursor, Error};
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Reload {
     pub interval: Duration,
     pub jitter: Duration,
