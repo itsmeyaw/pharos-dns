@@ -25,8 +25,9 @@ fn query(name: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
+#[cfg(feature = "plugin-prometheus")]
 async fn listeners_share_metrics_and_attribute_whoami_responses() {
-    let blocks = parse("Corefile", ".:1053 dns://.:1054 {\n whoami\n}").unwrap();
+    let blocks = parse("Corefile", ".:1053 dns://.:1054 {\n prometheus\n whoami\n}").unwrap();
     let configs = configure::<Chain>(&blocks, directives()).unwrap();
     let (servers, _) = servers(configs).unwrap();
     for server in servers.values() {

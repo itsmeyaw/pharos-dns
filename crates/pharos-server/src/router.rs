@@ -17,6 +17,7 @@ pub struct ServerBlock<C> {
     filters: Vec<ViewFilter>,
     metrics: Option<BlockMetrics>,
     plugin_metrics: Vec<(&'static str, PluginMetrics)>,
+    plugin_names: Vec<&'static str>,
 }
 
 impl<C> ServerBlock<C> {
@@ -26,10 +27,8 @@ impl<C> ServerBlock<C> {
     pub fn chain(&self) -> Option<&C> {
         self.chain.as_ref()
     }
-    pub(crate) fn metrics(&self) -> &BlockMetrics {
-        self.metrics
-            .as_ref()
-            .expect("Server Block metrics initialized")
+    pub(crate) fn metrics(&self) -> Option<&BlockMetrics> {
+        self.metrics.as_ref()
     }
     pub(crate) fn plugin_metrics(&self, name: &str) -> Option<&PluginMetrics> {
         self.plugin_metrics
@@ -38,10 +37,10 @@ impl<C> ServerBlock<C> {
             .map(|(_, metrics)| metrics)
     }
     pub(crate) fn plugin_name(&self, name: &str) -> Option<&'static str> {
-        self.plugin_metrics
+        self.plugin_names
             .iter()
-            .find(|(candidate, _)| *candidate == name)
-            .map(|(name, _)| *name)
+            .copied()
+            .find(|candidate| *candidate == name)
     }
 }
 
@@ -80,6 +79,7 @@ impl<C> Router<C> {
             filters,
             metrics: None,
             plugin_metrics: Vec::new(),
+            plugin_names: Vec::new(),
         };
         if let Some(context) = self.metric_contexts.get(&key) {
             (context.prepare)(&mut block, &context.registry, &context.server);
@@ -148,6 +148,13 @@ impl<C> Router<C> {
 }
 
 impl<C: Chain> Router<C> {
+    pub(crate) fn metrics_enabled(&self, key: &ListenerKey) -> bool {
+        self.listeners.get(key).is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block.chain.as_ref().is_some_and(Chain::metrics_enabled))
+        })
+    }
     pub(crate) fn prepare_metrics(&mut self, key: &ListenerKey, registry: &Registry, server: &str) {
         self.metric_contexts.insert(
             *key,
@@ -167,13 +174,19 @@ impl<C: Chain> Router<C> {
 
 fn prepare_block<C: Chain>(block: &mut ServerBlock<C>, registry: &Registry, server: &str) {
     // shortcut: View names are unavailable until named View filters are implemented.
-    let metrics = registry.block(server, &block.domain.to_string(), "");
     block.plugin_metrics.clear();
+    block.plugin_names.clear();
     if let Some(chain) = &block.chain {
+        let metrics = chain
+            .metrics_enabled()
+            .then(|| registry.block(server, &block.domain.to_string(), ""));
         chain.visit_enabled(&mut |name| {
-            metrics.plugin_enabled(name);
-            block.plugin_metrics.push((name, metrics.plugin(name)));
+            block.plugin_names.push(name);
+            if let Some(metrics) = &metrics {
+                metrics.plugin_enabled(name);
+                block.plugin_metrics.push((name, metrics.plugin(name)));
+            }
         });
+        block.metrics = metrics;
     }
-    block.metrics = Some(metrics);
 }

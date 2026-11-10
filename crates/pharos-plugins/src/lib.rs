@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 //! Plugins are enabled by `plugin-<directive>` Cargo features (underscores in
-//! Directive names become hyphens). Log and whoami are implemented; other enabled
+//! Directive names become hyphens). Log, prometheus and whoami are implemented; other enabled
 //! Directives reject configuration rather than silently accepting it.
 
 use pharos_corefile::{BlockContext, Cursor, Directive, Error};
@@ -17,6 +17,8 @@ use std::{
 pub mod log;
 #[cfg(feature = "plugin-log")]
 pub mod log_format;
+#[cfg(feature = "plugin-prometheus")]
+pub mod prometheus;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -43,7 +45,24 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     let metrics = pharos_server::metrics::Registry::default();
+    #[cfg(feature = "plugin-prometheus")]
+    let mut exporters = std::collections::BTreeMap::new();
     for block in blocks {
+        #[cfg(feature = "plugin-prometheus")]
+        if let Some(prometheus) = &block.config.prometheus {
+            if exporters
+                .get(&prometheus.address)
+                .is_some_and(|config| config != &prometheus.tls_config)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "conflicting prometheus TLS configuration",
+                ));
+            }
+            exporters
+                .entry(prometheus.address.clone())
+                .or_insert_with(|| prometheus.tls_config.clone());
+        }
         let keys = block.keys().to_vec();
         let addresses = block.listen_addresses.clone();
         let empty = pharos_server::Chain::is_empty(&block.config);
@@ -83,13 +102,57 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
             }
         }
     }
-    Ok((
-        groups
-            .into_iter()
-            .map(|(key, router)| (key, Server::with_registry(router, key, metrics.clone())))
-            .collect(),
-        lifecycle,
-    ))
+    let servers = groups
+        .into_iter()
+        .map(|(key, router)| (key, Server::with_registry(router, key, metrics.clone())))
+        .collect();
+    #[cfg(feature = "plugin-prometheus")]
+    for (address, tls_config) in exporters {
+        let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
+        let startup_listener = Arc::clone(&listener);
+        let registry = metrics.clone();
+        lifecycle.register(pharos_server::Phase::Startup, move || {
+            let address = address.clone();
+            let tls_config = tls_config.clone();
+            let registry = registry.clone();
+            let listener = Arc::clone(&startup_listener);
+            async move {
+                if tls_config.is_some() {
+                    // shortcut: exporter-toolkit TLS and authentication require a compatible configuration implementation.
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "prometheus TLS configuration is not supported",
+                    ));
+                }
+                let address = if address.starts_with(':') {
+                    format!("0.0.0.0{address}")
+                } else {
+                    address
+                };
+                let server = pharos_server::http::Listener::bind(&address, move |path| {
+                    if path != "/metrics" {
+                        return None;
+                    }
+                    let mut body = String::new();
+                    registry.encode(&mut body);
+                    Some(("text/plain; version=0.0.4; charset=utf-8", body))
+                })
+                .await?;
+                *listener.lock().unwrap() = Some(server);
+                Ok(())
+            }
+        });
+        lifecycle.register(pharos_server::Phase::Shutdown, move || {
+            let server = listener.lock().unwrap().take();
+            async move {
+                if let Some(server) = server {
+                    server.shutdown().await?;
+                }
+                Ok(())
+            }
+        });
+    }
+    Ok((servers, lifecycle))
 }
 
 /// Placeholder for enabled but unimplemented Plugins, whose setup always fails.
@@ -119,6 +182,12 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 #[cfg(feature = "plugin-log")]
 fn setup_log(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.log = Some(log::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-prometheus")]
+fn setup_prometheus(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.prometheus = Some(prometheus::parse(cursor)?);
     Ok(())
 }
 

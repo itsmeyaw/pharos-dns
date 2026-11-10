@@ -24,6 +24,7 @@ fn main() {
         let ty = match *name {
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
+            "prometheus" => "prometheus::Prometheus",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -33,11 +34,13 @@ fn main() {
         let setup = match *name {
             "whoami" => "setup_whoami",
             "log" => "setup_log",
+            "prometheus" => "setup_prometheus",
             _ => "setup_unimplemented",
         };
+        let once = *name == "prometheus";
         writeln!(
             code,
-            "pharos_corefile::Directive {{ name: {name:?}, once: false, setup: {setup} }},"
+            "pharos_corefile::Directive {{ name: {name:?}, once: {once}, setup: {setup} }},"
         )
         .unwrap();
     }
@@ -70,7 +73,13 @@ fn main() {
     for name in &enabled {
         writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
     }
-    code.push_str("}\n}\n");
+    code.push_str("}\n");
+    if enabled.contains(&"prometheus") {
+        code.push_str("fn metrics_enabled(&self) -> bool { self.prometheus.is_some() }\n");
+    } else {
+        code.push_str("fn metrics_enabled(&self) -> bool { false }\n");
+    }
+    code.push_str("}\n");
     for i in 0..enabled.len() {
         let next = i + 1;
         writeln!(code, "struct Next{i}<'a>(&'a Chain);\nimpl pharos_server::Next for Next{i}<'_> {{ async fn run(self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.0.serve_{next}(cx).await }} }}").unwrap();

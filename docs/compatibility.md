@@ -65,9 +65,20 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `log` and `whoami` are implemented. Other built-in Directives are
+Only `log`, `prometheus` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
+
+The `prometheus` Directive accepts `runtime_metrics`, but has no effect: Go
+runtime metrics do not exist in Pharos. The `tls` option is parsed, but any
+TLS configuration fails startup rather than silently serving unprotected HTTP;
+Prometheus exporter-toolkit TLS and authentication are not implemented.
+Blocks sharing a metrics address must use the same TLS configuration. Metrics
+HTTP connections are capped at five seconds total, rather than CoreDNS's
+separate per-request read, write and idle deadlines. The wildcard metrics
+address `:port` listens on IPv4 rather than CoreDNS's dual-stack Listener.
+Bind and startup errors are reported, whereas CoreDNS's shared Listener setup
+currently discards errors from its `uniq.ForEach` callback.
 
 Whoami reports an error if adding the protocol label would make its SRV owner
 name exceed the DNS name length limit. CoreDNS ignores the resulting write

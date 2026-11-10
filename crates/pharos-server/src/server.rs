@@ -13,6 +13,9 @@ pub trait Chain: Send + Sync + 'static {
     fn serve(&self, context: &mut Context<'_>) -> impl Future<Output = Outcome> + Send;
     fn is_empty(&self) -> bool;
     fn visit_enabled(&self, _visit: &mut dyn FnMut(&'static str)) {}
+    fn metrics_enabled(&self) -> bool {
+        true
+    }
 }
 
 impl<C: Chain> Chain for Arc<C> {
@@ -25,6 +28,9 @@ impl<C: Chain> Chain for Arc<C> {
     fn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {
         self.as_ref().visit_enabled(visit);
     }
+    fn metrics_enabled(&self) -> bool {
+        self.as_ref().metrics_enabled()
+    }
 }
 
 /// One Listener's routing, admission and Plugin Chain execution.
@@ -35,7 +41,7 @@ pub struct Server<C> {
     pub debug: bool,
     pub logger: fn(Error),
     metrics: Registry,
-    dropped: BlockMetrics,
+    dropped: Option<BlockMetrics>,
 }
 
 impl<C: Chain> Server<C> {
@@ -60,7 +66,9 @@ impl<C: Chain> Server<C> {
         };
         let server = format!("{scheme}://{address}");
         router.prepare_metrics(&key, &metrics, &server);
-        let dropped = metrics.block(&server, "dropped", "");
+        let dropped = router
+            .metrics_enabled(&key)
+            .then(|| metrics.block(&server, "dropped", ""));
         Self {
             router,
             key,
@@ -100,8 +108,10 @@ impl<C: Chain> Handler for Server<C> {
                 if let Ok(query) = pharos_proto::Message::parse(wire) {
                     let rcode = pharos_proto::Message::parse(response)
                         .map_or(0, |message| message.rcode().0);
-                    if rcode != Rcode::BADVERS.0 {
-                        self.dropped.record(
+                    if rcode != Rcode::BADVERS.0
+                        && let Some(dropped) = &self.dropped
+                    {
+                        dropped.record(
                             query.questions().next().map_or(0, |q| q.qtype.0),
                             protocol == Protocol::Tcp,
                             peer_is_ipv6(peer),
@@ -206,20 +216,22 @@ impl<C: Chain> Handler for Server<C> {
             );
         } else {
             let metrics = if outcome == Outcome::Error(Error::PluginPanic) {
-                &self.dropped
+                self.dropped.as_ref()
             } else {
-                block.map_or(&self.dropped, |block| block.metrics())
+                block.map_or(self.dropped.as_ref(), |block| block.metrics())
             };
-            metrics.record(
-                qtype,
-                protocol == Protocol::Tcp,
-                peer_is_ipv6(peer),
-                dnssec,
-                wire.len(),
-                response_len,
-                code,
-                duration,
-            );
+            if let Some(metrics) = metrics {
+                metrics.record(
+                    qtype,
+                    protocol == Protocol::Tcp,
+                    peer_is_ipv6(peer),
+                    dnssec,
+                    wire.len(),
+                    response_len,
+                    code,
+                    duration,
+                );
+            }
         }
         action
     }

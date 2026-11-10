@@ -9,6 +9,7 @@
 - `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
 - The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
 - The log Plugin, formatter and tests follow CoreDNS v1.15.0's `plugin/log`, `plugin/pkg/replacer` and `plugin/pkg/response`.
+- The prometheus Plugin and tests follow CoreDNS v1.15.0's `plugin/metrics`.
 - EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
 - Server routing, startup formatting, and tests in `crates/pharos-server` follow CoreDNS v1.15.0's `core/dnsserver/server.go`, `server_test.go`, and `onstartup.go`.
 - Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics`.
