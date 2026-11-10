@@ -88,3 +88,18 @@ fn malformed_dnssec_signature_is_not_classified_as_cacheable() {
     let wire = response(0x8000, Type::A, &records, true);
     assert_eq!(typify(&wire, 100), ResponseType::OtherError);
 }
+
+#[test]
+fn soa_takes_precedence_over_ns_and_dnssec_serial_arithmetic_matches_miekg() {
+    let authority = [
+        (Section::Authority, Type::NS, &b"\0"[..]),
+        (Section::Authority, Type::SOA, &b""[..]),
+    ];
+    let wire = response(0x8000, Type::A, &authority, false);
+    assert_eq!(typify(&wire, 100), ResponseType::NoData);
+
+    let sig = b"\0\x02\x08\0\0\0\0\x3c\0\0\0\x96\0\0\0\x32\0\x01\0";
+    let records = [(Section::Answer, Type::RRSIG, &sig[..])];
+    let wire = response(0x8000, Type::A, &records, true);
+    assert_eq!(typify(&wire, (1_i64 << 32) + 100), ResponseType::OtherError);
+}
