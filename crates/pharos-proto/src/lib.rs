@@ -6,3 +6,6 @@ pub use name::{Name, NameError, NameRef, Origin};
 
 mod message;
 pub use message::{Message, MessageError, MessageMut, Question, Questions, Record, Records};
+
+mod codes;
+pub use codes::{Class, Opcode, Rcode, Type};

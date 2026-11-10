@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{NameError, NameRef};
+use crate::{Class, NameError, NameRef, Opcode, Rcode, Type};
 
 const HEADER_LEN: usize = 12;
 
@@ -53,16 +53,16 @@ pub struct Message<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct Question<'a> {
     pub name: NameRef<'a>,
-    pub qtype: u16,
-    pub qclass: u16,
+    pub qtype: Type,
+    pub qclass: Class,
 }
 
 /// A resource record in a Message.
 #[derive(Clone, Copy, Debug)]
 pub struct Record<'a> {
     pub name: NameRef<'a>,
-    pub rtype: u16,
-    pub class: u16,
+    pub rtype: Type,
+    pub class: Class,
     pub ttl: u32,
     pub rdata: &'a [u8],
     pub rdata_offset: usize,
@@ -74,16 +74,16 @@ fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), Message
     let offset = offset + name.wire_len();
     let result = Question {
         name,
-        qtype: read_u16(wire, offset)?,
-        qclass: read_u16(wire, offset + 2)?,
+        qtype: Type(read_u16(wire, offset)?),
+        qclass: Class(read_u16(wire, offset + 2)?),
     };
     Ok((result, offset + 4))
 }
 fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageError> {
     let name = NameRef::parse(wire, offset)?;
     let offset = offset + name.wire_len();
-    let rtype = read_u16(wire, offset)?;
-    let class = read_u16(wire, offset + 2)?;
+    let rtype = Type(read_u16(wire, offset)?);
+    let class = Class(read_u16(wire, offset + 2)?);
     let ttl = read_u32(wire, offset + 4)?;
     let len = usize::from(read_u16(wire, offset + 8)?);
     let rdata_offset = offset + 10;
@@ -147,8 +147,8 @@ impl<'a> Message<'a> {
         self.flags() & 0x8000 != 0
     }
     #[must_use]
-    pub fn opcode(&self) -> u8 {
-        ((self.flags() >> 11) & 15) as u8
+    pub fn opcode(&self) -> Opcode {
+        Opcode(((self.flags() >> 11) & 15) as u8)
     }
     #[must_use]
     pub fn aa(&self) -> bool {
@@ -179,8 +179,8 @@ impl<'a> Message<'a> {
         self.flags() & 0x0010 != 0
     }
     #[must_use]
-    pub fn rcode(&self) -> u8 {
-        (self.flags() & 15) as u8
+    pub fn rcode(&self) -> Rcode {
+        Rcode(self.flags() & 15)
     }
     #[must_use]
     pub const fn question_count(&self) -> u16 {
