@@ -32,10 +32,20 @@ fn new_line(previous: &Token, current: &Token) -> bool {
 
 /// Parse a Corefile without validating Plugin-specific Directive names or arguments.
 pub fn parse(file: &str, input: &str) -> Result<Vec<ServerBlock>, Error> {
+    parse_with_env(file, input, |name| std::env::var(name).ok())
+}
+
+/// Parse using an injectable environment lookup.
+pub fn parse_with_env(
+    file: &str,
+    input: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<ServerBlock>, Error> {
     Parser {
         tokens: lex(file, input),
         pos: 0,
         file,
+        lookup: &lookup,
     }
     .parse_all()
 }
@@ -44,9 +54,31 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     file: &'a str,
+    lookup: &'a dyn Fn(&str) -> Option<String>,
 }
 
 impl Parser<'_> {
+    fn substitute(&self, text: &str) -> String {
+        let mut result = text.to_owned();
+        for (start, end) in [("{%", "%}"), ("{$", "}")] {
+            let mut remaining = 0;
+            while let Some(relative) = result[remaining..].find(start) {
+                let index = remaining + relative;
+                let Some(end_offset) = result[index..].find(end) else {
+                    break;
+                };
+                let end_index = index + end_offset;
+                if end_index <= index + start.len() {
+                    break;
+                }
+                let name = &result[index + start.len()..end_index];
+                let value = (self.lookup)(name).unwrap_or_default();
+                result.replace_range(index..end_index + end.len(), &value);
+                remaining = index + value.len();
+            }
+        }
+        result
+    }
     fn error(&self, message: &str) -> Error {
         let token = self.tokens.get(self.pos).or_else(|| self.tokens.last());
         Error {
@@ -71,18 +103,18 @@ impl Parser<'_> {
         let mut block = ServerBlock::default();
         let mut expecting = false;
         while self.pos < self.tokens.len() {
-            let token = &self.tokens[self.pos];
-            if token.text == "{" {
+            let text = self.substitute(&self.tokens[self.pos].text);
+            if text == "{" {
                 if expecting {
                     return Err(self.error("expected another Server Block Key"));
                 }
                 break;
             }
-            if !token.text.is_empty() {
-                expecting = token.text.ends_with(',');
+            if !text.is_empty() {
+                expecting = text.ends_with(',');
                 block
                     .keys
-                    .push(token.text.strip_suffix(',').unwrap_or(&token.text).into());
+                    .push(text.strip_suffix(',').unwrap_or(&text).into());
             }
             self.pos += 1;
             if self.pos == self.tokens.len() {
@@ -114,7 +146,7 @@ impl Parser<'_> {
     }
 
     fn directive(&mut self, block: &mut ServerBlock) -> Result<(), Error> {
-        let name = self.tokens[self.pos].text.clone();
+        let name = self.substitute(&self.tokens[self.pos].text);
         let mut items = vec![self.tokens[self.pos].clone()];
         self.pos += 1;
         let mut nesting = 0usize;
@@ -130,7 +162,9 @@ impl Parser<'_> {
                 }
                 nesting -= 1;
             }
-            items.push(token.clone());
+            let mut token = token.clone();
+            token.text = self.substitute(&token.text);
+            items.push(token);
             self.pos += 1;
         }
         if nesting != 0 {
