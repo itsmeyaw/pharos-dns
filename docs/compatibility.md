@@ -334,7 +334,8 @@ TSIG-signed Queries and Responses bypass caching so that ID, flags and TTL
 rewrites cannot invalidate their signatures. Wildcard source Metadata is not
 saved with cache entries.
 
-Background refreshes use a fresh Metadata map. A `verify` refresh on a routed
+Background refreshes use a fresh Metadata map and retain Listener state for
+Self Lookup. A `verify` refresh on a routed
 Server Block runs as a background task, even without a verify timeout, and
 concurrent verifies are coalesced. Direct use of an unbound Plugin cannot
 launch a background refresh; its verify mode does not enforce the configured
@@ -346,3 +347,14 @@ ordinary warmed hits do not allocate.
 
 Cache metric series are initialized at setup, including zero-valued series;
 CoreDNS initializes individual labelled series on first use.
+
+## Self Lookup
+
+Self Lookup is limited to 10 nested Self Lookups; CoreDNS v1.15.0 does not enforce
+a depth limit. This prevents unbounded recursion, for example from a cycle of
+ExternalName Services. Exceeding the limit returns a Plugin error, normally
+answered with SERVFAIL.
+
+Copying a Query for Self Lookup re-encodes its records. It fails if RDATA is
+malformed, contains an unsupported name-bearing type, or the resulting Message
+exceeds 65,535 bytes; CoreDNS copies its decoded Message instead.

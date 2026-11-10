@@ -112,14 +112,14 @@ pub(crate) fn spawn<H: Handler>(
                         continue;
                     }
                     response.clear();
-                    if handler
-                        .handle(
-                            &buffers[index][..length],
-                            peer,
-                            Protocol::Udp,
-                            &mut response,
-                        )
-                        .await
+                    if H::handle_shared(
+                        &handler,
+                        &buffers[index][..length],
+                        peer,
+                        Protocol::Udp,
+                        &mut response,
+                    )
+                    .await
                         == Action::Respond
                         && let Err(error) = socket
                             .async_io(Interest::WRITABLE, || send(&socket, &response, peer))

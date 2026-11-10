@@ -37,6 +37,7 @@ fn main() {
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
     }
+    code.push_str("#[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] pub self_lookup_test: Option<self_lookup_test::TestPlugin>,\n");
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
@@ -86,10 +87,9 @@ fn main() {
         }
         code.push_str("}\n");
     }
-    code.push_str("// shortcut: Self Lookup (#35) must Box::pin re-entry and cap depth at 10.\n");
     code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
     if let Some(index) = enabled.iter().position(|name| *name == "cache") {
-        writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.serve_{}(cx).await }}", index + 1).unwrap();
+        writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ #[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] if let Some(plugin) = &self.self_lookup_test {{ return plugin.serve(cx).await; }} self.serve_{}(cx).await }}", index + 1).unwrap();
     }
     for (i, name) in enabled.iter().enumerate() {
         let next = i + 1;
@@ -133,7 +133,12 @@ fn main() {
             continue;
         }
         let next = i + 1;
-        writeln!(code, "struct Next{i}<'a>(&'a Chain);\nimpl pharos_server::Next for Next{i}<'_> {{ async fn run(self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.0.serve_{next}(cx).await }} }}").unwrap();
+        let test_hook = if *name == "cache" {
+            "#[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] if let Some(plugin) = &self.0.self_lookup_test { return plugin.serve(cx).await; }"
+        } else {
+            ""
+        };
+        writeln!(code, "struct Next{i}<'a>(&'a Chain);\nimpl pharos_server::Next for Next{i}<'_> {{ async fn run(self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ {test_hook} self.0.serve_{next}(cx).await }} }}").unwrap();
     }
     fs::write(
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("plugins.rs"),

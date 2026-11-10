@@ -28,6 +28,9 @@ pub mod health;
 pub mod hosts;
 pub mod proxy;
 
+#[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]
+mod self_lookup_test;
+
 #[cfg(feature = "plugin-forward")]
 pub mod forward;
 
