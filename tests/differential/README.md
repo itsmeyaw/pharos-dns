@@ -25,6 +25,6 @@ Each scenario is a directory containing:
   directories for both processes, preserving relative paths.
 
 IDs and RR order within each section are ignored; all other fields are compared.
-The default scenario records the documented built-in `log` difference, which
-does not change DNS Responses. The current whoami Responses cannot exceed the
-512-octet UDP minimum for these short Queries, so truncation is not covered.
+The `whoami-log` scenario compares Responses, not log output. The current whoami
+Responses cannot exceed the 512-octet UDP minimum for these short Queries, so
+truncation is not covered.
