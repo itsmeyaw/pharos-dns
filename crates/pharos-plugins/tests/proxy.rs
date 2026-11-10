@@ -362,3 +362,27 @@ async fn ignores_short_udp_responses_before_valid_response() {
     );
     upstream.await.unwrap();
 }
+
+#[tokio::test]
+async fn short_tcp_response_is_a_transport_error() {
+    use pharos_plugins::proxy::Error;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(listener.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let len = usize::from(stream.read_u16().await.unwrap());
+        let mut wire = [0; 512];
+        stream.read_exact(&mut wire[..len]).await.unwrap();
+        stream.write_u16(2).await.unwrap();
+        stream.write_all(&wire[..2]).await.unwrap();
+    });
+    let mut response = [0; 512];
+    assert!(
+        matches!(proxy.exchange(QUERY, &mut response, Transport::Tcp, Options::default()).await, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData)
+    );
+    upstream.await.unwrap();
+}
