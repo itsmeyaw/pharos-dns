@@ -411,3 +411,69 @@ async fn malformed_upstream_response_starts_health_check() {
     );
     upstream.await.unwrap();
 }
+
+#[tokio::test]
+async fn udp_record_overflow_returns_truncated_response_and_reuses_socket() {
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let mut first = None;
+        for index in 0..2 {
+            let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+            if index == 0 {
+                first = Some(peer);
+                wire[2] |= 0x80;
+                wire[7] = 1;
+                wire[len] = 0;
+                wire[len + 1] = 0;
+                server.send_to(&wire[..len + 2], peer).await.unwrap();
+            } else {
+                assert_eq!(Some(peer), first);
+                wire[2] |= 0x80;
+                server.send_to(&wire[..len], peer).await.unwrap();
+            }
+        }
+    });
+    let mut response = [0; 512];
+    let result = proxy
+        .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap();
+    let message = pharos_proto::Message::parse(&response[..result.len]).unwrap();
+    assert!(message.qr() && message.tc());
+    assert_eq!(message.id(), 0x1234);
+    assert_eq!(message.question_count(), 1);
+    assert_eq!(message.answer_count(), 0);
+    assert_eq!(message.authority_count(), 0);
+    assert_eq!(message.additional_count(), 0);
+    proxy
+        .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_udp_wrong_id_is_ignored_before_valid_response() {
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+        let mut bad = [0; 13];
+        bad[..12].copy_from_slice(&wire[..12]);
+        bad[0] ^= 1;
+        bad[2] |= 0x80;
+        bad[12] = 1;
+        server.send_to(&bad, peer).await.unwrap();
+        wire[2] |= 0x80;
+        server.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let mut response = [0; 512];
+    proxy
+        .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap();
+    task.await.unwrap();
+}

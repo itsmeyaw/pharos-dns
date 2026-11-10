@@ -5,7 +5,7 @@
 pub mod health;
 pub use health::{Health, HealthConfig};
 
-use pharos_proto::{Message, Rcode, Type};
+use pharos_proto::{Message, MessageError, NameError, Rcode, Type};
 use pharos_server::metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry};
 use std::{
     collections::VecDeque,
@@ -28,6 +28,13 @@ static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 thread_local! { static SHARD: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS; }
 const EXPIRE: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn is_overflow(error: &MessageError) -> bool {
+    matches!(
+        error,
+        MessageError::Truncated | MessageError::Name(NameError::Truncated)
+    )
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transport {
@@ -310,13 +317,39 @@ impl Proxy {
         })
         .await
         .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))?;
-        let length = received.map_err(|err| {
+        let mut length = received.map_err(|err| {
             if reused && err.kind() == io::ErrorKind::UnexpectedEof {
                 Error::CachedClosed
             } else {
                 Error::Io(err)
             }
         })?;
+        if let Err(error) = Message::parse(&response[..length]) {
+            if transport != Transport::Udp || !is_overflow(&error) {
+                return Err(Error::Io(io::ErrorKind::InvalidData.into()));
+            }
+            let counts: [u8; 6] = response[6..12].try_into().unwrap();
+            response[6..12].fill(0);
+            let question_matches = Message::parse(&response[..length]).is_ok_and(|answer| {
+                answer.qr()
+                    && request.question_count() == answer.question_count()
+                    && request.questions().zip(answer.questions()).all(|(a, b)| {
+                        a.name == b.name && a.qtype == b.qtype && a.qclass == b.qclass
+                    })
+            });
+            response[6..12].copy_from_slice(&counts);
+            if !question_matches {
+                return Err(Error::Io(io::ErrorKind::InvalidData.into()));
+            }
+            length = 12
+                + request
+                    .questions()
+                    .map(|q| q.name.wire_len() + 4)
+                    .sum::<usize>();
+            response[..length].copy_from_slice(&query[..length]);
+            response[2] |= 0x82;
+            response[6..12].fill(0);
+        }
         let answer = Message::parse(&response[..length])
             .map_err(|_| Error::Io(io::ErrorKind::InvalidData.into()))?;
         if let Some(metrics) = &self.metrics {
@@ -347,5 +380,23 @@ impl Proxy {
             local_addr,
             transport,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_truncated_message_and_name_errors_are_overflows() {
+        for (error, expected) in [
+            (MessageError::Truncated, true),
+            (MessageError::Name(NameError::Truncated), true),
+            (MessageError::Name(NameError::InvalidLabelType), false),
+            (MessageError::Name(NameError::PointerNotBackwards), false),
+            (MessageError::InvalidOpt, false),
+        ] {
+            assert_eq!(is_overflow(&error), expected, "{error:?}");
+        }
     }
 }

@@ -191,7 +191,6 @@ Idle sockets are checked for expiration when their worker shard is next used;
 CoreDNS also cleans idle sockets periodically, so inactive Pharos shards may
 retain expired sockets until reuse or Proxy destruction. Pharos does not yet
 adapt its TCP dial timeout (fixed at 30 seconds), enable Linux UDP error-queue
-socket options, or synthesize a truncated Response for an oversized malformed
-UDP Response. Upstream TSIG Messages retain their original ID rather than
+socket options. Upstream TSIG Messages retain their original ID rather than
 rewriting the signed Message. Proxy metric RCODE series are initialized on
 first observation, which allocates once per distinct RCODE.
