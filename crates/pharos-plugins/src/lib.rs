@@ -4,6 +4,10 @@
 //! Directives reject configuration rather than silently accepting it.
 
 use pharos_corefile::{BlockContext, Cursor, Directive, Error};
+use pharos_server::{Context, Outcome};
+
+#[cfg(feature = "plugin-whoami")]
+mod whoami;
 
 include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
 
@@ -17,6 +21,24 @@ pub fn directives() -> &'static [Directive<'static, Vec<Plugin>>] {
 #[must_use]
 pub const fn plugins_listing() -> &'static str {
     PLUGINS_LISTING
+}
+
+/// Remaining Plugins in Plugin Order. Awaiting Next does not allocate.
+#[derive(Clone, Copy)]
+pub struct Next<'a>(&'a [Plugin]);
+
+impl<'a> Next<'a> {
+    #[must_use]
+    pub const fn new(plugins: &'a [Plugin]) -> Self {
+        Self(plugins)
+    }
+
+    pub async fn run(self, context: &mut Context<'_>) -> Outcome {
+        match self.0.split_first() {
+            Some((plugin, remaining)) => plugin.call(context, Self(remaining)).await,
+            None => Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL),
+        }
+    }
 }
 
 #[cfg(feature = "plugin-whoami")]

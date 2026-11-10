@@ -6,6 +6,7 @@
 - License: Apache-2.0
 - Copyright 2016-2020 The CoreDNS authors and contributors
 - `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
+- The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
 
 ## coredns/caddy
 

@@ -24,7 +24,7 @@ fn main() {
             })
             .collect()
     };
-    let mut code = String::from("#[derive(Debug)]\npub enum Plugin {\n");
+    let mut code = String::from("#[derive(Clone, Copy, Debug)]\npub enum Plugin {\n");
     for name in &enabled {
         code.push_str(&format!("{},\n", variant(name)));
     }
@@ -44,8 +44,22 @@ fn main() {
     code.push_str("];\n");
     let mut sorted = enabled.clone();
     sorted.sort_unstable();
-    let listing = sorted.join("\n") + "\n\n";
+    let listing = if sorted.is_empty() {
+        "\n".to_owned()
+    } else {
+        sorted.join("\n") + "\n\n"
+    };
     code.push_str(&format!("pub const PLUGINS_LISTING: &str = {listing:?};\n"));
+    code.push_str("impl Plugin { async fn call(&self, _context: &mut pharos_server::Context<'_>, _next: Next<'_>) -> pharos_server::Outcome { match *self {\n");
+    for name in &enabled {
+        let body = if *name == "whoami" {
+            "whoami::serve(_context)"
+        } else {
+            "pharos_server::Outcome::Error(pharos_server::Error::NotImplemented)"
+        };
+        code.push_str(&format!("Self::{} => {body},\n", variant(name)));
+    }
+    code.push_str("} } }\n");
     fs::write(
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("plugins.rs"),
         code,
