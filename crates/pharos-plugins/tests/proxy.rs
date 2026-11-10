@@ -199,3 +199,25 @@ async fn records_exchange_metrics_in_registry() {
     assert!(metrics.contains("pharos_proxy_conn_cache_misses_total"));
     assert!(metrics.contains("pharos_proxy_request_duration_seconds_count"));
 }
+
+#[tokio::test]
+async fn ignores_out_of_order_udp_response_ids() {
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+        wire[2] |= 0x80;
+        wire[0] ^= 1;
+        server.send_to(&wire[..len], peer).await.unwrap();
+        wire[0] ^= 1;
+        server.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let mut response = [0; 512];
+    proxy
+        .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap();
+    assert_eq!(&response[..2], &QUERY[..2]);
+    task.await.unwrap();
+}
