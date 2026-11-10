@@ -68,6 +68,14 @@ fn directive_registry_can_be_borrowed_from_the_caller() {
 }
 
 #[test]
+fn empty_public_directive_tokens_do_not_panic() {
+    let mut blocks = parse("Corefile", ". {\n}").unwrap();
+    blocks[0].directives.insert("unknown".into(), Vec::new());
+    let registry: &[Directive<'_, Vec<String>>] = &[];
+    assert!(configure(&blocks, registry).is_err());
+}
+
+#[test]
 fn unknown_and_once_only_directives_report_locations() {
     let registry = [Directive {
         name: "first",

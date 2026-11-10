@@ -42,6 +42,13 @@ pub fn configure<C: Default>(
     let mut configured = Vec::with_capacity(blocks.len());
     for block in blocks {
         for (name, tokens) in &block.directives {
+            if tokens.is_empty() {
+                return Err(Error {
+                    file: String::new(),
+                    line: 0,
+                    message: format!("Directive '{name}' has no tokens"),
+                });
+            }
             if !registry.iter().any(|directive| directive.name == name) {
                 let token = &tokens[0];
                 return Err(Error {
