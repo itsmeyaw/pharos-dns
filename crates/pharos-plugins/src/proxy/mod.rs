@@ -182,7 +182,7 @@ pub struct Proxy {
     expire: Duration,
     max_age: Duration,
     max_idle_conns: usize,
-    idle: AtomicUsize,
+    idle: [AtomicUsize; 2],
     stopped: AtomicBool,
     started: Instant,
     next_sweep: AtomicU64,
@@ -208,7 +208,7 @@ impl Proxy {
             expire: EXPIRE,
             max_age: Duration::ZERO,
             max_idle_conns: 0,
-            idle: AtomicUsize::new(0),
+            idle: [AtomicUsize::new(0), AtomicUsize::new(0)],
             stopped: AtomicBool::new(false),
             started: Instant::now(),
             next_sweep: AtomicU64::new(EXPIRE.as_nanos() as u64),
@@ -252,14 +252,19 @@ impl Proxy {
             return;
         }
         // shortcut: without traffic expired sockets remain until stop; add a timer if idle cleanup is required.
-        for shard in self.shards.iter().flatten() {
+        for (protocol, shard) in self
+            .shards
+            .iter()
+            .enumerate()
+            .flat_map(|(p, s)| s.iter().map(move |s| (p, s)))
+        {
             let mut queue = shard.lock().unwrap();
             let before = queue.len();
             queue.retain(|conn| {
                 conn.used.elapsed() <= self.expire
                     && (self.max_age.is_zero() || conn.created.elapsed() <= self.max_age)
             });
-            self.idle.fetch_sub(before - queue.len(), Ordering::Relaxed);
+            self.idle[protocol].fetch_sub(before - queue.len(), Ordering::Relaxed);
         }
     }
 
@@ -267,14 +272,19 @@ impl Proxy {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.health.shutdown();
-        for shard in self.shards.iter().flatten() {
+        for (protocol, shard) in self
+            .shards
+            .iter()
+            .enumerate()
+            .flat_map(|(p, s)| s.iter().map(move |s| (p, s)))
+        {
             let mut queue = shard.lock().unwrap();
-            self.idle.fetch_sub(queue.len(), Ordering::Relaxed);
+            self.idle[protocol].fetch_sub(queue.len(), Ordering::Relaxed);
             queue.clear();
         }
     }
 
-    /// Limit idle connections across this Upstream; zero means unlimited.
+    /// Limit idle connections per Transport for this Upstream; zero means unlimited.
     pub fn set_max_idle_conns(&mut self, max: usize) {
         self.max_idle_conns = max;
     }
@@ -340,7 +350,9 @@ impl Proxy {
         for shard in self.shards.iter_mut().flatten() {
             shard.get_mut().unwrap().clear();
         }
-        self.idle.store(0, Ordering::Relaxed);
+        for idle in &self.idle {
+            idle.store(0, Ordering::Relaxed);
+        }
         self.source_address = source;
         let mut config = self.health.config();
         config.source_address = source;
@@ -430,7 +442,7 @@ impl Proxy {
             loop {
                 match queue.pop_front() {
                     Some(cached) => {
-                        self.idle.fetch_sub(1, Ordering::Relaxed);
+                        self.idle[protocol].fetch_sub(1, Ordering::Relaxed);
                         if cached.used.elapsed() <= self.expire
                             && (self.max_age.is_zero() || cached.created.elapsed() <= self.max_age)
                         {
@@ -546,8 +558,7 @@ impl Proxy {
         {
             let mut queue = self.shards[protocol][shard].lock().unwrap();
             if !self.stopped.load(Ordering::Acquire)
-                && self
-                    .idle
+                && self.idle[protocol]
                     .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                         (self.max_idle_conns == 0 || count < self.max_idle_conns).then(|| count + 1)
                     })

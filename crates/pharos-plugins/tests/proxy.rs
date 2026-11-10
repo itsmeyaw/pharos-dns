@@ -485,7 +485,8 @@ async fn malformed_udp_wrong_id_is_ignored_before_valid_response() {
 }
 
 #[tokio::test]
-async fn idle_cap_is_shared_across_udp_and_tcp() {
+async fn idle_cap_applies_per_transport() {
+    use std::time::Duration;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -499,27 +500,27 @@ async fn idle_cap_is_shared_across_udp_and_tcp() {
         let (len, peer) = udp.recv_from(&mut wire).await.unwrap();
         wire[2] |= 0x80;
         udp.send_to(&wire[..len], peer).await.unwrap();
-        let mut peers = Vec::new();
+        // Accept once: an idle UDP socket must not stop the TCP connection from being cached.
+        let (mut stream, _) = tcp.accept().await.unwrap();
         for _ in 0..2 {
-            let (mut stream, peer) = tcp.accept().await.unwrap();
-            peers.push(peer);
             let len = usize::from(stream.read_u16().await.unwrap());
             stream.read_exact(&mut wire[..len]).await.unwrap();
             wire[2] |= 0x80;
             stream.write_u16(len as u16).await.unwrap();
             stream.write_all(&wire[..len]).await.unwrap();
         }
-        peers
     });
     let mut response = [0; 512];
     for protocol in [Transport::Udp, Transport::Tcp, Transport::Tcp] {
-        proxy
-            .exchange(QUERY, &mut response, protocol, Options::default())
-            .await
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            proxy.exchange(QUERY, &mut response, protocol, Options::default()),
+        )
+        .await
+        .expect("TCP connection reused")
+        .unwrap();
     }
-    let peers = upstream.await.unwrap();
-    assert_ne!(peers[0], peers[1]);
+    upstream.await.unwrap();
 }
 
 #[tokio::test]
