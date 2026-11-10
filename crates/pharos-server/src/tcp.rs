@@ -119,15 +119,14 @@ async fn serve<H: Handler>(
         let failed = failed.clone();
         queries.spawn(async move {
             let _permit = permit;
-            let result = tokio::task::spawn_blocking(move || {
-                let mut response = Vec::new();
-                let action = handler.handle(&query, peer, Protocol::Tcp, &mut response);
-                (action, response)
-            })
-            .await;
-            let Ok((Action::Respond, response)) = result else {
+            let mut response = Vec::new();
+            if handler
+                .handle(&query, peer, Protocol::Tcp, &mut response)
+                .await
+                != Action::Respond
+            {
                 return;
-            };
+            }
             let Ok(length) = u16::try_from(response.len()) else {
                 return;
             };

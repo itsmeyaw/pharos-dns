@@ -52,7 +52,7 @@ pub(crate) fn spawn<H: Handler>(
                         }
                     };
                     response.clear();
-                    if handler.handle(&query[..length], peer, Protocol::Udp, &mut response) == Action::Respond
+                    if handler.handle(&query[..length], peer, Protocol::Udp, &mut response).await == Action::Respond
                         && let Err(error) = socket.send_to(&response, peer).await {
                         eprintln!("UDP Response to {peer} failed: {error}");
                     }

@@ -1,16 +1,12 @@
 #![forbid(unsafe_code)]
 
-use std::{
-    net::SocketAddr,
-    sync::{Mutex, mpsc},
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 
 use pharos_server::{Action, Handler, Listener, Protocol};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::mpsc as async_mpsc,
+    sync::{Mutex, mpsc as async_mpsc},
     time::timeout,
 };
 
@@ -19,7 +15,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 struct Echo;
 
 impl Handler for Echo {
-    fn handle(
+    async fn handle(
         &self,
         query: &[u8],
         _peer: SocketAddr,
@@ -34,13 +30,13 @@ impl Handler for Echo {
 
 struct Slow {
     started: async_mpsc::UnboundedSender<()>,
-    release: Mutex<mpsc::Receiver<()>>,
+    release: Mutex<async_mpsc::UnboundedReceiver<()>>,
 }
 
 struct Conditional;
 
 impl Handler for Conditional {
-    fn handle(
+    async fn handle(
         &self,
         query: &[u8],
         _peer: SocketAddr,
@@ -57,7 +53,7 @@ impl Handler for Conditional {
 }
 
 impl Handler for Slow {
-    fn handle(
+    async fn handle(
         &self,
         query: &[u8],
         _peer: SocketAddr,
@@ -66,7 +62,7 @@ impl Handler for Slow {
     ) -> Action {
         if query == b"slow" {
             self.started.send(()).unwrap();
-            self.release.lock().unwrap().recv().unwrap();
+            self.release.lock().await.recv().await.unwrap();
         }
         response.extend_from_slice(query);
         Action::Respond
@@ -100,9 +96,13 @@ async fn receive(stream: &mut TcpStream) -> Vec<u8> {
     .expect("response timed out")
 }
 
-fn slow_handler() -> (Slow, async_mpsc::UnboundedReceiver<()>, mpsc::Sender<()>) {
+fn slow_handler() -> (
+    Slow,
+    async_mpsc::UnboundedReceiver<()>,
+    async_mpsc::UnboundedSender<()>,
+) {
     let (started, started_rx) = async_mpsc::unbounded_channel();
-    let (release, release_rx) = mpsc::channel();
+    let (release, release_rx) = async_mpsc::unbounded_channel();
     (
         Slow {
             started,

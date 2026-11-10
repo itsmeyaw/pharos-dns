@@ -148,11 +148,8 @@ pub enum Action {
     Drop,
 }
 
-/// Synchronous, statically dispatched Query handling. Clear and reuse the
-/// supplied Response buffer; return `Drop` to suppress a Response.
-///
-/// UDP handlers must not block the runtime worker. TCP handlers run on Tokio's
-/// blocking pool and may execute concurrently for a single connection.
+/// Async, statically dispatched Query handling. Clear and reuse the supplied
+/// Response buffer; return `Drop` to suppress a Response.
 pub trait Handler: Send + Sync + 'static {
     fn handle(
         &self,
@@ -160,7 +157,7 @@ pub trait Handler: Send + Sync + 'static {
         peer: SocketAddr,
         protocol: Protocol,
         response: &mut Vec<u8>,
-    ) -> Action;
+    ) -> impl Future<Output = Action> + Send;
 }
 
 /// A DNS Listener serving UDP and TCP on the same address.

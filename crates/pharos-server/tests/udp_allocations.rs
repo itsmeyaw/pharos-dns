@@ -24,7 +24,13 @@ struct Counts {
 }
 
 impl Handler for Echo {
-    fn handle(&self, query: &[u8], _: SocketAddr, _: Protocol, response: &mut Vec<u8>) -> Action {
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
         let mut counts = self.counts.lock().unwrap();
         counts.queries += 1;
         if counts.queries == 101 {
