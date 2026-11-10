@@ -21,3 +21,6 @@ pub use edns::{Opt, ResponseOpt, normalized_udp_size};
 
 mod rdata;
 pub use rdata::{Rdata, RdataError, SvcParams};
+
+mod response;
+pub use response::{ResponseClass, ResponseType, classify_response, typify_response};
