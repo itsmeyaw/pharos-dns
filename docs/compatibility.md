@@ -68,7 +68,3 @@ The default TCP read, write, and idle timeouts are 3, 5, and 10 seconds,
 respectively, matching CoreDNS v1.15.0 `core/dnsserver/server.go`.
 
 On Linux, each `sendmmsg` sends one Response (nix-rust/nix#2797).
-
-Lifecycle hooks for a Server Block shared by multiple Listeners run once per
-Listener. Explicit Listener shutdown runs shutdown hooks; dropping it cannot
-await them. CoreDNS runs lifecycle hooks per configuration instance.

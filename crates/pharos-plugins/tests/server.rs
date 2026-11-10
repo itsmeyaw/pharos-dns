@@ -7,7 +7,7 @@ use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::{Message, Name, Rcode};
 use pharos_server::{Listener, Phase};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use tokio::{
@@ -22,6 +22,49 @@ fn query(name: &str) -> Vec<u8> {
     wire.extend_from_slice(name.as_wire());
     wire.extend_from_slice(&[0, 1, 0, 1]);
     wire
+}
+
+#[tokio::test]
+async fn lifecycle_runs_once_for_a_block_with_multiple_listeners() {
+    let blocks = parse("Corefile", ".:1053 dns://.:1054 {\n whoami\n}").unwrap();
+    let mut configs = configure::<Chain>(&blocks, directives()).unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let hook_count = Arc::clone(&count);
+    configs[0]
+        .config
+        .lifecycle
+        .register_sync(Phase::Startup, move || {
+            hook_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
+    let (listeners, lifecycle) = servers(configs).unwrap();
+    assert_eq!(listeners.len(), 2);
+    lifecycle.run(Phase::Startup).await.unwrap();
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn grouped_lifecycle_preserves_block_order() {
+    let blocks = parse(
+        "Corefile",
+        "example.org:1053 {\n whoami\n}\nother.org:1054 {\n whoami\n}",
+    )
+    .unwrap();
+    let mut configs = configure::<Chain>(&blocks, directives()).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    for (index, config) in configs.iter_mut().enumerate() {
+        let events = Arc::clone(&events);
+        config
+            .config
+            .lifecycle
+            .register_sync(Phase::Startup, move || {
+                events.lock().unwrap().push(index);
+                Ok(())
+            });
+    }
+    let (_, lifecycle) = servers(configs).unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    assert_eq!(*events.lock().unwrap(), [0, 1]);
 }
 
 #[tokio::test]
@@ -42,7 +85,8 @@ async fn corefile_routes_real_udp_and_tcp_queries() {
             });
         }
     }
-    let mut servers = servers(configs).unwrap();
+    let (mut servers, lifecycle) = servers(configs).unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
     assert_eq!(servers.len(), 1);
     let (key, server) = servers.drain().next().unwrap();
     let listener = Listener::bind(key.address, server).await.unwrap();
@@ -81,5 +125,6 @@ async fn corefile_routes_real_udp_and_tcp_queries() {
     }
     drop(tcp);
     listener.shutdown().await.unwrap();
+    lifecycle.run(Phase::Shutdown).await.unwrap();
     assert_eq!(hooks.load(Ordering::Relaxed), 4);
 }

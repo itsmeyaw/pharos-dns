@@ -7,7 +7,7 @@
 use pharos_corefile::{BlockContext, Cursor, Directive, Error};
 use pharos_server::{Lifecycle, ListenerKey, Router, Server, Transport};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
@@ -30,17 +30,20 @@ pub const fn plugins_listing() -> &'static str {
     PLUGINS_LISTING
 }
 
-/// Group configured Server Blocks by Listener, sharing Chains across keys.
-pub fn servers(
-    blocks: Vec<BlockContext<Chain>>,
-) -> io::Result<HashMap<ListenerKey, Server<Arc<Chain>>>> {
-    let mut groups: HashMap<ListenerKey, (Router<Arc<Chain>>, Lifecycle)> = HashMap::new();
+/// Configured DNS Servers keyed by Listener.
+pub type Servers = HashMap<ListenerKey, Server<Arc<Chain>>>;
+
+/// Group Server Blocks by Listener and collect their hooks in block order.
+/// The caller runs Startup before serving and Shutdown after all Listeners drain.
+pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecycle)> {
+    let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
+    let mut lifecycle = Lifecycle::default();
     for block in blocks {
         let keys = block.keys().to_vec();
         let addresses = block.listen_addresses.clone();
         let empty = pharos_server::Chain::is_empty(&block.config);
+        lifecycle.extend(&block.config.lifecycle);
         let chain = Arc::new(block.config);
-        let mut registered = HashSet::new();
         for key in keys {
             if key.transport != "dns" {
                 return Err(io::Error::new(
@@ -66,12 +69,7 @@ pub fn servers(
                     transport: Transport::Dns,
                     address: SocketAddr::new(ip, port),
                 };
-                let (router, lifecycle) = groups.entry(listener).or_default();
-                // shortcut: shared Chains run hooks per Listener until global reload orchestration exists.
-                if registered.insert(listener) {
-                    lifecycle.extend(&chain.lifecycle);
-                }
-                router.add(
+                groups.entry(listener).or_default().add(
                     listener,
                     domain.clone(),
                     (!empty).then(|| Arc::clone(&chain)),
@@ -80,14 +78,13 @@ pub fn servers(
             }
         }
     }
-    Ok(groups
-        .into_iter()
-        .map(|(key, (router, lifecycle))| {
-            let mut server = Server::new(router, key);
-            server.lifecycle = lifecycle;
-            (key, server)
-        })
-        .collect())
+    Ok((
+        groups
+            .into_iter()
+            .map(|(key, router)| (key, Server::new(router, key)))
+            .collect(),
+        lifecycle,
+    ))
 }
 
 /// Placeholder for enabled but unimplemented Plugins, whose setup always fails.

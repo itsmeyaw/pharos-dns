@@ -1,8 +1,8 @@
 use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use crate::{
-    Action, Admission, Context, Error, Handler, Lifecycle, ListenerKey, Metadata, Outcome, Phase,
-    Protocol, Router, admit, contain_panic, finish_outcome, response_limit,
+    Action, Admission, Context, Error, Handler, ListenerKey, Metadata, Outcome, Protocol, Router,
+    admit, contain_panic, finish_outcome, response_limit,
 };
 use pharos_proto::Rcode;
 
@@ -27,7 +27,6 @@ pub struct Server<C> {
     pub key: ListenerKey,
     pub allow_non_in: bool,
     pub debug: bool,
-    pub lifecycle: Lifecycle,
     pub logger: fn(Error),
 }
 
@@ -38,13 +37,8 @@ impl<C> Server<C> {
             key,
             allow_non_in: false,
             debug: false,
-            lifecycle: Lifecycle::default(),
             logger: log_error,
         }
-    }
-
-    pub async fn run_hooks(&self, phase: Phase) -> std::io::Result<()> {
-        self.lifecycle.run(phase).await
     }
 }
 
@@ -87,13 +81,5 @@ impl<C: Chain> Handler for Server<C> {
             Outcome::Unanswered(Rcode::REFUSED)
         };
         finish_outcome(query, protocol, outcome, response, self.logger)
-    }
-
-    async fn startup(&self) -> std::io::Result<()> {
-        self.run_hooks(Phase::Startup).await
-    }
-
-    async fn shutdown(&self) -> std::io::Result<()> {
-        self.run_hooks(Phase::Shutdown).await
     }
 }

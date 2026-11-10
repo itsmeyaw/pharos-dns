@@ -52,7 +52,7 @@ impl Handler for Counting {
 #[tokio::test(flavor = "current_thread")]
 async fn routed_udp_queries_do_not_allocate() {
     let blocks = parse("Corefile", ".:0 {\n whoami\n}").unwrap();
-    let mut servers = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let (key, server) = servers.drain().next().unwrap();
     let counts = Arc::new(Mutex::new(Counts::default()));
     let listener = Listener::bind(
