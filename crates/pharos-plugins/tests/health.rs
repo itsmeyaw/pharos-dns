@@ -48,3 +48,59 @@ async fn health_answers_all_methods_and_only_its_path() {
     );
     lifecycle.run(Phase::Shutdown).await.unwrap();
 }
+
+#[tokio::test]
+async fn server_blocks_share_a_health_address() {
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap();
+    drop(socket);
+    let input = format!("a.:0 {{\n health {address}\n}}\nb.:0 {{\n health {address}\n}}");
+    let blocks = parse("Corefile", &input).unwrap();
+    let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    let response = request(address, "GET", "/health").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n") && response.ends_with("\r\n\r\nOK"));
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+}
+
+#[cfg(feature = "plugin-prometheus")]
+#[tokio::test]
+async fn health_self_probes_export_unlabelled_histogram_and_failures() {
+    let first = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let second = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let health = first.local_addr().unwrap();
+    let metrics = second.local_addr().unwrap();
+    drop((first, second));
+    let input = format!(
+        "a.:0 {{\n health {health}\n prometheus {metrics}\n}}\nb.:0 {{\n health 127.0.0.1:0\n}}\n"
+    );
+    let blocks = parse("Corefile", &input).unwrap();
+    let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let response = request(metrics, "GET", "/metrics").await;
+    for bucket in ["0.00025", "0.0025", "0.025", "0.25", "2.5", "+Inf"] {
+        assert!(
+            response.contains(&format!(
+                "pharos_health_request_duration_seconds_bucket{{le=\"{bucket}\"}}"
+            )),
+            "{response}"
+        );
+    }
+    let value = |name: &str| {
+        response
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap()
+    };
+    assert!(
+        value("pharos_health_request_duration_seconds_count ") >= 2,
+        "{response}"
+    );
+    assert!(
+        value("pharos_health_request_failures_total ") >= 1,
+        "{response}"
+    );
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+}

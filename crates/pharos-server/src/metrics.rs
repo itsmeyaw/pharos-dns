@@ -36,6 +36,7 @@ const TIME_BUCKETS: &[f64] = &[
     0.00025, 0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128, 0.256, 0.512, 1.024,
     2.048, 4.096, 8.192,
 ];
+const HEALTH_BUCKETS: &[f64] = &[0.00025, 0.0025, 0.025, 0.25, 2.5];
 const SIZE_BUCKETS: &[f64] = &[
     0., 100., 200., 300., 400., 511., 1023., 2047., 4095., 8291., 16000., 32000., 48000., 64000.,
 ];
@@ -53,6 +54,9 @@ struct RegistryInner {
     blocks: Mutex<BTreeMap<Key, Arc<Block>>>,
     statuses: Mutex<BTreeMap<StatusKey, Arc<AtomicU64>>>,
     process: AtomicBool,
+    health_enabled: AtomicBool,
+    health_duration: Histogram,
+    health_failures: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -138,6 +142,9 @@ impl Registry {
             blocks: Mutex::new(BTreeMap::new()),
             statuses: Mutex::new(BTreeMap::new()),
             process: AtomicBool::new(false),
+            health_enabled: AtomicBool::new(false),
+            health_duration: Histogram::new(HEALTH_BUCKETS),
+            health_failures: AtomicU64::new(0),
         }))
     }
 
@@ -169,6 +176,17 @@ impl Registry {
         self.0.process.store(true, Ordering::Relaxed);
     }
 
+    pub fn enable_health_metrics(&self) {
+        self.0.health_enabled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn observe_health(&self, seconds: f64, failed: bool) {
+        self.0.health_duration.observe(HEALTH_BUCKETS, seconds);
+        if failed {
+            self.0.health_failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Resolve a transport status vector ("https", "https3", or "quic").
     pub fn transport_status(&self, transport: &str, server: &str, status: &str) -> TransportStatus {
         assert!(matches!(transport, "https" | "https3" | "quic"));
@@ -185,6 +203,43 @@ impl Registry {
 
     /// Append text to `out`; callers can append process metrics to the same buffer.
     pub fn encode(&self, out: &mut String) {
+        if self.0.health_enabled.load(Ordering::Relaxed) {
+            let name = "health_request_duration_seconds";
+            header(
+                out,
+                name,
+                "Histogram of the time (in seconds) each request took.",
+                "histogram",
+            );
+            let histogram = &self.0.health_duration;
+            let mut count = 0;
+            for (index, bucket) in histogram.buckets.iter().enumerate() {
+                count += bucket.load(Ordering::Relaxed);
+                let bound = HEALTH_BUCKETS
+                    .get(index)
+                    .map_or_else(|| "+Inf".into(), |v| float(*v));
+                writeln!(out, "pharos_{name}_bucket{{le=\"{bound}\"}} {count}").unwrap();
+            }
+            writeln!(
+                out,
+                "pharos_{name}_sum {}",
+                float(f64::from_bits(histogram.sum.load(Ordering::Relaxed)))
+            )
+            .unwrap();
+            writeln!(out, "pharos_{name}_count {count}").unwrap();
+            header(
+                out,
+                "health_request_failures_total",
+                "The number of times the health check failed.",
+                "counter",
+            );
+            writeln!(
+                out,
+                "pharos_health_request_failures_total {}",
+                self.0.health_failures.load(Ordering::Relaxed)
+            )
+            .unwrap();
+        }
         header(
             out,
             "build_info",

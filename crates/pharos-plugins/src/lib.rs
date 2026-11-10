@@ -68,6 +68,8 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     let metrics = pharos_server::metrics::Registry::default();
+    #[cfg(feature = "plugin-health")]
+    metrics.enable_health_metrics();
     #[cfg(feature = "plugin-prometheus")]
     let mut exporters = std::collections::BTreeMap::new();
     #[cfg(feature = "plugin-ready")]
@@ -161,11 +163,18 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         .collect();
     #[cfg(feature = "plugin-health")]
     for (address, lameduck) in health_addresses {
-        let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
+        let listener = Arc::new(std::sync::Mutex::new(
+            None::<(
+                pharos_server::http::Listener,
+                pharos_server::http::HealthProbe,
+            )>,
+        ));
         let startup_listener = Arc::clone(&listener);
+        let registry = metrics.clone();
         lifecycle.register(pharos_server::Phase::Startup, move || {
             let address = address.clone();
             let listener = Arc::clone(&startup_listener);
+            let registry = registry.clone();
             async move {
                 let server =
                     pharos_server::http::Listener::bind_with_methods(&address, |_, path| {
@@ -180,15 +189,17 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
                         })
                     })
                     .await?;
-                *listener.lock().unwrap() = Some(server);
+                let probe = pharos_server::http::HealthProbe::start(&address, registry);
+                *listener.lock().unwrap() = Some((server, probe));
                 Ok(())
             }
         });
         lifecycle.register(pharos_server::Phase::Shutdown, move || {
             let server = listener.lock().unwrap().take();
             async move {
-                if let Some(server) = server {
+                if let Some((server, probe)) = server {
                     tokio::time::sleep(lameduck).await;
+                    drop(probe);
                     server.shutdown().await?;
                 }
                 Ok(())

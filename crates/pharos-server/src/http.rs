@@ -37,6 +37,73 @@ pub struct Listener {
     task: Option<JoinHandle<io::Result<()>>>,
 }
 
+/// Periodic health self-probe, cancelled on drop.
+pub struct HealthProbe(JoinHandle<()>);
+
+impl HealthProbe {
+    pub fn start(address: &str, registry: crate::metrics::Registry) -> Self {
+        let address = if address.starts_with(':') {
+            format!("localhost{address}")
+        } else {
+            address.to_owned()
+        };
+        Self(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let start = std::time::Instant::now();
+                let result =
+                    tokio::time::timeout(Duration::from_secs(3), health_request(&address)).await;
+                let failed = !matches!(result, Ok(Ok(())));
+                let elapsed = start.elapsed();
+                registry.observe_health(elapsed.as_secs_f64(), failed);
+                if failed {
+                    crate::logging::log(
+                        "WARN",
+                        "health",
+                        &format!("Local health request to http://{address}/health failed"),
+                    );
+                } else if elapsed > Duration::from_secs(1) {
+                    crate::logging::log(
+                        "WARN",
+                        "health",
+                        &format!(
+                            "Local health request to http://{address}/health took more than 1s: {elapsed:?}"
+                        ),
+                    );
+                }
+            }
+        }))
+    }
+}
+
+impl Drop for HealthProbe {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn health_request(address: &str) -> io::Result<()> {
+    let stream = tokio::net::TcpStream::connect(address).await?;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(io::Error::other)?;
+    let request = Request::builder()
+        .uri("/health")
+        .header("host", address)
+        .body(Full::<Bytes>::default())
+        .map_err(io::Error::other)?;
+    let response = sender.send_request(request);
+    tokio::pin!(connection, response);
+    tokio::select! {
+        biased;
+        result = &mut response => result.map(|_| ()).map_err(io::Error::other),
+        result = &mut connection => result.map_err(io::Error::other).and_then(|()| Err(io::Error::other("health connection closed"))),
+    }
+}
+
 impl Listener {
     /// Bind an IP address or DNS hostname, then start accepting connections.
     pub async fn bind<F>(address: &str, route: F) -> io::Result<Self>

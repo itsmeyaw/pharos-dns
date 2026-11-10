@@ -97,6 +97,14 @@ During Lameduck Pharos keeps `/ready` available with 503 `Shutting down`.
 CoreDNS v1.15.0 normally closes the readiness Listener before the health
 Lameduck delay, so subsequent requests fail to connect instead.
 
+Health addresses are shared once per exact configured address, using the
+first Lameduck duration; CoreDNS creates one Listener and probe per Server
+Block and can share ports using SO_REUSEPORT. Pharos reports bind errors,
+requires numeric ports, and uses the HTTP connection limits described above.
+Unlike Go's ServeMux, it does not redirect unclean paths. The self-probe opens
+a fresh connection for every check and exports classic histogram buckets, not
+Prometheus native histogram samples.
+
 Whoami reports an error if adding the protocol label would make its SRV owner
 name exceed the DNS name length limit. CoreDNS ignores the resulting write
 error. The UDP caller must supply a Response buffer with enough capacity;
