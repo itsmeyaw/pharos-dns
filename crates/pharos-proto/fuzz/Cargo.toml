@@ -1,0 +1,43 @@
+[package]
+name = "pharos-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pharos-proto = { path = ".." }
+domain = { version = "0.12.3", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "message"
+path = "fuzz_targets/message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "name"
+path = "fuzz_targets/name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
