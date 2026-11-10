@@ -315,11 +315,22 @@ impl Parser<'_> {
             {
                 return Err(self.error("too many import wildcards"));
             }
-            let paths = glob::glob(&glob_pattern).map_err(|e| self.error(&e.to_string()))?;
+            let mut translated = String::new();
+            let mut chars = glob_pattern.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '\\' {
+                    let Some(escaped) = chars.next().filter(|c| *c != '/') else {
+                        return Err(self.error("invalid import pattern"));
+                    };
+                    translated.push_str(&glob::Pattern::escape(&escaped.to_string()));
+                } else {
+                    translated.push(ch);
+                }
+            }
+            let paths = glob::glob(&translated).map_err(|e| self.error(&e.to_string()))?;
             let mut imported = Vec::new();
             let mut count = 0;
-            for path in paths {
-                let path = path.map_err(|e| self.error(&e.to_string()))?;
+            for path in paths.flatten() {
                 count += 1;
                 let contents =
                     std::fs::read_to_string(&path).map_err(|e| self.error(&e.to_string()))?;

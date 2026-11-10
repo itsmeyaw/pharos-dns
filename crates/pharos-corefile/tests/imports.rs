@@ -62,3 +62,17 @@ fn imports_inside_directive_blocks() {
         ["proxy", "{", "option", "value", "}"]
     );
 }
+
+#[test]
+fn glob_backslash_escapes_metacharacters() {
+    let dir = fixture_dir();
+    fs::write(dir.join("literal*.server"), "literal {\n errors\n}\n").unwrap();
+    fs::write(dir.join("literal-other.server"), "other {\n errors\n}\n").unwrap();
+    let blocks = parse(
+        &dir.join("Corefile").to_string_lossy(),
+        "import literal\\*.server",
+    )
+    .unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].keys(), ["literal"]);
+}
