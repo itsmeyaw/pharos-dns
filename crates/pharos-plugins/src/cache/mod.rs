@@ -351,6 +351,7 @@ impl Cache {
         let stored = hit.refresh.expect("refresh requested");
         let generation = hit.generation;
         let stale = hit.stale;
+        let safe_query = cx.query.can_set_ad_in_wire();
         let mut wire = cx.query.as_wire().to_vec();
         wire[3] |= 0x20;
         let domain = cx.domain.clone();
@@ -386,6 +387,9 @@ impl Cache {
         };
         tokio::spawn(async move {
             let mut guard = guard;
+            if !safe_query {
+                return None;
+            }
             let Some(cache) = &guard.chain.cache else {
                 return None;
             };
