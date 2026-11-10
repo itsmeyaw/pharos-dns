@@ -251,10 +251,11 @@ impl Parser<'_> {
         if pattern.is_empty() {
             return Err(self.error("import requires a non-empty path"));
         }
-        if let Some(next) = self.tokens.get(start + 2) {
-            if next.file == arg.file && next.line == arg.line + arg.text.matches('\n').count() {
-                return Err(self.error("import takes only one argument"));
-            }
+        if let Some(next) = self.tokens.get(start + 2)
+            && next.file == arg.file
+            && next.line == arg.line + arg.text.matches('\n').count()
+        {
+            return Err(self.error("import takes only one argument"));
         }
         let imported = if let Some(tokens) = self.snippets.get(&pattern) {
             self.snippet_expansions += 1;
