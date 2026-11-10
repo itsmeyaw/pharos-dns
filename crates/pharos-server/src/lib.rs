@@ -16,9 +16,11 @@ use tokio::{
 
 mod admission;
 mod outcome;
+mod panic;
 mod quota;
 pub use admission::{Admission, admit};
 pub use outcome::{finish_outcome, response_limit};
+pub use panic::{contain_panic, panics_total};
 mod router;
 pub use router::{Router, ServerBlock, ViewFilter};
 mod tcp;
@@ -80,6 +82,7 @@ pub enum Error {
     ResponseBufferTooSmall,
     NotImplemented,
     NoNextPlugin,
+    PluginPanic,
 }
 
 impl fmt::Display for Error {
@@ -90,6 +93,7 @@ impl fmt::Display for Error {
             Self::ResponseBufferTooSmall => f.write_str("Response buffer too small"),
             Self::NotImplemented => f.write_str("plugin is not implemented"),
             Self::NoNextPlugin => f.write_str("no next plugin found"),
+            Self::PluginPanic => f.write_str("plugin panicked"),
         }
     }
 }
