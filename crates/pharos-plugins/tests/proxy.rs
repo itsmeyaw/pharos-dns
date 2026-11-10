@@ -963,3 +963,31 @@ async fn health_probes_bind_requested_loopback_source() {
         health.stop();
     }
 }
+
+#[tokio::test]
+async fn oversized_udp_response_becomes_a_clean_truncated_response() {
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+        let mut reply = wire[..len].to_vec();
+        reply[2] |= 0x80;
+        reply[7] = 40;
+        for _ in 0..40 {
+            reply.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 1]);
+        }
+        assert!(reply.len() > 512);
+        server.send_to(&reply, peer).await.unwrap();
+    });
+    let mut response = [0; 512];
+    let result = proxy
+        .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap();
+    let message = pharos_proto::Message::parse(&response[..result.len]).unwrap();
+    assert!(message.tc());
+    assert_eq!(message.answer_count(), 0);
+    assert_eq!(message.question_count(), 1);
+    upstream.await.unwrap();
+}
