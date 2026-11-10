@@ -84,7 +84,6 @@ fn main() {
         }
         code.push_str("}\n");
     }
-    code.push_str("// shortcut: Self Lookup (#35) must Box::pin re-entry and cap depth at 10.\n");
     code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
     if let Some(index) = enabled.iter().position(|name| *name == "cache") {
         writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.serve_{}(cx).await }}", index + 1).unwrap();

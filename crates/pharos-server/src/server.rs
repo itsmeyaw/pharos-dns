@@ -108,6 +108,34 @@ impl<C: Chain> Handler for Server<C> {
         protocol: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
+        self.handle_with_depth(wire, peer, protocol, response, 0)
+            .await
+    }
+}
+
+impl<C: Chain> crate::SelfLookupServer for Server<C> {
+    fn lookup<'a>(
+        &'a self,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        // shortcut: recursive static Plugin Chains require boxing only on Self Lookup.
+        Box::pin(self.handle_with_depth(wire, peer, protocol, response, depth))
+    }
+}
+
+impl<C: Chain> Server<C> {
+    async fn handle_with_depth(
+        &self,
+        wire: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+        depth: u8,
+    ) -> Action {
         let start = Instant::now();
         let query = match admit(wire, self.allow_non_in, response) {
             Admission::Query(query) => query,
@@ -145,6 +173,11 @@ impl<C: Chain> Handler for Server<C> {
                 slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
                 slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
                 slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
+                let mut metadata = Metadata::new(&mut slots);
+                metadata.self_lookup = Some(crate::SelfLookupState {
+                    server: self,
+                    depth,
+                });
                 let mut context = Context {
                     query,
                     client: peer,
@@ -152,7 +185,7 @@ impl<C: Chain> Handler for Server<C> {
                     transport: self.key.transport,
                     protocol,
                     domain: block.domain(),
-                    metadata: Metadata::new(&mut slots),
+                    metadata,
                     response,
                     max_response_size: response_limit(query, protocol),
                 };
