@@ -6,7 +6,7 @@
 //!
 //! | Code | Meaning |
 //! | --- | --- |
-//! | 0 | Version, Plugin listing, SIGQUIT, or successful shutdown |
+//! | 0 | Help, version, Plugin listing, SIGQUIT, or successful shutdown |
 //! | 1 | Configuration, startup, or log-format error |
 //! | 2 | Invalid flag or second SIGINT during shutdown |
 //! | 3 | Listener stop failure after SIGTERM |
@@ -20,6 +20,7 @@ use std::process::ExitCode;
 
 #[derive(Default)]
 struct Options {
+    help: bool,
     conf: Option<String>,
     port: Option<u16>,
     pidfile: Option<String>,
@@ -44,12 +45,17 @@ fn options() -> Result<Options, (u8, String)> {
             "-version" => Some("--version"),
             "-quiet" => Some("--quiet"),
             "-log-format" => Some("--log-format"),
+            "-help" => Some("--help"),
             _ => None,
         };
         if let Some(replacement) = replacement {
             return Err((2, format!("use {replacement} instead of {flag}")));
         }
         match flag {
+            "--help" | "-h" if value.is_none() => {
+                options.help = true;
+                return Ok(options);
+            }
             "--conf" | "-c" | "--port" | "-p" | "--pidfile" | "--log-format" => {
                 let value = value
                     .or_else(|| args.next())
@@ -95,7 +101,19 @@ async fn main() -> ExitCode {
             return ExitCode::from(code);
         }
     };
-    if options.version {
+    if options.help {
+        print!(
+            "Usage: pharos [OPTIONS]\n\
+  -h, --help              Print help\n\
+  -c, --conf <path|stdin>  Corefile path or stdin\n\
+  -p, --port <port>       Default DNS port (default: 53)\n\
+      --pidfile <path>     Write process ID to path\n\
+      --plugins            List enabled Plugins\n\
+  -V, --version           Print version\n\
+  -q, --quiet             Suppress startup output\n\
+      --log-format <text|json>  Select log format\n"
+        );
+    } else if options.version {
         version();
     } else if options.plugins {
         print!("{}", pharos_plugins::plugins_listing());

@@ -36,6 +36,7 @@ fn legacy_flags_explain_replacements() {
         ("-version", "--version"),
         ("-quiet", "--quiet"),
         ("-log-format", "--log-format"),
+        ("-help", "--help"),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_pharos"))
             .arg(old)
@@ -46,6 +47,31 @@ fn legacy_flags_explain_replacements() {
             String::from_utf8_lossy(&output.stderr)
                 .contains(&format!("use {new} instead of {old}"))
         );
+    }
+}
+
+#[test]
+fn help_flags_print_usage_and_exit_successfully() {
+    for flag in ["-h", "--help"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let usage = String::from_utf8(output.stdout).unwrap();
+        for option in [
+            "Usage:",
+            "--help",
+            "--conf",
+            "--port",
+            "--pidfile",
+            "--plugins",
+            "--version",
+            "--quiet",
+            "--log-format",
+        ] {
+            assert!(usage.contains(option), "{usage}");
+        }
     }
 }
 
