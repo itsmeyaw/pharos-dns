@@ -295,7 +295,9 @@ concurrent verifies are coalesced. Direct use of an unbound Plugin cannot
 launch a background refresh; its verify mode does not enforce the configured
 timeout. Stale age is evaluated in whole seconds, but fractional configured
 windows are not truncated as they are in CoreDNS. A refresh is not stored if
-a newer cache entry was installed while it was in flight.
+a newer cache entry was installed while it was in flight. A hit that launches
+a background refresh allocates for the task and its Query and Response buffers;
+ordinary warmed hits do not allocate.
 
 Cache metric series are initialized at setup, including zero-valued series;
 CoreDNS initializes individual labelled series on first use.
