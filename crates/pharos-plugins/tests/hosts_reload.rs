@@ -42,22 +42,32 @@ async fn updates_changed_file_and_zero_disables_reload() {
             [192, 0, 2, 1]
         );
         std::fs::write(&path, "192.0.2.22 example.org\n").unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            server
-                .handle(query, client, Protocol::Udp, &mut response)
-                .await,
-            Action::Respond
-        );
-        assert_eq!(
-            Message::parse(&response)
-                .unwrap()
-                .answers()
-                .next()
-                .unwrap()
-                .rdata,
-            expected
-        );
+        if interval == "0" {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                assert_eq!(
+                    server
+                        .handle(query, client, Protocol::Udp, &mut response)
+                        .await,
+                    Action::Respond
+                );
+                if Message::parse(&response)
+                    .unwrap()
+                    .answers()
+                    .next()
+                    .unwrap()
+                    .rdata
+                    == expected
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("hosts file did not reload");
         lifecycle.run(Phase::Shutdown).await.unwrap();
         std::fs::remove_file(path).unwrap();
     }

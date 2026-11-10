@@ -22,6 +22,7 @@ fn accepts_coredns_hosts_setup_cases() {
         "hosts highly_unlikely_to_exist_hosts_file example.org {\n 10.0.0.1 example.org\n fallthrough\n}",
         "hosts /etc/coredns/NodeHosts {\n ttl 60\n reload 15s\n fallthrough\n}",
         "hosts {\n no_reverse\n ttl 65535 ignored\n reload 0\n fallthrough example.org\n fallthrough_unsupported\n}",
+        "hosts {\n fallthrough_unsupported\n fallthrough example.org\n}",
     ] {
         assert!(accepts(text), "rejected {text}");
     }

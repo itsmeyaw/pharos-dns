@@ -66,7 +66,7 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `cache`, `errors`, `forward`, `health`, `log`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
+Only `cache`, `errors`, `forward`, `health`, `hosts`, `log`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
 
@@ -119,6 +119,22 @@ Whoami reports an error if adding the protocol label would make its SRV owner
 name exceed the DNS name length limit. CoreDNS ignores the resulting write
 error. The UDP caller must supply a Response buffer with enough capacity;
 otherwise Pharos reports an error instead of allocating on the UDP Query path.
+
+## Hosts
+
+Hosts file paths relative to a Corefile resolve against that file's directory.
+CoreDNS instead resolves them against its configured `root`, or the process
+working directory if no root is set. Pharos discards names that are not valid
+DNS names or UTF-8; CoreDNS retains arbitrary fields in its hosts maps. Pharos
+lowercases ASCII name bytes, while CoreDNS applies Go's Unicode lowercasing.
+Configured Domains that cannot be represented as DNS names are ignored for
+matching; CoreDNS keeps its normalized strings.
+On a file read error, an unfinished field is discarded; CoreDNS processes the
+last partial chunk before logging the error.
+Responses require a preallocated UDP buffer, as with Whoami. Hosts-file reloads
+stop during configuration Restart and resume if that Restart fails.
+File parsing runs on a Tokio worker, so a large or slow hosts file can delay
+other tasks on that worker.
 
 ## Reload
 

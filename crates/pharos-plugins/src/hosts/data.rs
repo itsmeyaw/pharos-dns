@@ -39,11 +39,21 @@ impl Map {
             .bytes()
             .chain(std::iter::once(Ok(b'\n')))
         {
-            let Ok(byte) = result else { break };
+            let byte = match result {
+                Ok(byte) => byte,
+                Err(error) => {
+                    pharos_server::logging::log(
+                        "ERROR",
+                        "hosts",
+                        &format!("Failed to parse {source}: {error}"),
+                    );
+                    break;
+                }
+            };
             if !comment && byte == b'#' {
                 comment = true;
             }
-            if byte.is_ascii_whitespace() || comment {
+            if matches!(byte, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') || comment {
                 if !field.is_empty() || oversized {
                     index += 1;
                     if oversized {
@@ -208,5 +218,61 @@ mod tests {
             ["127.0.0.2".parse::<IpAddr>().unwrap()]
         );
         assert!(map.reverse.is_empty());
+    }
+
+    #[test]
+    fn vertical_tab_and_form_feed_separate_fields() {
+        let map = Map::parse(
+            &b"127.0.0.1\x0bfoo\x0cbar\n"[..],
+            &[".".parse().unwrap()],
+            true,
+            "Inline hosts entries",
+        );
+        assert_eq!(
+            map.lookup("foo.", true),
+            ["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            map.lookup("bar.", true),
+            ["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn exact_and_wildcard_lookup_is_separate_per_family() {
+        let input = &b"192.0.2.1 *.example.org\n192.0.2.2 x.example.org\n2001:db8::1 *.example.org\n192.0.2.3 *.deep.example.org\n"[..];
+        let map = Map::parse(input, &["example.org.".parse().unwrap()], true, "test");
+        assert_eq!(
+            map.lookup("x.example.org.", true),
+            ["192.0.2.2".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            map.lookup("x.example.org.", false),
+            ["2001:db8::1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            map.lookup("y.example.org.", true),
+            ["192.0.2.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            map.lookup("y.deep.example.org.", true),
+            ["192.0.2.3".parse::<IpAddr>().unwrap()]
+        );
+        assert!(map.lookup("deep.example.org.", false).len() == 1);
+        assert!(map.lookup("a.b.deep.example.org.", true).is_empty());
+    }
+
+    #[test]
+    fn oversized_address_discards_only_its_line() {
+        let input = format!(
+            "{} ignored.example.org\n192.0.2.1 valid.example.org\n",
+            "1".repeat(1025)
+        );
+        let map = Map::parse(input.as_bytes(), &[".".parse().unwrap()], true, "test");
+        assert!(map.lookup("ignored.example.org.", true).is_empty());
+        assert_eq!(
+            map.lookup("valid.example.org.", true),
+            ["192.0.2.1".parse::<IpAddr>().unwrap()]
+        );
     }
 }

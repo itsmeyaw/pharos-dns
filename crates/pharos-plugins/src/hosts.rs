@@ -91,13 +91,13 @@ impl Hosts {
         let source = cursor.file().to_owned();
         let args = cursor.remaining_args();
         let mut path = PathBuf::from(args.first().map_or("/etc/hosts", String::as_str));
-        if args.first().is_some() && path.is_relative() {
+        if !args.is_empty() && path.is_relative() {
             path = Path::new(&source)
                 .parent()
                 .unwrap_or(Path::new(""))
                 .join(path);
         }
-        if args.first().is_some() {
+        if !args.is_empty() {
             match std::fs::metadata(&path) {
                 Ok(metadata) if metadata.is_dir() => pharos_server::logging::log(
                     "WARN",
@@ -209,14 +209,6 @@ impl Hosts {
             hosts.auto_reverse,
             "Inline hosts entries",
         );
-        if let Ok(file) = std::fs::File::open(&hosts.path) {
-            hosts.state.entries.store(Arc::new(data::Map::parse(
-                file,
-                &hosts.domain_names,
-                hosts.auto_reverse,
-                &format!("Hosts file {:?}", hosts.path),
-            )));
-        }
         Ok(hosts)
     }
 }
@@ -408,6 +400,12 @@ fn reverse_address(name: NameRef<'_>) -> Option<std::net::IpAddr> {
     {
         let mut bytes = [0; 4];
         for (i, label) in labels[..4].iter().enumerate() {
+            if label.is_empty()
+                || (label.len() > 1 && label[0] == b'0')
+                || !label.iter().all(u8::is_ascii_digit)
+            {
+                return None;
+            }
             bytes[3 - i] = std::str::from_utf8(label).ok()?.parse().ok()?;
         }
         return Some(std::net::Ipv4Addr::from(bytes).into());
@@ -431,4 +429,25 @@ fn reverse_address(name: NameRef<'_>) -> Option<std::net::IpAddr> {
         );
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reverse_ipv4_requires_canonical_octets() {
+        for (input, expected) in [
+            ("1.0.0.127.in-addr.arpa.", true),
+            ("01.0.0.127.in-addr.arpa.", false),
+            ("+1.0.0.127.in-addr.arpa.", false),
+        ] {
+            let name: Name = input.parse().unwrap();
+            assert_eq!(
+                reverse_address(NameRef::parse(name.as_wire(), 0).unwrap()).is_some(),
+                expected,
+                "{input}"
+            );
+        }
+    }
 }
