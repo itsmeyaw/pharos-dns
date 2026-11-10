@@ -17,7 +17,7 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Ready, Error> {
         return Err(cursor.arg_err());
     }
     let address = args.first().map_or(":8181", String::as_str);
-    if !valid_address(address) {
+    if !crate::valid_http_address(address) {
         return Err(cursor.error("invalid ready address"));
     }
     let mut continuous = false;
@@ -39,20 +39,6 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Ready, Error> {
         address: address.to_owned(),
         continuous,
     })
-}
-
-fn valid_address(address: &str) -> bool {
-    let Some((host, port)) = address.rsplit_once(':') else {
-        return false;
-    };
-    if port.contains(['[', ']']) {
-        return false;
-    }
-    if host.starts_with('[') {
-        host.ends_with(']') && !host[1..host.len() - 1].contains(['[', ']'])
-    } else {
-        !host.contains([':', '[', ']'])
-    }
 }
 
 type Check = Box<dyn Fn() -> bool + Send + Sync>;

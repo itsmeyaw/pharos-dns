@@ -26,6 +26,21 @@ pub mod whoami;
 
 include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
 
+#[cfg(any(feature = "plugin-prometheus", feature = "plugin-ready"))]
+fn valid_http_address(address: &str) -> bool {
+    let Some((host, port)) = address.rsplit_once(':') else {
+        return false;
+    };
+    if port.contains(['[', ']']) {
+        return false;
+    }
+    if host.starts_with('[') {
+        host.ends_with(']') && !host[1..host.len() - 1].contains(['[', ']'])
+    } else {
+        !host.contains([':', '[', ']'])
+    }
+}
+
 /// Directive registry in Plugin Order.
 #[must_use]
 pub fn directives() -> &'static [Directive<'static, Chain>] {

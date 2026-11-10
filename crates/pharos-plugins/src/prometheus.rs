@@ -16,7 +16,7 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Prometheus, Error> {
         return Err(cursor.arg_err());
     }
     let address = args.first().map_or("localhost:9153", String::as_str);
-    if !valid_address(address) {
+    if !crate::valid_http_address(address) {
         return Err(cursor.error("invalid metrics address"));
     }
     let mut tls_config = None;
@@ -44,20 +44,6 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Prometheus, Error> {
         address: address.to_owned(),
         tls_config,
     })
-}
-
-fn valid_address(address: &str) -> bool {
-    let Some((host, port)) = address.rsplit_once(':') else {
-        return false;
-    };
-    if port.contains(['[', ']']) {
-        return false;
-    }
-    if host.starts_with('[') {
-        host.ends_with(']') && !host[1..host.len() - 1].contains(['[', ']'])
-    } else {
-        !host.contains([':', '[', ']'])
-    }
 }
 
 impl Plugin for Prometheus {
