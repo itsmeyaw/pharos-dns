@@ -59,6 +59,94 @@ async fn verify_uses_fresh_answer() {
     assert_eq!(request(&server, 1002).await, (1002, 2));
 }
 
+#[cfg(feature = "plugin-forward")]
+#[tokio::test]
+async fn verify_timeout_serves_stale_and_keeps_refresh_running() {
+    use pharos_proto::{Class, MessageBuilder, Section, Type};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sent, done) = tokio::sync::oneshot::channel();
+    let upstream = tokio::spawn(async move {
+        let (mut connection, _) = listener.accept().await.unwrap();
+        for index in 0..2 {
+            let len = connection.read_u16().await.unwrap();
+            let mut wire = vec![0; usize::from(len)];
+            connection.read_exact(&mut wire).await.unwrap();
+            if index == 1 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            let query = Message::parse(&wire).unwrap();
+            let q = query.questions().next().unwrap();
+            let mut response = Vec::new();
+            let mut builder = MessageBuilder::new(&mut response, 512, query.id(), 0x8080).unwrap();
+            builder.question(q.name, q.qtype, q.qclass).unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    q.name,
+                    Type::A,
+                    Class::IN,
+                    1,
+                    &[192, 0, 2, index + 1],
+                )
+                .unwrap();
+            let _ = builder.finish();
+            connection.write_u16(response.len() as u16).await.unwrap();
+            connection.write_all(&response).await.unwrap();
+        }
+        let _ = sent.send(());
+    });
+    let text = format!(
+        ".:0 {{\n cache {{\n success 1024 1 0\n serve_stale 10s verify 100ms\n }}\n forward . {address} {{\n force_tcp\n }}\n}}"
+    );
+    let blocks = parse("Corefile", &text).unwrap();
+    let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (_, server) = servers.drain().next().unwrap();
+    let peer = ([127, 0, 0, 1], 1001).into();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(QUERY, peer, Protocol::Udp, &mut response)
+            .await,
+        Action::Respond
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            server.handle(QUERY, peer, Protocol::Udp, &mut response)
+        )
+        .await
+        .unwrap(),
+        Action::Respond
+    );
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .ttl,
+        0
+    );
+    tokio::time::timeout(Duration::from_secs(2), done)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(
+        server
+            .handle(QUERY, peer, Protocol::Udp, &mut response)
+            .await,
+        Action::Respond
+    );
+    assert!(
+        matches!(Message::parse(&response).unwrap().answers().next().unwrap().data().unwrap(), Rdata::A(ip) if ip.octets() == [192, 0, 2, 2])
+    );
+    upstream.await.unwrap();
+}
+
 #[tokio::test]
 async fn popular_entry_prefetches_before_expiry() {
     let server = setup("prefetch 1 1m 90%");
