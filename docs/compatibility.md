@@ -326,7 +326,8 @@ TSIG-signed Queries and Responses bypass caching so that ID, flags and TTL
 rewrites cannot invalidate their signatures. Wildcard source Metadata is not
 saved with cache entries.
 
-Background refreshes use a fresh Metadata map. A `verify` refresh on a routed
+Background refreshes use a fresh Metadata map and retain Listener state for
+Self Lookup. A `verify` refresh on a routed
 Server Block runs as a background task, even without a verify timeout, and
 concurrent verifies are coalesced. Direct use of an unbound Plugin cannot
 launch a background refresh; its verify mode does not enforce the configured
@@ -348,6 +349,4 @@ answered with SERVFAIL.
 
 Copying a Query for Self Lookup re-encodes its records. It fails if RDATA is
 malformed, contains an unsupported name-bearing type, or the resulting Message
-exceeds 65,535 bytes; CoreDNS copies its decoded Message instead. A detached
-cache background refresh currently has no Listener state for Self Lookup,
-unlike a Query routed by a Listener.
+exceeds 65,535 bytes; CoreDNS copies its decoded Message instead.

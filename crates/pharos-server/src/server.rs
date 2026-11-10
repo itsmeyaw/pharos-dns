@@ -108,7 +108,18 @@ impl<C: Chain> Handler for Server<C> {
         protocol: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
-        self.handle_with_depth(wire, peer, protocol, response, 0)
+        self.handle_with_depth(wire, peer, protocol, response, 0, self)
+            .await
+    }
+
+    async fn handle_shared(
+        self: &Arc<Self>,
+        wire: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        self.handle_with_depth(wire, peer, protocol, response, 0, self)
             .await
     }
 }
@@ -123,7 +134,40 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
         response: &'a mut Vec<u8>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
         // shortcut: static re-entry boxes a future, remove if recursive dispatch no longer needs it.
-        Box::pin(self.handle_with_depth(wire, peer, protocol, response, depth))
+        Box::pin(self.handle_with_depth(wire, peer, protocol, response, depth, self))
+    }
+}
+
+impl<C: Chain> crate::SelfLookupServer for Arc<Server<C>> {
+    fn lookup<'a>(
+        &'a self,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        Box::pin(self.handle_with_depth(wire, peer, protocol, response, depth, self))
+    }
+
+    fn owned(&self) -> Option<Arc<dyn crate::OwnedSelfLookupServer>> {
+        Some(Arc::clone(self) as Arc<dyn crate::OwnedSelfLookupServer>)
+    }
+}
+
+impl<C: Chain> crate::OwnedSelfLookupServer for Server<C> {
+    fn lookup<'a>(
+        self: Arc<Self>,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        Box::pin(async move {
+            self.handle_with_depth(wire, peer, protocol, response, depth, &self)
+                .await
+        })
     }
 }
 
@@ -135,6 +179,7 @@ impl<C: Chain> Server<C> {
         protocol: Protocol,
         response: &mut Vec<u8>,
         depth: u8,
+        lookup_server: &dyn crate::SelfLookupServer,
     ) -> Action {
         let start = Instant::now();
         let query = match admit(wire, self.allow_non_in, response) {
@@ -175,7 +220,7 @@ impl<C: Chain> Server<C> {
                 slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
                 let mut metadata = Metadata::new(&mut slots);
                 metadata.self_lookup = Some(crate::SelfLookupState {
-                    server: self,
+                    server: lookup_server,
                     depth,
                 });
                 let mut context = Context {

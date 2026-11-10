@@ -130,9 +130,7 @@ async fn serve<H: Handler>(
         let mut response = responses.pop().unwrap_or_default();
         response.clear();
         queries.spawn(async move {
-            if handler
-                .handle(&query, peer, Protocol::Tcp, &mut response)
-                .await
+            if H::handle_shared(&handler, &query, peer, Protocol::Tcp, &mut response).await
                 == Action::Respond
                 && let Ok(length) = u16::try_from(response.len())
             {

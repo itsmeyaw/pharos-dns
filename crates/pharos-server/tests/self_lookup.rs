@@ -246,3 +246,140 @@ async fn self_lookup_uses_state_held_before_reload() {
     drop(retired);
     registry.shutdown().await.unwrap();
 }
+
+struct DetachedDepth(Arc<AtomicUsize>);
+
+impl Chain for DetachedDepth {
+    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+        let visit = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+        if visit > 11 {
+            return Outcome::Unanswered(Rcode::REFUSED);
+        }
+        if visit == 11 {
+            let handle = cx.self_lookup_handle().expect("owned Listener state");
+            let wire = cx.query.as_wire().to_vec();
+            let client = cx.client;
+            let local = cx.local;
+            let domain = cx.domain.clone();
+            let protocol = cx.protocol;
+            let transport = cx.transport;
+            let error = tokio::spawn(async move {
+                let mut slots = [None; 8];
+                let mut response = Vec::new();
+                let context = Context {
+                    query: Message::parse(&wire).unwrap(),
+                    client,
+                    local,
+                    transport,
+                    protocol,
+                    domain: &domain,
+                    metadata: pharos_server::Metadata::with_self_lookup(&mut slots, Some(&handle)),
+                    response: &mut response,
+                    max_response_size: 512,
+                };
+                context
+                    .self_lookup(&"loop.example.".parse().unwrap(), Type::A)
+                    .await
+                    .unwrap_err()
+            })
+            .await
+            .unwrap();
+            assert_eq!(error, Error::SelfLookupDepth);
+            return Outcome::Error(error);
+        }
+        let response = cx
+            .self_lookup(&"loop.example.".parse().unwrap(), Type::A)
+            .await
+            .unwrap();
+        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::SERVFAIL);
+        Outcome::Error(Error::InvalidQuery)
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn detached_self_lookup_retains_depth_limit() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let visits = Arc::new(AtomicUsize::new(0));
+    let mut router = Router::default();
+    router.add(
+        key,
+        "example.".parse().unwrap(),
+        Some(DetachedDepth(visits.clone())),
+        vec![],
+    );
+    let server = Arc::new(Server::new(router, key));
+    let query = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\0\x04loop\x07example\0\0\x01\0\x01";
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        Handler::handle_shared(
+            &server,
+            query,
+            "192.0.2.10:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        )
+        .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::SERVFAIL);
+    assert_eq!(visits.load(Ordering::SeqCst), 11);
+}
+
+struct CountOwners {
+    server: std::sync::Weak<Server<CountOwners>>,
+    observed: Arc<AtomicUsize>,
+}
+
+impl Chain for CountOwners {
+    async fn serve(&self, _: &mut Context<'_>) -> Outcome {
+        self.observed
+            .store(self.server.strong_count(), Ordering::SeqCst);
+        Outcome::Unanswered(Rcode::REFUSED)
+    }
+
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn ordinary_query_does_not_clone_listener_state() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let observed = Arc::new(AtomicUsize::new(0));
+    let server = Arc::new_cyclic(|weak| {
+        let mut router = Router::default();
+        router.add(
+            key,
+            "example.".parse().unwrap(),
+            Some(CountOwners {
+                server: weak.clone(),
+                observed: observed.clone(),
+            }),
+            vec![],
+        );
+        Server::new(router, key)
+    });
+    let query = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\0\x01a\x07example\0\0\x01\0\x01";
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        Handler::handle_shared(
+            &server,
+            query,
+            "192.0.2.10:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        )
+        .await,
+        Action::Respond
+    );
+    assert_eq!(observed.load(Ordering::SeqCst), 1);
+}

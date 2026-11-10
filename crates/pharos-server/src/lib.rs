@@ -155,6 +155,19 @@ impl<'a> Metadata<'a> {
         }
     }
 
+    /// Construct fresh Metadata while retaining detached Self Lookup routing.
+    pub fn with_self_lookup(
+        slots: &'a mut [Option<(&'a str, &'a str)>],
+        handle: Option<&'a SelfLookupHandle>,
+    ) -> Self {
+        let mut metadata = Self::new(slots);
+        metadata.self_lookup = handle.map(|handle| SelfLookupState {
+            server: handle,
+            depth: handle.depth,
+        });
+        metadata
+    }
+
     /// Insert or replace a named value; returns false when no slot is free.
     pub fn insert(&mut self, name: &'a str, value: &'a str) -> bool {
         if let Some(slot) = self
@@ -234,9 +247,56 @@ trait SelfLookupServer: Sync {
         depth: u8,
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
+
+    fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
+        None
+    }
+}
+
+trait OwnedSelfLookupServer: Send + Sync {
+    fn lookup<'a>(
+        self: Arc<Self>,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
+}
+
+/// Owned Listener state for a detached Query, including its Self Lookup depth.
+pub struct SelfLookupHandle {
+    server: Arc<dyn OwnedSelfLookupServer>,
+    depth: u8,
+}
+
+impl SelfLookupServer for SelfLookupHandle {
+    fn lookup<'a>(
+        &'a self,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, response)
+    }
+
+    fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
+        Some(Arc::clone(&self.server))
+    }
 }
 
 impl Context<'_> {
+    /// Retain this Query's Listener state for a detached task, if available.
+    pub fn self_lookup_handle(&self) -> Option<SelfLookupHandle> {
+        let state = self.metadata.self_lookup.as_ref()?;
+        Some(SelfLookupHandle {
+            server: state.server.owned()?,
+            depth: state.depth,
+        })
+    }
+
     /// Route a new Query through this Query's Listener and capture its Response.
     pub async fn self_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
         let state = self
@@ -293,6 +353,17 @@ pub trait Handler: Send + Sync + 'static {
         protocol: Protocol,
         response: &mut Vec<u8>,
     ) -> impl Future<Output = Action> + Send;
+
+    /// Handle a Query while retaining access to the Listener's owned state.
+    fn handle_shared(
+        self: &Arc<Self>,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+    ) -> impl Future<Output = Action> + Send {
+        self.handle(query, peer, protocol, response)
+    }
 }
 
 /// A DNS Listener serving UDP and TCP on the same address.
@@ -513,6 +584,7 @@ impl<H: Handler> Handler for Swappable<H> {
         protocol: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
-        self.0.load().handle(query, peer, protocol, response).await
+        let handler = self.0.load();
+        H::handle_shared(&handler, query, peer, protocol, response).await
     }
 }

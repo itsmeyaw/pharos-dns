@@ -373,6 +373,7 @@ impl Cache {
         } else {
             cx.max_response_size
         };
+        let self_lookup = cx.self_lookup_handle();
         let guard = RefreshGuard {
             chain,
             key,
@@ -405,7 +406,10 @@ impl Cache {
                 transport,
                 protocol,
                 domain: &domain,
-                metadata: pharos_server::Metadata::new(&mut slots),
+                metadata: pharos_server::Metadata::with_self_lookup(
+                    &mut slots,
+                    self_lookup.as_ref(),
+                ),
                 response: &mut response,
                 max_response_size,
             };
