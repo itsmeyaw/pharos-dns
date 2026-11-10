@@ -267,6 +267,21 @@ impl<'a> NameRef<'a> {
         self.wire_len
     }
 
+    /// Returns the name's original offset in its Message.
+    #[must_use]
+    pub const fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Walks the encoded labels and compression pointers, including pointer targets.
+    #[must_use]
+    pub fn wire_parts(&self) -> NameWireParts<'a> {
+        NameWireParts {
+            message: self.message,
+            position: Some(self.offset),
+        }
+    }
+
     /// Returns an iterator over labels without copying the name.
     #[must_use]
     pub fn labels(&self) -> NameRefLabels<'a> {
@@ -288,6 +303,48 @@ impl<'a> NameRef<'a> {
         }
         wire.push(0);
         Name { wire }
+    }
+}
+
+/// One physical part of a validated name encoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NameWirePart {
+    /// Encoded label, including its length octet.
+    Label { offset: usize, len: usize },
+    /// Terminal root octet.
+    Root { offset: usize },
+    /// Compression pointer and its target, both relative to the Message.
+    Pointer { offset: usize, target: usize },
+}
+
+/// Allocation-free traversal of a validated name and its pointer chain.
+pub struct NameWireParts<'a> {
+    message: &'a [u8],
+    position: Option<usize>,
+}
+
+impl Iterator for NameWireParts<'_> {
+    type Item = NameWirePart;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let offset = self.position?;
+        let byte = self.message[offset];
+        match byte {
+            0 => {
+                self.position = None;
+                Some(NameWirePart::Root { offset })
+            }
+            1..=63 => {
+                let len = usize::from(byte) + 1;
+                self.position = Some(offset + len);
+                Some(NameWirePart::Label { offset, len })
+            }
+            _ => {
+                let target = usize::from(byte & 0x3f) << 8 | usize::from(self.message[offset + 1]);
+                self.position = Some(target);
+                Some(NameWirePart::Pointer { offset, target })
+            }
+        }
     }
 }
 

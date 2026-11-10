@@ -5,7 +5,7 @@ mod weighted;
 use std::{net::IpAddr, path::PathBuf, time::Duration};
 
 use pharos_corefile::{Cursor, Error};
-use pharos_proto::{Message, Rcode, Type};
+use pharos_proto::{Message, NameRef, NameWirePart, Rcode, Type};
 use pharos_server::{Context, Next, Outcome, Plugin};
 
 #[derive(Debug)]
@@ -92,6 +92,7 @@ impl Plugin for LoadBalance {
 struct Record {
     start: u16,
     end: u16,
+    destination: u16,
     sequence: u16,
     group: u8,
     weight: u8,
@@ -101,6 +102,7 @@ struct Record {
 const EMPTY_RECORD: Record = Record {
     start: 0,
     end: 0,
+    destination: 0,
     sequence: 0,
     group: 0,
     weight: 0,
@@ -111,6 +113,18 @@ struct Scratch {
     records: [Record; 5957],
     order: [Record; 5957],
     original: [u8; 65535],
+    pointers: [Pointer; 32768],
+    seen: [u8; 8192],
+    direct: [u8; 8192],
+    labels: [u8; 8192],
+}
+
+#[derive(Clone, Copy, Default)]
+struct Pointer {
+    source: u16,
+    destination: u16,
+    target: u16,
+    original_target: u16,
 }
 
 #[derive(Debug)]
@@ -168,6 +182,10 @@ thread_local! {
         records: [EMPTY_RECORD; 5957],
         order: [EMPTY_RECORD; 5957],
         original: [0; 65535],
+        pointers: [Pointer { source: 0, destination: 0, target: 0, original_target: 0 }; 32768],
+        seen: [0; 8192],
+        direct: [0; 8192],
+        labels: [0; 8192],
     }) };
     static RANDOM: std::cell::Cell<u64> = {
         let mut seed = [0; 8];
@@ -185,6 +203,99 @@ fn random(limit: usize) -> usize {
         random.set(value);
         (value % limit as u64) as usize
     })
+}
+
+fn relocated(records: &[Record], offset: usize) -> usize {
+    let index = records.partition_point(|record| usize::from(record.start) <= offset);
+    if index == 0 {
+        return offset;
+    }
+    let record = records[index - 1];
+    if offset < usize::from(record.end) {
+        usize::from(record.destination) + offset - usize::from(record.start)
+    } else {
+        offset
+    }
+}
+
+fn bit(bits: &[u8], offset: usize) -> bool {
+    bits[offset / 8] & (1 << (offset % 8)) != 0
+}
+
+fn mark(bits: &mut [u8], offset: usize) {
+    bits[offset / 8] |= 1 << (offset % 8);
+}
+
+struct PointerCollector<'a> {
+    records: &'a [Record],
+    pointers: &'a mut [Pointer],
+    seen: &'a mut [u8],
+    direct: &'a mut [u8],
+    labels: &'a mut [u8],
+    count: usize,
+}
+
+impl PointerCollector<'_> {
+    fn visit(&mut self, name: NameRef<'_>) -> bool {
+        let mut previous = None;
+        let mut pointer_limit = usize::MAX;
+        for part in name.wire_parts() {
+            let (offset, len) = match part {
+                NameWirePart::Label { offset, len } => (offset, len),
+                NameWirePart::Root { offset } => (offset, 1),
+                NameWirePart::Pointer { offset, .. } => (offset, 2),
+            };
+            let destination = relocated(self.records, offset);
+            // A referenced name can cross record boundaries; its encoding must stay contiguous.
+            if destination + len > pointer_limit
+                || previous
+                    .is_some_and(|(old_end, new_end)| old_end == offset && new_end != destination)
+                || (0..len).any(|i| relocated(self.records, offset + i) != destination + i)
+            {
+                return false;
+            }
+            if let NameWirePart::Pointer { target, .. } = part {
+                if offset >= name.offset() && offset < name.offset() + name.wire_len() {
+                    mark(self.direct, offset);
+                }
+                let target_after = relocated(self.records, target);
+                if target_after > 0x3fff || target_after >= destination {
+                    return false;
+                }
+                if !bit(self.seen, offset) {
+                    if self.count == self.pointers.len() {
+                        return false;
+                    }
+                    mark(self.seen, offset);
+                    self.pointers[self.count] = Pointer {
+                        source: offset as u16,
+                        destination: destination as u16,
+                        target: target_after as u16,
+                        original_target: target as u16,
+                    };
+                    self.count += 1;
+                }
+                pointer_limit = destination;
+                previous = None;
+            } else {
+                for byte in offset..offset + len {
+                    mark(self.labels, byte);
+                }
+                previous = Some((offset + len, destination + len));
+            }
+        }
+        true
+    }
+
+    fn safe(&self) -> bool {
+        // A pointer reached through opaque data or literal labels must not alter those bytes.
+        self.pointers[..self.count].iter().all(|pointer| {
+            pointer.target == pointer.original_target
+                || (bit(self.direct, usize::from(pointer.source))
+                    && !bit(self.labels, usize::from(pointer.source))
+                    && !bit(self.labels, usize::from(pointer.source) + 1))
+        })
+    }
 }
 
 fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subnet]) {
@@ -217,6 +328,10 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
             records,
             order,
             original,
+            pointers,
+            seen,
+            direct,
+            labels,
         } = &mut *scratch;
         // Every RR occupies at least 11 bytes; no valid DNS Message can exceed this bound.
         let mut sections = [(0usize, 0usize); 3];
@@ -237,6 +352,7 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
                 records[count] = Record {
                     start: (rr.ttl_offset - 4 - rr.name.wire_len()) as u16,
                     end: (rr.rdata_offset + rr.rdata.len()) as u16,
+                    destination: (rr.ttl_offset - 4 - rr.name.wire_len()) as u16,
                     sequence: 0,
                     group: match rr.rtype {
                         Type::CNAME => 0,
@@ -256,29 +372,13 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
             }
             sections[section] = (first, count);
         }
-        // Opaque RDATA can contain names too: conservatively treat pointer-shaped bytes as pointers.
-        for pair in wire.windows(2) {
-            if pair[0] & 0xc0 != 0xc0 {
-                continue;
-            }
-            let target = usize::from(u16::from_be_bytes([pair[0] & 0x3f, pair[1]]));
-            if sections.iter().any(|&(first, end)| {
-                end > first + 1
-                    && target >= usize::from(records[first].start)
-                    && target < usize::from(records[end - 1].end)
-            }) {
-                return;
-            }
-        }
-        original[..wire.len()].copy_from_slice(wire);
+        order[..count].copy_from_slice(&records[..count]);
         for (section, (first, end)) in sections.into_iter().enumerate() {
             if end <= first + 1 || (weights.is_some() && section == 1) {
                 continue;
             }
             let section_start = usize::from(records[first].start);
-            let actual = &records[first..end];
-            let items = &mut order[..actual.len()];
-            items.copy_from_slice(actual);
+            let items = &mut order[first..end];
             if weights.is_some() && prefer.is_empty() && !items.iter().any(|item| item.group == 2) {
                 continue;
             }
@@ -336,10 +436,66 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
             let mut dest = section_start;
             for item in items.iter() {
                 let len = usize::from(item.end - item.start);
-                wire[dest..dest + len]
-                    .copy_from_slice(&original[usize::from(item.start)..usize::from(item.end)]);
+                let index = records[..count]
+                    .binary_search_by_key(&item.start, |record| record.start)
+                    .expect("record came from this Message");
+                records[index].destination = dest as u16;
                 dest += len;
             }
+        }
+        seen.fill(0);
+        direct.fill(0);
+        labels.fill(0);
+        let pointer_count = {
+            let mut collector = PointerCollector {
+                records: &records[..count],
+                pointers,
+                seen,
+                direct,
+                labels,
+                count: 0,
+            };
+            for question in message.questions() {
+                if !collector.visit(question.name) {
+                    return;
+                }
+            }
+            for rr in message
+                .answers()
+                .chain(message.authorities())
+                .chain(message.additionals())
+            {
+                if !collector.visit(rr.name) {
+                    return;
+                }
+                let Ok(names) = rr.compressible_names() else {
+                    return;
+                };
+                for name in names.into_iter().flatten() {
+                    if !collector.visit(name) {
+                        return;
+                    }
+                }
+            }
+            if !collector.safe() {
+                return;
+            }
+            collector.count
+        };
+        original[..wire.len()].copy_from_slice(wire);
+        for item in &order[..count] {
+            let index = records[..count]
+                .binary_search_by_key(&item.start, |record| record.start)
+                .expect("record came from this Message");
+            let destination = usize::from(records[index].destination);
+            let len = usize::from(item.end - item.start);
+            wire[destination..destination + len]
+                .copy_from_slice(&original[usize::from(item.start)..usize::from(item.end)]);
+        }
+        for pointer in &pointers[..pointer_count] {
+            let destination = usize::from(pointer.destination);
+            wire[destination..destination + 2]
+                .copy_from_slice(&(0xc000 | pointer.target).to_be_bytes());
         }
     });
 }
