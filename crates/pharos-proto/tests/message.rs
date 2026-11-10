@@ -1,6 +1,16 @@
 use pharos_proto::Message;
 
 #[test]
+fn authenticated_query_view_does_not_mutate_wire() {
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let original = Message::parse(wire).unwrap();
+    let authenticated = original.with_ad();
+    assert!(!original.ad());
+    assert!(authenticated.ad());
+    assert_eq!(authenticated.as_wire(), wire);
+}
+
+#[test]
 fn reads_a_query_and_rejects_truncation() {
     let wire = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x07example\x03com\0\x00\x01\x00\x01";
     let message = Message::parse(wire).unwrap();

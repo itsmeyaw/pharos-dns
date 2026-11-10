@@ -42,6 +42,17 @@ struct LocalRefreshGuard<'a> {
     success: bool,
 }
 
+struct QueryGuard<'a, 'b> {
+    context: &'a mut Context<'b>,
+    query: Message<'b>,
+}
+
+impl Drop for QueryGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.context.query = self.query;
+    }
+}
+
 impl Drop for LocalRefreshGuard<'_> {
     fn drop(&mut self) {
         self.store
@@ -123,6 +134,14 @@ impl Plugin for Cache {
             return next.run(cx).await;
         };
         if query.opcode() != Opcode::QUERY
+            || query.additionals().any(|record| record.rtype == Type::TSIG)
+            || question.name.wire_len()
+                != question
+                    .name
+                    .labels()
+                    .map(|label| label.len() + 1)
+                    .sum::<usize>()
+                    + 1
             || !self
                 .config
                 .zones
@@ -213,7 +232,14 @@ impl Plugin for Cache {
                         success: false,
                     };
                     let stale = cx.response.clone();
-                    let outcome = next.run(cx).await;
+                    let outcome = {
+                        cx.query = query.with_ad();
+                        let guard = QueryGuard {
+                            context: &mut *cx,
+                            query,
+                        };
+                        next.run(&mut *guard.context).await
+                    };
                     let valid =
                         outcome == Outcome::Response && self.accept_refresh(&query, cx.response);
                     if valid
@@ -245,8 +271,14 @@ impl Plugin for Cache {
         if let Some(metrics) = metrics {
             metrics.miss();
         }
-        // shortcut: downstream AD is not forced; separate Query and Metadata lifetimes to refresh authentication.
-        let outcome = next.run(cx).await;
+        let outcome = {
+            cx.query = query.with_ad();
+            let guard = QueryGuard {
+                context: &mut *cx,
+                query,
+            };
+            next.run(&mut *guard.context).await
+        };
         self.process_response(cx, outcome, None)
     }
 }
@@ -264,6 +296,9 @@ impl Cache {
         if response.tc()
             || !response.qr()
             || response.question_count() != 1
+            || response
+                .additionals()
+                .any(|record| record.rtype == Type::TSIG)
             || expected.name != actual.name
             || expected.qtype != actual.qtype
             || expected.qclass != actual.qclass
@@ -485,6 +520,12 @@ impl Cache {
         let Ok(response) = Message::parse(cx.response) else {
             return outcome;
         };
+        if response
+            .additionals()
+            .any(|record| record.rtype == Type::TSIG)
+        {
+            return outcome;
+        }
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64);

@@ -23,6 +23,39 @@ impl Next for Unanswered<'_> {
     }
 }
 
+struct Pending;
+impl Next for Pending {
+    async fn run(self, _: &mut Context<'_>) -> Outcome {
+        std::future::pending().await
+    }
+}
+
+struct SignedBackend<'a>(&'a AtomicUsize);
+impl Next for SignedBackend<'_> {
+    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let q = cx.query.questions().next().unwrap();
+        let root = pharos_proto::NameRef::parse(&[0], 0).unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x80a0).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        builder
+            .record(
+                Section::Answer,
+                q.name,
+                Type::A,
+                Class::IN,
+                30,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        builder
+            .record(Section::Additional, root, Type::TSIG, Class::ANY, 0, &[])
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
 struct AuthenticatedBackend<'a>(&'a AtomicUsize);
 impl Next for AuthenticatedBackend<'_> {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {
@@ -54,6 +87,13 @@ impl Next for AuthenticatedBackend<'_> {
 impl Next for Backend<'_> {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {
         self.calls.fetch_add(1, Ordering::Relaxed);
+        if cx.query.additionals().any(|rr| rr.rtype == Type::TSIG) {
+            assert!(!cx.query.ad());
+            assert_eq!(
+                cx.query.flags(),
+                u16::from_be_bytes([cx.query.as_wire()[2], cx.query.as_wire()[3]])
+            );
+        }
         let question = cx.query.questions().next().unwrap();
         let flags = 0x80a0 | self.rcode | (u16::from(self.truncated) * 0x0200);
         let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), flags).unwrap();
@@ -151,7 +191,6 @@ async fn cache_removes_upstream_opt_on_miss_and_hit() {
 }
 
 #[tokio::test]
-#[ignore = "downstream Query AD is not set during cache refresh"]
 async fn miss_requests_authenticated_upstream_data_for_later_ad_clients() {
     let chain = cache();
     let calls = AtomicUsize::new(0);
@@ -186,6 +225,169 @@ async fn miss_requests_authenticated_upstream_data_for_later_ad_clients() {
         assert_eq!(Message::parse(cx.response).unwrap().ad(), ad);
     }
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[cfg(feature = "plugin-forward")]
+#[tokio::test]
+async fn authenticated_refresh_sets_ad_on_forwarded_wire() {
+    let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut wire = [0_u8; 512];
+        let (len, peer) = upstream.recv_from(&mut wire).await.unwrap();
+        assert!(Message::parse(&wire[..len]).unwrap().ad());
+        wire[2] |= 0x80;
+        wire[3] |= 0x20;
+        upstream.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let text = format!(".:0 {{\n cache\n forward . {address}\n}}");
+    let blocks = parse("Corefile", &text).unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let domain: Name = ".".parse().unwrap();
+    let mut wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01".to_vec();
+    let mut response = Vec::with_capacity(65535);
+    for ad in [false, true] {
+        if ad {
+            wire[3] |= 0x20;
+        }
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1000".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), chain.serve(&mut cx))
+                .await
+                .unwrap(),
+            Outcome::Response
+        );
+        assert_eq!(Message::parse(cx.response).unwrap().ad(), ad);
+        assert_eq!(cx.query.ad(), ad, "the client Query must be restored");
+    }
+    task.await.unwrap();
+}
+
+#[cfg(feature = "plugin-forward")]
+#[tokio::test]
+async fn compressed_query_survives_ad_refresh() {
+    let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut wire = [0_u8; 512];
+        let (len, peer) = upstream.recv_from(&mut wire).await.unwrap();
+        assert!(!Message::parse(&wire[..len]).unwrap().ad());
+        wire[2] |= 0x80;
+        upstream.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let text = format!(".:0 {{\n cache\n forward . {address}\n}}");
+    let blocks = parse("Corefile", &text).unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\xc0\x03\0\x01\0\x01";
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1000".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_restores_the_client_query() {
+    let chain = cache();
+    let domain: Name = ".".parse().unwrap();
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1000".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            chain.cache.as_ref().unwrap().serve(&mut cx, Pending)
+        )
+        .await
+        .is_err()
+    );
+    assert!(!cx.query.ad());
+}
+
+#[tokio::test]
+async fn tsig_queries_bypass_cache_without_modification() {
+    let mut wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\x01x\0\0\x01\0\x01".to_vec();
+    wire.extend_from_slice(b"\0\0\xfa\0\xff\0\0\0\0\0\0");
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let _ = query(&chain, &wire, &calls, 0, false).await;
+    let _ = query(&chain, &wire, &calls, 0, false).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn tsig_responses_are_not_cached_or_rewritten() {
+    let chain = cache_with("cache 1");
+    let calls = AtomicUsize::new(0);
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    for _ in 0..2 {
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(wire).unwrap(),
+            client: "127.0.0.1:1000".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .cache
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, SignedBackend(&calls))
+                .await,
+            Outcome::Response
+        );
+        let message = Message::parse(cx.response).unwrap();
+        assert!(message.ad());
+        assert_eq!(message.answers().next().unwrap().ttl, 30);
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]

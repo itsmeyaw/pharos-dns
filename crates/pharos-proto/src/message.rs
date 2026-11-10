@@ -50,6 +50,7 @@ pub struct Message<'a> {
     wire: &'a [u8],
     starts: [usize; 4],
     counts: [u16; 4],
+    flags: u16,
 }
 
 /// A Question in a Message.
@@ -183,6 +184,7 @@ impl<'a> Message<'a> {
             wire,
             starts,
             counts,
+            flags: u16::from_be_bytes([wire[2], wire[3]]),
         })
     }
     #[must_use]
@@ -191,7 +193,14 @@ impl<'a> Message<'a> {
     }
     #[must_use]
     pub fn flags(&self) -> u16 {
-        u16::from_be_bytes([self.wire[2], self.wire[3]])
+        self.flags
+    }
+    /// Returns a view with AD set. `as_wire` still returns the original bytes;
+    /// a sender must apply `flags()` when transmitting the modified view.
+    #[must_use]
+    pub fn with_ad(mut self) -> Self {
+        self.flags |= 0x20;
+        self
     }
     #[must_use]
     pub fn qr(&self) -> bool {

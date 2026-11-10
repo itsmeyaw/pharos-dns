@@ -287,6 +287,7 @@ async fn verify_returns_stale_on_servfail() {
     }
     impl Next for Backend {
         async fn run(self, cx: &mut Context<'_>) -> Outcome {
+            assert!(cx.query.ad(), "refresh must request authenticated data");
             if self.0 {
                 return Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL);
             }
