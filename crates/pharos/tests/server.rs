@@ -18,6 +18,91 @@ impl Drop for Process {
 }
 
 #[test]
+fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
+    fn port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+    fn http(port: u16, path: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+    let dir = std::env::temp_dir().join(format!("pharos-health-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let (dns, ready, health) = (port(), port(), port());
+    let config = format!(
+        ".:{dns} {{\n ready 127.0.0.1:{ready}\n health 127.0.0.1:{health} {{\n lameduck 2s\n }}\n whoami\n}}\n"
+    );
+    fs::write(dir.join("Corefile"), config).unwrap();
+    let pidfile = dir.join("pid");
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .current_dir(&dir)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !pidfile.exists() {
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "server exited early"
+        );
+        assert!(Instant::now() < deadline, "server did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(http(ready, "/ready").starts_with("HTTP/1.1 200"));
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &process.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let response = http(ready, "/ready");
+        if response.starts_with("HTTP/1.1 503") {
+            assert!(response.ends_with("\r\n\r\nShutting down"));
+            break;
+        }
+        assert!(Instant::now() < deadline, "readiness did not change");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let response = http(health, "/health");
+    assert!(response.starts_with("HTTP/1.1 200") && response.ends_with("\r\n\r\nOK"));
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    udp.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let query = [
+        0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1,
+    ];
+    udp.send_to(&query, ("127.0.0.1", dns)).unwrap();
+    let mut response = [0; 1024];
+    let len = udp.recv(&mut response).unwrap();
+    assert!(len > 12 && response[2] & 0x80 != 0);
+    assert!(pidfile.exists());
+    assert_eq!(process.0.wait().unwrap().code(), Some(0));
+    assert!(!pidfile.exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn default_server_answers_udp_and_tcp_then_removes_pidfile() {
     let dir = std::env::temp_dir().join(format!("pharos-e2e-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();

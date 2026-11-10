@@ -75,7 +75,7 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     #[cfg(feature = "plugin-ready")]
     let mut ready_addresses = std::collections::BTreeSet::new();
     #[cfg(feature = "plugin-health")]
-    let mut health_addresses = std::collections::BTreeSet::new();
+    let mut health_addresses = std::collections::BTreeMap::new();
     #[cfg(feature = "plugin-ready")]
     {
         let state = Arc::clone(&ready_state);
@@ -88,7 +88,9 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
     for block in blocks {
         #[cfg(feature = "plugin-health")]
         if let Some(health) = &block.config.health {
-            health_addresses.insert(health.address.clone());
+            health_addresses
+                .entry(health.address.clone())
+                .or_insert(health.lameduck);
         }
         #[cfg(feature = "plugin-ready")]
         if let Some(ready) = &block.config.ready {
@@ -158,7 +160,7 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
         .map(|(key, router)| (key, Server::with_registry(router, key, metrics.clone())))
         .collect();
     #[cfg(feature = "plugin-health")]
-    for address in health_addresses {
+    for (address, lameduck) in health_addresses {
         let listener = Arc::new(std::sync::Mutex::new(None::<pharos_server::http::Listener>));
         let startup_listener = Arc::clone(&listener);
         lifecycle.register(pharos_server::Phase::Startup, move || {
@@ -186,6 +188,7 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
             let server = listener.lock().unwrap().take();
             async move {
                 if let Some(server) = server {
+                    tokio::time::sleep(lameduck).await;
                     server.shutdown().await?;
                 }
                 Ok(())

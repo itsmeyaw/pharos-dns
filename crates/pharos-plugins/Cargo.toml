@@ -9,6 +9,7 @@ repository.workspace = true
 pharos-corefile = { path = "../pharos-corefile" }
 pharos-proto = { path = "../pharos-proto" }
 pharos-server = { path = "../pharos-server" }
+tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 criterion = "0.5"
