@@ -369,6 +369,24 @@ fn reserved_opt_is_bounded_and_validated() {
 }
 
 #[test]
+fn failed_opt_finalization_keeps_a_valid_message() {
+    let root = name(".");
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 7, 0).unwrap();
+    builder
+        .question(borrowed(&root), Type::A, Class::IN)
+        .unwrap();
+    builder.reserve(11).unwrap();
+    assert_eq!(
+        builder.finish_with_opt(&[0; 11]),
+        Err(BuildError::InvalidRdata)
+    );
+    let message = Message::parse(&wire).unwrap();
+    assert_eq!(message.question_count(), 1);
+    assert_eq!(message.additional_count(), 0);
+}
+
+#[test]
 fn reserved_opt_can_finish_without_truncation() {
     let opt = b"\0\0\x29\x02\x00\0\0\0\0\0\0";
     let root = name(".");

@@ -199,18 +199,22 @@ impl<'a> MessageBuilder<'a> {
 
     /// Appends one pre-encoded OPT record from the reserved space and finishes.
     /// The record must have an uncompressed root owner and a complete RDATA field.
-    /// On error, the buffer contains an unfinished Message and must not be sent.
+    /// On error, the buffer contains the completed Message without the OPT.
     pub fn finish_with_opt(mut self, opt: &[u8]) -> Result<&'a mut Vec<u8>, BuildError> {
-        if opt.len() > self.reserved {
-            return Err(BuildError::SizeLimit);
-        }
-        if opt.len() < 11
+        let error = if opt.len() > self.reserved {
+            Some(BuildError::SizeLimit)
+        } else if opt.len() < 11
             || opt[0..3] != [0, 0, 41]
             || usize::from(u16::from_be_bytes([opt[9], opt[10]])) != opt.len() - 11
         {
-            return Err(BuildError::InvalidRdata);
+            Some(BuildError::InvalidRdata)
+        } else {
+            self.check_count(3).err()
+        };
+        if let Some(error) = error {
+            let _ = self.finish();
+            return Err(error);
         }
-        self.check_count(3)?;
         self.wire.extend_from_slice(opt);
         self.counts[3] += 1;
         Ok(self.finish())
