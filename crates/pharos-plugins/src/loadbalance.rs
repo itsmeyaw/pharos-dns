@@ -123,6 +123,9 @@ impl Subnet {
     fn parse(value: &str) -> Option<Self> {
         let (address, prefix) = value.split_once('/')?;
         let mut address: IpAddr = address.parse().ok()?;
+        if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
         let mut prefix: u32 = prefix.parse().ok()?;
         if prefix > if address.is_ipv4() { 32 } else { 128 } {
             return None;
