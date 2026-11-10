@@ -28,6 +28,7 @@ mod tests {
         store.apply_service(service("10.0.0.1"));
         store.apply_endpoints(slice("one", "10.0.1.1"));
         store.apply_endpoints(slice("two", "10.0.1.2"));
+        store.with_read(|index| assert_eq!(index.counts(), (1, 2, 2, 0, 0)));
         store.apply_service(service("10.0.0.2"));
         store.apply_endpoints(slice("one", "10.0.1.3"));
         store.with_read(|index| {
@@ -149,6 +150,19 @@ fn lookup_reverse<'a, T>(map: &'a Reverse<T>, key: &str) -> impl Iterator<Item =
 }
 
 impl Index {
+    /// Service, EndpointSlice, endpoint-address, Pod and Namespace counts.
+    pub fn counts(&self) -> (usize, usize, usize, usize, usize) {
+        let services = self.services.values().map(HashMap::len).sum();
+        let slices = self.slices.values().map(HashMap::len).sum();
+        let addresses = self
+            .slices
+            .values()
+            .flat_map(HashMap::values)
+            .map(|slice| slice.addresses.len())
+            .sum();
+        let pods = self.pods.values().map(HashMap::len).sum();
+        (services, slices, addresses, pods, self.namespaces.len())
+    }
     pub fn service(&self, namespace: &str, name: &str) -> Option<&Service> {
         by_name(&self.services, namespace, name).map(Arc::as_ref)
     }
