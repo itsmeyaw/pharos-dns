@@ -9,6 +9,17 @@ fn record(cursor: &mut Cursor<'_>, block: &mut BlockContext<Vec<String>>) -> Res
     Ok(())
 }
 
+fn view(_: &mut Cursor<'_>, block: &mut BlockContext<Vec<String>>) -> Result<(), Error> {
+    block.view = true;
+    Ok(())
+}
+
+fn bind(cursor: &mut Cursor<'_>, block: &mut BlockContext<Vec<String>>) -> Result<(), Error> {
+    cursor.next();
+    block.listen_addresses = cursor.remaining_args();
+    Ok(())
+}
+
 #[test]
 fn setup_runs_in_plugin_order_and_shares_configuration() {
     let blocks = parse(
@@ -62,4 +73,49 @@ fn unknown_and_once_only_directives_report_locations() {
     let error = configure(&twice, &registry).unwrap_err();
     assert_eq!(error.line, 5);
     assert!(error.message.contains("first"));
+}
+
+#[test]
+fn validates_duplicate_keys_and_listener_overlaps() {
+    let registry = [
+        Directive {
+            name: "view",
+            once: true,
+            setup: view,
+        },
+        Directive {
+            name: "bind",
+            once: true,
+            setup: bind,
+        },
+    ];
+    for (input, valid) in [
+        ("example.org {\n}\nEXAMPLE.ORG:53 {\n}", false),
+        ("example.org example.org", false),
+        ("example.org {\n}\ntls://example.org {\n}", true),
+        ("example.org {\n}\nexample.org:54 {\n}", true),
+        ("example.org {\n}\nsub.example.org {\n}", true),
+        ("example.org {\n view\n}\nexample.org", true),
+        ("example.org {\n}\nexample.org {\n view\n}", true),
+        (
+            "example.org {\n bind 127.0.0.1\n}\nexample.org {\n bind 127.0.0.2\n}",
+            true,
+        ),
+        ("example.org {\n bind 127.0.0.1\n}\nexample.org", false),
+        (
+            "example.org {\n}\nexample.org {\n bind 127.0.0.1\n view\n}",
+            false,
+        ),
+        (
+            "example.org {\n bind 127.0.0.1\n view\n}\nexample.org",
+            true,
+        ),
+    ] {
+        let blocks = parse("Corefile", input).unwrap();
+        let result = configure(&blocks, &registry);
+        assert_eq!(result.is_ok(), valid, "{input}: {result:?}");
+        if let Err(error) = result {
+            assert_eq!(error.file, "Corefile");
+        }
+    }
 }

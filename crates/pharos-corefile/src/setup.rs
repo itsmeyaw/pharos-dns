@@ -5,6 +5,8 @@
 //! Parser tokens are visible only through the temporary setup cursor, never in
 //! the returned configuration. One context is shared by every key of a block.
 
+use std::collections::HashMap;
+
 use crate::{Cursor, Error, ServerBlock, ServerBlockKey, Token};
 
 /// A known Directive and its setup function, in Plugin Order.
@@ -76,7 +78,63 @@ pub fn configure<C: Default>(
         }
         configured.push(context);
     }
+    validate_overlaps(blocks, &configured)?;
     Ok(configured)
+}
+
+fn validate_overlaps<C>(
+    blocks: &[ServerBlock],
+    configured: &[BlockContext<C>],
+) -> Result<(), Error> {
+    let mut registered: HashMap<(ServerBlockKey, String), ()> = HashMap::new();
+    let mut unbound: HashMap<ServerBlockKey, String> = HashMap::new();
+    for (block, context) in blocks.iter().zip(configured) {
+        for (key, source) in block.normalized_key_sources()? {
+            for address in &context.listen_addresses {
+                let exact = registered.contains_key(&(key.clone(), address.clone()));
+                let overlap = if exact {
+                    None
+                } else if address.is_empty() {
+                    unbound.get(&key).map(String::as_str)
+                } else if registered.contains_key(&(key.clone(), String::new())) {
+                    Some("")
+                } else {
+                    None
+                };
+                let current = format_address(&key, address);
+                if exact && !context.view {
+                    return Err(Error {
+                        file: source.file.clone(),
+                        line: source.line,
+                        message: format!("cannot serve {current} - it is already defined"),
+                    });
+                }
+                if let Some(previous) = overlap {
+                    return Err(Error {
+                        file: source.file.clone(),
+                        line: source.line,
+                        message: format!(
+                            "cannot serve {current} - zone overlap listener capacity with {}",
+                            format_address(&key, previous)
+                        ),
+                    });
+                }
+                if !context.view {
+                    registered.insert((key.clone(), address.clone()), ());
+                    unbound.insert(key.clone(), address.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn format_address(key: &ServerBlockKey, address: &str) -> String {
+    let mut value = format!("{}://{}:{}", key.transport, key.domain, key.port);
+    if !address.is_empty() {
+        value.push_str(&format!(" on {address}"));
+    }
+    value
 }
 
 fn second_occurrence(tokens: &[Token]) -> Option<&Token> {

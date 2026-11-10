@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 
 /// A normalized Server Block Key.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ServerBlockKey {
     /// Transport selected by the key.
     pub transport: String,

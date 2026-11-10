@@ -22,13 +22,26 @@ impl ServerBlock {
 
     /// Validate and normalize keys, retaining source locations for errors.
     pub fn normalize_keys(&self) -> Result<Vec<ServerBlockKey>, Error> {
+        Ok(self
+            .normalized_key_sources()?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect())
+    }
+
+    pub(crate) fn normalized_key_sources(&self) -> Result<Vec<(ServerBlockKey, &Token)>, Error> {
         let mut normalized = Vec::new();
         for (key, source) in self.keys.iter().zip(&self.key_sources) {
-            normalized.extend(normalize_key(key).map_err(|message| Error {
-                file: source.file.clone(),
-                line: source.line,
-                message,
-            })?);
+            normalized.extend(
+                normalize_key(key)
+                    .map_err(|message| Error {
+                        file: source.file.clone(),
+                        line: source.line,
+                        message,
+                    })?
+                    .into_iter()
+                    .map(|key| (key, source)),
+            );
         }
         Ok(normalized)
     }
