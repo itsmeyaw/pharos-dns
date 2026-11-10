@@ -68,6 +68,14 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 The Kubernetes data crate ignores addresses in EndpointSlices with address
 types other than IPv4 or IPv6; CoreDNS retains them.
+Kubeconfig OIDC credentials use the configured ID token without refreshing it;
+CoreDNS includes the client-go OIDC authentication provider.
+DNS programming latency excludes initial lists and relists; CoreDNS records
+annotated EndpointSlices during those operations too. Kubernetes REST request
+duration ends when response headers arrive, rather than after processing the
+response body. Kube's internal retries are counted once per request rather
+than once per attempt as in client-go.
+Client-side rate-limit waits are capped at 100 years for extremely small QPS.
 
 Only `cache`, `errors`, `forward`, `health`, `hosts`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
