@@ -29,6 +29,70 @@ fn tcp_query(stream: &mut TcpStream, query: &[u8]) -> Vec<u8> {
     response
 }
 
+fn reload_version(port: u16) -> Option<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    response
+        .lines()
+        .find(|line| line.starts_with("pharos_reload_version_info{"))
+        .map(str::to_owned)
+}
+
+#[test]
+fn comments_and_whitespace_do_not_trigger_reload() {
+    let dir = std::env::temp_dir().join(format!("pharos-reload-whitespace-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let sockets: Vec<_> = (0..2)
+        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let dns = sockets[0].local_addr().unwrap().port();
+    let metrics = sockets[1].local_addr().unwrap().port();
+    drop(sockets);
+    let file = dir.join("Corefile");
+    let body = format!(".:{dns} {{\n reload 2s 0\n prometheus 127.0.0.1:{metrics}\n whoami\n}}\n");
+    fs::write(&file, &body).unwrap();
+    let pidfile = dir.join("pid");
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .current_dir(&dir)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pidfile.exists() {
+        assert!(process.0.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    let before = reload_version(metrics);
+    let changed = body.replace(" reload 2s 0", "    reload    2s     0");
+    fs::write(
+        &file,
+        format!("\n# comment\n{changed}\n# another comment\n"),
+    )
+    .unwrap();
+    thread::sleep(Duration::from_millis(2700));
+    assert_eq!(
+        reload_version(metrics),
+        before,
+        "comment-only edit caused reload"
+    );
+    drop(process);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn sigusr1_reloads_without_reload_directive() {
     let dir = std::env::temp_dir().join(format!("pharos-reload-{}", std::process::id()));
@@ -172,7 +236,13 @@ fn reload_directive_polls_for_changed_corefile() {
         .unwrap()
         .port();
     let file = dir.join("Corefile");
-    fs::write(&file, format!(".:{port} {{\n reload 2s 0\n whoami\n}}\n")).unwrap();
+    let backend = dir.join("backend.override");
+    fs::write(&backend, "whoami\n").unwrap();
+    fs::write(
+        &file,
+        format!(".:{port} {{\n reload 2s 0\n import *.override\n}}\n"),
+    )
+    .unwrap();
     let pidfile = dir.join("pid");
     let mut process = Process(
         Command::new(env!("CARGO_BIN_EXE_pharos"))
@@ -200,7 +270,7 @@ fn reload_directive_polls_for_changed_corefile() {
     let mut tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
     tcp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     assert_eq!(tcp_query(&mut tcp, &query)[3] & 15, 0);
-    fs::write(&file, format!(".:{port} {{\n errors\n}}\n")).unwrap();
+    fs::write(&backend, "errors\n").unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         socket.send_to(&query, ("127.0.0.1", port)).unwrap();
@@ -214,6 +284,8 @@ fn reload_directive_polls_for_changed_corefile() {
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(tcp_query(&mut tcp, &query)[3] & 15, 2);
+    fs::write(&file, format!(".:{port} {{\n errors\n}}\n")).unwrap();
+    thread::sleep(Duration::from_millis(2500));
     fs::write(&file, format!(".:{port} {{\n whoami\n}}\n")).unwrap();
     thread::sleep(Duration::from_millis(2500));
     socket.send_to(&query, ("127.0.0.1", port)).unwrap();

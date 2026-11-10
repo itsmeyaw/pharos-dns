@@ -52,17 +52,36 @@ fn init_logging(format: &str) {
 type Domains = BTreeMap<String, Vec<String>>;
 type ReloadConfig = Option<pharos_plugins::reload::Reload>;
 
+fn parse_blocks(
+    options: &Options,
+    file: &str,
+    input: &str,
+) -> Result<Vec<pharos_corefile::ServerBlock>, String> {
+    let blocks = pharos_corefile::parse(file, input).map_err(|e| e.to_string())?;
+    if blocks.is_empty() {
+        pharos_corefile::parse("<default>", &default_corefile(options)).map_err(|e| e.to_string())
+    } else {
+        Ok(blocks)
+    }
+}
+
 fn prepare(
     options: &Options,
     file: &str,
     input: &str,
     metrics: &pharos_server::metrics::Registry,
-) -> Result<(pharos_plugins::Servers, Lifecycle, Domains, ReloadConfig), String> {
-    let mut blocks = pharos_corefile::parse(file, input).map_err(|e| e.to_string())?;
-    if blocks.is_empty() {
-        blocks = pharos_corefile::parse("<default>", &default_corefile(options))
-            .map_err(|e| e.to_string())?;
-    }
+) -> Result<
+    (
+        pharos_plugins::Servers,
+        Lifecycle,
+        Domains,
+        ReloadConfig,
+        String,
+    ),
+    String,
+> {
+    let mut blocks = parse_blocks(options, file, input)?;
+    let hash = corefile_hash(&blocks);
     for block in &mut blocks {
         block.set_default_dns_port(options.port.unwrap_or(53));
     }
@@ -82,16 +101,48 @@ fn prepare(
     }
     let (servers, lifecycle) = pharos_plugins::servers_with_registry(blocks, metrics.clone())
         .map_err(|e| e.to_string())?;
-    Ok((servers, lifecycle, domains, reload_config))
+    Ok((servers, lifecycle, domains, reload_config, hash))
 }
 
-fn hash(input: &str) -> String {
-    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA512, input.as_bytes());
+fn digest_hex(digest: aws_lc_rs::digest::Digest) -> String {
     let mut output = String::with_capacity(128);
     for byte in digest.as_ref() {
         write!(output, "{byte:02x}").unwrap();
     }
     output
+}
+
+fn corefile_hash(blocks: &[pharos_corefile::ServerBlock]) -> String {
+    fn count(context: &mut aws_lc_rs::digest::Context, value: usize) {
+        context.update(&(value as u64).to_be_bytes());
+    }
+    fn text(context: &mut aws_lc_rs::digest::Context, value: &str) {
+        count(context, value.len());
+        context.update(value.as_bytes());
+    }
+    let mut context = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA512);
+    count(&mut context, blocks.len());
+    for block in blocks {
+        count(&mut context, block.keys().len());
+        for key in block.keys() {
+            text(&mut context, key);
+        }
+        count(&mut context, block.directives.len());
+        for (directive, tokens) in &block.directives {
+            text(&mut context, directive);
+            count(&mut context, tokens.len());
+            for (index, token) in tokens.iter().enumerate() {
+                if index > 0 {
+                    let previous = &tokens[index - 1];
+                    let same_line = previous.file == token.file
+                        && previous.line + previous.text.matches('\n').count() == token.line;
+                    context.update(&[u8::from(same_line)]);
+                }
+                text(&mut context, &token.text);
+            }
+        }
+    }
+    digest_hex(context.finish())
 }
 
 fn interval(config: pharos_plugins::reload::Reload) -> Duration {
@@ -129,7 +180,7 @@ async fn reload(
             .await
             .map_err(|e| e.to_string())?;
         let (file, input) = reread(options, initial)?;
-        let (servers, next, _, reload_config) = prepare(options, &file, &input, metrics)?;
+        let (servers, next, _, reload_config, hash) = prepare(options, &file, &input, metrics)?;
         if let Err(error) = next.run(Phase::Startup).await {
             let _ = next.run(Phase::Restart).await;
             let _ = next.run(Phase::Shutdown).await;
@@ -153,7 +204,7 @@ async fn reload(
             logging::log("ERROR", "", &format!("Reload shutdown: {error}"));
         }
         *lifecycle = next;
-        Ok((reload_config, input))
+        Ok((reload_config, hash))
     }
     .await;
     match result {
@@ -193,7 +244,7 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     let mut signals = Signals::new().map_err(|e| (1, e.to_string()))?;
     let (file, input) = configuration(&options).map_err(|e| (1, e))?;
     let metrics = pharos_server::metrics::Registry::default();
-    let (servers, mut lifecycle, domains, reload_config) =
+    let (servers, mut lifecycle, domains, reload_config, mut current_hash) =
         prepare(&options, &file, &input, &metrics).map_err(|e| (1, e))?;
     let mut listeners = ListenerRegistry::default();
     listeners
@@ -226,7 +277,6 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
             &format!("Could not write pidfile: {path}: {error}"),
         );
     }
-    let mut current_hash = hash(&input);
     let mut poll_interval = reload_config.map(interval);
     let mut poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
     if poll_at.is_some() {
@@ -240,8 +290,8 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
             _ = signals.hangup.recv() => {},
             _ = signals.reload.recv() => {
                 logging::log("INFO", "", "SIGUSR1: Reloading");
-                if let Some((config, loaded)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
-                    current_hash = hash(&loaded);
+                if let Some((config, loaded_hash)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
+                    current_hash = loaded_hash;
                     poll_interval = config.map(interval);
                     poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
                     if poll_at.is_some() { metrics.reload_version(current_hash.clone()); }
@@ -249,12 +299,13 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
             },
             _ = async { match poll_at { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending().await } } => {
                 poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
-                if let Ok((_, observed)) = reread(&options, &input) {
-                    let observed_hash = hash(&observed);
+                if let Ok((file, observed)) = reread(&options, &input)
+                    && let Ok(blocks) = parse_blocks(&options, &file, &observed) {
+                    let observed_hash = corefile_hash(&blocks);
                     if observed_hash != current_hash {
                         current_hash = observed_hash;
-                        if let Some((config, loaded)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
-                            current_hash = hash(&loaded);
+                        if let Some((config, loaded_hash)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
+                            current_hash = loaded_hash;
                             poll_interval = config.map(interval);
                             poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
                         }
@@ -319,12 +370,15 @@ fn remove_pidfile(options: &Options) {
 mod tests {
     use std::{cell::RefCell, io};
 
-    use super::{hash, interval, shutdown};
+    use super::{digest_hex, interval, shutdown};
 
     #[test]
     fn sha512_and_jitter_match_reload_contract() {
         assert_eq!(
-            hash("abc"),
+            digest_hex(aws_lc_rs::digest::digest(
+                &aws_lc_rs::digest::SHA512,
+                b"abc"
+            )),
             concat!(
                 "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a",
                 "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"

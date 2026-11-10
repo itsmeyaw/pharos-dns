@@ -128,9 +128,8 @@ its port. DNS Listeners with unchanged keys keep their sockets. New Listeners
 are bound before existing handlers are swapped; separate Listeners are swapped
 individually rather than in one process-wide atomic operation.
 
-Pharos hashes the raw Corefile, not CoreDNS's JSON-encoded parsed Server Blocks:
-the hash values differ, comments and whitespace can trigger Reload, and edits
-to imported files alone are not detected. Pharos exposes the initial hash before
+Pharos hashes a canonical representation of parsed, import-expanded Server
+Blocks instead of CoreDNS's JSON encoding, so the hash values differ. Pharos exposes the initial hash before
 the first change. Failed SIGUSR1 attempts and Corefile parse errors increment
 `pharos_reload_failed_total`; CoreDNS's counter is updated by its polling
 restart path, not these cases. The last attempted hash is reported even when a
