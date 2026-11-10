@@ -36,13 +36,7 @@ fn configuration(options: &Options) -> Result<(String, String), String> {
 }
 
 fn default_corefile(options: &Options) -> String {
-    // shortcut: omit log when disabled; remove this fallback when #18 lands.
-    let log = if pharos_plugins::directives().iter().any(|d| d.name == "log") {
-        "log\n"
-    } else {
-        ""
-    };
-    format!(".:{} {{\nwhoami\n{log}}}\n", options.port.unwrap_or(53))
+    format!(".:{} {{\nwhoami\nlog\n}}\n", options.port.unwrap_or(53))
 }
 
 fn init_logging(format: &str) {

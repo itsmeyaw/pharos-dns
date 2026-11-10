@@ -11,11 +11,12 @@ pharos-proto = { path = "../pharos-proto" }
 pharos-server = { path = "../pharos-server" }
 
 [dev-dependencies]
+criterion = "0.5"
 stats_alloc = "0.1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [features]
-default = ["plugin-whoami"]
+default = ["plugin-log", "plugin-whoami"]
 plugin-root = []
 plugin-metadata = []
 plugin-geoip = []
@@ -81,3 +82,8 @@ plugin-nomad = []
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "log"
+harness = false
+required-features = ["plugin-log"]

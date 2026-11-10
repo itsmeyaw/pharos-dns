@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 //! Plugins are enabled by `plugin-<directive>` Cargo features (underscores in
-//! Directive names become hyphens). Only whoami is implemented; other enabled
+//! Directive names become hyphens). Log and whoami are implemented; other enabled
 //! Directives reject configuration rather than silently accepting it.
 
 use pharos_corefile::{BlockContext, Cursor, Directive, Error};
@@ -13,6 +13,10 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-log")]
+pub mod log;
+#[cfg(feature = "plugin-log")]
+pub mod log_format;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -109,6 +113,12 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
         return Err(cursor.arg_err());
     }
     block.config.whoami = Some(whoami::Whoami);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-log")]
+fn setup_log(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.log = Some(log::parse(cursor)?);
     Ok(())
 }
 

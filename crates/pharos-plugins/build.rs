@@ -21,19 +21,19 @@ fn main() {
         "#[derive(Debug, Default)]\npub struct Chain {\npub lifecycle: pharos_server::Lifecycle,\n",
     );
     for name in &enabled {
-        let ty = if *name == "whoami" {
-            "whoami::Whoami"
-        } else {
-            "Unimplemented"
+        let ty = match *name {
+            "whoami" => "whoami::Whoami",
+            "log" => "log::Log",
+            _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
     }
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
-        let setup = if *name == "whoami" {
-            "setup_whoami"
-        } else {
-            "setup_unimplemented"
+        let setup = match *name {
+            "whoami" => "setup_whoami",
+            "log" => "setup_log",
+            _ => "setup_unimplemented",
         };
         writeln!(
             code,
