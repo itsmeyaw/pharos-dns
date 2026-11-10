@@ -85,17 +85,6 @@ domain also accepts duplicate or disordered windows. Both accept empty NSEC
 bitmaps; Pharos rejects them but accepts empty NSEC3 bitmaps (RFC 6840 section
 6.4).
 
-The SRV and NAPTR fixtures in `crates/pharos-proto/tests/rdata_service.rs`
-are adapted from miekg/dns v1.1.73 `parse_test.go` and `dns_test.go`
-([BSD-3-Clause](https://github.com/miekg/dns/blob/v1.1.73/LICENSE),
-copyright 2009 The Go Authors; extensions copyright 2011 Miek Gieben).
-DNSSEC fixtures in `crates/pharos-proto/tests/rdata_dnssec.rs` are adapted from
-miekg/dns v1.1.73 `parse_test.go` and `msg_helpers_test.go` under the same license.
-SVCB/HTTPS fixtures in `crates/pharos-proto/tests/rdata_svcb.rs` adapt its
-`parse_test.go` and `svcb_test.go` under the same license.
-Security record fixtures in `crates/pharos-proto/tests/rdata_security.rs`
-adapt its `parse_test.go` and `tsig_test.go` under the same license.
-
 ## Environment substitution
 
 CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each

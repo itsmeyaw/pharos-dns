@@ -24,6 +24,7 @@
 - DNS code presentation names in `crates/pharos-proto/src/codes.rs` follow miekg/dns v1.1.73.
 - DNS wire fixtures in `crates/pharos-proto/tests/corpus` are from miekg/dns tests; see the corpus README for the revision and original tests.
 - EDNS option formatting and tests in `crates/pharos-proto` follow miekg/dns v1.1.73's `edns.go` and `edns_test.go`.
+- RDATA presentation in `crates/pharos-proto/src/rdata.rs` follows miekg/dns v1.1.73; fixtures in `crates/pharos-proto/tests/rdata_*.rs` adapt its `parse_test.go`, `dns_test.go`, `msg_helpers_test.go`, `svcb_test.go` and `tsig_test.go`.
 
 BSD 3-Clause License
 
