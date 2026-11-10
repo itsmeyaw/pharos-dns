@@ -630,3 +630,74 @@ async fn fifo_rotated_connections_expire_by_creation_age() {
     assert!(!peers[..2].contains(&peers[4]));
     assert!(!peers[..2].contains(&peers[5]));
 }
+
+#[tokio::test]
+async fn source_address_is_used_by_udp_and_tcp() {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let udp = UdpSocket::bind(tcp.local_addr().unwrap()).await.unwrap();
+    let mut proxy = Proxy::new(tcp.local_addr().unwrap());
+    proxy.set_source_address(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    let upstream = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = udp.recv_from(&mut wire).await.unwrap();
+        assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        wire[2] |= 0x80;
+        udp.send_to(&wire[..len], peer).await.unwrap();
+        let (mut stream, peer) = tcp.accept().await.unwrap();
+        assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let len = usize::from(stream.read_u16().await.unwrap());
+        stream.read_exact(&mut wire[..len]).await.unwrap();
+        wire[2] |= 0x80;
+        stream.write_u16(len as u16).await.unwrap();
+        stream.write_all(&wire[..len]).await.unwrap();
+    });
+    let mut response = [0; 512];
+    for transport in [Transport::Udp, Transport::Tcp] {
+        let result = proxy
+            .exchange(QUERY, &mut response, transport, Options::default())
+            .await
+            .unwrap();
+        assert_eq!(result.local_addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+    upstream.await.unwrap();
+    let mut mismatch = Proxy::new("127.0.0.1:53".parse().unwrap());
+    mismatch.set_source_address(Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    for transport in [Transport::Udp, Transport::Tcp] {
+        assert!(
+            mismatch
+                .exchange(QUERY, &mut response, transport, Options::default())
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn health_check_uses_configured_source_address() {
+    use pharos_plugins::proxy::{Health, HealthConfig};
+    use std::{
+        net::{IpAddr, Ipv6Addr},
+        time::Duration,
+    };
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for force_tcp in [false, true] {
+        let mut config = HealthConfig::new(server.local_addr().unwrap(), 1);
+        config.source_address = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
+        config.force_tcp = force_tcp;
+        let health = Health::with_config(config);
+        health.start();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while health.fails() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        health.stop();
+    }
+}

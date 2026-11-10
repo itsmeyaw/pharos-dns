@@ -19,7 +19,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, UdpSocket},
+    net::{TcpSocket, TcpStream, UdpSocket},
     time::timeout,
 };
 
@@ -28,6 +28,18 @@ static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 thread_local! { static SHARD: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS; }
 const EXPIRE: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn connect_tcp(address: SocketAddr, source: Option<IpAddr>) -> io::Result<TcpStream> {
+    let socket = if address.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    if let Some(source) = source {
+        socket.bind(SocketAddr::new(source, 0))?;
+    }
+    socket.connect(address).await
+}
 
 fn is_overflow(error: &MessageError) -> bool {
     matches!(
@@ -145,6 +157,7 @@ pub struct Proxy {
     max_idle_conns: usize,
     idle: AtomicUsize,
     read_timeout: Duration,
+    source_address: Option<IpAddr>,
     metrics: Option<Metrics>,
     health: Health,
 }
@@ -166,6 +179,7 @@ impl Proxy {
             max_idle_conns: 0,
             idle: AtomicUsize::new(0),
             read_timeout: READ_TIMEOUT,
+            source_address: None,
             metrics: None,
             health: Health::new(address, 2),
         }
@@ -191,6 +205,20 @@ impl Proxy {
         self.read_timeout = read_timeout;
     }
 
+    /// Bind new Upstream and health-check connections to this local IP.
+    pub fn set_source_address(&mut self, source: Option<IpAddr>) {
+        if source != self.source_address {
+            for shard in self.shards.iter_mut().flatten() {
+                shard.get_mut().unwrap().clear();
+            }
+            self.idle.store(0, Ordering::Relaxed);
+        }
+        self.source_address = source;
+        let mut config = self.health.config();
+        config.source_address = source;
+        self.health = Health::with_config(config);
+    }
+
     /// Register the Upstream's metrics with the server's exporter.
     pub fn set_metrics(&mut self, registry: &Registry, name: &str) {
         let proxy = registry.proxy(name, &self.address.to_string());
@@ -207,6 +235,7 @@ impl Proxy {
     /// Configure health checks before starting exchanges.
     pub fn set_health_config(&mut self, mut config: HealthConfig) {
         assert_eq!(config.address, self.address);
+        config.source_address = self.source_address;
         if let Some(metrics) = &self.metrics {
             config.metrics = Some(metrics.proxy.clone());
         }
@@ -291,9 +320,12 @@ impl Proxy {
         } else if transport == Transport::Tcp {
             (
                 Socket::Tcp(
-                    timeout(Duration::from_secs(30), TcpStream::connect(self.address))
-                        .await
-                        .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))??,
+                    timeout(
+                        Duration::from_secs(30),
+                        connect_tcp(self.address, self.source_address),
+                    )
+                    .await
+                    .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))??,
                 ),
                 Instant::now(),
             )
@@ -303,7 +335,8 @@ impl Proxy {
             } else {
                 IpAddr::V6(Ipv6Addr::UNSPECIFIED)
             };
-            let socket = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
+            let socket =
+                UdpSocket::bind(SocketAddr::new(self.source_address.unwrap_or(ip), 0)).await?;
             socket.connect(self.address).await?;
             (Socket::Udp(socket), Instant::now())
         };

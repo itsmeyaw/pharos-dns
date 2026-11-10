@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, UdpSocket},
+    net::UdpSocket,
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -28,6 +28,7 @@ pub struct HealthConfig {
     pub domain: Name,
     pub recursive: bool,
     pub force_tcp: bool,
+    pub source_address: Option<IpAddr>,
     pub max_fails: u32,
     pub interval: Duration,
     pub metrics: Option<ProxyMetrics>,
@@ -42,6 +43,7 @@ impl HealthConfig {
             domain: ".".parse().expect("root is a valid DNS name"),
             recursive: true,
             force_tcp: false,
+            source_address: None,
             max_fails,
             interval: Duration::from_millis(500),
             metrics: None,
@@ -168,7 +170,11 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
     query.extend_from_slice(&[0, 2, 0, 1]);
 
     let response = if config.force_tcp {
-        let mut stream = timeout(DIAL_TIMEOUT, TcpStream::connect(config.address)).await??;
+        let mut stream = timeout(
+            DIAL_TIMEOUT,
+            super::connect_tcp(config.address, config.source_address),
+        )
+        .await??;
         timeout(IO_TIMEOUT, async {
             stream
                 .write_all(&(query.len() as u16).to_be_bytes())
@@ -190,7 +196,8 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
             IpAddr::V6(Ipv6Addr::UNSPECIFIED)
         };
         let socket = timeout(DIAL_TIMEOUT, async {
-            let socket = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
+            let socket =
+                UdpSocket::bind(SocketAddr::new(config.source_address.unwrap_or(ip), 0)).await?;
             socket.connect(config.address).await?;
             Ok::<_, io::Error>(socket)
         })
