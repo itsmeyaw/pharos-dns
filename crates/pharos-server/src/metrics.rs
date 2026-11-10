@@ -52,6 +52,7 @@ struct RegistryInner {
     rustc: String,
     blocks: Mutex<BTreeMap<Key, Arc<Block>>>,
     statuses: Mutex<BTreeMap<StatusKey, Arc<AtomicU64>>>,
+    proxies: Mutex<BTreeMap<(String, String), Arc<Proxy>>>,
     process: AtomicBool,
 }
 
@@ -60,6 +61,78 @@ pub struct BlockMetrics(Arc<Block>);
 
 #[derive(Clone)]
 pub struct TransportStatus(Arc<AtomicU64>);
+
+/// Metrics for an Upstream, shared by identical proxy name and address labels.
+#[derive(Clone)]
+pub struct ProxyMetrics(Arc<Proxy>);
+
+/// A request duration series with its RCODE label resolved ahead of recording.
+#[derive(Clone)]
+pub struct ProxyRequestDuration(Arc<Histogram>);
+
+/// Connection cache counters with their protocol label resolved ahead of recording.
+#[derive(Clone)]
+pub struct ProxyConnectionCache(Arc<ProxyCache>);
+
+struct Proxy {
+    proxy_name: String,
+    to: String,
+    durations: Mutex<BTreeMap<String, Arc<Histogram>>>,
+    caches: Mutex<BTreeMap<String, Arc<ProxyCache>>>,
+    healthcheck_failures: AtomicU64,
+}
+
+#[derive(Default)]
+struct ProxyCache {
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl ProxyMetrics {
+    /// Resolve an RCODE label once before observing request durations.
+    pub fn request_duration(&self, rcode: &str) -> ProxyRequestDuration {
+        ProxyRequestDuration(Arc::clone(
+            self.0
+                .durations
+                .lock()
+                .unwrap()
+                .entry(rcode.into())
+                .or_insert_with(|| Arc::new(Histogram::new(TIME_BUCKETS))),
+        ))
+    }
+
+    /// Resolve a protocol label once before recording connection cache events.
+    pub fn connection_cache(&self, proto: &str) -> ProxyConnectionCache {
+        ProxyConnectionCache(Arc::clone(
+            self.0
+                .caches
+                .lock()
+                .unwrap()
+                .entry(proto.into())
+                .or_default(),
+        ))
+    }
+
+    pub fn healthcheck_failure(&self) {
+        self.0.healthcheck_failures.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl ProxyRequestDuration {
+    pub fn observe(&self, seconds: f64) {
+        self.0.observe(TIME_BUCKETS, seconds);
+    }
+}
+
+impl ProxyConnectionCache {
+    pub fn hit(&self) {
+        self.0.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn miss(&self) {
+        self.0.misses.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 impl TransportStatus {
     pub fn increment(&self) {
@@ -137,6 +210,7 @@ impl Registry {
             rustc: rustc.into(),
             blocks: Mutex::new(BTreeMap::new()),
             statuses: Mutex::new(BTreeMap::new()),
+            proxies: Mutex::new(BTreeMap::new()),
             process: AtomicBool::new(false),
         }))
     }
@@ -162,6 +236,24 @@ impl Registry {
                 enabled: Mutex::new(BTreeMap::new()),
             })
         })))
+    }
+
+    /// Resolve metrics for a proxy and Upstream address before recording events.
+    pub fn proxy(&self, proxy_name: &str, to: &str) -> ProxyMetrics {
+        let mut proxies = self.0.proxies.lock().unwrap();
+        ProxyMetrics(Arc::clone(
+            proxies
+                .entry((proxy_name.into(), to.into()))
+                .or_insert_with(|| {
+                    Arc::new(Proxy {
+                        proxy_name: proxy_name.into(),
+                        to: to.into(),
+                        durations: Mutex::new(BTreeMap::new()),
+                        caches: Mutex::new(BTreeMap::new()),
+                        healthcheck_failures: AtomicU64::new(0),
+                    })
+                }),
+        ))
     }
 
     /// Include process metrics from the operating system at scrape time.
@@ -402,8 +494,97 @@ impl Registry {
             }
             sorted.write(out);
         }
+        self.encode_proxies(out);
         if self.0.process.load(Ordering::Relaxed) {
             crate::process_metrics::encode_process(out);
+        }
+    }
+
+    fn encode_proxies(&self, out: &mut String) {
+        let proxies = self.0.proxies.lock().unwrap();
+        for (name, help, hits) in [
+            (
+                "proxy_conn_cache_hits_total",
+                "Counter of connection cache hits per upstream and protocol.",
+                true,
+            ),
+            (
+                "proxy_conn_cache_misses_total",
+                "Counter of connection cache misses per upstream and protocol.",
+                false,
+            ),
+        ] {
+            let mut sorted = SortedSamples::default();
+            for proxy in proxies.values() {
+                for (proto, cache) in proxy.caches.lock().unwrap().iter() {
+                    let n = if hits { &cache.hits } else { &cache.misses }.load(Ordering::Relaxed);
+                    if n != 0 {
+                        sorted.sample(
+                            name,
+                            &[
+                                ("proto", proto),
+                                ("proxy_name", &proxy.proxy_name),
+                                ("to", &proxy.to),
+                            ],
+                            n,
+                        );
+                    }
+                }
+            }
+            if !sorted.0.is_empty() {
+                header(out, name, help, "counter");
+                sorted.write(out);
+            }
+        }
+        let mut sorted = SortedSamples::default();
+        for proxy in proxies.values() {
+            let n = proxy.healthcheck_failures.load(Ordering::Relaxed);
+            if n != 0 {
+                sorted.sample(
+                    "proxy_healthcheck_failures_total",
+                    &[("proxy_name", &proxy.proxy_name), ("to", &proxy.to)],
+                    n,
+                );
+            }
+        }
+        if !sorted.0.is_empty() {
+            header(
+                out,
+                "proxy_healthcheck_failures_total",
+                "Counter of the number of failed healthchecks.",
+                "counter",
+            );
+            sorted.write(out);
+        }
+        let mut sorted = SortedSamples::default();
+        for proxy in proxies.values() {
+            for (rcode, histogram) in proxy.durations.lock().unwrap().iter() {
+                if histogram.count() != 0 {
+                    let values = [
+                        ("proxy_name", proxy.proxy_name.as_str()),
+                        ("rcode", rcode.as_str()),
+                        ("to", proxy.to.as_str()),
+                    ];
+                    let mut text = String::new();
+                    encode_histogram(
+                        &mut text,
+                        "proxy_request_duration_seconds",
+                        &values,
+                        TIME_BUCKETS,
+                        histogram,
+                    );
+                    sorted.insert(&values, text);
+                }
+            }
+        }
+        if !sorted.0.is_empty() {
+            header(
+                out,
+                "proxy_request_duration_seconds",
+                "Histogram of the time each request took.",
+                "histogram",
+            );
+            sorted.write(out);
         }
     }
 }
@@ -644,32 +825,41 @@ fn histogram_family<'a>(
             }
             values.extend(b.labels());
             let mut text = String::new();
-            let out = &mut text;
-            let mut count = 0;
-            for (i, bucket) in histogram.buckets.iter().enumerate() {
-                count += bucket.load(Ordering::Relaxed);
-                write!(out, "pharos_{name}_bucket{{").unwrap();
-                labels(out, &values);
-                let bound = bounds
-                    .get(i)
-                    .map_or_else(|| "+Inf".into(), |value| float(*value));
-                writeln!(out, ",le=\"{bound}\"}} {}", float(count as f64)).unwrap();
-            }
-            write!(out, "pharos_{name}_sum{{").unwrap();
-            labels(out, &values);
-            writeln!(
-                out,
-                "}} {}",
-                float(f64::from_bits(histogram.sum.load(Ordering::Relaxed)))
-            )
-            .unwrap();
-            write!(out, "pharos_{name}_count{{").unwrap();
-            labels(out, &values);
-            writeln!(out, "}} {}", float(count as f64)).unwrap();
+            encode_histogram(&mut text, name, &values, bounds, histogram);
             sorted.insert(&values, text);
         }
     }
     sorted.write(out);
+}
+
+fn encode_histogram(
+    out: &mut String,
+    name: &str,
+    values: &[(&str, &str)],
+    bounds: &[f64],
+    histogram: &Histogram,
+) {
+    let mut count = 0;
+    for (i, bucket) in histogram.buckets.iter().enumerate() {
+        count += bucket.load(Ordering::Relaxed);
+        write!(out, "pharos_{name}_bucket{{").unwrap();
+        labels(out, values);
+        let bound = bounds
+            .get(i)
+            .map_or_else(|| "+Inf".into(), |value| float(*value));
+        writeln!(out, ",le=\"{bound}\"}} {}", float(count as f64)).unwrap();
+    }
+    write!(out, "pharos_{name}_sum{{").unwrap();
+    labels(out, values);
+    writeln!(
+        out,
+        "}} {}",
+        float(f64::from_bits(histogram.sum.load(Ordering::Relaxed)))
+    )
+    .unwrap();
+    write!(out, "pharos_{name}_count{{").unwrap();
+    labels(out, values);
+    writeln!(out, "}} {}", float(count as f64)).unwrap();
 }
 
 fn rcode(code: u16) -> String {
@@ -701,6 +891,89 @@ fn rcode(code: u16) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn proxy_series_share_labels_and_escape_values() {
+        let registry = super::Registry::new("test", "test", "test");
+        let upstream = registry.proxy("forward\"\n", "192.0.2.1:53");
+        let same = registry.proxy("forward\"\n", "192.0.2.1:53");
+        let other = registry.proxy("forward\"\n", "192.0.2.2:53");
+        upstream.request_duration("SERVFAIL").observe(9.0);
+        same.request_duration("SERVFAIL").observe(0.0005);
+        other.request_duration("NOERROR").observe(0.0);
+        upstream.connection_cache("tcp").hit();
+        same.connection_cache("tcp").hit();
+        other.connection_cache("udp").miss();
+        same.healthcheck_failure();
+
+        let mut out = String::new();
+        registry.encode(&mut out);
+        for expected in [
+            "pharos_proxy_request_duration_seconds_bucket{proxy_name=\"forward\\\"\\n\",rcode=\"SERVFAIL\",to=\"192.0.2.1:53\",le=\"0.00025\"} 0",
+            "pharos_proxy_request_duration_seconds_bucket{proxy_name=\"forward\\\"\\n\",rcode=\"SERVFAIL\",to=\"192.0.2.1:53\",le=\"8.192\"} 1",
+            "pharos_proxy_request_duration_seconds_bucket{proxy_name=\"forward\\\"\\n\",rcode=\"SERVFAIL\",to=\"192.0.2.1:53\",le=\"+Inf\"} 2",
+            "pharos_proxy_request_duration_seconds_count{proxy_name=\"forward\\\"\\n\",rcode=\"NOERROR\",to=\"192.0.2.2:53\"} 1",
+            "pharos_proxy_conn_cache_hits_total{proto=\"tcp\",proxy_name=\"forward\\\"\\n\",to=\"192.0.2.1:53\"} 2",
+            "pharos_proxy_conn_cache_misses_total{proto=\"udp\",proxy_name=\"forward\\\"\\n\",to=\"192.0.2.2:53\"} 1",
+            "pharos_proxy_healthcheck_failures_total{proxy_name=\"forward\\\"\\n\",to=\"192.0.2.1:53\"} 1",
+        ] {
+            assert!(
+                out.lines().any(|line| line == expected),
+                "missing {expected}\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn unused_proxy_handles_do_not_emit_series() {
+        let registry = super::Registry::new("test", "test", "test");
+        let proxy = registry.proxy("forward", "192.0.2.1:53");
+        let _ = proxy.request_duration("NOERROR");
+        let _ = proxy.connection_cache("udp");
+        let mut out = String::new();
+        registry.encode(&mut out);
+        assert!(!out.contains("pharos_proxy_"));
+    }
+
+    #[test]
+    fn proxy_metrics_export_upstream_series() {
+        let registry = super::Registry::new("test", "test", "test");
+        let upstream = registry.proxy("forward", "dns://192.0.2.1:53");
+        let duration = upstream.request_duration("NOERROR");
+        let cache = upstream.connection_cache("udp");
+        duration.observe(0.00025);
+        duration.observe(0.001);
+        cache.hit();
+        cache.hit();
+        cache.miss();
+        upstream.healthcheck_failure();
+        let mut out = String::new();
+        registry.encode(&mut out);
+
+        for expected in [
+            "# HELP pharos_proxy_request_duration_seconds Histogram of the time each request took.",
+            "# TYPE pharos_proxy_request_duration_seconds histogram",
+            "# HELP pharos_proxy_healthcheck_failures_total Counter of the number of failed healthchecks.",
+            "# TYPE pharos_proxy_healthcheck_failures_total counter",
+            "# HELP pharos_proxy_conn_cache_hits_total Counter of connection cache hits per upstream and protocol.",
+            "# TYPE pharos_proxy_conn_cache_hits_total counter",
+            "# HELP pharos_proxy_conn_cache_misses_total Counter of connection cache misses per upstream and protocol.",
+            "# TYPE pharos_proxy_conn_cache_misses_total counter",
+            "pharos_proxy_request_duration_seconds_bucket{proxy_name=\"forward\",rcode=\"NOERROR\",to=\"dns://192.0.2.1:53\",le=\"0.00025\"} 1",
+            "pharos_proxy_request_duration_seconds_bucket{proxy_name=\"forward\",rcode=\"NOERROR\",to=\"dns://192.0.2.1:53\",le=\"0.001\"} 2",
+            "pharos_proxy_request_duration_seconds_bucket{proxy_name=\"forward\",rcode=\"NOERROR\",to=\"dns://192.0.2.1:53\",le=\"+Inf\"} 2",
+            "pharos_proxy_request_duration_seconds_sum{proxy_name=\"forward\",rcode=\"NOERROR\",to=\"dns://192.0.2.1:53\"} 0.00125",
+            "pharos_proxy_request_duration_seconds_count{proxy_name=\"forward\",rcode=\"NOERROR\",to=\"dns://192.0.2.1:53\"} 2",
+            "pharos_proxy_healthcheck_failures_total{proxy_name=\"forward\",to=\"dns://192.0.2.1:53\"} 1",
+            "pharos_proxy_conn_cache_hits_total{proto=\"udp\",proxy_name=\"forward\",to=\"dns://192.0.2.1:53\"} 2",
+            "pharos_proxy_conn_cache_misses_total{proto=\"udp\",proxy_name=\"forward\",to=\"dns://192.0.2.1:53\"} 1",
+        ] {
+            assert!(
+                out.lines().any(|line| line == expected),
+                "missing {expected}\n{out}"
+            );
+        }
+    }
+
     #[test]
     fn go_float_formatting() {
         for (value, expected) in [

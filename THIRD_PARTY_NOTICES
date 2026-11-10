@@ -12,7 +12,7 @@
 - The log Plugin, formatter and tests follow CoreDNS v1.15.0's `plugin/log`, `plugin/pkg/replacer` and `plugin/pkg/response`.
 - EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
 - Server routing, startup formatting, and tests in `crates/pharos-server` follow CoreDNS v1.15.0's `core/dnsserver/server.go`, `server_test.go`, and `onstartup.go`.
-- Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics`.
+- Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics` and `plugin/pkg/proxy/metrics.go`.
 - The CLI layout and lifecycle in `crates/pharos` follow CoreDNS v1.15.0's `coremain/run.go` and `core/dnsserver/onstartup.go`.
 
 ## Prometheus Go client, common, and procfs
