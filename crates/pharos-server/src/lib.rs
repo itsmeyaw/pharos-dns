@@ -4,9 +4,17 @@
 //! buffer after awaiting Next. The Listener handles unanswered codes and errors.
 
 use std::{
-    collections::HashMap, fmt, future::Future, io, net::SocketAddr, sync::Arc, time::Duration,
+    any::Any,
+    collections::{HashMap, HashSet},
+    fmt,
+    future::Future,
+    io,
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
 };
 
+use arc_swap::ArcSwap;
 use pharos_proto::{BuildError, Message, Name, Rcode};
 use tokio::{
     net::{TcpListener, UdpSocket},
@@ -314,18 +322,102 @@ impl Drop for Listener {
 #[derive(Default)]
 pub struct ListenerRegistry {
     listeners: HashMap<ListenerKey, Listener>,
+    handlers: HashMap<ListenerKey, Box<dyn Any + Send + Sync>>,
 }
 
 impl ListenerRegistry {
     pub fn insert(&mut self, key: ListenerKey, listener: Listener) -> Option<Listener> {
+        self.handlers.remove(&key);
         self.listeners.insert(key, listener)
     }
 
     pub fn remove(&mut self, key: &ListenerKey) -> Option<Listener> {
+        self.handlers.remove(key);
         self.listeners.remove(key)
     }
 
     pub fn get(&self, key: &ListenerKey) -> Option<&Listener> {
         self.listeners.get(key)
+    }
+
+    /// Bind new Listeners before changing any existing Listener's handler.
+    pub async fn apply<H: Handler>(
+        &mut self,
+        mut servers: HashMap<ListenerKey, H>,
+    ) -> io::Result<()> {
+        let desired: HashSet<_> = servers.keys().copied().collect();
+        if desired.iter().any(|key| key.transport != Transport::Dns) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsupported Listener transport",
+            ));
+        }
+        for key in servers
+            .keys()
+            .filter(|key| self.listeners.contains_key(key))
+        {
+            if self
+                .handlers
+                .get(key)
+                .and_then(|handler| handler.downcast_ref::<Arc<ArcSwap<H>>>())
+                .is_none()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Listener handler type mismatch",
+                ));
+            }
+        }
+        let mut added = Vec::new();
+        let new_keys: Vec<_> = servers
+            .keys()
+            .filter(|key| !self.listeners.contains_key(key))
+            .copied()
+            .collect();
+        for key in new_keys {
+            let handler = Arc::new(ArcSwap::from_pointee(
+                servers.remove(&key).expect("new Listener"),
+            ));
+            let listener = Listener::bind(key.address, Swappable(Arc::clone(&handler))).await?;
+            added.push((key, listener, handler));
+        }
+        for (key, server) in servers {
+            self.handlers[&key]
+                .downcast_ref::<Arc<ArcSwap<H>>>()
+                .expect("validated handler")
+                .store(Arc::new(server));
+        }
+        let removed: Vec<_> = self
+            .listeners
+            .keys()
+            .filter(|key| !desired.contains(key))
+            .copied()
+            .collect();
+        for (key, listener, handler) in added {
+            self.listeners.insert(key, listener);
+            self.handlers.insert(key, Box::new(handler));
+        }
+        for key in removed {
+            if let Some(listener) = self.remove(&key)
+                && let Err(error) = listener.shutdown().await
+            {
+                logging::log("ERROR", "", &format!("Listener shutdown: {error}"));
+            }
+        }
+        Ok(())
+    }
+}
+
+struct Swappable<H>(Arc<ArcSwap<H>>);
+
+impl<H: Handler> Handler for Swappable<H> {
+    async fn handle(
+        &self,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        self.0.load().handle(query, peer, protocol, response).await
     }
 }
