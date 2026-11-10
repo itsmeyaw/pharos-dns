@@ -43,6 +43,17 @@ impl Listener {
     where
         F: Fn(&str) -> Option<(&'static str, String)> + Send + Sync + 'static,
     {
+        Self::bind_with_status(address, move |path| {
+            route(path).map(|(content_type, body)| (200, content_type, body))
+        })
+        .await
+    }
+
+    /// Bind an endpoint whose callback also selects the HTTP status.
+    pub async fn bind_with_status<F>(address: &str, route: F) -> io::Result<Self>
+    where
+        F: Fn(&str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
+    {
         let address = if address.ends_with(':') {
             Cow::Owned(format!("{address}0"))
         } else {
@@ -100,12 +111,13 @@ impl Listener {
                                 async move {
                                     let mut result = Response::new(Full::default());
                                     match response {
-                                        Some((content_type, body)) => match HeaderValue::from_str(content_type) {
-                                            Ok(content_type) => {
+                                        Some((status, content_type, body)) => match (StatusCode::from_u16(status), HeaderValue::from_str(content_type)) {
+                                            (Ok(status), Ok(content_type)) => {
+                                                *result.status_mut() = status;
                                                 result.headers_mut().insert(CONTENT_TYPE, content_type);
                                                 *result.body_mut() = Full::new(Bytes::from(body));
                                             }
-                                            Err(_) => *result.status_mut() = StatusCode::INTERNAL_SERVER_ERROR,
+                                            _ => *result.status_mut() = StatusCode::INTERNAL_SERVER_ERROR,
                                         },
                                         None => *result.status_mut() = StatusCode::NOT_FOUND,
                                     }
@@ -203,6 +215,23 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).await.unwrap();
         response
+    }
+
+    #[tokio::test]
+    async fn routes_can_return_service_unavailable() {
+        let listener = Listener::bind_with_status("127.0.0.1:0", |path| {
+            (path == "/ready").then(|| (503, "text/plain", "not-ready".into()))
+        })
+        .await
+        .unwrap();
+        let response = request(
+            listener.local_addr(),
+            "GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(response.ends_with("not-ready"));
+        listener.shutdown().await.unwrap();
     }
 
     #[tokio::test]
