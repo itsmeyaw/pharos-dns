@@ -12,6 +12,7 @@
 - The forward Plugin and tests follow CoreDNS v1.15.0's `plugin/forward`.
 - The cache Plugin and tests follow CoreDNS v1.15.0's `plugin/cache`, `plugin/pkg/cache` and `plugin/pkg/dnsutil`.
 - The hosts Plugin and tests follow CoreDNS v1.15.0's `plugin/hosts` and `plugin/pkg/fall`.
+- The loadbalance Plugin and tests follow CoreDNS v1.15.0's `plugin/loadbalance`.
 - The loop Plugin and tests follow CoreDNS v1.15.0's `plugin/loop`.
 - The log Plugin, formatter and tests follow CoreDNS v1.15.0's `plugin/log`, `plugin/pkg/replacer` and `plugin/pkg/response`.
 - The prometheus Plugin and tests follow CoreDNS v1.15.0's `plugin/metrics`.
