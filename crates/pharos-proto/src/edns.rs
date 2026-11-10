@@ -1,6 +1,36 @@
 use std::fmt;
 
-use crate::{BuildError, EdnsOption, EdnsOptions, Rcode, Record};
+use crate::{BuildError, EdnsOption, EdnsOptions, Message, MessageBuilder, Opcode, Rcode, Record};
+
+impl Message<'_> {
+    /// Builds CoreDNS's BADVERS Response for a Query with a nonzero EDNS version.
+    /// A Query without OPT or with version zero leaves `wire` unchanged.
+    pub fn badvers_response<'a>(
+        &self,
+        wire: &'a mut Vec<u8>,
+    ) -> Result<Option<&'a mut Vec<u8>>, BuildError> {
+        if !self.opt().is_some_and(Opt::bad_version) {
+            return Ok(None);
+        }
+        let flags = 0x8000
+            | (self.flags() & 0x7800)
+            | if self.opcode() == Opcode::QUERY {
+                self.flags() & 0x0110
+            } else {
+                0
+            };
+        let mut builder = MessageBuilder::new(wire, usize::from(u16::MAX), self.id(), flags)?;
+        let opt = Opt::badvers();
+        let response = opt.response(None, &[], Rcode::BADVERS);
+        builder.reserve_response_opt(&response)?;
+        if let Some(question) = self.questions().next()
+            && !builder.question(question.name, question.qtype, question.qclass)?
+        {
+            return Err(BuildError::SizeLimit);
+        }
+        builder.finish_with_response_opt(&response).map(Some)
+    }
+}
 
 /// A borrowed EDNS OPT record. The options have already been validated.
 #[derive(Clone, Copy, Debug)]

@@ -35,6 +35,36 @@ fn size_and_version_follow_coredns() {
 }
 
 #[test]
+fn badvers_response_preserves_question_and_query_flags() {
+    let query = [
+        0x12, 0x34, 1, 0x10, 0, 1, 0, 0, 0, 0, 0, 1, 1, b'x', 0, 0, 1, 0, 1, 0, 0, 41, 2, 0, 0, 2,
+        0x80, 0, 0, 0,
+    ];
+    let query = Message::parse(&query).unwrap();
+    let mut wire = Vec::new();
+    let result = query.badvers_response(&mut wire).unwrap().unwrap();
+    let response = Message::parse(result).unwrap();
+    assert_eq!(response.id(), 0x1234);
+    assert!(response.qr() && response.rd() && response.cd());
+    assert_eq!(response.question_count(), 1);
+    assert_eq!(response.rcode(), Rcode::BADVERS);
+    let opt = response.opt().unwrap();
+    assert_eq!(
+        (opt.udp_payload_size(), opt.version(), opt.flags()),
+        (0, 0, 0)
+    );
+
+    let no_opt = [0; 12];
+    assert!(
+        Message::parse(&no_opt)
+            .unwrap()
+            .badvers_response(&mut wire)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn response_existing_opt_keeps_its_options_and_high_flags() {
     let query = Opt::new(4096, 0, 0, 0, EdnsOptions::parse(&[]).unwrap());
     let existing = Opt::new(
