@@ -338,3 +338,16 @@ ordinary warmed hits do not allocate.
 
 Cache metric series are initialized at setup, including zero-valued series;
 CoreDNS initializes individual labelled series on first use.
+
+## Self Lookup
+
+Self Lookup is limited to 10 nested Self Lookups; CoreDNS v1.15.0 does not enforce
+a depth limit. This prevents unbounded recursion, for example from a cycle of
+ExternalName Services. Exceeding the limit returns a Plugin error, normally
+answered with SERVFAIL.
+
+Copying a Query for Self Lookup re-encodes its records. It fails if RDATA is
+malformed, contains an unsupported name-bearing type, or the resulting Message
+exceeds 65,535 bytes; CoreDNS copies its decoded Message instead. A detached
+cache background refresh currently has no Listener state for Self Lookup,
+unlike a Query routed by a Listener.

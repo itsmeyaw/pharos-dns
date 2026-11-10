@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "512"]
 
 use pharos_proto::{Class, Message, MessageBuilder, Name, Rcode, Section, Type};
 use pharos_server::{

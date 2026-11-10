@@ -224,6 +224,7 @@ struct SelfLookupState<'a> {
     depth: u8,
 }
 
+// Type erasure keeps Context nongeneric without allocating on ordinary Queries.
 trait SelfLookupServer: Sync {
     fn lookup<'a>(
         &'a self,

@@ -20,6 +20,7 @@
 - Reload timing setup and tests follow CoreDNS v1.15.0's `plugin/reload`.
 - EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
 - Self Lookup Query copying follows CoreDNS v1.15.0's `request.NewWithQuestion`.
+- Self Lookup routing and capture follow CoreDNS v1.15.0's `plugin/pkg/upstream` and `plugin/pkg/nonwriter`.
 - Response Type and Class classification and tests follow CoreDNS v1.15.0's `plugin/pkg/response`.
 - Server routing, startup formatting, and tests in `crates/pharos-server` follow CoreDNS v1.15.0's `core/dnsserver/server.go`, `server_test.go`, and `onstartup.go`.
 - Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics` and `plugin/pkg/proxy/metrics.go`.

@@ -122,7 +122,7 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
         depth: u8,
         response: &'a mut Vec<u8>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
-        // shortcut: recursive static Plugin Chains require boxing only on Self Lookup.
+        // shortcut: static re-entry boxes a future, remove if recursive dispatch no longer needs it.
         Box::pin(self.handle_with_depth(wire, peer, protocol, response, depth))
     }
 }
