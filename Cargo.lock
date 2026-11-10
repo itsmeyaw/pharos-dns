@@ -1678,6 +1678,7 @@ dependencies = [
  "pharos-server",
  "serde",
  "serde_json",
+ "stats_alloc",
  "tempfile",
  "tokio",
  "tower",
