@@ -221,3 +221,18 @@ async fn ignores_out_of_order_udp_response_ids() {
     assert_eq!(&response[..2], &QUERY[..2]);
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn read_timeout_is_configurable() {
+    use pharos_plugins::proxy::Error;
+    use std::{io, time::Duration};
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut proxy = Proxy::new(server.local_addr().unwrap());
+    proxy.set_read_timeout(Duration::from_millis(20));
+    let mut response = [0; 512];
+    let error = proxy
+        .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Io(err) if err.kind() == io::ErrorKind::TimedOut));
+}

@@ -106,6 +106,7 @@ pub struct Proxy {
     address: SocketAddr,
     shards: [[Mutex<VecDeque<Cached>>; SHARDS]; 2],
     expire: Duration,
+    read_timeout: Duration,
     metrics: Option<Metrics>,
 }
 
@@ -122,6 +123,7 @@ impl Proxy {
             address,
             shards: std::array::from_fn(|_| std::array::from_fn(|_| Mutex::new(VecDeque::new()))),
             expire: EXPIRE,
+            read_timeout: READ_TIMEOUT,
             metrics: None,
         }
     }
@@ -129,6 +131,11 @@ impl Proxy {
     /// Set the maximum idle time before an Upstream connection is discarded.
     pub fn set_expire(&mut self, expire: Duration) {
         self.expire = expire;
+    }
+
+    /// Set the Response read timeout (two seconds by default).
+    pub fn set_read_timeout(&mut self, read_timeout: Duration) {
+        self.read_timeout = read_timeout;
     }
 
     /// Register the Upstream's metrics with the server's exporter.
@@ -230,7 +237,7 @@ impl Proxy {
                 Error::Io(err)
             });
         }
-        let received = timeout(READ_TIMEOUT, async {
+        let received = timeout(self.read_timeout, async {
             loop {
                 let len = socket.receive(response).await?;
                 if len >= 2 && response[..2] == id {
