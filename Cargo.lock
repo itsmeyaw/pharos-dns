@@ -465,6 +465,9 @@ dependencies = [
 [[package]]
 name = "pharos-server"
 version = "0.1.0"
+dependencies = [
+ "pharos-proto",
+]
 
 [[package]]
 name = "pin-project-lite"
