@@ -7,3 +7,11 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1"
+
+[[bench]]
+name = "name"
+harness = false
