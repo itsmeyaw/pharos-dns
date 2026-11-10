@@ -1,5 +1,16 @@
 # CoreDNS compatibility
 
+## Plugins
+
+Only `whoami` is implemented. Other built-in Directives are disabled by
+default; explicitly enabling their Cargo features makes setup fail with a
+not-implemented error rather than accepting their configuration.
+
+Whoami reports an error if adding the protocol label would make its SRV owner
+name exceed the DNS name length limit. CoreDNS ignores the resulting write
+error. The caller must supply a Response buffer with enough capacity; otherwise
+Pharos reports an error instead of allocating on the Query path.
+
 ## Domain names
 
 CoreDNS v1.15.0 uses miekg/dns v1.1.73. Pharos rejects compression
