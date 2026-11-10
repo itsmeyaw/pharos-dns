@@ -15,6 +15,14 @@ fn version_uses_pharos_identity() {
             text.starts_with("Pharos-0.1.0\nCoreDNS-1.15.0 compatible\n"),
             "{text}"
         );
+        assert!(
+            text.contains(&format!(
+                "{}/{}, rustc ",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )),
+            "{text}"
+        );
     }
 }
 
@@ -67,4 +75,70 @@ fn invalid_flags_fail() {
         assert!(!output.status.success());
         assert!(!output.stderr.is_empty());
     }
+}
+
+#[test]
+fn corefile_errors_report_their_source() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pharos"))
+        .args(["--conf", "stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b".:1053 {\nmissing\n}\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("stdin:2: Unknown directive 'missing'")
+    );
+
+    let path = std::env::temp_dir().join(format!("pharos-cli-{}", std::process::id()));
+    std::fs::write(&path, ".:1053 {\nmissing\n}\n").unwrap();
+    for flag in ["-c", "--conf"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .arg(flag)
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(&format!("{}:2:", path.display()))
+        );
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn log_formats_are_accepted() {
+    for format in ["text", "json"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .args(["--log-format", format, "-V"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+}
+
+#[test]
+fn corefile_fallback_and_parse_errors_report_location() {
+    let dir = std::env::temp_dir().join(format!("pharos-lookup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Corefile"), ". {\nwhoami\n").unwrap();
+    if !std::path::Path::new("/etc/pharos/pharos.conf").exists() {
+        let output = Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Corefile:2:"));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

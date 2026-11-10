@@ -1,4 +1,19 @@
 #![forbid(unsafe_code)]
+//! Pharos command-line binary.
+//!
+//! Exit codes follow CoreDNS v1.15.0 and coredns/caddy v1.1.4's
+//! `coremain/run.go`, `sigtrap.go`, `sigtrap_posix.go` and `caddy.go`:
+//!
+//! | Code | Meaning |
+//! | --- | --- |
+//! | 0 | Version, Plugin listing, SIGQUIT, or successful shutdown |
+//! | 1 | Configuration, startup, log-format, or pidfile error |
+//! | 2 | Invalid flag or second SIGINT during shutdown |
+//! | 3 | Listener stop failure |
+//! | 4 | Shutdown hook failure |
+//!
+//! Unlike Caddy, a pidfile write failure is fatal and Listener stop failure
+//! is reported for either shutdown signal. See `docs/compatibility.md`.
 
 mod app;
 
@@ -99,7 +114,11 @@ async fn main() -> ExitCode {
 
 fn version() {
     println!(
-        "Pharos-{}\nCoreDNS-1.15.0 compatible",
-        env!("CARGO_PKG_VERSION")
+        "Pharos-{}\nCoreDNS-1.15.0 compatible\n{}/{}, {}, {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        env!("PHAROS_RUSTC"),
+        env!("PHAROS_REVISION")
     );
 }
