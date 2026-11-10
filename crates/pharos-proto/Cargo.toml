@@ -11,7 +11,12 @@ workspace = true
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1"
+stats_alloc = "0.1.10"
 
 [[bench]]
 name = "name"
+harness = false
+
+[[bench]]
+name = "message"
 harness = false
