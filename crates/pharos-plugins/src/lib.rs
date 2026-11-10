@@ -15,7 +15,11 @@ use std::{
 
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
-#[cfg(any(feature = "plugin-health", feature = "plugin-errors"))]
+#[cfg(any(
+    feature = "plugin-health",
+    feature = "plugin-errors",
+    feature = "plugin-reload"
+))]
 pub mod health;
 pub mod proxy;
 
@@ -30,6 +34,8 @@ pub mod log_format;
 pub mod prometheus;
 #[cfg(feature = "plugin-ready")]
 pub mod ready;
+#[cfg(feature = "plugin-reload")]
+pub mod reload;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
