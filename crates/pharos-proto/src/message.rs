@@ -137,6 +137,12 @@ fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageErro
 }
 
 impl<'a> Message<'a> {
+    /// Return the original Message bytes without copying.
+    #[must_use]
+    pub const fn as_wire(&self) -> &'a [u8] {
+        self.wire
+    }
+
     /// Validates all section boundaries and names before exposing the view.
     /// Bytes after the declared sections are ignored, as in CoreDNS.
     pub fn parse(wire: &'a [u8]) -> Result<Self, MessageError> {
