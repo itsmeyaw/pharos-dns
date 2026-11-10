@@ -134,10 +134,10 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     let stop = async {
         let mut result = Ok(());
         for listener in listeners {
-            if let Err(error) = listener.shutdown().await {
-                if result.is_ok() {
-                    result = Err(error);
-                }
+            if let Err(error) = listener.shutdown().await
+                && result.is_ok()
+            {
+                result = Err(error);
             }
         }
         result
