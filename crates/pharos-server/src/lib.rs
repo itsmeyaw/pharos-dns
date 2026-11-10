@@ -236,10 +236,20 @@ pub struct Listener {
 
 impl Listener {
     pub async fn bind<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
-        let tcp = TcpListener::bind(address).await?;
-        let address = tcp.local_addr()?;
+        // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
+        let mut attempts = if address.port() == 0 { 16 } else { 1 };
+        let (tcp, address, first) = loop {
+            let tcp = TcpListener::bind(address).await?;
+            let bound = tcp.local_addr()?;
+            match udp::bind(bound) {
+                Ok(udp) => break (tcp, bound, udp),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts > 1 => {
+                    attempts -= 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let mut sockets = Vec::new();
-        let first = udp::bind(address)?;
         sockets.push(first);
         for _ in 1..quota::worker_count() {
             sockets.push(udp::bind(address)?);
