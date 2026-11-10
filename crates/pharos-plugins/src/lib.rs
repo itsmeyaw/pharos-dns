@@ -82,7 +82,9 @@ pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecyc
             Ok(())
         });
     }
-    for mut block in blocks {
+    for block in blocks {
+        #[cfg(feature = "plugin-forward")]
+        let mut block = block;
         #[cfg(feature = "plugin-forward")]
         if let Some(forward) = &mut block.config.forward {
             forward.set_metrics(&metrics);
