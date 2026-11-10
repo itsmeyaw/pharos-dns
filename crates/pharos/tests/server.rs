@@ -105,7 +105,6 @@ fn explicit_corefile_uses_default_port_quiet_and_signals() {
                 "--pidfile",
                 "pid",
                 "-q",
-                "--quiet",
                 "--log-format",
                 "json",
             ])
@@ -162,6 +161,68 @@ fn explicit_corefile_uses_default_port_quiet_and_signals() {
     assert!(stdout.is_empty());
     assert!(stderr.contains("Reload"));
     assert!(!pidfile.exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn long_quiet_flag_suppresses_startup() {
+    let dir = std::env::temp_dir().join(format!("pharos-quiet-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let pid = dir.join("pid");
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .current_dir(&dir)
+            .args([
+                "--conf",
+                "stdin",
+                "--port",
+                &port.to_string(),
+                "--pidfile",
+                "pid",
+                "--quiet",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    process
+        .0
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b". {\nwhoami\n}\n")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !pid.exists() {
+        assert!(process.0.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &process.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(process.0.wait().unwrap().code(), Some(0));
+    let mut stdout = String::new();
+    process
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    assert!(stdout.is_empty());
+    assert!(!pid.exists());
     fs::remove_dir_all(dir).unwrap();
 }
 
