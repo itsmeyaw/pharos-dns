@@ -336,7 +336,7 @@ async fn authenticated_refresh_sets_ad_on_forwarded_wire() {
         .remove(0)
         .config;
     let domain: Name = ".".parse().unwrap();
-    let mut wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01".to_vec();
+    let mut wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\x01x\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\0\0\0\x06\xfd\xe9\0\x02\xc0\x01".to_vec();
     let mut response = Vec::with_capacity(65535);
     for ad in [false, true] {
         if ad {
@@ -401,6 +401,40 @@ async fn compressed_query_survives_ad_refresh() {
     };
     assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn opaque_label_bytes_do_not_prevent_authenticated_caching() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x02\xc0\x03\0\0\x01\0\x01";
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    for _ in 0..2 {
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(wire).unwrap(),
+            client: "127.0.0.1:1000".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .cache
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, AuthenticatedBackend(&calls))
+                .await,
+            Outcome::Response
+        );
+        assert!(!Message::parse(cx.response).unwrap().ad());
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

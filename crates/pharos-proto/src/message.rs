@@ -202,6 +202,38 @@ impl<'a> Message<'a> {
         self.flags |= 0x20;
         self
     }
+    /// Whether setting AD in the wire header preserves encoded names.
+    /// Non-OPT RDATA with a possible pointer into the header is conservatively rejected.
+    #[must_use]
+    pub fn can_set_ad_in_wire(&self) -> bool {
+        if self.wire[3] & 0x20 != 0 {
+            return true;
+        }
+        let mut offset = self.starts[0];
+        for question in self.questions() {
+            if name_references_header(self.wire, offset) {
+                return false;
+            }
+            offset += question.name.wire_len() + 4;
+        }
+        for record in self
+            .answers()
+            .chain(self.authorities())
+            .chain(self.additionals())
+        {
+            let name_offset = record.ttl_offset - 4 - record.name.wire_len();
+            if name_references_header(self.wire, name_offset)
+                || (record.rtype != Type::OPT
+                    && record
+                        .rdata
+                        .windows(2)
+                        .any(|pair| pair[0] == 0xc0 && pair[1] < 12))
+            {
+                return false;
+            }
+        }
+        true
+    }
     #[must_use]
     pub fn qr(&self) -> bool {
         self.flags() & 0x8000 != 0
@@ -295,6 +327,23 @@ impl<'a> Message<'a> {
             remaining: self.counts[section],
         }
     }
+}
+
+fn name_references_header(wire: &[u8], mut offset: usize) -> bool {
+    for _ in 0..=255 {
+        match wire[offset] {
+            0 => return false,
+            length @ 1..=63 => offset += 1 + usize::from(length),
+            pointer => {
+                let target = (usize::from(pointer & 0x3f) << 8) | usize::from(wire[offset + 1]);
+                if target < HEADER_LEN {
+                    return true;
+                }
+                offset = target;
+            }
+        }
+    }
+    true
 }
 
 /// Questions of a validated Message.

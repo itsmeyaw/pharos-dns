@@ -199,7 +199,9 @@ impl Plugin for Cache {
             }
             if let Some(stored) = hit.refresh {
                 let store = if denial { &self.denial } else { &self.success };
-                if let Some(chain) = self.chain.get().and_then(Weak::upgrade) {
+                if !query.can_set_ad_in_wire() {
+                    store.finish_refresh(key, stored, self.config.stale_recheck, false);
+                } else if let Some(chain) = self.chain.get().and_then(Weak::upgrade) {
                     if (!hit.stale || !self.config.verify)
                         && let Some(metrics) = metrics
                     {
@@ -270,6 +272,9 @@ impl Plugin for Cache {
         }
         if let Some(metrics) = metrics {
             metrics.miss();
+        }
+        if !query.can_set_ad_in_wire() {
+            return next.run(cx).await;
         }
         let outcome = {
             cx.query = query.with_ad();

@@ -252,9 +252,7 @@ impl Plugin for Forward {
             let original_query = cx.query.as_wire();
             let query_wire = if cx.query.flags()
                 != u16::from_be_bytes([original_query[2], original_query[3]])
-                && !original_query
-                    .windows(2)
-                    .any(|pair| pair[0] == 0xc0 && pair[1] < 12)
+                && cx.query.can_set_ad_in_wire()
             {
                 query_buffer.clear();
                 query_buffer.extend_from_slice(original_query);
