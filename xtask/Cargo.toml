@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+pharos-proto = { path = "../crates/pharos-proto" }
+
 [lints]
 workspace = true

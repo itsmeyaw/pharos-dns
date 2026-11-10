@@ -1,0 +1,3 @@
+example.org. A IN udp +bufsize=1232
+example.org. A IN tcp +dnssec +bufsize=1232
+example.org. A IN udp +ednsversion=1

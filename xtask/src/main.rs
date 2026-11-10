@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod compare;
 mod coredns;
+mod differential;
+mod query;
 
 use std::{
     env, fs,
@@ -16,23 +19,45 @@ fn main() -> ExitCode {
     let args: Vec<_> = env::args().skip(1).collect();
     match args.as_slice() {
         [command] if command == "check" => check(),
-        [command] if command == "coredns" => {
-            let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-            match coredns::build(root) {
-                Ok(path) => {
-                    println!("{}", path.display());
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    ExitCode::FAILURE
-                }
+        [command] if command == "coredns" => match coredns::build(root()) {
+            Ok(path) => {
+                println!("{}", path.display());
+                ExitCode::SUCCESS
             }
-        }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
+        [command] if command == "diff" => diff(false),
+        [command, flag] if command == "diff" && flag == "--self-test" => diff(true),
         [command] if command == "fuzz" => fuzz(false),
         [command, flag] if command == "fuzz" && flag == "--short" => fuzz(true),
         _ => {
-            eprintln!("usage: cargo xtask check | coredns | fuzz [--short]");
+            eprintln!("usage: cargo xtask check | coredns | diff [--self-test] | fuzz [--short]");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+}
+
+fn cached_coredns() -> PathBuf {
+    root().join("target/coredns/v1.15.0/coredns")
+}
+
+fn diff(self_test: bool) -> ExitCode {
+    let coredns = cached_coredns();
+    if !coredns.is_file() {
+        eprintln!("CoreDNS is not cached; run cargo xtask coredns first");
+        return ExitCode::FAILURE;
+    }
+    match differential::run(root(), &coredns, self_test) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
             ExitCode::FAILURE
         }
     }
@@ -156,7 +181,11 @@ fn check() -> ExitCode {
         }
     };
     match unsafe_gate(&crates) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) if cached_coredns().is_file() => diff(false),
+        Ok(()) => {
+            println!("CoreDNS not cached; skipping differential scenarios");
+            ExitCode::SUCCESS
+        }
         Err(message) => {
             eprintln!("unsafe-code gate failed: {message}");
             ExitCode::FAILURE
