@@ -59,6 +59,10 @@ fn help_flags_print_usage_and_exit_successfully() {
             .unwrap();
         assert_eq!(output.status.code(), Some(0));
         let usage = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            usage.lines().skip(1).all(|line| line.starts_with("  ")),
+            "{usage}"
+        );
         for option in [
             "Usage:",
             "--help",

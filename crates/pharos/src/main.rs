@@ -102,17 +102,17 @@ async fn main() -> ExitCode {
         }
     };
     if options.help {
-        print!(
-            "Usage: pharos [OPTIONS]\n\
-  -h, --help              Print help\n\
-  -c, --conf <path|stdin>  Corefile path or stdin\n\
-  -p, --port <port>       Default DNS port (default: 53)\n\
-      --pidfile <path>     Write process ID to path\n\
-      --plugins            List enabled Plugins\n\
-  -V, --version           Print version\n\
-  -q, --quiet             Suppress startup output\n\
-      --log-format <text|json>  Select log format\n"
-        );
+        print!(concat!(
+            "Usage: pharos [OPTIONS]\n",
+            "  -h, --help                    Print help\n",
+            "  -c, --conf <path|stdin>       Corefile path or stdin\n",
+            "  -p, --port <port>             Default DNS port (default: 53)\n",
+            "      --pidfile <path>          Write process ID to path\n",
+            "      --plugins                 List enabled Plugins\n",
+            "  -V, --version                 Print version\n",
+            "  -q, --quiet                   Suppress startup output\n",
+            "      --log-format <text|json>  Select log format\n",
+        ));
     } else if options.version {
         version();
     } else if options.plugins {
