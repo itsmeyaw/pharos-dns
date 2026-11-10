@@ -21,6 +21,9 @@ pub struct ClientConfig {
     pub endpoint: Option<String>,
     pub tls: Option<TlsConfig>,
     pub kubeconfig: Option<(PathBuf, Option<String>)>,
+    pub api_qps: f32,
+    pub api_burst: usize,
+    pub api_max_inflight: usize,
 }
 
 impl ClientConfig {
@@ -28,13 +31,25 @@ impl ClientConfig {
         &self,
         registry: &pharos_server::metrics::Registry,
     ) -> Result<kube::Client, Box<dyn Error + Send + Sync>> {
+        if !self.api_qps.is_finite() || self.api_qps < 0.0 {
+            return Err("API QPS must be finite and nonnegative".into());
+        }
+        if self.api_max_inflight > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err("API maximum inflight exceeds semaphore limit".into());
+        }
         let config = self.resolve().await?;
         let host = config
             .cluster_url
             .authority()
             .map_or("", |authority| authority.as_str())
             .to_owned();
-        let layer = crate::metrics::Layer::new(registry.kubernetes(), host);
+        let layer = crate::metrics::Layer::new(
+            registry.kubernetes(),
+            host,
+            self.api_qps,
+            self.api_burst,
+            self.api_max_inflight,
+        );
         Ok(kube::client::ClientBuilder::try_from(config)?
             .with_layer(&layer)
             .build())

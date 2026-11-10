@@ -149,6 +149,10 @@ impl KubernetesMetrics {
 impl KubernetesRequestMetrics {
     pub fn observe(&self, seconds: f64, code: &str) {
         self.0.duration.observe(REST, seconds);
+        self.result(code);
+    }
+
+    pub fn result(&self, code: &str) {
         let mut codes = self.0.codes.lock().unwrap();
         if let Some(counter) = codes.get(code) {
             counter.fetch_add(1, Ordering::Relaxed);

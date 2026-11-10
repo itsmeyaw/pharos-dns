@@ -28,6 +28,8 @@ struct FakeServer {
     requests: Requests,
     lists: Arc<Mutex<HashMap<String, Value>>>,
     list_delay: Arc<std::sync::atomic::AtomicU64>,
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -39,10 +41,14 @@ impl FakeServer {
         let requests: Requests = Arc::default();
         let lists: Arc<Mutex<HashMap<String, Value>>> = Arc::default();
         let list_delay = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let task_watches = watches.clone();
         let task_requests = requests.clone();
         let task_lists = lists.clone();
         let task_delay = list_delay.clone();
+        let task_active = active.clone();
+        let task_peak = peak.clone();
         let task = tokio::spawn(async move {
             loop {
                 let (socket, _) = listener.accept().await.unwrap();
@@ -50,12 +56,16 @@ impl FakeServer {
                 let requests = task_requests.clone();
                 let lists = task_lists.clone();
                 let delay = task_delay.clone();
+                let active = task_active.clone();
+                let peak = task_peak.clone();
                 tokio::spawn(async move {
                     let service = service_fn(move |request: Request<Incoming>| {
                         let watches = watches.clone();
                         let requests = requests.clone();
                         let lists = lists.clone();
                         let delay = delay.clone();
+                        let active = active.clone();
+                        let peak = peak.clone();
                         async move {
                             requests.lock().unwrap().push(request.uri().to_string());
                             let path = request.uri().path().to_owned();
@@ -76,10 +86,14 @@ impl FakeServer {
                                 });
                                 StreamBody::new(stream).boxed()
                             } else {
+                                let current =
+                                    active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                                peak.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
                                 tokio::time::sleep(Duration::from_millis(
                                     delay.load(std::sync::atomic::Ordering::Relaxed),
                                 ))
                                 .await;
+                                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                                 let (api, kind, items) = match path.as_str() {
                                     "/api/v1/services" => (
                                         "v1",
@@ -118,6 +132,8 @@ impl FakeServer {
             requests,
             lists,
             list_delay,
+            active,
+            peak,
             task,
         }
     }
@@ -211,7 +227,93 @@ async fn client_records_throttled_requests() {
     }
     let mut out = String::new();
     registry.encode(&mut out);
-    assert!(out.contains("pharos_kubernetes_rest_client_rate_limiter_duration_seconds_count{"));
+    assert!(out.lines().any(|line| {
+        line.starts_with("pharos_kubernetes_rest_client_rate_limiter_duration_seconds_count{")
+            && line.ends_with(" 12")
+    }));
+}
+
+#[tokio::test]
+async fn watch_requests_count_results_without_list_latency() {
+    let server = FakeServer::start().await;
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    let config = pharos_kubernetes::ClientConfig {
+        endpoint: Some(server.url.clone()),
+        ..Default::default()
+    };
+    let client = config.client(&registry).await.unwrap();
+    let mut controller =
+        Controller::start_with_metrics(client, WatchConfig::default(), registry.kubernetes());
+    until(|| {
+        let mut out = String::new();
+        registry.encode(&mut out);
+        out.lines().any(|line| {
+            line.starts_with("pharos_kubernetes_rest_client_requests_total{")
+                && line.ends_with(" 6")
+        })
+    })
+    .await;
+    let mut out = String::new();
+    registry.encode(&mut out);
+    for name in ["request", "rate_limiter"] {
+        let prefix = format!("pharos_kubernetes_rest_client_{name}_duration_seconds_count{{");
+        assert!(
+            out.lines()
+                .any(|line| line.starts_with(&prefix) && line.ends_with(" 3")),
+            "{out}"
+        );
+    }
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn api_client_accepts_custom_throttle_and_inflight_options() {
+    let server = FakeServer::start().await;
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    let config = pharos_kubernetes::ClientConfig {
+        endpoint: Some(server.url.clone()),
+        api_qps: 100.0,
+        api_burst: 1,
+        api_max_inflight: 1,
+        ..Default::default()
+    };
+    let client = config.client(&registry).await.unwrap();
+    let services = kube::Api::<k8s_openapi::api::core::v1::Service>::all(client);
+    services.list(&Default::default()).await.unwrap();
+    services.list(&Default::default()).await.unwrap();
+    let mut out = String::new();
+    registry.encode(&mut out);
+    assert!(out.lines().any(|line| {
+        line.starts_with("pharos_kubernetes_rest_client_rate_limiter_duration_seconds_count{")
+            && line.ends_with(" 2")
+    }));
+}
+
+#[tokio::test]
+async fn max_inflight_limits_concurrent_api_requests() {
+    for (max, expected_peak) in [(0, 2), (1, 1)] {
+        let server = FakeServer::start().await;
+        server
+            .list_delay
+            .store(100, std::sync::atomic::Ordering::Relaxed);
+        let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+        let config = pharos_kubernetes::ClientConfig {
+            endpoint: Some(server.url.clone()),
+            api_max_inflight: max,
+            ..Default::default()
+        };
+        let client = config.client(&registry).await.unwrap();
+        let services = kube::Api::<k8s_openapi::api::core::v1::Service>::all(client);
+        let params = Default::default();
+        let (a, b) = tokio::join!(services.list(&params), services.list(&params));
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(server.active.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            server.peak.load(std::sync::atomic::Ordering::SeqCst),
+            expected_peak
+        );
+    }
 }
 
 #[tokio::test]
