@@ -37,6 +37,9 @@ pub struct KubernetesRequestMetrics(Arc<Request>);
 impl KubernetesMetrics {
     pub fn request(&self, verb: &str, host: &str) -> KubernetesRequestMetrics {
         let mut requests = self.0.requests.lock().unwrap();
+        if let Some((_, request)) = requests.iter().find(|((v, h), _)| v == verb && h == host) {
+            return KubernetesRequestMetrics(request.clone());
+        }
         KubernetesRequestMetrics(
             requests
                 .entry((verb.into(), host.into()))
@@ -52,14 +55,16 @@ impl KubernetesMetrics {
     }
 
     pub fn programming_duration(&self, kind: &str, seconds: f64) {
-        let histogram = self
-            .0
-            .programming
-            .lock()
-            .unwrap()
-            .entry(kind.into())
-            .or_insert_with(|| Arc::new(Histogram::new(PROGRAMMING)))
-            .clone();
+        let mut programming = self.0.programming.lock().unwrap();
+        let histogram = if let Some(histogram) = programming.get(kind) {
+            histogram.clone()
+        } else {
+            programming
+                .entry(kind.into())
+                .or_insert_with(|| Arc::new(Histogram::new(PROGRAMMING)))
+                .clone()
+        };
+        drop(programming);
         histogram.observe(PROGRAMMING, seconds);
     }
 
@@ -144,13 +149,15 @@ impl KubernetesMetrics {
 impl KubernetesRequestMetrics {
     pub fn observe(&self, seconds: f64, code: &str) {
         self.0.duration.observe(REST, seconds);
-        self.0
-            .codes
-            .lock()
-            .unwrap()
-            .entry(code.into())
-            .or_default()
-            .fetch_add(1, Ordering::Relaxed);
+        let mut codes = self.0.codes.lock().unwrap();
+        if let Some(counter) = codes.get(code) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        } else {
+            codes
+                .entry(code.into())
+                .or_default()
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn rate_limiter(&self, seconds: f64) {
         self.0.limiter.observe(REST, seconds);

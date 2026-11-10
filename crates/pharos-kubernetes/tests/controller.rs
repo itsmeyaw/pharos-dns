@@ -150,6 +150,12 @@ async fn startup_timeout_allows_unsynced_then_becomes_ready() {
 #[tokio::test]
 async fn watch_events_record_client_and_programming_metrics() {
     let server = FakeServer::start().await;
+    server.lists.lock().unwrap().insert("/apis/discovery.k8s.io/v1/endpointslices".into(), json!([{
+        "metadata":{"name":"slice","namespace":"prod","resourceVersion":"1",
+            "labels":{"kubernetes.io/service-name":"web"},
+            "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}},
+        "addressType":"IPv4","endpoints":[{"addresses":["10.0.1.1"]}]
+    }]));
     let registry = pharos_server::metrics::Registry::new("test", "test", "test");
     let config = pharos_kubernetes::ClientConfig {
         endpoint: Some(server.url.clone()),
@@ -159,6 +165,9 @@ async fn watch_events_record_client_and_programming_metrics() {
     let mut controller =
         Controller::start_with_metrics(client, WatchConfig::default(), registry.kubernetes());
     until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
+    let mut before = String::new();
+    registry.encode(&mut before);
+    assert!(!before.contains("pharos_kubernetes_dns_programming_duration_seconds_count"));
     server.send("/apis/discovery.k8s.io/v1/endpointslices", "MODIFIED", json!({
         "apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice", "metadata":{
             "name":"slice", "namespace":"prod", "resourceVersion":"2",
@@ -171,6 +180,19 @@ async fn watch_events_record_client_and_programming_metrics() {
     registry.encode(&mut out);
     assert!(out.contains("pharos_kubernetes_rest_client_requests_total{code=\"200\""));
     assert!(out.contains("pharos_kubernetes_rest_client_request_duration_seconds_count{"));
+    server.send("/api/v1/services", "MODIFIED", json!({"apiVersion":"v1", "kind":"Service", "metadata":{"name":"web","namespace":"prod","resourceVersion":"3"}, "spec":{"clusterIP":"None"}}));
+    until(|| {
+        controller.store().with_read(|index| {
+            index
+                .service("prod", "web")
+                .is_some_and(|service| service.headless())
+        })
+    })
+    .await;
+    server.send("/apis/discovery.k8s.io/v1/endpointslices", "MODIFIED", json!({"apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice", "metadata":{
+        "name":"slice", "namespace":"prod", "resourceVersion":"3", "labels":{"kubernetes.io/service-name":"web"},
+        "annotations":{"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"}}, "addressType":"IPv4"}));
+    until(|| { let mut out = String::new(); registry.encode(&mut out); out.contains("pharos_kubernetes_dns_programming_duration_seconds_count{service_kind=\"headless_with_selector\"} 1") }).await;
     controller.stop().await;
 }
 
@@ -268,6 +290,11 @@ async fn controller_applies_list_watch_updates_and_deletions() {
         assert_eq!(index.endpoints("prod", "web").count(), 1);
         assert!(index.namespace("prod").is_some());
     });
+    server.send(
+        "/api/v1/services",
+        "BOOKMARK",
+        json!({"apiVersion":"v1","kind":"Service","metadata":{"resourceVersion":"2"}}),
+    );
     server.send("/api/v1/services", "MODIFIED", json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"web","namespace":"prod","resourceVersion":"2"},"spec":{"clusterIP":"10.0.0.2"}}));
     server.send("/apis/discovery.k8s.io/v1/endpointslices", "DELETED", json!({"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"slice","namespace":"prod","resourceVersion":"2"},"addressType":"IPv4"}));
     server.send("/api/v1/namespaces", "DELETED", json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"prod","resourceVersion":"2"}}));

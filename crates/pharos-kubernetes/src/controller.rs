@@ -223,7 +223,14 @@ impl Controller {
                         );
                         record_latency(metrics.as_ref(), latency);
                     }
-                    Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+                    Err(error) => {
+                        pharos_server::logging::log(
+                            "WARN",
+                            "kubernetes",
+                            &format!("Kubernetes watch error: {error}"),
+                        );
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
                 }
             }
         }));

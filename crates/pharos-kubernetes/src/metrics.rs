@@ -9,6 +9,9 @@ use std::{
 use pharos_server::metrics::KubernetesMetrics;
 use tower::{Layer as TowerLayer, Service};
 
+const REQUESTS_PER_SECOND: f64 = 5.0;
+const BURST: f64 = 10.0;
+
 #[derive(Clone)]
 pub struct Layer {
     metrics: KubernetesMetrics,
@@ -26,13 +29,13 @@ impl Limiter {
         let now = Instant::now();
         let base = now.max(self.updated);
         self.tokens = (self.tokens
-            + now.saturating_duration_since(self.updated).as_secs_f64() * 5.0)
-            .min(10.0);
+            + now.saturating_duration_since(self.updated).as_secs_f64() * REQUESTS_PER_SECOND)
+            .min(BURST);
         let delay = if self.tokens >= 1.0 {
             self.tokens -= 1.0;
             Duration::ZERO
         } else {
-            let delay = Duration::from_secs_f64((1.0 - self.tokens) / 5.0);
+            let delay = Duration::from_secs_f64((1.0 - self.tokens) / REQUESTS_PER_SECOND);
             self.tokens = 0.0;
             (base - now) + delay
         };
@@ -47,7 +50,7 @@ impl Layer {
             metrics,
             host,
             limiter: Arc::new(Mutex::new(Limiter {
-                tokens: 10.0,
+                tokens: BURST,
                 updated: Instant::now(),
             })),
         }
@@ -100,11 +103,12 @@ where
                 metric.rate_limiter(throttled.elapsed().as_secs_f64());
             }
             let response = future.await;
-            let code = response.as_ref().map_or_else(
-                |_| "<error>".to_owned(),
-                |response| response.status().as_u16().to_string(),
-            );
-            metric.observe(start.elapsed().as_secs_f64(), &code);
+            match &response {
+                Ok(response) => {
+                    metric.observe(start.elapsed().as_secs_f64(), response.status().as_str())
+                }
+                Err(_) => metric.observe(start.elapsed().as_secs_f64(), "<error>"),
+            }
             response
         })
     }

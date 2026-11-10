@@ -280,6 +280,7 @@ impl Index {
         }
     }
     fn apply_pod(&mut self, pod: Pod) {
+        // CoreDNS keeps the previous Pod until its Delete event arrives.
         if pod.deleting {
             return;
         }
