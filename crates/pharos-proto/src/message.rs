@@ -1,6 +1,9 @@
 use std::fmt;
 
-use crate::{Class, EdnsOptions, NameError, NameRef, Opcode, Opt, Rcode, Type};
+use crate::{
+    BuildError, Class, EdnsOptions, MessageBuilder, Name, NameError, NameRef, Opcode, Opt, Rcode,
+    Section, Type,
+};
 
 const HEADER_LEN: usize = 12;
 
@@ -138,6 +141,45 @@ fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageErro
 }
 
 impl<'a> Message<'a> {
+    /// Copy this Message with its first Question replaced by an IN Question.
+    pub fn with_question(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, BuildError> {
+        let mut wire = Vec::with_capacity(self.wire.len() + name.as_wire().len());
+        let mut builder =
+            MessageBuilder::new(&mut wire, usize::from(u16::MAX), self.id(), self.flags())?;
+        let mut questions = self.questions();
+        questions.next().ok_or(BuildError::InvalidRdata)?;
+        let name = NameRef::parse(name.as_wire(), 0).expect("validated name");
+        if !builder.question(name, qtype, Class::IN)? {
+            return Err(BuildError::SizeLimit);
+        }
+        for question in questions {
+            if !builder.question(question.name, question.qtype, question.qclass)? {
+                return Err(BuildError::SizeLimit);
+            }
+        }
+        for (section, records) in [
+            (Section::Answer, self.answers()),
+            (Section::Authority, self.authorities()),
+            (Section::Additional, self.additionals()),
+        ] {
+            for record in records {
+                let data = record.data().map_err(|_| BuildError::InvalidRdata)?;
+                if !builder.record_with(
+                    section,
+                    record.name,
+                    record.rtype,
+                    record.class,
+                    record.ttl,
+                    |writer| data.write(writer),
+                )? {
+                    return Err(BuildError::SizeLimit);
+                }
+            }
+        }
+        let _ = builder.finish();
+        Ok(wire)
+    }
+
     /// Return the original Message bytes without copying.
     #[must_use]
     pub const fn as_wire(&self) -> &'a [u8] {
