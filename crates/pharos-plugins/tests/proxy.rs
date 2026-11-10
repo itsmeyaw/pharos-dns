@@ -290,3 +290,54 @@ async fn signed_query_preserves_its_id_on_the_wire() {
         .unwrap();
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn force_tcp_takes_precedence_in_protocol_selection() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    for (client, force_tcp, prefer_udp, expected) in [
+        (Transport::Udp, false, false, Transport::Udp),
+        (Transport::Tcp, false, false, Transport::Tcp),
+        (Transport::Tcp, false, true, Transport::Udp),
+        (Transport::Udp, true, false, Transport::Tcp),
+        (Transport::Udp, true, true, Transport::Tcp),
+        (Transport::Tcp, true, true, Transport::Tcp),
+    ] {
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = tcp.local_addr().unwrap();
+        let udp = UdpSocket::bind(address).await.unwrap();
+        let upstream = tokio::spawn(async move {
+            let mut wire = [0; 512];
+            if expected == Transport::Udp {
+                let (len, peer) = udp.recv_from(&mut wire).await.unwrap();
+                wire[2] |= 0x80;
+                udp.send_to(&wire[..len], peer).await.unwrap();
+            } else {
+                let (mut stream, _) = tcp.accept().await.unwrap();
+                let len = usize::from(stream.read_u16().await.unwrap());
+                stream.read_exact(&mut wire[..len]).await.unwrap();
+                wire[2] |= 0x80;
+                stream.write_u16(len as u16).await.unwrap();
+                stream.write_all(&wire[..len]).await.unwrap();
+            }
+        });
+        let proxy = Proxy::new(address);
+        let mut response = [0; 512];
+        let result = proxy
+            .exchange(
+                QUERY,
+                &mut response,
+                client,
+                Options {
+                    force_tcp,
+                    prefer_udp,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.transport, expected);
+        upstream.await.unwrap();
+    }
+}
