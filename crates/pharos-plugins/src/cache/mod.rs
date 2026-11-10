@@ -570,7 +570,12 @@ impl Cache {
                 ttl = ttl.min(minimum);
             }
         }
-        if !found || response_type == ResponseType::Referral {
+        if !found
+            || !matches!(
+                response_type,
+                ResponseType::Positive | ResponseType::NxDomain | ResponseType::NoData
+            )
+        {
             ttl = 5;
         }
         ttl = ttl.max(minimum).min(maximum);

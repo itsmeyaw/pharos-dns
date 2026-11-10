@@ -524,6 +524,26 @@ async fn caches_servfail_and_can_disable_it() {
 }
 
 #[tokio::test]
+async fn uncached_other_errors_use_coredns_fallback_ttl() {
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    for _ in 0..2 {
+        let response = query(&chain, wire, &calls, 5, false).await;
+        assert_eq!(
+            Message::parse(&response)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .ttl,
+            5
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
 async fn caches_unanswered_servfail() {
     let chain = cache();
     let calls = AtomicUsize::new(0);
