@@ -25,6 +25,7 @@ fn main() {
             "cache" => "cache::Cache",
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
+            "loop" => "r#loop::Loop",
             "prometheus" => "prometheus::Prometheus",
             "ready" => "ready::Ready",
             "forward" => "forward::Forward",
@@ -41,6 +42,7 @@ fn main() {
             "cache" => "setup_cache",
             "whoami" => "setup_whoami",
             "log" => "setup_log",
+            "loop" => "setup_loop",
             "prometheus" => "setup_prometheus",
             "ready" => "setup_ready",
             "forward" => "setup_forward",
@@ -51,7 +53,7 @@ fn main() {
         };
         let once = matches!(
             *name,
-            "cache" | "prometheus" | "ready" | "errors" | "reload"
+            "cache" | "prometheus" | "ready" | "errors" | "reload" | "loop"
         );
         writeln!(
             code,

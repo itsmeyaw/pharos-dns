@@ -32,6 +32,8 @@ pub mod forward;
 pub mod log;
 #[cfg(feature = "plugin-log")]
 pub mod log_format;
+#[cfg(feature = "plugin-loop")]
+pub mod r#loop;
 #[cfg(feature = "plugin-prometheus")]
 pub mod prometheus;
 #[cfg(feature = "plugin-ready")]
@@ -390,6 +392,17 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
         return Err(cursor.arg_err());
     }
     block.config.whoami = Some(whoami::Whoami);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-loop")]
+fn setup_loop(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    cursor.next();
+    if cursor.next_arg() {
+        return Err(cursor.arg_err());
+    }
+    let domain = block.keys().first().map_or(".", |key| key.domain.as_str());
+    block.config.r#loop = Some(r#loop::Loop::new(domain));
     Ok(())
 }
 

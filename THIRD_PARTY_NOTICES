@@ -11,6 +11,7 @@
 - Upstream proxy exchange and tests follow CoreDNS v1.15.0's `plugin/pkg/proxy`.
 - The forward Plugin and tests follow CoreDNS v1.15.0's `plugin/forward`.
 - The cache Plugin and tests follow CoreDNS v1.15.0's `plugin/cache`, `plugin/pkg/cache` and `plugin/pkg/dnsutil`.
+- The loop Plugin and tests follow CoreDNS v1.15.0's `plugin/loop`.
 - The log Plugin, formatter and tests follow CoreDNS v1.15.0's `plugin/log`, `plugin/pkg/replacer` and `plugin/pkg/response`.
 - The prometheus Plugin and tests follow CoreDNS v1.15.0's `plugin/metrics`.
 - The ready Plugin and tests follow CoreDNS v1.15.0's `plugin/ready`.
