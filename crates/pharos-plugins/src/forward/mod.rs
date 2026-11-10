@@ -309,6 +309,7 @@ impl Plugin for Forward {
                     if fails >= count {
                         break;
                     }
+                    tokio::task::yield_now().await;
                     continue;
                 };
                 let result = loop {

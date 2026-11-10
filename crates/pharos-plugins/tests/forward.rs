@@ -127,6 +127,19 @@ async fn invalid_file_nameserver_falls_back_to_next_upstream() {
     std::fs::remove_file(path).unwrap();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn unlimited_invalid_upstream_does_not_block_runtime() {
+    let path = std::env::temp_dir().join(format!("pharos-forward-busy-{}", std::process::id()));
+    std::fs::write(&path, "nameserver #\n").unwrap();
+    let chain = chain(&format!(
+        ".:0 {{\n forward . {} {{\n max_connect_attempts 0\n }}\n}}",
+        path.display()
+    ));
+    let result = tokio::time::timeout(std::time::Duration::from_millis(50), run(&chain)).await;
+    assert!(result.is_err(), "invalid upstream blocked the runtime");
+    std::fs::remove_file(path).unwrap();
+}
+
 #[tokio::test]
 async fn next_rcode_passes_to_following_forward_and_records_upstream() {
     let (first, task1) = fake(3, false).await;
