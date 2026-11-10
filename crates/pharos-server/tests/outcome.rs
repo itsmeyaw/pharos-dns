@@ -186,3 +186,45 @@ fn nonfinal_opt_keeps_its_options_and_discards_following_records() {
     assert_eq!(opt.udp_payload_size(), 1232);
     assert_eq!(opt.options().as_bytes(), &[0, 3, 0, 1, b'x']);
 }
+
+#[test]
+fn response_opt_is_removed_when_query_has_no_edns() {
+    let wire = query(false);
+    let mut response = response(1);
+    response[11] = 1;
+    response.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0x80, 0, 0, 0]);
+    assert_eq!(
+        finish_outcome(
+            Message::parse(&wire).unwrap(),
+            Protocol::Udp,
+            Outcome::Response,
+            &mut response,
+            |_| panic!()
+        ),
+        Action::Respond
+    );
+    let result = Message::parse(&response).unwrap();
+    assert!(result.opt().is_none());
+    assert!(!result.tc());
+}
+
+#[test]
+fn unanswered_tcp_response_can_append_edns_to_an_empty_buffer() {
+    let mut wire = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 14];
+    wire.extend_from_slice(b"abcdefghijklmn");
+    wire.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 41, 4, 208, 0, 0, 0x80, 0, 0, 0]);
+    let mut response = Vec::new();
+    let mut logged = false;
+    let action = finish_outcome(
+        Message::parse(&wire).unwrap(),
+        Protocol::Tcp,
+        Outcome::Unanswered(Rcode::REFUSED),
+        &mut response,
+        |_| logged = true,
+    );
+    assert_eq!(action, Action::Respond);
+    assert!(!logged);
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.rcode(), Rcode::REFUSED);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
+}

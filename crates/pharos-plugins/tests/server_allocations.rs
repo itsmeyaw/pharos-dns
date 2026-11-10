@@ -1,0 +1,94 @@
+#![forbid(unsafe_code)]
+#![cfg(feature = "plugin-whoami")]
+#![recursion_limit = "512"]
+
+use pharos_corefile::{configure, parse};
+use pharos_plugins::{Chain, directives, servers};
+use pharos_server::{Action, Handler, Listener, Protocol, Server};
+use stats_alloc::{INSTRUMENTED_SYSTEM, Stats, StatsAlloc};
+use std::{
+    alloc::System,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+
+#[global_allocator]
+static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+
+#[derive(Default)]
+struct Counts {
+    queries: usize,
+    before: Option<Stats>,
+    after: Option<Stats>,
+}
+struct Counting {
+    server: Server<Arc<Chain>>,
+    counts: Arc<Mutex<Counts>>,
+}
+
+impl Handler for Counting {
+    async fn handle(
+        &self,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        {
+            let mut counts = self.counts.lock().unwrap();
+            counts.queries += 1;
+            if counts.queries == 101 {
+                counts.before = Some(GLOBAL.stats());
+            }
+            if counts.queries == 201 {
+                counts.after = Some(GLOBAL.stats());
+            }
+        }
+        self.server.handle(query, peer, protocol, response).await
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn routed_udp_queries_do_not_allocate() {
+    let blocks = parse("Corefile", ".:0 {\n whoami\n}").unwrap();
+    let mut servers = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (key, server) = servers.drain().next().unwrap();
+    let counts = Arc::new(Mutex::new(Counts::default()));
+    let listener = Listener::bind(
+        key.address,
+        Counting {
+            server,
+            counts: Arc::clone(&counts),
+        },
+    )
+    .await
+    .unwrap();
+    let address = SocketAddr::from(([127, 0, 0, 1], listener.local_addr().port()));
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let query = [
+            0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, b'a', 0, 0, 1, 0, 1, 0, 0, 41, 2, 0, 0, 0, 0x80,
+            0, 0, 0,
+        ];
+        let mut buf = [0; 512];
+        for _ in 0..201 {
+            socket.send_to(&query, address).unwrap();
+            let (n, _) = socket.recv_from(&mut buf).unwrap();
+            assert!(n > 12 && buf[2] & 0x80 != 0);
+        }
+        let _ = done.send(());
+    });
+    finished.await.unwrap();
+    client.join().unwrap();
+    let (before, after) = {
+        let counts = counts.lock().unwrap();
+        (counts.before.unwrap(), counts.after.unwrap())
+    };
+    assert_eq!(after.allocations - before.allocations, 0);
+    assert_eq!(after.reallocations - before.reallocations, 0);
+    listener.shutdown().await.unwrap();
+}

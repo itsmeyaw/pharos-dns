@@ -8,8 +8,9 @@ not-implemented error rather than accepting their configuration.
 
 Whoami reports an error if adding the protocol label would make its SRV owner
 name exceed the DNS name length limit. CoreDNS ignores the resulting write
-error. The caller must supply a Response buffer with enough capacity; otherwise
-Pharos reports an error instead of allocating on the Query path.
+error. The UDP caller must supply a Response buffer with enough capacity;
+otherwise Pharos reports an error instead of allocating on the UDP Query path.
+TCP allocates the buffer when whoami runs, not while earlier Plugins await.
 
 ## Domain names
 
@@ -25,15 +26,17 @@ to an octet as miekg/dns does.
 
 The protocol parser rejects duplicate OPT records, OPT records outside
 Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
-The DNS admission seam returns FORMERR for these malformed Messages and drops
-short headers; it is not yet wired into the Listener. CoreDNS v1.15.0 accepts
+The DNS Listener returns FORMERR for these malformed Messages and drops
+short headers. CoreDNS v1.15.0 accepts
 them when its header-count policy allows them, and selects the last OPT in
 Additional. CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC
-report transport errors. Pharos's admission seam returns a header-only FORMERR
+report transport errors. Pharos returns a header-only FORMERR
 for malformed Messages, whereas CoreDNS may retain a partially decoded Question.
 
 For pass-through Responses, Pharos truncates the encoded Message without
 recompression; CoreDNS may fit more records by recompressing first.
+Pharos removes OPT from a Response to a non-EDNS Query, as RFC 6891 requires;
+CoreDNS may preserve a Plugin-supplied OPT in that case.
 Pharos logs Plugin errors and answers SERVFAIL; CoreDNS ignores returned errors.
 
 Pharos also rejects Client Subnet address lengths that do not match the prefix
@@ -60,3 +63,7 @@ The default TCP read, write, and idle timeouts are 3, 5, and 10 seconds,
 respectively, matching CoreDNS v1.15.0 `core/dnsserver/server.go`.
 
 On Linux, each `sendmmsg` sends one Response (nix-rust/nix#2797).
+
+Lifecycle hooks for a Server Block shared by multiple Listeners run once per
+Listener. Explicit Listener shutdown runs shutdown hooks; dropping it cannot
+await them. CoreDNS runs lifecycle hooks per configuration instance.

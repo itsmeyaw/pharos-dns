@@ -839,6 +839,7 @@ dependencies = [
  "pharos-proto",
  "pharos-server",
  "stats_alloc",
+ "tokio",
 ]
 
 [[package]]

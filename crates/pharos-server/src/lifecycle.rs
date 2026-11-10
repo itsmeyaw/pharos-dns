@@ -1,6 +1,6 @@
-use std::{future::Future, io, pin::Pin};
+use std::{future::Future, io, pin::Pin, sync::Arc};
 
-type Hook = Box<dyn Fn() -> Pin<Box<dyn Future<Output = io::Result<()>> + Send>> + Send + Sync>;
+type Hook = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = io::Result<()>> + Send>> + Send + Sync>;
 
 /// Hook phase. OnStartup maps to Startup, OnRestart to Reload, and
 /// OnFinalShutdown to Shutdown. OnShutdown hooks needed for both reload and
@@ -14,7 +14,7 @@ pub enum Phase {
 }
 
 /// Setup-time registration of ordered synchronous or asynchronous hooks.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Lifecycle {
     hooks: Vec<(Phase, Hook)>,
 }
@@ -25,7 +25,7 @@ impl Lifecycle {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = io::Result<()>> + Send + 'static,
     {
-        self.hooks.push((phase, Box::new(move || Box::pin(hook()))));
+        self.hooks.push((phase, Arc::new(move || Box::pin(hook()))));
     }
 
     pub fn register_sync<F>(&mut self, phase: Phase, hook: F)
@@ -44,5 +44,17 @@ impl Lifecycle {
             hook().await?;
         }
         Ok(())
+    }
+
+    pub fn extend(&mut self, other: &Self) {
+        self.hooks.extend(other.hooks.iter().cloned());
+    }
+}
+
+impl std::fmt::Debug for Lifecycle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lifecycle")
+            .field("hooks", &self.hooks.len())
+            .finish()
     }
 }

@@ -28,7 +28,13 @@ fn response(context: &mut Context<'_>) -> Result<(), Error> {
     let class = question.map_or(Class(0), |question| question.qclass);
     let max_size = context.max_response_size.max(512);
     if context.response.capacity() < max_size {
-        return Err(Error::ResponseBufferTooSmall);
+        if context.protocol == Protocol::Tcp {
+            context
+                .response
+                .reserve(max_size.saturating_sub(context.response.len()));
+        } else {
+            return Err(Error::ResponseBufferTooSmall);
+        }
     }
     let mut srv_name = [0_u8; 255];
     let label = match context.protocol {

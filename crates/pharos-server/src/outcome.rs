@@ -20,7 +20,7 @@ pub fn finish_outcome(
 ) -> Action {
     match outcome {
         Outcome::Drop => return Action::Drop,
-        // shortcut: Zone Transfer streams need a streaming Listener (#35).
+        // shortcut: Zone Transfer streams need a streaming Listener.
         Outcome::Stream(_) => return Action::Drop,
         Outcome::Unanswered(code) => {
             if !matches!(
@@ -37,16 +37,21 @@ pub fn finish_outcome(
         }
         Outcome::Response => {}
     }
-    if let Err(error) = scrub(query, response_limit(query, protocol), response) {
+    if let Err(error) = scrub(query, response_limit(query, protocol), protocol, response) {
         log(error);
         write_error(query, response, Rcode::SERVFAIL);
     }
     Action::Respond
 }
 
-fn scrub(query: Message<'_>, limit: usize, wire: &mut Vec<u8>) -> Result<(), Error> {
+fn scrub(
+    query: Message<'_>,
+    limit: usize,
+    protocol: Protocol,
+    wire: &mut Vec<u8>,
+) -> Result<(), Error> {
     let message = Message::parse(wire).map_err(|_| Error::InvalidQuery)?;
-    if query.opt().is_none() && wire.len() <= limit {
+    if query.opt().is_none() && message.opt().is_none() && wire.len() <= limit {
         return Ok(());
     }
     let mut options = [0_u8; 65535];
@@ -72,10 +77,7 @@ fn scrub(query: Message<'_>, limit: usize, wire: &mut Vec<u8>) -> Result<(), Err
     });
     let rcode = message.rcode();
     let response_opt = query.opt().map(|opt| opt.response(existing, &[], rcode));
-    let opt_len = response_opt.map_or_else(
-        || existing.map_or(0, |opt| 11 + opt.options().as_bytes().len()),
-        |opt| opt.wire_len(),
-    );
+    let opt_len = response_opt.map_or(0, |opt| opt.wire_len());
     let budget = limit
         .max(512)
         .checked_sub(opt_len)
@@ -121,16 +123,16 @@ fn scrub(query: Message<'_>, limit: usize, wire: &mut Vec<u8>) -> Result<(), Err
     }
     let truncated = counts != original;
     if end + opt_len > wire.capacity() {
-        return Err(Error::ResponseBufferTooSmall);
+        if protocol == Protocol::Udp {
+            return Err(Error::ResponseBufferTooSmall);
+        }
+        wire.reserve((end + opt_len).saturating_sub(wire.len()));
     }
     wire.truncate(end);
     if truncated {
         wire[2] |= 0x02;
     }
     if let Some(opt) = response_opt {
-        opt.encode(wire).map_err(Error::Build)?;
-        counts[3] += 1;
-    } else if let Some(opt) = existing {
         opt.encode(wire).map_err(Error::Build)?;
         counts[3] += 1;
     }

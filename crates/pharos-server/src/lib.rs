@@ -4,7 +4,8 @@
 //! buffer after awaiting Next. The Listener handles unanswered codes and errors.
 
 use std::{
-    collections::HashMap, fmt, future::Future, io, net::SocketAddr, sync::Arc, time::Duration,
+    collections::HashMap, fmt, future::Future, io, net::SocketAddr, pin::Pin, sync::Arc,
+    time::Duration,
 };
 
 use pharos_proto::{BuildError, Message, Name, Rcode};
@@ -24,8 +25,10 @@ pub use lifecycle::{Lifecycle, Phase};
 pub use outcome::{finish_outcome, response_limit};
 pub use panic::{contain_panic, panics_total};
 mod router;
+mod server;
 mod startup;
 pub use router::{Router, ServerBlock, ViewFilter};
+pub use server::{Chain, Server};
 pub use startup::startup_domains;
 mod tcp;
 mod udp;
@@ -176,13 +179,25 @@ pub trait Handler: Send + Sync + 'static {
         protocol: Protocol,
         response: &mut Vec<u8>,
     ) -> impl Future<Output = Action> + Send;
+
+    fn startup(&self) -> impl Future<Output = io::Result<()>> + Send {
+        async { Ok(()) }
+    }
+
+    fn shutdown(&self) -> impl Future<Output = io::Result<()>> + Send {
+        async { Ok(()) }
+    }
 }
+
+type ShutdownHook =
+    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = io::Result<()>> + Send>> + Send>;
 
 /// A DNS Listener serving UDP and TCP on the same address.
 pub struct Listener {
     address: SocketAddr,
     stop: watch::Sender<bool>,
     tasks: Vec<JoinHandle<io::Result<()>>>,
+    shutdown_hook: Option<ShutdownHook>,
 }
 
 impl Listener {
@@ -197,6 +212,10 @@ impl Listener {
         }
         let (stop, receiver) = watch::channel(false);
         let handler = Arc::new(handler);
+        handler.startup().await?;
+        let hook_handler = Arc::clone(&handler);
+        let shutdown_hook: ShutdownHook =
+            Box::new(move || Box::pin(async move { hook_handler.shutdown().await }));
         let mut tasks = sockets
             .into_iter()
             .map(|socket| {
@@ -209,6 +228,7 @@ impl Listener {
             address,
             stop,
             tasks,
+            shutdown_hook: Some(shutdown_hook),
         })
     }
 
@@ -216,7 +236,8 @@ impl Listener {
         self.address
     }
 
-    /// Stop accepting Queries and drain accepted Queries for at most five seconds.
+    /// Stop accepting Queries, drain for at most five seconds, and run shutdown hooks.
+    /// Dropping a Listener signals stop but cannot await shutdown hooks.
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.stop.send_replace(true);
         let mut result = Ok(());
@@ -240,6 +261,12 @@ impl Listener {
                     }
                     break;
                 }
+            }
+        }
+        if let Some(hook) = self.shutdown_hook.take() {
+            let next = hook().await;
+            if result.is_ok() {
+                result = next;
             }
         }
         result
