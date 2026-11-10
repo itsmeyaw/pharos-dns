@@ -424,6 +424,7 @@ async fn udp_record_overflow_returns_truncated_response_and_reuses_socket() {
             if index == 0 {
                 first = Some(peer);
                 wire[2] |= 0x80;
+                wire[3] = 3;
                 wire[7] = 1;
                 wire[len] = 0;
                 wire[len + 1] = 0;
@@ -444,6 +445,11 @@ async fn udp_record_overflow_returns_truncated_response_and_reuses_socket() {
     assert!(message.qr() && message.tc());
     assert_eq!(message.id(), 0x1234);
     assert_eq!(message.question_count(), 1);
+    assert_eq!(message.rcode(), pharos_proto::Rcode::NXDOMAIN);
+    let question = message.questions().next().unwrap();
+    assert_eq!(question.name.to_string(), ".");
+    assert_eq!(question.qtype, pharos_proto::Type::NS);
+    assert_eq!(question.qclass, pharos_proto::Class::IN);
     assert_eq!(message.answer_count(), 0);
     assert_eq!(message.authority_count(), 0);
     assert_eq!(message.additional_count(), 0);

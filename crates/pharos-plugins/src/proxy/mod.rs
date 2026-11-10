@@ -516,8 +516,10 @@ impl Proxy {
                     .questions()
                     .map(|q| q.name.wire_len() + 4)
                     .sum::<usize>();
+            let flags = [response[2], response[3]];
             response[..length].copy_from_slice(&query[..length]);
-            response[2] |= 0x82;
+            response[2] = flags[0] | 0x02;
+            response[3] = flags[1];
             response[6..12].fill(0);
         }
         let answer = Message::parse(&response[..length])
