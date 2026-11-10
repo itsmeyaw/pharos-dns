@@ -36,6 +36,15 @@ typed options and framing; other option codes are passed through without the
 additional type-specific validation miekg/dns applies to some of them. Invalid
 UTF-8 in Extended DNS Error text is rendered with replacement characters.
 
+## Record data
+
+The typed RDATA parser currently supports A, AAAA, NS, CNAME, PTR, MX and
+SOA. Unsupported name-bearing types are rejected by the typed parser;
+other types remain opaque and print in RFC 3597 form rather than using their
+CoreDNS presentation. Presentation parsing is not yet implemented. Unlike
+miekg/dns, incomplete typed records are rejected rather than accepted as
+partial values.
+
 ## Environment substitution
 
 CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each

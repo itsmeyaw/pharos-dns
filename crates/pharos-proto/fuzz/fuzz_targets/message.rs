@@ -31,6 +31,9 @@ fuzz_target!(|wire: &[u8]| {
                 record.rdata
             );
             let _ = record.name.to_name();
+            if let Ok(data) = record.data() {
+                let _ = data.to_string();
+            }
         }
         if let Some(opt) = message.opt() {
             let options = opt.options();

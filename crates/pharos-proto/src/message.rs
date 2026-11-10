@@ -70,6 +70,14 @@ pub struct Record<'a> {
     pub rdata: &'a [u8],
     pub rdata_offset: usize,
     pub ttl_offset: usize,
+    wire: &'a [u8],
+}
+
+impl<'a> Record<'a> {
+    /// Parses the record's RDATA without allocating.
+    pub fn data(&self) -> Result<crate::Rdata<'a>, crate::RdataError> {
+        crate::Rdata::parse_in_message(self.rtype, self.wire, self.rdata_offset, self.rdata.len())
+    }
 }
 
 fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), MessageError> {
@@ -102,6 +110,7 @@ fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageErro
             rdata,
             rdata_offset,
             ttl_offset: offset + 4,
+            wire,
         },
         rdata_offset + len,
     ))

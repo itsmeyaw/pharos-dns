@@ -33,7 +33,10 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
             )
             .unwrap();
     }
-    std::hint::black_box(builder.finish_with_opt(opt).unwrap());
+    let response = builder.finish_with_opt(opt).unwrap();
+    for record in Message::parse(response).unwrap().answers() {
+        std::hint::black_box(record.data().unwrap());
+    }
     let allocations = region.change();
     assert_eq!(allocations.allocations, 0);
     assert_eq!(allocations.reallocations, 0);

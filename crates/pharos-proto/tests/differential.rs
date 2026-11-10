@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use domain::base::{Message as DomainMessage, opt::UnknownOptData};
+use domain::{base::name::ParsedName, rdata::AllRecordData};
 use hickory_proto::{
     op::{Header, Message as HickoryMessage, Query},
     rr::{Name as HickoryName, Record as HickoryRecord},
@@ -546,4 +547,115 @@ fn forward_compression_pointer_is_rejected() {
     let wire = [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0xc0, 18, 0, 1, 0, 1, 0];
     let result = compare(&wire);
     assert!(result.is_ok(), "{}", result.unwrap_err());
+}
+
+#[test]
+fn supported_typed_rdata_agrees_with_domain() {
+    let owner: Name = "example.com.".parse().unwrap();
+    let owner = NameRef::parse(owner.as_wire(), 0).unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 4096, 0, 0).unwrap();
+    builder.question(owner, Type::A, Class::IN).unwrap();
+    for (rtype, bytes) in [(Type::A, vec![192, 0, 2, 1]), (Type::AAAA, vec![0; 16])] {
+        builder
+            .record(Section::Answer, owner, rtype, Class::IN, 0, &bytes)
+            .unwrap();
+    }
+    for rtype in [Type::NS, Type::CNAME, Type::PTR] {
+        builder
+            .record_with(Section::Answer, owner, rtype, Class::IN, 0, |w| {
+                w.write_name(owner)
+            })
+            .unwrap();
+    }
+    builder
+        .record_with(Section::Answer, owner, Type::MX, Class::IN, 0, |w| {
+            w.write_bytes(&10u16.to_be_bytes())?;
+            w.write_name(owner)
+        })
+        .unwrap();
+    builder
+        .record_with(Section::Answer, owner, Type::SOA, Class::IN, 0, |w| {
+            w.write_name(owner)?;
+            w.write_name(owner)?;
+            for n in [1u32, 2, 3, 4, 5] {
+                w.write_bytes(&n.to_be_bytes())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let _ = builder.finish();
+    let pharos = Message::parse(&wire).unwrap();
+    let domain = DomainMessage::from_octets(wire.as_slice()).unwrap();
+    let domain_answers = domain.question().answer().unwrap().collect::<Vec<_>>();
+    assert_eq!(domain_answers.len(), usize::from(pharos.answer_count()));
+    // Domain omits the trailing root dot in ParsedName's Display.
+    macro_rules! compare_name {
+        ($a:expr, $b:expr) => {
+            assert_eq!(
+                $a.labels().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+                $b.iter()
+                    .filter(|l| !l.as_slice().is_empty())
+                    .map(|l| l.as_slice().to_vec())
+                    .collect::<Vec<_>>()
+            )
+        };
+    }
+    for (actual, expected) in pharos.answers().zip(domain_answers) {
+        let actual = actual.data().unwrap();
+        let expected = expected
+            .unwrap()
+            .to_any_record::<AllRecordData<_, ParsedName<_>>>()
+            .unwrap()
+            .into_data();
+        match (actual, expected) {
+            (pharos_proto::Rdata::A(a), AllRecordData::A(b)) => assert_eq!(a, b.addr()),
+            (pharos_proto::Rdata::Aaaa(a), AllRecordData::Aaaa(b)) => assert_eq!(a, b.addr()),
+            (pharos_proto::Rdata::Ns(a), AllRecordData::Ns(b)) => {
+                compare_name!(a, b.nsdname())
+            }
+            (pharos_proto::Rdata::Cname(a), AllRecordData::Cname(b)) => {
+                compare_name!(a, b.cname())
+            }
+            (pharos_proto::Rdata::Ptr(a), AllRecordData::Ptr(b)) => {
+                compare_name!(a, b.ptrdname())
+            }
+            (
+                pharos_proto::Rdata::Mx {
+                    preference,
+                    exchange,
+                },
+                AllRecordData::Mx(b),
+            ) => {
+                assert_eq!(preference, b.preference());
+                compare_name!(exchange, b.exchange());
+            }
+            (
+                pharos_proto::Rdata::Soa {
+                    mname,
+                    rname,
+                    serial,
+                    refresh,
+                    retry,
+                    expire,
+                    minimum,
+                },
+                AllRecordData::Soa(b),
+            ) => {
+                compare_name!(mname, b.mname());
+                compare_name!(rname, b.rname());
+                assert_eq!(
+                    (serial, refresh, retry, expire, minimum),
+                    (
+                        b.serial().into_int(),
+                        b.refresh().as_secs(),
+                        b.retry().as_secs(),
+                        b.expire().as_secs(),
+                        b.minimum().as_secs()
+                    )
+                );
+            }
+            pair => panic!("typed RDATA mismatch: {pair:?}"),
+        }
+    }
 }
