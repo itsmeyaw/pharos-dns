@@ -219,6 +219,17 @@
 
 - Without `multisocket`, Pharos uses the CPU-quota-aware worker count for UDP; CoreDNS uses one socket.
 - CoreDNS v1.15.0 uses miekg/dns v1.1.73.
+- TSIG accepts RFC 8945-permitted truncated MACs and enforces their minimum length and optional local policy; miekg/dns v1.1.73's default provider compares only full-length MACs.
+- TSIG rejects misplaced, duplicate, non-ANY, nonzero-TTL, or malformed TSIG records and compressed algorithm names; miekg/dns does not enforce all of these checks.
+- TSIG maps an unsupported algorithm on a known key to BADSIG, as CoreDNS does, rather than RFC 8945's BADKEY. Each `TsigKey` is pinned to one supported algorithm; CoreDNS accepts any supported algorithm for a configured secret.
+- Stream verification includes unsigned intermediate Messages in the running MAC and requires signed first and last Messages, following RFC 8945; miekg/dns does not accumulate unsigned intermediates.
+- Subsequent stream TSIGs with an Error or Other Data are rejected because those fields are not authenticated by the stream MAC; miekg/dns does not reject them.
+- Stream signatures reject decreasing Time Signed values; miekg/dns does not track previous times. The stream API also permits callers to feed unsigned intermediate Messages for legacy interoperability, although RFC 8945 requires senders to sign every Response.
+- TSIG uses the supplied zero Time Signed or Fudge literally; miekg/dns substitutes the current time or 300 seconds. Signed NOTAUTH Responses can be verified by Pharos, whereas miekg/dns rejects NOTAUTH before checking the MAC.
+- BADTIME Responses retain the Query's Fudge as RFC 8945 requires; CoreDNS's TSIG Plugin defaults it to 300 seconds.
+- TSIG error Responses retain the Query TSIG's Original ID; CoreDNS's TSIG Plugin uses the Response header ID.
+- TSIG key-file parsing takes UTF-8 input, reads lines beyond Go's 64 KiB scanner limit, and uses Rust Unicode lowercasing, which can differ from Go for names such as a word-final capital sigma. CoreDNS can silently stop reading an overlong key-file line.
+- TSIG Response signing and verification require a valid-length Query MAC. The RFC 8945 exception for a signed Response to an unsigned TKEY Query is not supported by this API; miekg/dns allows generating a Response without a Query MAC.
 - Pharos rejects compression pointers that do not point backwards, while miekg/dns follows them until its hop limit.
 - Pharos also rejects targets whose encoding overlaps the pointer; miekg/dns accepts them.
 - Pharos permits up to 255 pointer hops; miekg/dns permits 126.

@@ -8,6 +8,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+aws-lc-rs = "1"
+base64 = "0.22"
+
 [dev-dependencies]
 criterion = "0.5"
 domain = { version = "0.12.3", default-features = false, features = ["std"] }
