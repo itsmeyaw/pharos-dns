@@ -326,6 +326,14 @@ fn visit_reverse(
     found
 }
 
+fn external_name(index: &Index, req: &name::Request<'_>) -> Option<String> {
+    let service = index.service(
+        std::str::from_utf8(req.namespace).ok()?,
+        std::str::from_utf8(req.service).ok()?,
+    )?;
+    (service.service_type == "ExternalName").then(|| service.external_name.clone())
+}
+
 fn visit(
     index: &Index,
     req: &name::Request<'_>,
@@ -604,6 +612,19 @@ impl pharos_server::Plugin for Kubernetes {
                     || count == 1 && (labels[0] == b"svc" || labels[0] == b"pod")
                     || count == 2 && labels[0] == b"ns" && labels[1] == b"dns")
         {
+            if q.qtype == Type::SOA
+                && !multicluster
+                && !reverse_name
+                && let Some(req) = &req
+                && req.kind == b"svc"
+                && !req.service.is_empty()
+            {
+                external = store.with_read(|i| {
+                    visit(i, req, &self.config, |_, _, _| {})
+                        .then(|| external_name(i, req))
+                        .flatten()
+                });
+            }
             true
         } else if let Some(req) = &req {
             if reverse_name && !req.kind.is_empty() {
@@ -616,16 +637,8 @@ impl pharos_server::Plugin for Kubernetes {
             } else if req.kind == b"svc" {
                 store.with_read(|i| {
                     let ok = visit(i, req, &self.config, |_, _, _| {});
-                    if ok
-                        && !multicluster
-                        && let (Ok(ns), Ok(svc)) = (
-                            std::str::from_utf8(req.namespace),
-                            std::str::from_utf8(req.service),
-                        )
-                        && let Some(service) = i.service(ns, svc)
-                        && service.service_type == "ExternalName"
-                    {
-                        external = Some(service.external_name.clone());
+                    if ok && !multicluster {
+                        external = external_name(i, req);
                     }
                     ok
                 })
@@ -934,8 +947,9 @@ impl pharos_server::Plugin for Kubernetes {
                 }
             }
             // Kubernetes DNS spec 1.1.0 §2.5: ExternalName services have a CNAME to the target.
+            // RFC 1034 §4.3.2 step 3a: the CNAME is returned whatever the QTYPE.
             if let Some(target) = &target
-                && (q.qtype == Type::CNAME || chased.is_some())
+                && (!matches!(q.qtype, Type::A | Type::AAAA) || chased.is_some())
             {
                 let target_ref = NameRef::parse(target.as_wire(), 0).unwrap();
                 b.record_with(
