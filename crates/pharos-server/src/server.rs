@@ -54,7 +54,7 @@ impl<C: Chain> Chain for Arc<C> {
 
 /// One Listener's routing, admission and Plugin Chain execution.
 pub struct Server<C> {
-    pub router: Router<C>,
+    pub router: Arc<Router<C>>,
     pub key: ListenerKey,
     pub allow_non_in: bool,
     pub debug: bool,
@@ -90,7 +90,7 @@ impl<C: Chain> Server<C> {
             .metrics_enabled(&key)
             .then(|| metrics.block(&server, "dropped", ""));
         Self {
-            router,
+            router: Arc::new(router),
             key,
             allow_non_in: false,
             debug: false,
@@ -174,6 +174,19 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
     ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
         // shortcut: static re-entry boxes a future, remove if recursive dispatch no longer needs it.
         Box::pin(self.handle_with_depth(wire, peer, protocol, response, (depth, siit), self))
+    }
+
+    fn owned(&self) -> Option<Arc<dyn crate::OwnedSelfLookupServer>> {
+        Some(Arc::new(Self {
+            router: Arc::clone(&self.router),
+            key: self.key,
+            allow_non_in: self.allow_non_in,
+            debug: self.debug,
+            udp_workers: self.udp_workers,
+            logger: self.logger,
+            metrics: self.metrics.clone(),
+            dropped: self.dropped.clone(),
+        }))
     }
 }
 

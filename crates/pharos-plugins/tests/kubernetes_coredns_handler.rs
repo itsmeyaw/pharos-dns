@@ -293,7 +293,7 @@ async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
         }))
     };
     let (servers, _) = servers(blocks).unwrap();
-    let server = std::sync::Arc::new(servers.into_values().next().unwrap());
+    let server = servers.values().next().unwrap();
     let serial = if synced {
         let zone: Name = "cluster.local.".parse().unwrap();
         let mut query = Vec::with_capacity(512);
@@ -307,14 +307,14 @@ async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
             .unwrap();
         let _ = builder.finish();
         let mut wire = Vec::with_capacity(4096);
-        pharos_server::Handler::handle_shared(
-            &server,
-            &query,
-            "127.0.0.1:1234".parse().unwrap(),
-            Protocol::Tcp,
-            &mut wire,
-        )
-        .await;
+        server
+            .handle(
+                &query,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Tcp,
+                &mut wire,
+            )
+            .await;
         let msg = Message::parse(&wire).unwrap();
         let Rdata::Soa { serial, .. } = msg.answers().next().unwrap().data().unwrap() else {
             panic!("missing SOA")
@@ -338,14 +338,14 @@ async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
             .unwrap();
         let _ = builder.finish();
         let mut wire = Vec::with_capacity(4096);
-        pharos_server::Handler::handle_shared(
-            &server,
-            &query,
-            "127.0.0.1:1234".parse().unwrap(),
-            Protocol::Tcp,
-            &mut wire,
-        )
-        .await;
+        server
+            .handle(
+                &query,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Tcp,
+                &mut wire,
+            )
+            .await;
         let message =
             Message::parse(&wire).unwrap_or_else(|e| panic!("{} {}: {e:?}", case.id, case.name));
         assert!(!message.tc(), "{} unexpected truncation", case.id);

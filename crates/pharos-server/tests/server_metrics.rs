@@ -4,6 +4,7 @@ use pharos_server::{
     Action, Chain, Context, Error, Handler, ListenerKey, Outcome, Protocol, Router, Server,
     Transport,
 };
+use std::sync::Arc;
 
 struct Broken;
 
@@ -55,8 +56,8 @@ async fn blocks_added_after_server_creation_record_metrics() {
     };
     let mut server = Server::new(Router::default(), key);
     server.logger = |_| {};
-    server
-        .router
+    Arc::get_mut(&mut server.router)
+        .unwrap()
         .add(key, ".".parse().unwrap(), Some(Broken), vec![]);
     let query = [0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1];
     server
