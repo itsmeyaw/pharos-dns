@@ -1,0 +1,3 @@
+miek.nl.	1800	IN	SOA	linode.atoom.net. miek.miek.nl. 1460175181 14400 3600 604800 14400
+miek.nl.		1800	IN	NS	omval.tednet.nl.
+miek.nl.		0	IN	NSEC3PARAM 1 0 5 A3DEBC9CC4F695C7

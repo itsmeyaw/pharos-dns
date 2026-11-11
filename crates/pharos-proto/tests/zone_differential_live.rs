@@ -262,6 +262,32 @@ fn covers_raw_owner_and_target_octets() {
 }
 
 #[test]
+fn covers_coredns_fixture_manifest() {
+    macro_rules! fixtures {
+        ($($name:ident => $origin:literal),* $(,)?) => {
+            [$( (stringify!($name), $origin) ),*]
+        };
+    }
+    let fixtures = include!("corpus/zone-coredns/manifest.rs");
+    assert_eq!(fixtures.len(), 36, "CoreDNS fixture count");
+    let cases = cases();
+    for (name, origin) in fixtures {
+        let case_name = format!("coredns-fixture-{name}");
+        let matching: Vec<_> = cases.iter().filter(|case| case.name == case_name).collect();
+        assert_eq!(matching.len(), 1, "{case_name}: missing or duplicate case");
+        assert_eq!(matching[0].origin, origin, "{case_name}: origin");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/corpus/zone-coredns")
+            .join(format!("{name}.zone"));
+        assert_eq!(
+            matching[0].zone,
+            fs::read(path).unwrap(),
+            "{case_name}: zone"
+        );
+    }
+}
+
+#[test]
 fn covers_miekg_presentation_types() {
     // miekg/dns scan_rr.go and svcb.go at b2d6c9f: textual RR parse implementations.
     let types = [
@@ -350,7 +376,7 @@ fn covers_miekg_presentation_types() {
             .iter()
             .filter(|case| !case.name.starts_with("rr-") && !case.name.starts_with("byte-"))
             .count(),
-        409
+        409 + 36
     );
     for rtype in types {
         for kind in ["valid", "malformed"] {
@@ -399,6 +425,19 @@ fn cases() -> Vec<Case> {
             b"$INCLUDE nonexistent.zone\n".as_slice(),
         ),
     ];
+    macro_rules! fixtures {
+        ($($name:ident => $origin:literal),* $(,)?) => {
+            vec![$({
+                let name = stringify!($name);
+                let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/corpus/zone-coredns")
+                    .join(format!("{name}.zone"));
+                let zone = fs::read(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+                case(format!("coredns-fixture-{name}"), $origin, zone)
+            }),*]
+        };
+    }
+    cases.extend(include!("corpus/zone-coredns/manifest.rs"));
     // RFC 1035 §5.1: vary owner, class/TTL order, quoting and record grammar.
     let rdata = [
         "A 192.0.2.1",
