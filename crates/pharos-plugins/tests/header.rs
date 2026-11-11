@@ -23,11 +23,14 @@ fn coredns_setup_cases() {
         "header {\n response set aa\n}",
         "header {\n response set ra aa\n query clear rd\n}",
         "header ignored {\n QuErY SeT RD aa\n ReSpOnSe ClEaR RA\n}",
+        "header {}\nheader {\n query set rd\n}",
+        "header {\n query set rd\n}\nheader {\n query foo rd\n}",
     ] {
         assert!(configured(directive).is_ok(), "{directive}");
     }
     for directive in [
         "header",
+        "header ignored",
         "header {}",
         "header {\n foo\n}",
         "header {\n response set\n}",
@@ -217,5 +220,8 @@ async fn forwarding_rejects_header_compression_even_when_ad_is_set() {
         response: &mut response,
         max_response_size: 512,
     };
-    assert_eq!(chain.serve(&mut cx).await, Outcome::Unanswered(Rcode::FORMERR));
+    assert_eq!(
+        chain.serve(&mut cx).await,
+        Outcome::Unanswered(Rcode::FORMERR)
+    );
 }

@@ -76,6 +76,12 @@
 - Health checks start on exchange failure, and proxy connections and checks are stopped on Shutdown.
 - Forward reuses Upstream Response buffers from a pool; a new buffer is allocated when concurrent Queries exceed the pool's previous high-water mark, and the pool retains that peak allocation until the Plugin is dropped.
 
+## header
+
+- Header rules modify encoded Response flags in place; a compressed name pointing into the changed header bytes can therefore decode differently than CoreDNS's re-encoded Response. Query views retain their original name bytes until forwarded, rather than re-encoding them.
+- Forwarding a Query with changed flags returns FORMERR when the existing forwarding safety check cannot rule out compression pointers into the header or opaque RDATA. CoreDNS re-encodes its decoded Query instead.
+- Response rules apply only to a Response returned by Next; Listener-synthesized Responses for errors or unanswered outcomes are not modified, following the explicit Plugin outcome contract.
+
 ## health
 
 - Health addresses are shared once per exact configured address, using the first Lameduck duration; CoreDNS creates one Listener and probe per Server Block and can share ports using SO_REUSEPORT.
@@ -207,7 +213,7 @@
 
 ## General
 
-- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI

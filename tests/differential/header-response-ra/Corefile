@@ -1,0 +1,6 @@
+.:{port} {
+    header {
+        response set ra
+    }
+    whoami
+}
