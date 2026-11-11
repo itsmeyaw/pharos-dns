@@ -1638,6 +1638,80 @@ async fn coredns_edns_subnet_uses_ipv6_prefix_and_masks_host_bits() {
     );
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rewrite_test.go TestRewriteEDNS0Subnet.
+#[tokio::test]
+async fn coredns_edns_subnet_prefix_rows() {
+    for (rule, client, expected) in [
+        (
+            "24 56",
+            "10.240.0.1:40212",
+            &b"\0\x08\0\x07\0\x01\x18\0\x0a\xf0\0"[..],
+        ),
+        (
+            "32 56",
+            "10.240.0.1:40212",
+            &b"\0\x08\0\x08\0\x01\x20\0\x0a\xf0\0\x01"[..],
+        ),
+        ("0 56", "10.240.0.1:40212", &b"\0\x08\0\x04\0\x01\0\0"[..]),
+        (
+            "24 56",
+            "[fe80::42:ff:feca:4c65]:40212",
+            &b"\0\x08\0\x0b\0\x02\x38\0\xfe\x80\0\0\0\0\0"[..],
+        ),
+        (
+            "24 128",
+            "[fe80::42:ff:feca:4c65]:40212",
+            &b"\0\x08\0\x14\0\x02\x80\0\xfe\x80\0\0\0\0\0\0\0\x42\0\xff\xfe\xca\x4c\x65"[..],
+        ),
+        (
+            "24 0",
+            "[fe80::42:ff:feca:4c65]:40212",
+            &b"\0\x08\0\x04\0\x02\0\0"[..],
+        ),
+    ] {
+        let config = format!(".:53 {{\n rewrite edns0 subnet set {rule}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = "example.com.".parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: client.parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, InspectOptionBytes(expected))
+                .await,
+            Outcome::Drop,
+            "{rule} {client}"
+        );
+    }
+}
+
 struct InspectMaybeOptions(Option<&'static [u8]>);
 impl Next for InspectMaybeOptions {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
