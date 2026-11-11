@@ -59,6 +59,7 @@ impl AutoPath {
     pub(crate) fn bind_kubernetes(&mut self, kubernetes: Option<&crate::kubernetes::Kubernetes>) {
         if self.provider.as_deref() == Some("kubernetes") && kubernetes.is_some() {
             self.kubernetes = kubernetes.cloned();
+            self.search.clear();
             if let Ok(file) = std::fs::read_to_string("/etc/resolv.conf") {
                 self.search = parse_resolv(&file);
             }
