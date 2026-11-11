@@ -397,6 +397,15 @@ impl SelfLookupServer for SelfLookupHandle {
 }
 
 impl Context<'_, '_> {
+    /// Return the nesting depth of this Query's Self Lookup, or zero for an external Query.
+    #[must_use]
+    pub fn self_lookup_depth(&self) -> u8 {
+        self.metadata
+            .self_lookup
+            .as_ref()
+            .map_or(0, |state| state.depth)
+    }
+
     /// Run Next with temporary Query bytes while preserving Metadata and Response state.
     pub async fn run_with_query<N: Next + Send>(&mut self, wire: &[u8], next: N) -> Outcome {
         let Ok(query) = Message::parse(wire) else {

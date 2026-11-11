@@ -207,6 +207,133 @@ impl Next for InspectQuestion {
     }
 }
 
+struct InspectLocalOption;
+impl Next for InspectLocalOption {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let opt = cx.query.opt().expect("rewrite created OPT");
+        assert!(opt.options().iter().any(|option| matches!(
+            option,
+            pharos_proto::EdnsOption::Unknown {
+                code: 0xffee,
+                data: b"abcd"
+            }
+        )));
+        Outcome::Drop
+    }
+}
+
+struct WaitForever;
+impl Next for WaitForever {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+        std::future::pending().await
+    }
+}
+
+#[test]
+fn edns_buffer_is_released_when_a_query_is_cancelled() {
+    use std::{
+        future::Future,
+        task::{Context as TaskContext, Poll, Waker},
+    };
+    let config = ".:53 {\n rewrite edns0 local set 0xffee abcd\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let plugin = chain.rewrite.as_ref().unwrap();
+    let name: Name = "example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut first_response = Vec::with_capacity(512);
+    let mut second_response = Vec::with_capacity(512);
+    let mut first_slots = [];
+    let mut second_slots = [];
+    let mut first = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut first_slots),
+        response: &mut first_response,
+        max_response_size: 512,
+    };
+    let mut second = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut second_slots),
+        response: &mut second_response,
+        max_response_size: 512,
+    };
+    let mut first_future = Box::pin(plugin.serve(&mut first, WaitForever));
+    let mut second_future = Box::pin(plugin.serve(&mut second, InspectLocalOption));
+    let mut task = TaskContext::from_waker(Waker::noop());
+    assert_eq!(first_future.as_mut().poll(&mut task), Poll::Pending);
+    assert_eq!(second_future.as_mut().poll(&mut task), Poll::Pending);
+    drop(first_future);
+    assert_eq!(
+        second_future.as_mut().poll(&mut task),
+        Poll::Ready(Outcome::Drop)
+    );
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rewrite_test.go.
+#[tokio::test]
+async fn coredns_edns_local_set_reaches_next_without_original_opt() {
+    let config = ".:53 {\n rewrite edns0 local set 0xffee abcd\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, InspectLocalOption)
+            .await,
+        Outcome::Drop
+    );
+    assert!(cx.query.opt().is_none());
+}
+
 struct InspectName(&'static str);
 impl Next for InspectName {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {

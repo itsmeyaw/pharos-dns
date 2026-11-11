@@ -69,6 +69,14 @@ fn coredns_ttl_setup_cases() {
     }
 }
 
+#[test]
+fn edns_hex_data_rejects_non_ascii_without_panicking() {
+    let text = ".:53 {\n rewrite edns0 local set 0xffee 0xaé0\n}";
+    let result =
+        parse("Corefile", text).and_then(|blocks| configure::<Chain>(&blocks, directives()));
+    assert!(result.is_err());
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/name_test.go TestNewNameRule.
 #[test]
 fn coredns_name_setup_cases() {

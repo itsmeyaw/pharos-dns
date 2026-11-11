@@ -4,7 +4,8 @@ use std::fmt::Write;
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{
-    Class, Message, MessageBuilder, MessageMut, Name, NameRef, Rdata, Section, Type,
+    BuildError, Class, FixedBuffer, Message, MessageBuffer, MessageBuilder, MessageMut, Name,
+    NameRef, Rdata, RdataWriter, Section, Type,
 };
 use pharos_server::{Context, Error as ServerError, Metadata, Next, Outcome, Plugin};
 
@@ -23,6 +24,7 @@ enum Action {
     Class(Class, Class),
     Name(String, bool, Option<Vec<NamePart>>, Vec<AnswerRule>),
     Cname(Matcher, String),
+    EdnsLocalSet(u16, Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -65,6 +67,7 @@ impl Matcher {
 #[derive(Debug)]
 pub struct Rewrite {
     rules: Vec<Rule>,
+    edns_buffers: Vec<tokio::sync::Mutex<Vec<u8>>>,
 }
 
 impl Rewrite {
@@ -96,6 +99,44 @@ impl Rewrite {
             let Some((kind, args)) = args.split_first() else {
                 return Err(cursor.arg_err());
             };
+            if kind.eq_ignore_ascii_case("edns0") {
+                let [typ, action, code, data] = args else {
+                    return Err(cursor.arg_err());
+                };
+                if !typ.eq_ignore_ascii_case("local") || !action.eq_ignore_ascii_case("set") {
+                    return Err(cursor.error("unsupported EDNS rule"));
+                }
+                let code = if let Some(hex) =
+                    code.strip_prefix("0x").or_else(|| code.strip_prefix("0X"))
+                {
+                    u16::from_str_radix(hex, 16)
+                } else {
+                    code.parse()
+                }
+                .map_err(|_| cursor.error("invalid EDNS code"))?;
+                let data = if let Some(hex) = data.strip_prefix("0x") {
+                    if hex.len() % 2 != 0 {
+                        return Err(cursor.error("invalid hex data"));
+                    }
+                    hex.as_bytes()
+                        .chunks_exact(2)
+                        .map(|pair| {
+                            let pair = std::str::from_utf8(pair)
+                                .map_err(|_| cursor.error("invalid hex data"))?;
+                            u8::from_str_radix(pair, 16)
+                                .map_err(|_| cursor.error("invalid hex data"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    data.as_bytes().to_vec()
+                };
+                rules.push(Rule {
+                    matcher: Matcher::Any,
+                    action: Action::EdnsLocalSet(code, data),
+                    stop,
+                });
+                continue;
+            }
             if kind.eq_ignore_ascii_case("cname") {
                 let (mode, from, to) = match args {
                     [from, to] => ("exact", from, to),
@@ -296,7 +337,25 @@ impl Rewrite {
                 stop,
             });
         }
-        Ok(Self { rules })
+        let edns_buffers = if rules
+            .iter()
+            .any(|rule| matches!(rule.action, Action::EdnsLocalSet(..)))
+        {
+            (0..=10)
+                .map(|_| {
+                    let buffer = tokio::sync::Mutex::new(vec![0; 65535]);
+                    // Initialize the platform mutex at setup, not on the first Query.
+                    drop(buffer.try_lock().expect("new scratch buffer"));
+                    buffer
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            rules,
+            edns_buffers,
+        })
     }
 }
 
@@ -855,6 +914,359 @@ fn apply_history<'a>(
     NameRef::parse(&output[..len], 0).expect("validated name")
 }
 
+fn edns_query(
+    query: Message<'_>,
+    original_query: Message<'_>,
+    metadata: &Metadata<'_>,
+    rules: &[Rule],
+    end: usize,
+    output: &mut [u8],
+) -> Result<usize, ServerError> {
+    let opt = query.opt();
+    let original = opt.map_or(&[][..], |opt| opt.options().as_bytes());
+    let mut fixed = FixedBuffer::new(output);
+    let mut builder = MessageBuilder::new(&mut fixed, 65535, query.id(), query.flags())
+        .map_err(ServerError::Build)?;
+    for question in query.questions() {
+        if !builder
+            .question(question.name, question.qtype, question.qclass)
+            .map_err(ServerError::Build)?
+        {
+            return Err(ServerError::ResponseBufferTooSmall);
+        }
+    }
+    let mut written_opt = false;
+    for (section, records) in [
+        (Section::Answer, query.answers()),
+        (Section::Authority, query.authorities()),
+        (Section::Additional, query.additionals()),
+    ] {
+        for rr in records {
+            let written = if rr.rtype == Type::OPT {
+                written_opt = true;
+                builder
+                    .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
+                        write_edns_options(writer, original, original_query, metadata, rules, end)
+                    })
+                    .map_err(ServerError::Build)?
+            } else {
+                let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+                builder
+                    .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
+                        data.write(writer)
+                    })
+                    .map_err(ServerError::Build)?
+            };
+            if !written {
+                return Err(ServerError::ResponseBufferTooSmall);
+            }
+        }
+    }
+    if !written_opt {
+        // RFC 6891 §6.1.2: an OPT pseudo-record has a root owner and advertises UDP size.
+        let root = NameRef::parse(&[0], 0).expect("root name");
+        if !builder
+            .record_with(
+                Section::Additional,
+                root,
+                Type::OPT,
+                Class(4096),
+                0,
+                |writer| write_edns_options(writer, original, original_query, metadata, rules, end),
+            )
+            .map_err(ServerError::Build)?
+        {
+            return Err(ServerError::ResponseBufferTooSmall);
+        }
+    }
+    Ok(builder.finish().len())
+}
+
+fn option_contains(mut options: &[u8], code: u16) -> bool {
+    while !options.is_empty() {
+        let current = u16::from_be_bytes([options[0], options[1]]);
+        let len = usize::from(u16::from_be_bytes([options[2], options[3]]));
+        if current == code {
+            return true;
+        }
+        options = &options[4 + len..];
+    }
+    false
+}
+
+fn write_edns_options<B: MessageBuffer>(
+    writer: &mut RdataWriter<'_, '_, B>,
+    original: &[u8],
+    query: Message<'_>,
+    metadata: &Metadata<'_>,
+    rules: &[Rule],
+    end: usize,
+) -> Result<(), BuildError> {
+    let latest = |code| {
+        rules[..end]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, rule)| {
+                let Action::EdnsLocalSet(candidate, data) = &rule.action else {
+                    return None;
+                };
+                (*candidate == code && active_at(rules, index, query, metadata))
+                    .then_some(data.as_slice())
+            })
+    };
+    let write =
+        |writer: &mut RdataWriter<'_, '_, B>, code: u16, data: &[u8]| -> Result<(), BuildError> {
+            let len = u16::try_from(data.len()).map_err(|_| BuildError::RdataTooLong)?;
+            writer.write_bytes(&code.to_be_bytes())?;
+            writer.write_bytes(&len.to_be_bytes())?;
+            writer.write_bytes(data)
+        };
+    let mut position = 0;
+    while position < original.len() {
+        let code = u16::from_be_bytes([original[position], original[position + 1]]);
+        let len = usize::from(u16::from_be_bytes([
+            original[position + 2],
+            original[position + 3],
+        ]));
+        let next = position + 4 + len;
+        if !option_contains(&original[..position], code)
+            && let Some(data) = latest(code)
+        {
+            write(writer, code, data)?;
+        } else {
+            writer.write_bytes(&original[position..next])?;
+        }
+        position = next;
+    }
+    for (index, rule) in rules[..end].iter().enumerate() {
+        let Action::EdnsLocalSet(code, _) = &rule.action else {
+            continue;
+        };
+        if option_contains(original, *code) || !active_at(rules, index, query, metadata) {
+            continue;
+        }
+        if rules[..index].iter().enumerate().any(|(earlier, rule)| {
+            matches!(&rule.action, Action::EdnsLocalSet(previous, _) if previous == code)
+                && active_at(rules, earlier, query, metadata)
+        }) {
+            continue;
+        }
+        if let Some(data) = latest(*code) {
+            write(writer, *code, data)?;
+        }
+    }
+    Ok(())
+}
+
+#[inline(never)]
+fn build_cname_response(
+    cx: &mut Context<'_, '_>,
+    lookup: Message<'_>,
+    from: &NameText,
+    target: &Name,
+) -> Result<(), ServerError> {
+    let mut scratch = [0u8; 65535];
+    if cx.response.len() > scratch.len() {
+        return Err(ServerError::InvalidQuery);
+    }
+    scratch[..cx.response.len()].copy_from_slice(cx.response);
+    let response =
+        Message::parse(&scratch[..cx.response.len()]).map_err(|_| ServerError::InvalidQuery)?;
+    let flags = (response.flags() & !0x0200) | (lookup.flags() & 0x0200);
+    let mut builder = MessageBuilder::new(
+        cx.response,
+        cx.max_response_size.max(512),
+        response.id(),
+        flags,
+    )
+    .map_err(ServerError::Build)?;
+    for q in response.questions() {
+        builder
+            .question(q.name, q.qtype, q.qclass)
+            .map_err(ServerError::Build)?;
+    }
+    for rr in response.answers() {
+        let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+        if let Rdata::Cname(value) = data {
+            let mut text = NameText {
+                bytes: [0; 1024],
+                len: 0,
+            };
+            let replace =
+                write!(text, "{value}").is_ok() && text.bytes[..text.len] == from.bytes[..from.len];
+            let value = if replace {
+                NameRef::parse(target.as_wire(), 0).expect("configured name")
+            } else {
+                value
+            };
+            builder
+                .record_with(Section::Answer, rr.name, rr.rtype, rr.class, rr.ttl, |w| {
+                    Rdata::Cname(value).write(w)
+                })
+                .map_err(ServerError::Build)?;
+            if replace {
+                break;
+            }
+        }
+    }
+    for rr in lookup.answers() {
+        let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+        builder
+            .record_with(Section::Answer, rr.name, rr.rtype, rr.class, rr.ttl, |w| {
+                data.write(w)
+            })
+            .map_err(ServerError::Build)?;
+    }
+    for (section, records) in [
+        (Section::Authority, response.authorities()),
+        (Section::Additional, response.additionals()),
+    ] {
+        for rr in records {
+            let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+            builder
+                .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |w| {
+                    data.write(w)
+                })
+                .map_err(ServerError::Build)?;
+        }
+    }
+    let _ = builder.finish();
+    Ok(())
+}
+
+#[inline(never)]
+fn build_reverted_response(
+    cx: &mut Context<'_, '_>,
+    original_query: Message<'_>,
+    rules: &[Rule],
+    end: usize,
+) -> Result<(), ServerError> {
+    let mut scratch = [0u8; 65535];
+    if cx.response.len() > scratch.len() {
+        return Err(ServerError::InvalidQuery);
+    }
+    scratch[..cx.response.len()].copy_from_slice(cx.response);
+    let response =
+        Message::parse(&scratch[..cx.response.len()]).map_err(|_| ServerError::InvalidQuery)?;
+    let original = original_query
+        .questions()
+        .next()
+        .ok_or(ServerError::InvalidQuery)?;
+    let mut builder = MessageBuilder::new(
+        cx.response,
+        cx.max_response_size.max(512),
+        response.id(),
+        response.flags(),
+    )
+    .map_err(ServerError::Build)?;
+    builder
+        .question(original.name, original.qtype, original.qclass)
+        .map_err(ServerError::Build)?;
+    for q in response.questions().skip(1) {
+        builder
+            .question(q.name, q.qtype, q.qclass)
+            .map_err(ServerError::Build)?;
+    }
+    for (section, records) in [
+        (Section::Answer, response.answers()),
+        (Section::Authority, response.authorities()),
+        (Section::Additional, response.additionals()),
+    ] {
+        for rr in records {
+            let mut owner_buffer = [0; 255];
+            let owner = apply_history(
+                rr.name,
+                original_query,
+                &cx.metadata,
+                rules,
+                end,
+                false,
+                &mut owner_buffer,
+            );
+            let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+            let mut value_buffer = [0; 255];
+            macro_rules! map {
+                ($value:expr) => {
+                    apply_history(
+                        $value,
+                        original_query,
+                        &cx.metadata,
+                        rules,
+                        end,
+                        true,
+                        &mut value_buffer,
+                    )
+                };
+            }
+            let data = match data {
+                Rdata::Cname(value) => Rdata::Cname(map!(value)),
+                Rdata::Dname(value) => Rdata::Dname(map!(value)),
+                Rdata::Ns(value) => Rdata::Ns(map!(value)),
+                Rdata::Ptr(value) => Rdata::Ptr(map!(value)),
+                Rdata::Mx {
+                    preference,
+                    exchange,
+                } => Rdata::Mx {
+                    preference,
+                    exchange: map!(exchange),
+                },
+                Rdata::Soa {
+                    mname,
+                    rname,
+                    serial,
+                    refresh,
+                    retry,
+                    expire,
+                    minimum,
+                } => Rdata::Soa {
+                    mname: map!(mname),
+                    rname,
+                    serial,
+                    refresh,
+                    retry,
+                    expire,
+                    minimum,
+                },
+                Rdata::Srv {
+                    priority,
+                    weight,
+                    port,
+                    target,
+                } => Rdata::Srv {
+                    priority,
+                    weight,
+                    port,
+                    target: map!(target),
+                },
+                Rdata::Naptr {
+                    order,
+                    preference,
+                    flags,
+                    services,
+                    regexp,
+                    replacement,
+                } => Rdata::Naptr {
+                    order,
+                    preference,
+                    flags,
+                    services,
+                    regexp,
+                    replacement: map!(replacement),
+                },
+                other => other,
+            };
+            builder
+                .record_with(section, owner, rr.rtype, rr.class, rr.ttl, |writer| {
+                    data.write(writer)
+                })
+                .map_err(ServerError::Build)?;
+        }
+    }
+    let _ = builder.finish();
+    Ok(())
+}
+
 impl Plugin for Rewrite {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let original_query = cx.query;
@@ -863,6 +1275,7 @@ impl Plugin for Rewrite {
         };
         let mut end = self.rules.len();
         let mut response_rules = false;
+        let mut rewrite_edns = false;
         let mut cname = None;
         for (index, rule) in self.rules.iter().enumerate() {
             let matched = match apply_rule(rule, &mut cx.query, &cx.metadata) {
@@ -878,6 +1291,7 @@ impl Plugin for Rewrite {
                         cname = Some((matcher, to.as_str()));
                         response_rules = true;
                     }
+                    Action::EdnsLocalSet(..) => rewrite_edns = true,
                     Action::Ttl(..) | Action::Rcode(..) => response_rules = true,
                     _ => {}
                 }
@@ -889,7 +1303,27 @@ impl Plugin for Rewrite {
             }
         }
         let rewritten_query = cx.query;
-        let outcome = next.run(cx).await;
+        let outcome = if rewrite_edns {
+            // shortcut: EDNS Queries serialize per Self Lookup depth until slot-based buffers are available.
+            let mut buffer = self.edns_buffers[usize::from(cx.self_lookup_depth()).min(10)]
+                .lock()
+                .await;
+            let wire = &mut *buffer;
+            let len = match edns_query(
+                cx.query,
+                original_query,
+                &cx.metadata,
+                &self.rules,
+                end,
+                wire,
+            ) {
+                Ok(len) => len,
+                Err(error) => return Outcome::Error(error),
+            };
+            cx.run_with_query(&wire[..len], next).await
+        } else {
+            next.run(cx).await
+        };
         if outcome == Outcome::Response
             && let Some((matcher, replacement)) = cname
         {
@@ -910,99 +1344,9 @@ impl Plugin for Rewrite {
                 if let Ok(wire) = cx.self_lookup(&target, question.qtype).await
                     && let Ok(lookup) = Message::parse(&wire)
                 {
-                    let mut scratch = [0u8; 65535];
-                    if cx.response.len() > scratch.len() {
-                        return Outcome::Error(ServerError::InvalidQuery);
+                    if let Err(error) = build_cname_response(cx, lookup, &from, &target) {
+                        return Outcome::Error(error);
                     }
-                    scratch[..cx.response.len()].copy_from_slice(cx.response);
-                    let Ok(response) = Message::parse(&scratch[..cx.response.len()]) else {
-                        return Outcome::Error(ServerError::InvalidQuery);
-                    };
-                    let flags = (response.flags() & !0x0200) | (lookup.flags() & 0x0200);
-                    let Ok(mut builder) = MessageBuilder::new(
-                        cx.response,
-                        cx.max_response_size.max(512),
-                        response.id(),
-                        flags,
-                    ) else {
-                        return Outcome::Error(ServerError::ResponseBufferTooSmall);
-                    };
-                    for q in response.questions() {
-                        if builder.question(q.name, q.qtype, q.qclass).is_err() {
-                            return Outcome::Error(ServerError::InvalidQuery);
-                        }
-                    }
-                    for rr in response.answers() {
-                        let Ok(data) = rr.data() else {
-                            return Outcome::Error(ServerError::InvalidQuery);
-                        };
-                        if let Rdata::Cname(value) = data {
-                            let mut text = NameText {
-                                bytes: [0; 1024],
-                                len: 0,
-                            };
-                            let replace = write!(text, "{value}").is_ok()
-                                && text.bytes[..text.len] == from.bytes[..from.len];
-                            let value = if replace {
-                                NameRef::parse(target.as_wire(), 0).expect("configured name")
-                            } else {
-                                value
-                            };
-                            if builder
-                                .record_with(
-                                    Section::Answer,
-                                    rr.name,
-                                    rr.rtype,
-                                    rr.class,
-                                    rr.ttl,
-                                    |w| Rdata::Cname(value).write(w),
-                                )
-                                .is_err()
-                            {
-                                return Outcome::Error(ServerError::InvalidQuery);
-                            }
-                            if replace {
-                                break;
-                            }
-                        }
-                    }
-                    for rr in lookup.answers() {
-                        let Ok(data) = rr.data() else {
-                            return Outcome::Error(ServerError::InvalidQuery);
-                        };
-                        if builder
-                            .record_with(
-                                Section::Answer,
-                                rr.name,
-                                rr.rtype,
-                                rr.class,
-                                rr.ttl,
-                                |w| data.write(w),
-                            )
-                            .is_err()
-                        {
-                            return Outcome::Error(ServerError::InvalidQuery);
-                        }
-                    }
-                    for (section, records) in [
-                        (Section::Authority, response.authorities()),
-                        (Section::Additional, response.additionals()),
-                    ] {
-                        for rr in records {
-                            let Ok(data) = rr.data() else {
-                                return Outcome::Error(ServerError::InvalidQuery);
-                            };
-                            if builder
-                                .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |w| {
-                                    data.write(w)
-                                })
-                                .is_err()
-                            {
-                                return Outcome::Error(ServerError::InvalidQuery);
-                            }
-                        }
-                    }
-                    let _ = builder.finish();
                 }
             }
         }
@@ -1113,137 +1457,9 @@ impl Plugin for Rewrite {
             });
         }
         if outcome == Outcome::Response && response_rules {
-            let mut scratch = [0u8; 65535];
-            if cx.response.len() > scratch.len() {
-                return Outcome::Error(ServerError::InvalidQuery);
+            if let Err(error) = build_reverted_response(cx, original_query, &self.rules, end) {
+                return Outcome::Error(error);
             }
-            scratch[..cx.response.len()].copy_from_slice(cx.response);
-            let Ok(response) = Message::parse(&scratch[..cx.response.len()]) else {
-                return Outcome::Error(ServerError::InvalidQuery);
-            };
-            let Some(original) = original_query.questions().next() else {
-                return Outcome::Error(ServerError::InvalidQuery);
-            };
-            let Ok(mut builder) = MessageBuilder::new(
-                cx.response,
-                cx.max_response_size.max(512),
-                response.id(),
-                response.flags(),
-            ) else {
-                return Outcome::Error(ServerError::ResponseBufferTooSmall);
-            };
-            if builder
-                .question(original.name, original.qtype, original.qclass)
-                .is_err()
-            {
-                return Outcome::Error(ServerError::InvalidQuery);
-            }
-            for q in response.questions().skip(1) {
-                if builder.question(q.name, q.qtype, q.qclass).is_err() {
-                    return Outcome::Error(ServerError::InvalidQuery);
-                }
-            }
-            for (section, records) in [
-                (Section::Answer, response.answers()),
-                (Section::Authority, response.authorities()),
-                (Section::Additional, response.additionals()),
-            ] {
-                for rr in records {
-                    let mut owner_buffer = [0; 255];
-                    let owner = apply_history(
-                        rr.name,
-                        original_query,
-                        &cx.metadata,
-                        &self.rules,
-                        end,
-                        false,
-                        &mut owner_buffer,
-                    );
-                    let Ok(data) = rr.data() else {
-                        return Outcome::Error(ServerError::InvalidQuery);
-                    };
-                    let mut value_buffer = [0; 255];
-                    macro_rules! map {
-                        ($value:expr) => {
-                            apply_history(
-                                $value,
-                                original_query,
-                                &cx.metadata,
-                                &self.rules,
-                                end,
-                                true,
-                                &mut value_buffer,
-                            )
-                        };
-                    }
-                    let data = match data {
-                        Rdata::Cname(value) => Rdata::Cname(map!(value)),
-                        Rdata::Dname(value) => Rdata::Dname(map!(value)),
-                        Rdata::Ns(value) => Rdata::Ns(map!(value)),
-                        Rdata::Ptr(value) => Rdata::Ptr(map!(value)),
-                        Rdata::Mx {
-                            preference,
-                            exchange,
-                        } => Rdata::Mx {
-                            preference,
-                            exchange: map!(exchange),
-                        },
-                        Rdata::Soa {
-                            mname,
-                            rname,
-                            serial,
-                            refresh,
-                            retry,
-                            expire,
-                            minimum,
-                        } => Rdata::Soa {
-                            mname: map!(mname),
-                            rname,
-                            serial,
-                            refresh,
-                            retry,
-                            expire,
-                            minimum,
-                        },
-                        Rdata::Srv {
-                            priority,
-                            weight,
-                            port,
-                            target,
-                        } => Rdata::Srv {
-                            priority,
-                            weight,
-                            port,
-                            target: map!(target),
-                        },
-                        Rdata::Naptr {
-                            order,
-                            preference,
-                            flags,
-                            services,
-                            regexp,
-                            replacement,
-                        } => Rdata::Naptr {
-                            order,
-                            preference,
-                            flags,
-                            services,
-                            regexp,
-                            replacement: map!(replacement),
-                        },
-                        other => other,
-                    };
-                    if builder
-                        .record_with(section, owner, rr.rtype, rr.class, rr.ttl, |writer| {
-                            data.write(writer)
-                        })
-                        .is_err()
-                    {
-                        return Outcome::Error(ServerError::InvalidQuery);
-                    }
-                }
-            }
-            let _ = builder.finish();
         }
         outcome
     }
