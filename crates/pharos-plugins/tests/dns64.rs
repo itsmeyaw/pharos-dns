@@ -10,6 +10,158 @@ use pharos_server::{
 };
 use std::net::Ipv6Addr;
 
+struct ScriptedChain {
+    dns64: pharos_plugins::dns64::Dns64,
+    initial_rcode: u16,
+    initial_soa: bool,
+    fallback_rcode: u16,
+    fallback_answers: bool,
+    truncated: bool,
+}
+
+impl pharos_server::Chain for ScriptedChain {
+    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+        self.dns64.serve(cx, ScriptedNext(self)).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+struct ScriptedNext<'a>(&'a ScriptedChain);
+impl Next for ScriptedNext<'_> {
+    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let fallback = q.qtype == Type::A;
+        let code = if fallback {
+            self.0.fallback_rcode
+        } else {
+            self.0.initial_rcode
+        };
+        let flags = 0x8100
+            | code
+            | if fallback && self.0.truncated {
+                0x0200
+            } else {
+                0
+            };
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), flags).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        if fallback && self.0.fallback_answers {
+            builder
+                .record(
+                    Section::Answer,
+                    q.name,
+                    Type::A,
+                    Class::IN,
+                    60,
+                    &[192, 0, 2, 42],
+                )
+                .unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    q.name,
+                    Type::A,
+                    Class::IN,
+                    5000,
+                    &[192, 0, 2, 43],
+                )
+                .unwrap();
+        }
+        if (!fallback && self.0.initial_soa) || (fallback && !self.0.fallback_answers) {
+            // RFC 1035 §3.3.13: MNAME, RNAME and five unsigned 32-bit fields.
+            let soa = [0u8; 22];
+            builder
+                .record(
+                    Section::Authority,
+                    q.name,
+                    Type::SOA,
+                    Class::IN,
+                    if fallback { 3600 } else { 70 },
+                    &soa,
+                )
+                .unwrap();
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS TestDNS64 and TestDNS64FallbackError.
+#[tokio::test]
+async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
+    for (initial, soa, fallback, answers, truncated, expected_code, expected_ttls) in [
+        (0, true, 0, true, false, 0, vec![60, 70]),
+        (5, false, 0, true, false, 0, vec![60, 600]),
+        (0, true, 0, true, true, 0, vec![60, 70]),
+        (0, true, 0, false, false, 0, vec![]),
+        (0, false, 2, false, false, 2, vec![]),
+        (0, false, 5, false, false, 5, vec![]),
+        (0, false, 1, false, false, 1, vec![]),
+        (0, false, 3, false, false, 3, vec![]),
+        (0, false, 4, false, false, 4, vec![]),
+    ] {
+        let blocks = parse("Corefile", ".:53 {\n dns64\n}").unwrap();
+        let mut chain = configure::<Chain>(&blocks, directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let scripted = ScriptedChain {
+            dns64: chain.dns64.take().unwrap(),
+            initial_rcode: initial,
+            initial_soa: soa,
+            fallback_rcode: fallback,
+            fallback_answers: answers,
+            truncated,
+        };
+        let key = pharos_server::ListenerKey {
+            transport: Transport::Dns,
+            address: "127.0.0.1:53".parse().unwrap(),
+        };
+        let mut router = pharos_server::Router::default();
+        router.add(key, ".".parse().unwrap(), Some(scripted), vec![]);
+        let server = pharos_server::Server::new(router, key);
+        let name: Name = "example.com.".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::AAAA,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &wire,
+                    "[::1]:1234".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+        let message = Message::parse(&response).unwrap();
+        assert_eq!(message.id(), 42);
+        assert_eq!(message.questions().next().unwrap().qtype, Type::AAAA);
+        assert_eq!(message.rcode(), Rcode(expected_code));
+        assert_eq!(message.tc(), truncated);
+        assert_eq!(
+            message.answers().map(|rr| rr.ttl).collect::<Vec<_>>(),
+            expected_ttls
+        );
+        if answers {
+            assert!(message.answers().all(|rr| rr.rtype == Type::AAAA));
+        } else {
+            assert_eq!(message.authorities().next().unwrap().ttl, 3600);
+        }
+    }
+}
+
 struct FakeNext {
     rcode: u16,
     has_aaaa: bool,
