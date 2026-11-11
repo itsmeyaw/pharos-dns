@@ -23,7 +23,14 @@ enum Action {
     Class(Class, Class),
     Name(String, bool, Option<Vec<NamePart>>, Vec<AnswerRule>),
     Cname(Matcher, String),
-    EdnsLocal(u16, Vec<u8>, EdnsAction),
+    Edns(u16, EdnsValue, EdnsAction),
+}
+
+#[derive(Debug)]
+enum EdnsValue {
+    Local(Vec<u8>),
+    Nsid,
+    Subnet(u8, u8),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,12 +120,9 @@ impl Rewrite {
                 return Err(cursor.arg_err());
             };
             if kind.eq_ignore_ascii_case("edns0") {
-                let Some([typ, action, code, rest @ ..]) = args.get(..) else {
+                let Some([typ, action, rest @ ..]) = args.get(..) else {
                     return Err(cursor.arg_err());
                 };
-                if !typ.eq_ignore_ascii_case("local") {
-                    return Err(cursor.error("unsupported EDNS rule"));
-                }
                 let action = match action.to_ascii_lowercase().as_str() {
                     "set" => EdnsAction::Set,
                     "append" => EdnsAction::Append,
@@ -126,39 +130,59 @@ impl Rewrite {
                     "unset" => EdnsAction::Unset,
                     _ => return Err(cursor.error("invalid EDNS action")),
                 };
-                let data = match (action, rest) {
-                    (EdnsAction::Unset, []) => "",
-                    (EdnsAction::Unset, _) => return Err(cursor.arg_err()),
-                    (_, [data]) => data.as_str(),
-                    _ => return Err(cursor.arg_err()),
-                };
-                let code = if let Some(hex) =
-                    code.strip_prefix("0x").or_else(|| code.strip_prefix("0X"))
-                {
-                    u16::from_str_radix(hex, 16)
-                } else {
-                    code.parse()
-                }
-                .map_err(|_| cursor.error("invalid EDNS code"))?;
-                let data = if let Some(hex) = data.strip_prefix("0x") {
-                    if hex.len() % 2 != 0 {
-                        return Err(cursor.error("invalid hex data"));
+                let (code, data) = if typ.eq_ignore_ascii_case("local") {
+                    let (code, data) = match (action, rest) {
+                        (EdnsAction::Unset, [code]) => (code.as_str(), ""),
+                        (EdnsAction::Unset, _) => return Err(cursor.arg_err()),
+                        (_, [code, data]) => (code.as_str(), data.as_str()),
+                        _ => return Err(cursor.arg_err()),
+                    };
+                    let code =
+                        parse_edns_number(code).ok_or_else(|| cursor.error("invalid EDNS code"))?;
+                    let data = if let Some(hex) = data.strip_prefix("0x") {
+                        if hex.len() % 2 != 0 {
+                            return Err(cursor.error("invalid hex data"));
+                        }
+                        hex.as_bytes()
+                            .chunks_exact(2)
+                            .map(|pair| {
+                                let pair = std::str::from_utf8(pair)
+                                    .map_err(|_| cursor.error("invalid hex data"))?;
+                                u8::from_str_radix(pair, 16)
+                                    .map_err(|_| cursor.error("invalid hex data"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        data.as_bytes().to_vec()
+                    };
+                    (code, EdnsValue::Local(data))
+                } else if typ.eq_ignore_ascii_case("nsid") {
+                    if !rest.is_empty() {
+                        return Err(cursor.arg_err());
                     }
-                    hex.as_bytes()
-                        .chunks_exact(2)
-                        .map(|pair| {
-                            let pair = std::str::from_utf8(pair)
-                                .map_err(|_| cursor.error("invalid hex data"))?;
-                            u8::from_str_radix(pair, 16)
-                                .map_err(|_| cursor.error("invalid hex data"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
+                    (3, EdnsValue::Nsid)
+                } else if typ.eq_ignore_ascii_case("subnet") {
+                    let (v4, v6) = match (action, rest) {
+                        (EdnsAction::Unset, []) => (0, 0),
+                        (_, [v4, v6]) if action != EdnsAction::Unset => (
+                            parse_edns_number(v4)
+                                .filter(|v| *v <= 32)
+                                .ok_or_else(|| cursor.error("invalid IPv4 prefix"))?
+                                as u8,
+                            parse_edns_number(v6)
+                                .filter(|v| *v <= 128)
+                                .ok_or_else(|| cursor.error("invalid IPv6 prefix"))?
+                                as u8,
+                        ),
+                        _ => return Err(cursor.arg_err()),
+                    };
+                    (8, EdnsValue::Subnet(v4, v6))
                 } else {
-                    data.as_bytes().to_vec()
+                    return Err(cursor.error("unsupported EDNS rule"));
                 };
                 rules.push(Rule {
                     matcher: Matcher::Any,
-                    action: Action::EdnsLocal(code, data, action),
+                    action: Action::Edns(code, data, action),
                     stop,
                 });
                 continue;
@@ -365,7 +389,7 @@ impl Rewrite {
         }
         let edns_buffers = if rules
             .iter()
-            .any(|rule| matches!(rule.action, Action::EdnsLocal(..)))
+            .any(|rule| matches!(rule.action, Action::Edns(..)))
         {
             (0..=10)
                 .map(|_| {
@@ -473,6 +497,30 @@ fn name_parts(mut replacement: &str, groups: usize) -> Option<Vec<NamePart>> {
         replacement = after;
     }
     Some(parts)
+}
+
+fn parse_edns_number(value: &str) -> Option<u16> {
+    let value = value.strip_prefix('+').unwrap_or(value);
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u16::from_str_radix(hex, 16).ok()
+    } else if let Some(binary) = value
+        .strip_prefix("0b")
+        .or_else(|| value.strip_prefix("0B"))
+    {
+        u16::from_str_radix(binary, 2).ok()
+    } else if let Some(octal) = value
+        .strip_prefix("0o")
+        .or_else(|| value.strip_prefix("0O"))
+    {
+        u16::from_str_radix(octal, 8).ok()
+    } else if value.len() > 1 && value.starts_with('0') {
+        u16::from_str_radix(&value[1..], 8).ok()
+    } else {
+        value.parse().ok()
+    }
 }
 
 fn rcode(value: &str) -> Option<u16> {
@@ -948,6 +996,27 @@ struct EdnsState<'a> {
     len: usize,
 }
 
+fn subnet_data(ip: std::net::IpAddr, v4: u8, v6: u8, output: &mut [u8; 20]) -> &[u8] {
+    let (family, prefix, address): (u16, u8, [u8; 16]) = match ip {
+        std::net::IpAddr::V4(ip) => {
+            let mut address = [0; 16];
+            address[..4].copy_from_slice(&ip.octets());
+            (1, v4, address)
+        }
+        std::net::IpAddr::V6(ip) => (2, v6, ip.octets()),
+    };
+    output[..2].copy_from_slice(&family.to_be_bytes());
+    output[2] = prefix;
+    output[3] = 0;
+    let len = usize::from(prefix.div_ceil(8));
+    output[4..4 + len].copy_from_slice(&address[..len]);
+    // RFC 7871 §6: host bits after the source prefix are zero.
+    if !prefix.is_multiple_of(8) {
+        output[3 + len] &= u8::MAX << (8 - prefix % 8);
+    }
+    &output[..4 + len]
+}
+
 impl<'a> EdnsState<'a> {
     fn new(bytes: &'a mut [u8], query: &Message<'_>) -> Self {
         let original = query.opt().map_or(&[][..], |opt| opt.options().as_bytes());
@@ -958,7 +1027,13 @@ impl<'a> EdnsState<'a> {
         }
     }
 
-    fn apply(&mut self, code: u16, data: &[u8], action: EdnsAction) -> Result<bool, ServerError> {
+    fn apply(
+        &mut self,
+        code: u16,
+        data: &[u8],
+        action: EdnsAction,
+        append_existing: bool,
+    ) -> Result<bool, ServerError> {
         let mut position = 0;
         let mut first = None;
         while position < self.len {
@@ -981,6 +1056,9 @@ impl<'a> EdnsState<'a> {
         }
         if action == EdnsAction::Unset {
             return Ok(true);
+        }
+        if action == EdnsAction::Append && first.is_some() && !append_existing {
+            return Ok(false);
         }
         if action == EdnsAction::Replace && first.is_none() {
             return Ok(false);
@@ -1304,12 +1382,22 @@ impl Plugin for Rewrite {
         };
         for (index, rule) in self.rules.iter().enumerate() {
             let applied = match &rule.action {
-                Action::EdnsLocal(code, data, action) => {
+                Action::Edns(code, value, action) => {
                     rewrite_edns = true;
-                    state
-                        .as_mut()
-                        .expect("EDNS scratch allocated")
-                        .apply(*code, data, *action)
+                    let mut data = [0; 20];
+                    let (value, append_existing): (&[u8], bool) = match value {
+                        EdnsValue::Local(bytes) => (bytes, true),
+                        EdnsValue::Nsid => (&[], true),
+                        EdnsValue::Subnet(v4, v6) => {
+                            (subnet_data(cx.client.ip(), *v4, *v6, &mut data), false)
+                        }
+                    };
+                    state.as_mut().expect("EDNS scratch allocated").apply(
+                        *code,
+                        value,
+                        *action,
+                        append_existing,
+                    )
                 }
                 _ => apply_rule(rule, &mut cx.query, &cx.metadata),
             };
@@ -1329,7 +1417,7 @@ impl Plugin for Rewrite {
                         cname = Some((matcher, to.as_str()));
                         response_rules = true;
                     }
-                    Action::EdnsLocal(..) => {}
+                    Action::Edns(..) => {}
                     Action::Ttl(..) | Action::Rcode(..) => response_rules = true,
                     _ => {}
                 }

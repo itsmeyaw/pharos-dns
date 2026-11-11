@@ -56,6 +56,8 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         ("rewrite edns0 local append 0xffee abcd", "example."),
         ("rewrite edns0 local replace 0xffee abcd", "example."),
         ("rewrite edns0 local unset 0xffee", "example."),
+        ("rewrite edns0 nsid set", "example."),
+        ("rewrite edns0 subnet set 24 56", "example."),
     ] {
         let config = format!(".:53 {{\n {rule}\n}}");
         let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
