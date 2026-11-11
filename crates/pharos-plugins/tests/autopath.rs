@@ -6,8 +6,8 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Section, Type};
 use pharos_server::{
-    Action, Context, Handler, ListenerKey, Next, Outcome, Plugin, Protocol, Router, Server,
-    Transport,
+    Action, Context, Handler, ListenerKey, Metadata, Next, Outcome, Plugin, Protocol, Router,
+    Server, Transport,
 };
 
 struct Scripted(pharos_plugins::autopath::AutoPath);
@@ -50,6 +50,71 @@ impl Next for Backend {
         let _ = b.finish();
         Outcome::Response
     }
+}
+
+struct Alias;
+impl Next for Alias {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let owner: Name = "other.example.org.".parse().unwrap();
+        let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        b.question(q.name, q.qtype, q.qclass).unwrap();
+        b.record(
+            Section::Answer,
+            NameRef::parse(owner.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+            33,
+            &[1, 2, 3, 4],
+        )
+        .unwrap();
+        let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn coredns_first_success_with_different_owner_adds_cname() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/autopath-search.conf"
+    );
+    let config = format!(".:53 {{\n autopath {path}\n}}");
+    let blocks = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap();
+    let plugin = blocks[0].config.autopath.as_ref().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let name: Name = "a.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(plugin.serve(&mut cx, Alias).await, Outcome::Response);
+    let response = Message::parse(&response).unwrap();
+    assert_eq!(response.answers().count(), 2);
+    let first = response.answers().next().unwrap();
+    assert_eq!(first.ttl, 33);
+    let Rdata::Cname(target) = first.data().unwrap() else {
+        panic!("expected CNAME")
+    };
+    assert_eq!(target.to_string(), "other.example.org.");
 }
 
 // Derived from CoreDNS v1.15.0 plugin/autopath/autopath_test.go.

@@ -178,7 +178,28 @@ impl Plugin for AutoPath {
             return Outcome::Error(ServerError::InvalidQuery);
         };
         if first_response.rcode() != Rcode::NXDOMAIN {
+            if first_response
+                .answers()
+                .any(|rr| different_name(rr.name, question.name))
+            {
+                let mut scratch = [0u8; u16::MAX as usize];
+                let len = cx.response.len();
+                if len > scratch.len() {
+                    return Outcome::Error(ServerError::InvalidQuery);
+                }
+                scratch[..len].copy_from_slice(cx.response);
+                let response = match Message::parse(&scratch[..len]) {
+                    Ok(response) => response,
+                    Err(_) => return Outcome::Error(ServerError::InvalidQuery),
+                };
+                if let Err(error) = rebuild(cx, &response) {
+                    return Outcome::Error(error);
+                }
+            }
             self.count(cx.local);
+            return outcome;
+        }
+        if paths.clone().count() == 1 {
             return outcome;
         }
         let original = cx.response.clone();
@@ -241,6 +262,14 @@ fn within_ref(name: NameRef<'_>, suffix: NameRef<'_>) -> bool {
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
+fn different_name(a: NameRef<'_>, b: NameRef<'_>) -> bool {
+    a.labels().count() != b.labels().count()
+        || !a
+            .labels()
+            .zip(b.labels())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
 #[cfg(feature = "plugin-kubernetes")]
 fn prefix_zone<'a>(labels: &[&[u8]], zone: &Name, wire: &'a mut [u8; 255]) -> Option<&'a [u8]> {
     let mut used = 0;
@@ -280,13 +309,10 @@ fn rebuild(cx: &mut Context<'_, '_>, response: &Message<'_>) -> Result<(), Serve
         .map_err(ServerError::Build)?;
     b.question(question.name, question.qtype, question.qclass)
         .map_err(ServerError::Build)?;
-    if let Some(first) = response.answers().find(|rr| {
-        !rr.name
-            .labels()
-            .zip(question.name.labels())
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
-            || rr.name.labels().count() != question.name.labels().count()
-    }) {
+    if let Some(first) = response
+        .answers()
+        .find(|rr| different_name(rr.name, question.name))
+    {
         b.record_with(
             Section::Answer,
             question.name,
