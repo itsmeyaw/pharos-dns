@@ -7,6 +7,10 @@
 - An unbound Listener and an explicit `bind ::` on the same port share one Listener. CoreDNS groups them separately, so its competing sockets can direct Queries to the wrong Server Block.
 - Reload binds new Listeners before removing old ones, so switching between a wildcard and a specific address on the same port can fail rather than replacing the socket.
 
+## bufsize
+
+- When forwarding a Query with a compression pointer into the OPT CLASS bytes, Pharos rewrites those bytes in the original encoding; CoreDNS re-encodes the decoded Message and preserves the pointed-to name.
+
 ## cache
 
 - Negative Responses use the SOA MINIMUM as well as the record TTLs to bound the cache lifetime, following RFC 2308; CoreDNS's `MinimalTTLWithMaximum` checks only record TTLs.
@@ -190,7 +194,7 @@
 
 ## General
 
-- Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `bind`, `bufsize`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI

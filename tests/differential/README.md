@@ -54,6 +54,9 @@ They do not compare randomized order or weight distributions.
 The `whoami-log` scenario compares Responses, not log output. The current whoami
 Responses cannot exceed the 512-octet UDP minimum for these short Queries, so
 truncation is not covered.
+The `bufsize` README scenarios use a local `whoami` Upstream instead of the
+example's external resolver, and `hosts` instead of the unimplemented `file`
+backend. They compare Responses for both UDP and TCP, with and without EDNS.
 The `loop` scenario compares Responses for a non-looping configuration. The
 looping README example is covered by a binary exit test instead: this harness
 expects both processes to remain available and does not compare exit codes.

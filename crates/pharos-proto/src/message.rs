@@ -54,6 +54,7 @@ pub struct Message<'a> {
     starts: [usize; 4],
     counts: [u16; 4],
     flags: u16,
+    udp_payload_limit: Option<u16>,
 }
 
 /// A Question in a Message.
@@ -187,7 +188,7 @@ impl<'a> Message<'a> {
         Ok(wire)
     }
 
-    /// Return the original Message bytes without copying.
+    /// Return the original Message bytes without copying; view changes are not applied.
     #[must_use]
     pub const fn as_wire(&self) -> &'a [u8] {
         self.wire
@@ -237,6 +238,7 @@ impl<'a> Message<'a> {
             starts,
             counts,
             flags: u16::from_be_bytes([wire[2], wire[3]]),
+            udp_payload_limit: None,
         })
     }
     #[must_use]
@@ -253,6 +255,42 @@ impl<'a> Message<'a> {
     pub fn with_ad(mut self) -> Self {
         self.flags |= 0x20;
         self
+    }
+    /// Return a view limiting the advertised UDP payload size without copying.
+    #[must_use]
+    pub fn with_udp_payload_limit(mut self, limit: u16) -> Self {
+        self.udp_payload_limit = Some(self.udp_payload_limit.map_or(limit, |old| old.min(limit)));
+        self
+    }
+
+    /// Apply view changes to a copy of the original wire Message.
+    pub fn copy_wire(&self, output: &mut Vec<u8>) {
+        output.clear();
+        output.extend_from_slice(self.wire);
+        output[2..4].copy_from_slice(&self.flags.to_be_bytes());
+        if let Some(limit) = self.udp_payload_limit
+            && let Some(rr) = self.additionals().find(|rr| rr.rtype == Type::OPT)
+        {
+            // RFC 6891 §6.1.2: the OPT CLASS is the advertised UDP payload size.
+            output[rr.ttl_offset - 2..rr.ttl_offset]
+                .copy_from_slice(&rr.class.0.min(limit).to_be_bytes());
+        }
+    }
+
+    /// Whether the view differs from the original wire Message.
+    #[must_use]
+    pub fn wire_changed(&self) -> bool {
+        self.flags != u16::from_be_bytes([self.wire[2], self.wire[3]])
+            || self.udp_payload_limit.is_some_and(|limit| {
+                self.additionals()
+                    .find(|rr| rr.rtype == Type::OPT)
+                    .is_some_and(|rr| {
+                        u16::from_be_bytes([
+                            self.wire[rr.ttl_offset - 2],
+                            self.wire[rr.ttl_offset - 1],
+                        ]) > limit
+                    })
+            })
     }
     /// Whether setting AD in the wire header preserves encoded names.
     /// Non-OPT RDATA with possible compression pointers is conservatively rejected.
@@ -374,6 +412,7 @@ impl<'a> Message<'a> {
             wire: self.wire,
             offset: self.starts[section],
             remaining: self.counts[section],
+            udp_payload_limit: self.udp_payload_limit,
         }
     }
 }
@@ -418,6 +457,7 @@ pub struct Records<'a> {
     wire: &'a [u8],
     offset: usize,
     remaining: u16,
+    udp_payload_limit: Option<u16>,
 }
 impl<'a> Iterator for Records<'a> {
     type Item = Record<'a>;
@@ -425,7 +465,12 @@ impl<'a> Iterator for Records<'a> {
         if self.remaining == 0 {
             return None;
         }
-        let (item, next) = record(self.wire, self.offset).ok()?;
+        let (mut item, next) = record(self.wire, self.offset).ok()?;
+        if item.rtype == Type::OPT
+            && let Some(limit) = self.udp_payload_limit
+        {
+            item.class.0 = item.class.0.min(limit);
+        }
         self.remaining -= 1;
         self.offset = next;
         Some(item)

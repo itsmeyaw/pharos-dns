@@ -15,6 +15,8 @@ use std::{
 
 #[cfg(feature = "plugin-bind")]
 pub mod bind;
+#[cfg(feature = "plugin-bufsize")]
+pub mod bufsize;
 #[cfg(feature = "plugin-cache")]
 pub mod cache;
 #[cfg(feature = "plugin-errors")]
@@ -455,6 +457,12 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 #[cfg(feature = "plugin-nsid")]
 fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.nsid = Some(nsid::Nsid::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-bufsize")]
+fn setup_bufsize(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.bufsize = Some(bufsize::Bufsize::parse(cursor)?);
     Ok(())
 }
 

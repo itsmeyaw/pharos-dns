@@ -24,6 +24,7 @@ fn main() {
         let ty = match *name {
             "cache" => "cache::Cache",
             "bind" => "()",
+            "bufsize" => "bufsize::Bufsize",
             "multisocket" => "Option<usize>",
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
@@ -48,6 +49,7 @@ fn main() {
         let setup = match *name {
             "cache" => "setup_cache",
             "bind" => "setup_bind",
+            "bufsize" => "setup_bufsize",
             "multisocket" => "setup_multisocket",
             "whoami" => "setup_whoami",
             "log" => "setup_log",

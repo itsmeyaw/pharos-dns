@@ -1,0 +1,8 @@
+.:{port} {
+    bufsize 1220
+    hosts empty.hosts {
+        192.0.2.10 example.org
+        reload 0
+    }
+    log
+}
