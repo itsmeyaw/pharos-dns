@@ -21,7 +21,14 @@ enum Action {
     Rcode(u16, u16),
     Type(Type, Type),
     Class(Class, Class),
-    Name(String, bool),
+    Name(String, bool, Option<Vec<NamePart>>),
+}
+
+#[derive(Debug)]
+enum NamePart {
+    Literal(String),
+    Capture(usize),
+    Label(String),
 }
 
 #[derive(Debug)]
@@ -87,6 +94,14 @@ impl Rewrite {
                     [mode, from, to, extra @ ..] => (mode.as_str(), from, to, extra),
                     _ => return Err(cursor.arg_err()),
                 };
+                let (metadata, extra) = if extra.first().is_some_and(|value| value == "metadata") {
+                    (true, &extra[1..])
+                } else {
+                    (false, extra)
+                };
+                if metadata && !mode.eq_ignore_ascii_case("regex") {
+                    return Err(cursor.error("metadata requires regex"));
+                }
                 let auto = match extra {
                     [] => false,
                     [answer, auto] if answer == "answer" && auto == "auto" => true,
@@ -113,16 +128,35 @@ impl Rewrite {
                         let used = (0..=100)
                             .filter(|index| to.contains(&format!("{{{index}}}")))
                             .count();
-                        if used > pattern.captures_len() - 1 {
+                        if !metadata && used > pattern.captures_len() - 1 {
                             return Err(cursor.error("too many capture groups"));
                         }
                         Matcher::Regex(pattern)
                     }
                     _ => return Err(cursor.error("invalid name match type")),
                 };
+                let parts = if metadata {
+                    let Matcher::Regex(pattern) = &matcher else {
+                        unreachable!()
+                    };
+                    let mut replacement = to.to_owned();
+                    if !replacement.ends_with('.') {
+                        replacement.push('.');
+                    }
+                    Some(
+                        name_parts(&replacement, pattern.captures_len() - 1)
+                            .ok_or_else(|| cursor.error("invalid metadata replacement"))?,
+                    )
+                } else {
+                    None
+                };
                 rules.push(Rule {
                     matcher,
-                    action: Action::Name(normal(to), auto || mode.eq_ignore_ascii_case("exact")),
+                    action: Action::Name(
+                        normal(to),
+                        auto || mode.eq_ignore_ascii_case("exact"),
+                        parts,
+                    ),
                     stop,
                 });
                 continue;
@@ -217,6 +251,41 @@ impl Rewrite {
         }
         Ok(Self { rules })
     }
+}
+
+fn name_parts(mut replacement: &str, groups: usize) -> Option<Vec<NamePart>> {
+    let mut parts = Vec::new();
+    while !replacement.is_empty() {
+        let (before, rest) = replacement
+            .split_once('{')
+            .map_or((replacement, None), |(a, b)| (a, Some(b)));
+        if before.contains('}') {
+            return None;
+        }
+        if !before.is_empty() {
+            parts.push(NamePart::Literal(before.to_lowercase()));
+        }
+        let Some(rest) = rest else {
+            break;
+        };
+        let (label, after) = rest.split_once('}')?;
+        if let Ok(index) = label.parse::<usize>() {
+            if index > groups {
+                return None;
+            }
+            parts.push(NamePart::Capture(index));
+        } else if label
+            .split_once('/')
+            .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty())
+            && !label.contains(['{', '}'])
+        {
+            parts.push(NamePart::Label(label.to_owned()));
+        } else {
+            return None;
+        }
+        replacement = after;
+    }
+    Some(parts)
 }
 
 fn rcode(value: &str) -> Option<u16> {
@@ -371,7 +440,7 @@ impl Plugin for Rewrite {
         let mut end = self.rules.len();
         let mut name_rewritten = false;
         let mut suffix = None;
-        for (index, rule) in self.rules.iter().enumerate() {
+        'rules: for (index, rule) in self.rules.iter().enumerate() {
             let matched = match rule.action {
                 Action::Type(from, to)
                     if from.0 != 0
@@ -394,7 +463,7 @@ impl Plugin for Rewrite {
                     true
                 }
                 Action::Type(..) | Action::Class(..) => false,
-                Action::Name(ref target, auto) if rule.matcher.matches(name) => {
+                Action::Name(ref target, auto, ref parts) if rule.matcher.matches(name) => {
                     let mut text = NameText {
                         bytes: [0; 1024],
                         len: 0,
@@ -420,14 +489,50 @@ impl Plugin for Rewrite {
                         Matcher::Regex(pattern) => {
                             // shortcut: regex captures allocate; non-regex rules remain allocation-free.
                             let captures = pattern.captures(name).expect("matched regex");
-                            let mut replacement = target.clone();
-                            for (index, value) in captures.iter().enumerate() {
-                                replacement = replacement.replace(
-                                    &format!("{{{index}}}"),
-                                    value.map_or("", |value| value.as_str()),
-                                );
+                            if let Some(parts) = parts {
+                                let mut result = Ok(());
+                                for part in parts {
+                                    match part {
+                                        NamePart::Literal(value) => {
+                                            result = result.and_then(|()| text.write_str(value))
+                                        }
+                                        NamePart::Capture(index) => {
+                                            result = result.and_then(|()| {
+                                                text.write_str(
+                                                    captures
+                                                        .get(*index)
+                                                        .map_or("", |value| value.as_str()),
+                                                )
+                                            })
+                                        }
+                                        NamePart::Label(label) => {
+                                            if !cx.metadata.enabled() {
+                                                continue 'rules;
+                                            }
+                                            let Some(value) = cx
+                                                .metadata
+                                                .get(label)
+                                                .filter(|value| !value.is_empty())
+                                            else {
+                                                continue 'rules;
+                                            };
+                                            result = result.and_then(|()| {
+                                                text.write_str(&value.to_lowercase())
+                                            });
+                                        }
+                                    }
+                                }
+                                result
+                            } else {
+                                let mut replacement = target.clone();
+                                for (index, value) in captures.iter().enumerate() {
+                                    replacement = replacement.replace(
+                                        &format!("{{{index}}}"),
+                                        value.map_or("", |value| value.as_str()),
+                                    );
+                                }
+                                text.write_str(&replacement)
                             }
-                            text.write_str(&replacement)
                         }
                         _ => unreachable!("validated name matcher"),
                     };
