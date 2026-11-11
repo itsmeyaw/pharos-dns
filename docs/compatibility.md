@@ -68,8 +68,6 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 The Kubernetes data crate ignores addresses in EndpointSlices with address
 types other than IPv4 or IPv6; CoreDNS retains them.
-The `kubernetes` Plugin rejects `multicluster` with a not-implemented error;
-Multi-Cluster Services are tracked in #41.
 As in CoreDNS v1.15.0, Kubernetes NS discovery snapshots local addresses per
 Plugin instance. CoreDNS's CIDR-only selection yields no local NS addresses
 for explicit `bind` IP literals; Pharos matches that behavior.
