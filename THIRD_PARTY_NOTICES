@@ -6,6 +6,8 @@
 - License: Apache-2.0
 - Copyright 2016-2020 The CoreDNS authors and contributors
 - DNS wire fixture in `crates/pharos-proto/tests/corpus` is from CoreDNS test source; see the corpus README for the revision and original test.
+- DNSSEC black-lie bitmaps and tests in `crates/pharos-dnssec` follow CoreDNS v1.15.0's `plugin/dnssec/black_lies.go`.
+- The BIND key pair in `crates/pharos-dnssec/tests/fixtures` is from CoreDNS v1.15.0's `plugin/sign/testdata`.
 - `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
 - The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
 - Upstream proxy exchange and tests follow CoreDNS v1.15.0's `plugin/pkg/proxy`.
@@ -126,6 +128,7 @@ insights.
 - License: BSD-3-Clause
 - Copyright (c) 2009, The Go Authors. Extensions copyright (c) 2011, Miek Gieben.
 - DNS code presentation names in `crates/pharos-proto/src/codes.rs` follow miekg/dns v1.1.73.
+- The DNSSEC interoperability verifier in `crates/pharos-dnssec/tests/interop` uses miekg/dns v1.1.73.
 - Response classification's signature validity check follows miekg/dns v1.1.73's `RRSIG.ValidityPeriod`.
 - DNS wire fixtures in `crates/pharos-proto/tests/corpus` are from miekg/dns tests; see the corpus README for the revision and original tests.
 - TSIG error handling in `crates/pharos-proto/src/tsig.rs`, tests and generated interoperability fixtures in `tests/tsig.rs` and `tests/corpus/tsig-miekg.txt` follow miekg/dns v1.1.73's `tsig_test.go` and `tsig.go`.

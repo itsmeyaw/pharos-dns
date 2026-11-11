@@ -28,6 +28,14 @@
 - A hit that launches a background refresh allocates for the task and its Query and Response buffers; ordinary warmed hits do not allocate.
 - Cache metric series are initialized at setup, including zero-valued series; CoreDNS initializes individual labelled series on first use.
 
+## dnssec
+
+- Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as unsigned. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
+- RSA private keys below 2048 bits are rejected by aws-lc-rs; CoreDNS accepts them.
+- Key files currently require a standalone DNSKEY record with an absolute owner, IN class if specified, and a numeric TTL; the complete zone-file grammar is not supported.
+- Canonical signing rejects A6 and legacy name-bearing RDATA that `pharos-proto` cannot safely relocate, rather than signing them as CoreDNS does.
+- Constructing a black-lie NSEC allocates; callers must check that its span does not cover an existing name and convert NXDOMAIN to NODATA.
+
 ## errors
 
 - The `errors` Plugin uses Rust's `regex` syntax rather than Go's RE2 syntax. For example, `\w`, `\d`, `\s` and word boundaries are Unicode-aware in Rust but ASCII-only in Go; some expressions are accepted by only one engine.
@@ -175,6 +183,11 @@
 - The last attempted hash is reported even when a Reload fails, as in CoreDNS.
 - Candidate setup can register metric series before a failed Reload is rolled back.
 - Shutdown waits for Queries on replaced states to finish, so a stuck Query can delay processing subsequent signals.
+
+## sign
+
+- The shared signer has the same key and canonical-RDATA restrictions listed under `dnssec`.
+- NSEC3 chain construction supports complete chains only, not opt-out.
 
 ## whoami
 
