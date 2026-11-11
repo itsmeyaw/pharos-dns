@@ -34,6 +34,14 @@ enum EdnsValue {
     Subnet(u8, u8),
 }
 
+fn edns_value_tag(value: &EdnsValue) -> u8 {
+    match value {
+        EdnsValue::Local(_) | EdnsValue::Variable(_) => 0,
+        EdnsValue::Nsid => 1,
+        EdnsValue::Subnet(..) => 2,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EdnsAction {
     Set,
@@ -89,6 +97,7 @@ pub struct Rewrite {
 struct EdnsScratch {
     wire: Vec<u8>,
     matched: Vec<u8>,
+    tags: Vec<u8>,
     snapshots: Vec<EdnsSnapshot>,
 }
 
@@ -459,6 +468,7 @@ impl Rewrite {
                     let buffer = tokio::sync::Mutex::new(EdnsScratch {
                         wire: vec![0; 2 * 65535],
                         matched: vec![0; rules.len()],
+                        tags: vec![0; 16384],
                         snapshots: snapshot_labels
                             .iter()
                             .map(|label| EdnsSnapshot {
@@ -1094,7 +1104,9 @@ fn apply_history<'a, 'q>(
 
 struct EdnsState<'a> {
     bytes: &'a mut [u8],
+    tags: &'a mut [u8],
     len: usize,
+    count: usize,
 }
 
 fn subnet_data(ip: std::net::IpAddr, v4: u8, v6: u8, output: &mut [u8; 20]) -> &[u8] {
@@ -1187,37 +1199,63 @@ fn edns_variable<'a>(
 }
 
 impl<'a> EdnsState<'a> {
-    fn new(bytes: &'a mut [u8], query: &Message<'_>) -> Self {
+    fn new(bytes: &'a mut [u8], tags: &'a mut [u8], query: &Message<'_>) -> Self {
         let original = query.opt().map_or(&[][..], |opt| opt.options().as_bytes());
-        Self::from_bytes(bytes, original)
+        Self::from_bytes(bytes, tags, original)
     }
 
-    fn from_bytes(bytes: &'a mut [u8], original: &[u8]) -> Self {
+    fn from_bytes(bytes: &'a mut [u8], tags: &'a mut [u8], original: &[u8]) -> Self {
         bytes[..original.len()].copy_from_slice(original);
+        let mut count = 0;
+        let mut position = 0;
+        while position < original.len() {
+            let code = u16::from_be_bytes([original[position], original[position + 1]]);
+            let len = usize::from(u16::from_be_bytes([
+                original[position + 2],
+                original[position + 3],
+            ]));
+            tags[count] = match code {
+                3 => 1,
+                8 => 2,
+                1..=12 | 15 | 18 | 19 => 3,
+                _ => 0,
+            };
+            count += 1;
+            position += 4 + len;
+        }
         Self {
             bytes,
+            tags,
             len: original.len(),
+            count,
         }
     }
 
     fn first(&self, code: u16) -> Option<&[u8]> {
+        self.first_matching(code, None)
+    }
+
+    fn first_matching(&self, code: u16, tag: Option<u8>) -> Option<&[u8]> {
         let mut position = 0;
+        let mut index = 0;
         while position < self.len {
             let current = u16::from_be_bytes([self.bytes[position], self.bytes[position + 1]]);
             let len = usize::from(u16::from_be_bytes([
                 self.bytes[position + 2],
                 self.bytes[position + 3],
             ]));
-            if current == code {
+            if current == code && tag.is_none_or(|tag| self.tags[index] == tag) {
                 return Some(&self.bytes[position + 4..position + 4 + len]);
             }
             position += 4 + len;
+            index += 1;
         }
         None
     }
 
     fn remove_first(&mut self, code: u16) {
         let mut position = 0;
+        let mut index = 0;
         while position < self.len {
             let current = u16::from_be_bytes([self.bytes[position], self.bytes[position + 1]]);
             let len = usize::from(u16::from_be_bytes([
@@ -1228,9 +1266,12 @@ impl<'a> EdnsState<'a> {
             if current == code {
                 self.bytes.copy_within(next..self.len, position);
                 self.len -= next - position;
+                self.tags.copy_within(index + 1..self.count, index);
+                self.count -= 1;
                 break;
             }
             position = next;
+            index += 1;
         }
     }
 
@@ -1240,8 +1281,10 @@ impl<'a> EdnsState<'a> {
         data: &[u8],
         action: EdnsAction,
         append_existing: bool,
+        tag: Option<u8>,
     ) -> Result<bool, ServerError> {
         let mut position = 0;
+        let mut index = 0;
         let mut first = None;
         while position < self.len {
             let current = u16::from_be_bytes([self.bytes[position], self.bytes[position + 1]]);
@@ -1250,16 +1293,21 @@ impl<'a> EdnsState<'a> {
                 self.bytes[position + 3],
             ]));
             let next = position + 4 + len;
-            if current == code {
+            if current == code
+                && (action == EdnsAction::Unset || tag.is_none_or(|tag| self.tags[index] == tag))
+            {
                 if action == EdnsAction::Unset {
                     self.bytes.copy_within(next..self.len, position);
                     self.len -= next - position;
+                    self.tags.copy_within(index + 1..self.count, index);
+                    self.count -= 1;
                     continue;
                 }
                 first = Some((position, next));
                 break;
             }
             position = next;
+            index += 1;
         }
         if action == EdnsAction::Unset {
             return Ok(true);
@@ -1280,6 +1328,13 @@ impl<'a> EdnsState<'a> {
         let total = self.len - (old_end - start) + 4 + data.len();
         if total > self.bytes.len() {
             return Err(ServerError::ResponseBufferTooSmall);
+        }
+        if start == old_end {
+            if self.count == self.tags.len() {
+                return Err(ServerError::ResponseBufferTooSmall);
+            }
+            self.tags[self.count] = tag.unwrap_or(0);
+            self.count += 1;
         }
         self.bytes.copy_within(old_end..self.len, new_end);
         self.bytes[start..start + 2].copy_from_slice(&code.to_be_bytes());
@@ -1302,20 +1357,22 @@ fn apply_edns(
     };
     let mut data = [0; 1024];
     let value = match value {
-        EdnsValue::Local(bytes) => Some((bytes.as_slice(), true)),
+        EdnsValue::Local(bytes) => Some((bytes.as_slice(), true, 0)),
         EdnsValue::Variable(variable) => {
-            edns_variable(cx, query, variable, &mut data, snapshots).map(|value| (value, false))
+            edns_variable(cx, query, variable, &mut data, snapshots).map(|value| (value, false, 0))
         }
-        EdnsValue::Nsid => Some((&[][..], true)),
+        EdnsValue::Nsid => Some((&[][..], true, 1)),
         EdnsValue::Subnet(v4, v6) => {
             let mut subnet = [0; 20];
             let bytes = subnet_data(cx.client.ip(), *v4, *v6, &mut subnet);
             data[..bytes.len()].copy_from_slice(bytes);
-            Some((&data[..bytes.len()], false))
+            Some((&data[..bytes.len()], false, 2))
         }
     };
     value
-        .map(|(value, append_existing)| state.apply(*code, value, *action, append_existing))
+        .map(|(value, append_existing, tag)| {
+            state.apply(*code, value, *action, append_existing, Some(tag))
+        })
         .transpose()
 }
 
@@ -1478,8 +1535,9 @@ fn revert_edns_response<'q>(
         return Ok(());
     }
     let mut output_options = [0; 65535];
+    let mut output_tags = [0; 16384];
     let seed = response_opt.map_or(query_options, |opt| opt.options().as_bytes());
-    let mut options = EdnsState::from_bytes(&mut output_options, seed);
+    let mut options = EdnsState::from_bytes(&mut output_options, &mut output_tags, seed);
     if response_opt.is_none() {
         let mut position = 0;
         while position < options.len {
@@ -1493,12 +1551,12 @@ fn revert_edns_response<'q>(
             if registered {
                 position = next;
             } else {
-                options.bytes.copy_within(next..options.len, position);
-                options.len -= next - position;
+                options.remove_first(code);
             }
         }
     }
     let mut replay = [0; 65535];
+    let mut replay_tags = [0; 16384];
     let passes = if response_opt.is_some() {
         usize::from(response.answer_count())
             + usize::from(response.authority_count())
@@ -1508,13 +1566,13 @@ fn revert_edns_response<'q>(
     };
     for _ in 0..passes {
         for index in (0..end).rev() {
-            let Action::Edns(code, _, action, revert) = &rules[index].action else {
+            let Action::Edns(code, value, action, revert) = &rules[index].action else {
                 continue;
             };
             if !*revert || matched[index] == 0 || options.first(*code).is_none() {
                 continue;
             }
-            let mut previous_options = EdnsState::new(&mut replay, &original);
+            let mut previous_options = EdnsState::new(&mut replay, &mut replay_tags, &original);
             let mut previous_query = original;
             for earlier in 0..index {
                 if matched[earlier] == 0 {
@@ -1541,8 +1599,10 @@ fn revert_edns_response<'q>(
             }
             if *action == EdnsAction::Append {
                 options.remove_first(*code);
-            } else if let Some(previous) = previous_options.first(*code) {
-                options.apply(*code, previous, EdnsAction::Replace, false)?;
+            } else if let Some(previous) =
+                previous_options.first_matching(*code, Some(edns_value_tag(value)))
+            {
+                options.apply(*code, previous, EdnsAction::Replace, false, None)?;
             } else {
                 options.remove_first(*code);
             }
@@ -1798,6 +1858,7 @@ impl Plugin for Rewrite {
             let EdnsScratch {
                 wire,
                 matched,
+                tags,
                 snapshots,
             } = &mut **scratch;
             matched.fill(0);
@@ -1807,7 +1868,7 @@ impl Plugin for Rewrite {
             }
             let (options, output) = wire.split_at_mut(65535);
             (
-                Some(EdnsState::new(options, &cx.query)),
+                Some(EdnsState::new(options, tags, &cx.query)),
                 Some(output),
                 Some(matched.as_mut_slice()),
                 Some(snapshots.as_mut_slice()),
