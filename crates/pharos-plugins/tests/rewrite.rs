@@ -2385,6 +2385,11 @@ async fn coredns_regex_name_metadata_and_missing_labels() {
 }";
     for (value, expected) in [
         (Some("Team-A"), "web.team-a.svc.cluster.local."),
+        (Some(""), "web.example."),
+        (
+            Some("{1}.{test/Other}"),
+            "web.{1}.{test/other}.svc.cluster.local.",
+        ),
         (None, "web.example."),
     ] {
         let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
