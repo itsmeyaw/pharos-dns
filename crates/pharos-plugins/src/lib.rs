@@ -22,11 +22,14 @@ pub mod errors;
     feature = "plugin-errors",
     feature = "plugin-reload",
     feature = "plugin-hosts",
-    feature = "plugin-loadbalance"
+    feature = "plugin-loadbalance",
+    feature = "plugin-kubernetes"
 ))]
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
 pub mod hosts;
+#[cfg(feature = "plugin-kubernetes")]
+pub mod kubernetes;
 #[cfg(feature = "plugin-loadbalance")]
 pub mod loadbalance;
 pub mod proxy;
@@ -508,4 +511,15 @@ fn setup_errors(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 fn setup_unimplemented(cursor: &mut Cursor<'_>, _: &mut BlockContext<Chain>) -> Result<(), Error> {
     cursor.next();
     Err(cursor.error(format!("{}: plugin is not implemented", cursor.val())))
+}
+
+#[cfg(feature = "plugin-kubernetes")]
+fn setup_kubernetes(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    let domains = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.as_str())
+        .collect::<Vec<_>>();
+    kubernetes::setup::parse(cursor, &domains)?;
+    Err(cursor.error("kubernetes: DNS backend is not implemented"))
 }

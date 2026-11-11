@@ -54,11 +54,19 @@ fn main() {
             "loadbalance" => "setup_loadbalance",
             "reload" => "setup_reload",
             "errors" => "setup_errors",
+            "kubernetes" => "setup_kubernetes",
             _ => "setup_unimplemented",
         };
         let once = matches!(
             *name,
-            "cache" | "prometheus" | "ready" | "errors" | "reload" | "hosts" | "loop"
+            "cache"
+                | "prometheus"
+                | "ready"
+                | "errors"
+                | "reload"
+                | "hosts"
+                | "loop"
+                | "kubernetes"
         );
         writeln!(
             code,
