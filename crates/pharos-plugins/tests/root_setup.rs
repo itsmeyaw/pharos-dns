@@ -17,11 +17,7 @@ fn accepts_coredns_root_paths_and_rejects_invalid_setup() {
     for text in ["root /tmp", "root /unlikely-pharos-root-missing"] {
         assert!(configure_root(text).is_ok(), "rejected {text}");
     }
-    for text in [
-        "root",
-        "root {\n /tmp\n}",
-        "root bad\0path",
-    ] {
+    for text in ["root", "root {\n /tmp\n}", "root bad\0path"] {
         assert!(configure_root(text).is_err(), "accepted {text:?}");
     }
 }

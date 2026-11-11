@@ -7,7 +7,13 @@ use pharos_plugins::{Chain, directives};
 
 #[test]
 fn coredns_cancel_setup_cases() {
-    for directive in ["cancel", "cancel 5s", "cancel 1h30m", "cancel 1ms", "cancel 2s\ncancel 3s"] {
+    for directive in [
+        "cancel",
+        "cancel 5s",
+        "cancel 1h30m",
+        "cancel 1ms",
+        "cancel 2s\ncancel 3s",
+    ] {
         let text = format!(".:53 {{\n{directive}\n}}");
         assert!(
             configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).is_ok(),

@@ -7,7 +7,11 @@ use pharos_plugins::{Chain, directives, servers};
 
 #[test]
 fn coredns_debug_setup_cases() {
-    for (directive, valid) in [("debug", true), ("debug\ndebug", true), ("debug off", false)] {
+    for (directive, valid) in [
+        ("debug", true),
+        ("debug\ndebug", true),
+        ("debug off", false),
+    ] {
         let text = format!(".:53 {{\n{directive}\n}}");
         assert_eq!(
             configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).is_ok(),
