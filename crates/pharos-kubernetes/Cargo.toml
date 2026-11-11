@@ -1,0 +1,30 @@
+[package]
+name = "pharos-kubernetes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+k8s-openapi = { version = "0.29", features = ["v1_37"] }
+kube = { version = "5", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+serde = "1"
+pharos-server = { path = "../pharos-server" }
+http = "1"
+jiff = "0.2"
+tower = "0.5"
+
+[dev-dependencies]
+serde_json = "1"
+stats_alloc = "0.1.10"
+tempfile = "3"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+
+[lints]
+workspace = true

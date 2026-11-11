@@ -9,6 +9,9 @@ use std::{
     },
 };
 
+mod kubernetes;
+pub use kubernetes::{KubernetesMetrics, KubernetesRequestMetrics};
+
 const TYPES: &[(u16, &str)] = &[
     (1, "A"),
     (28, "AAAA"),
@@ -66,6 +69,7 @@ struct RegistryInner {
     reload_enabled: AtomicBool,
     reload_failures: AtomicU64,
     reload_hash: Mutex<Option<String>>,
+    kubernetes: KubernetesMetrics,
 }
 
 #[derive(Default)]
@@ -326,6 +330,7 @@ impl Registry {
             reload_enabled: AtomicBool::new(false),
             reload_failures: AtomicU64::new(0),
             reload_hash: Mutex::new(None),
+            kubernetes: KubernetesMetrics::default(),
         }))
     }
 
@@ -368,6 +373,10 @@ impl Registry {
             gauge,
             timestamp: Arc::clone(&self.0.hosts_timestamp),
         }
+    }
+
+    pub fn kubernetes(&self) -> KubernetesMetrics {
+        self.0.kubernetes.clone()
     }
 
     /// Resolve metrics for a proxy and Upstream address before recording events.
@@ -440,6 +449,7 @@ impl Registry {
 
     /// Append text to `out`; callers can append process metrics to the same buffer.
     pub fn encode(&self, out: &mut String) {
+        self.0.kubernetes.encode(out);
         if self.0.reload_enabled.load(Ordering::Relaxed) {
             header(
                 out,
@@ -1273,6 +1283,28 @@ fn rcode(code: u16) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kubernetes_metrics_export_coredns_labels_and_buckets() {
+        let registry = super::Registry::new("test", "test", "test");
+        let metrics = registry.kubernetes();
+        let request = metrics.request("GET", "api:6443");
+        request.observe(0.02, "200");
+        request.rate_limiter(0.003);
+        metrics.programming_duration("cluster_ip", 0.002);
+        let mut out = String::new();
+        registry.encode(&mut out);
+        for line in [
+            "pharos_kubernetes_rest_client_request_duration_seconds_count{host=\"api:6443\",verb=\"GET\"} 1",
+            "pharos_kubernetes_rest_client_rate_limiter_duration_seconds_count{host=\"api:6443\",verb=\"GET\"} 1",
+            "pharos_kubernetes_rest_client_requests_total{code=\"200\",host=\"api:6443\",method=\"GET\"} 1",
+            "pharos_kubernetes_dns_programming_duration_seconds_bucket{service_kind=\"cluster_ip\",le=\"0.002\"} 1",
+        ] {
+            assert!(
+                out.lines().any(|actual| actual == line),
+                "missing {line}\n{out}"
+            );
+        }
+    }
     #[test]
     fn proxy_series_share_labels_and_escape_values() {
         let registry = super::Registry::new("test", "test", "test");

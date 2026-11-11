@@ -15,3 +15,11 @@ allow = [
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"
+
+[[licenses.exceptions]]
+name = "ar_archive_writer"
+allow = ["Apache-2.0 WITH LLVM-exception"]
+
+[[licenses.exceptions]]
+name = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
