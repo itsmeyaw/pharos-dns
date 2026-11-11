@@ -65,7 +65,7 @@ pub fn parse_rdata(rtype: Type, fields: &[&str], origin: &Name) -> Result<Vec<u8
                 );
             }
         }
-        // RFC 7208 §3.1: SPF records use the same character-string format as TXT.
+        // RFC 4408 §3.1.1: the obsolete SPF RR type has the same format as TXT.
         Type::TXT | Type::SPF => {
             if fields.is_empty() {
                 return Err("TXT requires a character-string".into());
