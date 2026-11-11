@@ -48,6 +48,78 @@ impl Next for InspectQuestion {
     }
 }
 
+struct InspectName(&'static str);
+impl Next for InspectName {
+    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        assert_eq!(
+            cx.query.questions().next().unwrap().name.to_string(),
+            self.0
+        );
+        Outcome::Drop
+    }
+}
+
+#[tokio::test]
+async fn coredns_non_regex_name_rewrite_modes() {
+    for (rule, incoming, expected) in [
+        (
+            "rewrite name prefix ftp web",
+            "ftp.example.",
+            "web.example.",
+        ),
+        (
+            "rewrite name suffix .schmoogle.com. .google.com.",
+            "www.schmoogle.com.",
+            "www.google.com.",
+        ),
+        (
+            "rewrite name substring service.us-west-1.example.org service.us-west-1.consul",
+            "ftp.service.us-west-1.example.org.",
+            "ftp.service.us-west-1.consul.",
+        ),
+    ] {
+        let config = format!(".:53 {{\n {rule}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = incoming.parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        b.question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, InspectName(expected))
+                .await,
+            Outcome::Drop,
+            "{rule}"
+        );
+    }
+}
+
 struct AliasedAnswer;
 impl Next for AliasedAnswer {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {

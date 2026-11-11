@@ -21,7 +21,7 @@ enum Action {
     Rcode(u16, u16),
     Type(Type, Type),
     Class(Class, Class),
-    Name(Option<Name>),
+    Name(String, bool),
 }
 
 #[derive(Debug)]
@@ -82,9 +82,9 @@ impl Rewrite {
                 return Err(cursor.arg_err());
             };
             if kind.eq_ignore_ascii_case("name") {
-                let (from, to) = match args {
-                    [from, to] => (from, to),
-                    [mode, from, to] if mode.eq_ignore_ascii_case("exact") => (from, to),
+                let (mode, from, to) = match args {
+                    [from, to] => ("exact", from, to),
+                    [mode, from, to] => (mode.as_str(), from, to),
                     _ => return Err(cursor.arg_err()),
                 };
                 let normal = |value: &str| {
@@ -94,9 +94,16 @@ impl Rewrite {
                     }
                     value
                 };
+                let matcher = match mode.to_ascii_lowercase().as_str() {
+                    "exact" => Matcher::Exact(normal(from)),
+                    "prefix" => Matcher::Prefix(normal(from)),
+                    "suffix" => Matcher::Suffix(normal(from)),
+                    "substring" => Matcher::Substring(normal(from)),
+                    _ => return Err(cursor.error("invalid name match type")),
+                };
                 rules.push(Rule {
-                    matcher: Matcher::Exact(normal(from)),
-                    action: Action::Name(normal(to).parse().ok()),
+                    matcher,
+                    action: Action::Name(normal(to), mode.eq_ignore_ascii_case("exact")),
                     stop,
                 });
                 continue;
@@ -327,14 +334,45 @@ impl Plugin for Rewrite {
                     true
                 }
                 Action::Type(..) | Action::Class(..) => false,
-                Action::Name(ref target) if rule.matcher.matches(name) => {
-                    let Some(target) = target else {
+                Action::Name(ref target, auto) if rule.matcher.matches(name) => {
+                    let mut text = NameText {
+                        bytes: [0; 1024],
+                        len: 0,
+                    };
+                    let result = match &rule.matcher {
+                        Matcher::Exact(_) => text.write_str(target),
+                        Matcher::Prefix(from) => text
+                            .write_str(target)
+                            .and_then(|()| text.write_str(name.strip_prefix(from).unwrap())),
+                        Matcher::Suffix(from) => text
+                            .write_str(name.strip_suffix(from).unwrap())
+                            .and_then(|()| text.write_str(target)),
+                        Matcher::Substring(from) => {
+                            let mut result = Ok(());
+                            for (index, part) in name.split(from).enumerate() {
+                                if index != 0 {
+                                    result = result.and_then(|()| text.write_str(target));
+                                }
+                                result = result.and_then(|()| text.write_str(part));
+                            }
+                            result
+                        }
+                        _ => unreachable!("validated name matcher"),
+                    };
+                    if result.is_err() {
+                        return Outcome::Error(ServerError::InvalidQuery);
+                    }
+                    let mut wire = [0; 255];
+                    let Ok(text) = std::str::from_utf8(&text.bytes[..text.len]) else {
                         return Outcome::Error(ServerError::InvalidQuery);
                     };
-                    cx.query = cx.query.with_question_name(
-                        NameRef::parse(target.as_wire(), 0).expect("configured name"),
-                    );
-                    name_rewritten = true;
+                    let Ok(wire) = Name::parse_absolute_into(text, &mut wire) else {
+                        return Outcome::Error(ServerError::InvalidQuery);
+                    };
+                    cx.query = cx
+                        .query
+                        .with_question_name(NameRef::parse(wire, 0).expect("validated name"));
+                    name_rewritten |= auto;
                     true
                 }
                 Action::Name(..) => false,
