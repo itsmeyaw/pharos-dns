@@ -129,3 +129,18 @@ impl Plugin for Chaos {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn shuffles_deterministically_for_same_seed() {
+        let mut first = (0..20).collect::<Vec<_>>();
+        let mut second = first.clone();
+        super::shuffle(&mut first, 42);
+        super::shuffle(&mut second, 42);
+        assert_eq!(first, second);
+        assert_ne!(first, (0..20).collect::<Vec<_>>());
+        first.sort_unstable();
+        assert_eq!(first, (0..20).collect::<Vec<_>>());
+    }
+}

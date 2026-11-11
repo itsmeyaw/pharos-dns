@@ -169,3 +169,15 @@ async fn chaos_enables_non_in_for_all_blocks_on_listener() {
         assert_eq!(Message::parse(&response).unwrap().rcode(), pharos_proto::Rcode::NOERROR);
     }
 }
+
+#[tokio::test]
+async fn authors_are_shuffled_without_losing_records() {
+    let authors = (0..20).map(|i| format!("author{i:02}")).collect::<Vec<_>>();
+    let chain = configured(&format!("chaos v1 {}", authors.join(" "))).unwrap();
+    let (_, wire) = query(&chain, "authors.bind.", Type::TXT, Class::CH).await;
+    let message = Message::parse(&wire).unwrap();
+    let order = message.answers().map(|rr| std::str::from_utf8(&rr.rdata[1..]).unwrap().to_owned()).collect::<Vec<_>>();
+    let mut sorted = order.clone();
+    sorted.sort();
+    assert_eq!(sorted, authors);
+}
