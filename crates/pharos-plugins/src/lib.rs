@@ -53,6 +53,8 @@ pub mod minimal;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 pub mod proxy;
+#[cfg(feature = "plugin-siit")]
+pub mod siit;
 
 #[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]
 mod self_lookup_test;
@@ -699,6 +701,12 @@ fn setup_acl(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result
 #[cfg(feature = "plugin-dns64")]
 fn setup_dns64(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.dns64 = Some(dns64::Dns64::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-siit")]
+fn setup_siit(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.siit = Some(siit::Siit::parse(cursor)?);
     Ok(())
 }
 

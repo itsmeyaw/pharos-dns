@@ -24,6 +24,7 @@ fn main() {
         let ty = match *name {
             "acl" => "acl::Acl",
             "dns64" => "dns64::Dns64",
+            "siit" => "siit::Siit",
             "any" => "any::Any",
             "chaos" => "chaos::Chaos",
             "cache" => "cache::Cache",
@@ -57,6 +58,7 @@ fn main() {
         let setup = match *name {
             "acl" => "setup_acl",
             "dns64" => "setup_dns64",
+            "siit" => "setup_siit",
             "any" => "setup_any",
             "chaos" => "setup_chaos",
             "cache" => "setup_cache",
