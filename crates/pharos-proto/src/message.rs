@@ -305,6 +305,13 @@ impl<'a> Message<'a> {
         if self.wire[3] & 0x20 != 0 {
             return true;
         }
+        self.can_change_flags_in_wire()
+    }
+
+    /// Whether changing header flags preserves encoded names and opaque RDATA.
+    #[must_use]
+    pub fn can_change_flags_in_wire(&self) -> bool {
+        // RFC 1035 §4.1.4: compression pointers can refer to earlier header bytes.
         let mut offset = self.starts[0];
         for question in self.questions() {
             if name_references_header(self.wire, offset) {

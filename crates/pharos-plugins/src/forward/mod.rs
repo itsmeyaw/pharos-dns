@@ -253,7 +253,7 @@ impl Plugin for Forward {
             let original_query = cx.query.as_wire();
             let query_wire = if cx.query.wire_changed() {
                 if cx.query.flags() != u16::from_be_bytes([original_query[2], original_query[3]])
-                    && !cx.query.can_set_ad_in_wire()
+                    && !cx.query.can_change_flags_in_wire()
                 {
                     return Outcome::Unanswered(Rcode::FORMERR);
                 }
