@@ -152,6 +152,59 @@ fn repair_dangling_name_escape(zone: &[u8]) -> Option<Vec<u8>> {
     Some(repaired)
 }
 
+fn repair_miekg_type_prefix(zone: &[u8]) -> Option<Vec<u8>> {
+    let mut repaired = Vec::with_capacity(zone.len());
+    let (mut quoted, mut escaped, mut comment) = (false, false, false);
+    let mut changed = false;
+    let mut i = 0;
+    while i < zone.len() {
+        let b = zone[i];
+        if comment {
+            repaired.push(b);
+            comment = b != b'\n';
+            i += 1;
+        } else if escaped {
+            repaired.push(b);
+            escaped = false;
+            i += 1;
+        } else if b == b'\\' {
+            repaired.push(b);
+            escaped = true;
+            i += 1;
+        } else if b == b'"' {
+            repaired.push(b);
+            quoted = !quoted;
+            i += 1;
+        } else if b == b';' && !quoted {
+            repaired.push(b);
+            comment = true;
+            i += 1;
+        } else if !quoted && matches!(b, b' ' | b'\t' | b'\n') {
+            repaired.push(b);
+            i += 1;
+        } else {
+            let end = zone[i..]
+                .iter()
+                .position(|b| matches!(b, b' ' | b'\t' | b'\n' | b';' | b'"' | b'\\'))
+                .map_or(zone.len(), |offset| i + offset);
+            let token = &zone[i..end];
+            // RFC 3597 §5: numeric type mnemonics have the TYPE prefix.
+            if token.len() >= 5
+                && !token[..4].eq_ignore_ascii_case(b"TYPE")
+                && token[4..].iter().all(u8::is_ascii_digit)
+            {
+                repaired.extend_from_slice(b"TYPE");
+                repaired.extend_from_slice(&token[4..]);
+                changed = true;
+            } else {
+                repaired.extend_from_slice(token);
+            }
+            i = end;
+        }
+    }
+    changed.then_some(repaired)
+}
+
 fn pharos(zone: &[u8]) -> String {
     let origin: Name = ORIGIN.parse().unwrap();
     match ZoneParser::new(Cursor::new(zone), origin, "fuzz.zone").collect::<Result<Vec<_>, _>>() {
@@ -208,6 +261,13 @@ fuzz_target!(|zone: &[u8]| {
     // spelling out that name reproduces exactly the original accepted result.
     if actual == "reject\n" && expected.starts_with("accept\n") {
         if let Some(repaired) = repair_dangling_name_escape(zone) {
+            if pharos(&repaired) == expected && oracle.parse(&repaired) == expected {
+                return;
+            }
+        }
+        // miekg/dns reads the fifth byte onward as a numeric type in bitmaps without checking
+        // that the first four bytes spell TYPE; only skip when the corrected spelling agrees.
+        if let Some(repaired) = repair_miekg_type_prefix(zone) {
             if pharos(&repaired) == expected && oracle.parse(&repaired) == expected {
                 return;
             }

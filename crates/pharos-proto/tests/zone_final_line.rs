@@ -183,6 +183,21 @@ fn unmatched_closing_parenthesis_is_rejected() {
 }
 
 #[test]
+fn type_bitmaps_require_type_mnemonics() {
+    // RFC 3597 §5: an unknown type mnemonic is TYPE followed by its decimal code.
+    assert!(parse(b"n IN NXT 0 I2000\n").is_err());
+    assert_eq!(
+        parse(b"n IN NXT 0 TYPE0\n"),
+        Ok(vec![(
+            30,
+            vec![
+                1, b'0', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0, 0, 1, 128
+            ]
+        )])
+    );
+}
+
+#[test]
 fn generate_template_escapes_keep_their_meaning() {
     // RFC 1035 §5.1: \X is X and \DDD is the octet DDD.
     assert_eq!(
