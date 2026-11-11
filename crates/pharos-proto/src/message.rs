@@ -249,6 +249,12 @@ impl<'a> Message<'a> {
     pub fn flags(&self) -> u16 {
         self.flags
     }
+    /// Return a view with modified header flags; `copy_wire` applies the change.
+    #[must_use]
+    pub fn with_flags(mut self, flags: u16) -> Self {
+        self.flags = flags;
+        self
+    }
     /// Returns a view with AD set. `as_wire` still returns the original bytes;
     /// a sender must apply `flags()` when transmitting the modified view.
     #[must_use]

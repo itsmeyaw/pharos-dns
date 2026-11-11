@@ -25,6 +25,8 @@ pub mod cache;
 pub mod chaos;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
+#[cfg(feature = "plugin-header")]
+pub mod header;
 #[cfg(any(
     feature = "plugin-health",
     feature = "plugin-errors",
@@ -489,6 +491,12 @@ fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
 #[cfg(feature = "plugin-bufsize")]
 fn setup_bufsize(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.bufsize = Some(bufsize::Bufsize::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-header")]
+fn setup_header(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.header = Some(header::Header::parse(cursor)?);
     Ok(())
 }
 
