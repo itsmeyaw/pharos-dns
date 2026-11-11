@@ -40,7 +40,7 @@ fn parse_rdata_inner(
             return Err("missing generic RDATA length".into());
         }
         let len: u16 = at!(1, number(fields[1]))?;
-        let data = at!(2.min(fields.len()), hex(&fields[2..].concat()))?;
+        let data = at!(hex_error_index(fields, 2), hex(&fields[2..].concat()))?;
         if data.len() != usize::from(len) {
             return Err("generic RDATA length mismatch".into());
         }
@@ -192,7 +192,7 @@ fn parse_rdata_inner(
             at!(0, put16(&mut out, fields[0]))?;
             out.push(at!(1, dnssec_algorithm(fields[1], true))?);
             out.push(at!(2, number(fields[2]))?);
-            out.extend(at!(3.min(fields.len()), hex(&fields[3..].concat()))?);
+            out.extend(at!(hex_error_index(fields, 3), hex(&fields[3..].concat()))?);
         }
         // RFC 4034 §2 and RFC 7344 §4: DNSKEY/CDNSKEY public keys use base64.
         Type::DNSKEY | Type::CDNSKEY => {
@@ -218,7 +218,10 @@ fn parse_rdata_inner(
             for (i, field) in fields[..prefix].iter().enumerate() {
                 out.push(at!(i, number(field))?);
             }
-            out.extend(at!(prefix, hex(&fields[prefix..].concat()))?);
+            out.extend(at!(
+                hex_error_index(fields, prefix),
+                hex(&fields[prefix..].concat())
+            )?);
         }
         // RFC 8976 §2.1: ZONEMD uses a serial, scheme, algorithm, and hexadecimal digest.
         Type::ZONEMD => {
@@ -229,7 +232,7 @@ fn parse_rdata_inner(
             at!(0, put32(&mut out, fields[0]))?;
             out.push(at!(1, number(fields[1]))?);
             out.push(at!(2, number(fields[2]))?);
-            let digest = at!(3.min(fields.len()), hex(&fields[3..].concat()))?;
+            let digest = at!(hex_error_index(fields, 3), hex(&fields[3..].concat()))?;
             out.extend(digest);
         }
         // RFC 4034 §3.1: signature times accept either decimal seconds or YYYYMMDDHHMMSS.
@@ -722,6 +725,13 @@ fn base64_error_index(fields: &[&str], start: usize) -> usize {
                 .bytes()
                 .any(|b| !b.is_ascii_alphanumeric() && !matches!(b, b'+' | b'/' | b'='))
         })
+        .map_or_else(|| fields.len().saturating_sub(1).max(start), |i| start + i)
+}
+
+fn hex_error_index(fields: &[&str], start: usize) -> usize {
+    fields[start..]
+        .iter()
+        .position(|field| field.bytes().any(|b| !b.is_ascii_hexdigit()))
         .map_or_else(|| fields.len().saturating_sub(1).max(start), |i| start + i)
 }
 

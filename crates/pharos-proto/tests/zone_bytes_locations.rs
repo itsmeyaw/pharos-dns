@@ -165,6 +165,18 @@ fn missing_rdata_points_to_the_record_end() {
 }
 
 #[test]
+fn malformed_multiline_hex_points_to_the_bad_token() {
+    for input in [
+        &b"a 1 DS ( 1 8 2 AA\n  ZZ )\n"[..],
+        &b"a 1 ZONEMD ( 1 1 1 AA\n  ZZ )\n"[..],
+        &b"a 1 TYPE65400 ( \\# 2 AA\n  ZZ )\n"[..],
+    ] {
+        let error = parser(input).next().unwrap().unwrap_err();
+        assert_eq!((error.line, error.column), (2, 3), "{error}");
+    }
+}
+
+#[test]
 fn record_must_fit_the_dns_wire_limit() {
     let mut zone = format!(
         "a 1 TXT {}",
