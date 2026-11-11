@@ -475,7 +475,7 @@ impl pharos_server::Plugin for Unimplemented {
 #[cfg(feature = "plugin-any")]
 fn setup_any(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     cursor.next();
-    if !cursor.remaining_args().is_empty() || cursor.next_block() {
+    if cursor.next_arg() || cursor.next_block() {
         return Err(cursor.arg_err());
     }
     block.config.any = Some(any::Any);

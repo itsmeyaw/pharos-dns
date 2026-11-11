@@ -23,7 +23,7 @@ fn coredns_setup_accepts_any() {
 fn coredns_setup_rejects_arguments_and_block_options() {
     assert!(configured("any example.org").is_err());
     assert!(configured("any {\n foo\n}").is_err());
-    assert!(configured("any {\n}").is_ok());
+    assert!(configured("any {\n}").is_err());
     assert!(configured("any {}").is_err());
     assert!(configured("any\nany").is_ok());
 }
