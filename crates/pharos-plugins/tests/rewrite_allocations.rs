@@ -109,6 +109,10 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         ("rewrite edns0 local set 0xffee {server_port}", "example."),
         ("rewrite edns0 local set 0xffee {protocol}", "example."),
         ("rewrite edns0 local set 0xffee {test/label}", "example."),
+        (
+            "rewrite continue edns0 local set 0xffee {test/label}\n rewrite edns0 local replace 0xffee new revert",
+            "example.",
+        ),
         ("rewrite edns0 local set 0xffee {missing/label}", "example."),
     ] {
         let config = format!(".:53 {{\n {rule}\n}}");

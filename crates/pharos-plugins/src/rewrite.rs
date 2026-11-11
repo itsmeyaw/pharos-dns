@@ -89,6 +89,15 @@ pub struct Rewrite {
 struct EdnsScratch {
     wire: Vec<u8>,
     matched: Vec<u8>,
+    snapshots: Vec<EdnsSnapshot>,
+}
+
+#[derive(Debug)]
+struct EdnsSnapshot {
+    label: String,
+    value: Vec<u8>,
+    len: usize,
+    present: bool,
 }
 
 impl Rewrite {
@@ -431,6 +440,16 @@ impl Rewrite {
                 stop,
             });
         }
+        let mut snapshot_labels = Vec::<String>::new();
+        for (index, rule) in rules.iter().enumerate() {
+            let Action::Edns(code, EdnsValue::Variable(label), _, _) = &rule.action else {
+                continue;
+            };
+            if label.contains('/') && !snapshot_labels.contains(label)
+                && rules[index + 1..].iter().any(|later| matches!(&later.action, Action::Edns(candidate, _, _, true) if candidate == code)) {
+                snapshot_labels.push(label.clone());
+            }
+        }
         let edns_buffers = if rules
             .iter()
             .any(|rule| matches!(rule.action, Action::Edns(..)))
@@ -440,6 +459,15 @@ impl Rewrite {
                     let buffer = tokio::sync::Mutex::new(EdnsScratch {
                         wire: vec![0; 2 * 65535],
                         matched: vec![0; rules.len()],
+                        snapshots: snapshot_labels
+                            .iter()
+                            .map(|label| EdnsSnapshot {
+                                label: label.clone(),
+                                value: vec![0; 65535],
+                                len: 0,
+                                present: false,
+                            })
+                            .collect(),
                     });
                     // Initialize the platform mutex at setup, not on the first Query.
                     drop(buffer.try_lock().expect("new scratch buffer"));
@@ -1095,6 +1123,7 @@ fn edns_variable<'a>(
     query: &Message<'_>,
     variable: &str,
     output: &'a mut [u8; 1024],
+    snapshots: Option<&'a [EdnsSnapshot]>,
 ) -> Option<&'a [u8]> {
     match variable {
         "qname" => {
@@ -1141,13 +1170,19 @@ fn edns_variable<'a>(
             pharos_server::Protocol::Udp => b"udp",
             pharos_server::Protocol::Tcp => b"tcp",
         }),
-        label => cx
-            .metadata
-            .enabled()
-            .then(|| cx.metadata.get(label))
-            .flatten()
-            .filter(|value| !value.is_empty())
-            .map(str::as_bytes),
+        label => {
+            if let Some(snapshot) =
+                snapshots.and_then(|values| values.iter().find(|value| value.label == label))
+            {
+                return snapshot.present.then_some(&snapshot.value[..snapshot.len]);
+            }
+            cx.metadata
+                .enabled()
+                .then(|| cx.metadata.get(label))
+                .flatten()
+                .filter(|value| !value.is_empty())
+                .map(str::as_bytes)
+        }
     }
 }
 
@@ -1260,6 +1295,7 @@ fn apply_edns(
     query: &Message<'_>,
     cx: &Context<'_, '_>,
     state: &mut EdnsState<'_>,
+    snapshots: Option<&[EdnsSnapshot]>,
 ) -> Result<Option<bool>, ServerError> {
     let Action::Edns(code, value, action, _) = &rule.action else {
         return Ok(None);
@@ -1268,7 +1304,7 @@ fn apply_edns(
     let value = match value {
         EdnsValue::Local(bytes) => Some((bytes.as_slice(), true)),
         EdnsValue::Variable(variable) => {
-            edns_variable(cx, query, variable, &mut data).map(|value| (value, false))
+            edns_variable(cx, query, variable, &mut data, snapshots).map(|value| (value, false))
         }
         EdnsValue::Nsid => Some((&[][..], true)),
         EdnsValue::Subnet(v4, v6) => {
@@ -1417,14 +1453,19 @@ fn build_cname_response(
 }
 
 #[inline(never)]
-fn revert_edns_response(
+fn revert_edns_response<'q>(
     cx: &mut Context<'_, '_>,
-    original: Message<'_>,
+    original: Message<'q>,
     query_options: &[u8],
-    rules: &[Rule],
-    matched: &[u8],
+    sources: (
+        &[Rule],
+        &[u8],
+        &[EdnsSnapshot],
+        &[(usize, Message<'q>, Message<'q>)],
+    ),
     end: usize,
 ) -> Result<(), ServerError> {
+    let (rules, matched, snapshots, name_history) = sources;
     let mut scratch = [0; 65535];
     if cx.response.len() > scratch.len() {
         return Err(ServerError::InvalidQuery);
@@ -1479,9 +1520,21 @@ fn revert_edns_response(
                 if matched[earlier] == 0 {
                     continue;
                 }
+                if let Some((_, _, after)) = name_history
+                    .iter()
+                    .find(|(position, _, _)| *position == earlier)
+                {
+                    previous_query = *after;
+                    continue;
+                }
                 if matches!(rules[earlier].action, Action::Edns(..)) {
-                    let _ =
-                        apply_edns(&rules[earlier], &previous_query, cx, &mut previous_options)?;
+                    let _ = apply_edns(
+                        &rules[earlier],
+                        &previous_query,
+                        cx,
+                        &mut previous_options,
+                        Some(snapshots),
+                    )?;
                 } else {
                     let _ = apply_rule(&rules[earlier], &mut previous_query, &cx.metadata)?;
                 }
@@ -1741,26 +1794,58 @@ impl Plugin for Rewrite {
                     .await,
             )
         };
-        let (mut state, output, mut matches) = if let Some(scratch) = &mut scratch {
-            let EdnsScratch { wire, matched } = &mut **scratch;
+        let (mut state, output, mut matches, mut snapshots) = if let Some(scratch) = &mut scratch {
+            let EdnsScratch {
+                wire,
+                matched,
+                snapshots,
+            } = &mut **scratch;
             matched.fill(0);
+            for snapshot in snapshots.iter_mut() {
+                snapshot.present = false;
+                snapshot.len = 0;
+            }
             let (options, output) = wire.split_at_mut(65535);
             (
                 Some(EdnsState::new(options, &cx.query)),
                 Some(output),
                 Some(matched.as_mut_slice()),
+                Some(snapshots.as_mut_slice()),
             )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         for (index, rule) in self.rules.iter().enumerate() {
             let before = cx.query;
+            if let Action::Edns(_, EdnsValue::Variable(label), _, _) = &rule.action
+                && let Some(snapshot) = snapshots
+                    .as_deref_mut()
+                    .and_then(|values| values.iter_mut().find(|value| value.label == *label))
+            {
+                let value = cx
+                    .metadata
+                    .enabled()
+                    .then(|| cx.metadata.get(label))
+                    .flatten()
+                    .filter(|value| !value.is_empty());
+                if let Some(value) = value
+                    && value.len() <= snapshot.value.len()
+                {
+                    snapshot.value[..value.len()].copy_from_slice(value.as_bytes());
+                    snapshot.len = value.len();
+                    snapshot.present = true;
+                } else {
+                    snapshot.len = 0;
+                    snapshot.present = false;
+                }
+            }
             let applied = match &rule.action {
                 Action::Edns(..) => match apply_edns(
                     rule,
                     &cx.query,
                     cx,
                     state.as_mut().expect("EDNS scratch allocated"),
+                    None,
                 ) {
                     Ok(Some(matched)) => {
                         rewrite_edns = true;
@@ -1834,8 +1919,12 @@ impl Plugin for Rewrite {
                 cx,
                 original_query,
                 &state.bytes[..state.len],
-                &self.rules,
-                matched,
+                (
+                    &self.rules,
+                    matched,
+                    snapshots.as_deref().unwrap_or(&[]),
+                    &name_history,
+                ),
                 end,
             )
         {
@@ -1974,8 +2063,12 @@ impl Plugin for Rewrite {
                     cx,
                     original_query,
                     &state.bytes[..state.len],
-                    &self.rules,
-                    matched,
+                    (
+                        &self.rules,
+                        matched,
+                        snapshots.as_deref().unwrap_or(&[]),
+                        &name_history,
+                    ),
                     end,
                 )
             {
