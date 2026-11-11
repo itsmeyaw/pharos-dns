@@ -1,4 +1,3 @@
-#![recursion_limit = "512"]
 #![cfg(feature = "plugin-errors")]
 
 use pharos_corefile::{configure, parse};
@@ -70,7 +69,11 @@ fn errors_are_logged_and_consolidated() {
         ),
     ] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "errors_probe", "--nocapture"])
+            .args([
+                "--exact",
+                "errors::errors_outcomes::errors_probe",
+                "--nocapture",
+            ])
             .env("PHAROS_ERRORS_TEST", case)
             .output()
             .unwrap();

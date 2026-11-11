@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{Cursor, configure, parse};
 use pharos_plugins::{

@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-loadbalance")]
-#![recursion_limit = "512"]
 
-#[path = "support/loadbalance_fixtures.rs"]
+#[path = "../support/loadbalance_fixtures.rs"]
 mod fixtures;
 
 use pharos_corefile::{configure, parse};
@@ -15,7 +14,6 @@ use pharos_server::{
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::alloc::System;
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 struct Reply<'a>(&'a [u8]);
@@ -50,6 +48,7 @@ impl pharos_server::Chain for Routed {
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_compressed_cname_shuffle_has_no_allocations() {
+    let _serial = crate::serial();
     let blocks = parse("Corefile", ".:53 {\n loadbalance\n}").unwrap();
     let chain = configure::<Chain>(&blocks, directives())
         .unwrap()

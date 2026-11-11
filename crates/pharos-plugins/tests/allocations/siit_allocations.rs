@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-siit")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -13,7 +12,6 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
 };
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 struct Answer {
@@ -51,6 +49,7 @@ impl Next for Answer {
 
 #[test]
 fn siit_non_synthesis_paths_do_not_allocate() {
+    let _serial = crate::serial();
     let configured =
         configure::<Chain>(&parse("Corefile", ". {\n siit\n}").unwrap(), directives()).unwrap();
     let plugin = configured[0].config.siit.as_ref().unwrap();

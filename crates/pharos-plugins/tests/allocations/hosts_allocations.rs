@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-hosts")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
@@ -9,11 +8,11 @@ use pharos_server::{Action, Handler, Phase, Protocol};
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::alloc::System;
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_hosts_hit_has_no_allocations() {
+    let _serial = crate::serial();
     let path =
         std::env::temp_dir().join(format!("pharos-hosts-allocations-{}", std::process::id()));
     std::fs::write(

@@ -4,7 +4,6 @@
     feature = "plugin-whoami",
     feature = "plugin-cache"
 ))]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};

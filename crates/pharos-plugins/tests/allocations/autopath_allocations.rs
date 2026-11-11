@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-autopath")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -13,7 +12,6 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
 };
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 struct Answer<'a>(Option<&'a Name>);
@@ -40,6 +38,7 @@ impl Next for Answer<'_> {
 
 #[test]
 fn autopath_without_self_lookup_does_not_allocate() {
+    let _serial = crate::serial();
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/autopath-search.conf"

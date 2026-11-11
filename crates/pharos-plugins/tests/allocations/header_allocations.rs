@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(all(feature = "plugin-header", feature = "plugin-whoami"))]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -13,11 +12,11 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
 };
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
 fn header_rules_do_not_allocate_per_query() {
+    let _serial = crate::serial();
     let blocks = parse(
         "Corefile",
         ". {\n header {\n query set rd\n response set ra aa\n response clear rd\n }\n whoami\n}",

@@ -1,4 +1,3 @@
-#![recursion_limit = "512"]
 #![cfg(feature = "plugin-log")]
 
 use pharos_corefile::{configure, parse};
@@ -28,7 +27,11 @@ fn classes_and_first_matching_rule_control_emission() {
         ("drop-default", Some(" - ")),
     ] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "class_filter_probe", "--nocapture"])
+            .args([
+                "--exact",
+                "log::log_outcomes::class_filter_probe",
+                "--nocapture",
+            ])
             .env("PHAROS_LOG_TEST", case)
             .output()
             .unwrap();

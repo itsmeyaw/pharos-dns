@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-local")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -13,11 +12,11 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
 };
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
 fn local_responses_do_not_allocate_per_query() {
+    let _serial = crate::serial();
     let blocks = parse("Corefile", ". {\n local\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let domain: Name = ".".parse().unwrap();

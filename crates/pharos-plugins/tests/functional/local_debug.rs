@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-local")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -13,7 +12,7 @@ async fn localhost_interception_supports_debug_logging() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "localhost_interception_supports_debug_logging",
+                "local::local_debug::localhost_interception_supports_debug_logging",
                 "--nocapture",
             ])
             .env("PHAROS_LOCAL_DEBUG_CHILD", "1")

@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-rewrite")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -14,7 +13,6 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
 };
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 struct Answer;
@@ -46,6 +44,7 @@ impl Drop for Done<'_> {
 
 #[test]
 fn cold_regex_matching_stays_allocation_free_across_threads() {
+    let _serial = crate::serial();
     let config = r".:53 {
  rewrite continue name regex ^(.*)\.other\.$ {1}.internal.
  rewrite ttl regex ^((a|b|c|d)?)+\.example\.$ 30

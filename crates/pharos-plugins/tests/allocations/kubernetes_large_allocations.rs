@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
-#![recursion_limit = "512"]
 
-#[path = "../../pharos/tests/support/mod.rs"]
+#[path = "../../../pharos/tests/support/mod.rs"]
 mod support;
 
 use pharos_corefile::{configure, parse};
@@ -13,11 +12,11 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::{alloc::System, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[tokio::test(flavor = "current_thread")]
 async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
+    let _serial = crate::serial();
     let local_ip = nix::ifaddrs::getifaddrs()
         .unwrap()
         .filter_map(|entry| entry.address?.as_sockaddr_in().map(|ip| ip.ip()))

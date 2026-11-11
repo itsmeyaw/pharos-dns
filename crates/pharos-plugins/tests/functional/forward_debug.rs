@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(all(feature = "plugin-forward", feature = "plugin-debug"))]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
@@ -59,7 +58,7 @@ fn wrong_reply_is_hexdumped_when_debug_is_on() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "wrong_reply_is_hexdumped_when_debug_is_on",
+            "forward::forward_debug::wrong_reply_is_hexdumped_when_debug_is_on",
             "--nocapture",
         ])
         .env("PHAROS_DEBUG_TEST", "1")

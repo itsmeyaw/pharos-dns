@@ -1,5 +1,4 @@
 #![forbid(unsafe_code)]
-#![recursion_limit = "512"]
 #![cfg(feature = "plugin-log")]
 
 use std::{alloc::System, time::Duration};
@@ -9,7 +8,6 @@ use pharos_proto::{Message, Name, Rcode};
 use pharos_server::{Context, Error, Metadata, Outcome, Protocol, Transport};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 fn render(format: &str, cx: &Context<'_, '_>, outcome: Outcome) -> String {
@@ -20,6 +18,7 @@ fn render(format: &str, cx: &Context<'_, '_>, outcome: Outcome) -> String {
 
 #[test]
 fn coredns_replacer_formats_requests_responses_and_metadata_without_allocating() {
+    let _serial = crate::serial();
     // The request and response use the same question as CoreDNS's replacer tests.
     let query =
         b"\x04\x1d\x01\x30\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x0d\x00\x01";

@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -8,7 +7,7 @@ use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, 
 use pharos_server::{Context, Metadata, Outcome, Phase, Protocol, Transport};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[path = "../../pharos/tests/support/mod.rs"]
+#[path = "../../../pharos/tests/support/mod.rs"]
 mod support;
 
 const WILDCARD: &str = "0.0.0.0:53";

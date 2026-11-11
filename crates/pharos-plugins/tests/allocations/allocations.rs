@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-whoami")]
-#![recursion_limit = "512"]
 
 use std::{
     alloc::System,
@@ -14,11 +13,11 @@ use pharos_proto::{Message, Name};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
 fn whoami_does_not_allocate_per_query() {
+    let _serial = crate::serial();
     let blocks = parse("Corefile", ". {\n whoami\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let wire = b"\x12\x34\x01\x00\x00\x01\0\0\0\0\0\0\x03www\x07example\x03com\0\0\x01\0\x01";

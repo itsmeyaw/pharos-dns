@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
-#![recursion_limit = "512"]
 
-#[path = "../../pharos/tests/support/mod.rs"]
+#[path = "../../../pharos/tests/support/mod.rs"]
 mod support;
 
 use std::{

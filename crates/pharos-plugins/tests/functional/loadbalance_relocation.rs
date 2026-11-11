@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-loadbalance")]
-#![recursion_limit = "512"]
 
-#[path = "support/loadbalance_fixtures.rs"]
+#[path = "../support/loadbalance_fixtures.rs"]
 mod fixtures;
 
 use pharos_corefile::{configure, parse};

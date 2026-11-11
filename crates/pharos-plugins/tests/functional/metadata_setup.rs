@@ -1,4 +1,3 @@
-#![recursion_limit = "512"]
 #![cfg(all(feature = "plugin-metadata", feature = "plugin-whoami"))]
 
 use pharos_corefile::{configure, parse};

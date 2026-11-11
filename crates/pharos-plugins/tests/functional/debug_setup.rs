@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-debug")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
@@ -61,7 +60,7 @@ fn debug_logging_is_enabled_only_after_startup() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "debug_logging_is_enabled_only_after_startup",
+            "debug::debug_setup::debug_logging_is_enabled_only_after_startup",
             "--nocapture",
         ])
         .env("PHAROS_DEBUG_TEST", "1")

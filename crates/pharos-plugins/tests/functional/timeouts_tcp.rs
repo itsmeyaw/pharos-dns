@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(all(feature = "plugin-timeouts", feature = "plugin-whoami"))]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};

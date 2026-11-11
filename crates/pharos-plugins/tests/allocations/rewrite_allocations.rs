@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-rewrite")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -13,7 +12,6 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
 };
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 struct Answer;
 struct WaitForever;
@@ -97,6 +95,7 @@ impl Next for Answer {
 
 #[test]
 fn rewrite_non_regex_rules_do_not_allocate() {
+    let _serial = crate::serial();
     for (rule, incoming) in [
         ("rewrite type A AAAA", "example."),
         ("rewrite class IN CH", "example."),

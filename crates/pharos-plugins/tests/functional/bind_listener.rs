@@ -1,5 +1,4 @@
 #![forbid(unsafe_code)]
-#![recursion_limit = "512"]
 #![cfg(feature = "plugin-bind")]
 
 use pharos_corefile::{configure, parse};

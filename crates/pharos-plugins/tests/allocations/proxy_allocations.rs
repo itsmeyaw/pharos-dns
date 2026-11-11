@@ -1,15 +1,14 @@
 #![forbid(unsafe_code)]
-#![recursion_limit = "512"]
 use pharos_plugins::proxy::{Options, Proxy, Transport};
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::{alloc::System, net::UdpSocket, time::Duration};
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 const QUERY: &[u8] = &[0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1];
 
 #[test]
 fn warmed_udp_exchange_does_not_allocate() {
+    let _serial = crate::serial();
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     server
         .set_read_timeout(Some(Duration::from_secs(5)))

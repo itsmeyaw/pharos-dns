@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
-#![recursion_limit = "512"]
 
-#[path = "../../pharos/tests/support/mod.rs"]
+#[path = "../../../pharos/tests/support/mod.rs"]
 mod support;
 
 use pharos_corefile::{configure, parse};
@@ -13,7 +12,6 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::alloc::System;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 enum TruncatedRoute {
@@ -45,6 +43,7 @@ impl pharos_server::Chain for TruncatedRoute {
 
 #[test]
 fn services_are_answered_from_watched_kubernetes_objects() {
+    let _serial = crate::serial();
     // This fixture holds many distinct Plugin Chain futures in one test future.
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)

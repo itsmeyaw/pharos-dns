@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(all(feature = "plugin-loadbalance", feature = "plugin-hosts"))]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};

@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-cache")]
-#![recursion_limit = "512"]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

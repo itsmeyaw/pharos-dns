@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(all(feature = "plugin-cancel", feature = "plugin-whoami"))]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -9,11 +8,11 @@ use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::alloc::System;
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[tokio::test(flavor = "current_thread")]
 async fn fast_queries_do_not_allocate() {
+    let _serial = crate::serial();
     let blocks = parse("Corefile", ". {\n cancel\n whoami\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let query =

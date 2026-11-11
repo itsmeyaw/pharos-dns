@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
-#![recursion_limit = "512"]
 
-#[path = "../../pharos/tests/support/mod.rs"]
+#[path = "../../../pharos/tests/support/mod.rs"]
 mod support;
 
 use pharos_corefile::{configure, parse};
@@ -13,11 +12,11 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::alloc::System;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
+    let _serial = crate::serial();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", support::free_port()))
         .await
         .unwrap();

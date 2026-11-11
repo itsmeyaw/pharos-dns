@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(all(feature = "plugin-cache", feature = "plugin-whoami"))]
-#![recursion_limit = "512"]
 
 use std::alloc::System;
 
@@ -10,11 +9,11 @@ use pharos_proto::{Message, Rdata};
 use pharos_server::{Action, Handler, Protocol};
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[tokio::test(flavor = "current_thread")]
 async fn warmed_routed_cache_hit_has_no_allocations() {
+    let _serial = crate::serial();
     let blocks = parse(
         "Corefile",
         ".:0 {\n cache {\n success 1024 3600 3600\n }\n whoami\n}",

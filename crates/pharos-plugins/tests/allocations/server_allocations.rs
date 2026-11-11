@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-whoami")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
@@ -13,7 +12,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[derive(Default)]
@@ -59,6 +57,7 @@ impl Handler for Counting {
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_udp_queries_do_not_allocate() {
+    let _serial = crate::serial();
     check_routed_udp_queries_do_not_allocate(".:0 {\n whoami\n}").await;
     #[cfg(feature = "plugin-errors")]
     check_routed_udp_queries_do_not_allocate(".:0 {\n errors\n whoami\n}").await;

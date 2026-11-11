@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(all(feature = "plugin-forward", feature = "plugin-prometheus"))]
-#![recursion_limit = "512"]
 
 use std::{
     alloc::System,
@@ -14,11 +13,11 @@ use pharos_plugins::{Chain, directives, servers};
 use pharos_server::{Action, Handler, Protocol};
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 
-#[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
 fn warmed_forward_queries_with_metrics_do_not_allocate() {
+    let _serial = crate::serial();
     for (protocol, failover) in [
         (Protocol::Udp, false),
         (Protocol::Tcp, false),

@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-whoami")]
-#![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
@@ -143,7 +142,7 @@ async fn plugin_errors_are_logged_only_when_enabled() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "plugin_errors_are_logged_only_when_enabled",
+                "server::server::plugin_errors_are_logged_only_when_enabled",
                 "--nocapture",
             ])
             .env("PHAROS_TEST_PLUGIN_ERROR", mode)

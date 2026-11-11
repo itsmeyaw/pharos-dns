@@ -1,4 +1,3 @@
-#![recursion_limit = "512"]
 #![cfg(feature = "plugin-errors")]
 
 use pharos_corefile::{configure, parse};
