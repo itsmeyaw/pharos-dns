@@ -127,6 +127,17 @@ fn coredns_new_rule_setup_rows() {
     }
 }
 
+// CoreDNS TestNewRule passes invalid UTF-8 directly to its private constructor; the Rust setup seam accepts &str.
+#[test]
+fn coredns_invalid_utf8_rule_arguments_cannot_enter_str_setup() {
+    for bytes in [
+        &b"\xecore\\.(ddns)\\.(rocks)"[..],
+        &b"\xedns\\.(core)\\.(rocks)"[..],
+    ] {
+        assert!(std::str::from_utf8(bytes).is_err());
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/setup_test.go.
 #[test]
 fn coredns_rewrite_setup_cases() {
