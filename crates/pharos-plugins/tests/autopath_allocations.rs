@@ -4,7 +4,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
-use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
+use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
 use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::{
@@ -16,12 +16,23 @@ use std::{
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-struct Answer;
-impl Next for Answer {
+struct Answer<'a>(Option<&'a Name>);
+impl Next for Answer<'_> {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
         b.question(q.name, q.qtype, q.qclass).unwrap();
+        if let Some(owner) = self.0 {
+            b.record(
+                Section::Answer,
+                NameRef::parse(owner.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+                60,
+                &[1, 2, 3, 4],
+            )
+            .unwrap();
+        }
         let _ = b.finish();
         Outcome::Response
     }
@@ -38,7 +49,12 @@ fn autopath_without_self_lookup_does_not_allocate() {
         configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap();
     let plugin = configured[0].config.autopath.as_ref().unwrap();
     let root: Name = ".".parse().unwrap();
-    for name in ["outside.example.com.", "inside.example.org."] {
+    let alias: Name = "other.example.org.".parse().unwrap();
+    for (name, owner) in [
+        ("outside.example.com.", None),
+        ("inside.example.org.", None),
+        ("inside.example.org.", Some(&alias)),
+    ] {
         let name: Name = name.parse().unwrap();
         let mut wire = Vec::with_capacity(512);
         let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
@@ -63,7 +79,7 @@ fn autopath_without_self_lookup_does_not_allocate() {
             max_response_size: 512,
         };
         let region = Region::new(GLOBAL);
-        let mut future = std::pin::pin!(plugin.serve(&mut cx, Answer));
+        let mut future = std::pin::pin!(plugin.serve(&mut cx, Answer(owner)));
         let result = future
             .as_mut()
             .poll(&mut TaskContext::from_waker(Waker::noop()));
