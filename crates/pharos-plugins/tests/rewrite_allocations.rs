@@ -18,7 +18,8 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 struct Answer;
 impl Next for Answer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
-        let q = cx.query.questions().next().unwrap();
+        let query = cx.query;
+        let q = query.questions().next().unwrap();
         let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
         b.question(q.name, q.qtype, q.qclass).unwrap();
         b.record(
@@ -30,6 +31,17 @@ impl Next for Answer {
             &[127, 0, 0, 1],
         )
         .unwrap();
+        if let Some(opt) = query.opt() {
+            b.record(
+                Section::Additional,
+                NameRef::parse(&[0], 0).unwrap(),
+                Type::OPT,
+                Class(opt.udp_payload_size()),
+                0,
+                opt.options().as_bytes(),
+            )
+            .unwrap();
+        }
         let _ = b.finish();
         Outcome::Response
     }
@@ -53,6 +65,9 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         ("rewrite name other. internal.", "example."),
         ("rewrite cname old.example. new.example.", "example."),
         ("rewrite edns0 local set 0xffee abcd", "example."),
+        ("rewrite edns0 local set 0xffee abcd revert", "example."),
+        ("rewrite edns0 nsid set revert", "example."),
+        ("rewrite edns0 subnet set 24 56 revert", "example."),
         ("rewrite edns0 local append 0xffee abcd", "example."),
         ("rewrite edns0 local replace 0xffee abcd", "example."),
         ("rewrite edns0 local unset 0xffee", "example."),

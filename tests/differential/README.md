@@ -77,7 +77,8 @@ IPv4 loopback, so synthesis without `allow_ipv4` is covered by Rust tests.
 The siit README scenario uses an inline hosts Backend to exercise the prefix.
 The `rewrite-name-auto` scenario uses an inline hosts Backend for the README's
 suffix and automatic answer rewrite example. `rewrite-regex` and `rewrite-ttl`
-also use hosts; `rewrite-type` uses whoami and masks its client port.
+also use hosts; `rewrite-type` and `rewrite-edns-local` use whoami and mask its
+client port.
 The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
 The bind scenario compares Responses on 127.0.0.1 with an excluded IPv6 address;
 the harness cannot send Queries to another bind address or scrape metrics.

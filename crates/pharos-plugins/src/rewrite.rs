@@ -23,7 +23,7 @@ enum Action {
     Class(Class, Class),
     Name(String, bool, Option<Vec<NamePart>>, Vec<AnswerRule>),
     Cname(Matcher, String),
-    Edns(u16, EdnsValue, EdnsAction),
+    Edns(u16, EdnsValue, EdnsAction, bool),
 }
 
 #[derive(Debug)]
@@ -131,6 +131,13 @@ impl Rewrite {
                     "unset" => EdnsAction::Unset,
                     _ => return Err(cursor.error("invalid EDNS action")),
                 };
+                let (revert, rest) = if action != EdnsAction::Unset
+                    && rest.last().is_some_and(|value| value == "revert")
+                {
+                    (true, &rest[..rest.len() - 1])
+                } else {
+                    (false, rest)
+                };
                 let (code, data) = if typ.eq_ignore_ascii_case("local") {
                     let (code, data) = match (action, rest) {
                         (EdnsAction::Unset, [code]) => (code.as_str(), ""),
@@ -203,7 +210,7 @@ impl Rewrite {
                 };
                 rules.push(Rule {
                     matcher: Matcher::Any,
-                    action: Action::Edns(code, data, action),
+                    action: Action::Edns(code, data, action, revert),
                     stop,
                 });
                 continue;
@@ -1040,6 +1047,7 @@ fn subnet_data(ip: std::net::IpAddr, v4: u8, v6: u8, output: &mut [u8; 20]) -> &
 
 fn edns_variable<'a>(
     cx: &'a Context<'_, '_>,
+    query: &Message<'_>,
     variable: &str,
     output: &'a mut [u8; 1024],
 ) -> Option<&'a [u8]> {
@@ -1049,12 +1057,12 @@ fn edns_variable<'a>(
                 bytes: [0; 1024],
                 len: 0,
             };
-            write!(text, "{}", cx.query.questions().next()?.name).ok()?;
+            write!(text, "{}", query.questions().next()?.name).ok()?;
             output[..text.len].copy_from_slice(&text.bytes[..text.len]);
             Some(&output[..text.len])
         }
         "qtype" => {
-            output[..2].copy_from_slice(&cx.query.questions().next()?.qtype.0.to_be_bytes());
+            output[..2].copy_from_slice(&query.questions().next()?.qtype.0.to_be_bytes());
             Some(&output[..2])
         }
         "client_port" | "server_port" => {
@@ -1101,10 +1109,48 @@ fn edns_variable<'a>(
 impl<'a> EdnsState<'a> {
     fn new(bytes: &'a mut [u8], query: &Message<'_>) -> Self {
         let original = query.opt().map_or(&[][..], |opt| opt.options().as_bytes());
+        Self::from_bytes(bytes, original)
+    }
+
+    fn from_bytes(bytes: &'a mut [u8], original: &[u8]) -> Self {
         bytes[..original.len()].copy_from_slice(original);
         Self {
             bytes,
             len: original.len(),
+        }
+    }
+
+    fn first(&self, code: u16) -> Option<&[u8]> {
+        let mut position = 0;
+        while position < self.len {
+            let current = u16::from_be_bytes([self.bytes[position], self.bytes[position + 1]]);
+            let len = usize::from(u16::from_be_bytes([
+                self.bytes[position + 2],
+                self.bytes[position + 3],
+            ]));
+            if current == code {
+                return Some(&self.bytes[position + 4..position + 4 + len]);
+            }
+            position += 4 + len;
+        }
+        None
+    }
+
+    fn remove_first(&mut self, code: u16) {
+        let mut position = 0;
+        while position < self.len {
+            let current = u16::from_be_bytes([self.bytes[position], self.bytes[position + 1]]);
+            let len = usize::from(u16::from_be_bytes([
+                self.bytes[position + 2],
+                self.bytes[position + 3],
+            ]));
+            let next = position + 4 + len;
+            if current == code {
+                self.bytes.copy_within(next..self.len, position);
+                self.len -= next - position;
+                break;
+            }
+            position = next;
         }
     }
 
@@ -1162,6 +1208,34 @@ impl<'a> EdnsState<'a> {
         self.len = total;
         Ok(true)
     }
+}
+
+fn apply_edns(
+    rule: &Rule,
+    query: &Message<'_>,
+    cx: &Context<'_, '_>,
+    state: &mut EdnsState<'_>,
+) -> Result<Option<bool>, ServerError> {
+    let Action::Edns(code, value, action, _) = &rule.action else {
+        return Ok(None);
+    };
+    let mut data = [0; 1024];
+    let value = match value {
+        EdnsValue::Local(bytes) => Some((bytes.as_slice(), true)),
+        EdnsValue::Variable(variable) => {
+            edns_variable(cx, query, variable, &mut data).map(|value| (value, false))
+        }
+        EdnsValue::Nsid => Some((&[][..], true)),
+        EdnsValue::Subnet(v4, v6) => {
+            let mut subnet = [0; 20];
+            let bytes = subnet_data(cx.client.ip(), *v4, *v6, &mut subnet);
+            data[..bytes.len()].copy_from_slice(bytes);
+            Some((&data[..bytes.len()], false))
+        }
+    };
+    value
+        .map(|(value, append_existing)| state.apply(*code, value, *action, append_existing))
+        .transpose()
 }
 
 fn edns_query(query: Message<'_>, options: &[u8], output: &mut [u8]) -> Result<usize, ServerError> {
@@ -1292,6 +1366,134 @@ fn build_cname_response(
                 })
                 .map_err(ServerError::Build)?;
         }
+    }
+    let _ = builder.finish();
+    Ok(())
+}
+
+#[inline(never)]
+fn revert_edns_response(
+    cx: &mut Context<'_, '_>,
+    original: Message<'_>,
+    query_options: &[u8],
+    rules: &[Rule],
+    matched: &[u8],
+    end: usize,
+) -> Result<(), ServerError> {
+    let mut scratch = [0; 65535];
+    if cx.response.len() > scratch.len() {
+        return Err(ServerError::InvalidQuery);
+    }
+    scratch[..cx.response.len()].copy_from_slice(cx.response);
+    let response =
+        Message::parse(&scratch[..cx.response.len()]).map_err(|_| ServerError::InvalidQuery)?;
+    let response_opt = response.opt();
+    if response_opt.is_none() && original.opt().is_none() {
+        return Ok(());
+    }
+    let mut output_options = [0; 65535];
+    let seed = response_opt.map_or(query_options, |opt| opt.options().as_bytes());
+    let mut options = EdnsState::from_bytes(&mut output_options, seed);
+    if response_opt.is_none() {
+        let mut position = 0;
+        while position < options.len {
+            let code = u16::from_be_bytes([options.bytes[position], options.bytes[position + 1]]);
+            let len = usize::from(u16::from_be_bytes([
+                options.bytes[position + 2],
+                options.bytes[position + 3],
+            ]));
+            let next = position + 4 + len;
+            let registered = rules.iter().any(|rule| matches!(&rule.action, Action::Edns(candidate, EdnsValue::Local(_) | EdnsValue::Variable(_), _, _) if *candidate == code));
+            if registered {
+                position = next;
+            } else {
+                options.bytes.copy_within(next..options.len, position);
+                options.len -= next - position;
+            }
+        }
+    }
+    let mut replay = [0; 65535];
+    for index in (0..end).rev() {
+        let Action::Edns(code, _, action, revert) = &rules[index].action else {
+            continue;
+        };
+        if !*revert || matched[index] == 0 || options.first(*code).is_none() {
+            continue;
+        }
+        let mut previous_options = EdnsState::new(&mut replay, &original);
+        let mut previous_query = original;
+        for earlier in 0..index {
+            if matched[earlier] == 0 {
+                continue;
+            }
+            if matches!(rules[earlier].action, Action::Edns(..)) {
+                let _ = apply_edns(&rules[earlier], &previous_query, cx, &mut previous_options)?;
+            } else {
+                let _ = apply_rule(&rules[earlier], &mut previous_query, &cx.metadata)?;
+            }
+        }
+        if *action == EdnsAction::Append {
+            options.remove_first(*code);
+        } else if let Some(previous) = previous_options.first(*code) {
+            options.apply(*code, previous, EdnsAction::Replace, false)?;
+        } else {
+            options.remove_first(*code);
+        }
+    }
+    let mut builder = MessageBuilder::new(
+        cx.response,
+        cx.max_response_size.max(512),
+        response.id(),
+        response.flags(),
+    )
+    .map_err(ServerError::Build)?;
+    for q in response.questions() {
+        builder
+            .question(q.name, q.qtype, q.qclass)
+            .map_err(ServerError::Build)?;
+    }
+    for (section, records) in [
+        (Section::Answer, response.answers()),
+        (Section::Authority, response.authorities()),
+        (Section::Additional, response.additionals()),
+    ] {
+        for rr in records {
+            if rr.rtype == Type::OPT {
+                builder
+                    .record(
+                        section,
+                        rr.name,
+                        rr.rtype,
+                        rr.class,
+                        rr.ttl,
+                        &options.bytes[..options.len],
+                    )
+                    .map_err(ServerError::Build)?;
+            } else {
+                let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+                builder
+                    .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
+                        data.write(writer)
+                    })
+                    .map_err(ServerError::Build)?;
+            }
+        }
+    }
+    if response_opt.is_none()
+        && let Some(opt) = original.opt()
+    {
+        let root = NameRef::parse(&[0], 0).expect("root name");
+        // RFC 6891 §6.1.2: the OPT pseudo-record carries the Query's UDP payload size.
+        builder
+            .record(
+                Section::Additional,
+                root,
+                Type::OPT,
+                Class(opt.udp_payload_size()),
+                u32::from(opt.flags()),
+                &options.bytes[..options.len],
+            )
+            .map_err(ServerError::Build)?;
     }
     let _ = builder.finish();
     Ok(())
@@ -1463,33 +1665,19 @@ impl Plugin for Rewrite {
         };
         for (index, rule) in self.rules.iter().enumerate() {
             let applied = match &rule.action {
-                Action::Edns(code, value, action) => {
-                    let mut data = [0; 1024];
-                    let value = match value {
-                        EdnsValue::Local(bytes) => Some((bytes.as_slice(), true)),
-                        EdnsValue::Variable(variable) => {
-                            edns_variable(cx, variable, &mut data).map(|value| (value, false))
-                        }
-                        EdnsValue::Nsid => Some((&[][..], true)),
-                        EdnsValue::Subnet(v4, v6) => {
-                            let mut subnet = [0; 20];
-                            let bytes = subnet_data(cx.client.ip(), *v4, *v6, &mut subnet);
-                            data[..bytes.len()].copy_from_slice(bytes);
-                            Some((&data[..bytes.len()], false))
-                        }
-                    };
-                    if let Some((value, append_existing)) = value {
+                Action::Edns(..) => match apply_edns(
+                    rule,
+                    &cx.query,
+                    cx,
+                    state.as_mut().expect("EDNS scratch allocated"),
+                ) {
+                    Ok(Some(matched)) => {
                         rewrite_edns = true;
-                        state.as_mut().expect("EDNS scratch allocated").apply(
-                            *code,
-                            value,
-                            *action,
-                            append_existing,
-                        )
-                    } else {
-                        Ok(false)
+                        Ok(matched)
                     }
-                }
+                    Ok(None) => Ok(false),
+                    Err(error) => Err(error),
+                },
                 _ => apply_rule(rule, &mut cx.query, &cx.metadata),
             };
             let matched = match applied {
@@ -1508,7 +1696,7 @@ impl Plugin for Rewrite {
                         cname = Some((matcher, to.as_str()));
                         response_rules = true;
                     }
-                    Action::Edns(..) => {}
+                    Action::Edns(_, _, _, revert) => response_rules |= *revert,
                     Action::Ttl(..) | Action::Rcode(..) => response_rules = true,
                     _ => {}
                 }
@@ -1531,6 +1719,21 @@ impl Plugin for Rewrite {
         } else {
             next.run(cx).await
         };
+        if outcome == Outcome::Response
+            && rewrite_edns
+            && let Some(matched) = matches.as_deref()
+            && let Some(state) = &state
+            && let Err(error) = revert_edns_response(
+                cx,
+                original_query,
+                &state.bytes[..state.len],
+                &self.rules,
+                matched,
+                end,
+            )
+        {
+            return Outcome::Error(error);
+        }
         if outcome == Outcome::Response
             && let Some((matcher, replacement)) = cname
         {
