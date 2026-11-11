@@ -29,6 +29,7 @@ enum Action {
 #[derive(Debug)]
 enum EdnsValue {
     Local(Vec<u8>),
+    Variable(String),
     Nsid,
     Subnet(u8, u8),
 }
@@ -139,23 +140,43 @@ impl Rewrite {
                     };
                     let code =
                         parse_edns_number(code).ok_or_else(|| cursor.error("invalid EDNS code"))?;
-                    let data = if let Some(hex) = data.strip_prefix("0x") {
+                    let data = if data.starts_with('{') && data.ends_with('}') {
+                        let variable = &data[1..data.len() - 1];
+                        if !matches!(
+                            variable,
+                            "qname"
+                                | "qtype"
+                                | "client_ip"
+                                | "client_port"
+                                | "protocol"
+                                | "server_ip"
+                                | "server_port"
+                        ) && !variable
+                            .split_once('/')
+                            .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty())
+                        {
+                            return Err(cursor.error("invalid EDNS variable"));
+                        }
+                        EdnsValue::Variable(variable.to_owned())
+                    } else if let Some(hex) = data.strip_prefix("0x") {
                         if hex.len() % 2 != 0 {
                             return Err(cursor.error("invalid hex data"));
                         }
-                        hex.as_bytes()
-                            .chunks_exact(2)
-                            .map(|pair| {
-                                let pair = std::str::from_utf8(pair)
-                                    .map_err(|_| cursor.error("invalid hex data"))?;
-                                u8::from_str_radix(pair, 16)
-                                    .map_err(|_| cursor.error("invalid hex data"))
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
+                        EdnsValue::Local(
+                            hex.as_bytes()
+                                .chunks_exact(2)
+                                .map(|pair| {
+                                    let pair = std::str::from_utf8(pair)
+                                        .map_err(|_| cursor.error("invalid hex data"))?;
+                                    u8::from_str_radix(pair, 16)
+                                        .map_err(|_| cursor.error("invalid hex data"))
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                        )
                     } else {
-                        data.as_bytes().to_vec()
+                        EdnsValue::Local(data.as_bytes().to_vec())
                     };
-                    (code, EdnsValue::Local(data))
+                    (code, data)
                 } else if typ.eq_ignore_ascii_case("nsid") {
                     if !rest.is_empty() {
                         return Err(cursor.arg_err());
@@ -1017,6 +1038,66 @@ fn subnet_data(ip: std::net::IpAddr, v4: u8, v6: u8, output: &mut [u8; 20]) -> &
     &output[..4 + len]
 }
 
+fn edns_variable<'a>(
+    cx: &'a Context<'_, '_>,
+    variable: &str,
+    output: &'a mut [u8; 1024],
+) -> Option<&'a [u8]> {
+    match variable {
+        "qname" => {
+            let mut text = NameText {
+                bytes: [0; 1024],
+                len: 0,
+            };
+            write!(text, "{}", cx.query.questions().next()?.name).ok()?;
+            output[..text.len].copy_from_slice(&text.bytes[..text.len]);
+            Some(&output[..text.len])
+        }
+        "qtype" => {
+            output[..2].copy_from_slice(&cx.query.questions().next()?.qtype.0.to_be_bytes());
+            Some(&output[..2])
+        }
+        "client_port" | "server_port" => {
+            let port = if variable == "client_port" {
+                cx.client.port()
+            } else {
+                cx.local.port()
+            };
+            output[..2].copy_from_slice(&port.to_be_bytes());
+            Some(&output[..2])
+        }
+        "client_ip" | "server_ip" => {
+            let ip = if variable == "client_ip" {
+                cx.client.ip()
+            } else {
+                cx.local.ip()
+            };
+            match (cx.client.ip(), ip) {
+                (std::net::IpAddr::V4(_), std::net::IpAddr::V4(ip)) => {
+                    output[..4].copy_from_slice(&ip.octets());
+                    Some(&output[..4])
+                }
+                (std::net::IpAddr::V6(_), std::net::IpAddr::V6(ip)) => {
+                    output[..16].copy_from_slice(&ip.octets());
+                    Some(&output[..16])
+                }
+                _ => None,
+            }
+        }
+        "protocol" => Some(match cx.protocol {
+            pharos_server::Protocol::Udp => b"udp",
+            pharos_server::Protocol::Tcp => b"tcp",
+        }),
+        label => cx
+            .metadata
+            .enabled()
+            .then(|| cx.metadata.get(label))
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .map(str::as_bytes),
+    }
+}
+
 impl<'a> EdnsState<'a> {
     fn new(bytes: &'a mut [u8], query: &Message<'_>) -> Self {
         let original = query.opt().map_or(&[][..], |opt| opt.options().as_bytes());
@@ -1383,21 +1464,31 @@ impl Plugin for Rewrite {
         for (index, rule) in self.rules.iter().enumerate() {
             let applied = match &rule.action {
                 Action::Edns(code, value, action) => {
-                    rewrite_edns = true;
-                    let mut data = [0; 20];
-                    let (value, append_existing): (&[u8], bool) = match value {
-                        EdnsValue::Local(bytes) => (bytes, true),
-                        EdnsValue::Nsid => (&[], true),
+                    let mut data = [0; 1024];
+                    let value = match value {
+                        EdnsValue::Local(bytes) => Some((bytes.as_slice(), true)),
+                        EdnsValue::Variable(variable) => {
+                            edns_variable(cx, variable, &mut data).map(|value| (value, false))
+                        }
+                        EdnsValue::Nsid => Some((&[][..], true)),
                         EdnsValue::Subnet(v4, v6) => {
-                            (subnet_data(cx.client.ip(), *v4, *v6, &mut data), false)
+                            let mut subnet = [0; 20];
+                            let bytes = subnet_data(cx.client.ip(), *v4, *v6, &mut subnet);
+                            data[..bytes.len()].copy_from_slice(bytes);
+                            Some((&data[..bytes.len()], false))
                         }
                     };
-                    state.as_mut().expect("EDNS scratch allocated").apply(
-                        *code,
-                        value,
-                        *action,
-                        append_existing,
-                    )
+                    if let Some((value, append_existing)) = value {
+                        rewrite_edns = true;
+                        state.as_mut().expect("EDNS scratch allocated").apply(
+                            *code,
+                            value,
+                            *action,
+                            append_existing,
+                        )
+                    } else {
+                        Ok(false)
+                    }
                 }
                 _ => apply_rule(rule, &mut cx.query, &cx.metadata),
             };

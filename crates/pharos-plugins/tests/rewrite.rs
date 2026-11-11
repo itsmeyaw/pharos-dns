@@ -349,6 +349,81 @@ async fn coredns_edns_nsid_and_subnet_rewrite() {
     }
 }
 
+struct InspectMaybeOptions(Option<&'static [u8]>);
+impl Next for InspectMaybeOptions {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        assert_eq!(cx.query.opt().map(|opt| opt.options().as_bytes()), self.0);
+        Outcome::Drop
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rewrite_test.go TestRewriteEDNS0LocalVariable.
+#[tokio::test]
+async fn coredns_edns_local_variables_and_metadata() {
+    for (variable, value, expected) in [
+        ("qname", None, Some(&b"\xff\xee\0\x08example."[..])),
+        ("qtype", None, Some(&b"\xff\xee\0\x02\0\x01"[..])),
+        (
+            "client_ip",
+            None,
+            Some(&b"\xff\xee\0\x04\xc0\0\x02\x81"[..]),
+        ),
+        ("client_port", None, Some(&b"\xff\xee\0\x02\x04\xd2"[..])),
+        ("server_ip", None, Some(&b"\xff\xee\0\x04\x7f\0\0\x01"[..])),
+        ("server_port", None, Some(&b"\xff\xee\0\x02\0\x35"[..])),
+        ("protocol", None, Some(&b"\xff\xee\0\x03udp"[..])),
+        (
+            "test/label",
+            Some("Team-A"),
+            Some(&b"\xff\xee\0\x06Team-A"[..]),
+        ),
+        ("test/label", None, None),
+    ] {
+        let config = format!(".:53 {{\n rewrite edns0 local set 0xffee {{{variable}}}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = "example.".parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        b.question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "192.0.2.129:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        if let Some(value) = value {
+            cx.metadata.insert("test/label", value);
+        }
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, InspectMaybeOptions(expected))
+                .await,
+            Outcome::Drop,
+            "{variable}"
+        );
+    }
+}
+
 struct WaitForever;
 impl Next for WaitForever {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {

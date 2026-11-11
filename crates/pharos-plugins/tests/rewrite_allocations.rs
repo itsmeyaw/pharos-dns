@@ -58,6 +58,15 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         ("rewrite edns0 local unset 0xffee", "example."),
         ("rewrite edns0 nsid set", "example."),
         ("rewrite edns0 subnet set 24 56", "example."),
+        ("rewrite edns0 local set 0xffee {qname}", "example."),
+        ("rewrite edns0 local set 0xffee {qtype}", "example."),
+        ("rewrite edns0 local set 0xffee {client_ip}", "example."),
+        ("rewrite edns0 local set 0xffee {client_port}", "example."),
+        ("rewrite edns0 local set 0xffee {server_ip}", "example."),
+        ("rewrite edns0 local set 0xffee {server_port}", "example."),
+        ("rewrite edns0 local set 0xffee {protocol}", "example."),
+        ("rewrite edns0 local set 0xffee {test/label}", "example."),
+        ("rewrite edns0 local set 0xffee {missing/label}", "example."),
     ] {
         let config = format!(".:53 {{\n {rule}\n}}");
         let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
@@ -76,7 +85,7 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         .unwrap();
         let _ = b.finish();
         let mut response = Vec::with_capacity(512);
-        let mut slots = [];
+        let mut slots = [None];
         let mut cx = Context {
             query: Message::parse(&wire).unwrap(),
             client: "127.0.0.1:1234".parse().unwrap(),
@@ -88,6 +97,7 @@ fn rewrite_non_regex_rules_do_not_allocate() {
             response: &mut response,
             max_response_size: 512,
         };
+        assert!(cx.metadata.insert("test/label", "Team-A"));
         let region = Region::new(GLOBAL);
         let future = chain.rewrite.as_ref().unwrap().serve(&mut cx, Answer);
         let mut future = std::pin::pin!(future);

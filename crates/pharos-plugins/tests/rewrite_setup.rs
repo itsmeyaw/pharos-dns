@@ -99,6 +99,28 @@ fn coredns_edns_local_setup_cases() {
     }
 }
 
+#[test]
+fn coredns_edns_variable_setup_cases() {
+    for (variable, valid) in [
+        ("qname", true),
+        ("qtype", true),
+        ("client_ip", true),
+        ("client_port", true),
+        ("server_ip", true),
+        ("server_port", true),
+        ("protocol", true),
+        ("test/label", true),
+        ("dummy", false),
+        ("/label", false),
+        ("provider/", false),
+    ] {
+        let text = format!(".:53 {{\n rewrite edns0 local set 0xffee {{{variable}}}\n}}");
+        let result =
+            parse("Corefile", &text).and_then(|blocks| configure::<Chain>(&blocks, directives()));
+        assert_eq!(result.is_ok(), valid, "{variable}: {result:?}");
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/name_test.go TestNewNameRule.
 #[test]
 fn coredns_name_setup_cases() {
