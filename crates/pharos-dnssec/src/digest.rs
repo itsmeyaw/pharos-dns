@@ -68,7 +68,7 @@ pub fn cds_rdata(owner: &Name, dnskey: &[u8], algorithm: DigestType) -> Option<V
 /// Produces CDNSKEY RDATA for a DNSKEY.
 #[must_use]
 pub fn cdnskey_rdata(dnskey: &[u8]) -> Option<Vec<u8>> {
-    // RFC 7344 §4.1: CDNSKEY uses the same RDATA format as DNSKEY.
+    // RFC 7344 §4.2: CDNSKEY uses the same RDATA format as DNSKEY.
     key_tag(dnskey)?;
     Some(dnskey.to_vec())
 }

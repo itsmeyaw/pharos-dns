@@ -57,7 +57,7 @@ fn rfc_4509_dnskey_and_ds_vector() {
 fn key_tag_handles_rsa_md5_and_bad_lengths() {
     assert_eq!(key_tag(&[0, 0, 3]), None);
     assert_eq!(key_tag(&[0, 0, 3, 1, 0x12, 0x34, 0x56]), Some(0x1234));
-    assert_eq!(key_tag(&vec![0; 65536]), None);
+    assert_eq!(key_tag(&[0; 65536]), None);
 }
 
 #[test]
