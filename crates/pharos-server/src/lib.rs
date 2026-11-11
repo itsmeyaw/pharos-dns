@@ -423,9 +423,8 @@ impl Listener {
             let tcp4 = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
             let address = tcp4.local_addr()?;
             let address6 = SocketAddr::from((Ipv6Addr::UNSPECIFIED, address.port()));
-            let tcp6 = match bind_ipv6_only(address6) {
-                Ok(tcp) => Some(tcp),
-                Err(error) if ipv6_unavailable(&error) => None,
+            let mut tcp6 = match optional_ipv6(bind_ipv6_only(address6)) {
+                Ok(tcp) => tcp,
                 Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts > 1 => {
                     attempts -= 1;
                     continue;
@@ -436,9 +435,20 @@ impl Listener {
                 let mut sockets = Vec::new();
                 for _ in 0..quota::worker_count() {
                     sockets.push(udp::bind(address)?);
-                    if tcp6.is_some() {
-                        sockets.push(udp::bind(address6)?);
+                }
+                if tcp6.is_some() {
+                    let mut ipv6 = Vec::new();
+                    for _ in 0..quota::worker_count() {
+                        match optional_ipv6(udp::bind(address6))? {
+                            Some(socket) => ipv6.push(socket),
+                            None => {
+                                tcp6 = None;
+                                ipv6.clear();
+                                break;
+                            }
+                        }
                     }
+                    sockets.extend(ipv6);
                 }
                 Ok::<_, io::Error>(sockets)
             })();
@@ -518,9 +528,34 @@ fn bind_ipv6_only(address: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::from_std(socket.into())
 }
 
-fn ipv6_unavailable(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::AddrNotAvailable
-        || error.raw_os_error() == Some(libc::EAFNOSUPPORT)
+fn optional_ipv6<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error)
+            if error.kind() == io::ErrorKind::AddrNotAvailable
+                || error.raw_os_error() == Some(libc::EAFNOSUPPORT) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod wildcard_tests {
+    use super::optional_ipv6;
+    use std::io;
+
+    #[test]
+    fn unavailable_ipv6_falls_back_but_other_errors_remain_errors() {
+        assert_eq!(
+            optional_ipv6::<()>(Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT))).unwrap(),
+            None
+        );
+        assert!(
+            optional_ipv6::<()>(Err(io::Error::new(io::ErrorKind::AddrInUse, "occupied"))).is_err()
+        );
+    }
 }
 
 impl Drop for Listener {
