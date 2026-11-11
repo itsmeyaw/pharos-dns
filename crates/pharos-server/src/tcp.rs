@@ -88,6 +88,7 @@ async fn serve<H: Handler>(
         if *shutdown.borrow() || *write_failed.borrow() {
             break;
         }
+        // RFC 7766 §6.2.3: a server may close a connection at any time and clients must cope.
         if options.max_queries.is_some_and(|max| count >= max) {
             break;
         }
@@ -103,6 +104,7 @@ async fn serve<H: Handler>(
                 },
             }
         }
+        // RFC 7766 §6.2.3: servers close idle connections after a timeout; idle starts once no Query is in flight.
         let query = {
             let frame = read_frame(&mut reader);
             tokio::pin!(frame);
