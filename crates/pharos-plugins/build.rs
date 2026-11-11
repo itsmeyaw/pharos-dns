@@ -80,7 +80,7 @@ fn main() {
             "dns64" => "setup_dns64",
             "siit" => "setup_siit",
             "rewrite" => "setup_rewrite",
-            "autopath" => "setup_autopath",
+            "autopath" => "autopath::setup::setup",
             "root" => "setup_root",
             "cancel" => "setup_cancel",
             "timeouts" => "setup_timeouts",

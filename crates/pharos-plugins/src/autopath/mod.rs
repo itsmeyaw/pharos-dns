@@ -1,5 +1,7 @@
 //! Server-side search path completion.
 
+pub(crate) mod setup;
+
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type};
 use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin, Protocol};

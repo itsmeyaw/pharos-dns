@@ -865,16 +865,7 @@ fn setup_rewrite(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Re
     Ok(())
 }
 
-#[cfg(feature = "plugin-autopath")]
-fn setup_autopath(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let domains = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.as_str())
-        .collect::<Vec<_>>();
-    block.config.autopath = Some(autopath::AutoPath::parse(cursor, &domains)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-kubernetes")]
 fn setup_kubernetes(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
