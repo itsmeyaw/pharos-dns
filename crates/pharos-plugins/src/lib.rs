@@ -590,15 +590,7 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
     Ok(())
 }
 
-#[cfg(feature = "plugin-minimal")]
-fn setup_minimal(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if cursor.next_arg() {
-        return Err(cursor.arg_err());
-    }
-    block.config.minimal = Some(minimal::Minimal);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-nsid")]
 fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

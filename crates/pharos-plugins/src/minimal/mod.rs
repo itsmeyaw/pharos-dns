@@ -1,5 +1,7 @@
 //! Remove unnecessary sections from positive Responses.
 
+pub(crate) mod setup;
+
 use pharos_proto::{Message, NameRef, NameWirePart, ResponseType, typify_response};
 use pharos_server::{Context, Next, Outcome, Plugin};
 use std::time::{SystemTime, UNIX_EPOCH};
