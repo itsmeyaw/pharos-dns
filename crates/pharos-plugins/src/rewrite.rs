@@ -768,6 +768,93 @@ fn active_at(
     false
 }
 
+fn states_at<'a>(
+    rules: &[Rule],
+    index: usize,
+    mut query: Message<'a>,
+    metadata: &Metadata<'_>,
+) -> Option<(Message<'a>, Message<'a>)> {
+    for (position, rule) in rules.iter().enumerate().take(index + 1) {
+        let before = query;
+        let matched = apply_rule(rule, &mut query, metadata).ok()?;
+        if position == index {
+            return matched.then_some((before, query));
+        }
+        if matched && rule.stop {
+            return None;
+        }
+    }
+    None
+}
+
+fn copy_name(source: NameRef<'_>, output: &mut [u8; 255]) -> Option<usize> {
+    let mut len = 0;
+    for label in source.labels() {
+        if len + label.len() + 1 >= output.len() {
+            return None;
+        }
+        output[len] = label.len() as u8;
+        len += 1;
+        output[len..len + label.len()].copy_from_slice(label);
+        len += label.len();
+    }
+    output[len] = 0;
+    Some(len + 1)
+}
+
+fn apply_history<'a>(
+    source: NameRef<'a>,
+    original: Message<'_>,
+    metadata: &Metadata<'_>,
+    rules: &[Rule],
+    end: usize,
+    value: bool,
+    output: &'a mut [u8; 255],
+) -> NameRef<'a> {
+    let mut current = [0; 255];
+    let Some(mut len) = copy_name(source, &mut current) else {
+        return source;
+    };
+    for index in (0..end).rev() {
+        let Action::Name(target, auto, _, answers) = &rules[index].action else {
+            continue;
+        };
+        if !auto && answers.is_empty() {
+            continue;
+        }
+        let Some((before, after)) = states_at(rules, index, original, metadata) else {
+            continue;
+        };
+        let (Some(before), Some(after)) = (before.questions().next(), after.questions().next())
+        else {
+            continue;
+        };
+        let suffix = match (&rules[index].matcher, auto) {
+            (Matcher::Suffix(from), true) => Some((target.as_str(), from.as_str())),
+            _ => None,
+        };
+        let name = NameRef::parse(&current[..len], 0).expect("validated name");
+        let mut mapped = [0; 255];
+        let result = apply_answer(
+            name,
+            (after.name, before.name),
+            suffix,
+            *auto,
+            answers,
+            value,
+            &mut mapped,
+        );
+        let mut next = [0; 255];
+        let Some(next_len) = copy_name(result, &mut next) else {
+            return source;
+        };
+        current = next;
+        len = next_len;
+    }
+    output[..len].copy_from_slice(&current[..len]);
+    NameRef::parse(&output[..len], 0).expect("validated name")
+}
+
 impl Plugin for Rewrite {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
         let original_query = cx.query;
@@ -776,9 +863,6 @@ impl Plugin for Rewrite {
         };
         let mut end = self.rules.len();
         let mut name_rewritten = false;
-        let mut suffix = None;
-        let mut answer_auto = false;
-        let mut selected_answers = &[][..];
         let mut cname = None;
         for (index, rule) in self.rules.iter().enumerate() {
             let matched = match apply_rule(rule, &mut cx.query, &cx.metadata) {
@@ -787,13 +871,8 @@ impl Plugin for Rewrite {
             };
             if matched {
                 match &rule.action {
-                    Action::Name(target, auto, _, answers) => {
+                    Action::Name(_, auto, _, answers) => {
                         name_rewritten |= *auto || !answers.is_empty();
-                        answer_auto = *auto;
-                        selected_answers = answers;
-                        if *auto && let Matcher::Suffix(from) = &rule.matcher {
-                            suffix = Some((target.as_str(), from.as_str()));
-                        }
                     }
                     Action::Cname(matcher, to) => cname = Some((matcher, to.as_str())),
                     _ => {}
@@ -988,9 +1067,6 @@ impl Plugin for Rewrite {
             let Some(original) = original_query.questions().next() else {
                 return Outcome::Error(ServerError::InvalidQuery);
             };
-            let Some(rewritten) = rewritten_query.questions().next() else {
-                return Outcome::Error(ServerError::InvalidQuery);
-            };
             let Ok(mut builder) = MessageBuilder::new(
                 cx.response,
                 cx.max_response_size.max(512),
@@ -1012,12 +1088,12 @@ impl Plugin for Rewrite {
             ] {
                 for rr in records {
                     let mut owner_buffer = [0; 255];
-                    let owner = apply_answer(
+                    let owner = apply_history(
                         rr.name,
-                        (rewritten.name, original.name),
-                        suffix,
-                        answer_auto,
-                        selected_answers,
+                        original_query,
+                        &cx.metadata,
+                        &self.rules,
+                        end,
                         false,
                         &mut owner_buffer,
                     );
@@ -1027,12 +1103,12 @@ impl Plugin for Rewrite {
                     let mut value_buffer = [0; 255];
                     macro_rules! map {
                         ($value:expr) => {
-                            apply_answer(
+                            apply_history(
                                 $value,
-                                (rewritten.name, original.name),
-                                suffix,
-                                answer_auto,
-                                selected_answers,
+                                original_query,
+                                &cx.metadata,
+                                &self.rules,
+                                end,
                                 true,
                                 &mut value_buffer,
                             )
