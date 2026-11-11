@@ -162,6 +162,7 @@ pub fn black_lie(
     qtype: Type,
     kind: BlackLieKind,
 ) -> Result<Nsec, DenialError> {
+    // shortcut: allocates per Query; use caller-provided buffers before hot-path integration.
     if !qname.is_subdomain_of(apex) {
         return Err(DenialError::OutOfZone);
     }
