@@ -59,6 +59,7 @@ impl Config {
             pods_verified: self.pod_mode == "verified",
             endpoints: self.endpoints,
             zonal: self.zonal,
+            multicluster: false,
         }
     }
 }

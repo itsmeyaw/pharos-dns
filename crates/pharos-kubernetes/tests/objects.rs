@@ -3,6 +3,26 @@ use pharos_kubernetes::object::{Endpoints, Pod, Service};
 use serde_json::json;
 
 #[test]
+fn service_import_keeps_cluster_ips_ports_and_type() {
+    let input: kube::core::DynamicObject = serde_json::from_value(json!({
+        "apiVersion":"multicluster.x-k8s.io/v1alpha1", "kind":"ServiceImport",
+        "metadata":{"name":"web", "namespace":"prod", "resourceVersion":"9"},
+        "spec":{"type":"ClusterSetIP", "ips":["10.0.0.1", "fd00::1"],
+                "ports":[{"name":"http", "protocol":"TCP", "port":80}]}
+    }))
+    .unwrap();
+    let import = pharos_kubernetes::object::ServiceImport::from(input);
+    assert_eq!(import.name.as_ref(), "web");
+    assert_eq!(import.namespace.as_ref(), "prod");
+    assert_eq!(import.version, "9");
+    assert_eq!(import.cluster_ips, ["10.0.0.1", "fd00::1"]);
+    assert_eq!(import.ports[0].name, "http");
+    assert_eq!(import.ports[0].protocol, "TCP");
+    assert_eq!(import.ports[0].port, 80);
+    assert!(!import.headless());
+}
+
+#[test]
 fn service_keeps_addresses_and_supplies_port_sentinel() {
     let input: v1::Service = serde_json::from_value(json!({
         "metadata": {"name":"web", "namespace":"prod", "resourceVersion":"9"},

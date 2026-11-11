@@ -5,6 +5,87 @@ mod tests {
     use k8s_openapi::api::{core::v1, discovery::v1::EndpointSlice};
     use serde_json::json;
 
+    #[test]
+    fn multicluster_indices_track_updates_deletes_and_relists() {
+        let store = Store::default();
+        let import = |version: &str, ip: &str| {
+            crate::object::ServiceImport::from(
+                serde_json::from_value::<kube::core::DynamicObject>(json!({
+                    "apiVersion":"multicluster.x-k8s.io/v1alpha1", "kind":"ServiceImport",
+                    "metadata":{"name":"web", "namespace":"prod", "resourceVersion":version},
+                    "spec":{"type":"ClusterSetIP", "ips":[ip]}
+                }))
+                .unwrap(),
+            )
+        };
+        let slice = |name: &str, service: &str, cluster: &str| {
+            crate::object::MultiClusterEndpoints::from(
+                serde_json::from_value::<EndpointSlice>(json!({
+                    "metadata":{"name":name,"namespace":"prod","labels":{
+                        "multicluster.kubernetes.io/service-name":service,
+                        "multicluster.kubernetes.io/source-cluster":cluster}},
+                    "addressType":"IPv4","endpoints":[{"addresses":["10.0.1.1"]}]
+                }))
+                .unwrap(),
+            )
+        };
+        store.apply_service_import(import("1", "10.0.0.1"));
+        store.apply_multicluster_endpoints(slice("one", "web", "east"));
+        store.apply_multicluster_endpoints(slice("two", "web", "west"));
+        store.with_read(|index| {
+            assert_eq!(
+                index.service_import("prod", "web").unwrap().cluster_ips,
+                ["10.0.0.1"]
+            );
+            assert_eq!(index.multicluster_endpoints("prod", "web").count(), 2);
+        });
+        store.apply_service_import(import("2", "10.0.0.2"));
+        store.apply_multicluster_endpoints(slice("one", "other", "east"));
+        store.with_read(|index| {
+            assert_eq!(
+                index.service_import("prod", "web").unwrap().cluster_ips,
+                ["10.0.0.2"]
+            );
+            assert_eq!(index.multicluster_endpoints("prod", "web").count(), 1);
+            assert_eq!(
+                index
+                    .multicluster_endpoints("prod", "other")
+                    .next()
+                    .unwrap()
+                    .cluster_id,
+                "east"
+            );
+        });
+        store.delete_multicluster_endpoints("prod", "two");
+        store.replace_multicluster_endpoints(Vec::new());
+        store.replace_service_imports(Vec::new());
+        store.with_read(|index| {
+            assert!(index.service_import("prod", "web").is_none());
+            assert_eq!(index.multicluster_endpoints("prod", "web").count(), 0);
+            assert_eq!(index.multicluster_endpoints("prod", "other").count(), 0);
+        });
+    }
+
+    #[test]
+    fn multicluster_serial_changes_on_dns_relevant_updates_only() {
+        let store = Store::default();
+        let mut import = crate::object::ServiceImport::from(serde_json::from_value::<kube::core::DynamicObject>(json!({
+            "apiVersion":"multicluster.x-k8s.io/v1alpha1", "kind":"ServiceImport",
+            "metadata":{"name":"web", "namespace":"prod", "resourceVersion":"1"},
+            "spec":{"type":"ClusterSetIP", "ips":["10.0.0.1"], "ports":[{"name":"http","protocol":"TCP","port":80}]}
+        })).unwrap());
+        store.apply_service_import(import.clone());
+        store.0.write().unwrap().multicluster_serial = 1;
+        import.version = "2".into();
+        import.cluster_ips = vec!["10.0.0.2".into()];
+        store.apply_service_import(import.clone());
+        assert_eq!(store.with_read(|i| i.multicluster_serial()), 1);
+        import.version = "3".into();
+        import.ports[0].port = 81;
+        store.apply_service_import(import);
+        assert_ne!(store.with_read(|i| i.multicluster_serial()), 1);
+    }
+
     fn service(ip: &str) -> Service {
         Service::from(
             serde_json::from_value::<v1::Service>(json!({
@@ -275,7 +356,7 @@ mod tests {
 }
 // Incremental indices shared by watchers and DNS readers.
 
-use crate::object::{Endpoints, Namespace, Pod, Service};
+use crate::object::{Endpoints, MultiClusterEndpoints, Namespace, Pod, Service, ServiceImport};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
@@ -288,9 +369,13 @@ type Grouped<T> = HashMap<Arc<str>, Reverse<T>>;
 #[derive(Default)]
 pub struct Index {
     serial: u32,
+    multicluster_serial: u32,
     allowed_namespaces: HashSet<Arc<str>>,
     require_namespace: bool,
     services: Names<Service>,
+    service_imports: Names<ServiceImport>,
+    multicluster_slices: Names<MultiClusterEndpoints>,
+    multicluster_endpoints: Grouped<MultiClusterEndpoints>,
     service_ips: Reverse<Service>,
     service_external_ips: Reverse<Service>,
     slices: Names<Endpoints>,
@@ -344,6 +429,17 @@ impl Index {
         self.serial
     }
 
+    pub fn multicluster_serial(&self) -> u32 {
+        self.multicluster_serial
+    }
+
+    fn mark_multicluster_modified(&mut self) {
+        self.multicluster_serial = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+    }
+
     fn mark_modified(&mut self) {
         self.serial = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -374,6 +470,25 @@ impl Index {
         } else {
             None
         }
+    }
+    pub fn service_import(&self, namespace: &str, name: &str) -> Option<&ServiceImport> {
+        self.namespace_allowed(namespace)
+            .then(|| by_name(&self.service_imports, namespace, name))
+            .flatten()
+            .map(Arc::as_ref)
+    }
+    pub fn multicluster_endpoints(
+        &self,
+        namespace: &str,
+        service: &str,
+    ) -> impl Iterator<Item = &MultiClusterEndpoints> {
+        self.multicluster_endpoints
+            .get(namespace)
+            .and_then(|services| services.get(service))
+            .into_iter()
+            .flatten()
+            .map(Arc::as_ref)
+            .filter(|_| self.namespace_allowed(namespace))
     }
     /// Look up a Service without applying namespace visibility restrictions.
     pub fn service_unfiltered(&self, namespace: &str, name: &str) -> Option<&Service> {
@@ -428,6 +543,37 @@ impl Index {
                 remove_reverse(&mut self.service_external_ips, ip, &service);
             }
         }
+    }
+    fn delete_multicluster_endpoints(&mut self, namespace: &str, name: &str) {
+        if let Some(slice) = remove(&mut self.multicluster_slices, namespace, name)
+            && let Some(imports) = self.multicluster_endpoints.get_mut(namespace)
+        {
+            if let Some(slices) = imports.get_mut(slice.import_name.as_ref()) {
+                slices.retain(|item| !Arc::ptr_eq(item, &slice));
+                if slices.is_empty() {
+                    imports.remove(slice.import_name.as_ref());
+                }
+            }
+            if imports.is_empty() {
+                self.multicluster_endpoints.remove(namespace);
+            }
+        }
+    }
+    fn apply_multicluster_endpoints(&mut self, slice: MultiClusterEndpoints) {
+        self.delete_multicluster_endpoints(&slice.endpoints.namespace, &slice.endpoints.name);
+        let slice = Arc::new(slice);
+        self.multicluster_endpoints
+            .entry(slice.endpoints.namespace.clone())
+            .or_default()
+            .entry(slice.import_name.clone())
+            .or_default()
+            .push(slice.clone());
+        put(
+            &mut self.multicluster_slices,
+            slice.endpoints.namespace.clone(),
+            slice.endpoints.name.clone(),
+            slice,
+        );
     }
     fn apply_service(&mut self, service: Service) {
         self.delete_service(&service.namespace, &service.name);
@@ -521,6 +667,110 @@ impl Store {
     }
     pub fn with_read<R>(&self, read: impl FnOnce(&Index) -> R) -> R {
         read(&self.0.read().unwrap())
+    }
+    pub(crate) fn apply_service_import(&self, object: ServiceImport) {
+        let mut index = self.0.write().unwrap();
+        match by_name(&index.service_imports, &object.namespace, &object.name) {
+            None => index.mark_modified(),
+            Some(old) if service_import_changed(old, &object) => index.mark_multicluster_modified(),
+            _ => {}
+        }
+        put(
+            &mut index.service_imports,
+            object.namespace.clone(),
+            object.name.clone(),
+            Arc::new(object),
+        );
+    }
+    pub(crate) fn delete_service_import(&self, namespace: &str, name: &str) {
+        let mut index = self.0.write().unwrap();
+        remove(&mut index.service_imports, namespace, name);
+        index.mark_modified();
+    }
+    pub(crate) fn replace_service_imports(&self, objects: Vec<ServiceImport>) {
+        let mut index = self.0.write().unwrap();
+        if index
+            .service_imports
+            .values()
+            .map(HashMap::len)
+            .sum::<usize>()
+            != objects.len()
+            || objects
+                .iter()
+                .any(|o| by_name(&index.service_imports, &o.namespace, &o.name).is_none())
+        {
+            index.mark_modified();
+        }
+        if objects.iter().any(|o| {
+            by_name(&index.service_imports, &o.namespace, &o.name)
+                .is_some_and(|old| service_import_changed(old, o))
+        }) {
+            index.mark_multicluster_modified();
+        }
+        index.service_imports.clear();
+        for object in objects {
+            put(
+                &mut index.service_imports,
+                object.namespace.clone(),
+                object.name.clone(),
+                Arc::new(object),
+            );
+        }
+    }
+    pub(crate) fn apply_multicluster_endpoints(&self, object: MultiClusterEndpoints) {
+        let mut index = self.0.write().unwrap();
+        match by_name(
+            &index.multicluster_slices,
+            &object.endpoints.namespace,
+            &object.endpoints.name,
+        ) {
+            None => index.mark_modified(),
+            Some(old) if multicluster_endpoints_changed(old, &object) => {
+                index.mark_multicluster_modified()
+            }
+            _ => {}
+        }
+        index.apply_multicluster_endpoints(object);
+    }
+    pub(crate) fn delete_multicluster_endpoints(&self, namespace: &str, name: &str) {
+        let mut index = self.0.write().unwrap();
+        index.delete_multicluster_endpoints(namespace, name);
+        index.mark_modified();
+    }
+    pub(crate) fn replace_multicluster_endpoints(&self, objects: Vec<MultiClusterEndpoints>) {
+        let mut index = self.0.write().unwrap();
+        if index
+            .multicluster_slices
+            .values()
+            .map(HashMap::len)
+            .sum::<usize>()
+            != objects.len()
+            || objects.iter().any(|o| {
+                by_name(
+                    &index.multicluster_slices,
+                    &o.endpoints.namespace,
+                    &o.endpoints.name,
+                )
+                .is_none()
+            })
+        {
+            index.mark_modified();
+        }
+        if objects.iter().any(|o| {
+            by_name(
+                &index.multicluster_slices,
+                &o.endpoints.namespace,
+                &o.endpoints.name,
+            )
+            .is_some_and(|old| multicluster_endpoints_changed(old, o))
+        }) {
+            index.mark_multicluster_modified();
+        }
+        index.multicluster_slices.clear();
+        index.multicluster_endpoints.clear();
+        for object in objects {
+            index.apply_multicluster_endpoints(object);
+        }
     }
     pub(crate) fn apply_service(&self, object: Service) {
         let mut index = self.0.write().unwrap();
@@ -664,6 +914,19 @@ fn service_changed(old: Option<&Service>, new: &Service) -> bool {
         old.version != new.version
             && (old.external_name != new.external_name || old.ports != new.ports)
     })
+}
+
+fn service_import_changed(old: &ServiceImport, new: &ServiceImport) -> bool {
+    old.version != new.version && (old.service_type != new.service_type || old.ports != new.ports)
+}
+
+fn multicluster_endpoints_changed(
+    old: &MultiClusterEndpoints,
+    new: &MultiClusterEndpoints,
+) -> bool {
+    old.endpoints.version != new.endpoints.version
+        && (old.cluster_id != new.cluster_id
+            || endpoints_changed(Some(&old.endpoints), &new.endpoints))
 }
 
 fn endpoints_changed(old: Option<&Endpoints>, new: &Endpoints) -> bool {
