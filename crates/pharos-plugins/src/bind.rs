@@ -122,4 +122,26 @@ mod tests {
         );
         assert!(expand(&["missing".into()], &ifaces, &cursor).is_err());
     }
+
+    // CoreDNS plugin/bind/setup_test.go cases, with deterministic interface addresses.
+    #[test]
+    fn interface_setup_expands_and_excludes_addresses() {
+        let ifaces = vec![
+            ("lo".into(), Some("127.0.0.1".parse().unwrap())),
+            ("lo".into(), Some("::1".parse().unwrap())),
+        ];
+        for (directive, expected) in [
+            ("bind 1.2.3.4 lo", vec!["1.2.3.4", "127.0.0.1", "::1"]),
+            ("bind lo {\n except 127.0.0.1\n}", vec!["::1"]),
+            ("bind lo {\n except lo\n}", vec![]),
+        ] {
+            let blocks =
+                pharos_corefile::parse("Corefile", &format!(".:53 {{\n{directive}\n}}")).unwrap();
+            let mut cursor = Cursor::new("Corefile", &blocks[0].directives["bind"]);
+            assert_eq!(
+                parse_with_interfaces(&mut cursor, &ifaces).unwrap(),
+                expected
+            );
+        }
+    }
 }

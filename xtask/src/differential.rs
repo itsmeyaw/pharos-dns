@@ -203,7 +203,15 @@ fn start(
             corefile
                 .replace("{port}", &port.to_string())
                 .replace("{port2}", &port2.to_string())
-                .replace("{metrics_port}", &metrics_port.to_string()),
+                .replace("{metrics_port}", &metrics_port.to_string())
+                .replace(
+                    "{loopback}",
+                    if cfg!(target_os = "macos") {
+                        "lo0"
+                    } else {
+                        "lo"
+                    },
+                ),
         )
         .map_err(|e| e.to_string())?;
         Some(conf)
@@ -455,7 +463,12 @@ mod tests {
     #[test]
     fn substitutes_dns_upstream_and_metrics_ports_for_each_server() {
         let temp = TempDir::new().unwrap();
-        let config = ".:{port} {\n    forward . 127.0.0.1:{port2}\n    prometheus localhost:{metrics_port}\n}\n";
+        let config = ".:{port} {\n    forward . 127.0.0.1:{port2}\n    prometheus localhost:{metrics_port}\n}\n# {loopback}\n";
+        let loopback = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
         let pharos = temp.0.join("pharos");
         let coredns = temp.0.join("coredns");
         std::fs::create_dir(&pharos).unwrap();
@@ -482,11 +495,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             std::fs::read_to_string(pharos.join("Corefile")).unwrap(),
-            ".:1001 {\n    forward . 127.0.0.1:1003\n    prometheus localhost:1002\n}\n"
+            format!(
+                ".:1001 {{\n    forward . 127.0.0.1:1003\n    prometheus localhost:1002\n}}\n# {loopback}\n"
+            )
         );
         assert_eq!(
             std::fs::read_to_string(coredns.join("Corefile")).unwrap(),
-            ".:2001 {\n    forward . 127.0.0.1:2003\n    prometheus localhost:2002\n}\n"
+            format!(
+                ".:2001 {{\n    forward . 127.0.0.1:2003\n    prometheus localhost:2002\n}}\n# {loopback}\n"
+            )
         );
     }
 

@@ -9,7 +9,8 @@ Each scenario is a directory containing:
 
 - `Corefile`: the same configuration for both processes; `{port}` is replaced
   by the chosen Listener port, `{port2}` by a second DNS Listener port, and
-  `{metrics_port}` by a distinct free port for each process. Omit it to exercise each built-in default in an empty working
+  `{metrics_port}` by a distinct free port for each process. `{loopback}` is
+  `lo0` on macOS and `lo` elsewhere. Omit it to exercise each built-in default in an empty working
   directory.
 - `queries`: one Query per line, `name type class udp|tcp [flags...]`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
