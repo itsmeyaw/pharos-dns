@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{
-    Class, Message, MessageBuilder, MessageMut, Name, NameRef, Rcode, Section, Type,
+    Class, Message, MessageBuilder, MessageMut, Name, NameRef, Rcode, Rdata, Section, Type,
 };
 use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin};
 
@@ -259,6 +259,34 @@ impl std::fmt::Write for NameText {
     }
 }
 
+fn remap<'a>(
+    source: NameRef<'a>,
+    from: NameRef<'_>,
+    to: NameRef<'_>,
+    buffer: &'a mut [u8; 255],
+) -> NameRef<'a> {
+    let count = source.labels().count();
+    let suffix = from.labels().count();
+    if count < suffix
+        || (suffix == 0 && count != 0)
+        || !source.labels().skip(count - suffix).eq(from.labels())
+    {
+        return source;
+    }
+    let mut len = 0;
+    for label in source.labels().take(count - suffix).chain(to.labels()) {
+        if len + 1 + label.len() >= buffer.len() {
+            return source;
+        }
+        buffer[len] = label.len() as u8;
+        len += 1;
+        buffer[len..len + label.len()].copy_from_slice(label);
+        len += label.len();
+    }
+    buffer[len] = 0;
+    NameRef::parse(&buffer[..=len], 0).expect("valid remapped name")
+}
+
 impl Plugin for Rewrite {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
         let original_query = cx.query;
@@ -410,13 +438,72 @@ impl Plugin for Rewrite {
                 (Section::Additional, response.additionals()),
             ] {
                 for rr in records {
-                    let owner = if rr.name == rewritten.name {
-                        original.name
-                    } else {
-                        rr.name
-                    };
+                    let mut owner_buffer = [0; 255];
+                    let owner = remap(rr.name, rewritten.name, original.name, &mut owner_buffer);
                     let Ok(data) = rr.data() else {
                         return Outcome::Error(ServerError::InvalidQuery);
+                    };
+                    let mut value_buffer = [0; 255];
+                    macro_rules! map {
+                        ($value:expr) => {
+                            remap($value, rewritten.name, original.name, &mut value_buffer)
+                        };
+                    }
+                    let data = match data {
+                        Rdata::Cname(value) => Rdata::Cname(map!(value)),
+                        Rdata::Ns(value) => Rdata::Ns(map!(value)),
+                        Rdata::Ptr(value) => Rdata::Ptr(map!(value)),
+                        Rdata::Mx {
+                            preference,
+                            exchange,
+                        } => Rdata::Mx {
+                            preference,
+                            exchange: map!(exchange),
+                        },
+                        Rdata::Soa {
+                            mname,
+                            rname,
+                            serial,
+                            refresh,
+                            retry,
+                            expire,
+                            minimum,
+                        } => Rdata::Soa {
+                            mname: map!(mname),
+                            rname,
+                            serial,
+                            refresh,
+                            retry,
+                            expire,
+                            minimum,
+                        },
+                        Rdata::Srv {
+                            priority,
+                            weight,
+                            port,
+                            target,
+                        } => Rdata::Srv {
+                            priority,
+                            weight,
+                            port,
+                            target: map!(target),
+                        },
+                        Rdata::Naptr {
+                            order,
+                            preference,
+                            flags,
+                            services,
+                            regexp,
+                            replacement,
+                        } => Rdata::Naptr {
+                            order,
+                            preference,
+                            flags,
+                            services,
+                            regexp,
+                            replacement: map!(replacement),
+                        },
+                        other => other,
                     };
                     if builder
                         .record_with(section, owner, rr.rtype, rr.class, rr.ttl, |writer| {

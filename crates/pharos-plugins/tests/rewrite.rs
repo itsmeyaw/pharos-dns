@@ -48,6 +48,78 @@ impl Next for InspectQuestion {
     }
 }
 
+struct AliasedAnswer;
+impl Next for AliasedAnswer {
+    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        assert_eq!(q.name.to_string(), "internal.example.");
+        let owner: Name = "alias.internal.example.".parse().unwrap();
+        let target: Name = "other.internal.example.".parse().unwrap();
+        let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        b.question(q.name, q.qtype, q.qclass).unwrap();
+        b.record_with(
+            Section::Answer,
+            NameRef::parse(owner.as_wire(), 0).unwrap(),
+            Type::CNAME,
+            Class::IN,
+            60,
+            |writer| writer.write_name(NameRef::parse(target.as_wire(), 0).unwrap()),
+        )
+        .unwrap();
+        let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn coredns_exact_auto_rewrites_subdomain_owners_and_values() {
+    let config = ".:53 {\n rewrite name example.com. internal.example.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.com.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, AliasedAnswer)
+            .await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    let rr = message.answers().next().unwrap();
+    assert_eq!(rr.name.to_string(), "alias.example.com.");
+    let pharos_proto::Rdata::Cname(target) = rr.data().unwrap() else {
+        panic!("expected CNAME")
+    };
+    assert_eq!(target.to_string(), "other.example.com.");
+}
+
 #[tokio::test]
 async fn coredns_type_and_class_rewrite_question() {
     for (rules, expected_type, expected_class) in [
