@@ -112,8 +112,8 @@ pub fn servers_with_registry(
     blocks: Vec<BlockContext<Chain>>,
     metrics: pharos_server::metrics::Registry,
 ) -> io::Result<(Servers, Lifecycle)> {
-    let mut groups: HashMap<ListenerKey, (Router<Arc<Chain>>, Option<usize>, bool)> =
-        HashMap::new();
+    type ListenerGroup = (Router<Arc<Chain>>, Option<usize>, bool);
+    let mut groups: HashMap<ListenerKey, ListenerGroup> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
