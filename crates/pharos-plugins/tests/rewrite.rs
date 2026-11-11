@@ -4019,6 +4019,162 @@ async fn coredns_answer_value_rewrites_name_bearing_record_types() {
     }
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/reverter_test.go valueTests.
+#[tokio::test]
+async fn coredns_response_value_fixture_rows() {
+    use pharos_proto::Rdata;
+    let srv: Name = "srv1.my.cluster.local.".parse().unwrap();
+    let cname: Name = "cname.cluster.local.".parse().unwrap();
+    let dname: Name = "dname.cluster.local.".parse().unwrap();
+    let mx: Name = "mx1.cluster.local.".parse().unwrap();
+    let ns: Name = "ns1.cluster.local.".parse().unwrap();
+    let admin: Name = "admin.cluster.local.".parse().unwrap();
+    let naptr: Name = "_sip._udp.cluster.local.".parse().unwrap();
+    fn borrow(name: &Name) -> NameRef<'_> {
+        NameRef::parse(name.as_wire(), 0).unwrap()
+    }
+    let cases = [
+        (
+            Type::SRV,
+            Rdata::Srv {
+                priority: 0,
+                weight: 100,
+                port: 100,
+                target: borrow(&srv),
+            },
+            borrow(&srv),
+            "srv1.my.domain.uk.",
+            "srv1.my.domain.uk.",
+        ),
+        (
+            Type::ANY,
+            Rdata::Cname(borrow(&cname)),
+            borrow(&cname),
+            "cname.domain.uk.",
+            "cname.domain.uk.",
+        ),
+        (
+            Type::ANY,
+            Rdata::Dname(borrow(&dname)),
+            borrow(&dname),
+            "dname.domain.uk.",
+            "dname.domain.uk.",
+        ),
+        (
+            Type::MX,
+            Rdata::Mx {
+                preference: 1,
+                exchange: borrow(&mx),
+            },
+            borrow(&mx),
+            "mx1.domain.uk.",
+            "mx1.domain.uk.",
+        ),
+        (
+            Type::ANY,
+            Rdata::Ns(borrow(&ns)),
+            borrow(&ns),
+            "ns1.domain.uk.",
+            "ns1.domain.uk.",
+        ),
+        (
+            Type::SOA,
+            Rdata::Soa {
+                mname: borrow(&ns),
+                rname: borrow(&admin),
+                serial: 1502165581,
+                refresh: 14400,
+                retry: 3600,
+                expire: 604800,
+                minimum: 14400,
+            },
+            borrow(&ns),
+            "ns1.domain.uk.",
+            "ns1.domain.uk.",
+        ),
+        (
+            Type::NAPTR,
+            Rdata::Naptr {
+                order: 100,
+                preference: 10,
+                flags: b"S",
+                services: b"SIP+D2U",
+                regexp: b"!^.*$!sip:customer-service@example.com!",
+                replacement: borrow(&naptr),
+            },
+            borrow(&ns),
+            "_sip._udp.domain.uk.",
+            "ns1.domain.uk.",
+        ),
+    ];
+    for rules in [
+        r"rewrite name regex (.*)\.domain\.uk {1}.cluster.local answer name (.*)\.cluster\.local {1}.domain.uk answer value (.*)\.cluster\.local {1}.domain.uk",
+        r"rewrite continue name regex (.*)\.domain\.uk {1}.cluster.local answer name (.*)\.cluster\.local {1}.domain.uk answer value (.*)\.cluster\.local {1}.domain.uk",
+        r"rewrite name suffix .domain.uk .cluster.local answer auto answer value (.*)\.cluster\.local {1}.domain.uk",
+        "rewrite continue name suffix .domain.uk .domain.us answer auto\n rewrite name suffix .domain.us .cluster.local answer auto",
+    ] {
+        let config = format!(".:53 {{\n {rules}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        for (qtype, data, extra_owner, expected_value, expected_extra) in cases {
+            let name: Name = "my.domain.uk.".parse().unwrap();
+            let root: Name = ".".parse().unwrap();
+            let mut wire = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+            builder
+                .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, Class::IN)
+                .unwrap();
+            let _ = builder.finish();
+            let mut response = Vec::with_capacity(512);
+            let mut slots = [];
+            let mut cx = Context {
+                query: Message::parse(&wire).unwrap(),
+                client: "127.0.0.1:1234".parse().unwrap(),
+                local: "127.0.0.1:53".parse().unwrap(),
+                transport: Transport::Dns,
+                protocol: Protocol::Udp,
+                domain: &root,
+                metadata: Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size: 512,
+            };
+            assert_eq!(
+                chain
+                    .rewrite
+                    .as_ref()
+                    .unwrap()
+                    .serve(&mut cx, ValueAnswer { data, extra_owner })
+                    .await,
+                Outcome::Response,
+                "{rules} {qtype}"
+            );
+            let message = Message::parse(cx.response).unwrap();
+            let question = message.questions().next().unwrap();
+            assert_eq!(
+                (question.name.to_string().as_str(), question.qtype),
+                ("my.domain.uk.", qtype)
+            );
+            let answer = message.answers().next().unwrap();
+            assert_eq!(answer.rtype, data.rtype());
+            let value = match answer.data().unwrap() {
+                Rdata::Cname(value) | Rdata::Dname(value) | Rdata::Ns(value) => value,
+                Rdata::Mx { exchange, .. } => exchange,
+                Rdata::Srv { target, .. } => target,
+                Rdata::Soa { mname, .. } => mname,
+                Rdata::Naptr { replacement, .. } => replacement,
+                _ => panic!("unexpected record"),
+            };
+            assert_eq!(value.to_string(), expected_value);
+            assert_eq!(
+                message.additionals().next().unwrap().name.to_string(),
+                expected_extra
+            );
+        }
+    }
+}
+
 struct DnameAnswer;
 impl Next for DnameAnswer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
