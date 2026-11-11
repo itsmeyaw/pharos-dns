@@ -120,6 +120,50 @@ async fn coredns_non_regex_name_rewrite_modes() {
     }
 }
 
+#[tokio::test]
+async fn coredns_regex_name_capture_rewrite() {
+    let config = r".:53 {
+ rewrite name regex (.*)-(us-west-1)\.example\.org {1}.service.{2}.consul
+}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "ftp-us-west-1.example.org.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, InspectName("ftp.service.us-west-1.consul."))
+            .await,
+        Outcome::Drop
+    );
+}
+
 struct AliasedAnswer;
 impl Next for AliasedAnswer {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {

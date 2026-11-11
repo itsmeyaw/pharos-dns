@@ -250,6 +250,11 @@
 - Candidate setup can register metric series before a failed Reload is rolled back.
 - Shutdown waits for Queries on replaced states to finish, so a stuck Query can delay processing subsequent signals.
 
+## rewrite
+
+- Regex rules use Rust regex syntax rather than Go RE2; character classes such as `\d` and `\w` are Unicode-aware by default, unlike Go. Regex captures allocate per Query.
+- TTL rewrites leave OPT's extended RCODE, version and flags untouched as required by RFC 6891 §6.1.3; CoreDNS applies its TTL rule to OPT records as well.
+
 ## siit
 
 - AAAA Self Lookup allocates per Query; issue #86 tracks allocation-free Self

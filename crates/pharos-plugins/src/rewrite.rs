@@ -99,6 +99,20 @@ impl Rewrite {
                     "prefix" => Matcher::Prefix(normal(from)),
                     "suffix" => Matcher::Suffix(normal(from)),
                     "substring" => Matcher::Substring(normal(from)),
+                    "regex" => {
+                        if from.len() > 10_000 {
+                            return Err(cursor.error("regex pattern too long"));
+                        }
+                        let pattern =
+                            regex::Regex::new(from).map_err(|_| cursor.error("invalid regex"))?;
+                        let used = (0..=100)
+                            .filter(|index| to.contains(&format!("{{{index}}}")))
+                            .count();
+                        if used > pattern.captures_len() - 1 {
+                            return Err(cursor.error("too many capture groups"));
+                        }
+                        Matcher::Regex(pattern)
+                    }
                     _ => return Err(cursor.error("invalid name match type")),
                 };
                 rules.push(Rule {
@@ -356,6 +370,18 @@ impl Plugin for Rewrite {
                                 result = result.and_then(|()| text.write_str(part));
                             }
                             result
+                        }
+                        Matcher::Regex(pattern) => {
+                            // shortcut: regex captures allocate; non-regex rules remain allocation-free.
+                            let captures = pattern.captures(name).expect("matched regex");
+                            let mut replacement = target.clone();
+                            for (index, value) in captures.iter().enumerate() {
+                                replacement = replacement.replace(
+                                    &format!("{{{index}}}"),
+                                    value.map_or("", |value| value.as_str()),
+                                );
+                            }
+                            text.write_str(&replacement)
                         }
                         _ => unreachable!("validated name matcher"),
                     };
