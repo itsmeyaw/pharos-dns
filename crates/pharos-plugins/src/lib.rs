@@ -796,13 +796,7 @@ fn setup_shed(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
     Ok(())
 }
 
-#[cfg(feature = "plugin-errors")]
-fn setup_errors(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let plugin = errors::parse(cursor)?;
-    plugin.register_shutdown(&mut block.config.lifecycle);
-    block.config.errors = Some(plugin);
-    Ok(())
-}
+
 
 #[allow(dead_code)]
 fn setup_unimplemented(cursor: &mut Cursor<'_>, _: &mut BlockContext<Chain>) -> Result<(), Error> {

@@ -1,5 +1,7 @@
 //! CoreDNS error logging configuration.
 
+pub(crate) mod setup;
+
 use pharos_corefile::{Cursor, Error};
 use pharos_server::{Context, Next, Outcome, Plugin};
 use regex::Regex;

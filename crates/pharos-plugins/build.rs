@@ -107,7 +107,7 @@ fn main() {
             "local" => "setup_local",
             "nsid" => "setup_nsid",
             "reload" => "setup_reload",
-            "errors" => "setup_errors",
+            "errors" => "errors::setup::setup",
             "kubernetes" => "setup_kubernetes",
             _ => "setup_unimplemented",
         };
