@@ -919,6 +919,35 @@ async fn coredns_edns_local_append_replace_and_unset() {
         ),
         ("rewrite edns0 local replace 0xffee b", &b""[..], &b""[..]),
         ("rewrite edns0 local unset 0xffee", &initial[..], &b""[..]),
+        ("rewrite edns0 local unset 0xffee", &b""[..], &b""[..]),
+        (
+            "rewrite edns0 local unset 0xffed",
+            &initial[..],
+            &initial[..],
+        ),
+        ("rewrite edns0 nsid unset", &b"\0\x03\0\0"[..], &b""[..]),
+        ("rewrite edns0 nsid unset", &b""[..], &b""[..]),
+        (
+            "rewrite edns0 subnet unset",
+            &b"\0\x08\0\x04\0\x01\0\0"[..],
+            &b""[..],
+        ),
+        ("rewrite edns0 subnet unset", &b""[..], &b""[..]),
+        (
+            "rewrite edns0 nsid unset",
+            &b"\xff\xee\0\x06foobar\0\x03\0\0"[..],
+            &b"\xff\xee\0\x06foobar"[..],
+        ),
+        (
+            "rewrite edns0 local unset 0xffee",
+            &b"\xff\xee\0\x06foobar\0\x03\0\0"[..],
+            &b"\0\x03\0\0"[..],
+        ),
+        (
+            "rewrite edns0 subnet unset",
+            &b"\xff\xee\0\x06foobar\0\x03\0\0"[..],
+            &b"\xff\xee\0\x06foobar\0\x03\0\0"[..],
+        ),
         (
             "rewrite edns0 local set 0xffee 0xabcdef",
             &b""[..],
