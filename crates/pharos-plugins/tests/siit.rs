@@ -243,3 +243,79 @@ async fn siit_metrics_count_translations_only() {
         "{metrics}"
     );
 }
+
+// Derived from CoreDNS TestSIITDNS64NoRecursion.
+#[cfg(feature = "plugin-dns64")]
+#[tokio::test]
+async fn siit_dns64_self_lookup_does_not_recurse() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Both {
+        dns64: pharos_plugins::dns64::Dns64,
+        siit: pharos_plugins::siit::Siit,
+        calls: std::sync::Arc<AtomicUsize>,
+    }
+    struct RunSiit<'a>(&'a Both);
+    struct Empty<'a>(&'a Both);
+    impl pharos_server::Chain for Both {
+        async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+            self.dns64.serve(cx, RunSiit(self)).await
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+    }
+    impl Next for RunSiit<'_> {
+        async fn run(self, cx: &mut Context<'_>) -> Outcome {
+            self.0.siit.serve(cx, Empty(self.0)).await
+        }
+    }
+    impl Next for Empty<'_> {
+        async fn run(self, cx: &mut Context<'_>) -> Outcome {
+            self.0.calls.fetch_add(1, Ordering::Relaxed);
+            let q = cx.query.questions().next().unwrap();
+            let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8100).unwrap();
+            b.question(q.name, q.qtype, q.qclass).unwrap();
+            let _ = b.finish();
+            Outcome::Response
+        }
+    }
+    for (client, options) in [("[::1]:1234", ""), ("127.0.0.1:1234", "allow_ipv4")] {
+        let config = format!(".:53 {{\n dns64 {{\n {options}\n }}\n siit\n}}");
+        let mut chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let both = Both {
+            dns64: chain.dns64.take().unwrap(),
+            siit: chain.siit.take().unwrap(),
+            calls: calls.clone(),
+        };
+        let key = pharos_server::ListenerKey {
+            transport: Transport::Dns,
+            address: "127.0.0.1:53".parse().unwrap(),
+        };
+        let mut router = pharos_server::Router::default();
+        router.add(key, ".".parse().unwrap(), Some(both), vec![]);
+        let server = pharos_server::Server::new(router, key);
+        let name: Name = "example.org.".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        b.question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(&wire, client.parse().unwrap(), Protocol::Udp, &mut response)
+                .await,
+            Action::Respond
+        );
+        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode(0));
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+}
