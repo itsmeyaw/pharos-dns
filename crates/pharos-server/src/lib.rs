@@ -387,6 +387,8 @@ pub struct Listener {
     address: SocketAddr,
     stop: watch::Sender<bool>,
     tasks: Vec<JoinHandle<io::Result<()>>>,
+    udp_stop: watch::Sender<bool>,
+    udp_tasks: Vec<JoinHandle<io::Result<()>>>,
 }
 
 impl Listener {
@@ -441,19 +443,26 @@ impl Listener {
             }
         };
         let (stop, receiver) = watch::channel(false);
+        let (udp_stop, udp_receiver) = watch::channel(false);
         let handler = Arc::new(handler);
-        let mut tasks = sockets
+        let udp_tasks = sockets
             .into_iter()
             .map(|socket| {
                 let socket = UdpSocket::from_std(socket)?;
-                Ok(udp::spawn(socket, Arc::clone(&handler), receiver.clone()))
+                Ok(udp::spawn(
+                    socket,
+                    Arc::clone(&handler),
+                    udp_receiver.clone(),
+                ))
             })
             .collect::<io::Result<Vec<_>>>()?;
-        tasks.push(tcp::spawn(tcp, handler, receiver));
+        let tasks = vec![tcp::spawn(tcp, handler, receiver)];
         Ok(Self {
             address,
             stop,
             tasks,
+            udp_stop,
+            udp_tasks,
         })
     }
 
@@ -464,6 +473,8 @@ impl Listener {
     /// Stop accepting Queries and drain for at most five seconds.
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.stop.send_replace(true);
+        self.udp_stop.send_replace(true);
+        self.tasks.append(&mut self.udp_tasks);
         let mut result = Ok(());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while let Some(mut task) = self.tasks.pop() {
@@ -594,6 +605,87 @@ mod wildcard_tests {
         listener.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn reload_replaces_only_changed_udp_workers_and_keeps_tcp() {
+        use std::collections::HashMap;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        struct Counted(usize, u8);
+        impl Handler for Counted {
+            fn udp_workers(&self) -> usize {
+                self.0
+            }
+            async fn handle(
+                &self,
+                _: &[u8],
+                _: SocketAddr,
+                _: Protocol,
+                response: &mut Vec<u8>,
+            ) -> Action {
+                response.push(self.1);
+                Action::Respond
+            }
+        }
+        let key = super::ListenerKey {
+            transport: super::Transport::Dns,
+            address: "127.0.0.1:0".parse().unwrap(),
+        };
+        let mut registry = super::ListenerRegistry::default();
+        registry
+            .apply(HashMap::from([(key, Counted(2, 1))]))
+            .await
+            .unwrap();
+        let listener = registry.get(&key).unwrap();
+        let address = listener.local_addr();
+        let ids: Vec<_> = listener
+            .udp_tasks
+            .iter()
+            .map(tokio::task::JoinHandle::id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        let mut tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+        registry
+            .apply(HashMap::from([(key, Counted(2, 2))]))
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .get(&key)
+                .unwrap()
+                .udp_tasks
+                .iter()
+                .map(tokio::task::JoinHandle::id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+        registry
+            .apply(HashMap::from([(key, Counted(3, 3))]))
+            .await
+            .unwrap();
+        let listener = registry.get(&key).unwrap();
+        assert_eq!(listener.local_addr(), address);
+        let new_ids: Vec<_> = listener
+            .udp_tasks
+            .iter()
+            .map(tokio::task::JoinHandle::id)
+            .collect();
+        assert_eq!(new_ids.len(), 3);
+        assert!(new_ids.iter().all(|id| !ids.contains(id)));
+        tcp.write_all(&[0, 1, 42]).await.unwrap();
+        let mut response = [0; 3];
+        tcp.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, [0, 1, 3]);
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        udp.send_to(b"q", address).await.unwrap();
+        let mut byte = [0];
+        tokio::time::timeout(std::time::Duration::from_secs(2), udp.recv(&mut byte))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(byte, [3]);
+        drop(tcp);
+        registry.shutdown().await.unwrap();
+    }
+
     async fn assert_ipv4_fallback(listener: Listener) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         assert!(listener.local_addr().is_ipv4());
@@ -679,6 +771,7 @@ mod wildcard_tests {
 impl Drop for Listener {
     fn drop(&mut self) {
         self.stop.send_replace(true);
+        self.udp_stop.send_replace(true);
     }
 }
 
@@ -769,6 +862,29 @@ impl ListenerRegistry {
             };
             added.push((key, listener, handler));
         }
+        let mut replacements = Vec::new();
+        for (key, server) in &servers {
+            let listener = &self.listeners[key];
+            let count = server.udp_workers();
+            if count == listener.udp_tasks.len() {
+                continue;
+            }
+            let sockets = (0..count)
+                .map(|_| udp::bind(listener.address).and_then(UdpSocket::from_std))
+                .collect::<io::Result<Vec<_>>>();
+            match sockets {
+                Ok(sockets) => replacements.push((*key, sockets)),
+                Err(error) => {
+                    for (_, listener, _) in added {
+                        let _: io::Result<()> = listener.shutdown().await;
+                    }
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("{}: {error}", key.address),
+                    ));
+                }
+            }
+        }
         let mut retired = Vec::new();
         for (key, server) in servers {
             retired.push(
@@ -777,6 +893,22 @@ impl ListenerRegistry {
                     .expect("validated handler")
                     .swap(Arc::new(server)),
             );
+        }
+        for (key, sockets) in replacements {
+            let handler = self.handlers[&key]
+                .downcast_ref::<Arc<ArcSwap<H>>>()
+                .expect("validated handler");
+            let handler = Arc::new(Swappable(Arc::clone(handler)));
+            let listener = self.listeners.get_mut(&key).expect("existing Listener");
+            let (stop, receiver) = watch::channel(false);
+            let tasks = sockets
+                .into_iter()
+                .map(|socket| udp::spawn(socket, Arc::clone(&handler), receiver.clone()))
+                .collect();
+            listener.udp_stop.send_replace(true);
+            listener.tasks.append(&mut listener.udp_tasks);
+            listener.udp_stop = stop;
+            listener.udp_tasks = tasks;
         }
         let removed: Vec<_> = self
             .listeners
