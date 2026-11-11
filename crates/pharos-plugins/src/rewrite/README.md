@@ -71,3 +71,5 @@ additional records. A Rust integration test covers this deviation.
 - Derived from CoreDNS v1.15.0 plugin/rewrite/ttl_test.go TestNewTTLRule.
 - Derived from CoreDNS v1.15.0 plugin/rewrite/ttl_test.go TestTtlRewrite.
 - Derived from CoreDNS v1.15.0 plugin/rewrite/ttl_test.go.
+
+- [CoreDNS v1.15.0 `plugin/rewrite`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/rewrite)

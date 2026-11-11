@@ -15,3 +15,6 @@
 ## Sources
 
 - CoreDNS plugin/hosts/hosts_test.go hostsExample.
+
+- [CoreDNS v1.15.0 `plugin/hosts`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/hosts)
+- [CoreDNS v1.15.0 `plugin/pkg/fall`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/pkg/fall)

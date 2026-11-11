@@ -23,3 +23,6 @@ by Rust tests, not the differential harness.
 - Derived from CoreDNS v1.15.0 plugin/metadata/metadata_test.go TestLabelFormat.
 - Derived from CoreDNS v1.15.0 plugin/metadata/setup_test.go TestSetupHealth.
 - Derived from CoreDNS v1.15.0 plugin/metadata/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/kubernetes/metadata_test.go`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/kubernetes/metadata_test.go)
+- [CoreDNS v1.15.0 `plugin/metadata`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/metadata)

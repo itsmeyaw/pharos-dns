@@ -17,3 +17,7 @@
 ## Sources
 
 - Derived from CoreDNS v1.15.0 plugin/log/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/log`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/log)
+- [CoreDNS v1.15.0 `plugin/pkg/replacer`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/pkg/replacer)
+- [CoreDNS v1.15.0 `plugin/pkg/response`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/pkg/response)

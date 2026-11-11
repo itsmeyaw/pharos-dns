@@ -11,3 +11,7 @@
 The `bufsize` README scenarios use a local `whoami` Upstream instead of the
 example's external resolver, and `hosts` instead of the unimplemented `file`
 backend. They compare Responses for both UDP and TCP, with and without EDNS.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/bufsize`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/bufsize)

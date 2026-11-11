@@ -18,3 +18,6 @@ the harness cannot send Queries to another bind address or scrape metrics.
 
 - CoreDNS plugin/bind/setup_test.go cases, with deterministic interface addresses.
 - Derived from CoreDNS v1.15.0 plugin/bind/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/bind`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/bind)
+- [CoreDNS v1.15.0 `plugin/sign/testdata`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/sign/testdata)

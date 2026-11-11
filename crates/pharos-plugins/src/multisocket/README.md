@@ -11,3 +11,6 @@
 ## Sources
 
 - CoreDNS v1.15.0 plugin/multisocket/multisocket_test.go.
+
+- [CoreDNS v1.15.0 `core/dnsserver/register.go`](https://github.com/coredns/coredns/tree/v1.15.0/core/dnsserver/register.go)
+- [CoreDNS v1.15.0 `plugin/multisocket`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/multisocket)

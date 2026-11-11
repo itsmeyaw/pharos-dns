@@ -15,3 +15,5 @@
 
 - Derived from CoreDNS v1.15.0 plugin/errors/errors_test.go.
 - Derived from CoreDNS v1.15.0 plugin/errors/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/errors`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/errors)

@@ -18,3 +18,5 @@ The siit README scenario uses an inline hosts Backend to exercise the prefix.
 
 - Derived from CoreDNS v1.15.0 plugin/siit/setup_test.go.
 - Derived from CoreDNS v1.15.0 plugin/siit/siit_test.go.
+
+- [CoreDNS v1.15.0 `plugin/siit`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/siit)

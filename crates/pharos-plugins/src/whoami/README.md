@@ -12,3 +12,7 @@
 The `whoami-log` scenario compares Responses, not log output. The current whoami
 Responses cannot exceed the 512-octet UDP minimum for these short Queries, so
 truncation is not covered.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/whoami`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/whoami)

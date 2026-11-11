@@ -21,3 +21,7 @@
 The loadbalance scenarios compare a multi-address `hosts` Response with
 round-robin and subnet preference, and a single-address weighted Response.
 They do not compare randomized order or weight distributions.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/loadbalance`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/loadbalance)

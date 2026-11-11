@@ -22,3 +22,5 @@ backend and compare DNS Responses rather than reload timing.
 ## Sources
 
 - Derived from CoreDNS v1.15.0 plugin/reload/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/reload`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/reload)

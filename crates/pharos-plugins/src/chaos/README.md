@@ -14,3 +14,7 @@
 
 The two `chaos` README scenarios configure the same explicit identity on both
 servers; default identity differences are covered by Rust tests instead.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/chaos`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/chaos)

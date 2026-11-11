@@ -12,3 +12,7 @@
 
 The `local` README and prefix-off scenarios use `whoami` as Next to compare
 both intercepted Queries and those passed through.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/local`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/local)

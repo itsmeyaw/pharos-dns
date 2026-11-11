@@ -19,3 +19,5 @@ expects both processes to remain available and does not compare exit codes.
 
 - Derived from CoreDNS v1.15.0 plugin/loop/loop_test.go.
 - Derived from CoreDNS v1.15.0 plugin/loop/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/loop`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/loop)

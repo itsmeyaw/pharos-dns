@@ -26,3 +26,6 @@ cover verified Pod namespace search using an explicit client address.
 
 - Derived from CoreDNS v1.15.0 plugin/autopath/autopath_test.go.
 - Derived from CoreDNS v1.15.0 plugin/autopath/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/autopath`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/autopath)
+- [miekg/dns resolver configuration parsing](https://github.com/miekg/dns)

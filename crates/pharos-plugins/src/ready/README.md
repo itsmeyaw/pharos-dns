@@ -14,3 +14,5 @@
 ## Sources
 
 - Derived from CoreDNS v1.15.0 plugin/ready/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/ready`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/ready)

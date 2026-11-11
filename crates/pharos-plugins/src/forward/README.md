@@ -22,3 +22,7 @@
 - Upstream Metadata uses the normalized numeric socket address, which may differ from CoreDNS's configured address text.
 - Health checks start on exchange failure, and proxy connections and checks are stopped on Shutdown.
 - Forward reuses Upstream Response buffers from a pool; a new buffer is allocated when concurrent Queries exceed the pool's previous high-water mark, and the pool retains that peak allocation until the Plugin is dropped.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/forward`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/forward)

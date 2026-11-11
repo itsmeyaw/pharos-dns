@@ -18,3 +18,5 @@ from loopback, so non-loopback allow and drop branches require Rust tests.
 - Derived from CoreDNS v1.15.0 plugin/acl/acl_test.go, TestACLServeDNS.
 - Derived from CoreDNS v1.15.0 plugin/acl/acl_test.go.
 - Derived from CoreDNS v1.15.0 plugin/acl/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/acl`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/acl)

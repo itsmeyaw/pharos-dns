@@ -19,3 +19,5 @@ The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
 ## Sources
 
 - Derived from CoreDNS v1.15.0 plugin/metrics/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/metrics`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/metrics)

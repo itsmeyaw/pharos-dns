@@ -34,3 +34,10 @@
 
 - Adapted from CoreDNS v1.15.0 plugin/kubernetes/parse_test.go.
 - Derived from CoreDNS v1.15.0 plugin/kubernetes/metadata_test.go TestMetadataPodsVerified.
+
+- [CoreDNS v1.15.0 `plugin/backend_lookup.go`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/backend_lookup.go)
+- [CoreDNS v1.15.0 `plugin/kubernetes`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/kubernetes)
+- [CoreDNS v1.15.0 `plugin/kubernetes/README.md`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/kubernetes/README.md)
+- [CoreDNS v1.15.0 `plugin/kubernetes/metadata_test.go`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/kubernetes/metadata_test.go)
+- [CoreDNS v1.15.0 `plugin/metadata`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/metadata)
+- [CoreDNS v1.15.0 `plugin/pkg/dnsutil`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/pkg/dnsutil)

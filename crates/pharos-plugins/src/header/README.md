@@ -12,3 +12,7 @@
 
 The three `header` README scenarios use `whoami` as the Backend and compare
 Responses over UDP and TCP; Rust tests also inspect forwarded Queries.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/header`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/header)

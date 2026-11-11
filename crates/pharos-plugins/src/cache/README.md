@@ -32,3 +32,9 @@ ephemeral port. This exercises miss/hit Responses, not upstream call counts.
 No `errors`-specific differential scenario is included: the implemented
 Plugins cannot deterministically return the same error in both servers, and
 `forward` is not implemented. Error logging and consolidation are tested in Rust.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/cache`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/cache)
+- [CoreDNS v1.15.0 `plugin/pkg/cache`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/pkg/cache)
+- [CoreDNS v1.15.0 `plugin/pkg/dnsutil`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/pkg/dnsutil)

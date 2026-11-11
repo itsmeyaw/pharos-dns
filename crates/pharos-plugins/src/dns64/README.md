@@ -21,3 +21,5 @@ IPv4 loopback, so synthesis without `allow_ipv4` is covered by Rust tests.
 
 - Derived from CoreDNS v1.15.0 plugin/dns64/dns64_test.go, TestTo6.
 - Derived from CoreDNS v1.15.0 plugin/dns64/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/dns64`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/dns64)

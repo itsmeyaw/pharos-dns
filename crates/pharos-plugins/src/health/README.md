@@ -13,3 +13,5 @@
 
 - Derived from CoreDNS v1.15.0 plugin/health/health_test.go.
 - Derived from CoreDNS v1.15.0 plugin/health/setup_test.go.
+
+- [CoreDNS v1.15.0 `plugin/health`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/health)

@@ -9,3 +9,7 @@
 - Each Pharos UDP worker processes ordinary Queries serially, so overload can also cause uncounted kernel receive drops before the shed Plugin. Enabling shed uses the portable UDP path instead of Linux's batched receive path.
 - Toggling `shed` on Reload replaces UDP workers; while old sockets drain, a datagram can be delivered to a retiring worker and lost.
 - The README differential scenario substitutes a local Upstream for 8.8.8.8 and uses one socket for determinism.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/shed`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/shed)
