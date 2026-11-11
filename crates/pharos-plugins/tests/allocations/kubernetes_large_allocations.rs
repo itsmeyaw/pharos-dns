@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
 
-#[path = "../../../pharos/tests/support/mod.rs"]
-mod support;
+use crate::support;
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -16,7 +15,6 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[tokio::test(flavor = "current_thread")]
 async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
-    let _serial = crate::serial();
     if crate::run_isolated(
         "kubernetes::kubernetes_large_allocations::large_endpoints_preserve_records_and_do_not_allocate_after_warmup",
     ) {

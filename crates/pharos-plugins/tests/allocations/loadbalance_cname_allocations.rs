@@ -48,7 +48,6 @@ impl pharos_server::Chain for Routed {
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_compressed_cname_shuffle_has_no_allocations() {
-    let _serial = crate::serial();
     if crate::run_isolated(
         "loadbalance::loadbalance_cname_allocations::routed_compressed_cname_shuffle_has_no_allocations",
     ) {

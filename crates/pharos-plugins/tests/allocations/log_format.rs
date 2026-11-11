@@ -18,7 +18,6 @@ fn render(format: &str, cx: &Context<'_, '_>, outcome: Outcome) -> String {
 
 #[test]
 fn coredns_replacer_formats_requests_responses_and_metadata_without_allocating() {
-    let _serial = crate::serial();
     if crate::run_isolated(
         "log::log_format::coredns_replacer_formats_requests_responses_and_metadata_without_allocating",
     ) {

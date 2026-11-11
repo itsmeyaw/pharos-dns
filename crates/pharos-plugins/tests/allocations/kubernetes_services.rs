@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
 
-#[path = "../../../pharos/tests/support/mod.rs"]
-mod support;
+use crate::support;
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
@@ -43,7 +42,6 @@ impl pharos_server::Chain for TruncatedRoute {
 
 #[test]
 fn services_are_answered_from_watched_kubernetes_objects() {
-    let _serial = crate::serial();
     if crate::run_isolated(
         "kubernetes::kubernetes_services::services_are_answered_from_watched_kubernetes_objects",
     ) {

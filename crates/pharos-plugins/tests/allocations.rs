@@ -21,7 +21,8 @@ fn run_isolated(name: &str) -> bool {
     if std::env::var_os("PHAROS_ALLOCATION_CHILD").is_some() {
         return false;
     }
-    // ADR-0007: isolate measurements from allocations by the parallel test harness.
+    // ADR-0007: serialize isolated measurements, excluding harness allocations.
+    let _serial = serial();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture"])
         .env("PHAROS_ALLOCATION_CHILD", "1")
@@ -36,6 +37,10 @@ fn run_isolated(name: &str) -> bool {
     assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
     true
 }
+
+#[cfg(feature = "plugin-kubernetes")]
+#[path = "../../pharos/tests/support/mod.rs"]
+mod support;
 
 #[path = "allocations"]
 mod acl {

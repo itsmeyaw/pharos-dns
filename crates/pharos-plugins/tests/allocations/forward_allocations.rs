@@ -17,7 +17,6 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
 fn warmed_forward_queries_with_metrics_do_not_allocate() {
-    let _serial = crate::serial();
     if crate::run_isolated(
         "forward::forward_allocations::warmed_forward_queries_with_metrics_do_not_allocate",
     ) {

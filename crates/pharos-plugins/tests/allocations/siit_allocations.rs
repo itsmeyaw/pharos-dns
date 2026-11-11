@@ -49,7 +49,6 @@ impl Next for Answer {
 
 #[test]
 fn siit_non_synthesis_paths_do_not_allocate() {
-    let _serial = crate::serial();
     if crate::run_isolated("siit::siit_allocations::siit_non_synthesis_paths_do_not_allocate") {
         return;
     }

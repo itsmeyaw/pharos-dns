@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
 
-#[path = "../../../pharos/tests/support/mod.rs"]
-mod support;
+use crate::support;
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};

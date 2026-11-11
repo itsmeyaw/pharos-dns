@@ -17,7 +17,6 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
 fn whoami_does_not_allocate_per_query() {
-    let _serial = crate::serial();
     if crate::run_isolated("whoami::allocations::whoami_does_not_allocate_per_query") {
         return;
     }

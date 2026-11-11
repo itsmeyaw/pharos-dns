@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[cfg(feature = "plugin-kubernetes")]
+#[path = "../../pharos/tests/support/mod.rs"]
+mod support;
+
 #[path = "functional"]
 mod acl {
     #[path = "acl_metrics.rs"]

@@ -38,7 +38,6 @@ impl Next for Answer<'_> {
 
 #[test]
 fn autopath_without_self_lookup_does_not_allocate() {
-    let _serial = crate::serial();
     if crate::run_isolated(
         "autopath::autopath_allocations::autopath_without_self_lookup_does_not_allocate",
     ) {

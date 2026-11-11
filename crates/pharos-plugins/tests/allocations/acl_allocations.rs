@@ -16,7 +16,6 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
 fn acl_block_does_not_allocate_per_query() {
-    let _serial = crate::serial();
     if crate::run_isolated("acl::acl_allocations::acl_block_does_not_allocate_per_query") {
         return;
     }

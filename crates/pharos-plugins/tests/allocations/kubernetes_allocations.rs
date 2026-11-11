@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 #![cfg(feature = "plugin-kubernetes")]
 
-#[path = "../../../pharos/tests/support/mod.rs"]
-mod support;
+use crate::support;
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers_with_registry};
@@ -16,7 +15,6 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
-    let _serial = crate::serial();
     if crate::run_isolated(
         "kubernetes::kubernetes_allocations::routed_kubernetes_cluster_ip_queries_do_not_allocate",
     ) {

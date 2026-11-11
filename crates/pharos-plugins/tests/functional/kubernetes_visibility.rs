@@ -7,8 +7,7 @@ use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, 
 use pharos_server::{Context, Metadata, Outcome, Phase, Protocol, Transport};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[path = "../../../pharos/tests/support/mod.rs"]
-mod support;
+use crate::support;
 
 const WILDCARD: &str = "0.0.0.0:53";
 

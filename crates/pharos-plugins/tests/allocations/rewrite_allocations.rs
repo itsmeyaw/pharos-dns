@@ -95,7 +95,6 @@ impl Next for Answer {
 
 #[test]
 fn rewrite_non_regex_rules_do_not_allocate() {
-    let _serial = crate::serial();
     if crate::run_isolated("rewrite::rewrite_allocations::rewrite_non_regex_rules_do_not_allocate")
     {
         return;

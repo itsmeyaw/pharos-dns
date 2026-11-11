@@ -16,7 +16,6 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
 fn any_response_does_not_allocate_per_query() {
-    let _serial = crate::serial();
     if crate::run_isolated("any::any_allocations::any_response_does_not_allocate_per_query") {
         return;
     }
