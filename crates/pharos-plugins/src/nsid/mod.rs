@@ -1,5 +1,7 @@
 //! NSID Directive.
 
+pub(crate) mod setup;
+
 use pharos_corefile::{Cursor, Error as CorefileError};
 use pharos_proto::{EdnsOption, Message, Type};
 use pharos_server::{Context, Error, Next, Outcome, Plugin};

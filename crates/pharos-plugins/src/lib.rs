@@ -594,11 +594,7 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 
 
 
-#[cfg(feature = "plugin-nsid")]
-fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.nsid = Some(nsid::Nsid::parse(cursor)?);
-    Ok(())
-}
+
 
 
 

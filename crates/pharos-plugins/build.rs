@@ -105,7 +105,7 @@ fn main() {
             "hosts" => "hosts::setup::setup",
             "loadbalance" => "loadbalance::setup::setup",
             "local" => "local::setup::setup",
-            "nsid" => "setup_nsid",
+            "nsid" => "nsid::setup::setup",
             "reload" => "setup_reload",
             "errors" => "errors::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
