@@ -16,6 +16,8 @@
 //! See `docs/compatibility.md` for remaining differences.
 
 mod app;
+#[cfg(test)]
+mod compatibility;
 
 use std::process::ExitCode;
 
