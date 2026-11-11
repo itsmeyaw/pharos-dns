@@ -481,7 +481,9 @@ impl Context<'_, '_> {
             .query
             .with_question(name, qtype)
             .map_err(Error::Build)?;
-        if let Some(server) = state.server.owned() {
+        if let Some(server) = state.server.owned()
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
             let peer = self.client;
             let protocol = self.protocol;
             let depth = state.depth + 1;

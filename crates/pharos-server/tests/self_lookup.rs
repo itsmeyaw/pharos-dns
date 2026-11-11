@@ -169,6 +169,31 @@ fn server(first: TestChain) -> Server<TestChain> {
     Server::new(router, key)
 }
 
+#[test]
+fn shared_self_lookup_can_be_polled_without_tokio_runtime() {
+    use std::{
+        future::Future,
+        task::{Context as TaskContext, Poll, Waker},
+    };
+    let server = Arc::new(server(TestChain::Lookup));
+    let query = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\x01\x01a\x07example\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\x80\0\0\x06\xfd\xe9\0\x02\xc0\x01";
+    let mut response = vec![42];
+    let future = Handler::handle_shared(
+        &server,
+        query,
+        "192.0.2.10:1234".parse().unwrap(),
+        Protocol::Tcp,
+        &mut response,
+    );
+    let mut future = std::pin::pin!(future);
+    assert_eq!(
+        future
+            .as_mut()
+            .poll(&mut TaskContext::from_waker(Waker::noop())),
+        Poll::Ready(Action::Respond)
+    );
+}
+
 #[tokio::test]
 async fn self_lookup_routes_and_captures_without_touching_client_response() {
     let query = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\x01\x01a\x07example\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\x80\0\0\x06\xfd\xe9\0\x02\xc0\x01";
