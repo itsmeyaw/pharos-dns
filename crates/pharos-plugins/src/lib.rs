@@ -576,11 +576,7 @@ impl pharos_server::Plugin for Unimplemented {
 
 
 
-#[cfg(feature = "plugin-chaos")]
-fn setup_chaos(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.chaos = Some(chaos::Chaos::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-local")]
 fn setup_local(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

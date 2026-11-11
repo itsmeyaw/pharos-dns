@@ -87,7 +87,7 @@ fn main() {
             "debug" => "setup_debug",
             "shed" => "setup_shed",
             "any" => "any::setup::setup",
-            "chaos" => "setup_chaos",
+            "chaos" => "chaos::setup::setup",
             "cache" => "cache::setup::setup",
             "bind" => "bind::setup::setup",
             "bufsize" => "bufsize::setup::setup",
