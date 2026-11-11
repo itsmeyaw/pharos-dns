@@ -13,6 +13,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[tokio::test(flavor = "current_thread")]
 async fn fast_queries_do_not_allocate() {
     let _serial = crate::serial();
+    if crate::run_isolated("cancel::cancel_allocations::fast_queries_do_not_allocate") {
+        return;
+    }
     let blocks = parse("Corefile", ". {\n cancel\n whoami\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let query =

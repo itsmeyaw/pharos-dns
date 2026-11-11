@@ -19,6 +19,11 @@ fn render(format: &str, cx: &Context<'_, '_>, outcome: Outcome) -> String {
 #[test]
 fn coredns_replacer_formats_requests_responses_and_metadata_without_allocating() {
     let _serial = crate::serial();
+    if crate::run_isolated(
+        "log::log_format::coredns_replacer_formats_requests_responses_and_metadata_without_allocating",
+    ) {
+        return;
+    }
     // The request and response use the same question as CoreDNS's replacer tests.
     let query =
         b"\x04\x1d\x01\x30\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x0d\x00\x01";

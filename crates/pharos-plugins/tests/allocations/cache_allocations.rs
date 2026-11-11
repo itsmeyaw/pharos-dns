@@ -14,6 +14,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[tokio::test(flavor = "current_thread")]
 async fn warmed_routed_cache_hit_has_no_allocations() {
     let _serial = crate::serial();
+    if crate::run_isolated("cache::cache_allocations::warmed_routed_cache_hit_has_no_allocations") {
+        return;
+    }
     let blocks = parse(
         "Corefile",
         ".:0 {\n cache {\n success 1024 3600 3600\n }\n whoami\n}",

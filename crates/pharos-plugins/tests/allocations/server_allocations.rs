@@ -58,6 +58,9 @@ impl Handler for Counting {
 #[tokio::test(flavor = "current_thread")]
 async fn routed_udp_queries_do_not_allocate() {
     let _serial = crate::serial();
+    if crate::run_isolated("server::server_allocations::routed_udp_queries_do_not_allocate") {
+        return;
+    }
     check_routed_udp_queries_do_not_allocate(".:0 {\n whoami\n}").await;
     #[cfg(feature = "plugin-errors")]
     check_routed_udp_queries_do_not_allocate(".:0 {\n errors\n whoami\n}").await;

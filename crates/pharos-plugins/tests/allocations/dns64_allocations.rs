@@ -37,6 +37,9 @@ impl Next for Answer {
 #[test]
 fn dns64_non_synthesis_paths_do_not_allocate() {
     let _serial = crate::serial();
+    if crate::run_isolated("dns64::dns64_allocations::dns64_non_synthesis_paths_do_not_allocate") {
+        return;
+    }
     let blocks = parse("Corefile", ". {\n dns64\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let plugin = configured[0].config.dns64.as_ref().unwrap();

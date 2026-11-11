@@ -45,6 +45,11 @@ impl Drop for Done<'_> {
 #[test]
 fn cold_regex_matching_stays_allocation_free_across_threads() {
     let _serial = crate::serial();
+    if crate::run_isolated(
+        "rewrite::rewrite_regex_allocations::cold_regex_matching_stays_allocation_free_across_threads",
+    ) {
+        return;
+    }
     let config = r".:53 {
  rewrite continue name regex ^(.*)\.other\.$ {1}.internal.
  rewrite ttl regex ^((a|b|c|d)?)+\.example\.$ 30

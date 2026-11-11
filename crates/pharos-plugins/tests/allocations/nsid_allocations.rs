@@ -17,6 +17,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[test]
 fn requested_nsid_does_not_allocate_per_query() {
     let _serial = crate::serial();
+    if crate::run_isolated("nsid::nsid_allocations::requested_nsid_does_not_allocate_per_query") {
+        return;
+    }
     let blocks = parse("Corefile", ". {\n nsid NSID\n whoami\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let wire = [

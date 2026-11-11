@@ -17,6 +17,25 @@ fn serial() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn run_isolated(name: &str) -> bool {
+    if std::env::var_os("PHAROS_ALLOCATION_CHILD").is_some() {
+        return false;
+    }
+    // ADR-0007: isolate measurements from allocations by the parallel test harness.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env("PHAROS_ALLOCATION_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 #[path = "allocations"]
 mod acl {
     #[path = "acl_allocations.rs"]

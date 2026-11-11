@@ -9,6 +9,9 @@ const QUERY: &[u8] = &[0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1];
 #[test]
 fn warmed_udp_exchange_does_not_allocate() {
     let _serial = crate::serial();
+    if crate::run_isolated("proxy::proxy_allocations::warmed_udp_exchange_does_not_allocate") {
+        return;
+    }
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     server
         .set_read_timeout(Some(Duration::from_secs(5)))

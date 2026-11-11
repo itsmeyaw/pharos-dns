@@ -17,6 +17,11 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[tokio::test(flavor = "current_thread")]
 async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
     let _serial = crate::serial();
+    if crate::run_isolated(
+        "kubernetes::kubernetes_allocations::routed_kubernetes_cluster_ip_queries_do_not_allocate",
+    ) {
+        return;
+    }
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", support::free_port()))
         .await
         .unwrap();

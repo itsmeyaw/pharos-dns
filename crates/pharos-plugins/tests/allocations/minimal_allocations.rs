@@ -17,6 +17,11 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[test]
 fn minimal_chain_does_not_allocate_per_query() {
     let _serial = crate::serial();
+    if crate::run_isolated(
+        "minimal::minimal_allocations::minimal_chain_does_not_allocate_per_query",
+    ) {
+        return;
+    }
     let blocks = parse("Corefile", ". {\n minimal\n whoami\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let wire = [0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1];

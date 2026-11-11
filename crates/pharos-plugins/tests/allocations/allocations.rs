@@ -18,6 +18,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[test]
 fn whoami_does_not_allocate_per_query() {
     let _serial = crate::serial();
+    if crate::run_isolated("whoami::allocations::whoami_does_not_allocate_per_query") {
+        return;
+    }
     let blocks = parse("Corefile", ". {\n whoami\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let wire = b"\x12\x34\x01\x00\x00\x01\0\0\0\0\0\0\x03www\x07example\x03com\0\0\x01\0\x01";

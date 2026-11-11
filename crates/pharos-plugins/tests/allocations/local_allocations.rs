@@ -17,6 +17,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[test]
 fn local_responses_do_not_allocate_per_query() {
     let _serial = crate::serial();
+    if crate::run_isolated("local::local_allocations::local_responses_do_not_allocate_per_query") {
+        return;
+    }
     let blocks = parse("Corefile", ". {\n local\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let domain: Name = ".".parse().unwrap();

@@ -17,6 +17,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[test]
 fn header_rules_do_not_allocate_per_query() {
     let _serial = crate::serial();
+    if crate::run_isolated("header::header_allocations::header_rules_do_not_allocate_per_query") {
+        return;
+    }
     let blocks = parse(
         "Corefile",
         ". {\n header {\n query set rd\n response set ra aa\n response clear rd\n }\n whoami\n}",

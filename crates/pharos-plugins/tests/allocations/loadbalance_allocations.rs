@@ -13,6 +13,11 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[tokio::test(flavor = "current_thread")]
 async fn routed_shuffled_hosts_hit_has_no_allocations() {
     let _serial = crate::serial();
+    if crate::run_isolated(
+        "loadbalance::loadbalance_allocations::routed_shuffled_hosts_hit_has_no_allocations",
+    ) {
+        return;
+    }
     let path =
         std::env::temp_dir().join(format!("pharos-hosts-allocations-{}", std::process::id()));
     std::fs::write(

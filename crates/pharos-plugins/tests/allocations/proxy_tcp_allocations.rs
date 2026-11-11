@@ -15,6 +15,9 @@ const QUERY: &[u8] = &[0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1];
 #[test]
 fn warmed_tcp_exchange_does_not_allocate() {
     let _serial = crate::serial();
+    if crate::run_isolated("proxy::proxy_tcp_allocations::warmed_tcp_exchange_does_not_allocate") {
+        return;
+    }
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut proxy = Proxy::new(server.local_addr().unwrap());
     let registry = pharos_server::metrics::Registry::new("v", "r", "rust");

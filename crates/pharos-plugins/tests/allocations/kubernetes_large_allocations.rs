@@ -17,6 +17,11 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[tokio::test(flavor = "current_thread")]
 async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
     let _serial = crate::serial();
+    if crate::run_isolated(
+        "kubernetes::kubernetes_large_allocations::large_endpoints_preserve_records_and_do_not_allocate_after_warmup",
+    ) {
+        return;
+    }
     let local_ip = nix::ifaddrs::getifaddrs()
         .unwrap()
         .filter_map(|entry| entry.address?.as_sockaddr_in().map(|ip| ip.ip()))

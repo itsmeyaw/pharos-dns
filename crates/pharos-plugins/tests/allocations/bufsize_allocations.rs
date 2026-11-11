@@ -17,6 +17,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[test]
 fn clamping_does_not_allocate_per_query() {
     let _serial = crate::serial();
+    if crate::run_isolated("bufsize::bufsize_allocations::clamping_does_not_allocate_per_query") {
+        return;
+    }
     let blocks = parse("Corefile", ". {\n bufsize\n whoami\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let wire = [

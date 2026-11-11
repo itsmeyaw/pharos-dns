@@ -17,6 +17,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[test]
 fn acl_block_does_not_allocate_per_query() {
     let _serial = crate::serial();
+    if crate::run_isolated("acl::acl_allocations::acl_block_does_not_allocate_per_query") {
+        return;
+    }
     let blocks = parse("Corefile", ". {\n acl {\n  block\n }\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let wire = [0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1];
