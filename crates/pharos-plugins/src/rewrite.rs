@@ -3,8 +3,10 @@
 use std::fmt::Write;
 
 use pharos_corefile::{Cursor, Error};
-use pharos_proto::{Class, Message, MessageMut, Rcode, Type};
-use pharos_server::{Context, Next, Outcome, Plugin};
+use pharos_proto::{
+    Class, Message, MessageBuilder, MessageMut, Name, NameRef, Rcode, Section, Type,
+};
+use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin};
 
 #[derive(Debug)]
 struct Rule {
@@ -19,6 +21,7 @@ enum Action {
     Rcode(u16, u16),
     Type(Type, Type),
     Class(Class, Class),
+    Name(Option<Name>),
 }
 
 #[derive(Debug)]
@@ -78,6 +81,26 @@ impl Rewrite {
             let Some((kind, args)) = args.split_first() else {
                 return Err(cursor.arg_err());
             };
+            if kind.eq_ignore_ascii_case("name") {
+                let (from, to) = match args {
+                    [from, to] => (from, to),
+                    [mode, from, to] if mode.eq_ignore_ascii_case("exact") => (from, to),
+                    _ => return Err(cursor.arg_err()),
+                };
+                let normal = |value: &str| {
+                    let mut value = value.to_ascii_lowercase();
+                    if !value.ends_with('.') {
+                        value.push('.');
+                    }
+                    value
+                };
+                rules.push(Rule {
+                    matcher: Matcher::Exact(normal(from)),
+                    action: Action::Name(normal(to).parse().ok()),
+                    stop,
+                });
+                continue;
+            }
             if kind.eq_ignore_ascii_case("type") || kind.eq_ignore_ascii_case("class") {
                 let [from, to] = args else {
                     return Err(cursor.arg_err());
@@ -238,6 +261,7 @@ impl std::fmt::Write for NameText {
 
 impl Plugin for Rewrite {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+        let original_query = cx.query;
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
@@ -251,6 +275,7 @@ impl Plugin for Rewrite {
         name.bytes[..name.len].make_ascii_lowercase();
         let name = std::str::from_utf8(&name.bytes[..name.len]).expect("DNS presentation is UTF-8");
         let mut end = self.rules.len();
+        let mut name_rewritten = false;
         for (index, rule) in self.rules.iter().enumerate() {
             let matched = match rule.action {
                 Action::Type(from, to)
@@ -274,6 +299,17 @@ impl Plugin for Rewrite {
                     true
                 }
                 Action::Type(..) | Action::Class(..) => false,
+                Action::Name(ref target) if rule.matcher.matches(name) => {
+                    let Some(target) = target else {
+                        return Outcome::Error(ServerError::InvalidQuery);
+                    };
+                    cx.query = cx.query.with_question_name(
+                        NameRef::parse(target.as_wire(), 0).expect("configured name"),
+                    );
+                    name_rewritten = true;
+                    true
+                }
+                Action::Name(..) => false,
                 _ => rule.matcher.matches(name),
             };
             if matched && rule.stop {
@@ -281,6 +317,7 @@ impl Plugin for Rewrite {
                 break;
             }
         }
+        let rewritten_query = cx.query;
         let outcome = next.run(cx).await;
         let rewrite_rcode = |mut code: u16| {
             for rule in self.rules[..end]
@@ -337,6 +374,61 @@ impl Plugin for Rewrite {
                 }
                 ttl
             });
+        }
+        if outcome == Outcome::Response && name_rewritten {
+            let mut scratch = [0u8; 65535];
+            if cx.response.len() > scratch.len() {
+                return Outcome::Error(ServerError::InvalidQuery);
+            }
+            scratch[..cx.response.len()].copy_from_slice(cx.response);
+            let Ok(response) = Message::parse(&scratch[..cx.response.len()]) else {
+                return Outcome::Error(ServerError::InvalidQuery);
+            };
+            let Some(original) = original_query.questions().next() else {
+                return Outcome::Error(ServerError::InvalidQuery);
+            };
+            let Some(rewritten) = rewritten_query.questions().next() else {
+                return Outcome::Error(ServerError::InvalidQuery);
+            };
+            let Ok(mut builder) = MessageBuilder::new(
+                cx.response,
+                cx.max_response_size.max(512),
+                response.id(),
+                response.flags(),
+            ) else {
+                return Outcome::Error(ServerError::ResponseBufferTooSmall);
+            };
+            for (index, q) in response.questions().enumerate() {
+                let q = if index == 0 { original } else { q };
+                if builder.question(q.name, q.qtype, q.qclass).is_err() {
+                    return Outcome::Error(ServerError::InvalidQuery);
+                }
+            }
+            for (section, records) in [
+                (Section::Answer, response.answers()),
+                (Section::Authority, response.authorities()),
+                (Section::Additional, response.additionals()),
+            ] {
+                for rr in records {
+                    let owner = if rr.name == rewritten.name {
+                        original.name
+                    } else {
+                        rr.name
+                    };
+                    let Ok(data) = rr.data() else {
+                        return Outcome::Error(ServerError::InvalidQuery);
+                    };
+                    if builder
+                        .record_with(section, owner, rr.rtype, rr.class, rr.ttl, |writer| {
+                            data.write(writer)
+                        })
+                        .is_err()
+                    {
+                        return Outcome::Error(ServerError::InvalidQuery);
+                    }
+                }
+            }
+            let _ = builder.finish();
         }
         outcome
     }

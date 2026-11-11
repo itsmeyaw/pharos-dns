@@ -41,7 +41,8 @@ impl Next for InspectQuestion {
         assert_eq!((q.qtype, q.qclass), (self.0, self.1));
         let mut copy = Vec::with_capacity(512);
         cx.query.copy_wire(&mut copy);
-        let copied = Message::parse(&copy).unwrap().questions().next().unwrap();
+        let parsed = Message::parse(&copy).unwrap();
+        let copied = parsed.questions().next().unwrap();
         assert_eq!((copied.qtype, copied.qclass), (self.0, self.1));
         Outcome::Drop
     }
@@ -89,6 +90,53 @@ async fn coredns_type_and_class_rewrite_question() {
             Outcome::Drop
         );
     }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_test.go.
+#[tokio::test]
+async fn coredns_exact_name_rewrites_query_and_auto_reverts_response() {
+    let config = ".:53 {\n rewrite name example.com. internal.example.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.com.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain.rewrite.as_ref().unwrap().serve(&mut cx, Answer).await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    assert_eq!(
+        message.questions().next().unwrap().name.to_string(),
+        "example.com."
+    );
+    assert_eq!(
+        message.answers().next().unwrap().name.to_string(),
+        "example.com."
+    );
 }
 
 // Derived from CoreDNS v1.15.0 plugin/rewrite/rcode_test.go.

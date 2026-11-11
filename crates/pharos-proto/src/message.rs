@@ -57,6 +57,8 @@ pub struct Message<'a> {
     udp_payload_limit: Option<u16>,
     question_type: Option<Type>,
     question_class: Option<Class>,
+    question_name: [u8; 255],
+    question_name_len: usize,
 }
 
 /// A Question in a Message.
@@ -243,6 +245,8 @@ impl<'a> Message<'a> {
             udp_payload_limit: None,
             question_type: None,
             question_class: None,
+            question_name: [0; 255],
+            question_name_len: 0,
         })
     }
     #[must_use]
@@ -287,6 +291,21 @@ impl<'a> Message<'a> {
         self
     }
 
+    /// Override the first Question's name using an uncompressed copy.
+    #[must_use]
+    pub fn with_question_name(mut self, name: NameRef<'_>) -> Self {
+        let mut len = 0;
+        for label in name.labels() {
+            self.question_name[len] = label.len() as u8;
+            len += 1;
+            self.question_name[len..len + label.len()].copy_from_slice(label);
+            len += label.len();
+        }
+        self.question_name[len] = 0;
+        self.question_name_len = len + 1;
+        self
+    }
+
     /// Apply view changes to a copy of the original wire Message.
     pub fn copy_wire(&self, output: &mut Vec<u8>) {
         if self.copy_wire_checked(output).is_err() {
@@ -296,7 +315,10 @@ impl<'a> Message<'a> {
 
     /// Copy view changes, rebuilding records when the Question changes.
     pub fn copy_wire_checked(&self, output: &mut Vec<u8>) -> Result<(), BuildError> {
-        if self.question_type.is_some() || self.question_class.is_some() {
+        if self.question_type.is_some()
+            || self.question_class.is_some()
+            || self.question_name_len != 0
+        {
             // RFC 1035 §4.1.4: rebuild names so pointers cannot refer to modified Question fields.
             let mut builder =
                 MessageBuilder::new(output, usize::from(u16::MAX), self.id(), self.flags())?;
@@ -344,6 +366,7 @@ impl<'a> Message<'a> {
     #[must_use]
     pub fn wire_changed(&self) -> bool {
         self.flags != u16::from_be_bytes([self.wire[2], self.wire[3]])
+            || self.question_name_len != 0
             || (self.counts[0] > 0
                 && question(self.wire, self.starts[0]).is_ok_and(|(question, _)| {
                     self.question_type
@@ -466,13 +489,17 @@ impl<'a> Message<'a> {
         self.counts[3]
     }
     #[must_use]
-    pub fn questions(&self) -> Questions<'a> {
+    pub fn questions(&self) -> Questions<'_> {
         Questions {
             wire: self.wire,
             offset: self.starts[0],
             remaining: self.counts[0],
             question_type: self.question_type,
             question_class: self.question_class,
+            question_name: (self.question_name_len != 0).then(|| {
+                NameRef::parse(&self.question_name[..self.question_name_len], 0)
+                    .expect("validated Question name")
+            }),
         }
     }
     #[must_use]
@@ -521,6 +548,7 @@ pub struct Questions<'a> {
     remaining: u16,
     question_type: Option<Type>,
     question_class: Option<Class>,
+    question_name: Option<NameRef<'a>>,
 }
 impl<'a> Iterator for Questions<'a> {
     type Item = Question<'a>;
@@ -529,6 +557,9 @@ impl<'a> Iterator for Questions<'a> {
             return None;
         }
         let (mut item, next) = question(self.wire, self.offset).ok()?;
+        if let Some(value) = self.question_name.take() {
+            item.name = value;
+        }
         if let Some(value) = self.question_type.take() {
             item.qtype = value;
         }

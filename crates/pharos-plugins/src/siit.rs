@@ -127,7 +127,8 @@ impl Siit {
 
 impl Plugin for Siit {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
-        let Some(question) = cx.query.questions().next() else {
+        let query = cx.query;
+        let Some(question) = query.questions().next() else {
             return next.run(cx).await;
         };
         // RFC 6147 §5.1: only IN A Queries are eligible for synthesis.

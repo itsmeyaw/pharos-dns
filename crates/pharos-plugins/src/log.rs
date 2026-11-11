@@ -135,7 +135,7 @@ fn classify(cx: &Context<'_>, outcome: Outcome) -> (&'static str, &'static str, 
         return ("OTHERERROR", "error", 8);
     };
     let opcode = message.map_or(cx.query.opcode(), |m| m.opcode());
-    let question = match message {
+    let question = match &message {
         Some(m) => m.questions().next(),
         None => cx.query.questions().next(),
     };
