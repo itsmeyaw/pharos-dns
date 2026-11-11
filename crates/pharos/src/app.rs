@@ -145,7 +145,7 @@ pub fn check(options: &Options) -> Result<(), String> {
         keys.join(", "),
         directives.iter().copied().collect::<Vec<_>>().join(", ")
     );
-    let sections = crate::compatibility::parse(include_str!("../../../docs/compatibility.md"));
+    let sections = crate::compatibility::parse(include_str!("../compatibility.md"));
     for (heading, bullets) in sections
         .iter()
         .filter(|(heading, _)| directives.contains(heading))

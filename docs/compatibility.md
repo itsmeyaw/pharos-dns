@@ -56,6 +56,10 @@
 - A hit that launches a background refresh allocates for the task and its Query and Response buffers; ordinary warmed hits do not allocate.
 - Cache metric series are initialized at setup, including zero-valued series; CoreDNS initializes individual labelled series on first use.
 
+## cancel
+
+- On expiry Pharos drops the Next future and the Response. CoreDNS only signals context cancellation, so Plugins that ignore the context may continue and write a Response.
+
 ## chaos
 
 - The default version is `Pharos-<version>` and the default authors are Pharos authors rather than CoreDNS's identity (ADR-0003).
@@ -63,6 +67,12 @@
 - Author records use a different per-second shuffle generator than CoreDNS, so their order and the subset in a truncated Response can differ; simultaneous `authors.bind` Queries share a lock.
 - An overlong version with explicit authors produces a Plugin error and SERVFAIL rather than CoreDNS's failed write; UDP callers must supply a sufficiently large Response buffer, as with `whoami`.
 - When building a Response with many authors, Pharos truncates to the Query's limit before Listener processing; CoreDNS builds the full Response first. Plugins earlier in the chain can therefore observe a truncated Response.
+
+## debug
+
+- Pharos disables panic containment on all Listeners when any Server Block enables `debug`; CoreDNS disables it for the Listener that includes that block, while debug logging is process-wide.
+- An uncontained Rust panic terminates its Tokio task rather than necessarily terminating the process as an unhandled Go goroutine panic does. The `errors` Plugin does not add panic recovery, matching CoreDNS v1.15.0 despite its debug README.
+- Debug logging is enabled after Listeners start and is reset when a Reload without `debug` succeeds; CoreDNS enables it when constructing its Listener and does not clear its global flag on Reload.
 
 ## dns64
 
@@ -86,7 +96,6 @@
 
 - The `errors` Plugin uses Rust's `regex` syntax rather than Go's RE2 syntax. For example, `\w`, `\d`, `\s` and word boundaries are Unicode-aware in Rust but ASCII-only in Go; some expressions are accepted by only one engine.
 - Rust's regex compiler also imposes its own compiled-size limit.
-- Pharos emits `debug` consolidation messages without CoreDNS's separate debug switch.
 - The Plugin contract represents an error as SERVFAIL without an independent RCODE, so error logs always report `2`.
 - Rust panic traces and Pharos's text/JSON logging format differ from CoreDNS's Go stack and log format.
 - Pharos selects `stacktrace` per routed Server Block; CoreDNS's last Server Block setting applies to the whole Listener.
@@ -128,7 +137,6 @@
 
 ## hosts
 
-- Relative hosts file paths resolve against the working directory; `root` is not implemented yet, so CoreDNS's join with a configured `root` is not applied.
 - Pharos discards names that are not valid DNS names or UTF-8; CoreDNS retains arbitrary fields in its hosts maps.
 - Pharos lowercases ASCII name bytes, while CoreDNS applies Go's Unicode lowercasing.
 - Configured Domains that cannot be represented as DNS names are ignored for matching; CoreDNS keeps its normalized strings.
@@ -169,7 +177,6 @@
 
 - Pharos permutes encoded records and relocates compression pointers without re-encoding names. It leaves a Response unchanged if relocation would create a forward or overlapping pointer, exceed the 14-bit pointer range, or if name encodings cannot be safely relocated. Signed TSIG Responses are not reordered. CoreDNS re-encodes its records and does not have these restrictions.
 - Other RDATA is opaque, so pointers in types outside the compression-receiving list are not relocated even if a sender encodes them contrary to the RFCs.
-- Relative weight file paths use the working directory until `root` is implemented.
 - Weight files must be UTF-8; CoreDNS accepts arbitrary bytes.
 - Pharos compares file contents directly instead of CoreDNS's MD5 checksum and keeps the last valid weights when parsing fails.
 - Weight file Domains that cannot be parsed as DNS names cannot match Responses.
@@ -287,6 +294,23 @@
 - The shared signer has the same key and canonical-RDATA restrictions listed under `dnssec`.
 - NSEC3 chain construction supports complete chains only, not opt-out.
 
+## root
+
+- The README's TLS Listener example remains unavailable because TLS is deferred to M3; the `file` Plugin is not implemented yet.
+
+## shed
+
+- Rust does not have Go's per-socket fdMutex limit. Pharos uses a single UDP writer with a 1,024-response newest-first stack and tracks query and response drops.
+- Each socket reserves 1,026 full-size UDP Response buffers at startup (about 64 MiB of address space), rather than allocating each queued Response as CoreDNS does.
+- Each Pharos UDP worker processes ordinary Queries serially, so overload can also cause uncounted kernel receive drops before the shed Plugin. Enabling shed uses the portable UDP path instead of Linux's batched receive path.
+- Toggling `shed` on Reload replaces UDP workers; while old sockets drain, a datagram can be delivered to a retiring worker and lost.
+- The README differential scenario substitutes a local Upstream for 8.8.8.8 and uses one socket for determinism.
+
+## timeouts
+
+- TCP timeouts and `maxtcpqueries` apply per Listener; encrypted Listener transports and their README scenarios are deferred to M3.
+- Pharos can read pipelined Queries while earlier Queries are executing, but starts the idle deadline only after all in-flight Queries finish; CoreDNS reads the next Query after handling the previous one. Existing connections keep their timeout settings across Reload, while newly accepted connections use the new settings.
+
 ## whoami
 
 - Whoami reports an error if adding the protocol label would make its SRV owner name exceed the DNS name length limit. CoreDNS ignores the resulting write error.
@@ -294,8 +318,11 @@
 
 ## General
 
-- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `siit` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
+- A first Zone record with an omitted owner is rejected: miekg/dns accepts it with an empty owner, which cannot be encoded as a valid DNS name without inventing one.
+- Zone records whose parsed data cannot be encoded on the wire are rejected. miekg/dns can accept such records during parsing, including invalid base64, duplicate SVCB keys and RDATA over 65,535 octets, but then fails to pack them.
+- LOC altitude rounding follows the default Go architecture behavior; an x86-64 Go binary built with `GOAMD64=v3` may fuse floating-point operations and differ at rounding boundaries.
 
 ## CLI
 
@@ -361,7 +388,20 @@
 - Invalid UTF-8 in Extended DNS Error text is rendered with replacement characters.
 - The requested record-data families are complete: the typed RDATA parser supports A, AAAA, NS, CNAME, PTR, MX, SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SSHFP, ZONEMD and TSIG.
 - Unsupported name-bearing types are rejected by the typed parser; other types remain opaque, preserve their bytes and print in RFC 3597 form rather than using their CoreDNS presentation.
-- Presentation parsing is deferred to the zone-file parsing issue (see the existing `shortcut:` comment in `rdata.rs`).
+- Zone-file presentation parsing is separate from the wire RDATA parser.
+- A record without RDATA (for example `www IN A`, `www IN TXT` or `www IN MX`) is rejected with its line and column (RFC 1035 §5.1). miekg/dns accepts it and packs empty or zero-filled RDATA, its form for dynamic update records, so such a Zone file loads in CoreDNS and serves malformed answers. Write `\# 0` (RFC 3597 §5) where an empty RDATA is meant; APL may still hold zero items (RFC 3123 §4).
+- A record missing trailing RDATA fields is rejected (RFC 1035 §3.3.13, RFC 6698 §2.1, RFC 4255 §3.1). miekg/dns zero-fills a SOA's missing serial and timers, and accepts TLSA and SSHFP without association data or fingerprint. When a record lacks its last field and another line follows, miekg/dns takes that line's first item as the field (`a IN MX 2` then `b` reads as `a IN MX 2 b`).
+- A comment may touch the item before it (RFC 1035 §5.1), so `a 60 TXT;c` followed by RDATA inside parentheses reads `TXT` as the type. miekg/dns does not recognize a type mnemonic directly before `;` and rejects the record. After a comment inside parentheses, miekg/dns also reads a following class or type mnemonic as a header field and rejects the record; Pharos reads it as RDATA.
+- An empty APL written as `TYPE42` at the end of a line is accepted (RFC 3123 §4, RFC 3597 §5). miekg/dns rejects it because its lexer does not recognize numeric type mnemonics at a newline; adding a space after `TYPE42` works.
+- An unmatched `)` is always rejected. miekg/dns ignores it at the end of an NSEC, NSEC3 or CSYNC type bitmap and drops the item touching it (`NSEC = A x)` gives bitmap `A`).
+- Pharos rejects a name ending in a lone backslash (RFC 1035 §5.1); miekg/dns accepts it in names and X25 data but rejects it in TXT data. It also skips the 63-octet label check (RFC 1035 §2.3.4) for a final label ending that way.
+- A lone HINFO or ISDN string containing an escaped blank (`HINFO \ b`) is rejected: miekg/dns splits it at the blank, leaving a lone backslash that it accepts as an empty string, while Pharos rejects the lone backslash (RFC 1035 §5.1).
+- Type bitmaps require known type mnemonics or `TYPE` followed by a decimal code (RFC 3597 §5). miekg/dns accepts a token with any first four bytes when its remaining bytes are a decimal code, for example `I2000` as `TYPE0` in NXT RDATA (`scan.go:typeToInt`).
+- Escapes in a `$GENERATE` template keep their RFC 1035 §5.1 meaning: `\t` is `t` and `\065` is `A`. miekg/dns drops the escaped character (`\t` becomes nothing, `\065` becomes `65`) and rejects `\\`; only `\$` matches.
+- An unterminated quote is always rejected. miekg/dns accepts one in a `$GENERATE` template, copying the following lines into the generated RDATA, and one touching the previous item in the last record of the file (`w IN HTTPS 0" `).
+- A quoted string where a domain name is expected is rejected. miekg/dns accepts `""` followed by a blank in MINFO RDATA and reads the quote and blank characters as names.
+- Numeric RDATA fields decode valid escapes before parsing (RFC 1035 §5.1): `MX \049\048 a` is `MX 10 a`. A malformed escape, a backslash with one or two digits such as `\9`, is rejected there. miekg/dns rejects any backslash in a numeric field.
+- A Zone file without a final newline is parsed as if it had one. miekg/dns treats an incomplete last line differently at end of file: it accepts `www` or `www IN A ` (dropping the line or emitting empty RDATA) and rejects `www IN A`, the reverse of its result when the line ends with a newline. Complete last lines parse the same. miekg/dns re-parses each `$GENERATE` template the same way, so it also accepts incomplete templates such as `$GENERATE 1-1 a\\` that Pharos rejects.
 - Unlike miekg/dns, incomplete typed records are rejected rather than accepted as partial values.
 - Pharos rejects a zero-length TXT RDATA, which lacks the required character string; miekg/dns accepts it. TXT strings of length zero are accepted.
 - Pharos rejects empty and non-alphanumeric CAA tags as required by RFC 8659; miekg/dns accepts them.

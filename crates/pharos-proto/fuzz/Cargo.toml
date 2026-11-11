@@ -40,4 +40,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "zone"
+path = "fuzz_targets/zone.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

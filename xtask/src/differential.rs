@@ -276,6 +276,28 @@ pub(crate) fn start_with_config(
         .map_err(|e| format!("starting {}: {e}", binary.display()))
 }
 
+// `-q` keeps per-request INFO logging out of benchmark results.
+pub(crate) fn start_hickory(
+    binary: &Path,
+    directory: &Path,
+    port: u16,
+    log_path: &Path,
+) -> Result<Server, String> {
+    let log = fs::File::create(log_path).map_err(|e| e.to_string())?;
+    Command::new(binary)
+        .arg("-q")
+        .arg("-c")
+        .arg(directory.join("hickory.toml"))
+        .arg("-z")
+        .arg(directory)
+        .args(["-p", &port.to_string()])
+        .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .map(Server)
+        .map_err(|e| format!("starting {}: {e}", binary.display()))
+}
+
 fn exchange(port: u16, transport: Transport, wire: &[u8]) -> Result<Vec<u8>, String> {
     let timeout = Some(Duration::from_secs(2));
     match transport {
@@ -548,7 +570,7 @@ fn scenario(
 
 pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), String> {
     let status = Command::new("cargo")
-        .args(["build", "-p", "pharos"])
+        .args(["build", "-p", "pharos-dns"])
         .current_dir(root)
         .status()
         .map_err(|e| e.to_string())?;

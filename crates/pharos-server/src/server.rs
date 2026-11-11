@@ -22,6 +22,9 @@ pub trait Chain: Send + Sync + 'static {
     fn metrics_enabled(&self) -> bool {
         true
     }
+    fn shed_enabled(&self) -> bool {
+        false
+    }
     /// Whether contained Plugin panics should include a stacktrace.
     fn stacktrace(&self) -> bool {
         false
@@ -47,6 +50,9 @@ impl<C: Chain> Chain for Arc<C> {
     fn metrics_enabled(&self) -> bool {
         self.as_ref().metrics_enabled()
     }
+    fn shed_enabled(&self) -> bool {
+        self.as_ref().shed_enabled()
+    }
     fn stacktrace(&self) -> bool {
         self.as_ref().stacktrace()
     }
@@ -59,9 +65,11 @@ pub struct Server<C> {
     pub allow_non_in: bool,
     pub debug: bool,
     pub udp_workers: usize,
+    pub tcp_options: crate::TcpOptions,
     pub logger: fn(Error),
     metrics: Registry,
     dropped: Option<BlockMetrics>,
+    shed: Option<crate::metrics::ShedMetrics>,
 }
 
 impl<C: Chain> Server<C> {
@@ -89,15 +97,18 @@ impl<C: Chain> Server<C> {
         let dropped = router
             .metrics_enabled(&key)
             .then(|| metrics.block(&server, "dropped", ""));
+        let shed = router.shed_enabled(&key).then(|| metrics.shed(&server));
         Self {
             router: Arc::new(router),
             key,
             allow_non_in: false,
             debug: false,
             udp_workers: crate::quota::worker_count(),
+            tcp_options: crate::TcpOptions::default(),
             logger: log_error,
             metrics,
             dropped,
+            shed,
         }
     }
 
@@ -115,6 +126,23 @@ fn log_plugin_error(plugin: &str, error: Error) {
 }
 
 impl<C: Chain> Handler for Server<C> {
+    fn shed_metrics(&self) -> Option<crate::metrics::ShedMetrics> {
+        self.shed.clone()
+    }
+    fn shed_query(&self, wire: &[u8], peer: SocketAddr) -> bool {
+        // shortcut: admit writes its discarded error Response here, so a malformed, non-IN, or BADVERS Query allocates while the stack is full; pass a reused buffer if overload floods of such Queries matter.
+        let mut response = Vec::new();
+        let Admission::Query(query) = admit(wire, self.allow_non_in, &mut response) else {
+            return false;
+        };
+        self.router
+            .route(&self.key, query, peer, Protocol::Udp)
+            .and_then(|block| block.chain())
+            .is_some_and(Chain::shed_enabled)
+    }
+    fn tcp_options(&self) -> crate::TcpOptions {
+        self.tcp_options
+    }
     fn udp_workers(&self) -> usize {
         self.udp_workers
     }

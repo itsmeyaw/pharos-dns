@@ -1297,7 +1297,6 @@ impl<'a> Rdata<'a> {
     }
 }
 
-// shortcut: presentation parsing is deferred until zone-file parsing is implemented.
 impl fmt::Display for Rdata<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

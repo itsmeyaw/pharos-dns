@@ -62,7 +62,7 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
         Ok(_) => {}
     }
     let status = Command::new("cargo")
-        .args(["build", "--release", "-p", "pharos"])
+        .args(["build", "--release", "-p", "pharos-dns"])
         .current_dir(root)
         .status()
         .map_err(|e| format!("building Pharos: {e}"))?;
@@ -91,7 +91,7 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let pharos = measure(
         "pharos",
         &root.join("target/release/pharos"),
-        true,
+        Target::Pharos,
         &cwd,
         &corefile,
         &directory,
@@ -101,11 +101,34 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let mut rows = vec![("Pharos", pharos)];
     if coredns.is_file() {
         let result = measure(
-            "coredns", &coredns, false, &cwd, &corefile, &directory, &queries,
+            "coredns",
+            &coredns,
+            Target::CoreDns,
+            &cwd,
+            &corefile,
+            &directory,
+            &queries,
         )?;
         rows.push(("CoreDNS", result));
     } else {
         println!("CoreDNS not cached; skipping informational comparison");
+    }
+    let hickory = crate::hickory::binary(root);
+    if hickory.is_file() {
+        let config = directory.join("hickory");
+        write_hickory_config(&config)?;
+        let result = measure(
+            "hickory",
+            &hickory,
+            Target::Hickory(&config),
+            &cwd,
+            &corefile,
+            &directory,
+            &queries,
+        )?;
+        rows.push(("Hickory", result));
+    } else {
+        println!("Hickory DNS not cached; run cargo xtask hickory to include it");
     }
     print!("{}", table(&rows));
     let baselines = common.join("pharos-bench");
@@ -130,20 +153,60 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    Pharos,
+    CoreDns,
+    // Hickory has no Corefile; it serves the zones and hickory.toml in this directory.
+    Hickory(&'a Path),
+}
+
+// Hickory DNS has no `whoami`, so it answers the benchmark Queries from small authoritative zones.
+fn write_hickory_config(directory: &Path) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+    let mut config = String::from("drop_privileges = false\n");
+    for zone in ["example.org", "example.net", "example.com"] {
+        config.push_str(&format!(
+            "\n[[zones]]\nzone = \"{zone}\"\nzone_type = \"Primary\"\nfile = \"{zone}.zone\"\n"
+        ));
+        // RFC 1035 §5.1: master file entries; RFC 1034 §4.3.4: zone needs SOA and NS at the apex.
+        let data = format!(
+            "$ORIGIN {zone}.\n@ 3600 IN SOA ns admin 1 3600 600 86400 60\n@ 3600 IN NS ns\nns 3600 IN A 127.0.0.1\n@ 3600 IN A 192.0.2.1\n@ 3600 IN AAAA 2001:db8::1\nwww 3600 IN TXT \"pharos\"\n"
+        );
+        fs::write(directory.join(format!("{zone}.zone")), data).map_err(|e| e.to_string())?;
+    }
+    fs::write(directory.join("hickory.toml"), config).map_err(|e| e.to_string())
+}
+
 fn measure(
     name: &str,
     binary: &Path,
-    pharos: bool,
+    target: Target,
     cwd: &Path,
     corefile: &str,
     directory: &Path,
     queries: &Path,
 ) -> Result<Metrics, String> {
     let port = differential::free_port()?;
-    let conf = TemporaryCorefile::new(cwd, corefile, port)?;
     let log = directory.join(format!("{name}.server.log"));
-    let mut server =
-        differential::start_with_config(binary, cwd, port, Some(&conf.0), &log, pharos)?;
+    let (_conf, mut server) = match target {
+        Target::Hickory(config) => (
+            None,
+            differential::start_hickory(binary, config, port, &log)?,
+        ),
+        _ => {
+            let conf = TemporaryCorefile::new(cwd, corefile, port)?;
+            let server = differential::start_with_config(
+                binary,
+                cwd,
+                port,
+                Some(&conf.0),
+                &log,
+                matches!(target, Target::Pharos),
+            )?;
+            (Some(conf), server)
+        }
+    };
     differential::ready(&mut server, &log, port)?;
     let out = directory.join(format!("{name}.dnsperf.out"));
     let err = directory.join(format!("{name}.dnsperf.err"));
@@ -586,6 +649,21 @@ mod tests {
                 Options::parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err()
             );
         }
+    }
+
+    #[test]
+    fn hickory_config_declares_every_benchmark_zone() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../target/bench-hickory-test-{}",
+            std::process::id()
+        ));
+        super::write_hickory_config(&dir).unwrap();
+        let config = std::fs::read_to_string(dir.join("hickory.toml")).unwrap();
+        for zone in ["example.org", "example.net", "example.com"] {
+            assert!(config.contains(&format!("file = \"{zone}.zone\"")));
+            assert!(dir.join(format!("{zone}.zone")).is_file());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

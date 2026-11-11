@@ -1,9 +1,15 @@
 [package]
-name = "pharos"
+name = "pharos-dns"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+description = "Pharos: a performance-first DNS server compatible with CoreDNS Corefiles"
+
+[[bin]]
+name = "pharos"
+path = "src/main.rs"
 
 [lints]
 workspace = true
@@ -11,7 +17,7 @@ workspace = true
 [dependencies]
 aws-lc-rs = "1"
 getrandom = "0.2"
-pharos-plugins = { path = "../pharos-plugins" }
-pharos-corefile = { path = "../pharos-corefile" }
-pharos-server = { path = "../pharos-server" }
+pharos-plugins = { version = "0.1.0", path = "../pharos-plugins" }
+pharos-corefile = { version = "0.1.0", path = "../pharos-corefile" }
+pharos-server = { version = "0.1.0", path = "../pharos-server" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }

@@ -2,7 +2,11 @@
 
 mod weighted;
 
-use std::{net::IpAddr, path::PathBuf, time::Duration};
+use std::{
+    net::IpAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{Message, NameRef, NameWirePart, Rcode, Type};
@@ -18,7 +22,7 @@ pub struct LoadBalance {
 }
 
 impl LoadBalance {
-    pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Self, Error> {
+    pub(crate) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Self, Error> {
         let mut lb = Self {
             weight_file: None,
             reload: Duration::from_secs(30),
@@ -34,8 +38,7 @@ impl LoadBalance {
                     lb.weighted_policy = true;
                     lb.prefer.clear();
                     lb.reload = Duration::from_secs(30);
-                    // shortcut: relative paths use the working directory; join with `root` once that Plugin exists.
-                    lb.weight_file = Some(PathBuf::from(&args[1]));
+                    lb.weight_file = Some(crate::resolve_path(PathBuf::from(&args[1]), root));
                     while cursor.next_block() {
                         if cursor.val() != "reload" {
                             return Err(cursor.error("unknown weighted property"));

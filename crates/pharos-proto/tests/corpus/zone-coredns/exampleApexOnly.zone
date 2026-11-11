@@ -1,0 +1,8 @@
+$ORIGIN example.com.
+@   IN      SOA     ns1.example.com. admin.example.com.  (
+                               2005011437 ; Serial
+                               1200       ; Refresh
+                               144        ; Retry
+                               1814400    ; Expire
+                               2h )       ; Minimum
+@           IN  NS      ns1.example.com.

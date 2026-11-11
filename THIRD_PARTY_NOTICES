@@ -27,6 +27,11 @@
 - The cache Plugin and tests follow CoreDNS v1.15.0's `plugin/cache`, `plugin/pkg/cache` and `plugin/pkg/dnsutil`.
 - The hosts Plugin and tests follow CoreDNS v1.15.0's `plugin/hosts` and `plugin/pkg/fall`.
 - The loadbalance Plugin and tests follow CoreDNS v1.15.0's `plugin/loadbalance`.
+- The root Plugin and tests follow CoreDNS v1.15.0's `plugin/root`.
+- The cancel Plugin and tests follow CoreDNS v1.15.0's `plugin/cancel`.
+- The timeouts Plugin and tests follow CoreDNS v1.15.0's `plugin/timeouts` and `core/dnsserver/server.go`.
+- Debug setup and hexdump tests follow CoreDNS v1.15.0's `plugin/debug`.
+- Shed setup, response stack, metrics and tests follow CoreDNS v1.15.0's `plugin/shed`.
 - The loop Plugin and tests follow CoreDNS v1.15.0's `plugin/loop`.
 - The Kubernetes client, controller, object conversions, metrics and tests follow CoreDNS v1.15.0's `plugin/kubernetes`.
 - The Kubernetes Plugin, name parsing, record synthesis and ported handler, namespace, NS, reverse, informer, controller and metrics tests follow CoreDNS v1.15.0's `plugin/kubernetes`, `plugin/backend_lookup.go` and `plugin/pkg/dnsutil`.
@@ -42,6 +47,7 @@
 - The errors Plugin and tests follow CoreDNS v1.15.0's `plugin/errors`.
 - Reload timing setup and tests follow CoreDNS v1.15.0's `plugin/reload`.
 - EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
+- Zone parser fixtures include CoreDNS v1.15.0's `plugin/file/example_org.go` and `plugin/file/*_test.go`.
 - TSIG key-file parsing and tests follow CoreDNS v1.15.0's `plugin/tsig/setup.go`.
 - TSIG unsupported-algorithm error handling and its regression test follow CoreDNS v1.15.0's `plugin/tsig/tsig.go`.
 - Self Lookup Query copying follows CoreDNS v1.15.0's `request.NewWithQuestion`.
@@ -145,6 +151,7 @@ insights.
 - The DNSSEC interoperability verifier in `crates/pharos-dnssec/tests/interop` uses miekg/dns v1.1.73.
 - Response classification's signature validity check follows miekg/dns v1.1.73's `RRSIG.ValidityPeriod`.
 - DNS wire fixtures in `crates/pharos-proto/tests/corpus` are from miekg/dns tests; see the corpus README for the revision and original tests.
+- Zone parsing, presentation RDATA and tests follow miekg/dns's `scan.go`, `scan_rr.go`, `generate.go`, `scan_test.go` and `parse_test.go`; the live Go oracle uses miekg/dns directly.
 - TSIG error handling in `crates/pharos-proto/src/tsig.rs`, tests and generated interoperability fixtures in `tests/tsig.rs` and `tests/corpus/tsig-miekg.txt` follow miekg/dns v1.1.73's `tsig_test.go` and `tsig.go`.
 - EDNS option formatting and tests in `crates/pharos-proto` follow miekg/dns v1.1.73's `edns.go` and `edns_test.go`.
 - RDATA presentation in `crates/pharos-proto/src/rdata.rs` follows miekg/dns v1.1.73; fixtures in `crates/pharos-proto/tests/rdata_*.rs` adapt its `parse_test.go`, `dns_test.go`, `msg_helpers_test.go`, `svcb_test.go` and `tsig_test.go`.

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "DNS wire format, names, records, zone files, TSIG and EDNS for Pharos"
 
 [lints]
 workspace = true
