@@ -81,6 +81,7 @@ missing hosts record. The type and EDNS scenarios use whoami and mask its client
 port. The EDNS variable scenario covers QNAME, QTYPE, client IP and protocol.
 The NSID and subnet scenarios compare client Responses; Rust tests also inspect
 the rewritten Query because whoami does not echo those options.
+`rewrite-edns-global` verifies option registration across Server Blocks.
 The `{server_port}` and `{client_port}` examples are covered by Rust tests: the
 processes use different ports. The metadata name example is also covered by Rust
 tests because the Kubernetes fixture has no Pod with the harness's loopback IP.

@@ -228,6 +228,9 @@ impl Rewrite {
                 } else {
                     return Err(cursor.error("unsupported EDNS rule"));
                 };
+                if matches!(data, EdnsValue::Local(_) | EdnsValue::Variable(_)) {
+                    pharos_proto::register_edns_option(code);
+                }
                 rules.push(Rule {
                     matcher: Matcher::Any,
                     action: Action::Edns(code, data, action, revert),
@@ -1572,7 +1575,7 @@ fn revert_edns_response<'q>(
                 options.bytes[position + 3],
             ]));
             let next = position + 4 + len;
-            let registered = rules.iter().any(|rule| matches!(&rule.action, Action::Edns(candidate, EdnsValue::Local(_) | EdnsValue::Variable(_), _, _) if *candidate == code));
+            let registered = pharos_proto::edns_option_registered(code);
             if registered {
                 position = next;
             } else {
