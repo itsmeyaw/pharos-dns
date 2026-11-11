@@ -115,6 +115,7 @@ fn valid_svc_param(key: u16, value: &[u8]) -> Result<(), RdataError> {
             }
         }
         // RFC 9460 §7.1.1: no-default-alpn has an empty wire value.
+        // RFC 9540 §4: ohttp has an empty wire value.
         2 | 8 if !value.is_empty() => return Err(RdataError),
         // RFC 9460 §7.2: the port value is a two-octet network-order integer.
         3 if value.len() != 2 => return Err(RdataError),
