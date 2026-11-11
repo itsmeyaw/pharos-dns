@@ -124,20 +124,38 @@ async fn coredns_reverter_preserves_no_opt_backend_response() {
     }
 }
 
-struct NoOptChain(pharos_plugins::rewrite::Rewrite);
+struct NoOptChain(pharos_plugins::rewrite::Rewrite, bool);
 impl pharos_server::Chain for NoOptChain {
     async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
-        self.0.serve(cx, NoOpt).await
+        self.0.serve(cx, MaybeNoOpt(self.1)).await
     }
     fn is_empty(&self) -> bool {
         false
+    }
+}
+struct MaybeNoOpt(bool);
+impl Next for MaybeNoOpt {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        if self.0 {
+            let q = cx.query.questions().next().unwrap();
+            let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+            builder.question(q.name, q.qtype, q.qclass).unwrap();
+            let _ = builder.finish();
+            Outcome::Response
+        } else {
+            NoOpt.run(cx).await
+        }
     }
 }
 
 // Derived from CoreDNS v1.15.0 plugin/rewrite/edns0_test.go TestEdns0LocalSetRevertNoLeak and TestEdns0LocalSetRevertRestoresPreexisting.
 #[tokio::test]
 async fn coredns_revert_survives_listener_scrubbing() {
-    for original in [&b""[..], &b"\xff\xee\0\x03\x11\x11\x11"[..]] {
+    for (original, empty_answer) in [
+        (&b""[..], false),
+        (&b"\xff\xee\0\x03\x11\x11\x11"[..], false),
+        (&b""[..], true),
+    ] {
         let config = ".:53 {\n rewrite edns0 local set 0xffee 0xabcdef revert\n}";
         let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
             .unwrap()
@@ -151,7 +169,7 @@ async fn coredns_revert_survives_listener_scrubbing() {
         router.add(
             key,
             ".".parse().unwrap(),
-            Some(NoOptChain(chain.rewrite.take().unwrap())),
+            Some(NoOptChain(chain.rewrite.take().unwrap(), empty_answer)),
             vec![],
         );
         let server = pharos_server::Server::new(router, key);
@@ -192,7 +210,7 @@ async fn coredns_revert_survives_listener_scrubbing() {
             pharos_server::Action::Respond
         );
         let response = Message::parse(&response).unwrap();
-        assert_eq!(response.answers().count(), 1);
+        assert_eq!(response.answers().count(), usize::from(!empty_answer));
         assert_eq!(response.opt().unwrap().options().as_bytes(), original);
     }
 }
