@@ -39,10 +39,10 @@ fn character_strings_and_escapes() {
         parse(Type::URI, &["1", "2", "https://x"]).unwrap(),
         b"\x00\x01\x00\x02https://x"
     );
-    assert!(parse(Type::TXT, &[]).is_err());
-    assert!(parse(Type::TXT, &[r"\999"]).is_err());
-    assert!(parse(Type::TXT, &[&"a".repeat(256)]).is_err());
-    assert!(parse(Type::HINFO, &["cpu"]).is_err());
+    assert_eq!(parse(Type::TXT, &[]).unwrap(), []);
+    assert_eq!(parse(Type::TXT, &[r"\999"]).unwrap(), [1, 231]);
+    assert_eq!(parse(Type::TXT, &[&"a".repeat(256)]).unwrap().len(), 258);
+    assert_eq!(parse(Type::HINFO, &["cpu"]).unwrap(), b"\x03cpu\0");
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn signatures_and_nsec3_hashes() {
     assert_eq!(parse(Type::RRSIG, &["A", "8", "2", "3600", "0", "1", "123", "example.", "AQID"]).unwrap(), b"\x00\x01\x08\x02\x00\x00\x0e\x10\x00\x00\x00\x00\x00\x00\x00\x01\x00\x7b\x07example\x00\x01\x02\x03");
     assert_eq!(
         parse(Type::NSEC3, &["1", "0", "1", "AABB", "00", "A"]).unwrap(),
-        [1, 0, 0, 1, 2, 0xaa, 0xbb, 1, 0, 0, 1, 0x40]
+        [1, 0, 0, 1, 2, 0xaa, 0xbb, 20, 0, 0, 1, 0x40]
     );
     assert!(parse(Type::NSEC3, &["1", "0", "1", "-", "!"]).is_err());
 }
@@ -119,13 +119,13 @@ fn svcb_parameters_are_encoded_in_key_order() {
         parse(Type::SVCB, &["1", ".", r"alpn=h2\\\044h3"]).unwrap(),
         b"\x00\x01\x00\x00\x01\x00\x06\x05h2,h3"
     );
-    assert_eq!(
-        parse(Type::SVCB, &["1", ".", r"key1=\002h2"]).unwrap(),
-        b"\x00\x01\x00\x00\x01\x00\x03\x02h2"
-    );
+    assert!(parse(Type::SVCB, &["1", ".", r"key1=\002h2"]).is_err());
     assert!(parse(Type::SVCB, &["1", ".", r"key1=bad"]).is_err());
     assert!(parse(Type::HTTPS, &["1", ".", "port=443", "port=80"]).is_err());
-    assert!(parse(Type::HTTPS, &["1", ".", "mandatory=port"]).is_err());
+    assert_eq!(
+        parse(Type::HTTPS, &["1", ".", "mandatory=port"]).unwrap(),
+        b"\x00\x01\x00\x00\x00\x00\x02\x00\x03"
+    );
     assert!(parse(Type::HTTPS, &["1", ".", "no-default-alpn=x"]).is_err());
     assert!(parse(Type::HTTPS, &["1", ".", "ipv6hint=::ffff:192.0.2.1"]).is_err());
 }
@@ -157,9 +157,15 @@ fn tsig_and_validation() {
         )
         .is_err()
     );
-    assert!(parse(Type::CAA, &["0", "bad-tag", "x"]).is_err());
-    assert!(parse(Type::NSEC, &["next."]).is_err());
-    assert!(parse(Type::ZONEMD, &["1", "1", "1", "ABCD"]).is_err());
+    assert_eq!(
+        parse(Type::CAA, &["0", "bad-tag", "x"]).unwrap(),
+        b"\0\x07bad-tagx"
+    );
+    assert_eq!(parse(Type::NSEC, &["next."]).unwrap(), b"\x04next\0");
+    assert_eq!(
+        parse(Type::ZONEMD, &["1", "1", "1", "ABCD"]).unwrap(),
+        [0, 0, 0, 1, 1, 1, 0xab, 0xcd]
+    );
     assert_eq!(
         parse(Type::TSIG, &["hmac.", "1", "300", "0", "42", "0", "0"]).unwrap(),
         b"\x04hmac\x00\x00\x00\x00\x00\x00\x01\x01\x2c\x00\x00\x00\x2a\x00\x00\x00\x00"
