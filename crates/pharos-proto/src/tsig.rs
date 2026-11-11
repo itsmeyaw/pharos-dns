@@ -164,7 +164,7 @@ impl TsigKey {
         if mac_len > self.algorithm.len() || mac_len < 10.max(self.algorithm.len() / 2) {
             return Err(TsigError::Format);
         }
-        self.validate_sign(wire, time)?;
+        self.validate_sign(wire, time, mac_len)?;
         let mut digest = self.digest();
         if let Some(mac) = prior_mac {
             let len = u16::try_from(mac.len()).map_err(|_| TsigError::Format)?;
@@ -181,7 +181,7 @@ impl TsigKey {
         Ok(())
     }
 
-    fn validate_sign(&self, wire: &[u8], time: u64) -> Result<(), TsigError> {
+    fn validate_sign(&self, wire: &[u8], time: u64, mac_len: usize) -> Result<(), TsigError> {
         let msg = Message::parse(wire).map_err(|_| TsigError::Format)?;
         // RFC 8945 §4.2 and RFC 1035 §4.1.1: time and section counts have fixed widths.
         if message_end(&msg) != wire.len()
@@ -195,11 +195,7 @@ impl TsigKey {
         {
             return Err(TsigError::Format);
         }
-        let size = self.name.as_wire().len()
-            + 10
-            + self.algorithm.name().len()
-            + 16
-            + self.algorithm.len();
+        let size = self.name.as_wire().len() + 10 + self.algorithm.name().len() + 16 + mac_len;
         if wire.len() + size > usize::from(u16::MAX) {
             return Err(TsigError::Format);
         }
@@ -244,7 +240,7 @@ impl TsigKey {
             Ok(_) => return Ok(None),
             Err(error) => return Err(error),
         };
-        self.validate_sign(response, now)?;
+        self.validate_sign(response, now, 0)?;
         // RFC 8945 §4.2: the server time is an unsigned 48-bit integer.
         if now >= 1 << 48 {
             return Err(TsigError::Format);
@@ -462,7 +458,8 @@ impl<'a> TsigStream<'a> {
         if self.last_time.is_some_and(|last| time < last) {
             return Err(TsigError::BadTime);
         }
-        self.key.validate_sign(wire, time)?;
+        self.key
+            .validate_sign(wire, time, self.key.algorithm.len())?;
         let mut digest = self.digest.take().expect("checked above");
         // RFC 8945 §5.3.1: subsequent Messages hash only the running MAC, Message and timers.
         digest.update(wire);

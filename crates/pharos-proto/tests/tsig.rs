@@ -232,6 +232,16 @@ fn truncated_mac_respects_format_time_and_local_policy_order() {
 }
 
 #[test]
+fn truncated_signature_fits_a_nearly_full_message() {
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let mut wire = hex("00010000000000000000000100ff00000100000000ffac");
+    wire.resize(65475, 0);
+    key.sign_truncated(&mut wire, 1000, 30, None, 16).unwrap();
+    assert_eq!(wire.len(), 65535);
+    key.verify(&wire, 1000, None, 0).unwrap();
+}
+
+#[test]
 fn unsigned_intermediate_is_covered_and_limited() {
     let secret = hex("3684c2254f8332a156cb068fcb14a28eb0c403f782de72b4c62dc030466e3d59");
     let key = TsigKey::new("testkey.".parse().unwrap(), TsigAlgorithm::Sha256, &secret);
