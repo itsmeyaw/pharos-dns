@@ -30,6 +30,13 @@ but does not bind Listeners or run Startup hooks; it cannot validate connectivit
 or credentials that are checked at Startup. It returns 0 on success, 1 for a
 configuration error, and 2 for an invalid flag.
 
+With the `kubernetes` option `multicluster`, the ServiceImport CRD
+(`serviceimports.multicluster.x-k8s.io`) must be installed and readable by the
+Pharos service account. Without it the Plugin never becomes ready and answers
+SERVFAIL for names it cannot find, as CoreDNS does. The example manifest's
+RBAC does not grant ServiceImports; add `list` and `watch` on
+`serviceimports` in API group `multicluster.x-k8s.io`.
+
 ## Metrics
 
 Rewrite `coredns_` to `pharos_` in PromQL alerts and Grafana dashboards, for

@@ -22,6 +22,7 @@ struct Expect {
     ttl: u32,
     mask_srv_port: bool,
     mask_soa_serial: bool,
+    dedupe_additional: bool,
     deviations: Vec<(String, u16, u16)>,
 }
 
@@ -40,6 +41,7 @@ fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
             "ttl" => expect.ttl = value.parse().map_err(|_| format!("invalid TTL: {value}"))?,
             "mask" if value == "additional.srv.port" => expect.mask_srv_port = true,
             "mask" if value == "soa.serial" => expect.mask_soa_serial = true,
+            "mask" if value == "additional.duplicates" => expect.dedupe_additional = true,
             "deviation" => {
                 let parts: Vec<_> = value.split('|').map(str::trim).collect();
                 let heading = parts[0];
@@ -527,11 +529,14 @@ fn scenario(
         apply_deviation(&expect, line, &mut pwire, &cwire)?;
         let pm = Message::parse(&pwire).map_err(|e| format!("Pharos {line}: {e}"))?;
         let cm = Message::parse(&cwire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
-        let result = if expect.mask_soa_serial {
-            compare::compare_with_soa_serial(&pm, &cm, expect.ttl, expect.mask_srv_port, true)
-        } else {
-            compare::compare(&pm, &cm, expect.ttl, expect.mask_srv_port)
-        };
+        let result = compare::compare_with_soa_serial(
+            &pm,
+            &cm,
+            expect.ttl,
+            expect.mask_srv_port,
+            expect.mask_soa_serial,
+            expect.dedupe_additional,
+        );
         result.map_err(|e| format!("{line}:\n{e}"))?;
         count += 1;
     }

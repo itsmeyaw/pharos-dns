@@ -38,6 +38,7 @@ struct FakeServer {
     endpoint_page_gate: Arc<Mutex<Option<Arc<Semaphore>>>>,
     active: Arc<std::sync::atomic::AtomicUsize>,
     peak: Arc<std::sync::atomic::AtomicUsize>,
+    gone: Arc<Mutex<std::collections::HashSet<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -55,6 +56,8 @@ impl FakeServer {
         let endpoint_page_gate: Arc<Mutex<Option<Arc<Semaphore>>>> = Arc::default();
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gone: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
+        let task_gone = gone.clone();
         let task_watches = watches.clone();
         let task_requests = requests.clone();
         let task_lists = lists.clone();
@@ -74,6 +77,7 @@ impl FakeServer {
                 let page_gate = task_page_gate.clone();
                 let active = task_active.clone();
                 let peak = task_peak.clone();
+                let gone = task_gone.clone();
                 tokio::spawn(async move {
                     let service = service_fn(move |request: Request<Incoming>| {
                         let watches = watches.clone();
@@ -84,9 +88,21 @@ impl FakeServer {
                         let page_gate = page_gate.clone();
                         let active = active.clone();
                         let peak = peak.clone();
+                        let gone = gone.clone();
                         async move {
                             requests.lock().unwrap().push(request.uri().to_string());
                             let path = request.uri().path().to_owned();
+                            let watch = request
+                                .uri()
+                                .query()
+                                .is_some_and(|query| query.contains("watch=true"));
+                            if watch && gone.lock().unwrap().remove(&path) {
+                                let body = json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Expired","message":"too old resource version","code":410}).to_string();
+                                let mut response =
+                                    Response::new(Full::new(Bytes::from(body)).boxed());
+                                *response.status_mut() = hyper::StatusCode::GONE;
+                                return Ok::<_, Infallible>(response);
+                            }
                             let body: BoxBody<Bytes, Infallible> = if request
                                 .uri()
                                 .query()
@@ -182,6 +198,7 @@ impl FakeServer {
             endpoint_page_gate,
             active,
             peak,
+            gone,
             task,
         }
     }
@@ -706,6 +723,32 @@ async fn until(mut condition: impl FnMut() -> bool) {
     })
     .await
     .unwrap();
+}
+
+// Kubernetes API concepts, "Efficient detection of changes": a 410 Gone watch
+// response means the resourceVersion expired and the client must relist.
+#[tokio::test]
+async fn watch_start_gone_relists() {
+    let server = FakeServer::start().await;
+    let services = "/api/v1/services";
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(client, WatchConfig::default());
+    let store = controller.store();
+    until(|| controller.has_synced() && server.watches.lock().unwrap().contains_key(services))
+        .await;
+    server.gone.lock().unwrap().insert(services.into());
+    server.lists.lock().unwrap().insert(
+        services.into(),
+        json!([{"metadata":{"name":"api","namespace":"prod","resourceVersion":"2"},"spec":{"clusterIP":"10.0.0.2"}}]),
+    );
+    server.watches.lock().unwrap().remove(services);
+    until(|| {
+        store.with_read(|index| {
+            index.service("prod", "api").is_some() && index.service("prod", "web").is_none()
+        })
+    })
+    .await;
+    controller.stop().await;
 }
 
 #[tokio::test]

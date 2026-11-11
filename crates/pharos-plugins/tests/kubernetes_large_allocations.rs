@@ -223,8 +223,9 @@ async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
             }
             5 if local_ip.is_some() => {
                 assert_eq!(message.answer_count(), 100);
-                assert!(message.tc());
-                assert!(message.additional_count() > 0 && message.additional_count() < 5000);
+                // RFC 2181 §5: one glue record per (name, address), so it all fits.
+                assert!(!message.tc());
+                assert_eq!(message.additional_count(), 100);
                 for (i, rr) in message.answers().enumerate() {
                     let Rdata::Ns(target) = rr.data().unwrap() else {
                         panic!("expected NS")

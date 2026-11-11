@@ -93,6 +93,17 @@
 - Client-side rate-limit waits are capped at 100 years for extremely small QPS.
 - CoreDNS parses `NaN` and positive infinity for `apiserver_qps`; Pharos accepts them in the Corefile but rejects them when creating the API client.
 - Pharos treats non-positive `startup_timeout` as an immediate timeout; CoreDNS's startup ticker panics for those values.
+- Pharos lowercases the zone when matching NS queries at the zone and `ns.dns.<zone>`, so mixed-case queries are answered (RFC 4343). CoreDNS compares the lowercased name with the zone in the query's case (`handler.go:22,53`, `ns.go:11`) and answers NODATA or NXDOMAIN.
+- Glue for NS answers and `ns.dns.<zone>` addresses are deduplicated (RFC 2181 §5); CoreDNS repeats glue when a local address is in several EndpointSlices of one Service.
+- The initial list is a consistent paginated list of 500 objects per page (kube-runtime default), served from etcd; CoreDNS uses a streaming WatchList or a `resourceVersion=0` read from the API server's cache. This never returns older data, but costs more etcd load when many DNS Pods restart together.
+- The CA file is read once when the API client is created; a rotated CA needs a restart.
+- Shared with CoreDNS v1.15.0, against the standards: an ExternalName name returns its CNAME only for CNAME and A/AAAA queries; other types get NODATA (RFC 1034 §4.3.2; #43).
+- Shared with CoreDNS v1.15.0: names with no records of their own (`dns.<zone>`, `_tcp.<service>.<namespace>.svc.<zone>`, and TXT at the zone, `svc.<zone>` and `<namespace>.svc.<zone>`) get NXDOMAIN instead of NODATA (RFC 8020; #43).
+- Shared with CoreDNS v1.15.0: `dns-version.<zone>` A and non-PTR queries for existing reverse names get NXDOMAIN instead of NODATA (RFC 2308 §2.2; #43).
+- Shared with CoreDNS v1.15.0: a SOA query for a name that does not exist gets NOERROR instead of NXDOMAIN (RFC 2308; #43).
+- Shared with CoreDNS v1.15.0: `dns-version` in a multicluster zone returns `1.1.0`; the multicluster DNS specification 1.0.0 (KEP-1645) says `1.0.0`.
+- Shared with CoreDNS v1.15.0: a ServiceImport without ports gets NXDOMAIN for A/AAAA, and a ServiceImport port without a protocol never matches `_tcp`; the MCS API defaults the protocol to TCP only in its documentation.
+- Shared with CoreDNS v1.15.0: ANY queries get NODATA, even at the zone (RFC 8482 §4 recommends at least one RRset).
 
 ## loadbalance
 

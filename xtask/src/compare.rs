@@ -1,12 +1,13 @@
 use pharos_proto::{Message, Rdata, Record, Type};
 
-pub(crate) fn compare(
+#[cfg(test)]
+fn compare(
     pharos: &Message<'_>,
     coredns: &Message<'_>,
     tolerance: u32,
     mask_srv_port: bool,
 ) -> Result<(), String> {
-    compare_with_soa_serial(pharos, coredns, tolerance, mask_srv_port, false)
+    compare_with_soa_serial(pharos, coredns, tolerance, mask_srv_port, false, false)
 }
 
 pub(crate) fn compare_with_soa_serial(
@@ -15,6 +16,7 @@ pub(crate) fn compare_with_soa_serial(
     tolerance: u32,
     mask_srv_port: bool,
     mask_soa_serial: bool,
+    dedupe_additional: bool,
 ) -> Result<(), String> {
     let questions = |message: &Message<'_>| {
         message
@@ -59,6 +61,11 @@ pub(crate) fn compare_with_soa_serial(
     ] {
         let mut left_sorted = left.clone();
         let mut right_sorted = right.clone();
+        if additional && dedupe_additional {
+            // RFC 2181 §5: duplicate RRs carry no meaning; CoreDNS may repeat glue.
+            let mut seen = std::collections::HashSet::new();
+            right_sorted.retain(|r| seen.insert((record_line(r), r.rdata.to_vec())));
+        }
         left_sorted.sort_by_key(|r| r.ttl);
         right_sorted.sort_by_key(|r| r.ttl);
         let mut unmatched = right_sorted;
@@ -224,17 +231,26 @@ mod tests {
         right[32] = 9; // serial
         let l = Message::parse(&left).unwrap();
         assert!(
-            compare_with_soa_serial(&l, &Message::parse(&right).unwrap(), 0, false, false).is_err()
+            compare_with_soa_serial(&l, &Message::parse(&right).unwrap(), 0, false, false, false)
+                .is_err()
         );
         assert!(
-            compare_with_soa_serial(&l, &Message::parse(&right).unwrap(), 0, false, true).is_ok()
+            compare_with_soa_serial(&l, &Message::parse(&right).unwrap(), 0, false, true, false)
+                .is_ok()
         );
         for offset in [16, 20, 24, 27, 36, 40, 44, 48] {
             let mut changed = right;
             changed[offset] ^= 1;
             assert!(
-                compare_with_soa_serial(&l, &Message::parse(&changed).unwrap(), 0, false, true)
-                    .is_err(),
+                compare_with_soa_serial(
+                    &l,
+                    &Message::parse(&changed).unwrap(),
+                    0,
+                    false,
+                    true,
+                    false
+                )
+                .is_err(),
                 "offset {offset}"
             );
         }
@@ -251,6 +267,7 @@ mod tests {
                 0,
                 false,
                 true,
+                false,
             )
             .is_err()
         );
@@ -340,6 +357,24 @@ mod tests {
                 "offset {offset}"
             );
         }
+    }
+
+    #[test]
+    fn masks_only_duplicate_coredns_additionals() {
+        let glue = [0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1];
+        let one = [
+            &[
+                0, 1, 0x84, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, b'a', 0, 0, 1, 0, 1,
+            ][..],
+            &glue,
+        ]
+        .concat();
+        let mut two = [&one[..], &glue].concat();
+        two[11] = 2;
+        let (l, r) = (Message::parse(&one).unwrap(), Message::parse(&two).unwrap());
+        assert!(compare_with_soa_serial(&l, &r, 0, false, false, true).is_ok());
+        assert!(compare_with_soa_serial(&l, &r, 0, false, false, false).is_err());
+        assert!(compare_with_soa_serial(&r, &l, 0, false, false, true).is_err());
     }
 
     #[test]
