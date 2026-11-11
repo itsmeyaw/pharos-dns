@@ -44,6 +44,23 @@ async fn coredns_ttl_exact_and_ranges() {
             10,
         ),
         ("rewrite ttl other.example. 1", "example.com.", 5),
+        (
+            "rewrite ttl exact srv15.coredns.rocks 15",
+            "srv15.coredns.rocks.",
+            15,
+        ),
+        ("rewrite ttl prefix srv30 30", "srv30.coredns.rocks.", 30),
+        (
+            "rewrite ttl suffix 45.coredns.rocks 45",
+            "srv45.coredns.rocks.",
+            45,
+        ),
+        ("rewrite ttl substring rv50 50", "srv50.coredns.rocks.", 50),
+        (
+            r"rewrite ttl regex (srv10)\.(coredns)\.(rocks) 10",
+            "srv10.coredns.rocks.",
+            10,
+        ),
     ] {
         let config = format!(".:53 {{\n {rule}\n}}");
         let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())

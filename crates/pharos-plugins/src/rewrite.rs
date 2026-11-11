@@ -8,10 +8,31 @@ use pharos_server::{Context, Next, Outcome, Plugin};
 
 #[derive(Debug)]
 struct Rule {
-    name: String,
+    matcher: Matcher,
     min: u32,
     max: u32,
     stop: bool,
+}
+
+#[derive(Debug)]
+enum Matcher {
+    Exact(String),
+    Prefix(String),
+    Suffix(String),
+    Substring(String),
+    Regex(regex::Regex),
+}
+
+impl Matcher {
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            Self::Exact(value) => name == value,
+            Self::Prefix(value) => name.starts_with(value),
+            Self::Suffix(value) => name.ends_with(value),
+            Self::Substring(value) => name.contains(value),
+            Self::Regex(value) => value.is_match(name),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -45,19 +66,42 @@ impl Rewrite {
                 }
                 true
             };
-            let [kind, name, ttl] = args else {
+            let Some((kind, args)) = args.split_first() else {
                 return Err(cursor.arg_err());
             };
             if !kind.eq_ignore_ascii_case("ttl") {
                 return Err(cursor.error("unsupported rewrite rule"));
             }
+            let (mode, name, ttl) = match args {
+                [name, ttl] => ("exact", name, ttl),
+                [mode, name, ttl] => (mode.as_str(), name, ttl),
+                _ => return Err(cursor.arg_err()),
+            };
             let (min, max) = ttl_range(ttl).ok_or_else(|| cursor.error("invalid TTL"))?;
-            let mut name = name.to_ascii_lowercase();
-            if !name.ends_with('.') {
-                name.push('.');
-            }
+            let matcher = if mode.eq_ignore_ascii_case("regex") {
+                if name.len() > 10_000 {
+                    return Err(cursor.error("regex pattern too long"));
+                }
+                Matcher::Regex(regex::Regex::new(name).map_err(|_| cursor.error("invalid regex"))?)
+            } else {
+                let mut name = name.to_ascii_lowercase();
+                if !name.ends_with('.') {
+                    name.push('.');
+                }
+                if mode.eq_ignore_ascii_case("exact") {
+                    Matcher::Exact(name)
+                } else if mode.eq_ignore_ascii_case("prefix") {
+                    Matcher::Prefix(name)
+                } else if mode.eq_ignore_ascii_case("suffix") {
+                    Matcher::Suffix(name)
+                } else if mode.eq_ignore_ascii_case("substring") {
+                    Matcher::Substring(name)
+                } else {
+                    return Err(cursor.error("invalid match type"));
+                }
+            };
             rules.push(Rule {
-                name,
+                matcher,
                 min,
                 max,
                 stop,
@@ -118,7 +162,7 @@ impl Plugin for Rewrite {
         let end = self
             .rules
             .iter()
-            .position(|rule| rule.stop && rule.name == name)
+            .position(|rule| rule.stop && rule.matcher.matches(name))
             .map_or(self.rules.len(), |i| i + 1);
         let outcome = next.run(cx).await;
         if outcome == Outcome::Response
@@ -129,7 +173,7 @@ impl Plugin for Rewrite {
                 for rule in self.rules[..end]
                     .iter()
                     .rev()
-                    .filter(|rule| rule.name == name)
+                    .filter(|rule| rule.matcher.matches(name))
                 {
                     ttl = ttl.max(rule.min).min(rule.max);
                 }
