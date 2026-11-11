@@ -1,0 +1,10 @@
+.:{port} {
+    dns64 {
+        translate_all
+    }
+    hosts empty.hosts {
+        192.0.2.10 one.example.org
+        2001:db8::10 one.example.org
+        reload 0
+    }
+}

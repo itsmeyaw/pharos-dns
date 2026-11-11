@@ -1,0 +1,7 @@
+.:{port} {
+    dns64
+    hosts empty.hosts {
+        192.0.2.10 one.example.org
+        reload 0
+    }
+}

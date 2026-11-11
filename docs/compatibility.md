@@ -51,6 +51,12 @@
 - An overlong version with explicit authors produces a Plugin error and SERVFAIL rather than CoreDNS's failed write; UDP callers must supply a sufficiently large Response buffer, as with `whoami`.
 - When building a Response with many authors, Pharos truncates to the Query's limit before Listener processing; CoreDNS builds the full Response first. Plugins earlier in the chain can therefore observe a truncated Response.
 
+## dns64
+
+- AAAA synthesis uses a Self Lookup that allocates per Query; issue #86 tracks
+  allocation-free Self Lookup. Queries that do not require synthesis do not
+  allocate in this Plugin.
+
 ## dnssec
 
 - Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as unsigned. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
