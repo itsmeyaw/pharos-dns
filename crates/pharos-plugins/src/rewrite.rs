@@ -862,7 +862,6 @@ impl Plugin for Rewrite {
             return next.run(cx).await;
         };
         let mut end = self.rules.len();
-        let mut name_rewritten = false;
         let mut response_rules = false;
         let mut cname = None;
         for (index, rule) in self.rules.iter().enumerate() {
@@ -873,7 +872,6 @@ impl Plugin for Rewrite {
             if matched {
                 match &rule.action {
                     Action::Name(_, auto, _, answers) => {
-                        name_rewritten |= *auto || !answers.is_empty();
                         response_rules |= *auto || !answers.is_empty();
                     }
                     Action::Cname(matcher, to) => {
@@ -1113,7 +1111,7 @@ impl Plugin for Rewrite {
                 ttl
             });
         }
-        if outcome == Outcome::Response && name_rewritten {
+        if outcome == Outcome::Response && response_rules {
             let mut scratch = [0u8; 65535];
             if cx.response.len() > scratch.len() {
                 return Outcome::Error(ServerError::InvalidQuery);
@@ -1133,8 +1131,13 @@ impl Plugin for Rewrite {
             ) else {
                 return Outcome::Error(ServerError::ResponseBufferTooSmall);
             };
-            for (index, q) in response.questions().enumerate() {
-                let q = if index == 0 { original } else { q };
+            if builder
+                .question(original.name, original.qtype, original.qclass)
+                .is_err()
+            {
+                return Outcome::Error(ServerError::InvalidQuery);
+            }
+            for q in response.questions().skip(1) {
                 if builder.question(q.name, q.qtype, q.qclass).is_err() {
                     return Outcome::Error(ServerError::InvalidQuery);
                 }
