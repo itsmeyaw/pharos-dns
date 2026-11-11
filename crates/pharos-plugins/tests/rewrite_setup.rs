@@ -266,3 +266,55 @@ fn coredns_name_metadata_validation() {
         assert!(result.is_err(), "{mode}");
     }
 }
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rcode_test.go.
+#[test]
+fn coredns_rcode_setup_cases() {
+    for (args, valid) in [
+        ("numeric.rcode.coredns.rocks 2 0", true),
+        ("too.few.rcode.coredns.rocks 2", false),
+        ("exact too.many.rcode.coredns.rocks 2 1 0", false),
+        (
+            "exact match.string.rcode.coredns.rocks SERVFAIL NOERROR",
+            true,
+        ),
+        (
+            r"regex (regex)\.rcode\.(coredns)\.(rocks) FORMERR NOERROR",
+            true,
+        ),
+        ("invalid.rcode.coredns.rocks random nothing", false),
+    ] {
+        for mode in ["stop", "continue"] {
+            let text = format!(".:53 {{\n rewrite {mode} rcode {args}\n}}");
+            let result = parse("Corefile", &text)
+                .and_then(|blocks| configure::<Chain>(&blocks, directives()));
+            assert_eq!(result.is_ok(), valid, "{mode} {args}: {result:?}");
+        }
+    }
+    let too_long = "a".repeat(10_001);
+    let text = format!(".:53 {{\n rewrite rcode regex {too_long} SERVFAIL NXDOMAIN\n}}");
+    assert!(
+        parse("Corefile", &text)
+            .and_then(|blocks| configure::<Chain>(&blocks, directives()))
+            .is_err()
+    );
+}
+
+#[test]
+fn coredns_rewrite_rejects_oversized_patterns() {
+    let too_long = "a".repeat(10_001);
+    for rule in [
+        format!("name regex {too_long} destination."),
+        format!("ttl regex {too_long} 300"),
+        format!("rcode regex {too_long} SERVFAIL NXDOMAIN"),
+        format!("cname regex {too_long} destination."),
+    ] {
+        let text = format!(".:53 {{\n rewrite {rule}\n}}");
+        assert!(
+            parse("Corefile", &text)
+                .and_then(|blocks| configure::<Chain>(&blocks, directives()))
+                .is_err(),
+            "{rule}"
+        );
+    }
+}
