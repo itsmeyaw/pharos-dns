@@ -1,5 +1,7 @@
 //! UDP shedding is coordinated by the Listener's per-socket writer.
 
+pub(crate) mod setup;
+
 use pharos_server::{Context, Next, Outcome, Plugin};
 
 #[derive(Debug)]

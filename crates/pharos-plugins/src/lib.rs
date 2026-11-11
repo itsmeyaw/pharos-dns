@@ -678,18 +678,7 @@ fn setup_timeouts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> R
 
 
 
-#[cfg(feature = "plugin-shed")]
-fn setup_shed(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if !cursor.remaining_args().is_empty() || cursor.next_block() {
-        return Err(cursor.arg_err());
-    }
-    if block.keys().iter().any(|key| key.transport != "dns") {
-        return Err(cursor.error("shed requires plain DNS"));
-    }
-    block.config.shed = Some(shed::Shed);
-    Ok(())
-}
+
 
 
 
