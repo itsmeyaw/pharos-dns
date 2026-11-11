@@ -441,11 +441,34 @@ pub enum Action {
     Drop,
 }
 
+/// TCP connection limits selected by the Listener configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TcpOptions {
+    pub read: std::time::Duration,
+    pub write: std::time::Duration,
+    pub idle: std::time::Duration,
+    pub max_queries: Option<usize>,
+}
+
+impl Default for TcpOptions {
+    fn default() -> Self {
+        Self {
+            read: std::time::Duration::from_secs(3),
+            write: std::time::Duration::from_secs(5),
+            idle: std::time::Duration::from_secs(10),
+            max_queries: None,
+        }
+    }
+}
+
 /// Async, statically dispatched Query handling. Clear and reuse the supplied
 /// Response buffer; return `Drop` to suppress a Response.
 /// Handlers must not block the runtime; TCP Queries on a connection may run
 /// concurrently.
 pub trait Handler: Send + Sync + 'static {
+    fn tcp_options(&self) -> TcpOptions {
+        TcpOptions::default()
+    }
     /// Number of UDP worker sockets for this Listener.
     fn udp_workers(&self) -> usize {
         quota::worker_count()
@@ -1068,6 +1091,9 @@ impl ListenerRegistry {
 struct Swappable<H>(Arc<ArcSwap<H>>);
 
 impl<H: Handler> Handler for Swappable<H> {
+    fn tcp_options(&self) -> TcpOptions {
+        self.0.load().tcp_options()
+    }
     fn udp_workers(&self) -> usize {
         self.0.load().udp_workers()
     }

@@ -59,6 +59,7 @@ pub struct Server<C> {
     pub allow_non_in: bool,
     pub debug: bool,
     pub udp_workers: usize,
+    pub tcp_options: crate::TcpOptions,
     pub logger: fn(Error),
     metrics: Registry,
     dropped: Option<BlockMetrics>,
@@ -95,6 +96,7 @@ impl<C: Chain> Server<C> {
             allow_non_in: false,
             debug: false,
             udp_workers: crate::quota::worker_count(),
+            tcp_options: crate::TcpOptions::default(),
             logger: log_error,
             metrics,
             dropped,
@@ -115,6 +117,9 @@ fn log_plugin_error(plugin: &str, error: Error) {
 }
 
 impl<C: Chain> Handler for Server<C> {
+    fn tcp_options(&self) -> crate::TcpOptions {
+        self.tcp_options
+    }
     fn udp_workers(&self) -> usize {
         self.udp_workers
     }

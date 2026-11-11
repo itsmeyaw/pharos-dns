@@ -28,7 +28,8 @@ pub mod errors;
     feature = "plugin-hosts",
     feature = "plugin-loadbalance",
     feature = "plugin-kubernetes",
-    feature = "plugin-cancel"
+    feature = "plugin-cancel",
+    feature = "plugin-timeouts"
 ))]
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
@@ -61,6 +62,8 @@ pub mod ready;
 pub mod reload;
 #[cfg(feature = "plugin-root")]
 pub mod root;
+#[cfg(feature = "plugin-timeouts")]
+pub mod timeouts;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -111,7 +114,8 @@ pub fn servers_with_registry(
     blocks: Vec<BlockContext<Chain>>,
     metrics: pharos_server::metrics::Registry,
 ) -> io::Result<(Servers, Lifecycle)> {
-    let mut groups: HashMap<ListenerKey, (Router<Arc<Chain>>, Option<usize>)> = HashMap::new();
+    type Group = (Router<Arc<Chain>>, Option<usize>, pharos_server::TcpOptions);
+    let mut groups: HashMap<ListenerKey, Group> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
@@ -260,22 +264,41 @@ pub fn servers_with_registry(
             chain.collect_readiness(&ready_state);
         }
         for (listener, domain) in routes {
-            groups
-                .entry(listener)
-                .or_insert_with(|| (Router::default(), workers))
-                .0
-                .add(
-                    listener,
-                    domain,
-                    (!empty).then(|| Arc::clone(&chain)),
-                    vec![],
-                );
+            let group = groups.entry(listener).or_insert_with(|| {
+                (
+                    Router::default(),
+                    workers,
+                    pharos_server::TcpOptions::default(),
+                )
+            });
+            #[cfg(feature = "plugin-timeouts")]
+            if let Some(options) = &chain.timeouts {
+                if let Some(value) = options.read {
+                    group.2.read = value;
+                }
+                if let Some(value) = options.write {
+                    group.2.write = value;
+                }
+                if let Some(value) = options.idle {
+                    group.2.idle = value;
+                }
+                if let Some(value) = options.max_tcp_queries {
+                    group.2.max_queries = usize::try_from(value).ok();
+                }
+            }
+            group.0.add(
+                listener,
+                domain,
+                (!empty).then(|| Arc::clone(&chain)),
+                vec![],
+            );
         }
     }
     let servers = groups
         .into_iter()
-        .map(|(key, (router, workers))| {
+        .map(|(key, (router, workers, tcp_options))| {
             let mut server = Server::with_registry(router, key, metrics.clone());
+            server.tcp_options = tcp_options;
             if let Some(workers) = workers {
                 server.udp_workers = workers;
             }
@@ -629,6 +652,12 @@ fn setup_root(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
 #[cfg(feature = "plugin-cancel")]
 fn setup_cancel(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.cancel = Some(cancel::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-timeouts")]
+fn setup_timeouts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.timeouts = Some(timeouts::parse(cursor)?);
     Ok(())
 }
 
