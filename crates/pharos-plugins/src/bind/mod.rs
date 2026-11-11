@@ -1,5 +1,7 @@
 //! Bind Directive setup and interface expansion.
 
+pub(crate) mod setup;
+
 use std::net::IpAddr;
 
 use pharos_corefile::{Cursor, Error};

@@ -89,7 +89,7 @@ fn main() {
             "any" => "any::setup::setup",
             "chaos" => "setup_chaos",
             "cache" => "setup_cache",
-            "bind" => "setup_bind",
+            "bind" => "bind::setup::setup",
             "bufsize" => "setup_bufsize",
             "header" => "setup_header",
             "minimal" => "setup_minimal",

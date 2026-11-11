@@ -683,12 +683,7 @@ fn setup_reload(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
     Ok(())
 }
 
-#[cfg(feature = "plugin-bind")]
-fn setup_bind(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.listen_addresses = bind::parse(cursor)?;
-    block.config.bind = Some(());
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-multisocket")]
 fn setup_multisocket(
