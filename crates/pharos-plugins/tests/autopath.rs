@@ -27,7 +27,7 @@ impl Next for Backend {
         if name == "c.bar.com." {
             return Outcome::Drop;
         }
-        let success = name == "b.com." || name == "a.example.com.";
+        let success = name == "b.com." || name == "b.baz.com." || name == "a.example.com.";
         let mut b = MessageBuilder::new(
             cx.response,
             512,
@@ -50,6 +50,59 @@ impl Next for Backend {
         let _ = b.finish();
         Outcome::Response
     }
+}
+
+// CoreDNS setup_test.go expects the search line to override the domain line.
+#[tokio::test]
+async fn coredns_resolv_search_order_and_explicit_domain() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/autopath-resolv.conf"
+    );
+    let config = format!(".:53 {{\n autopath bar.com {path}\n}}");
+    let mut chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(Scripted(chain.autopath.take().unwrap())),
+        vec![],
+    );
+    let server = Server::new(router, key);
+    let name: Name = "b.bar.com.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+        Action::Respond
+    );
+    let msg = Message::parse(&response).unwrap();
+    let Rdata::Cname(target) = msg.answers().next().unwrap().data().unwrap() else {
+        panic!("expected CNAME")
+    };
+    assert_eq!(target.to_string(), "b.baz.com.");
 }
 
 struct Alias;
