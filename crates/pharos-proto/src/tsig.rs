@@ -1,15 +1,12 @@
 use std::fmt;
 
 use aws_lc_rs::{constant_time, hmac as aws_hmac};
-use hmac::{Hmac, Mac};
-use md5::Md5;
 
 use crate::{Class, Message, Name, NameRef, NameWirePart, Rdata, Type};
 
 /// TSIG algorithms supported for compatibility with CoreDNS.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TsigAlgorithm {
-    Md5,
     Sha1,
     Sha224,
     Sha256,
@@ -20,7 +17,6 @@ pub enum TsigAlgorithm {
 impl TsigAlgorithm {
     fn name(self) -> &'static [u8] {
         match self {
-            Self::Md5 => b"\x08hmac-md5\x07sig-alg\x03reg\x03int\0",
             Self::Sha1 => b"\x09hmac-sha1\0",
             Self::Sha224 => b"\x0bhmac-sha224\0",
             Self::Sha256 => b"\x0bhmac-sha256\0",
@@ -31,7 +27,6 @@ impl TsigAlgorithm {
 
     fn len(self) -> usize {
         match self {
-            Self::Md5 => 16,
             Self::Sha1 => 20,
             Self::Sha224 => 28,
             Self::Sha256 => 32,
@@ -46,9 +41,9 @@ impl TsigAlgorithm {
 pub enum TsigError {
     /// Malformed Message, TSIG or prohibited MAC length (FORMERR).
     Format,
-    /// Unknown key or algorithm (BADKEY).
+    /// Unknown key or algorithm not configured for this key (BADKEY).
     BadKey,
-    /// Incorrect MAC (BADSIG).
+    /// Incorrect MAC or unsupported algorithm for a known key (BADSIG).
     BadSig,
     /// Signature outside its validity interval (BADTIME).
     BadTime,
@@ -62,70 +57,26 @@ impl fmt::Display for TsigError {
 }
 impl std::error::Error for TsigError {}
 
-// Avoid heap allocation on the signing path for the larger SHA context.
-#[allow(clippy::large_enum_variant)]
-enum KeyMaterial {
-    Md5(Hmac<Md5>),
-    Sha(aws_hmac::Key),
-}
-
-// Avoid heap allocation on the signing path for the larger SHA context.
-#[allow(clippy::large_enum_variant)]
-enum Digest {
-    Md5(Hmac<Md5>),
-    Sha(aws_hmac::Context),
-}
-impl Digest {
-    fn update(&mut self, bytes: &[u8]) {
-        match self {
-            Self::Md5(context) => context.update(bytes),
-            Self::Sha(context) => context.update(bytes),
-        }
-    }
-    fn finish(self) -> ([u8; 64], usize) {
-        let mut output = [0; 64];
-        let len = match self {
-            Self::Md5(context) => {
-                let tag = context.finalize().into_bytes();
-                output[..tag.len()].copy_from_slice(&tag);
-                tag.len()
-            }
-            Self::Sha(context) => {
-                let tag = context.sign();
-                output[..tag.as_ref().len()].copy_from_slice(tag.as_ref());
-                tag.as_ref().len()
-            }
-        };
-        (output, len)
-    }
-}
-
 /// A configured TSIG key. Secret material is not included in debug output.
 pub struct TsigKey {
     name: Name,
     algorithm: TsigAlgorithm,
-    key: KeyMaterial,
+    key: aws_hmac::Key,
 }
 impl TsigKey {
     #[must_use]
     pub fn new(name: Name, algorithm: TsigAlgorithm, secret: &[u8]) -> Self {
         // RFC 8945 §6: TSIG algorithm names select the corresponding HMAC.
-        let key = match algorithm {
-            TsigAlgorithm::Md5 => KeyMaterial::Md5(
-                Hmac::<Md5>::new_from_slice(secret).expect("HMAC accepts any key length"),
-            ),
-            _ => KeyMaterial::Sha(aws_hmac::Key::new(
-                match algorithm {
-                    TsigAlgorithm::Sha1 => aws_hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
-                    TsigAlgorithm::Sha224 => aws_hmac::HMAC_SHA224,
-                    TsigAlgorithm::Sha256 => aws_hmac::HMAC_SHA256,
-                    TsigAlgorithm::Sha384 => aws_hmac::HMAC_SHA384,
-                    TsigAlgorithm::Sha512 => aws_hmac::HMAC_SHA512,
-                    TsigAlgorithm::Md5 => unreachable!(),
-                },
-                secret,
-            )),
-        };
+        let key = aws_hmac::Key::new(
+            match algorithm {
+                TsigAlgorithm::Sha1 => aws_hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+                TsigAlgorithm::Sha224 => aws_hmac::HMAC_SHA224,
+                TsigAlgorithm::Sha256 => aws_hmac::HMAC_SHA256,
+                TsigAlgorithm::Sha384 => aws_hmac::HMAC_SHA384,
+                TsigAlgorithm::Sha512 => aws_hmac::HMAC_SHA512,
+            },
+            secret,
+        );
         Self {
             name,
             algorithm,
@@ -133,11 +84,35 @@ impl TsigKey {
         }
     }
 
-    fn digest(&self) -> Digest {
-        match &self.key {
-            KeyMaterial::Md5(key) => Digest::Md5(key.clone()),
-            KeyMaterial::Sha(key) => Digest::Sha(aws_hmac::Context::with_key(key)),
+    fn digest(&self) -> aws_hmac::Context {
+        aws_hmac::Context::with_key(&self.key)
+    }
+
+    fn check_key(&self, owner: NameRef<'_>, algorithm: NameRef<'_>) -> Result<(), TsigError> {
+        // RFC 8945 §5.2.1: check the key and its configured algorithm before the MAC.
+        if owner != self.name {
+            return Err(TsigError::BadKey);
         }
+        if algorithm != NameRef::parse(self.algorithm.name(), 0).expect("algorithm name") {
+            let known = [
+                TsigAlgorithm::Sha1,
+                TsigAlgorithm::Sha224,
+                TsigAlgorithm::Sha256,
+                TsigAlgorithm::Sha384,
+                TsigAlgorithm::Sha512,
+            ]
+            .into_iter()
+            .any(|candidate| {
+                algorithm == NameRef::parse(candidate.name(), 0).expect("algorithm name")
+            });
+            // CoreDNS maps miekg/dns's ErrKeyAlg to BADSIG for a known key.
+            return Err(if known {
+                TsigError::BadKey
+            } else {
+                TsigError::BadSig
+            });
+        }
+        Ok(())
     }
 
     /// Appends a full-length TSIG to a Message, chaining the verified Query MAC for a Response.
@@ -186,8 +161,8 @@ impl TsigKey {
         let owner = NameRef::parse(self.name.as_wire(), 0).expect("valid key name");
         let algorithm = NameRef::parse(self.algorithm.name(), 0).expect("valid algorithm name");
         variables(&mut digest, owner, algorithm, time, fudge, 0, &[]);
-        let (mac, _) = digest.finish();
-        self.append(wire, time, fudge, &mac[..mac_len]);
+        let mac = digest.sign();
+        self.append(wire, time, fudge, &mac.as_ref()[..mac_len]);
         Ok(())
     }
 
@@ -319,7 +294,8 @@ impl TsigKey {
                 code,
                 other,
             );
-            (mac, _) = digest.finish();
+            let tag = digest.sign();
+            mac[..mac_len].copy_from_slice(tag.as_ref());
         }
         let count = u16::from_be_bytes([response[10], response[11]]) + 1;
         write_name(response, query_tsig.owner);
@@ -362,12 +338,7 @@ impl TsigKey {
         if wire[2] & 0x80 == 0 && tsig.error != 0 {
             return Err(TsigError::Format);
         }
-        // RFC 8945 §5.2.1: identify the key and algorithm before checking the MAC.
-        if tsig.owner != self.name
-            || tsig.algorithm != NameRef::parse(self.algorithm.name(), 0).expect("algorithm name")
-        {
-            return Err(TsigError::BadKey);
-        }
+        self.check_key(tsig.owner, tsig.algorithm)?;
         let len = tsig.mac.len();
         // RFC 8945 §5.2.2.1: reject MACs shorter than 10 octets or half the hash.
         if len > self.algorithm.len() || len < 10.max(self.algorithm.len() / 2) {
@@ -394,8 +365,8 @@ impl TsigKey {
             tsig.error,
             tsig.other,
         );
-        let (tag, _) = digest.finish();
-        if constant_time::verify_slices_are_equal(&tag[..len], tsig.mac).is_err() {
+        let tag = digest.sign();
+        if constant_time::verify_slices_are_equal(&tag.as_ref()[..len], tsig.mac).is_err() {
             return Err(TsigError::BadSig);
         }
         // RFC 8945 §5.2.3: check time only after authenticating the MAC.
@@ -414,7 +385,7 @@ impl TsigKey {
 pub struct TsigStream<'a> {
     key: &'a TsigKey,
     query_mac: &'a [u8],
-    digest: Option<Digest>,
+    digest: Option<aws_hmac::Context>,
     unsigned: usize,
     last_time: Option<u64>,
     failed: bool,
@@ -488,9 +459,9 @@ impl<'a> TsigStream<'a> {
         digest.update(wire);
         digest.update(&time.to_be_bytes()[2..]);
         digest.update(&fudge.to_be_bytes());
-        let (mac, len) = digest.finish();
-        self.key.append(wire, time, fudge, &mac[..len]);
-        self.chain(&mac[..len], time);
+        let mac = digest.sign();
+        self.key.append(wire, time, fudge, mac.as_ref());
+        self.chain(mac.as_ref(), time);
         Ok(())
     }
 
@@ -542,12 +513,7 @@ impl<'a> TsigStream<'a> {
         if tsig.error != 0 || !tsig.other.is_empty() {
             return Err(TsigError::Format);
         }
-        if tsig.owner != self.key.name
-            || tsig.algorithm
-                != NameRef::parse(self.key.algorithm.name(), 0).expect("algorithm name")
-        {
-            return Err(TsigError::BadKey);
-        }
+        self.key.check_key(tsig.owner, tsig.algorithm)?;
         let len = tsig.mac.len();
         // RFC 8945 §5.2.2.1: enforce the permitted MAC length in every stream Message.
         if len > self.key.algorithm.len() || len < 10.max(self.key.algorithm.len() / 2) {
@@ -561,8 +527,8 @@ impl<'a> TsigStream<'a> {
         digest.update(&wire[12..tsig.start]);
         digest.update(&tsig.time_signed.to_be_bytes()[2..]);
         digest.update(&tsig.fudge.to_be_bytes());
-        let (tag, _) = digest.finish();
-        if constant_time::verify_slices_are_equal(&tag[..len], tsig.mac).is_err() {
+        let tag = digest.sign();
+        if constant_time::verify_slices_are_equal(&tag.as_ref()[..len], tsig.mac).is_err() {
             return Err(TsigError::BadSig);
         }
         // RFC 8945 §5.3.1: successive signed stream timestamps do not decrease.
@@ -688,7 +654,7 @@ fn message_end(message: &Message<'_>) -> usize {
     }
 }
 
-fn canonical(digest: &mut Digest, name: NameRef<'_>) {
+fn canonical(digest: &mut aws_hmac::Context, name: NameRef<'_>) {
     // RFC 8945 §4.3.3: names in TSIG variables use canonical wire form.
     for label in name.labels() {
         digest.update(&[label.len() as u8]);
@@ -702,7 +668,7 @@ fn canonical(digest: &mut Digest, name: NameRef<'_>) {
 }
 
 fn variables(
-    digest: &mut Digest,
+    digest: &mut aws_hmac::Context,
     owner: NameRef<'_>,
     algorithm: NameRef<'_>,
     time: u64,

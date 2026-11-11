@@ -74,6 +74,66 @@ fn response_requires_query_mac() {
 }
 
 #[test]
+fn md5_query_matches_coredns_unsigned_badsig_response() {
+    // CoreDNS v1.15.0 maps miekg/dns ErrKeyAlg to NOTAUTH/BADSIG for a known key.
+    let query = hex(concat!(
+        "c60001000001000000000001076578616d706c6503636f6d0000060001",
+        "07746573746b65790000fa00ff00000000003a08686d61632d6d6435",
+        "077369672d616c670372656703696e740000005f0f9043012c0010",
+        "6fcce0af04e944c869df97e77a608e3dc60000000000"
+    ));
+    let secret = hex("3684c2254f8332a156cb068fcb14a28eb0c403f782de72b4c62dc030466e3d59");
+    let key = TsigKey::new("testkey.".parse().unwrap(), TsigAlgorithm::Sha256, &secret);
+    assert_eq!(
+        key.verify(&query, 1594855491, None, 0).unwrap_err(),
+        TsigError::BadSig
+    );
+    let unknown_key = TsigKey::new("other.".parse().unwrap(), TsigAlgorithm::Sha256, &secret);
+    assert_eq!(
+        unknown_key.verify(&query, 1594855491, None, 0).unwrap_err(),
+        TsigError::BadKey
+    );
+    let mut response = hex("c60081090001000000000000076578616d706c6503636f6d0000060001");
+    assert_eq!(
+        key.sign_error_response(&mut response, &query, 1594855491, 0)
+            .unwrap(),
+        Some(TsigError::BadSig)
+    );
+    assert_eq!(
+        response,
+        hex(concat!(
+            "c60081090001000000000001076578616d706c6503636f6d0000060001",
+            "07746573746b65790000fa00ff00000000002a08686d61632d6d6435",
+            "077369672d616c670372656703696e7400000000000000012c0000c60000100000"
+        ))
+    );
+}
+
+#[test]
+fn unsupported_and_unconfigured_algorithms_are_distinguished() {
+    let secret = hex("3684c2254f8332a156cb068fcb14a28eb0c403f782de72b4c62dc030466e3d59");
+    let key = TsigKey::new("testkey.".parse().unwrap(), TsigAlgorithm::Sha256, &secret);
+    let mut query = hex("c60001000001000000000000076578616d706c6503636f6d0000060001");
+    key.sign(&mut query, 1000, 300, None).unwrap();
+    let algorithm_offset = query
+        .windows(11)
+        .position(|window| window == b"hmac-sha256")
+        .unwrap();
+    let mut unknown = query.clone();
+    unknown[algorithm_offset + 8..algorithm_offset + 11].copy_from_slice(b"999");
+    assert_eq!(
+        key.verify(&unknown, 2000, None, 0).unwrap_err(),
+        TsigError::BadSig
+    );
+    let mut unconfigured = query;
+    unconfigured[algorithm_offset + 8..algorithm_offset + 11].copy_from_slice(b"512");
+    assert_eq!(
+        key.verify(&unconfigured, 2000, None, 0).unwrap_err(),
+        TsigError::BadKey
+    );
+}
+
+#[test]
 fn stream_chains_every_response_and_requires_signed_endpoints() {
     let key = TsigKey::new(
         "testkey.".parse().unwrap(),
@@ -167,7 +227,6 @@ fn miekg_interoperability_for_all_algorithms_and_streams() {
     let secret = hex("3684c2254f8332a156cb068fcb14a28eb0c403f782de72b4c62dc030466e3d59");
     let mut lines = include_str!("corpus/tsig-miekg.txt").lines();
     for algorithm in [
-        TsigAlgorithm::Md5,
         TsigAlgorithm::Sha1,
         TsigAlgorithm::Sha224,
         TsigAlgorithm::Sha256,
@@ -264,8 +323,8 @@ fn unsigned_intermediate_is_covered_and_limited() {
     let secret = hex("3684c2254f8332a156cb068fcb14a28eb0c403f782de72b4c62dc030466e3d59");
     let key = TsigKey::new("testkey.".parse().unwrap(), TsigAlgorithm::Sha256, &secret);
     let lines: Vec<_> = include_str!("corpus/tsig-miekg.txt").lines().collect();
-    let query = hex(lines[9].split_whitespace().nth(1).unwrap());
-    let first = hex(lines[10].split_whitespace().nth(1).unwrap());
+    let query = hex(lines[6].split_whitespace().nth(1).unwrap());
+    let first = hex(lines[7].split_whitespace().nth(1).unwrap());
     // Independently computed with Python hmac over prior MAC, both Messages and timers.
     let last = hex(
         "c6008000000000000000000107746573746b65790000fa00ff00000000003d0b686d61632d7368613235360000005f0f9043012c002008286d64268c92a303a9cca5ce2016eac2d09b4e49b092427c88df2474c9e33ac60000000000",
@@ -327,8 +386,8 @@ fn stream_time_does_not_move_backwards() {
     let secret = hex("3684c2254f8332a156cb068fcb14a28eb0c403f782de72b4c62dc030466e3d59");
     let key = TsigKey::new("testkey.".parse().unwrap(), TsigAlgorithm::Sha256, &secret);
     let lines: Vec<_> = include_str!("corpus/tsig-miekg.txt").lines().collect();
-    let query = hex(lines[9].split_whitespace().nth(1).unwrap());
-    let first = hex(lines[10].split_whitespace().nth(1).unwrap());
+    let query = hex(lines[6].split_whitespace().nth(1).unwrap());
+    let first = hex(lines[7].split_whitespace().nth(1).unwrap());
     // miekg/dns generated with timers-only and a one-second earlier timestamp.
     let earlier = hex(
         "c6008000000000000000000107746573746b65790000fa00ff00000000003d0b686d61632d7368613235360000005f0f9042012c00206aeb47f475280d4c87016d147056e0d9f51efcb01c7927fbc847130b6b7898bcc60000000000",

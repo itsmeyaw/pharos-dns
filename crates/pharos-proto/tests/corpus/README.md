@@ -32,7 +32,7 @@ License: BSD-3-Clause ([LICENSE](https://github.com/miekg/dns/blob/b2d6c9f4480a7
 | `miekg-servfail-response.bin` | [`dns_test.go`, `TestMsgPackBuffer`, `testMessages[2]`](https://github.com/miekg/dns/blob/b2d6c9f4480a71247e0df4ce709122852a2849cf/dns_test.go#L241-L260) | SERVFAIL response |
 | `miekg-edns-esu.bin` | [`edns_test.go`, `TestEDNS0_ESU`, `p`](https://github.com/miekg/dns/blob/b2d6c9f4480a71247e0df4ce709122852a2849cf/edns_test.go#L197-L210) | EDNS Source URI option |
 | `miekg-dynamic-update.bin` | [`update_test.go`, `TestDynamicUpdateUnpack`, `buf`](https://github.com/miekg/dns/blob/b2d6c9f4480a71247e0df4ce709122852a2849cf/update_test.go#L35-L45) | Dynamic update deleting and adding an A record |
-| `tsig-miekg.txt` | miekg/dns v1.1.73 `TsigGenerate` and `TsigGenerateWithProvider` | Hex TSIG Query, first Response, and subsequent Response, at time 1594855491, fudge 300, key `testkey.`, secret `NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=`. Each triple has the algorithm, wire Message and MAC. MD5 uses a Go HMAC-MD5 provider because miekg's default provider no longer implements it. |
+| `tsig-miekg.txt` | miekg/dns v1.1.73 `TsigGenerate` | Hex TSIG Query, first Response, and subsequent Response, at time 1594855491, fudge 300, key `testkey.`, secret `NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=`. Each triple has the algorithm, wire Message and MAC. |
 
 RFC 8945 has no Appendix A or published test vectors; the signed fixture in
 `tests/tsig.rs` is from miekg/dns `TestTsigErrors`.
