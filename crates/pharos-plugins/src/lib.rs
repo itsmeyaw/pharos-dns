@@ -99,6 +99,45 @@ pub mod whoami;
 
 include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
 
+/// Plugin-specific CoreDNS compatibility notes in their documented order.
+pub const COMPATIBILITY: &[(&str, &str)] = &[
+    ("acl", include_str!("acl/README.md")),
+    ("any", include_str!("any/README.md")),
+    ("autopath", include_str!("autopath/README.md")),
+    ("bind", include_str!("bind/README.md")),
+    ("bufsize", include_str!("bufsize/README.md")),
+    ("cache", include_str!("cache/README.md")),
+    ("cancel", include_str!("cancel/README.md")),
+    ("chaos", include_str!("chaos/README.md")),
+    ("debug", include_str!("debug/README.md")),
+    ("dns64", include_str!("dns64/README.md")),
+    ("dnssec", include_str!("dnssec/README.md")),
+    ("errors", include_str!("errors/README.md")),
+    ("forward", include_str!("forward/README.md")),
+    ("header", include_str!("header/README.md")),
+    ("health", include_str!("health/README.md")),
+    ("hosts", include_str!("hosts/README.md")),
+    ("kubernetes", include_str!("kubernetes/README.md")),
+    ("loadbalance", include_str!("loadbalance/README.md")),
+    ("local", include_str!("local/README.md")),
+    ("log", include_str!("log/README.md")),
+    ("metadata", include_str!("metadata/README.md")),
+    ("loop", include_str!("loop/README.md")),
+    ("minimal", include_str!("minimal/README.md")),
+    ("multisocket", include_str!("multisocket/README.md")),
+    ("nsid", include_str!("nsid/README.md")),
+    ("prometheus", include_str!("prometheus/README.md")),
+    ("ready", include_str!("ready/README.md")),
+    ("reload", include_str!("reload/README.md")),
+    ("rewrite", include_str!("rewrite/README.md")),
+    ("siit", include_str!("siit/README.md")),
+    ("sign", include_str!("sign/README.md")),
+    ("root", include_str!("root/README.md")),
+    ("shed", include_str!("shed/README.md")),
+    ("timeouts", include_str!("timeouts/README.md")),
+    ("whoami", include_str!("whoami/README.md")),
+];
+
 #[cfg(any(
     feature = "plugin-health",
     feature = "plugin-prometheus",
