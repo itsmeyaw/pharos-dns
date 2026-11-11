@@ -171,38 +171,44 @@ impl Plugin for AutoPath {
             return next.run(cx).await;
         }
         let outcome = next.run(cx).await;
-        if outcome != Outcome::Response {
+        if matches!(outcome, Outcome::Error(_) | Outcome::Stream(_)) {
             return outcome;
         }
-        let Ok(first_response) = Message::parse(cx.response) else {
-            return Outcome::Error(ServerError::InvalidQuery);
-        };
-        if first_response.rcode() != Rcode::NXDOMAIN {
-            if first_response
-                .answers()
-                .any(|rr| different_name(rr.name, question.name))
-            {
-                let mut scratch = [0u8; u16::MAX as usize];
-                let len = cx.response.len();
-                if len > scratch.len() {
-                    return Outcome::Error(ServerError::InvalidQuery);
+        if outcome == Outcome::Response {
+            let Ok(first_response) = Message::parse(cx.response) else {
+                return Outcome::Error(ServerError::InvalidQuery);
+            };
+            if first_response.rcode() != Rcode::NXDOMAIN {
+                if first_response
+                    .answers()
+                    .any(|rr| different_name(rr.name, question.name))
+                {
+                    let mut scratch = [0u8; u16::MAX as usize];
+                    let len = cx.response.len();
+                    if len > scratch.len() {
+                        return Outcome::Error(ServerError::InvalidQuery);
+                    }
+                    scratch[..len].copy_from_slice(cx.response);
+                    let response = match Message::parse(&scratch[..len]) {
+                        Ok(response) => response,
+                        Err(_) => return Outcome::Error(ServerError::InvalidQuery),
+                    };
+                    if let Err(error) = rebuild(cx, &response) {
+                        return Outcome::Error(error);
+                    }
                 }
-                scratch[..len].copy_from_slice(cx.response);
-                let response = match Message::parse(&scratch[..len]) {
-                    Ok(response) => response,
-                    Err(_) => return Outcome::Error(ServerError::InvalidQuery),
-                };
-                if let Err(error) = rebuild(cx, &response) {
-                    return Outcome::Error(error);
-                }
+                self.count(cx.local);
+                return outcome;
             }
-            self.count(cx.local);
-            return outcome;
         }
         if paths.clone().count() == 1 {
             return outcome;
         }
-        let original = cx.response.clone();
+        let original = if outcome == Outcome::Response {
+            cx.response.clone()
+        } else {
+            Vec::new()
+        };
         let first_labels = first.labels().count();
         let base_labels = question.name.labels().count().saturating_sub(first_labels);
         let mut wire = [0u8; 255];
@@ -239,8 +245,10 @@ impl Plugin for AutoPath {
                 Err(error) => Outcome::Error(error),
             };
         }
-        cx.response.clear();
-        cx.response.extend_from_slice(&original);
+        if outcome == Outcome::Response {
+            cx.response.clear();
+            cx.response.extend_from_slice(&original);
+        }
         outcome
     }
 }

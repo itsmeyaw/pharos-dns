@@ -73,6 +73,86 @@ impl Next for Alias {
     }
 }
 
+struct DropFirst(pharos_plugins::autopath::AutoPath);
+impl pharos_server::Chain for DropFirst {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, DropFirstBackend).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct DropFirstBackend;
+impl Next for DropFirstBackend {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        if q.name.to_string() != "x.example.com." {
+            return Outcome::Drop;
+        }
+        let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        b.question(q.name, q.qtype, q.qclass).unwrap();
+        b.record(
+            Section::Answer,
+            q.name,
+            Type::A,
+            Class::IN,
+            60,
+            &[1, 2, 3, 4],
+        )
+        .unwrap();
+        let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn coredns_search_continues_after_unwritten_first_reply() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/autopath-search.conf"
+    );
+    let config = format!(".:53 {{\n autopath {path}\n}}");
+    let mut chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(DropFirst(chain.autopath.take().unwrap())),
+        vec![],
+    );
+    let server = Server::new(router, key);
+    let name: Name = "x.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().answers().count(), 2);
+}
+
 #[tokio::test]
 async fn coredns_first_success_with_different_owner_adds_cname() {
     let path = concat!(
