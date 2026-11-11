@@ -92,7 +92,8 @@ pub enum Error {
     NoHealthy,
     NoForward,
     Stopped,
-    Mismatch,
+    /// The Upstream reply (of this length, left in the Response buffer) does not match the Query.
+    Mismatch(usize),
     CachedClosed,
     Io(io::Error),
 }
@@ -104,7 +105,7 @@ impl fmt::Display for Error {
             Self::NoHealthy => f.write_str("no healthy Upstreams"),
             Self::NoForward => f.write_str("no Upstream configured"),
             Self::Stopped => f.write_str("proxy: transport stopped"),
-            Self::Mismatch => f.write_str("Upstream Response does not match Query"),
+            Self::Mismatch(_) => f.write_str("Upstream Response does not match Query"),
             Self::CachedClosed => f.write_str("cached connection was closed by peer"),
             Self::Io(error) => write!(f, "{error}"),
         }
@@ -561,7 +562,7 @@ impl Proxy {
                 .zip(answer.questions())
                 .all(|(a, b)| a.name == b.name && a.qtype == b.qtype && a.qclass == b.qclass);
         if !answer.qr() || !same_questions {
-            return Err(Error::Mismatch);
+            return Err(Error::Mismatch(length));
         }
         // RFC 1035 §4.1.1: the response ID matches the original query ID.
         response[..2].copy_from_slice(&query[..2]);

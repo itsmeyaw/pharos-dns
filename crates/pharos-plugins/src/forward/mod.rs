@@ -343,7 +343,24 @@ impl Plugin for Forward {
                 };
                 let exchange = match result {
                     Ok(Ok(exchange)) => exchange,
-                    Ok(Err(proxy::Error::Mismatch | proxy::Error::InvalidRequest)) => {
+                    Ok(Err(proxy::Error::Mismatch(_len))) => {
+                        #[cfg(feature = "plugin-debug")]
+                        if pharos_server::logging::debug_enabled()
+                            && let Some(question) = cx.query.questions().next()
+                        {
+                            crate::debug::log_message(
+                                &format!(
+                                    "Wrong reply for id: {}, {} {}",
+                                    u16::from_be_bytes([wire[0], wire[1]]),
+                                    question.name,
+                                    question.qtype.0
+                                ),
+                                &wire[.._len],
+                            );
+                        }
+                        return Outcome::Unanswered(Rcode::FORMERR);
+                    }
+                    Ok(Err(proxy::Error::InvalidRequest)) => {
                         return Outcome::Unanswered(Rcode::FORMERR);
                     }
                     Ok(Err(proxy::Error::UnsupportedRequest)) => {
