@@ -42,6 +42,8 @@ pub mod hosts;
 pub mod kubernetes;
 #[cfg(feature = "plugin-loadbalance")]
 pub mod loadbalance;
+#[cfg(feature = "plugin-minimal")]
+pub mod minimal;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 pub mod proxy;
@@ -479,6 +481,16 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
         return Err(cursor.arg_err());
     }
     block.config.whoami = Some(whoami::Whoami);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-minimal")]
+fn setup_minimal(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    cursor.next();
+    if cursor.next_arg() {
+        return Err(cursor.arg_err());
+    }
+    block.config.minimal = Some(minimal::Minimal);
     Ok(())
 }
 
