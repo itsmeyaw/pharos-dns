@@ -17,6 +17,8 @@ use std::{
 pub mod bind;
 #[cfg(feature = "plugin-cache")]
 pub mod cache;
+#[cfg(feature = "plugin-cancel")]
+pub mod cancel;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 #[cfg(any(
@@ -25,7 +27,8 @@ pub mod errors;
     feature = "plugin-reload",
     feature = "plugin-hosts",
     feature = "plugin-loadbalance",
-    feature = "plugin-kubernetes"
+    feature = "plugin-kubernetes",
+    feature = "plugin-cancel"
 ))]
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
@@ -620,6 +623,12 @@ fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std
 #[cfg(feature = "plugin-root")]
 fn setup_root(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.root = Some(root::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-cancel")]
+fn setup_cancel(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.cancel = Some(cancel::parse(cursor)?);
     Ok(())
 }
 

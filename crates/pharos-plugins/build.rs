@@ -23,6 +23,7 @@ fn main() {
     for name in &enabled {
         let ty = match *name {
             "root" => "std::path::PathBuf",
+            "cancel" => "cancel::Cancel",
             "cache" => "cache::Cache",
             "bind" => "()",
             "multisocket" => "Option<usize>",
@@ -48,6 +49,7 @@ fn main() {
     for name in &enabled {
         let setup = match *name {
             "root" => "setup_root",
+            "cancel" => "setup_cancel",
             "cache" => "setup_cache",
             "bind" => "setup_bind",
             "multisocket" => "setup_multisocket",

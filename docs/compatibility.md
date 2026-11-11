@@ -28,6 +28,10 @@
 - A hit that launches a background refresh allocates for the task and its Query and Response buffers; ordinary warmed hits do not allocate.
 - Cache metric series are initialized at setup, including zero-valued series; CoreDNS initializes individual labelled series on first use.
 
+## cancel
+
+- On expiry Pharos drops the Next future and the Response. CoreDNS only signals context cancellation, so Plugins that ignore the context may continue and write a Response.
+
 ## dnssec
 
 - Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as unsigned. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
@@ -206,7 +210,7 @@
 
 ## General
 
-- Only `root`, `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI
