@@ -6,7 +6,7 @@ use pharos_corefile::{Cursor, Error};
 use pharos_proto::{
     Class, Message, MessageBuilder, MessageMut, Name, NameRef, Rcode, Rdata, Section, Type,
 };
-use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin};
+use pharos_server::{Context, Error as ServerError, Metadata, Next, Outcome, Plugin};
 
 #[derive(Debug)]
 struct Rule {
@@ -634,166 +634,171 @@ fn apply_answer<'a>(
     NameRef::parse(&buffer[..=len], 0).expect("validated name")
 }
 
+fn apply_rule(
+    rule: &Rule,
+    query: &mut Message<'_>,
+    metadata: &Metadata<'_>,
+) -> Result<bool, ServerError> {
+    let Some(question) = query.questions().next() else {
+        return Ok(false);
+    };
+    let mut name = NameText {
+        bytes: [0; 1024],
+        len: 0,
+    };
+    write!(name, "{}", question.name).map_err(|_| ServerError::InvalidQuery)?;
+    name.bytes[..name.len].make_ascii_lowercase();
+    let name =
+        std::str::from_utf8(&name.bytes[..name.len]).map_err(|_| ServerError::InvalidQuery)?;
+    match &rule.action {
+        Action::Type(from, to) => {
+            if from.0 == 0 || to.0 == 0 || question.qtype != *from {
+                return Ok(false);
+            }
+            *query = query.with_question_type(*to);
+            Ok(true)
+        }
+        Action::Class(from, to) => {
+            if from.0 == 0 || to.0 == 0 || question.qclass != *from {
+                return Ok(false);
+            }
+            *query = query.with_question_class(*to);
+            Ok(true)
+        }
+        Action::Name(target, _, parts, _) => {
+            if !rule.matcher.matches(name) {
+                return Ok(false);
+            }
+            let mut text = NameText {
+                bytes: [0; 1024],
+                len: 0,
+            };
+            let result = match &rule.matcher {
+                Matcher::Exact(_) => text.write_str(target),
+                Matcher::Prefix(from) => text
+                    .write_str(target)
+                    .and_then(|()| text.write_str(name.strip_prefix(from).unwrap())),
+                Matcher::Suffix(from) => text
+                    .write_str(name.strip_suffix(from).unwrap())
+                    .and_then(|()| text.write_str(target)),
+                Matcher::Substring(from) => {
+                    let mut result = Ok(());
+                    for (index, part) in name.split(from).enumerate() {
+                        if index != 0 {
+                            result = result.and_then(|()| text.write_str(target));
+                        }
+                        result = result.and_then(|()| text.write_str(part));
+                    }
+                    result
+                }
+                Matcher::Regex(pattern) => {
+                    // shortcut: regex captures allocate; non-regex rules remain allocation-free.
+                    let captures = pattern.captures(name).expect("matched regex");
+                    if let Some(parts) = parts {
+                        let mut result = Ok(());
+                        for part in parts {
+                            match part {
+                                NamePart::Literal(value) => {
+                                    result = result.and_then(|()| text.write_str(value))
+                                }
+                                NamePart::Capture(index) => {
+                                    result = result.and_then(|()| {
+                                        text.write_str(
+                                            captures.get(*index).map_or("", |value| value.as_str()),
+                                        )
+                                    })
+                                }
+                                NamePart::Label(label) => {
+                                    if !metadata.enabled() {
+                                        return Ok(false);
+                                    }
+                                    let Some(value) =
+                                        metadata.get(label).filter(|value| !value.is_empty())
+                                    else {
+                                        return Ok(false);
+                                    };
+                                    result =
+                                        result.and_then(|()| text.write_str(&value.to_lowercase()));
+                                }
+                            }
+                        }
+                        result
+                    } else {
+                        let mut replacement = target.clone();
+                        for (index, value) in captures.iter().enumerate() {
+                            replacement = replacement.replace(
+                                &format!("{{{index}}}"),
+                                value.map_or("", |value| value.as_str()),
+                            );
+                        }
+                        text.write_str(&replacement)
+                    }
+                }
+                Matcher::Any => unreachable!("validated name matcher"),
+            };
+            result.map_err(|_| ServerError::InvalidQuery)?;
+            let mut wire = [0; 255];
+            let text = std::str::from_utf8(&text.bytes[..text.len])
+                .map_err(|_| ServerError::InvalidQuery)?;
+            let wire = Name::parse_absolute_into(text, &mut wire)
+                .map_err(|_| ServerError::InvalidQuery)?;
+            *query = query.with_question_name(NameRef::parse(wire, 0).expect("validated name"));
+            Ok(true)
+        }
+        Action::Cname(..) => Ok(true),
+        _ => Ok(rule.matcher.matches(name)),
+    }
+}
+
+fn active_at(
+    rules: &[Rule],
+    index: usize,
+    mut query: Message<'_>,
+    metadata: &Metadata<'_>,
+) -> bool {
+    for (position, rule) in rules.iter().enumerate().take(index + 1) {
+        let matched = apply_rule(rule, &mut query, metadata).unwrap_or(false);
+        if position == index {
+            return matched;
+        }
+        if matched && rule.stop {
+            return false;
+        }
+    }
+    false
+}
+
 impl Plugin for Rewrite {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
         let original_query = cx.query;
-        let Some(question) = cx.query.questions().next() else {
+        let Some(_) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
-        let mut name = NameText {
-            bytes: [0; 1024],
-            len: 0,
-        };
-        if write!(name, "{}", question.name).is_err() {
-            return next.run(cx).await;
-        }
-        name.bytes[..name.len].make_ascii_lowercase();
-        let name = std::str::from_utf8(&name.bytes[..name.len]).expect("DNS presentation is UTF-8");
         let mut end = self.rules.len();
         let mut name_rewritten = false;
         let mut suffix = None;
         let mut answer_auto = false;
         let mut selected_answers = &[][..];
         let mut cname = None;
-        'rules: for (index, rule) in self.rules.iter().enumerate() {
-            let mut current_name = NameText {
-                bytes: [0; 1024],
-                len: 0,
+        for (index, rule) in self.rules.iter().enumerate() {
+            let matched = match apply_rule(rule, &mut cx.query, &cx.metadata) {
+                Ok(matched) => matched,
+                Err(error) => return Outcome::Error(error),
             };
-            let Some(question) = cx.query.questions().next() else {
-                break;
-            };
-            if write!(current_name, "{}", question.name).is_err() {
-                break;
+            if matched {
+                match &rule.action {
+                    Action::Name(target, auto, _, answers) => {
+                        name_rewritten |= *auto || !answers.is_empty();
+                        answer_auto = *auto;
+                        selected_answers = answers;
+                        if *auto && let Matcher::Suffix(from) = &rule.matcher {
+                            suffix = Some((target.as_str(), from.as_str()));
+                        }
+                    }
+                    Action::Cname(matcher, to) => cname = Some((matcher, to.as_str())),
+                    _ => {}
+                }
             }
-            current_name.bytes[..current_name.len].make_ascii_lowercase();
-            let name = std::str::from_utf8(&current_name.bytes[..current_name.len])
-                .expect("DNS presentation is UTF-8");
-            let matched = match rule.action {
-                Action::Type(from, to)
-                    if from.0 != 0
-                        && to.0 != 0
-                        && cx.query.questions().next().is_some_and(|q| q.qtype == from) =>
-                {
-                    cx.query = cx.query.with_question_type(to);
-                    true
-                }
-                Action::Class(from, to)
-                    if from.0 != 0
-                        && to.0 != 0
-                        && cx
-                            .query
-                            .questions()
-                            .next()
-                            .is_some_and(|q| q.qclass == from) =>
-                {
-                    cx.query = cx.query.with_question_class(to);
-                    true
-                }
-                Action::Type(..) | Action::Class(..) => false,
-                Action::Name(ref target, auto, ref parts, ref answers)
-                    if rule.matcher.matches(name) =>
-                {
-                    let mut text = NameText {
-                        bytes: [0; 1024],
-                        len: 0,
-                    };
-                    let result = match &rule.matcher {
-                        Matcher::Exact(_) => text.write_str(target),
-                        Matcher::Prefix(from) => text
-                            .write_str(target)
-                            .and_then(|()| text.write_str(name.strip_prefix(from).unwrap())),
-                        Matcher::Suffix(from) => text
-                            .write_str(name.strip_suffix(from).unwrap())
-                            .and_then(|()| text.write_str(target)),
-                        Matcher::Substring(from) => {
-                            let mut result = Ok(());
-                            for (index, part) in name.split(from).enumerate() {
-                                if index != 0 {
-                                    result = result.and_then(|()| text.write_str(target));
-                                }
-                                result = result.and_then(|()| text.write_str(part));
-                            }
-                            result
-                        }
-                        Matcher::Regex(pattern) => {
-                            // shortcut: regex captures allocate; non-regex rules remain allocation-free.
-                            let captures = pattern.captures(name).expect("matched regex");
-                            if let Some(parts) = parts {
-                                let mut result = Ok(());
-                                for part in parts {
-                                    match part {
-                                        NamePart::Literal(value) => {
-                                            result = result.and_then(|()| text.write_str(value))
-                                        }
-                                        NamePart::Capture(index) => {
-                                            result = result.and_then(|()| {
-                                                text.write_str(
-                                                    captures
-                                                        .get(*index)
-                                                        .map_or("", |value| value.as_str()),
-                                                )
-                                            })
-                                        }
-                                        NamePart::Label(label) => {
-                                            if !cx.metadata.enabled() {
-                                                continue 'rules;
-                                            }
-                                            let Some(value) = cx
-                                                .metadata
-                                                .get(label)
-                                                .filter(|value| !value.is_empty())
-                                            else {
-                                                continue 'rules;
-                                            };
-                                            result = result.and_then(|()| {
-                                                text.write_str(&value.to_lowercase())
-                                            });
-                                        }
-                                    }
-                                }
-                                result
-                            } else {
-                                let mut replacement = target.clone();
-                                for (index, value) in captures.iter().enumerate() {
-                                    replacement = replacement.replace(
-                                        &format!("{{{index}}}"),
-                                        value.map_or("", |value| value.as_str()),
-                                    );
-                                }
-                                text.write_str(&replacement)
-                            }
-                        }
-                        _ => unreachable!("validated name matcher"),
-                    };
-                    if result.is_err() {
-                        return Outcome::Error(ServerError::InvalidQuery);
-                    }
-                    let mut wire = [0; 255];
-                    let Ok(text) = std::str::from_utf8(&text.bytes[..text.len]) else {
-                        return Outcome::Error(ServerError::InvalidQuery);
-                    };
-                    let Ok(wire) = Name::parse_absolute_into(text, &mut wire) else {
-                        return Outcome::Error(ServerError::InvalidQuery);
-                    };
-                    cx.query = cx
-                        .query
-                        .with_question_name(NameRef::parse(wire, 0).expect("validated name"));
-                    name_rewritten |= auto || !answers.is_empty();
-                    answer_auto = auto;
-                    selected_answers = answers;
-                    if auto && let Matcher::Suffix(from) = &rule.matcher {
-                        suffix = Some((target.as_str(), from.as_str()));
-                    }
-                    true
-                }
-                Action::Name(..) => false,
-                Action::Cname(ref matcher, ref to) => {
-                    cname = Some((matcher, to.as_str()));
-                    true
-                }
-                _ => rule.matcher.matches(name),
-            };
             if matched && rule.stop {
                 end = index + 1;
                 break;
@@ -918,11 +923,10 @@ impl Plugin for Rewrite {
             }
         }
         let rewrite_rcode = |mut code: u16| {
-            for rule in self.rules[..end]
-                .iter()
-                .rev()
-                .filter(|rule| rule.matcher.matches(name))
-            {
+            for (index, rule) in self.rules[..end].iter().enumerate().rev() {
+                if !active_at(&self.rules, index, original_query, &cx.metadata) {
+                    continue;
+                }
                 if let Action::Rcode(from, to) = rule.action
                     && code == from
                 {
@@ -961,11 +965,10 @@ impl Plugin for Rewrite {
             };
             // RFC 6891 §6.1.3: OPT's TTL field contains EDNS metadata, not a TTL.
             response.rewrite_ttls(|mut ttl| {
-                for rule in self.rules[..end]
-                    .iter()
-                    .rev()
-                    .filter(|rule| rule.matcher.matches(name))
-                {
+                for (index, rule) in self.rules[..end].iter().enumerate().rev() {
+                    if !active_at(&self.rules, index, original_query, &cx.metadata) {
+                        continue;
+                    }
                     if let Action::Ttl(min, max) = rule.action {
                         ttl = ttl.max(min).min(max);
                     }
