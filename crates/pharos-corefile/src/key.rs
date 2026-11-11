@@ -134,6 +134,7 @@ fn valid_domain(name: &str) -> bool {
                     return false;
                 }
                 let label_len = i - begin;
+                // RFC 1035 §2.3.4: DNS labels are limited to 63 octets.
                 if label_len >= 64 {
                     return false;
                 }
@@ -166,6 +167,8 @@ fn parse_cidr(host: &str) -> Option<(IpAddr, u32)> {
 }
 
 fn reverse_domains(ip: IpAddr, prefix: u32) -> Vec<String> {
+    // RFC 1035 §3.5: IPv4 reverse names use reversed decimal octets under in-addr.arpa.
+    // RFC 3596 §2.5: IPv6 reverse names use reversed hex nibbles under ip6.arpa.
     let (value, bits, step, suffix) = match ip {
         IpAddr::V4(ip) => (u128::from(u32::from(ip)), 32, 8, "in-addr.arpa."),
         IpAddr::V6(ip) => (u128::from(ip), 128, 4, "ip6.arpa."),
