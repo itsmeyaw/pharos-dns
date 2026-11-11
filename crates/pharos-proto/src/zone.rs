@@ -175,15 +175,17 @@ impl<R: BufRead> ZoneParser<R> {
             self.line += 1;
             let line = &self.input;
             self.entry_end = (self.line, line.len() + usize::from(!line.ends_with(b"\n")));
-            if start == 0 && line.iter().any(|b| !b.is_ascii_whitespace()) {
+            // RFC 1035 §5.1: tabs and spaces delimit the items of an entry.
+            let mut content = line.iter().filter(|&&b| b != b'\r');
+            if start == 0 && content.clone().any(|&b| !matches!(b, b' ' | b'\t' | b'\n')) {
                 start = self.line;
-                inherited = line.first().is_some_and(|b| b.is_ascii_whitespace());
+                inherited = content.next().is_some_and(|&b| matches!(b, b' ' | b'\t'));
             }
             let mut i = 0;
             while i < line.len() {
                 let b = line[i];
                 let column = i + 1;
-                if !active && b != b';' && b != b'(' && b != b')' && !b.is_ascii_whitespace() {
+                if !active && !matches!(b, b';' | b'(' | b')' | b' ' | b'\t' | b'\r' | b'\n') {
                     position = (self.line, i + 1);
                 }
                 if b == b'\\' {
@@ -233,7 +235,7 @@ impl<R: BufRead> ZoneParser<R> {
                     } else if parens.pop().is_none() {
                         return Err(self.error(self.line, column, "unbalanced parentheses"));
                     }
-                } else if !quote && b.is_ascii_whitespace() {
+                } else if !quote && matches!(b, b' ' | b'\t' | b'\n') {
                     if active {
                         tokens.push(Token {
                             text: std::mem::take(&mut token),
