@@ -1526,6 +1526,16 @@ async fn coredns_edns_local_append_replace_and_unset() {
         ("rewrite edns0 local unset 0xffee", &initial[..], &b""[..]),
         ("rewrite edns0 local unset 0xffee", &b""[..], &b""[..]),
         (
+            "rewrite edns0 local unset 0xffee",
+            &b"\xff\xee\0\x03\xab\xcd\xef"[..],
+            &b""[..],
+        ),
+        (
+            "rewrite edns0 local unset 0xffed",
+            &b"\xff\xee\0\x03\xab\xcd\xef"[..],
+            &b"\xff\xee\0\x03\xab\xcd\xef"[..],
+        ),
+        (
             "rewrite edns0 local unset 0xffed",
             &initial[..],
             &initial[..],
