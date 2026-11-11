@@ -9,7 +9,7 @@ use pharos_server::{Lifecycle, ListenerKey, Router, Server, Transport};
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6},
+    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
     sync::Arc,
 };
 
@@ -183,7 +183,7 @@ pub fn servers_with_registry(
             })?;
             for address in &addresses {
                 let socket = if address.is_empty() {
-                    SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port)
+                    SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port)
                 } else if let Some((ip, interface)) = address.split_once('%') {
                     let ip: Ipv6Addr = ip.parse().map_err(|_| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")

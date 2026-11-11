@@ -38,6 +38,47 @@ fn answers(address: SocketAddr) -> bool {
 }
 
 #[test]
+fn unbound_listener_serves_both_address_families() {
+    if TcpListener::bind("[::1]:0").is_err() {
+        return;
+    }
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let dir = std::env::temp_dir().join(format!("pharos-bind-wildcard-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("Corefile"), format!(".:{port} {{\n whoami\n}}\n")).unwrap();
+    let pidfile = dir.join("pid");
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .current_dir(&dir)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !pidfile.exists() {
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "server exited early"
+        );
+        assert!(Instant::now() < deadline, "server did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(answers(format!("127.0.0.1:{port}").parse().unwrap()));
+    assert!(answers(format!("[::1]:{port}").parse().unwrap()));
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
+    assert!(TcpStream::connect(("::1", port)).is_ok());
+    drop(process);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn loopback_except_and_reload_change_listeners() {
     let ipv6 = TcpListener::bind("[::1]:0").is_ok();
     let port = TcpListener::bind("127.0.0.1:0")

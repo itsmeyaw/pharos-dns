@@ -9,7 +9,7 @@ use std::{
     fmt,
     future::Future,
     io,
-    net::SocketAddr,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     pin::Pin,
     sync::Arc,
     time::Duration,
@@ -379,6 +379,9 @@ pub struct Listener {
 
 impl Listener {
     pub async fn bind<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
+        if address.is_ipv6() && address.ip().is_unspecified() {
+            return Self::bind_wildcard(address.port(), handler).await;
+        }
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
         let mut attempts = if address.port() == 0 { 16 } else { 1 };
         let (tcp, address, first) = loop {
@@ -407,6 +410,59 @@ impl Listener {
             })
             .collect::<io::Result<Vec<_>>>()?;
         tasks.push(tcp::spawn(tcp, handler, receiver));
+        Ok(Self {
+            address,
+            stop,
+            tasks,
+        })
+    }
+
+    async fn bind_wildcard<H: Handler>(port: u16, handler: H) -> io::Result<Self> {
+        let mut attempts = if port == 0 { 16 } else { 1 };
+        let (tcp4, tcp6, address, sockets) = loop {
+            let tcp4 = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await?;
+            let address = tcp4.local_addr()?;
+            let address6 = SocketAddr::from((Ipv6Addr::UNSPECIFIED, address.port()));
+            let tcp6 = match bind_ipv6_only(address6) {
+                Ok(tcp) => Some(tcp),
+                Err(error) if ipv6_unavailable(&error) => None,
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts > 1 => {
+                    attempts -= 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let sockets = (|| {
+                let mut sockets = Vec::new();
+                for _ in 0..quota::worker_count() {
+                    sockets.push(udp::bind(address)?);
+                    if tcp6.is_some() {
+                        sockets.push(udp::bind(address6)?);
+                    }
+                }
+                Ok::<_, io::Error>(sockets)
+            })();
+            match sockets {
+                Ok(sockets) => break (tcp4, tcp6, address, sockets),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts > 1 => {
+                    attempts -= 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let (stop, receiver) = watch::channel(false);
+        let handler = Arc::new(handler);
+        let mut tasks = sockets
+            .into_iter()
+            .map(|socket| {
+                let socket = UdpSocket::from_std(socket)?;
+                Ok(udp::spawn(socket, Arc::clone(&handler), receiver.clone()))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        tasks.push(tcp::spawn(tcp4, Arc::clone(&handler), receiver.clone()));
+        if let Some(tcp6) = tcp6 {
+            tasks.push(tcp::spawn(tcp6, handler, receiver));
+        }
         Ok(Self {
             address,
             stop,
@@ -446,6 +502,25 @@ impl Listener {
         }
         result
     }
+}
+
+fn bind_ipv6_only(address: SocketAddr) -> io::Result<TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_only_v6(true)?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    socket.listen(1024)?;
+    TcpListener::from_std(socket.into())
+}
+
+fn ipv6_unavailable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AddrNotAvailable
+        || error.raw_os_error() == Some(libc::EAFNOSUPPORT)
 }
 
 impl Drop for Listener {

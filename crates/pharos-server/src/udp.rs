@@ -44,6 +44,9 @@ pub(crate) fn bind(address: SocketAddr) -> io::Result<StdUdpSocket> {
         Type::DGRAM,
         Some(SocketProtocol::UDP),
     )?;
+    if address.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;

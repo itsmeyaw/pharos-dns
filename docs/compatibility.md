@@ -74,9 +74,9 @@ not-implemented error rather than accepting their configuration.
 
 Interface enumeration uses `getifaddrs`; scoped IPv6 Listener labels use the
 numeric interface index rather than CoreDNS's interface name. Unspecified
-addresses are labelled as unbound addresses. The existing unbound DNS Listener
-uses an IPv4 wildcard instead of CoreDNS's dual-stack wildcard. Reload binds
-new Listeners before removing old ones, so switching between a wildcard and a
+addresses are labelled as unbound addresses. DNS wildcard Listeners use separate
+IPv4 and IPv6 sockets rather than CoreDNS's dual-stack socket. Reload binds new
+Listeners before removing old ones, so switching between a wildcard and a
 specific address on the same port can fail rather than replacing the socket.
 
 The `loop` Plugin probes only the first Domain in a Server Block at startup
