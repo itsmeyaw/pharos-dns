@@ -608,11 +608,7 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 
 
 
-#[cfg(feature = "plugin-prometheus")]
-fn setup_prometheus(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.prometheus = Some(prometheus::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-ready")]
 fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

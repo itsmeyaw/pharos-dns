@@ -98,7 +98,7 @@ fn main() {
             "log" => "log::setup::setup",
             "metadata" => "metadata::setup::setup",
             "loop" => "r#loop::setup::setup",
-            "prometheus" => "setup_prometheus",
+            "prometheus" => "prometheus::setup::setup",
             "ready" => "setup_ready",
             "forward" => "forward::setup::setup",
             "health" => "health::setup::setup",
