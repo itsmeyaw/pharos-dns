@@ -267,19 +267,19 @@ fn gateway_variants() {
     assert!(parse(Type::IPSECKEY, &["10", "0", "2", "gw"]).is_err());
 }
 
-// RFC 1035 §3.2.1: miekg packs zero-valued RDATA for an absent record body.
+// RFC 1035 §5.1: an RR entry carries RDATA; miekg/dns packs zero values instead.
 #[test]
-fn empty_records_match_miekg_zero_values() {
-    for (rtype, length) in [
-        (Type::LOC, 16),
-        (Type::HIP, 4),
-        (Type::CERT, 5),
-        (Type::CSYNC, 6),
-        (Type::IPSECKEY, 3),
-        (Type::AMTRELAY, 2),
-        (Type::TKEY, 16),
+fn empty_records_are_rejected() {
+    for rtype in [
+        Type::LOC,
+        Type::HIP,
+        Type::CERT,
+        Type::CSYNC,
+        Type::IPSECKEY,
+        Type::AMTRELAY,
+        Type::TKEY,
     ] {
-        assert_eq!(parse(rtype, &[]).unwrap(), vec![0; length], "{rtype:?}");
+        assert!(parse(rtype, &[]).is_err(), "{rtype:?}");
     }
 }
 

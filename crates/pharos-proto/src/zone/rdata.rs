@@ -33,6 +33,10 @@ fn parse_rdata_inner(
             $expr
         }};
     }
+    // RFC 1035 §5.1: an RR entry carries RDATA; RFC 3123 §4 lets APL hold zero items.
+    if fields.is_empty() && rtype != Type::APL {
+        return Err("missing RDATA".into());
+    }
     // RFC 3597 §5: generic RDATA can represent any RR type, including known types.
     if fields.first() == Some(&r"\#") {
         if fields.len() < 2 {

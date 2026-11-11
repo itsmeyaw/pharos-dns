@@ -39,7 +39,7 @@ fn character_strings_and_escapes() {
         parse(Type::URI, &["1", "2", "https://x"]).unwrap(),
         b"\x00\x01\x00\x02https://x"
     );
-    assert_eq!(parse(Type::TXT, &[]).unwrap(), []);
+    assert!(parse(Type::TXT, &[]).is_err());
     assert_eq!(parse(Type::TXT, &[r"\999"]).unwrap(), [1, 231]);
     assert_eq!(parse(Type::TXT, &[&"a".repeat(256)]).unwrap().len(), 258);
     assert_eq!(parse(Type::HINFO, &["cpu"]).unwrap(), b"\x03cpu\0");

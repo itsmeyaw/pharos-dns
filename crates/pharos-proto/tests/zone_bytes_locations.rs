@@ -206,27 +206,26 @@ fn record_must_fit_the_dns_wire_limit() {
 }
 
 #[test]
-fn empty_known_rdata_matches_packed_dynamic_update_records() {
-    for (rtype, expected) in [
-        ("A", vec![]),
-        ("AAAA", vec![]),
-        ("NS", vec![]),
-        ("MX", vec![0; 2]),
-        ("SOA", vec![0; 20]),
-        ("HINFO", vec![0; 2]),
-        ("SRV", vec![0; 6]),
-        ("NAPTR", vec![0; 7]),
-        ("TSIG", vec![0; 16]),
-        ("NSEC3", vec![0; 6]),
-        ("CAA", vec![0; 2]),
+fn empty_known_rdata_is_rejected() {
+    // RFC 1035 §5.1: an RR entry carries RDATA, unlike miekg/dns dynamic update records.
+    for rtype in [
+        "A",
+        "AAAA",
+        "NS",
+        "MX",
+        "SOA",
+        "HINFO",
+        "SRV",
+        "NAPTR",
+        "TSIG",
+        "NSEC3",
+        "CAA",
+        "TYPE65400",
+        "TYPE1",
     ] {
         let input = format!("a 60 IN {rtype}\n");
-        let record = parser(input.as_bytes()).next().unwrap().unwrap();
-        assert_eq!(record.rdata, expected, "{rtype}");
+        assert!(parser(input.as_bytes()).next().unwrap().is_err(), "{rtype}");
     }
-    assert!(parser(b"a 60 IN TYPE65400\n").next().unwrap().is_err());
-    assert!(parser(b"a 1 TYPE1\n").next().unwrap().is_err());
-    assert!(parser(b"a 1 TYPE28\n").next().unwrap().is_err());
     assert!(parser(b"a 60 IN A \n").next().unwrap().is_err());
 }
 

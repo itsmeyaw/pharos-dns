@@ -65,14 +65,14 @@ fn strings_and_coordinates() {
         parse(Type::UINFO, &["first", "discard"]).unwrap(),
         b"\x05first"
     );
-    assert_eq!(parse(Type::UINFO, &[]).unwrap(), b"\0");
+    assert!(parse(Type::UINFO, &[]).is_err());
     for ty in [Type::AVC, Type::NINFO, Type::RESINFO] {
         assert_eq!(
             parse(ty, &["a", r"b\032c"]).unwrap(),
             b"\x01a\x03b c",
             "{ty}"
         );
-        assert_eq!(parse(ty, &[]).unwrap(), b"", "{ty}");
+        assert!(parse(ty, &[]).is_err(), "{ty}");
         assert_eq!(parse(ty, &[&"x".repeat(256)]).unwrap().len(), 258, "{ty}");
     }
 }

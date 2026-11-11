@@ -78,3 +78,55 @@ fn generate_with_empty_template_yields_no_records() {
     assert!(parse(b"$GENERATE 0-1\n").is_err());
     assert!(parse(b"$GENERATE 0-1 a\n").is_err());
 }
+
+#[test]
+fn parentheses_do_not_end_an_item() {
+    // RFC 1035 §5.1: only tabs and spaces delimit items; parentheses only join lines.
+    assert_eq!(
+        parse(b"a IN TXT x(y)\n"),
+        Ok(vec![(16, b"\x02xy".to_vec())])
+    );
+    assert_eq!(parse(b"a IN MX 1(0 mx)\n"), parse(b"a IN MX 10 mx\n"));
+    assert_eq!(
+        parse(b"a IN A 19(2.0.2.1\n)\n"),
+        parse(b"a IN A 192.0.2.1\n")
+    );
+    for zone in [
+        b"a IN A(192.0.2.1)\n".as_slice(),
+        b"a(IN A 192.0.2.1)\n",
+        b"a 60(IN A 192.0.2.1)\n",
+        b"a IN TXT(x)\n",
+    ] {
+        assert!(parse(zone).is_err(), "{zone:?}");
+    }
+}
+
+#[test]
+fn records_without_rdata_are_rejected() {
+    // RFC 1035 §5.1: an RR entry is <type> <RDATA>; RFC 3597 §5 \# 0 is the empty form.
+    for zone in [
+        b"a IN A\n".as_slice(),
+        b"a 60 IN TXT\n",
+        b"a 2 TXT;\n",
+        b"a 2 TXT ;\n",
+        b"a IN MX\n",
+        b"a IN (A)\n",
+        b"a IN TXT()\n",
+        b"a IN LOC\n",
+        b"a IN SOA\n",
+    ] {
+        assert!(parse(zone).is_err(), "{zone:?}");
+    }
+    assert_eq!(parse(b"a IN TYPE65400 \\# 0\n"), Ok(vec![(65400, vec![])]));
+    // RFC 3123 §4: an APL RR may hold zero items.
+    assert_eq!(parse(b"a IN APL\n"), Ok(vec![(42, vec![])]));
+}
+
+#[test]
+fn unknown_dollar_word_is_an_owner_name() {
+    // RFC 1035 §5.1: only $ORIGIN and $INCLUDE are control entries (plus $TTL, $GENERATE).
+    let a = Ok(vec![(1, vec![192, 0, 2, 1])]);
+    assert_eq!(parse(b"$FOO IN A 192.0.2.1\n"), a);
+    assert_eq!(parse(b"$ IN A 192.0.2.1\n"), a);
+    assert!(parse(b"$TTL\n").is_err());
+}

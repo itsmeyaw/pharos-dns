@@ -218,18 +218,8 @@ impl<R: BufRead> ZoneParser<R> {
                     self.entry_end = (self.line, column);
                     break;
                 } else if !quote && (b == b'(' || b == b')') {
-                    if active {
-                        tokens.push(Token {
-                            text: std::mem::take(&mut token),
-                            line: position.0,
-                            column: position.1,
-                            followed_by_blank: false,
-                            columns: std::mem::take(&mut columns),
-                            raw: std::mem::take(&mut raw),
-                            quotes: std::mem::take(&mut quotes),
-                        });
-                        active = false;
-                    }
+                    // RFC 1035 §5.1 only makes tabs and spaces delimiters; like miekg/dns,
+                    // a parenthesis is dropped without ending the item.
                     if b == b'(' {
                         parens.push((self.line, column));
                     } else if parens.pop().is_none() {
@@ -307,7 +297,11 @@ impl<R: BufRead> ZoneParser<R> {
             }
         };
         reject_quote(&tokens[0])?;
-        if tokens[0].starts_with('$') {
+        // RFC 1035 §5.1: other entries starting with '$' are owner names, as in miekg/dns.
+        if ["$ORIGIN", "$TTL", "$INCLUDE", "$GENERATE"]
+            .iter()
+            .any(|directive| tokens[0].eq_ignore_ascii_case(directive))
+        {
             if tokens[0].eq_ignore_ascii_case("$ORIGIN") {
                 if tokens.len() != 2 {
                     return Err(err_at(2, "invalid origin"));
@@ -365,7 +359,8 @@ impl<R: BufRead> ZoneParser<R> {
                 child.depth = self.depth + 1;
                 child.include_allowed = true;
                 self.child = Some(Box::new(child));
-            } else if tokens[0].eq_ignore_ascii_case("$GENERATE") {
+            } else {
+                // $GENERATE
                 if tokens.len() < 2 {
                     return Err(err("invalid $GENERATE"));
                 }
@@ -399,8 +394,6 @@ impl<R: BufRead> ZoneParser<R> {
                     directive_ttl: false,
                     owner: None,
                 });
-            } else {
-                return Err(err("unsupported directive"));
             }
             return Ok(None);
         }
@@ -445,18 +438,7 @@ impl<R: BufRead> ZoneParser<R> {
         let ttl = ttl
             .or_else(|| saw_class.then_some(0))
             .ok_or_else(|| err_at(i - 1, "missing TTL"))?;
-        let empty = if i == tokens.len()
-            && !tokens[i - 1].followed_by_blank
-            && Type::from_mnemonic(&tokens[i - 1].to_ascii_uppercase()).is_some()
-        {
-            empty_rdata(rtype)
-        } else {
-            None
-        };
-        if empty.is_none()
-            && rtype == Type::TSIG
-            && tokens.get(i).is_none_or(|field| field.text != r"\#")
-        {
+        if rtype == Type::TSIG && tokens.get(i).is_none_or(|field| field.text != r"\#") {
             return Err(err_at(i - 1, "TSIG has no zone presentation format"));
         }
         // RFC 1035 §5.1: quotes delimit character-strings, not merely whitespace.
@@ -521,17 +503,14 @@ impl<R: BufRead> ZoneParser<R> {
         {
             return Err(err_at(i + 2 + index, "invalid SvcParam escape"));
         }
-        let rdata = match empty {
-            Some(data) => data,
-            None => rdata::parse_rdata_located(rtype, &fields, &self.origin).map_err(
-                |(index, message)| {
-                    err_at(
-                        field_tokens.get(index).copied().unwrap_or(tokens.len()),
-                        &message,
-                    )
-                },
-            )?,
-        };
+        let rdata = rdata::parse_rdata_located(rtype, &fields, &self.origin).map_err(
+            |(index, message)| {
+                err_at(
+                    field_tokens.get(index).copied().unwrap_or(tokens.len()),
+                    &message,
+                )
+            },
+        )?;
         // RFC 1035 §4.2.2: a wire Message cannot exceed 65,535 octets.
         if owner.as_wire().len() + 10 + rdata.len() > usize::from(u16::MAX) {
             return Err(err_at(i, "record exceeds DNS wire size"));
@@ -623,47 +602,6 @@ fn invalid_svc_escape(value: &str) -> bool {
         }
     }
     false
-}
-
-// RFC 2136 §2.5: empty update records use type-specific zero-value wire fields.
-fn empty_rdata(rtype: Type) -> Option<Vec<u8>> {
-    let len = match rtype.0 {
-        1..=5
-        | 7..=10
-        | 12
-        | 14
-        | 16
-        | 17
-        | 23
-        | 28
-        | 30..=32
-        | 39
-        | 41
-        | 42
-        | 47
-        | 49
-        | 56
-        | 58
-        | 61
-        | 99
-        | 128
-        | 258
-        | 261 => 0,
-        19 | 100 => 1,
-        13 | 15 | 18 | 20 | 21 | 26 | 36 | 44 | 64 | 65 | 105 | 107 | 257 | 260 => 2,
-        27 | 45 | 52 | 53 => 3,
-        25 | 43 | 48 | 55 | 57 | 59 | 60 | 101 | 102 | 256 | 32768 | 32769 => 4,
-        37 | 51 => 5,
-        33 | 50 | 62 | 63 | 108 => 6,
-        35 => 7,
-        109 => 8,
-        104 | 106 => 10,
-        29 | 249 | 250 => 16,
-        24 | 46 => 18,
-        6 => 20,
-        _ => return None,
-    };
-    Some(vec![0; len])
 }
 
 impl<R: BufRead> Iterator for ZoneParser<R> {

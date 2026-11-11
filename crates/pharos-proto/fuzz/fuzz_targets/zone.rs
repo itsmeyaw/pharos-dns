@@ -52,6 +52,8 @@ impl Oracle {
 fn pharos(zone: &[u8]) -> String {
     let origin: Name = ORIGIN.parse().unwrap();
     match ZoneParser::new(Cursor::new(zone), origin, "fuzz.zone").collect::<Result<Vec<_>, _>>() {
+        // Documented deviation: Pharos rejects records without RDATA; miekg/dns accepts them.
+        Err(error) if error.to_string().contains("missing RDATA") => "missing_rdata\n".to_owned(),
         Err(_) => "reject\n".to_owned(),
         Ok(records) => {
             let mut result = String::from("accept\n");
@@ -78,6 +80,9 @@ fuzz_target!(|zone: &[u8]| {
         .unwrap();
     let expected = oracle.parse(zone);
     let actual = pharos(zone);
+    if actual == "missing_rdata\n" {
+        return;
+    }
     // Documented deviations (docs/compatibility.md): Pharos rejects zones that miekg/dns
     // accepts but cannot pack, and records with an empty owner.
     if expected.starts_with("pack_error\n") || expected.contains("\n\t") {

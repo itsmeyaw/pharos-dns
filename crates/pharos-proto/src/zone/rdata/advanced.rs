@@ -26,21 +26,6 @@ pub(super) fn parse(
         };
     }
     let result = (|| -> Result<bool, String> {
-        // RFC 1035 §3.2.1: miekg packs zero-valued fields for an absent RDATA body.
-        if fields.is_empty() {
-            let size = match rtype {
-                Type::LOC | Type::TKEY => 16,
-                Type::HIP => 4,
-                Type::CERT => 5,
-                Type::CSYNC => 6,
-                Type::IPSECKEY => 3,
-                Type::AMTRELAY => 2,
-                Type::APL => 0,
-                _ => return Ok(false),
-            };
-            out.resize(size, 0);
-            return Ok(true);
-        }
         match rtype {
             // RFC 1876 §§2-3: LOC coordinates and precision are encoded in centimeters.
             Type::LOC => {

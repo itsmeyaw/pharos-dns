@@ -241,6 +241,7 @@
 - The requested record-data families are complete: the typed RDATA parser supports A, AAAA, NS, CNAME, PTR, MX, SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SSHFP, ZONEMD and TSIG.
 - Unsupported name-bearing types are rejected by the typed parser; other types remain opaque, preserve their bytes and print in RFC 3597 form rather than using their CoreDNS presentation.
 - Zone-file presentation parsing is separate from the wire RDATA parser.
+- A record without RDATA (for example `www IN A`, `www IN TXT` or `www IN MX`) is rejected with its line and column (RFC 1035 §5.1). miekg/dns accepts it and packs empty or zero-filled RDATA, its form for dynamic update records, so such a Zone file loads in CoreDNS and serves malformed answers. Write `\# 0` (RFC 3597 §5) where an empty RDATA is meant; APL may still hold zero items (RFC 3123 §4).
 - A Zone file without a final newline is parsed as if it had one. miekg/dns treats an incomplete last line differently at end of file: it accepts `www` or `www IN A ` (dropping the line or emitting empty RDATA) and rejects `www IN A`, the reverse of its result when the line ends with a newline. Complete last lines parse the same.
 - Unlike miekg/dns, incomplete typed records are rejected rather than accepted as partial values.
 - Pharos rejects a zero-length TXT RDATA, which lacks the required character string; miekg/dns accepts it. TXT strings of length zero are accepted.

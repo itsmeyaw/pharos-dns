@@ -165,7 +165,7 @@ fn txt_chunks_and_hinfo_fields_match_miekg() {
     expected.extend(vec![b'a'; 254]);
     expected.extend([b' ', 1, b'b']);
     assert_eq!(parse(Type::TXT, &[&escaped]).unwrap(), expected);
-    assert_eq!(parse(Type::HINFO, &[]).unwrap(), [0, 0]);
+    assert!(parse(Type::HINFO, &[]).is_err());
     assert_eq!(parse(Type::HINFO, &["cpu"]).unwrap(), b"\x03cpu\x00");
     assert_eq!(
         parse(Type::HINFO, &["cpu os extra"]).unwrap(),
