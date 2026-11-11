@@ -335,6 +335,14 @@ pub struct ListenerKey {
     pub address: SocketAddr,
 }
 
+fn canonical_peer(mut peer: SocketAddr) -> SocketAddr {
+    let ip = peer.ip().to_canonical();
+    if ip != peer.ip() {
+        peer.set_ip(ip);
+    }
+    peer
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Respond,
@@ -498,8 +506,26 @@ fn ipv6_unavailable(error: &io::Error) -> bool {
 
 #[cfg(test)]
 mod wildcard_tests {
-    use super::optional_ipv6;
-    use std::io;
+    use super::{canonical_peer, optional_ipv6};
+    use std::{
+        io,
+        net::{Ipv6Addr, SocketAddr, SocketAddrV6},
+    };
+
+    #[test]
+    fn canonical_peer_preserves_native_ipv6_scope() {
+        let scoped = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1".parse::<Ipv6Addr>().unwrap(),
+            53,
+            7,
+            3,
+        ));
+        assert_eq!(canonical_peer(scoped), scoped);
+        assert_eq!(
+            canonical_peer("[::ffff:127.0.0.1]:53".parse().unwrap()),
+            "127.0.0.1:53".parse().unwrap()
+        );
+    }
 
     #[test]
     fn unavailable_ipv6_falls_back_but_other_errors_remain_errors() {
