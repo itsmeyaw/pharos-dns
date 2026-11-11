@@ -105,6 +105,7 @@ impl Map {
         let Ok(text) = std::str::from_utf8(field) else {
             return;
         };
+        // RFC 4343 §3: DNS name lookup compares ASCII letters case-insensitively.
         let text = text.to_ascii_lowercase();
         let text = if text.ends_with('.') {
             text
@@ -114,6 +115,7 @@ impl Map {
         let Ok(name) = text.parse::<Name>() else {
             return;
         };
+        // RFC 1034 §3.1: a subdomain is contained within its parent domain.
         if !domains.iter().any(|domain| name.is_subdomain_of(domain)) {
             return;
         }
@@ -139,6 +141,7 @@ impl Map {
         }
         let mut wildcard = [0u8; 255];
         let suffix = &key[1 + usize::from(len)..];
+        // RFC 4592 §2.1.1: an asterisk label has wire encoding 0x01 0x2a.
         wildcard[0] = 1;
         wildcard[1] = b'*';
         wildcard[2..2 + suffix.len()].copy_from_slice(suffix);

@@ -31,6 +31,7 @@ impl<'a> EdnsOptions<'a> {
     /// Validate option framing and supported structured payloads without allocating.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, EdnsOptionError> {
         let mut remaining = bytes;
+        // RFC 6891 §6.1.2: each option has a 16-bit code, length, and length-bounded data.
         while !remaining.is_empty() {
             if remaining.len() < 4 {
                 return Err(EdnsOptionError::Truncated);
@@ -115,6 +116,7 @@ impl ClientSubnet {
         if source_prefix > bits || scope_prefix > bits {
             return Err(EdnsOptionError::InvalidOption { code: 8 });
         }
+        // RFC 7871 §6: ECS addresses are truncated to the source prefix and padded with zero bits.
         let address = match address {
             IpAddr::V4(ip) => IpAddr::V4(Ipv4Addr::from(
                 u32::from(ip)
@@ -214,6 +216,7 @@ impl EdnsOption<'_> {
                     &fixed[..0]
                 }
             }
+            // RFC 7871 §6: ECS carries family, source prefix, scope prefix, and address.
             Self::ClientSubnet(subnet) => {
                 fixed[..2].copy_from_slice(&subnet.family.to_be_bytes());
                 fixed[2] = subnet.source_prefix;
@@ -241,6 +244,7 @@ fn parse_option(code: u16, data: &[u8]) -> Result<EdnsOption<'_>, EdnsOptionErro
         3 => EdnsOption::Nsid(data),
         10 => EdnsOption::Cookie(data),
         12 => EdnsOption::Padding(data),
+        // RFC 8914 §2: EDE starts with a 16-bit info code followed by optional text.
         15 => {
             if data.len() < 2 {
                 return Err(invalid());
@@ -250,6 +254,7 @@ fn parse_option(code: u16, data: &[u8]) -> Result<EdnsOption<'_>, EdnsOptionErro
                 extra_text: &data[2..],
             }
         }
+        // RFC 7828 §3.1: keepalive timeout is omitted or encoded in two octets.
         11 => match data {
             [] => EdnsOption::TcpKeepalive(None),
             [hi, lo] => EdnsOption::TcpKeepalive(Some(u16::from_be_bytes([*hi, *lo]))),
@@ -268,6 +273,7 @@ fn parse_option(code: u16, data: &[u8]) -> Result<EdnsOption<'_>, EdnsOptionErro
                 2 => 128,
                 _ => return Err(invalid()),
             };
+            // RFC 7871 §6: the ECS address length and trailing padding must match its prefix.
             if source_prefix > bits
                 || (family != 0 && scope_prefix > bits)
                 || data.len() != 4 + usize::from(source_prefix).div_ceil(8)

@@ -185,6 +185,7 @@ impl State {
         let len =
             tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut response)).await??;
         let message = Message::parse(&response[..len]).map_err(io::Error::other)?;
+        // RFC 1035 §4.1.1: the response ID matches the query ID.
         if message.id() != id {
             return Err(io::Error::other("probe response ID mismatch"));
         }

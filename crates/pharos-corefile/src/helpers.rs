@@ -57,6 +57,7 @@ impl Fallthrough {
             let Some(prefix) = name.len().checked_sub(domain.len()) else {
                 return false;
             };
+            // RFC 4343 §3: DNS name lookup compares ASCII letters case-insensitively.
             if !name.is_char_boundary(prefix) || !name[prefix..].eq_ignore_ascii_case(domain) {
                 return false;
             }

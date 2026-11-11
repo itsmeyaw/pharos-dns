@@ -408,6 +408,7 @@ impl Listener {
         let mut ipv4_only = false;
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
         let mut attempts = if address.port() == 0 { 16 } else { 1 };
+        // RFC 7766 §5: general-purpose DNS implementations support both UDP and TCP.
         let (tcp, address, sockets) = loop {
             let tcp = if wildcard && !ipv4_only {
                 match optional_ipv6(bind_ipv6(address)) {

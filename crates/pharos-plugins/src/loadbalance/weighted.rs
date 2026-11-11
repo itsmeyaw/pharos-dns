@@ -172,6 +172,8 @@ fn parse(bytes: &[u8]) -> io::Result<Vec<Entry>> {
 }
 
 pub(super) fn weight(entries: &[Entry], rr: &Record<'_>) -> u8 {
+    // RFC 1035 §3.4.1: A RDATA is a 32-bit Internet address.
+    // RFC 3596 §2.2: AAAA RDATA is a 128-bit address in network byte order.
     let address = match (rr.rtype, rr.rdata) {
         (Type::A, [a, b, c, d]) => IpAddr::V4(Ipv4Addr::new(*a, *b, *c, *d)),
         (Type::AAAA, bytes) if bytes.len() == 16 => {

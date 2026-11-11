@@ -161,6 +161,7 @@ fn contains(name: NameRef<'_>, zone: &Name) -> bool {
 
 fn child<'a>(prefix: &[&[u8]], zone: NameRef<'_>, wire: &'a mut [u8; 255]) -> Option<NameRef<'a>> {
     let mut n = 0;
+    // RFC 1035 §3.1: labels are at most 63 octets and wire names at most 255 octets.
     for label in prefix.iter().copied().chain(zone.labels()) {
         if label.is_empty() || label.len() > 63 || n + label.len() + 2 > 255 {
             return None;
@@ -239,6 +240,7 @@ fn endpoint_label<'a>(
     pod_names: bool,
     buf: &'a mut [u8; 64],
 ) -> &'a [u8] {
+    // Kubernetes DNS spec 1.1.0 §2.1: an explicit endpoint hostname takes precedence.
     if !address.hostname.is_empty() {
         return address.hostname.as_bytes();
     }
@@ -273,6 +275,7 @@ fn visit_reverse(
 ) -> bool {
     let exposed =
         |namespace: &str| config.namespaces.is_empty() || index.namespace(namespace).is_some();
+    // Kubernetes DNS spec 1.1.0 §2.3.3: a ClusterIP PTR points to its service name.
     if let Some(service) = index
         .services_by_ip_unfiltered(ip)
         .find(|service| exposed(&service.namespace))
@@ -293,6 +296,7 @@ fn visit_reverse(
         return false;
     }
     let mut found = false;
+    // Kubernetes DNS spec 1.1.0 §2.4.3: endpoint PTRs point to hostname.service names.
     for endpoints in index.endpoints_by_ip_unfiltered(ip) {
         if !exposed(&endpoints.namespace) {
             continue;
@@ -349,6 +353,7 @@ fn visit(
         {
             return false;
         }
+        // KEP-1645 MCS DNS spec §2.4.1: headless records use ready endpoint addresses.
         if svc.headless() || !req.endpoint.is_empty() {
             let mut found = false;
             for ep in index.multicluster_endpoints(namespace, service) {
@@ -378,6 +383,7 @@ fn visit(
             return found;
         }
         let mut found = false;
+        // KEP-1645 MCS DNS spec §2.3.1: ClusterSetIP records use the service IPs.
         for port in &svc.ports {
             if matching(req, port) {
                 found = true;
@@ -411,6 +417,7 @@ fn visit(
             && svc.external_name.parse::<IpAddr>().is_err();
     }
     let mut found = !req.zone.is_empty();
+    // Kubernetes DNS spec 1.1.0 §2.4.1: headless records use ready endpoint addresses.
     if svc.headless() || !req.endpoint.is_empty() {
         let zone_matches = |ep: &pharos_kubernetes::object::Endpoints, addr: &EndpointAddress| {
             ep.zones
@@ -448,6 +455,7 @@ fn visit(
             }
         }
     } else {
+        // Kubernetes DNS spec 1.1.0 §2.3.1: ClusterIP records use the service IPs.
         for port in &svc.ports {
             if matching(req, port) {
                 found = true;
@@ -850,6 +858,7 @@ impl pharos_server::Plugin for Kubernetes {
                     return Err(e);
                 }
             }
+            // Kubernetes DNS spec 1.1.0 §2.2: dns-version carries the schema version in TXT.
             if count == 1 && labels[0] == b"dns-version" && q.qtype == Type::TXT {
                 b.record(
                     Section::Answer,
@@ -924,6 +933,7 @@ impl pharos_server::Plugin for Kubernetes {
                     answers += 1;
                 }
             }
+            // Kubernetes DNS spec 1.1.0 §2.5: ExternalName services have a CNAME to the target.
             if let Some(target) = &target
                 && (q.qtype == Type::CNAME || chased.is_some())
             {
@@ -998,6 +1008,9 @@ impl pharos_server::Plugin for Kubernetes {
                                 _ => return,
                             }
                         } else if q.qtype == Type::SRV && port.port >= 0 {
+                            // Kubernetes DNS spec 1.1.0 §2.3.2: ClusterIP SRV targets name services.
+                            // Kubernetes DNS spec 1.1.0 §2.4.2: headless SRV targets name endpoints.
+                            // KEP-1645 MCS DNS spec §2.4.2: headless SRV targets include cluster IDs.
                             let mut wire = [0; 255];
                             let mut parts = [&[][..]; 5];
                             let start = if let Some((endpoint, cluster)) = endpoint {
@@ -1050,6 +1063,7 @@ impl pharos_server::Plugin for Kubernetes {
                     if let Some(err) = write_error {
                         return Err(err);
                     }
+                    // Kubernetes DNS spec 1.1.0 §2.4.2: SRV answers may include target addresses.
                     if !stopped && q.qtype == Type::SRV && answers > 0 {
                         let mut error = None;
                         visit(i, req, &self.config, |ip, port, endpoint| {
@@ -1117,6 +1131,7 @@ impl pharos_server::Plugin for Kubernetes {
                     Ok(())
                 })?;
             }
+            // RFC 2308 §3: authoritative NXDOMAIN and NODATA responses include the zone SOA.
             if answers == 0 {
                 soa(
                     &mut b,

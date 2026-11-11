@@ -5,6 +5,7 @@ use std::{
     str::FromStr,
 };
 
+// RFC 1035 §2.3.4: wire names are at most 255 octets and labels at most 63 octets.
 const MAX_NAME_LEN: usize = 255;
 const MAX_LABEL_LEN: usize = 63;
 const MAX_POINTER_HOPS: usize = 255;
@@ -62,6 +63,7 @@ impl std::error::Error for NameError {}
 impl Name {
     /// Parses a presentation name, resolving relative names against `origin`.
     pub fn parse(value: &str, origin: &Origin) -> Result<Self, NameError> {
+        // RFC 1035 §5.1: @ denotes the current origin; relative names append it.
         if value == "@" {
             return Ok(origin.clone());
         }
@@ -158,6 +160,7 @@ impl Name {
                     label.clear();
                     position += 1;
                 }
+                // RFC 4343 §2.1: escapes represent literal octets or three-digit decimal values.
                 b'\\' => {
                     position += 1;
                     let escaped = bytes.get(position).ok_or(NameError::InvalidEscape)?;
@@ -229,6 +232,7 @@ impl Hash for Name {
 
 impl Ord for Name {
     fn cmp(&self, other: &Self) -> Ordering {
+        // RFC 4034 §6.1: canonical name order compares labels from right to left.
         let (left_offsets, left_count) = label_offsets(&self.wire);
         let (right_offsets, right_count) = label_offsets(&other.wire);
         for index in 0..left_count.min(right_count) {
@@ -457,6 +461,7 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
                 }
                 let low = *message.get(position + 1).ok_or(NameError::Truncated)?;
                 let target = usize::from(length & 0x3f) << 8 | usize::from(low);
+                // RFC 1035 §4.1.4: compression pointers refer to a prior occurrence.
                 if target >= position {
                     return Err(NameError::PointerNotBackwards);
                 }
@@ -540,6 +545,7 @@ fn label_at(wire: &[u8], offset: usize) -> &[u8] {
 }
 
 fn equal_label(left: &[u8], right: &[u8]) -> bool {
+    // RFC 4343 §3: ASCII letters in DNS labels compare case-insensitively.
     left.len() == right.len()
         && left
             .iter()
@@ -579,6 +585,7 @@ fn write_presentation<'a>(
     labels: impl Iterator<Item = &'a [u8]>,
     canonical: bool,
 ) -> fmt::Result {
+    // RFC 4343 §2.1: escape dots and non-printing label octets in presentation form.
     let mut first = true;
     for label in labels {
         if !first {

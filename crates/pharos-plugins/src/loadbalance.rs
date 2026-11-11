@@ -154,6 +154,8 @@ impl Subnet {
         Some(Self { address, prefix })
     }
 
+    // RFC 1035 §3.4.1: A RDATA is a 32-bit Internet address.
+    // RFC 3596 §2.2: AAAA RDATA is a 128-bit address in network byte order.
     fn contains(&self, rr: &pharos_proto::Record<'_>) -> bool {
         let address = match (rr.rtype, rr.rdata) {
             (Type::A, [a, b, c, d]) => IpAddr::V4(std::net::Ipv4Addr::new(*a, *b, *c, *d)),
@@ -259,6 +261,7 @@ impl PointerCollector<'_> {
                     mark(self.direct, offset);
                 }
                 let target_after = relocated(self.records, target);
+                // RFC 1035 §4.1.4: compression pointers use a 14-bit offset to a prior occurrence.
                 if target_after > 0x3fff || target_after >= destination {
                     return false;
                 }
@@ -317,6 +320,7 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
         let Ok(message) = Message::parse(wire) else {
             return;
         };
+        // RFC 8945 §4.3.2: a TSIG MAC covers the DNS message in wire format.
         if message.rcode() != Rcode::NOERROR
             || message
                 .questions()
@@ -502,6 +506,7 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
             wire[destination..destination + len]
                 .copy_from_slice(&original[usize::from(item.start)..usize::from(item.end)]);
         }
+        // RFC 1035 §4.1.4: a compression pointer has two leading one bits and a 14-bit offset.
         for pointer in &pointers[..pointer_count] {
             let destination = usize::from(pointer.destination);
             wire[destination..destination + 2]

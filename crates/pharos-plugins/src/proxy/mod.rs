@@ -155,6 +155,7 @@ impl Socket {
                 s.send(wire).await?;
                 Ok(())
             }
+            // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
             Self::Tcp(s) => {
                 s.write_all(&(wire.len() as u16).to_be_bytes()).await?;
                 s.write_all(wire).await
@@ -164,6 +165,7 @@ impl Socket {
     async fn receive(&mut self, wire: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Udp(s) => s.recv(wire).await,
+            // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
             Self::Tcp(s) => {
                 let len = usize::from(s.read_u16().await?);
                 if len > wire.len() {
@@ -407,6 +409,7 @@ impl Proxy {
             transport
         };
         let result = self.exchange_once(query, response, selected).await;
+        // RFC 2181 §9: a client can retry a truncated response over TCP.
         let result = match result {
             Ok(_result)
                 if selected == Transport::Udp
@@ -461,18 +464,21 @@ impl Proxy {
                 metrics.cache[protocol].miss();
             }
         }
+        // RFC 7766 §6.2.1: DNS clients should reuse persistent TCP connections.
         let (mut socket, created) = if let Some(cached) = cached {
             (cached.socket, cached.created)
         } else {
             (self.dial(transport).await?, Instant::now())
         };
         let mut id = [0; 2];
+        // RFC 8945 §5.5: forward messages with unshared TSIG keys unchanged.
         if request
             .additionals()
             .any(|record| record.rtype == Type::TSIG)
         {
             id.copy_from_slice(&query[..2]);
         } else {
+            // RFC 5452 §9.2: outgoing queries use unpredictable IDs.
             getrandom::getrandom(&mut id)
                 .map_err(|_| Error::Io(io::Error::other("random ID generation failed")))?;
         }
@@ -495,6 +501,7 @@ impl Proxy {
                 if len < 12 && transport == Transport::Tcp {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
+                // RFC 5452 §9.1: match response IDs to outstanding queries.
                 if len >= 12 && response[..2] == id {
                     return Ok::<_, io::Error>(len);
                 }
@@ -533,6 +540,7 @@ impl Proxy {
                     .sum::<usize>();
             let flags = [response[2], response[3]];
             response[..length].copy_from_slice(&query[..length]);
+            // RFC 5625 §4.4: a proxy that truncates a response must set TC.
             response[2] = flags[0] | 0x02;
             response[3] = flags[1];
             response[6..12].fill(0);
@@ -546,6 +554,7 @@ impl Proxy {
                 .get_or_init(|| metrics.proxy.request_duration(&Rcode(code).to_string()))
                 .observe(start.elapsed().as_secs_f64());
         }
+        // RFC 5452 §9.1: response names, classes, and types must match the query.
         let same_questions = request.question_count() == answer.question_count()
             && request
                 .questions()
@@ -554,6 +563,7 @@ impl Proxy {
         if !answer.qr() || !same_questions {
             return Err(Error::Mismatch);
         }
+        // RFC 1035 §4.1.1: the response ID matches the original query ID.
         response[..2].copy_from_slice(&query[..2]);
         {
             let mut queue = self.shards[protocol][shard].lock().unwrap();

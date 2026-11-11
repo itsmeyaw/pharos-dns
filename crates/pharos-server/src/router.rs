@@ -111,6 +111,7 @@ impl<C> Router<C> {
                 continue;
             }
             let domain = NameRef::parse(block.domain.as_wire(), 0).expect("validated Domain");
+            // RFC 4343 §3: DNS lookup compares ASCII letters case-insensitively.
             if !question
                 .name
                 .labels()

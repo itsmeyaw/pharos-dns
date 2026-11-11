@@ -240,8 +240,10 @@ impl pharos_server::Plugin for Hosts {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
+        // RFC 1035 §3.1: wire names are at most 255 octets and end with a zero-length label.
         let mut wire = [0u8; 255];
         let mut len = 0;
+        // RFC 4343 §3: DNS name lookup compares ASCII letters case-insensitively.
         for label in question.name.labels() {
             wire[len] = label.len() as u8;
             len += 1;
@@ -321,6 +323,7 @@ impl pharos_server::Plugin for Hosts {
                 .map_err(pharos_server::Error::Build)?;
             for ip in ips.0.iter().chain(ips.1) {
                 match ip {
+                    // RFC 1035 §3.4.1: A RDATA carries a 32-bit Internet address.
                     std::net::IpAddr::V4(ip) => builder.record(
                         Section::Answer,
                         question.name,
@@ -329,6 +332,7 @@ impl pharos_server::Plugin for Hosts {
                         self.ttl,
                         &ip.octets(),
                     ),
+                    // RFC 3596 §2.2: AAAA RDATA carries a 128-bit IPv6 address.
                     std::net::IpAddr::V6(ip) => builder.record(
                         Section::Answer,
                         question.name,
@@ -340,6 +344,7 @@ impl pharos_server::Plugin for Hosts {
                 }
                 .map_err(pharos_server::Error::Build)?;
             }
+            // RFC 1035 §3.3.12: PTR RDATA is a domain name.
             for name in names1
                 .into_iter()
                 .flatten()
@@ -363,6 +368,7 @@ impl pharos_server::Plugin for Hosts {
     }
 }
 
+// RFC 1034 §3.1: a subdomain name ends with its containing domain name.
 fn contains(mut key: &[u8], domains: &[Name]) -> bool {
     loop {
         if domains
@@ -388,6 +394,7 @@ fn reverse_address(name: NameRef<'_>) -> Option<std::net::IpAddr> {
         labels[count] = label;
         count += 1;
     }
+    // RFC 1035 §3.5: IPv4 reverse names use reversed decimal octets without leading zeros.
     if count == 6
         && labels[4].eq_ignore_ascii_case(b"in-addr")
         && labels[5].eq_ignore_ascii_case(b"arpa")
@@ -404,6 +411,7 @@ fn reverse_address(name: NameRef<'_>) -> Option<std::net::IpAddr> {
         }
         return Some(std::net::Ipv4Addr::from(bytes).into());
     }
+    // RFC 3596 §2.5: IP6.ARPA names encode IPv6 nibbles in reverse order.
     if count == 34
         && labels[32].eq_ignore_ascii_case(b"ip6")
         && labels[33].eq_ignore_ascii_case(b"arpa")

@@ -46,6 +46,7 @@ impl<'a> SvcParams<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, RdataError> {
         let mut rest = bytes;
         let mut previous = None;
+        // RFC 9460 §2.2: SvcParams are length-framed and strictly increasing by key.
         while !rest.is_empty() {
             let header = rest.get(..4).ok_or(RdataError)?;
             let key = u16::from_be_bytes([header[0], header[1]]);
@@ -85,6 +86,7 @@ impl<'a> SvcParams<'a> {
 
 fn valid_svc_param(key: u16, value: &[u8]) -> Result<(), RdataError> {
     match key {
+        // RFC 9460 §8: mandatory keys are nonempty, ordered, and exclude mandatory itself.
         0 => {
             if value.is_empty() || !value.len().is_multiple_of(2) {
                 return Err(RdataError);
@@ -98,6 +100,7 @@ fn valid_svc_param(key: u16, value: &[u8]) -> Result<(), RdataError> {
                 previous = key;
             }
         }
+        // RFC 9460 §7.1.1: alpn contains one or more nonempty length-prefixed IDs.
         1 => {
             if value.is_empty() {
                 return Err(RdataError);
@@ -111,8 +114,12 @@ fn valid_svc_param(key: u16, value: &[u8]) -> Result<(), RdataError> {
                 rest = next;
             }
         }
+        // RFC 9460 §7.1.1: no-default-alpn has an empty wire value.
+        // RFC 9540 §4: ohttp has an empty wire value.
         2 | 8 if !value.is_empty() => return Err(RdataError),
+        // RFC 9460 §7.2: the port value is a two-octet network-order integer.
         3 if value.len() != 2 => return Err(RdataError),
+        // RFC 9460 §7.3: address hints are nonempty sequences of addresses.
         4 if value.is_empty() || !value.len().is_multiple_of(4) => return Err(RdataError),
         6 => {
             if value.is_empty() || !value.len().is_multiple_of(16) {
@@ -130,6 +137,7 @@ fn valid_svc_param(key: u16, value: &[u8]) -> Result<(), RdataError> {
 }
 
 fn character_string(bytes: &[u8]) -> Result<(&[u8], &[u8]), RdataError> {
+    // RFC 1035 §3.3: a character-string is one length octet followed by its data.
     let (&len, rest) = bytes.split_first().ok_or(RdataError)?;
     let len = usize::from(len);
     if len > rest.len() {
@@ -191,6 +199,7 @@ pub(crate) fn compressible_names(
 }
 
 fn valid_txt(mut bytes: &[u8]) -> Result<(), RdataError> {
+    // RFC 1035 §3.3.14: TXT RDATA contains one or more character-strings.
     if bytes.is_empty() {
         return Err(RdataError);
     }
@@ -201,6 +210,7 @@ fn valid_txt(mut bytes: &[u8]) -> Result<(), RdataError> {
 }
 
 fn valid_bitmap(mut bytes: &[u8]) -> Result<(), RdataError> {
+    // RFC 4034 §4.1.2: bitmap windows are ordered, 1–32 octets, and have no trailing zeros.
     let mut previous = None;
     while !bytes.is_empty() {
         let header = bytes.get(..2).ok_or(RdataError)?;
@@ -644,9 +654,11 @@ impl<'a> Rdata<'a> {
             return Err(RdataError);
         }
         match rtype {
+            // RFC 1035 §3.4.1: A RDATA is a four-octet Internet address.
             Type::A => Ok(Self::A(Ipv4Addr::from(
                 <[u8; 4]>::try_from(bytes).map_err(|_| RdataError)?,
             ))),
+            // RFC 3596 §2.2: AAAA RDATA is a 128-bit IPv6 address in network order.
             Type::AAAA => Ok(Self::Aaaa(Ipv6Addr::from(
                 <[u8; 16]>::try_from(bytes).map_err(|_| RdataError)?,
             ))),
@@ -661,6 +673,7 @@ impl<'a> Rdata<'a> {
                     _ => Self::Ptr(name),
                 })
             }
+            // RFC 1035 §3.3.9: MX RDATA contains a preference and exchange name.
             Type::MX => {
                 let preference = u16::from_be_bytes(
                     bytes
@@ -679,6 +692,7 @@ impl<'a> Rdata<'a> {
                     exchange,
                 })
             }
+            // RFC 1035 §3.3.13: SOA has two names followed by five 32-bit fields.
             Type::SOA => {
                 let mname = NameRef::parse(wire, offset).map_err(|_| RdataError)?;
                 if mname.wire_len() >= len {
@@ -713,6 +727,7 @@ impl<'a> Rdata<'a> {
                 valid_txt(bytes)?;
                 Ok(Self::Txt(bytes))
             }
+            // RFC 1035 §3.3.2: HINFO contains CPU and OS character-strings.
             Type::HINFO => {
                 let (cpu, rest) = character_string(bytes)?;
                 let (os, rest) = character_string(rest)?;
@@ -721,6 +736,7 @@ impl<'a> Rdata<'a> {
                 }
                 Ok(Self::Hinfo { cpu, os })
             }
+            // RFC 8659 §4.1: CAA has flags, a nonempty alphanumeric tag, and value.
             Type::CAA => {
                 let (&flags, rest) = bytes.split_first().ok_or(RdataError)?;
                 let (tag, value) = character_string(rest)?;
@@ -729,6 +745,7 @@ impl<'a> Rdata<'a> {
                 }
                 Ok(Self::Caa { flags, tag, value })
             }
+            // RFC 7553 §4.5: URI RDATA has 16-bit priority and weight followed by target.
             Type::URI => {
                 let header = bytes.get(..4).ok_or(RdataError)?;
                 Ok(Self::Uri {
@@ -750,6 +767,7 @@ impl<'a> Rdata<'a> {
                     target,
                 })
             }
+            // RFC 3403 §4.1: NAPTR has order, preference, three strings, and replacement.
             Type::NAPTR => {
                 let header = bytes.get(..4).ok_or(RdataError)?;
                 let (flags, rest) = character_string(&bytes[4..])?;
@@ -770,6 +788,7 @@ impl<'a> Rdata<'a> {
                     replacement,
                 })
             }
+            // RFC 9460 §2.2: SVCB RDATA contains priority, target, and SvcParams.
             Type::SVCB | Type::HTTPS => {
                 let header = bytes.get(..2).ok_or(RdataError)?;
                 let priority = u16::from_be_bytes([header[0], header[1]]);
@@ -790,6 +809,7 @@ impl<'a> Rdata<'a> {
                     }
                 })
             }
+            // RFC 4034 §5.1: DS RDATA contains key tag, algorithm, digest type, and digest.
             Type::DS | Type::CDS => {
                 let h = bytes.get(..4).ok_or(RdataError)?;
                 let (key_tag, algorithm, digest_type, digest) =
@@ -810,6 +830,7 @@ impl<'a> Rdata<'a> {
                     }
                 })
             }
+            // RFC 4034 §2.1: DNSKEY has flags, protocol, algorithm, and public key.
             Type::DNSKEY | Type::CDNSKEY => {
                 let h = bytes.get(..4).ok_or(RdataError)?;
                 let (flags, protocol, algorithm, public_key) =
@@ -830,6 +851,7 @@ impl<'a> Rdata<'a> {
                     }
                 })
             }
+            // RFC 4034 §3.1: RRSIG has an 18-octet fixed prefix, signer name, and signature.
             Type::RRSIG => {
                 let h = bytes.get(..18).ok_or(RdataError)?;
                 let signer = NameRef::parse(wire, offset + 18).map_err(|_| RdataError)?;
@@ -846,12 +868,15 @@ impl<'a> Rdata<'a> {
                     signature,
                 })
             }
+            // RFC 4034 §4.1: NSEC contains a next-domain name and type bitmaps.
             Type::NSEC => {
                 let next = NameRef::parse(wire, offset).map_err(|_| RdataError)?;
                 let bitmap = bytes.get(next.wire_len()..).ok_or(RdataError)?;
                 valid_nsec_bitmap(bitmap)?;
                 Ok(Self::Nsec { next, bitmap })
             }
+            // RFC 5155 §3.2: NSEC3 adds a next hash and bitmap after the salt.
+            // RFC 5155 §4.2: NSEC3PARAM ends after its length-prefixed salt.
             Type::NSEC3 | Type::NSEC3PARAM => {
                 let h = bytes.get(..4).ok_or(RdataError)?;
                 let (salt, rest) = character_string(&bytes[4..])?;
@@ -897,6 +922,7 @@ impl<'a> Rdata<'a> {
                     fingerprint: &bytes[2..],
                 })
             }
+            // RFC 8976 §2.2.4: a ZONEMD digest is at least 12 octets.
             Type::ZONEMD => {
                 let h = bytes.get(..18).ok_or(RdataError)?;
                 Ok(Self::Zonemd {
@@ -906,6 +932,7 @@ impl<'a> Rdata<'a> {
                     digest: &bytes[6..],
                 })
             }
+            // RFC 8945 §4.2: TSIG uses a 48-bit time and length-prefixed MAC and other data.
             Type::TSIG => {
                 let algorithm = NameRef::parse(wire, offset).map_err(|_| RdataError)?;
                 let rest = bytes.get(algorithm.wire_len()..).ok_or(RdataError)?;
@@ -1035,6 +1062,7 @@ impl<'a> Rdata<'a> {
                 writer.write_bytes(&priority.to_be_bytes())?;
                 writer.write_bytes(&weight.to_be_bytes())?;
                 writer.write_bytes(&port.to_be_bytes())?;
+                // RFC 3597 §4: SRV target names are not compressed by senders.
                 writer.write_uncompressed_name(*target)
             }
             Self::Naptr {
@@ -1050,6 +1078,7 @@ impl<'a> Rdata<'a> {
                 write_character_string(writer, flags)?;
                 write_character_string(writer, services)?;
                 write_character_string(writer, regexp)?;
+                // RFC 3403 §4.1: the NAPTR replacement name is not compressed.
                 writer.write_uncompressed_name(*replacement)
             }
             Self::Svcb {
@@ -1064,6 +1093,7 @@ impl<'a> Rdata<'a> {
             } => {
                 SvcParams::parse(params).map_err(|_| BuildError::InvalidRdata)?;
                 writer.write_bytes(&priority.to_be_bytes())?;
+                // RFC 9460 §2.2: the SVCB TargetName is uncompressed.
                 writer.write_uncompressed_name(*target)?;
                 writer.write_bytes(params)
             }
@@ -1116,11 +1146,13 @@ impl<'a> Rdata<'a> {
                     writer.write_bytes(&value.to_be_bytes())?;
                 }
                 writer.write_bytes(&key_tag.to_be_bytes())?;
+                // RFC 4034 §3.1.7: senders must not compress the RRSIG signer name.
                 writer.write_uncompressed_name(*signer)?;
                 writer.write_bytes(signature)
             }
             Self::Nsec { next, bitmap } => {
                 valid_nsec_bitmap(bitmap).map_err(|_| BuildError::InvalidRdata)?;
+                // RFC 4034 §4.1.1: senders must not compress the NSEC next domain name.
                 writer.write_uncompressed_name(*next)?;
                 writer.write_bytes(bitmap)
             }
@@ -1206,6 +1238,7 @@ impl<'a> Rdata<'a> {
                 if name_len + 16 + mac.len() + other.len() > usize::from(u16::MAX) {
                     return Err(BuildError::InvalidRdata);
                 }
+                // RFC 8945 §4.2: the TSIG algorithm name must not be compressed.
                 writer.write_uncompressed_name(*algorithm)?;
                 writer.write_bytes(&time_signed.to_be_bytes()[2..])?;
                 writer.write_bytes(&fudge.to_be_bytes())?;
@@ -1505,6 +1538,7 @@ impl fmt::Display for Rdata<'_> {
                 Ok(())
             }
             Self::Unknown(_, bytes) => {
+                // RFC 3597 §5: unknown RDATA is presented as length and hexadecimal octets.
                 write!(f, "\\# {} ", bytes.len())?;
                 for byte in *bytes {
                     write!(f, "{byte:02x}")?;

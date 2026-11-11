@@ -45,6 +45,7 @@ fn expand(
             for (_, ip) in matches {
                 if let Some(ip) = ip {
                     let mut address = ip.to_string();
+                    // RFC 4007 §11.2: interface names can identify scoped IPv6 zones.
                     if let IpAddr::V6(v6) = ip
                         && (v6.is_unicast_link_local()
                             || (v6.is_multicast() && v6.segments()[0] & 0xf == 2))

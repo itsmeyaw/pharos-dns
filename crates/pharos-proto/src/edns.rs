@@ -9,6 +9,7 @@ impl Message<'_> {
         &self,
         wire: &'a mut Vec<u8>,
     ) -> Result<Option<&'a mut Vec<u8>>, BuildError> {
+        // RFC 6891 §6.1.3: unsupported EDNS versions require a BADVERS response.
         if !self.opt().is_some_and(Opt::bad_version) {
             return Ok(None);
         }
@@ -56,6 +57,7 @@ impl<'a> Opt<'a> {
         flags: u16,
         options: EdnsOptions<'a>,
     ) -> Self {
+        // RFC 6891 §6.1.3: OPT's TTL field carries extended RCODE, version, and flags.
         Self {
             size,
             ttl: ((extended_rcode as u32) << 24) | ((version as u32) << 16) | flags as u32,
@@ -110,6 +112,7 @@ impl<'a> Opt<'a> {
     pub fn encode(self, output: &mut Vec<u8>) -> Result<(), BuildError> {
         let len =
             u16::try_from(self.options.as_bytes().len()).map_err(|_| BuildError::RdataTooLong)?;
+        // RFC 6891 §6.1.2: OPT uses root NAME, TYPE 41, payload size, TTL fields, and options.
         output.extend_from_slice(&[0, 0, 41]);
         output.extend_from_slice(&self.size.to_be_bytes());
         output.extend_from_slice(&self.ttl.to_be_bytes());
@@ -231,6 +234,7 @@ pub const fn normalized_udp_size(size: u16, tcp: bool) -> u16 {
     if tcp {
         u16::MAX
     } else if size < 512 {
+        // RFC 6891 §6.2.3: advertised UDP sizes below 512 are treated as 512.
         512
     } else {
         size

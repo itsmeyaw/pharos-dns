@@ -89,6 +89,7 @@ impl<'a> MessageBuilder<'a> {
             return Err(BuildError::InvalidMaxSize);
         }
         wire.clear();
+        // RFC 1035 §4.1.1: the header starts with ID, flags, and four section counts.
         wire.extend_from_slice(&id.to_be_bytes());
         wire.extend_from_slice(&flags.to_be_bytes());
         wire.extend_from_slice(&[0; 8]);
@@ -157,6 +158,7 @@ impl<'a> MessageBuilder<'a> {
         self.check_count(0)?;
         let start = self.wire.len();
         let slots = self.offset_count;
+        // RFC 1035 §4.1.2: each question contains QNAME, QTYPE, and QCLASS.
         let result = self
             .write_name(name)
             .and_then(|()| self.write_bytes(&qtype.0.to_be_bytes()))
@@ -207,6 +209,7 @@ impl<'a> MessageBuilder<'a> {
         self.check_count(index)?;
         let start = self.wire.len();
         let slots = self.offset_count;
+        // RFC 1035 §4.1.3: each RR contains NAME, TYPE, CLASS, TTL, RDLENGTH, and RDATA.
         let result = (|| {
             self.write_name(name)?;
             self.write_bytes(&rtype.0.to_be_bytes())?;
@@ -283,6 +286,7 @@ impl<'a> MessageBuilder<'a> {
                 if error != BuildError::SizeLimit {
                     return Err(error);
                 }
+                // RFC 1035 §4.1.1: TC marks a message truncated by the transmission limit.
                 self.wire[2] |= 0x02;
                 self.stopped = true;
                 Ok(false)
@@ -317,6 +321,7 @@ impl<'a> MessageBuilder<'a> {
                         && NameRef::parse(self.wire, offset)
                             .is_ok_and(|stored| stored.labels().eq(name.labels().skip(index)))
                 });
+            // RFC 1035 §4.1.4: a pointer has two leading one bits and a 14-bit offset.
             if compress && let Some(offset) = pointer {
                 return self.write_bytes(&(0xc000 | offset).to_be_bytes());
             }

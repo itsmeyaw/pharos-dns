@@ -85,6 +85,7 @@ impl Plugin for Log {
                 .map_or_else(|| NameRef::parse(&[0], 0).unwrap(), |q| q.name);
             let count = labels.labels().count();
             let scope_count = scope.label_count();
+            // RFC 4343 §3: DNS label comparisons ignore ASCII letter case.
             count >= scope_count
                 && labels
                     .labels()

@@ -12,6 +12,7 @@ use std::{
 mod kubernetes;
 pub use kubernetes::{KubernetesMetrics, KubernetesRequestMetrics};
 
+// IANA DNS Parameters §Resource Record (RR) TYPEs: these values identify DNS query types.
 const TYPES: &[(u16, &str)] = &[
     (1, "A"),
     (28, "AAAA"),
@@ -1090,6 +1091,7 @@ fn record(
     rcode: u16,
     duration: f64,
 ) {
+    // RFC 6891 §6.1.3: the extended RCODE combines eight OPT bits with four header bits.
     assert!(
         usize::from(rcode) < RESPONSE_CODES,
         "DNS RCODE must fit in 12 bits"
@@ -1110,6 +1112,7 @@ fn record(
     responses[usize::from(rcode)].fetch_add(1, Ordering::Relaxed);
 }
 
+// Prometheus text exposition §Comments, help text, and type information: emit HELP and TYPE.
 fn header(out: &mut String, name: &str, help: &str, kind: &str) {
     writeln!(
         out,
@@ -1118,6 +1121,7 @@ fn header(out: &mut String, name: &str, help: &str, kind: &str) {
     .unwrap();
 }
 
+// Prometheus text exposition §Line format: escape backslash, quote, and line feed in labels.
 fn labels(out: &mut String, values: &[(&str, &str)]) {
     for (index, (name, value)) in values.iter().enumerate() {
         if index != 0 {
@@ -1168,6 +1172,7 @@ impl SortedSamples {
 }
 
 pub(crate) fn float(value: f64) -> String {
+    // Prometheus text exposition §Line format: NaN, +Inf, and -Inf are valid sample values.
     if value.is_nan() {
         return "NaN".into();
     }
@@ -1224,6 +1229,7 @@ fn histogram_family<'a>(
     sorted.write(out);
 }
 
+// Prometheus text exposition §Histograms and summaries: buckets are ordered and end with +Inf.
 fn encode_histogram(
     out: &mut String,
     name: &str,

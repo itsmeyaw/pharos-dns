@@ -60,6 +60,7 @@ pub(crate) fn spawn<H: Handler>(
 }
 
 async fn read_frame(reader: &mut OwnedReadHalf) -> io::Result<Vec<u8>> {
+    // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
     let mut length = [0; 2];
     timeout(IDLE_TIMEOUT, reader.read_exact(&mut length[..1]))
         .await
@@ -124,6 +125,7 @@ async fn serve<H: Handler>(
         }
 
         // A complete frame is accepted work and must finish even during shutdown.
+        // RFC 7766 §6.2.1.1: servers should process pipelined TCP queries concurrently.
         let handler = Arc::clone(&handler);
         let writer = Arc::clone(&writer);
         let failed = failed.clone();
@@ -134,6 +136,7 @@ async fn serve<H: Handler>(
                 == Action::Respond
                 && let Ok(length) = u16::try_from(response.len())
             {
+                // RFC 7766 §5: TCP responses use the same connection as the query.
                 let mut writer = writer.lock().await;
                 if let Some(stream) = writer.as_mut() {
                     let result = timeout(WRITE_TIMEOUT, async {

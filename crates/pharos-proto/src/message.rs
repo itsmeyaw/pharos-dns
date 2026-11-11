@@ -110,6 +110,7 @@ impl<'a> Record<'a> {
 }
 
 fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), MessageError> {
+    // RFC 1035 §4.1.2: a question consists of QNAME, QTYPE, and QCLASS.
     let name = NameRef::parse(wire, offset)?;
     let offset = offset + name.wire_len();
     let result = Question {
@@ -120,6 +121,7 @@ fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), Message
     Ok((result, offset + 4))
 }
 fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageError> {
+    // RFC 1035 §4.1.3: RDLENGTH bounds the RDATA following the fixed RR fields.
     let name = NameRef::parse(wire, offset)?;
     let offset = offset + name.wire_len();
     let rtype = Type(read_u16(wire, offset)?);
@@ -197,6 +199,7 @@ impl<'a> Message<'a> {
         if wire.len() < HEADER_LEN {
             return Err(MessageError::Truncated);
         }
+        // RFC 1035 §4.1.1: the four header counts describe the following sections.
         let counts = [
             read_u16(wire, 4)?,
             read_u16(wire, 6)?,
@@ -213,6 +216,8 @@ impl<'a> Message<'a> {
                     question(wire, offset)?.1
                 } else {
                     let (rr, next) = record(wire, offset)?;
+                    // RFC 6891 §6.1.1: OPT appears at most once in the additional section.
+                    // RFC 6891 §6.1.2: the OPT owner is the root and its RDATA holds options.
                     if rr.rtype == Type::OPT {
                         if section != 3
                             || has_opt
@@ -475,6 +480,7 @@ impl<'a> MessageMut<'a> {
                 let ttl = read_u32(self.wire, ttl_offset).expect("validated Message");
                 let len = usize::from(read_u16(self.wire, offset + 8).expect("validated Message"));
                 offset += 10 + len;
+                // RFC 6891 §6.1.3: OPT uses the TTL field for extended RCODE, version, and flags.
                 if !is_opt {
                     self.wire[ttl_offset..ttl_offset + 4]
                         .copy_from_slice(&rewrite(ttl).to_be_bytes());
