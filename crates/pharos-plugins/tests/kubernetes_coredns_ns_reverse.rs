@@ -126,7 +126,7 @@ async fn chain(endpoint: &str, zones: &str, options: &str) -> Chain {
 
 struct Sentinel;
 impl Next for Sentinel {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Unanswered(Rcode::REFUSED)
     }
 }

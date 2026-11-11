@@ -945,7 +945,7 @@ enum TruncatedRoute {
 }
 
 impl pharos_server::Chain for TruncatedRoute {
-    async fn serve(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {
+    async fn serve(&self, cx: &mut pharos_server::Context<'_, '_>) -> pharos_server::Outcome {
         match self {
             Self::Kubernetes(chain) => chain.serve(cx).await,
             Self::Target => {

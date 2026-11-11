@@ -18,7 +18,7 @@ struct Scripted {
 }
 
 impl pharos_server::Chain for Scripted {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         self.siit.serve(cx, Backend(self)).await
     }
     fn is_empty(&self) -> bool {
@@ -27,7 +27,7 @@ impl pharos_server::Chain for Scripted {
 }
 struct Backend<'a>(&'a Scripted);
 impl Next for Backend<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let secondary = q.qtype == Type::AAAA;
         let code = if secondary {
@@ -316,7 +316,7 @@ async fn siit_dns64_self_lookup_does_not_recurse() {
     struct RunSiit<'a>(&'a Both);
     struct Empty<'a>(&'a Both);
     impl pharos_server::Chain for Both {
-        async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+        async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
             self.dns64.serve(cx, RunSiit(self)).await
         }
         fn is_empty(&self) -> bool {
@@ -324,12 +324,12 @@ async fn siit_dns64_self_lookup_does_not_recurse() {
         }
     }
     impl Next for RunSiit<'_> {
-        async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
             self.0.siit.serve(cx, Empty(self.0)).await
         }
     }
     impl Next for Empty<'_> {
-        async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
             self.0.calls.fetch_add(1, Ordering::Relaxed);
             let q = cx.query.questions().next().unwrap();
             let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8100).unwrap();

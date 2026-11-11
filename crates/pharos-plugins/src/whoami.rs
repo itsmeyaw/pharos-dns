@@ -9,7 +9,7 @@ pub struct Whoami;
 impl pharos_server::Plugin for Whoami {
     async fn serve<N: pharos_server::Next + Send>(
         &self,
-        context: &mut Context<'_>,
+        context: &mut Context<'_, '_>,
         _next: N,
     ) -> Outcome {
         match response(context) {
@@ -19,7 +19,7 @@ impl pharos_server::Plugin for Whoami {
     }
 }
 
-fn response(context: &mut Context<'_>) -> Result<(), Error> {
+fn response(context: &mut Context<'_, '_>) -> Result<(), Error> {
     let question = context.query.questions().next();
     let name = question.map_or_else(
         || NameRef::parse(&[0], 0).expect("root name"),

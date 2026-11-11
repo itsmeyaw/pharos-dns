@@ -73,7 +73,7 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Log, Error> {
 }
 
 impl Plugin for Log {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let rule = self.rules.iter().find(|rule| {
             let Some(scope) = &rule.scope else {
                 return false;
@@ -114,7 +114,7 @@ impl Plugin for Log {
     }
 }
 
-fn classify(cx: &Context<'_>, outcome: Outcome) -> (&'static str, &'static str, u8) {
+fn classify(cx: &Context<'_, '_>, outcome: Outcome) -> (&'static str, &'static str, u8) {
     let message = (outcome == Outcome::Response)
         .then(|| Message::parse(cx.response).ok())
         .flatten();

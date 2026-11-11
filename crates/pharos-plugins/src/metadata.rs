@@ -21,7 +21,7 @@ pub struct Metadata {
 
 impl Metadata {
     #[cfg(feature = "plugin-kubernetes")]
-    pub(crate) fn matches(&self, cx: &Context<'_>) -> bool {
+    pub(crate) fn matches(&self, cx: &Context<'_, '_>) -> bool {
         let Some(question) = cx.query.questions().next() else {
             return false;
         };
@@ -55,7 +55,7 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>, domains: &[&str]) -> Result<Metadat
 }
 
 impl Plugin for Metadata {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         next.run(cx).await
     }
 }

@@ -21,7 +21,7 @@ struct Answer {
     aaaa: bool,
 }
 impl Next for Answer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let mut builder =
             MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8100 | self.rcode).unwrap();

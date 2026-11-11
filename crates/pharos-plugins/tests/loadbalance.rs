@@ -61,7 +61,7 @@ async fn round_robin_shuffles_hosts_answers() {
 struct Reply<'a>(&'a [u8]);
 
 impl Next for Reply<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         cx.response.clear();
         cx.response.extend_from_slice(self.0);
         Outcome::Response

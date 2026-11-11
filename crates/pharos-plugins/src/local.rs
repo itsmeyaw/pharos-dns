@@ -51,7 +51,7 @@ impl Local {
 }
 
 impl Plugin for Local {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };

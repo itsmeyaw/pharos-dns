@@ -17,7 +17,7 @@ struct Backend<'a> {
 
 struct Unanswered<'a>(&'a AtomicUsize);
 impl Next for Unanswered<'_> {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         self.0.fetch_add(1, Ordering::Relaxed);
         Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL)
     }
@@ -25,14 +25,14 @@ impl Next for Unanswered<'_> {
 
 struct Pending;
 impl Next for Pending {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         std::future::pending().await
     }
 }
 
 struct SignedBackend<'a>(&'a AtomicUsize);
 impl Next for SignedBackend<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         self.0.fetch_add(1, Ordering::Relaxed);
         let q = cx.query.questions().next().unwrap();
         let root = pharos_proto::NameRef::parse(&[0], 0).unwrap();
@@ -58,7 +58,7 @@ impl Next for SignedBackend<'_> {
 
 struct ExpiredSignature<'a>(&'a AtomicUsize);
 impl Next for ExpiredSignature<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         self.0.fetch_add(1, Ordering::Relaxed);
         let q = cx.query.questions().next().unwrap();
         let root = pharos_proto::NameRef::parse(&[0], 0).unwrap();
@@ -101,7 +101,7 @@ impl Next for ExpiredSignature<'_> {
 
 struct AuthenticatedBackend<'a>(&'a AtomicUsize);
 impl Next for AuthenticatedBackend<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         self.0.fetch_add(1, Ordering::Relaxed);
         let question = cx.query.questions().next().unwrap();
         let mut flags = 0x8080;
@@ -128,7 +128,7 @@ impl Next for AuthenticatedBackend<'_> {
 }
 
 impl Next for Backend<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if cx.query.additionals().any(|rr| rr.rtype == Type::TSIG) {
             assert!(!cx.query.ad());

@@ -49,14 +49,14 @@ mod udp_linux;
 
 /// A statically dispatched continuation of the Plugin Chain.
 pub trait Next {
-    fn run(self, cx: &mut Context<'_>) -> impl Future<Output = Outcome> + Send;
+    fn run(self, cx: &mut Context<'_, '_>) -> impl Future<Output = Outcome> + Send;
 }
 
 /// A Plugin may await Next and inspect or modify its outcome and Response.
 pub trait Plugin {
     fn serve<N: Next + Send>(
         &self,
-        cx: &mut Context<'_>,
+        cx: &mut Context<'_, '_>,
         next: N,
     ) -> impl Future<Output = Outcome> + Send;
 
@@ -311,17 +311,28 @@ pub trait MetadataSource: Send + Sync {
 }
 
 /// Borrowed Query state and reusable, preallocated Response buffer.
-pub struct Context<'a> {
-    pub query: Message<'a>,
+pub struct Context<'q, 'a> {
+    pub query: Message<'q>,
     pub client: SocketAddr,
     /// Listener address; wildcard addresses are not resolved per Query.
     pub local: SocketAddr,
     pub transport: Transport,
     pub protocol: Protocol,
-    pub domain: &'a Name,
+    pub domain: &'q Name,
     pub metadata: Metadata<'a>,
-    pub response: &'a mut Vec<u8>,
+    pub response: &'q mut Vec<u8>,
     pub max_response_size: usize,
+}
+
+struct NestedContext<'q, 'a> {
+    parent_metadata: &'q mut Metadata<'a>,
+    child: Context<'q, 'a>,
+}
+
+impl Drop for NestedContext<'_, '_> {
+    fn drop(&mut self) {
+        std::mem::swap(self.parent_metadata, &mut self.child.metadata);
+    }
 }
 
 /// The Listener state and depth associated with a Query.
@@ -385,7 +396,29 @@ impl SelfLookupServer for SelfLookupHandle {
     }
 }
 
-impl Context<'_> {
+impl Context<'_, '_> {
+    /// Run Next with temporary Query bytes while preserving Metadata and Response state.
+    pub async fn run_with_query<N: Next + Send>(&mut self, wire: &[u8], next: N) -> Outcome {
+        let Ok(query) = Message::parse(wire) else {
+            return Outcome::Error(Error::InvalidQuery);
+        };
+        let metadata = std::mem::replace(&mut self.metadata, Metadata::new(&mut []));
+        let mut nested = NestedContext {
+            parent_metadata: &mut self.metadata,
+            child: Context {
+                query,
+                client: self.client,
+                local: self.local,
+                transport: self.transport,
+                protocol: self.protocol,
+                domain: self.domain,
+                metadata,
+                response: self.response,
+                max_response_size: self.max_response_size,
+            },
+        };
+        next.run(&mut nested.child).await
+    }
     /// Retain this Query's Listener state for a detached task, if available.
     pub fn self_lookup_handle(&self) -> Option<SelfLookupHandle> {
         let state = self.metadata.self_lookup.as_ref()?;

@@ -47,7 +47,7 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Prometheus, Error> {
 }
 
 impl Plugin for Prometheus {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         next.run(cx).await
     }
 }

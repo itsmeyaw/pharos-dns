@@ -856,7 +856,7 @@ fn apply_history<'a>(
 }
 
 impl Plugin for Rewrite {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let original_query = cx.query;
         let Some(_) = cx.query.questions().next() else {
             return next.run(cx).await;

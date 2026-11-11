@@ -18,7 +18,7 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 struct Answer;
 impl Next for Answer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
         b.question(q.name, q.qtype, q.qclass).unwrap();

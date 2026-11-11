@@ -10,7 +10,7 @@ use pharos_proto::Rcode;
 
 /// Statically dispatched Plugin Chain supplied by the Plugin registry.
 pub trait Chain: Send + Sync + 'static {
-    fn serve(&self, context: &mut Context<'_>) -> impl Future<Output = Outcome> + Send;
+    fn serve(&self, context: &mut Context<'_, '_>) -> impl Future<Output = Outcome> + Send;
     fn is_empty(&self) -> bool;
     fn parallel_query(
         &self,
@@ -29,7 +29,7 @@ pub trait Chain: Send + Sync + 'static {
 }
 
 impl<C: Chain> Chain for Arc<C> {
-    fn serve(&self, context: &mut Context<'_>) -> impl Future<Output = Outcome> + Send {
+    fn serve(&self, context: &mut Context<'_, '_>) -> impl Future<Output = Outcome> + Send {
         self.as_ref().serve(context)
     }
     fn is_empty(&self) -> bool {

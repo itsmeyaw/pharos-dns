@@ -8,7 +8,7 @@ use pharos_server::{
 struct Broken;
 
 impl Chain for Broken {
-    async fn serve(&self, _: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Error(Error::InvalidQuery)
     }
 

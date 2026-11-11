@@ -20,7 +20,7 @@ struct ScriptedChain {
 }
 
 impl pharos_server::Chain for ScriptedChain {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         self.dns64.serve(cx, ScriptedNext(self)).await
     }
     fn is_empty(&self) -> bool {
@@ -30,7 +30,7 @@ impl pharos_server::Chain for ScriptedChain {
 
 struct ScriptedNext<'a>(&'a ScriptedChain);
 impl Next for ScriptedNext<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let fallback = q.qtype == Type::A;
         let code = if fallback {
@@ -169,7 +169,7 @@ struct FakeNext {
 
 struct ExpiredNx;
 impl Next for ExpiredNx {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8103).unwrap();
         builder.question(q.name, q.qtype, q.qclass).unwrap();
@@ -235,7 +235,7 @@ async fn dns64_classifies_expired_signed_nxdomain_like_coredns() {
 }
 
 impl Next for FakeNext {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let mut builder =
             MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8100 | self.rcode).unwrap();

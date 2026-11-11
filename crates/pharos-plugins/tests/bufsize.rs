@@ -169,7 +169,7 @@ struct Inspect {
 }
 
 impl Next for Inspect {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         assert_eq!(cx.query.opt().map(|o| o.udp_payload_size()), self.expected);
         assert_eq!(cx.max_response_size, self.max_response_size);
         let mut wire = Vec::new();

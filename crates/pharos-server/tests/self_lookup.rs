@@ -20,7 +20,7 @@ enum TestChain {
 }
 
 impl Chain for TestChain {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         match self {
             Self::Lookup => {
                 let name: Name = "b.other.".parse().unwrap();
@@ -145,7 +145,7 @@ struct ReloadChain {
 }
 
 impl Chain for ReloadChain {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         let question = cx.query.questions().next().unwrap();
         if cx.domain.to_string() == "example." {
             self.start.notify_one();
@@ -250,7 +250,7 @@ async fn self_lookup_uses_state_held_before_reload() {
 struct DetachedDepth(Arc<AtomicUsize>);
 
 impl Chain for DetachedDepth {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         let visit = self.0.fetch_add(1, Ordering::SeqCst) + 1;
         if visit > 11 {
             return Outcome::Unanswered(Rcode::REFUSED);
@@ -337,7 +337,7 @@ struct CountOwners {
 }
 
 impl Chain for CountOwners {
-    async fn serve(&self, _: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
         self.observed
             .store(self.server.strong_count(), Ordering::SeqCst);
         Outcome::Unanswered(Rcode::REFUSED)

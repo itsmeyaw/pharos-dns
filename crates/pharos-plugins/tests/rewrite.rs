@@ -9,7 +9,7 @@ use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transpor
 
 struct AliasChain(pharos_plugins::rewrite::Rewrite, &'static str);
 impl pharos_server::Chain for AliasChain {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         self.0.serve(cx, AliasBackend(self.1)).await
     }
     fn is_empty(&self) -> bool {
@@ -18,7 +18,7 @@ impl pharos_server::Chain for AliasChain {
 }
 struct AliasBackend(&'static str);
 impl Next for AliasBackend {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let original = q.name.to_string() == "alias.example.";
         let target: Name = "old.example.".parse().unwrap();
@@ -112,7 +112,7 @@ async fn coredns_cname_rewrite_follows_target_through_self_lookup() {
 
 struct Answer;
 impl Next for Answer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
         b.question(q.name, q.qtype, q.qclass).unwrap();
@@ -132,14 +132,14 @@ impl Next for Answer {
 
 struct Unanswered(Rcode);
 impl Next for Unanswered {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Unanswered(self.0)
     }
 }
 
 struct RcodeChain(pharos_plugins::rewrite::Rewrite);
 impl pharos_server::Chain for RcodeChain {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         self.0.serve(cx, Unanswered(Rcode::SERVFAIL)).await
     }
     fn is_empty(&self) -> bool {
@@ -195,7 +195,7 @@ async fn coredns_rcode_rewrite_returns_a_response_for_unanswered_success() {
 
 struct InspectQuestion(Type, Class);
 impl Next for InspectQuestion {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         assert_eq!((q.qtype, q.qclass), (self.0, self.1));
         let mut copy = Vec::with_capacity(512);
@@ -209,7 +209,7 @@ impl Next for InspectQuestion {
 
 struct InspectName(&'static str);
 impl Next for InspectName {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         assert_eq!(
             cx.query.questions().next().unwrap().name.to_string(),
             self.0
@@ -220,7 +220,7 @@ impl Next for InspectName {
 
 struct ExpectNameAnswer(&'static str);
 impl Next for ExpectNameAnswer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         assert_eq!(
             cx.query.questions().next().unwrap().name.to_string(),
             self.0
@@ -231,7 +231,7 @@ impl Next for ExpectNameAnswer {
 
 struct NoQuestionAnswer;
 impl Next for NoQuestionAnswer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
         b.record(
@@ -593,7 +593,7 @@ async fn coredns_regex_name_metadata_and_missing_labels() {
 
 struct AliasedAnswer;
 impl Next for AliasedAnswer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         assert_eq!(q.name.to_string(), "internal.example.");
         let owner: Name = "alias.internal.example.".parse().unwrap();
@@ -616,7 +616,7 @@ impl Next for AliasedAnswer {
 
 struct DnameAnswer;
 impl Next for DnameAnswer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let target: Name = "other.internal.example.".parse().unwrap();
         let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
@@ -681,7 +681,7 @@ async fn coredns_auto_rewrites_dname_values() {
 
 struct SuffixAnswer;
 impl Next for SuffixAnswer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         assert_eq!(q.name.to_string(), "www.internal.");
         let owner: Name = "other.internal.".parse().unwrap();
@@ -703,7 +703,7 @@ impl Next for SuffixAnswer {
 
 struct ChainedSuffixAnswer;
 impl Next for ChainedSuffixAnswer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         assert_eq!(q.name.to_string(), "www.c.");
         let owner: Name = "other.c.".parse().unwrap();

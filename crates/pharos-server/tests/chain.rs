@@ -17,7 +17,7 @@ struct NextTerminal<'a>(&'a Chain);
 struct End;
 
 impl Plugin for Middleware {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let outcome = next.run(cx).await;
         if outcome == Outcome::Response {
             let message = Message::parse(cx.response).unwrap();
@@ -28,23 +28,23 @@ impl Plugin for Middleware {
     }
 }
 impl Plugin for Terminal {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, _next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, _next: N) -> Outcome {
         cx.response.extend_from_slice(&[0; 12]);
         Outcome::Response
     }
 }
 impl Next for NextTerminal<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         self.0.terminal.serve(cx, End).await
     }
 }
 impl Next for End {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Error(pharos_server::Error::NoNextPlugin)
     }
 }
 impl Chain {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         self.middleware.serve(cx, NextTerminal(self)).await
     }
 }

@@ -8,7 +8,7 @@ use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transpor
 
 struct Answer<'a>(Outcome, &'a [u8]);
 impl Next for Answer<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         cx.response.extend_from_slice(self.1);
         self.0
     }

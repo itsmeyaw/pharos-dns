@@ -491,7 +491,7 @@ pub struct Unimplemented;
 impl pharos_server::Plugin for Unimplemented {
     async fn serve<N: pharos_server::Next + Send>(
         &self,
-        _cx: &mut pharos_server::Context<'_>,
+        _cx: &mut pharos_server::Context<'_, '_>,
         _next: N,
     ) -> pharos_server::Outcome {
         pharos_server::Outcome::Error(pharos_server::Error::NotImplemented)

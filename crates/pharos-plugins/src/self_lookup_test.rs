@@ -18,7 +18,7 @@ pub struct TestPlugin {
 }
 
 impl TestPlugin {
-    pub async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    pub async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 1
             && let Some((started, resume)) = &self.pause

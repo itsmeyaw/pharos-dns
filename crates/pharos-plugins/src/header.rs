@@ -80,7 +80,7 @@ impl Header {
 }
 
 impl Plugin for Header {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         cx.query = cx.query.with_flags(self.query.apply(cx.query.flags()));
         let outcome = next.run(cx).await;
         if outcome == Outcome::Response && cx.response.len() >= 4 {

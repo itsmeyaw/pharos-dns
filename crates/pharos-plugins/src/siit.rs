@@ -126,7 +126,7 @@ impl Siit {
 }
 
 impl Plugin for Siit {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let query = cx.query;
         let Some(question) = query.questions().next() else {
             return next.run(cx).await;

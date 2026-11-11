@@ -205,6 +205,10 @@ fn main() {
         };
         writeln!(code, "struct Next{i}<'a>(&'a Chain);\nimpl pharos_server::Next for Next{i}<'_> {{ async fn run(self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ {test_hook} self.0.serve_{next}(cx).await }} }}").unwrap();
     }
+    let code = code.replace(
+        "pharos_server::Context<'_>",
+        "pharos_server::Context<'_, '_>",
+    );
     fs::write(
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("plugins.rs"),
         code,

@@ -26,7 +26,7 @@ impl Bufsize {
 }
 
 impl Plugin for Bufsize {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         if cx
             .query
             .opt()

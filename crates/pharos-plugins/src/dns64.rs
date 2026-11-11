@@ -96,7 +96,7 @@ fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Erro
 }
 
 impl Plugin for Dns64 {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let query = cx.query;
         let Some(question) = query.questions().next() else {
             return next.run(cx).await;

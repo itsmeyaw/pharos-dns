@@ -9,14 +9,14 @@ use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transpor
 
 struct NextDrop;
 impl Next for NextDrop {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Drop
     }
 }
 
 struct NextAllowed;
 impl Next for NextAllowed {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Unanswered(Rcode::NOERROR)
     }
 }

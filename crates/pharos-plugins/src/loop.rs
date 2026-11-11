@@ -194,7 +194,7 @@ impl State {
 }
 
 impl Plugin for Loop {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let state = &self.state;
         if self.is_probe(&cx.query) && state.seen.fetch_add(1, Ordering::Relaxed) >= 2 {
             let address = *state.address.lock().unwrap();
@@ -223,7 +223,7 @@ mod tests {
 
     struct Pass;
     impl Next for Pass {
-        async fn run(self, _: &mut Context<'_>) -> Outcome {
+        async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
             Outcome::Unanswered(pharos_proto::Rcode::NOERROR)
         }
     }

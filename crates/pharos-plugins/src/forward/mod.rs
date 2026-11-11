@@ -220,7 +220,7 @@ impl Forward {
 }
 
 impl Plugin for Forward {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let root = [0];
         let name = cx.query.questions().next().map_or_else(
             || NameRef::parse(&root, 0).expect("root"),

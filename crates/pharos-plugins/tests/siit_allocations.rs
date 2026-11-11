@@ -22,7 +22,7 @@ struct Answer {
     truncated: bool,
 }
 impl Next for Answer {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
         let mut builder = MessageBuilder::new(
             cx.response,

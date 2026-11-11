@@ -56,7 +56,7 @@ impl std::fmt::Debug for Kubernetes {
 
 impl Kubernetes {
     #[cfg(feature = "plugin-metadata")]
-    pub(crate) fn collect_metadata(&self, cx: &mut Context<'_>) {
+    pub(crate) fn collect_metadata(&self, cx: &mut Context<'_, '_>) {
         if self.config.pod_mode == "verified" {
             let ip = scratch::IpText::new(cx.client.ip());
             let store = self.state.cache.read().unwrap().store.clone();
@@ -618,7 +618,7 @@ impl pharos_server::Plugin for Kubernetes {
         Some(self)
     }
 
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let Some(q) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
