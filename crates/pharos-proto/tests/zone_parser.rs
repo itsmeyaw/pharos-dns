@@ -42,6 +42,13 @@ fn known_type_mnemonic_accepts_generic_rdata() {
 }
 
 #[test]
+fn tsig_presentation_is_rejected_like_miekg() {
+    let input = "example. 3600 IN TSIG hmac. 1 300 0 42 0 0\n";
+    let parser = ZoneParser::new(Cursor::new(input), ".".parse().unwrap(), "tsig");
+    assert!(parser.collect::<Result<Vec<_>, _>>().is_err());
+}
+
+#[test]
 fn handles_multiline_quoting_and_escapes() {
     let input = "$TTL 60\n@ IN TXT ( \"a;b\" ; comment\n \"c\\032d\" )\n";
     let mut parser = ZoneParser::new(Cursor::new(input), "example.".parse().unwrap(), "quoted");

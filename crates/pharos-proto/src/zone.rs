@@ -313,6 +313,9 @@ impl<R: BufRead> ZoneParser<R> {
             return Err(err("invalid record header"));
         };
         let ttl = ttl.ok_or_else(|| err("missing TTL"))?;
+        if rtype == Type::TSIG && tokens.get(i).is_none_or(|field| field != r"\#") {
+            return Err(err("TSIG has no zone presentation format"));
+        }
         let fields: Vec<&str> = tokens[i..].iter().map(String::as_str).collect();
         let rdata = parse_rdata(rtype, &fields, &self.origin).map_err(|e| err(&e))?;
         if saw_ttl && !self.directive_ttl {
