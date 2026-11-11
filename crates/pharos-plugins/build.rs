@@ -104,7 +104,7 @@ fn main() {
             "health" => "health::setup::setup",
             "hosts" => "hosts::setup::setup",
             "loadbalance" => "loadbalance::setup::setup",
-            "local" => "setup_local",
+            "local" => "local::setup::setup",
             "nsid" => "setup_nsid",
             "reload" => "setup_reload",
             "errors" => "errors::setup::setup",

@@ -578,11 +578,7 @@ impl pharos_server::Plugin for Unimplemented {
 
 
 
-#[cfg(feature = "plugin-local")]
-fn setup_local(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.local = Some(local::Local::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-whoami")]
 fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

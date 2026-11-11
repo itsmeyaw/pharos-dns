@@ -1,5 +1,7 @@
 //! Localhost and locally served reverse Domains.
 
+pub(crate) mod setup;
+
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
