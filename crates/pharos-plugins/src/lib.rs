@@ -623,11 +623,7 @@ fn setup_loop(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
 
 
 
-#[cfg(feature = "plugin-log")]
-fn setup_log(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.log = Some(log::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-metadata")]
 fn setup_metadata(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

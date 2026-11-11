@@ -95,7 +95,7 @@ fn main() {
             "minimal" => "setup_minimal",
             "multisocket" => "setup_multisocket",
             "whoami" => "setup_whoami",
-            "log" => "setup_log",
+            "log" => "log::setup::setup",
             "metadata" => "setup_metadata",
             "loop" => "setup_loop",
             "prometheus" => "setup_prometheus",
