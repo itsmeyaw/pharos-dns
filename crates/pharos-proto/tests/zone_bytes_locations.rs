@@ -78,7 +78,19 @@ fn nested_parentheses_join_lines_and_extra_close_has_its_own_location() {
         .next()
         .unwrap()
         .unwrap_err();
-    assert_eq!((error.line, error.column), (1, 20));
+    assert_eq!((error.line, error.column), (1, 10));
+}
+
+#[test]
+fn unterminated_delimiters_point_to_the_opening_token() {
+    for (input, line, column) in [
+        (&b"a 60 TXT \"abc\ncontinuation"[..], 1, 10),
+        (&b"a 60 TXT ( \"abc\"\n"[..], 1, 10),
+        (&b"a 60 TXT ( ( \"abc\" )\n"[..], 1, 10),
+    ] {
+        let error = parser(input).next().unwrap().unwrap_err();
+        assert_eq!((error.line, error.column), (line, column), "{error}");
+    }
 }
 
 #[test]

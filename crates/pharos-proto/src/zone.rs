@@ -145,10 +145,10 @@ impl<R: BufRead> ZoneParser<R> {
         let mut position = (0, 0);
         let mut active = false;
         let mut quote = false;
-        let mut parens = 0_usize;
+        let mut quote_start = None;
+        let mut parens = Vec::new();
         let mut start = 0;
         let mut inherited = false;
-        let mut last_column = 1;
         loop {
             self.input.clear();
             let n = self
@@ -156,8 +156,8 @@ impl<R: BufRead> ZoneParser<R> {
                 .read_until(b'\n', &mut self.input)
                 .map_err(|e| self.error(self.line + 1, 1, e.to_string()))?;
             if n == 0 {
-                if quote || parens != 0 {
-                    return Err(self.error(self.line, last_column, "unterminated record"));
+                if let Some((line, column)) = quote_start.or_else(|| parens.last().copied()) {
+                    return Err(self.error(line, column, "unterminated record"));
                 }
                 if active {
                     tokens.push(Token {
@@ -175,7 +175,6 @@ impl<R: BufRead> ZoneParser<R> {
             self.line += 1;
             let line = &self.input;
             self.entry_end = (self.line, line.len() + usize::from(!line.ends_with(b"\n")));
-            last_column = (line.len() - usize::from(line.ends_with(b"\n"))).max(1);
             if start == 0 && line.iter().any(|b| !b.is_ascii_whitespace()) {
                 start = self.line;
                 inherited = line.first().is_some_and(|b| b.is_ascii_whitespace());
@@ -206,6 +205,11 @@ impl<R: BufRead> ZoneParser<R> {
                     active = true;
                 } else if b == b'"' {
                     quotes.push((token.len(), self.line, i + 1));
+                    quote_start = if quote {
+                        None
+                    } else {
+                        Some((self.line, column))
+                    };
                     quote = !quote;
                     active = true;
                 } else if !quote && b == b';' {
@@ -225,11 +229,9 @@ impl<R: BufRead> ZoneParser<R> {
                         active = false;
                     }
                     if b == b'(' {
-                        parens += 1;
-                    } else {
-                        parens = parens.checked_sub(1).ok_or_else(|| {
-                            self.error(self.line, i + 1, "unbalanced parentheses")
-                        })?;
+                        parens.push((self.line, column));
+                    } else if parens.pop().is_none() {
+                        return Err(self.error(self.line, column, "unbalanced parentheses"));
                     }
                 } else if !quote && b.is_ascii_whitespace() {
                     if active {
@@ -262,7 +264,7 @@ impl<R: BufRead> ZoneParser<R> {
                 columns.resize(token.len(), column);
                 i += 1;
             }
-            if parens == 0 && !quote {
+            if parens.is_empty() && !quote {
                 if active {
                     tokens.push(Token {
                         text: std::mem::take(&mut token),
