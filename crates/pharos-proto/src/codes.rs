@@ -70,6 +70,7 @@ impl Rcode {
     /// Combines the header's low four RCODE bits with the OPT extended byte.
     #[must_use]
     pub const fn from_parts(header: u8, extended: u8) -> Self {
+        // RFC 6891 §6.1.3: the extended RCODE adds eight high bits to the header's four.
         Self(((extended as u16) << 4) | ((header & 0x0f) as u16))
     }
 }
