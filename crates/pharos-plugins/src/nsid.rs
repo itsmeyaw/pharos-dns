@@ -118,6 +118,7 @@ fn update_nsid(cx: &mut Context<'_>, data: Option<&[u8]>) -> Result<(), Error> {
     } else {
         let (index, _) = record.ok_or(Error::InvalidQuery)?;
         if old_end < cx.response.len() {
+            // shortcut: records after OPT are dropped; re-encode the Message to retain them.
             // RFC 1035 §4.1.4: removing later records avoids invalidating compression pointers.
             cx.response[2] |= 0x02;
             cx.response[10..12].copy_from_slice(&((index + 1) as u16).to_be_bytes());

@@ -80,8 +80,8 @@ async fn query(chain: &Chain, options: Option<&[u8]>) -> Vec<u8> {
 #[tokio::test]
 async fn coredns_nsid_and_cache_return_requested_identifier() {
     for config in ["nsid NSID\nwhoami", "cache\nnsid NSID\nwhoami"] {
-        let chain = configured(config).unwrap();
-        for _ in 0..2 {
+        let mut chain = configured(config).unwrap();
+        for iteration in 0..2 {
             let response = query(&chain, Some(&[0, 3, 0, 0])).await;
             let message = Message::parse(&response).unwrap();
             let opt = message.opt().unwrap();
@@ -90,6 +90,16 @@ async fn coredns_nsid_and_cache_return_requested_identifier() {
                 opt.options().iter().collect::<Vec<_>>(),
                 [EdnsOption::Nsid(b"NSID")]
             );
+            if iteration == 0 && config.starts_with("cache") {
+                chain.whoami = None;
+                let response = query(&chain, Some(&[])).await;
+                let message = Message::parse(&response).unwrap();
+                assert!(!message.opt().is_some_and(|opt| {
+                    opt.options()
+                        .iter()
+                        .any(|option| matches!(option, EdnsOption::Nsid(_)))
+                }));
+            }
         }
     }
 }
@@ -102,6 +112,31 @@ async fn query_nsid_payload_is_ignored() {
     assert_eq!(
         message.opt().unwrap().options().iter().next(),
         Some(EdnsOption::Nsid(b"NSID"))
+    );
+}
+
+#[tokio::test]
+async fn oversized_nsid_returns_servfail_after_listener_scrubbing() {
+    let chain = configured(&format!("nsid {}\nwhoami", "x".repeat(500))).unwrap();
+    let mut response = query(&chain, Some(&[0, 3, 0, 0])).await;
+    let wire = [
+        0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 41, 2, 0, 0, 0, 0, 0, 0, 4, 0, 3,
+        0, 0,
+    ];
+    let query = Message::parse(&wire).unwrap();
+    assert_eq!(
+        pharos_server::finish_outcome(
+            query,
+            Protocol::Udp,
+            Outcome::Response,
+            &mut response,
+            |_| {}
+        ),
+        pharos_server::Action::Respond
+    );
+    assert_eq!(
+        Message::parse(&response).unwrap().rcode(),
+        pharos_proto::Rcode::SERVFAIL
     );
 }
 
