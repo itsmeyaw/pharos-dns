@@ -9,6 +9,7 @@ use std::{
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
 
 pub(super) fn resolve(host: &str, resolvers: &[SocketAddr]) -> io::Result<Vec<IpAddr>> {
+    // RFC 1034 §3.1: an absolute domain name's presentation form ends in a dot.
     let absolute = if host.ends_with('.') {
         host.to_owned()
     } else {
@@ -53,10 +54,12 @@ pub(super) fn resolve(host: &str, resolvers: &[SocketAddr]) -> io::Result<Vec<Ip
 }
 
 fn lookup(name: &Name, resolver: SocketAddr, qtype: Type) -> io::Result<Vec<IpAddr>> {
+    // RFC 5452 §9.2: outgoing queries use unpredictable IDs.
     let mut id = [0; 2];
     getrandom::getrandom(&mut id).map_err(|_| io::Error::other("random ID generation failed"))?;
     let id = u16::from_ne_bytes(id);
     let mut query = Vec::new();
+    // RFC 6891 §4.3: traditional DNS messages over UDP are limited to 512 octets.
     let mut builder = MessageBuilder::new(&mut query, 512, id, 0x0100).map_err(io::Error::other)?;
     builder
         .question(
@@ -79,15 +82,18 @@ fn lookup(name: &Name, resolver: SocketAddr, qtype: Type) -> io::Result<Vec<IpAd
     let mut wire = [0; 65535];
     let len = socket.recv(&mut wire)?;
     let response = Message::parse(&wire[..len]).map_err(io::Error::other)?;
+    // RFC 5452 §9.1: match the response ID to the query ID.
     if response.id() != id {
         return Err(io::Error::other("resolver response ID mismatch"));
     }
     let mut ips = Vec::new();
     for answer in response.answers() {
+        // RFC 1035 §3.4.1: A RDATA contains a 32-bit Internet address.
         if qtype == Type::A && answer.rtype == Type::A {
             if let Ok(bytes) = <[u8; 4]>::try_from(answer.rdata) {
                 ips.push(IpAddr::V4(Ipv4Addr::from(bytes)));
             }
+        // RFC 3596 §2.2: AAAA RDATA contains a 128-bit IPv6 address.
         } else if qtype == Type::AAAA
             && answer.rtype == Type::AAAA
             && let Ok(bytes) = <[u8; 16]>::try_from(answer.rdata)

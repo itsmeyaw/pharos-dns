@@ -327,6 +327,7 @@ fn one_arg<'a>(cursor: &Cursor<'_>, args: &'a [String]) -> Result<&'a str, Error
     }
 }
 
+// RFC 1035 §4.2.1: DNS queries over UDP use server port 53 by default.
 fn socket_address(value: &str) -> Option<SocketAddr> {
     value.parse::<SocketAddr>().ok().or_else(|| {
         value

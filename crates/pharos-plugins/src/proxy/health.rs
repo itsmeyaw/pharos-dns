@@ -179,8 +179,11 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
     getrandom::getrandom(&mut id).map_err(|_| io::Error::other("random ID generation failed"))?;
     let mut query = Vec::with_capacity(12 + config.domain.as_wire().len() + 4);
     query.extend_from_slice(&id);
+    // RFC 1035 §4.1.1: RD requests recursive query processing.
     query.extend_from_slice(&[u8::from(config.recursive), 0, 0, 1, 0, 0, 0, 0, 0, 0]);
     query.extend_from_slice(config.domain.as_wire());
+    // RFC 1035 §3.2.2: NS has type 2.
+    // RFC 1035 §3.2.4: IN has class 1.
     query.extend_from_slice(&[0, 2, 0, 1]);
 
     let response = if config.force_tcp {
@@ -190,6 +193,7 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
         )
         .await??;
         timeout(IO_TIMEOUT, async {
+            // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
             stream
                 .write_all(&(query.len() as u16).to_be_bytes())
                 .await?;
@@ -197,6 +201,7 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
         })
         .await??;
         timeout(IO_TIMEOUT, async {
+            // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
             let len = stream.read_u16().await?;
             let mut response = vec![0; usize::from(len)];
             stream.read_exact(&mut response).await?;

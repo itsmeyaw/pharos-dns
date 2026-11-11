@@ -99,6 +99,7 @@ impl std::fmt::Debug for Forward {
     }
 }
 
+// RFC 1034 §3.1: a subdomain's name ends with its containing domain's name.
 fn contains(name: NameRef<'_>, domain: &Name) -> bool {
     let domain = NameRef::parse(domain.as_wire(), 0).expect("valid configured Domain");
     let count = name.labels().count();
