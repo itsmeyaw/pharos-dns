@@ -93,7 +93,7 @@ fn main() {
             "bufsize" => "bufsize::setup::setup",
             "header" => "header::setup::setup",
             "minimal" => "minimal::setup::setup",
-            "multisocket" => "setup_multisocket",
+            "multisocket" => "multisocket::setup::setup",
             "whoami" => "setup_whoami",
             "log" => "log::setup::setup",
             "metadata" => "metadata::setup::setup",

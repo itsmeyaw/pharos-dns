@@ -58,6 +58,8 @@ pub mod loadbalance;
 pub mod local;
 #[cfg(feature = "plugin-minimal")]
 pub mod minimal;
+#[cfg(feature = "plugin-multisocket")]
+pub mod multisocket;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 pub mod proxy;
@@ -630,28 +632,7 @@ fn setup_reload(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 
 
 
-#[cfg(feature = "plugin-multisocket")]
-fn setup_multisocket(
-    cursor: &mut Cursor<'_>,
-    block: &mut BlockContext<Chain>,
-) -> Result<(), Error> {
-    cursor.next();
-    let args = cursor.remaining_args();
-    if args.len() > 1 || cursor.next() {
-        return Err(cursor.arg_err());
-    }
-    let count = args
-        .first()
-        .map(|arg| {
-            arg.parse::<usize>()
-                .ok()
-                .filter(|count| (1..=1024).contains(count))
-                .ok_or_else(|| cursor.error("invalid socket count"))
-        })
-        .transpose()?;
-    block.config.multisocket = Some(count);
-    Ok(())
-}
+
 
 
 
