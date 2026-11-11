@@ -5,6 +5,100 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rewrite_test.go TestNewRule.
+#[test]
+fn coredns_new_rule_setup_rows() {
+    for (args, valid) in [
+        ("", false),
+        ("foo", false),
+        ("name", false),
+        ("name a.com", false),
+        ("name a.com b.com c.com", false),
+        ("name a.com b.com", true),
+        ("name exact a.com b.com", true),
+        ("name prefix a.com b.com", true),
+        ("name suffix a.com b.com", true),
+        ("name substring a.com b.com", true),
+        (r"name regex ([a])\.com new-{1}.com", true),
+        (r"name regex ([a]\.com new-{1}.com", false),
+        (
+            r"name regex (dns)\.(core)\.(rocks) {2}.{1}.{3} answer name (core)\.(dns)\.(rocks) {2}.{1}.{3}",
+            true,
+        ),
+        (
+            r"name regex (adns)\.(core)\.(rocks) {2}.{1}.{3} answer name (core)\.(adns)\.(rocks) {2}.{1}.{3} too.long way.too.long",
+            false,
+        ),
+        (
+            r"name regex (bdns)\.(core)\.(rocks) {2}.{1}.{3} NoAnswer name (core)\.(bdns)\.(rocks) {2}.{1}.{3}",
+            false,
+        ),
+        (
+            r"name regex (cdns)\.(core)\.(rocks) {2}.{1}.{3} answer ttl (core)\.(cdns)\.(rocks) {2}.{1}.{3}",
+            false,
+        ),
+        (
+            r"name substring fcore.dns.rocks dns.fcore.rocks answer name (fcore)\.(dns)\.(rocks) {2}.{1}.{3}",
+            true,
+        ),
+        ("name substring a.com b.com c.com", false),
+        ("type", false),
+        ("type a", false),
+        ("type any a a", false),
+        ("type any a", true),
+        ("type XY WV", false),
+        ("type ANY WV", false),
+        ("class", false),
+        ("class IN", false),
+        ("class ch in in", false),
+        ("class ch in", true),
+        ("class XY WV", false),
+        ("class IN WV", false),
+        ("edns0", false),
+        ("edns0 unknown-rule-type set", false),
+        ("edns0 unknown-rule-type unset", false),
+        ("edns0 local", false),
+        ("edns0 local set", false),
+        ("edns0 local set 0xffee", false),
+        ("unknown-action name a.com b.com", false),
+        ("stop name a.com b.com", true),
+        ("continue name a.com b.com", true),
+        ("unknown-action type any a", false),
+        ("stop type any a", true),
+        ("continue type any a", true),
+        ("unknown-action class ch in", false),
+        ("stop class ch in", true),
+        ("continue class ch in", true),
+        ("unknown-action edns0 nsid set", false),
+    ] {
+        let text = format!(".:53 {{\n rewrite {args}\n}}");
+        let result =
+            parse("Corefile", &text).and_then(|blocks| configure::<Chain>(&blocks, directives()));
+        assert_eq!(result.is_ok(), valid, "{args}: {result:?}");
+    }
+    for mode in ["", "stop ", "continue "] {
+        for action in ["set", "append", "replace"] {
+            for variable in [
+                "qname",
+                "qtype",
+                "client_ip",
+                "client_port",
+                "protocol",
+                "server_ip",
+                "server_port",
+                "dummy",
+            ] {
+                let text = format!(
+                    ".:53 {{\n rewrite {mode}edns0 local {action} 0xffee {{{variable}}}\n}}"
+                );
+                let result = parse("Corefile", &text)
+                    .and_then(|blocks| configure::<Chain>(&blocks, directives()));
+                assert_eq!(result.is_ok(), variable != "dummy", "{text}: {result:?}");
+            }
+        }
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/setup_test.go.
 #[test]
 fn coredns_rewrite_setup_cases() {
