@@ -379,8 +379,7 @@ trait SelfLookupServer: Sync {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
-        siit: bool,
-        autopath: bool,
+        flags: (bool, bool),
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
 
@@ -396,8 +395,7 @@ trait OwnedSelfLookupServer: Send + Sync {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
-        siit: bool,
-        autopath: bool,
+        flags: (bool, bool),
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
 }
@@ -417,11 +415,10 @@ impl SelfLookupServer for SelfLookupHandle {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
-        siit: bool,
-        autopath: bool,
+        flags: (bool, bool),
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
-        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, siit, autopath, response)
+        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, flags, response)
     }
 
     fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
@@ -547,7 +544,14 @@ impl Context<'_, '_> {
             let mut task = AbortOnDrop(tokio::spawn(async move {
                 let mut response = Vec::with_capacity(usize::from(u16::MAX));
                 let action = server
-                    .lookup(&query, peer, protocol, depth, siit, autopath, &mut response)
+                    .lookup(
+                        &query,
+                        peer,
+                        protocol,
+                        depth,
+                        (siit, autopath),
+                        &mut response,
+                    )
                     .await;
                 (action, response)
             }));
@@ -565,8 +569,7 @@ impl Context<'_, '_> {
                 self.client,
                 self.protocol,
                 state.depth + 1,
-                siit || state.siit,
-                autopath || state.autopath,
+                (siit || state.siit, autopath || state.autopath),
                 &mut response,
             )
             .await

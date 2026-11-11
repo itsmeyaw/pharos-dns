@@ -169,8 +169,7 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
-        siit: bool,
-        autopath: bool,
+        flags: (bool, bool),
         response: &'a mut Vec<u8>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
         // shortcut: static re-entry boxes a future, remove if recursive dispatch no longer needs it.
@@ -179,7 +178,7 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             peer,
             protocol,
             response,
-            (depth, siit, autopath),
+            (depth, flags.0, flags.1),
             self,
         ))
     }
@@ -205,8 +204,7 @@ impl<C: Chain> crate::SelfLookupServer for Arc<Server<C>> {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
-        siit: bool,
-        autopath: bool,
+        flags: (bool, bool),
         response: &'a mut Vec<u8>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
         Box::pin(self.handle_with_depth(
@@ -214,7 +212,7 @@ impl<C: Chain> crate::SelfLookupServer for Arc<Server<C>> {
             peer,
             protocol,
             response,
-            (depth, siit, autopath),
+            (depth, flags.0, flags.1),
             self,
         ))
     }
@@ -231,8 +229,7 @@ impl<C: Chain> crate::OwnedSelfLookupServer for Server<C> {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
-        siit: bool,
-        autopath: bool,
+        flags: (bool, bool),
         response: &'a mut Vec<u8>,
     ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
         Box::pin(async move {
@@ -241,7 +238,7 @@ impl<C: Chain> crate::OwnedSelfLookupServer for Server<C> {
                 peer,
                 protocol,
                 response,
-                (depth, siit, autopath),
+                (depth, flags.0, flags.1),
                 &self,
             )
             .await
