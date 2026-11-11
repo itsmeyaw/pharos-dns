@@ -56,6 +56,8 @@ pub mod prometheus;
 pub mod ready;
 #[cfg(feature = "plugin-reload")]
 pub mod reload;
+#[cfg(feature = "plugin-root")]
+pub mod root;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -558,7 +560,7 @@ fn setup_hosts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
         .iter()
         .map(|key| key.domain.as_str())
         .collect::<Vec<_>>();
-    let hosts = hosts::Hosts::parse(cursor, &domains)?;
+    let hosts = hosts::Hosts::parse_with_root(cursor, &domains, root_path(&block.config))?;
     hosts.register_hooks(&mut block.config.lifecycle);
     block.config.hosts = Some(hosts);
     Ok(())
@@ -569,9 +571,55 @@ fn setup_loadbalance(
     cursor: &mut Cursor<'_>,
     block: &mut BlockContext<Chain>,
 ) -> Result<(), Error> {
-    let plugin = loadbalance::LoadBalance::parse(cursor)?;
+    let plugin = loadbalance::LoadBalance::parse(cursor, root_path(&block.config))?;
     plugin.register_hooks(&mut block.config.lifecycle);
     block.config.loadbalance = Some(plugin);
+    Ok(())
+}
+
+#[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
+fn root_path(chain: &Chain) -> Option<&std::path::Path> {
+    #[cfg(feature = "plugin-root")]
+    {
+        chain.root.as_deref()
+    }
+    #[cfg(not(feature = "plugin-root"))]
+    {
+        let _ = chain;
+        None
+    }
+}
+
+#[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
+fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let Some(root) = root.filter(|_| path.is_relative()) else {
+        return path;
+    };
+    let joined = root.join(path);
+    let mut clean = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(clean.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                clean.pop();
+            }
+            Component::ParentDir if !clean.has_root() => clean.push(component),
+            Component::ParentDir => {}
+            _ => clean.push(component),
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        clean.push(".");
+    }
+    clean
+}
+
+#[cfg(feature = "plugin-root")]
+fn setup_root(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.root = Some(root::parse(cursor)?);
     Ok(())
 }
 

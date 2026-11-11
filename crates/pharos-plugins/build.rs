@@ -22,6 +22,7 @@ fn main() {
     );
     for name in &enabled {
         let ty = match *name {
+            "root" => "std::path::PathBuf",
             "cache" => "cache::Cache",
             "bind" => "()",
             "multisocket" => "Option<usize>",
@@ -46,6 +47,7 @@ fn main() {
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
+            "root" => "setup_root",
             "cache" => "setup_cache",
             "bind" => "setup_bind",
             "multisocket" => "setup_multisocket",
@@ -66,7 +68,8 @@ fn main() {
         };
         let once = matches!(
             *name,
-            "cache"
+            "root"
+                | "cache"
                 | "metadata"
                 | "prometheus"
                 | "ready"
@@ -100,7 +103,7 @@ fn main() {
         for name in &enabled {
             if matches!(
                 *name,
-                "bind" | "multisocket" | "ready" | "health" | "reload"
+                "root" | "bind" | "multisocket" | "ready" | "health" | "reload"
             ) {
                 continue;
             }
@@ -125,7 +128,7 @@ fn main() {
         let next = i + 1;
         if matches!(
             *name,
-            "bind" | "multisocket" | "ready" | "health" | "reload"
+            "root" | "bind" | "multisocket" | "ready" | "health" | "reload"
         ) {
             writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.serve_{next}(cx).await }}").unwrap();
             continue;
@@ -138,7 +141,7 @@ fn main() {
     for name in &enabled {
         if !matches!(
             *name,
-            "bind" | "multisocket" | "ready" | "health" | "reload"
+            "root" | "bind" | "multisocket" | "ready" | "health" | "reload"
         ) {
             write!(code, " && self.r#{name}.is_none()").unwrap();
         }
@@ -149,7 +152,7 @@ fn main() {
     for name in &enabled {
         if !matches!(
             *name,
-            "bind" | "multisocket" | "ready" | "health" | "reload"
+            "root" | "bind" | "multisocket" | "ready" | "health" | "reload"
         ) {
             writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
         }
@@ -170,7 +173,7 @@ fn main() {
     for (i, name) in enabled.iter().enumerate() {
         if matches!(
             *name,
-            "bind" | "multisocket" | "ready" | "health" | "reload"
+            "root" | "bind" | "multisocket" | "ready" | "health" | "reload"
         ) {
             continue;
         }

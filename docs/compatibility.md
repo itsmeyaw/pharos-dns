@@ -76,7 +76,6 @@
 
 ## hosts
 
-- Relative hosts file paths resolve against the working directory; `root` is not implemented yet, so CoreDNS's join with a configured `root` is not applied.
 - Pharos discards names that are not valid DNS names or UTF-8; CoreDNS retains arbitrary fields in its hosts maps.
 - Pharos lowercases ASCII name bytes, while CoreDNS applies Go's Unicode lowercasing.
 - Configured Domains that cannot be represented as DNS names are ignored for matching; CoreDNS keeps its normalized strings.
@@ -117,7 +116,6 @@
 
 - Pharos permutes encoded records and relocates compression pointers without re-encoding names. It leaves a Response unchanged if relocation would create a forward or overlapping pointer, exceed the 14-bit pointer range, or if name encodings cannot be safely relocated. Signed TSIG Responses are not reordered. CoreDNS re-encodes its records and does not have these restrictions.
 - Other RDATA is opaque, so pointers in types outside the compression-receiving list are not relocated even if a sender encodes them contrary to the RFCs.
-- Relative weight file paths use the working directory until `root` is implemented.
 - Weight files must be UTF-8; CoreDNS accepts arbitrary bytes.
 - Pharos compares file contents directly instead of CoreDNS's MD5 checksum and keeps the last valid weights when parsing fails.
 - Weight file Domains that cannot be parsed as DNS names cannot match Responses.
@@ -197,6 +195,10 @@
 - The shared signer has the same key and canonical-RDATA restrictions listed under `dnssec`.
 - NSEC3 chain construction supports complete chains only, not opt-out.
 
+## root
+
+- The README's TLS Listener example remains unavailable because TLS is deferred to M3; the `file` Plugin is not implemented yet.
+
 ## whoami
 
 - Whoami reports an error if adding the protocol label would make its SRV owner name exceed the DNS name length limit. CoreDNS ignores the resulting write error.
@@ -204,7 +206,7 @@
 
 ## General
 
-- Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI
