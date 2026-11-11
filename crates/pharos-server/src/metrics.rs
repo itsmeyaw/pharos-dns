@@ -59,6 +59,7 @@ struct RegistryInner {
     statuses: Mutex<BTreeMap<StatusKey, Arc<AtomicU64>>>,
     proxies: Mutex<BTreeMap<(String, String), Arc<Proxy>>>,
     caches: Mutex<BTreeMap<Key, Arc<Cache>>>,
+    acl: Mutex<BTreeMap<Key, Arc<[AtomicU64; 4]>>>,
     hosts: Mutex<BTreeMap<String, Arc<HostsGauge>>>,
     hosts_timestamp: Arc<AtomicU64>,
     forward: Arc<ForwardCounters>,
@@ -88,6 +89,16 @@ pub struct ForwardMetrics(Arc<ForwardCounters>);
 /// Cache metrics with labels resolved once during setup.
 #[derive(Clone)]
 pub struct CacheMetrics(Arc<Cache>);
+
+/// ACL counters with labels resolved during setup.
+#[derive(Clone, Debug)]
+pub struct AclMetrics(Arc<[AtomicU64; 4]>);
+
+impl AclMetrics {
+    pub fn increment(&self, action: usize) {
+        self.0[action].fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug, Default)]
 struct HostsGauge {
@@ -322,6 +333,7 @@ impl Registry {
             statuses: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             caches: Mutex::new(BTreeMap::new()),
+            acl: Mutex::new(BTreeMap::new()),
             hosts: Mutex::new(BTreeMap::new()),
             hosts_timestamp: Arc::new(AtomicU64::new(0)),
             forward: Arc::new(ForwardCounters::default()),
@@ -368,6 +380,15 @@ impl Registry {
         CacheMetrics(Arc::clone(
             caches
                 .entry((server.into(), zones.into(), view.into()))
+                .or_default(),
+        ))
+    }
+
+    pub fn acl(&self, server: &str, zone: &str, view: &str) -> AclMetrics {
+        let mut metrics = self.0.acl.lock().unwrap();
+        AclMetrics(Arc::clone(
+            metrics
+                .entry((server.into(), zone.into(), view.into()))
                 .or_default(),
         ))
     }
@@ -562,6 +583,39 @@ impl Registry {
         out.push_str("} 1\n");
 
         self.encode_caches(out);
+        let acl = self.0.acl.lock().unwrap();
+        for (index, name, help) in [
+            (0, "allowed", "Counter of DNS requests being allowed."),
+            (1, "blocked", "Counter of DNS requests being blocked."),
+            (2, "filtered", "Counter of DNS requests being filtered."),
+            (3, "dropped", "Counter of DNS requests being dropped."),
+        ] {
+            if !acl
+                .values()
+                .any(|counters| counters[index].load(Ordering::Relaxed) != 0)
+            {
+                continue;
+            }
+            let metric = format!("acl_{name}_requests_total");
+            header(out, &metric, help, "counter");
+            for ((server, zone, view), counters) in acl.iter() {
+                let count = counters[index].load(Ordering::Relaxed);
+                if count == 0 {
+                    continue;
+                }
+                if index == 0 {
+                    sample(out, &metric, &[("server", server), ("view", view)], count);
+                } else {
+                    sample(
+                        out,
+                        &metric,
+                        &[("server", server), ("view", view), ("zone", zone)],
+                        count,
+                    );
+                }
+            }
+        }
+        drop(acl);
         let hosts = self.0.hosts.lock().unwrap();
         if !hosts.is_empty() {
             if hosts

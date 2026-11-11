@@ -152,7 +152,8 @@ pub fn servers_with_registry(
         #[cfg(any(
             feature = "plugin-forward",
             feature = "plugin-cache",
-            feature = "plugin-local"
+            feature = "plugin-local",
+            feature = "plugin-acl"
         ))]
         let mut block = block;
         #[cfg(feature = "plugin-forward")]
@@ -257,6 +258,11 @@ pub fn servers_with_registry(
         if let Some(cache) = &mut block.config.cache {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             cache.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-acl")]
+        if let Some(acl) = &mut block.config.acl {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            acl.set_metrics(&metrics, &listeners);
         }
         #[cfg(feature = "plugin-multisocket")]
         let workers = block.config.multisocket.flatten();

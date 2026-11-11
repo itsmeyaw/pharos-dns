@@ -3,17 +3,19 @@
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Section, Type};
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 #[derive(Debug)]
 pub struct Acl {
     rules: Vec<Rule>,
+    metrics: Vec<(SocketAddr, pharos_server::metrics::AclMetrics)>,
 }
 
 #[derive(Debug)]
 struct Rule {
     domains: Vec<Name>,
     policies: Vec<Policy>,
+    metrics: Vec<(SocketAddr, Vec<pharos_server::metrics::AclMetrics>)>,
 }
 
 #[derive(Debug)]
@@ -124,9 +126,40 @@ impl Acl {
                     networks,
                 });
             }
-            rules.push(Rule { domains, policies });
+            rules.push(Rule {
+                domains,
+                policies,
+                metrics: Vec::new(),
+            });
         }
-        Ok(Self { rules })
+        Ok(Self {
+            rules,
+            metrics: Vec::new(),
+        })
+    }
+
+    pub(crate) fn set_metrics(
+        &mut self,
+        registry: &pharos_server::metrics::Registry,
+        listeners: &[pharos_server::ListenerKey],
+    ) {
+        for listener in listeners {
+            let address = listener.address;
+            let server = if address.ip().is_unspecified() {
+                format!("dns://:{}", address.port())
+            } else {
+                format!("dns://{address}")
+            };
+            self.metrics.push((address, registry.acl(&server, "", "")));
+            for rule in &mut self.rules {
+                let metrics = rule
+                    .domains
+                    .iter()
+                    .map(|domain| registry.acl(&server, &domain.canonical(), ""))
+                    .collect();
+                rule.metrics.push((address, metrics));
+            }
+        }
     }
 }
 
@@ -142,19 +175,28 @@ impl Plugin for Acl {
         };
         for rule in &self.rules {
             // RFC 4343 §3: DNS name comparisons ignore ASCII letter case.
-            let matches_domain = rule.domains.iter().any(|domain| {
-                let count = domain.label_count();
-                labels >= count
-                    && question
-                        .name
-                        .labels()
-                        .skip(labels - count)
-                        .zip(NameRef::parse(domain.as_wire(), 0).unwrap().labels())
-                        .all(|(left, right)| left.eq_ignore_ascii_case(right))
-            });
-            if !matches_domain {
+            let matched_domain = rule
+                .domains
+                .iter()
+                .enumerate()
+                .filter(|(_, domain)| {
+                    let count = domain.label_count();
+                    labels >= count
+                        && question
+                            .name
+                            .labels()
+                            .skip(labels - count)
+                            .zip(NameRef::parse(domain.as_wire(), 0).unwrap().labels())
+                            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+                })
+                .max_by_key(|(_, domain)| domain.label_count())
+                .map(|(index, _)| index);
+            let Some(domain_index) = matched_domain else {
                 continue;
-            }
+            };
+            let metrics = rule.metrics.iter().find_map(|(address, metrics)| {
+                (*address == cx.local).then(|| &metrics[domain_index])
+            });
             let action = rule
                 .policies
                 .iter()
@@ -169,9 +211,17 @@ impl Plugin for Acl {
                 .map(|policy| policy.action);
             match action {
                 Some(Action::Allow) => break,
-                Some(Action::Drop) => return Outcome::Drop,
+                Some(Action::Drop) => {
+                    if let Some(metrics) = metrics {
+                        metrics.increment(3);
+                    }
+                    return Outcome::Drop;
+                }
                 Some(Action::Block | Action::Filter) => {
                     let blocked = matches!(action, Some(Action::Block));
+                    if let Some(metrics) = metrics {
+                        metrics.increment(if blocked { 1 } else { 2 });
+                    }
                     let result = (|| {
                         let max = cx.max_response_size.max(512);
                         if cx.response.capacity() < max {
@@ -215,6 +265,13 @@ impl Plugin for Acl {
                 }
                 None => {}
             }
+        }
+        if let Some(metrics) = self
+            .metrics
+            .iter()
+            .find_map(|(address, metrics)| (*address == cx.local).then_some(metrics))
+        {
+            metrics.increment(0);
         }
         next.run(cx).await
     }
