@@ -32,6 +32,7 @@
 - Server routing, startup formatting, and tests in `crates/pharos-server` follow CoreDNS v1.15.0's `core/dnsserver/server.go`, `server_test.go`, and `onstartup.go`.
 - Metric names, help text, buckets and reporting in `crates/pharos-server` follow CoreDNS v1.15.0's `plugin/metrics` and `plugin/pkg/proxy/metrics.go`.
 - The CLI layout and lifecycle in `crates/pharos` follow CoreDNS v1.15.0's `coremain/run.go` and `core/dnsserver/onstartup.go`.
+- The container capability and distroless stages follow CoreDNS v1.15.0's `Dockerfile`.
 
 ## Prometheus Go client, common, and procfs
 
@@ -173,3 +174,4 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 - License: Apache-2.0
 - Copyright The Kubernetes Authors and k3s contributors
 - Default Corefile fixtures under `crates/pharos/tests/fixtures/corefiles` follow the versions identified in each file; the Helm fixture follows https://github.com/coredns/helm (Apache-2.0).
+- `deploy/kubernetes/pharos.yaml` follows kubeadm's DNS manifests and embeds the kubeadm Corefile fixture.

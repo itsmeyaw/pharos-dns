@@ -10,6 +10,14 @@ long flags report their replacements. DNS ports and the configured health,
 readiness, and metrics ports and probe paths are unchanged. Check the
 [compatibility document](docs/compatibility.md) for endpoint differences.
 
+For a new installation, `deploy/kubernetes/pharos.yaml` is an example using
+the kubeadm Corefile and least-privilege watch RBAC. Set its image to one
+available to your nodes and its Service `clusterIP` to the kubelet's configured
+cluster DNS address. It creates a `kube-dns` Service and is not an
+in-place migration manifest: do not apply it over an existing kubeadm DNS
+installation. For that case, patch the existing CoreDNS Deployment instead,
+retaining its ConfigMap, RBAC, probes, security context and Service.
+
 Before rollout, run:
 
 ```sh
