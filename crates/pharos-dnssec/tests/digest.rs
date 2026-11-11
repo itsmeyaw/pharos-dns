@@ -1,0 +1,41 @@
+use base64::{Engine, engine::general_purpose::STANDARD};
+use pharos_dnssec::digest::{DigestType, ds_digest, key_tag, signature_valid_at};
+use pharos_proto::Name;
+
+#[test]
+fn rfc_4509_dnskey_and_ds_vector() {
+    let key = STANDARD
+        .decode(concat!(
+            "AQOeiiR0GOMYkDshWoSKz9Xz",
+            "fwJr1AYtsmx3TGkJaNXVbfi/",
+            "2pHm822aJ5iI9BMzNXxeYCmZ",
+            "DRD99WYwYqUSdjMmmAphXdvx",
+            "egXd/M5+X7OrzKBaMbCVdFLU",
+            "Uh6DhweJBjEVv5f2wwjM9Xzc",
+            "nOf+EPbtG9DMBmADjFDc2w/r",
+            "ljwvFw=="
+        ))
+        .unwrap();
+    let mut rdata = vec![1, 0, 3, 5];
+    rdata.extend(key);
+    assert_eq!(key_tag(&rdata), Some(60485));
+    let owner: Name = "DSKEY.Example.COM.".parse().unwrap();
+    assert_eq!(
+        ds_digest(&owner, &rdata, DigestType::Sha256),
+        [
+            0xd4, 0xb7, 0xd5, 0x20, 0xe7, 0xbb, 0x5f, 0x0f, 0x67, 0x67, 0x4a, 0x0c, 0xce, 0xb1,
+            0xe3, 0xe0, 0x61, 0x4b, 0x93, 0xc4, 0xf9, 0xe9, 0x9b, 0x83, 0x83, 0xf6, 0xa1, 0xe4,
+            0x46, 0x9d, 0xa5, 0x0a,
+        ]
+    );
+}
+
+#[test]
+fn signature_windows_wrap_and_include_endpoints() {
+    assert!(signature_valid_at(u32::MAX - 5, 5, u32::MAX - 5));
+    assert!(signature_valid_at(u32::MAX - 5, 5, 0));
+    assert!(signature_valid_at(u32::MAX - 5, 5, 5));
+    assert!(!signature_valid_at(u32::MAX - 5, 5, 6));
+    assert!(!signature_valid_at(10, 20, 9));
+    assert!(!signature_valid_at(0, 1 << 31, 1));
+}
