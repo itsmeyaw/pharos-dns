@@ -252,7 +252,7 @@ fn visit_reverse(
     let exposed =
         |namespace: &str| config.namespaces.is_empty() || index.namespace(namespace).is_some();
     if let Some(service) = index
-        .services_by_ip(ip)
+        .services_by_ip_unfiltered(ip)
         .find(|service| exposed(&service.namespace))
     {
         let mut wire = [0; 255];
@@ -271,7 +271,7 @@ fn visit_reverse(
         return false;
     }
     let mut found = false;
-    for endpoints in index.endpoints_by_ip(ip) {
+    for endpoints in index.endpoints_by_ip_unfiltered(ip) {
         if !exposed(&endpoints.namespace) {
             continue;
         }
@@ -397,9 +397,9 @@ fn visit_ns(
     let mut found = false;
     for local in locals {
         let local_text = local.to_string();
-        for ep in index.endpoints_by_ip(&local_text) {
+        for ep in index.endpoints_by_ip_unfiltered(&local_text) {
             found = true;
-            let Some(svc) = index.service(&ep.namespace, &ep.service_name) else {
+            let Some(svc) = index.service_unfiltered(&ep.namespace, &ep.service_name) else {
                 continue;
             };
             if svc.headless() {

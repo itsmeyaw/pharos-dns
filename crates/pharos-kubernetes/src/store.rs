@@ -320,12 +320,17 @@ impl Index {
             None
         }
     }
-    pub(crate) fn service_unfiltered(&self, namespace: &str, name: &str) -> Option<&Service> {
+    /// Look up a Service without applying namespace visibility restrictions.
+    pub fn service_unfiltered(&self, namespace: &str, name: &str) -> Option<&Service> {
         by_name(&self.services, namespace, name).map(Arc::as_ref)
     }
     pub fn services_by_ip(&self, ip: &str) -> impl Iterator<Item = &Service> {
-        lookup_reverse(&self.service_ips, ip)
+        self.services_by_ip_unfiltered(ip)
             .filter(|service| self.namespace_allowed(&service.namespace))
+    }
+    /// Look up Services by cluster IP without namespace visibility restrictions.
+    pub fn services_by_ip_unfiltered(&self, ip: &str) -> impl Iterator<Item = &Service> {
+        lookup_reverse(&self.service_ips, ip)
     }
     pub fn services_by_external_ip(&self, ip: &str) -> impl Iterator<Item = &Service> {
         lookup_reverse(&self.service_external_ips, ip)
@@ -341,8 +346,12 @@ impl Index {
             .filter(|slice| self.namespace_allowed(&slice.namespace))
     }
     pub fn endpoints_by_ip(&self, ip: &str) -> impl Iterator<Item = &Endpoints> {
-        lookup_reverse(&self.endpoint_ips, ip)
+        self.endpoints_by_ip_unfiltered(ip)
             .filter(|slice| self.namespace_allowed(&slice.namespace))
+    }
+    /// Look up EndpointSlices by address without namespace visibility restrictions.
+    pub fn endpoints_by_ip_unfiltered(&self, ip: &str) -> impl Iterator<Item = &Endpoints> {
+        lookup_reverse(&self.endpoint_ips, ip)
     }
     pub fn pods_by_ip(&self, ip: &str) -> impl Iterator<Item = &Pod> {
         lookup_reverse(&self.pod_ips, ip).filter(|pod| self.namespace_allowed(&pod.namespace))
