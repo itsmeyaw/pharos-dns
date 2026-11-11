@@ -1,0 +1,7 @@
+.:{port} {
+    rewrite continue edns0 local set 65520 {qname}
+    rewrite continue edns0 local set 65521 {qtype}
+    rewrite continue edns0 local set 65522 {client_ip}
+    rewrite edns0 local set 65523 {protocol}
+    whoami
+}

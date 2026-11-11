@@ -1,0 +1,2 @@
+example.org. A IN udp +ednsoption=65518:61626364
+example.org. AAAA IN tcp +ednsoption=65518:61626364
