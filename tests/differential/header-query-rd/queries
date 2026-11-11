@@ -1,0 +1,2 @@
+www.example.org. A IN udp +norec
+www.example.org. A IN tcp +norec

@@ -1,0 +1,3 @@
+example.org. A IN udp
+example.net. AAAA IN tcp
+outside.example.com. A IN udp

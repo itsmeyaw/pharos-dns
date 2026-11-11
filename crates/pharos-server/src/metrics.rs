@@ -63,6 +63,8 @@ struct RegistryInner {
     hosts_timestamp: Arc<AtomicU64>,
     forward: Arc<ForwardCounters>,
     forward_enabled: AtomicBool,
+    local: Arc<AtomicU64>,
+    local_enabled: AtomicBool,
     process: AtomicBool,
     health_enabled: AtomicBool,
     health_duration: Histogram,
@@ -324,6 +326,8 @@ impl Registry {
             hosts_timestamp: Arc::new(AtomicU64::new(0)),
             forward: Arc::new(ForwardCounters::default()),
             forward_enabled: AtomicBool::new(false),
+            local: Arc::new(AtomicU64::new(0)),
+            local_enabled: AtomicBool::new(false),
             process: AtomicBool::new(false),
             health_enabled: AtomicBool::new(false),
             health_duration: Histogram::new(HEALTH_BUCKETS),
@@ -404,6 +408,12 @@ impl Registry {
         ForwardMetrics(Arc::clone(&self.0.forward))
     }
 
+    /// Resolve the process-wide, unlabelled local counter at setup.
+    pub fn local(&self) -> Arc<AtomicU64> {
+        self.0.local_enabled.store(true, Ordering::Relaxed);
+        Arc::clone(&self.0.local)
+    }
+
     /// Include process metrics from the operating system at scrape time.
     pub fn enable_process_metrics(&self) {
         self.0.process.store(true, Ordering::Relaxed);
@@ -451,6 +461,20 @@ impl Registry {
     /// Append text to `out`; callers can append process metrics to the same buffer.
     pub fn encode(&self, out: &mut String) {
         self.0.kubernetes.encode(out);
+        if self.0.local_enabled.load(Ordering::Relaxed) {
+            header(
+                out,
+                "local_localhost_requests_total",
+                "Counter of special localhost subdomain requests.",
+                "counter",
+            );
+            writeln!(
+                out,
+                "pharos_local_localhost_requests_total {}",
+                self.0.local.load(Ordering::Relaxed)
+            )
+            .unwrap();
+        }
         if self.0.reload_enabled.load(Ordering::Relaxed) {
             header(
                 out,

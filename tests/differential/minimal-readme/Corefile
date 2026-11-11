@@ -1,0 +1,8 @@
+example.org:{port} {
+    whoami
+    forward . 127.0.0.1:{port2}
+    minimal
+}
+.:{port2} {
+    whoami
+}

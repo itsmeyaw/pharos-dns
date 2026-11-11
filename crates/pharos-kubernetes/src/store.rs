@@ -225,6 +225,7 @@ mod tests {
             version: "1".into(),
             name: "pod".into(),
             namespace: "prod".into(),
+            labels: Default::default(),
             ips: vec!["10.0.0.1".into()],
             deleting: false,
         };
@@ -279,6 +280,7 @@ mod tests {
             version: "1".into(),
             name: "pod".into(),
             namespace: "prod".into(),
+            labels: Default::default(),
             ips: vec!["10.0.0.1".into()],
             deleting: false,
         };
@@ -344,6 +346,7 @@ mod tests {
                 version: version.into(),
                 name: "dns-test".into(),
                 namespace: "testns".into(),
+                labels: Default::default(),
                 ips: ips.iter().map(|ip| (*ip).to_owned()).collect(),
                 deleting: false,
             };
@@ -525,6 +528,14 @@ impl Index {
     }
     pub fn pods_by_ip(&self, ip: &str) -> impl Iterator<Item = &Pod> {
         lookup_reverse(&self.pod_ips, ip).filter(|pod| self.namespace_allowed(&pod.namespace))
+    }
+    /// Retain a Pod snapshot for Metadata after the index lock is released.
+    pub fn pod_snapshot_by_ip(&self, ip: &str) -> Option<Arc<Pod>> {
+        self.pod_ips
+            .get(ip)?
+            .iter()
+            .find(|pod| self.namespace_allowed(&pod.namespace))
+            .cloned()
     }
     pub fn namespace(&self, name: &str) -> Option<&Namespace> {
         if self.namespace_allowed(name) {

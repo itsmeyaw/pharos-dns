@@ -171,12 +171,22 @@ async fn next_rcode_passes_to_following_forward_and_records_upstream() {
     let (first, task1) = fake(3, false).await;
     let (second, task2) = fake(0, false).await;
     let chain = chain(&format!(
-        ".:0 {{\n forward . {first} {{\n next NXDOMAIN\n }}\n forward . {second}\n}}"
+        ".:0 {{\n {}\n forward . {first} {{\n next NXDOMAIN\n }}\n forward . {second}\n}}",
+        if cfg!(feature = "plugin-metadata") {
+            "metadata"
+        } else {
+            ""
+        }
     ));
     let (outcome, response, upstream) = run(&chain).await;
     assert_eq!(outcome, Outcome::Response);
     assert_eq!(Message::parse(&response).unwrap().rcode().0, 0);
-    assert_eq!(upstream.as_deref(), Some(second.to_string().as_str()));
+    assert_eq!(
+        upstream.as_deref(),
+        cfg!(feature = "plugin-metadata")
+            .then_some(second.to_string())
+            .as_deref()
+    );
     task1.await.unwrap();
     task2.await.unwrap();
 }

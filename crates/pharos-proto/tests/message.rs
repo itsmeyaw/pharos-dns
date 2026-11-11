@@ -11,6 +11,43 @@ fn authenticated_query_view_does_not_mutate_wire() {
 }
 
 #[test]
+fn udp_payload_view_and_ad_copy_preserve_other_wire_fields() {
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x02\x01x\0\0\x01\0\x01\0\0\x29\x10\0\0\0\x80\0\0\x04\xfd\xe9\0\0\xc0\x0c\0\x01\0\x01\0\0\0\x3c\0\x04\x7f\0\0\x01";
+    let original = Message::parse(wire).unwrap();
+    let opt = original.additionals().next().unwrap();
+    let class_offset = opt.ttl_offset - 2;
+    let changed = original.with_udp_payload_limit(1232).with_ad();
+    assert!(changed.wire_changed());
+    assert_eq!(changed.opt().unwrap().udp_payload_size(), 1232);
+    assert_eq!(original.opt().unwrap().udp_payload_size(), 4096);
+    assert_eq!(changed.as_wire(), wire);
+
+    let mut expected = wire.to_vec();
+    expected[3] |= 0x20;
+    expected[class_offset..class_offset + 2].copy_from_slice(&1232_u16.to_be_bytes());
+    let mut copied = Vec::new();
+    changed.copy_wire(&mut copied);
+    assert_eq!(copied, expected);
+    let decoded = Message::parse(&copied).unwrap();
+    assert!(decoded.ad());
+    assert_eq!(decoded.opt().unwrap().udp_payload_size(), 1232);
+}
+
+#[test]
+fn udp_payload_view_never_increases_or_adds_an_opt() {
+    for wire in [
+        &b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\0\0\x01\0\x01\0\0\x29\x02\0\0\0\0\0\0\0"[..],
+        &b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\0\0\x01\0\x01"[..],
+    ] {
+        let view = Message::parse(wire).unwrap().with_udp_payload_limit(1232);
+        assert!(!view.wire_changed());
+        let mut copied = Vec::new();
+        view.copy_wire(&mut copied);
+        assert_eq!(copied, wire);
+    }
+}
+
+#[test]
 fn ad_wire_safety_checks_names_without_treating_edns_data_as_pointers() {
     let header_pointer = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\xc0\x03\0\x01\0\x01";
     let label_data = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x02\xc0\x03\0\0\x01\0\x01";

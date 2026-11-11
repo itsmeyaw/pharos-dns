@@ -1,0 +1,5 @@
+localhost.example.net. A IN udp
+localhost.example.net. AAAA IN tcp
+a.localhost. A IN udp
+a.localhost. MX IN tcp
+localhost. A IN udp

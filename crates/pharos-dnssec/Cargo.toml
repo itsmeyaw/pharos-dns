@@ -1,0 +1,14 @@
+[package]
+name = "pharos-dnssec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aws-lc-rs = "1.19"
+base64 = "0.22"
+pharos-proto = { path = "../pharos-proto" }
