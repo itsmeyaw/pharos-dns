@@ -184,3 +184,22 @@ fn comment_may_touch_the_type() {
         Ok(vec![(16, b"\x01x".to_vec())])
     );
 }
+
+#[test]
+fn escape_survives_a_stray_carriage_return() {
+    // RFC 1035 §5.1: \X is X; the CR between is dropped as miekg/dns does.
+    assert_eq!(
+        parse(b"1 IN TXT \\\rx\n"),
+        Ok(vec![(16, b"\x01x".to_vec())])
+    );
+    assert_eq!(
+        parse(b"1 IN TXT \\\r\x8d\n"),
+        Ok(vec![(16, b"\x01\x8d".to_vec())])
+    );
+    assert_eq!(
+        parse(b"1 IN TXT \\\r(x)\n"),
+        Ok(vec![(16, b"\x01x".to_vec())])
+    );
+    assert!(parse(b"1 IN TXT \\\r \n").is_err());
+    assert!(parse(b"1 IN TXT \\\r\"x\"\n").is_err());
+}

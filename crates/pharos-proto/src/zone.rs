@@ -193,6 +193,24 @@ impl<R: BufRead> ZoneParser<R> {
                         return Err(self.error(self.line, i + 1, "incomplete escape"));
                     }
                     i += 1;
+                    // miekg/dns drops a CR outside quotes; the escape then still applies to the
+                    // next byte unless that byte is zone syntax.
+                    let after_cr = i;
+                    while !quote && i + 1 < line.len() && line[i + 1] != b'\n' {
+                        if line[i] == b'(' && i != after_cr {
+                            parens.push((self.line, i + 1));
+                        } else if line[i] == b')' && i != after_cr {
+                            if parens.pop().is_none() {
+                                return Err(self.error(self.line, i + 1, "unbalanced parentheses"));
+                            }
+                        } else if line[i] != b'\r' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if i != after_cr && matches!(line[i], b' ' | b'\t' | b'"' | b';') {
+                        return Err(self.error(self.line, column, "trailing escape"));
+                    }
                     if line[i] == b'\r' && !quote {
                         raw.push(b'\\');
                         token.push('\\');

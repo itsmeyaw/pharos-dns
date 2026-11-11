@@ -246,7 +246,7 @@
 - A comment may touch the item before it (RFC 1035 §5.1), so `a 60 TXT;c` followed by RDATA inside parentheses reads `TXT` as the type. miekg/dns does not recognize a type mnemonic directly before `;` and rejects the record.
 - An unmatched `)` is always rejected. miekg/dns ignores it at the end of an NSEC, NSEC3 or CSYNC type bitmap and drops the item touching it (`NSEC = A x)` gives bitmap `A`).
 - Escapes in a `$GENERATE` template keep their RFC 1035 §5.1 meaning: `\t` is `t` and `\065` is `A`. miekg/dns drops the escaped character (`\t` becomes nothing, `\065` becomes `65`) and rejects `\\`; only `\$` matches.
-- An unterminated quote in a `$GENERATE` template is rejected. miekg/dns accepts it and copies the following lines into the generated RDATA.
+- An unterminated quote is always rejected. miekg/dns accepts one in a `$GENERATE` template, copying the following lines into the generated RDATA, and one touching the previous item in the last record of the file (`w IN HTTPS 0" `).
 - A Zone file without a final newline is parsed as if it had one. miekg/dns treats an incomplete last line differently at end of file: it accepts `www` or `www IN A ` (dropping the line or emitting empty RDATA) and rejects `www IN A`, the reverse of its result when the line ends with a newline. Complete last lines parse the same. miekg/dns re-parses each `$GENERATE` template the same way, so it also accepts incomplete templates such as `$GENERATE 1-1 a\\` that Pharos rejects.
 - Unlike miekg/dns, incomplete typed records are rejected rather than accepted as partial values.
 - Pharos rejects a zero-length TXT RDATA, which lacks the required character string; miekg/dns accepts it. TXT strings of length zero are accepted.

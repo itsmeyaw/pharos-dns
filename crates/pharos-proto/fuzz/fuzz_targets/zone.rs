@@ -64,9 +64,9 @@ fn pharos(zone: &[u8]) -> String {
     let origin: Name = ORIGIN.parse().unwrap();
     match ZoneParser::new(Cursor::new(zone), origin, "fuzz.zone").collect::<Result<Vec<_>, _>>() {
         // Documented deviations: Pharos rejects missing RDATA fields, unmatched ')' and
-        // unterminated quotes in $GENERATE.
+        // unterminated quotes.
         Err(error)
-            if ["missing ", "fields, got", "unbalanced parentheses"]
+            if ["missing ", "fields, got", "unbalanced parentheses", "unterminated record"]
                 .iter()
                 .any(|message| error.to_string().contains(message))
                 || generate_line_error(zone, &error.to_string()) =>
