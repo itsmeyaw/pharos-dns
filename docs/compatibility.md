@@ -66,9 +66,18 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 ## Plugins
 
-Only `cache`, `errors`, `forward`, `health`, `hosts`, `loadbalance`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
+Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `loadbalance`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
+
+## Bind
+
+Interface enumeration uses `getifaddrs`; scoped IPv6 Listener labels use the
+numeric interface index rather than CoreDNS's interface name. Unspecified
+addresses are labelled as unbound addresses. The existing unbound DNS Listener
+uses an IPv4 wildcard instead of CoreDNS's dual-stack wildcard. Reload binds
+new Listeners before removing old ones, so switching between a wildcard and a
+specific address on the same port can fail rather than replacing the socket.
 
 The `loop` Plugin probes only the first Domain in a Server Block at startup
 and after Reload, as CoreDNS does.
