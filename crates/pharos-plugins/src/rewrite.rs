@@ -1702,7 +1702,10 @@ impl Plugin for Rewrite {
             };
             let matched = match applied {
                 Ok(matched) => matched,
-                Err(error) => return Outcome::Error(error),
+                Err(error) => {
+                    cx.query = original_query;
+                    return Outcome::Error(error);
+                }
             };
             if let Some(matches) = &mut matches {
                 matches[index] = u8::from(matched);

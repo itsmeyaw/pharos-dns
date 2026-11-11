@@ -240,3 +240,29 @@ fn coredns_name_setup_cases() {
         }
     }
 }
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_metadata_test.go.
+#[test]
+fn coredns_name_metadata_validation() {
+    for replacement in [
+        "{missing}",
+        "{test/}",
+        "{/value}",
+        "{test/value",
+        "test/value}",
+        "{{test/value}}",
+        "{2}.{test/value}",
+        "{-1}.{test/value}",
+    ] {
+        let text = format!(".:53 {{\n rewrite name regex (.*) {replacement} metadata\n}}");
+        let result =
+            parse("Corefile", &text).and_then(|blocks| configure::<Chain>(&blocks, directives()));
+        assert!(result.is_err(), "{replacement}");
+    }
+    for mode in ["exact", "prefix", "suffix", "substring"] {
+        let text = format!(".:53 {{\n rewrite name {mode} example. {{test/value}}. metadata\n}}");
+        let result =
+            parse("Corefile", &text).and_then(|blocks| configure::<Chain>(&blocks, directives()));
+        assert!(result.is_err(), "{mode}");
+    }
+}
