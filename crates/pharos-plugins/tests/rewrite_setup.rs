@@ -1,0 +1,70 @@
+#![forbid(unsafe_code)]
+#![cfg(feature = "plugin-rewrite")]
+#![recursion_limit = "512"]
+
+use pharos_corefile::{configure, parse};
+use pharos_plugins::{Chain, directives};
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/setup_test.go.
+#[test]
+fn coredns_rewrite_setup_cases() {
+    for (rule, valid) in [
+        ("rewrite", false),
+        ("rewrite name", false),
+        ("rewrite name a.com b.com", true),
+        (
+            "rewrite stop {\n name regex foo bar\n answer name bar foo\n}",
+            true,
+        ),
+        ("rewrite stop name regex foo bar answer name bar foo", true),
+        (
+            "rewrite stop {\n name regex foo bar\n answer name bar foo\n name baz\n}",
+            false,
+        ),
+        (
+            "rewrite stop {\n answer name bar foo\n name regex foo bar\n}",
+            false,
+        ),
+        ("rewrite stop", false),
+        ("rewrite continue", false),
+        (
+            "rewrite stop name regex [bad[ bar answer name bar foo",
+            false,
+        ),
+    ] {
+        let text = format!(".:53 {{\n{rule}\n}}");
+        let result =
+            parse("Corefile", &text).and_then(|blocks| configure::<Chain>(&blocks, directives()));
+        assert_eq!(result.is_ok(), valid, "{rule}: {result:?}");
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/ttl_test.go TestNewTTLRule.
+#[test]
+fn coredns_ttl_setup_cases() {
+    for (args, valid) in [
+        ("srv1.coredns.rocks 10", true),
+        ("exact srv1.coredns.rocks 15", true),
+        ("prefix coredns.rocks 20", true),
+        ("suffix srv1 25", true),
+        ("substring coredns 30", true),
+        (r"regex (srv1)\.(coredns)\.(rocks) 35", true),
+        ("srv1.coredns.rocks 12345678901234567890", false),
+        ("srv1.coredns.rocks coredns.rocks", false),
+        ("srv1.coredns.rocks #1", false),
+        ("range.coredns.rocks 1-2", true),
+        ("ceil.coredns.rocks -2", true),
+        ("floor.coredns.rocks 1-", true),
+        ("range.coredns.rocks 2-2", true),
+        ("invalid.coredns.rocks -", false),
+        ("invalid.coredns.rocks 2-1", false),
+        ("invalid.coredns.rocks 5-10-20", false),
+    ] {
+        for mode in ["stop", "continue"] {
+            let text = format!(".:53 {{\n rewrite {mode} ttl {args}\n}}");
+            let result = parse("Corefile", &text)
+                .and_then(|blocks| configure::<Chain>(&blocks, directives()));
+            assert_eq!(result.is_ok(), valid, "{mode} {args}: {result:?}");
+        }
+    }
+}
