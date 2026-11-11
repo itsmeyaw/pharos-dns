@@ -126,6 +126,80 @@ fn cname(builder: &mut MessageBuilder<'_>, owner: &str, target: &str, ttl: u32) 
         .unwrap();
 }
 
+struct DropLookup(pharos_plugins::rewrite::Rewrite);
+impl pharos_server::Chain for DropLookup {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, DropLookupBackend).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct DropLookupBackend;
+impl Next for DropLookupBackend {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        if q.name.to_string() == "good.target." {
+            return Outcome::Drop;
+        }
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        cname(&mut builder, "bad.test.", "bad.target.", 60);
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/cname_target_test.go TestCNAMETargetRewrite_upstreamFailurePaths.
+#[tokio::test]
+async fn coredns_cname_dropped_lookup_preserves_target() {
+    let config = ".:53 {\n rewrite cname bad.target. good.target.\n}";
+    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(DropLookup(chain.rewrite.take().unwrap())),
+        vec![],
+    );
+    let server = Server::new(router, key);
+    let name: Name = "bad.test.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+        pharos_server::Action::Respond
+    );
+    let response = Message::parse(&response).unwrap();
+    let Rdata::Cname(target) = response.answers().next().unwrap().data().unwrap() else {
+        panic!("expected CNAME")
+    };
+    assert_eq!(target.to_string(), "bad.target.");
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/cname_target_test.go TestCNameTargetRewrite.
 #[tokio::test]
 async fn coredns_cname_target_rows() {
