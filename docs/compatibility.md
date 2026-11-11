@@ -19,6 +19,10 @@
   After an unwritten first outcome, SERVFAIL, REFUSED, FORMERR and NOTIMP
   Self Lookup Responses are treated as unwritten: Listener synthesis obscures
   whether a later Plugin actually wrote such a Response.
+- Resolver files must be UTF-8. Search suffixes that cannot be represented as
+  DNS wire names are treated as the root suffix; CoreDNS accepts arbitrary text.
+- A Response containing RDATA that cannot be decoded and relocated by Pharos
+  fails rather than being rebuilt by CoreDNS's DNS library.
 
 ## bind
 
