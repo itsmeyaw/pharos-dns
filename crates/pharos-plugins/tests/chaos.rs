@@ -17,7 +17,7 @@ fn configured(text: &str) -> Result<Chain, String> {
 
 struct NextDrop;
 impl Next for NextDrop {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Drop
     }
 }

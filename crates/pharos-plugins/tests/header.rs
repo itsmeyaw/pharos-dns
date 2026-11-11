@@ -48,7 +48,7 @@ struct Inspect {
 }
 
 impl Next for Inspect {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         assert_eq!(cx.query.flags(), self.expected);
         let mut wire = Vec::with_capacity(512);
         cx.query.copy_wire(&mut wire);

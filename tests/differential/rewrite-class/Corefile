@@ -1,0 +1,8 @@
+.:{port} {
+    chaos explicit
+    rewrite class CH IN
+    hosts empty.hosts {
+        192.0.2.10 example.org
+        reload 0
+    }
+}

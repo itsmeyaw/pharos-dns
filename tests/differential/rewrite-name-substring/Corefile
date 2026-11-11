@@ -1,0 +1,7 @@
+.:{port} {
+    rewrite name substring service.us-west-1.example.org service.us-west-1.consul
+    hosts empty.hosts {
+        192.0.2.10 ftp.service.us-west-1.consul
+        reload 0
+    }
+}

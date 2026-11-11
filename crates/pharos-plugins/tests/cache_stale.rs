@@ -383,12 +383,12 @@ async fn verify_returns_stale_on_servfail() {
     struct Backend(bool);
     struct Pending;
     impl Next for Pending {
-        async fn run(self, _: &mut Context<'_>) -> Outcome {
+        async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
             std::future::pending().await
         }
     }
     impl Next for Backend {
-        async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
             assert!(cx.query.ad(), "refresh must request authenticated data");
             if self.0 {
                 return Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL);

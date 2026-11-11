@@ -42,12 +42,12 @@ struct LocalRefreshGuard<'a> {
     success: bool,
 }
 
-struct QueryGuard<'a, 'b> {
-    context: &'a mut Context<'b>,
+struct QueryGuard<'a, 'b, 'c> {
+    context: &'a mut Context<'b, 'c>,
     query: Message<'b>,
 }
 
-impl Drop for QueryGuard<'_, '_> {
+impl Drop for QueryGuard<'_, '_, '_> {
     fn drop(&mut self) {
         self.context.query = self.query;
     }
@@ -128,7 +128,7 @@ impl Cache {
 }
 
 impl Plugin for Cache {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let query = cx.query;
         let Some(question) = query.questions().next() else {
             return next.run(cx).await;
@@ -344,7 +344,7 @@ impl Cache {
     fn spawn_refresh(
         &self,
         chain: Arc<crate::Chain>,
-        cx: &Context<'_>,
+        cx: &Context<'_, '_>,
         key: u64,
         denial: bool,
         hit: store::Hit,
@@ -352,10 +352,12 @@ impl Cache {
         let stored = hit.refresh.expect("refresh requested");
         let generation = hit.generation;
         let stale = hit.stale;
-        let safe_query = cx.query.can_set_ad_in_wire();
         let mut wire = Vec::with_capacity(cx.query.as_wire().len());
-        cx.query.copy_wire(&mut wire);
-        wire[3] |= 0x20;
+        let safe_query =
+            cx.query.can_set_ad_in_wire() && cx.query.copy_wire_checked(&mut wire).is_ok();
+        if safe_query {
+            wire[3] |= 0x20;
+        }
         let domain = cx.domain.clone();
         let synthetic = !stale || !self.config.verify;
         let client = if synthetic {
@@ -485,7 +487,7 @@ impl Cache {
 
     fn process_response(
         &self,
-        cx: &mut Context<'_>,
+        cx: &mut Context<'_, '_>,
         outcome: Outcome,
         expected: Option<(bool, Instant)>,
     ) -> Outcome {

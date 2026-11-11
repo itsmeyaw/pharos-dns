@@ -100,7 +100,7 @@ impl Format {
     pub fn format(
         &self,
         output: &mut String,
-        cx: &Context<'_>,
+        cx: &Context<'_, '_>,
         outcome: Outcome,
         elapsed: Duration,
     ) {
@@ -215,7 +215,7 @@ struct Response {
     size: usize,
 }
 
-fn response(cx: &Context<'_>, outcome: Outcome) -> Response {
+fn response(cx: &Context<'_, '_>, outcome: Outcome) -> Response {
     let deferred = match outcome {
         Outcome::Error(_) => Some(Rcode::SERVFAIL),
         Outcome::Unanswered(code)

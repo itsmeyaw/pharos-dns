@@ -29,7 +29,7 @@ impl Nsid {
 }
 
 impl Plugin for Nsid {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         // RFC 5001 §2.2: return NSID only when the Query contains the NSID option.
         let requested = cx.query.opt().is_some_and(|opt| {
             opt.options()
@@ -46,7 +46,7 @@ impl Plugin for Nsid {
     }
 }
 
-fn update_nsid(cx: &mut Context<'_>, data: Option<&[u8]>) -> Result<(), Error> {
+fn update_nsid(cx: &mut Context<'_, '_>, data: Option<&[u8]>) -> Result<(), Error> {
     let message = Message::parse(cx.response).map_err(|_| Error::InvalidQuery)?;
     // RFC 5001 §2.2: an NSID from Next must not reach a client that did not request it.
     if data.is_none()
@@ -157,7 +157,7 @@ mod tests {
     struct Return(Outcome);
 
     impl Next for Return {
-        async fn run(self, _cx: &mut Context<'_>) -> Outcome {
+        async fn run(self, _cx: &mut Context<'_, '_>) -> Outcome {
             self.0
         }
     }

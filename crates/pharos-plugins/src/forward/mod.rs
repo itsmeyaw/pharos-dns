@@ -220,7 +220,7 @@ impl Forward {
 }
 
 impl Plugin for Forward {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let root = [0];
         let name = cx.query.questions().next().map_or_else(
             || NameRef::parse(&root, 0).expect("root"),
@@ -257,7 +257,9 @@ impl Plugin for Forward {
                 {
                     return Outcome::Unanswered(Rcode::FORMERR);
                 }
-                cx.query.copy_wire(query_buffer);
+                if cx.query.copy_wire_checked(query_buffer).is_err() {
+                    return Outcome::Unanswered(Rcode::FORMERR);
+                }
                 query_buffer.as_slice()
             } else {
                 original_query

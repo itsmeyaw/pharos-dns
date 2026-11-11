@@ -21,7 +21,7 @@ struct Broken {
 
 struct LocalProbe;
 impl Chain for LocalProbe {
-    async fn serve(&self, context: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, context: &mut Context<'_, '_>) -> Outcome {
         assert_eq!(context.local, "[::]:53".parse().unwrap());
         Outcome::Unanswered(Rcode::REFUSED)
     }
@@ -55,7 +55,7 @@ async fn wildcard_context_keeps_configured_local_address() {
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
 }
 impl Chain for Broken {
-    async fn serve(&self, _: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
         if self.panic {
             panic!("broken plugin");
         }

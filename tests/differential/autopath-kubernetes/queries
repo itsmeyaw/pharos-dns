@@ -1,0 +1,2 @@
+web.default.svc.cluster.local. A IN udp
+missing.default.svc.cluster.local. A IN tcp

@@ -64,7 +64,10 @@ pub fn canonical_rdata(data: &Rdata<'_>) -> Result<Vec<u8>, CanonicalError> {
     match *data {
         Rdata::A(addr) => out.extend_from_slice(&addr.octets()),
         Rdata::Aaaa(addr) => out.extend_from_slice(&addr.octets()),
-        Rdata::Ns(name) | Rdata::Cname(name) | Rdata::Ptr(name) => write_name(&mut out, name, true),
+        // RFC 4034 §6.2: canonical DNAME targets are lowercased.
+        Rdata::Ns(name) | Rdata::Cname(name) | Rdata::Dname(name) | Rdata::Ptr(name) => {
+            write_name(&mut out, name, true)
+        }
         Rdata::Mx {
             preference,
             exchange,

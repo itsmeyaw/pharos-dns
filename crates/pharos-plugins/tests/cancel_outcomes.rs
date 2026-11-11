@@ -15,14 +15,14 @@ impl Drop for Pending<'_> {
     }
 }
 impl Next for Pending<'_> {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         std::future::pending().await
     }
 }
 
 struct Immediate;
 impl Next for Immediate {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Unanswered(Rcode::REFUSED)
     }
 }

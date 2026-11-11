@@ -6,7 +6,7 @@ use pharos_server::{Context, Next, Outcome, Plugin};
 pub struct Shed;
 
 impl Plugin for Shed {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         next.run(cx).await
     }
 }

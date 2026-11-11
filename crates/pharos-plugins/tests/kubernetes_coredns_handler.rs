@@ -101,6 +101,50 @@ async fn api(
     (format!("http://{address}"), gate, task)
 }
 
+#[cfg(feature = "plugin-autopath")]
+#[tokio::test]
+async fn autopath_uses_verified_client_pod_namespace() {
+    let (endpoint, _, task) = api(false).await;
+    let config = format!(
+        ".:53 {{\n autopath @kubernetes\n kubernetes cluster.local {{\n endpoint {endpoint}\n pods verified\n startup_timeout 3s\n }}\n}}"
+    );
+    let (mut listeners, lifecycle) =
+        servers(configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap())
+            .unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    let name: Name = "svc1.testns.podns.svc.cluster.local.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "10.240.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+        pharos_server::Action::Respond
+    );
+    let msg = Message::parse(&response).unwrap();
+    assert_eq!(msg.rcode(), Rcode::NOERROR);
+    let Rdata::Cname(target) = msg.answers().next().unwrap().data().unwrap() else {
+        panic!("expected CNAME")
+    };
+    assert_eq!(target.to_string(), "svc1.testns.svc.cluster.local.");
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    task.abort();
+}
+
 // Derived from CoreDNS v1.15.0 plugin/kubernetes/metadata_test.go TestMetadataPodsVerified.
 #[cfg(all(feature = "plugin-metadata", feature = "plugin-whoami"))]
 #[tokio::test]
@@ -945,7 +989,7 @@ enum TruncatedRoute {
 }
 
 impl pharos_server::Chain for TruncatedRoute {
-    async fn serve(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {
+    async fn serve(&self, cx: &mut pharos_server::Context<'_, '_>) -> pharos_server::Outcome {
         match self {
             Self::Kubernetes(chain) => chain.serve(cx).await,
             Self::Target => {

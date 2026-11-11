@@ -1,0 +1,3 @@
+example.org. ANY IN udp
+example.org. HINFO IN tcp
+example.org. A IN udp

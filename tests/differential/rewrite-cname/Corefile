@@ -1,0 +1,11 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    rewrite cname target.example.test other.example.test
+    hosts fixture.hosts {
+        fallthrough
+        reload 0
+    }
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+    }
+}

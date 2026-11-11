@@ -20,7 +20,7 @@ Each scenario is a directory containing:
   The API and DNS Listeners use the same non-ephemeral port reservation helper.
 - `queries`: one Query per line, `name type class udp|tcp [flags...]`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
-  `+bufsize=N`, `+nsid`, `+norec`, `+ednsversion=N`, and `+opcode=NAME` or a number.
+  `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, and `+opcode=NAME` or a number.
 - `expect` (optional): one setting per line. `ttl N` permits a TTL difference
   of N seconds for ordinary records; default is zero. `mask
   additional.srv.port` ignores only the SRV port in Additional (whoami reports
@@ -64,12 +64,40 @@ both intercepted Queries and those passed through.
 The three `header` README scenarios use `whoami` as the Backend and compare
 Responses over UDP and TCP; Rust tests also inspect forwarded Queries.
 The metadata scenarios compare DNS Responses with inherited and explicit Domains.
-The README mentions `rewrite` without a concrete Corefile; that Plugin is not
-implemented yet, so the scenarios use Kubernetes and whoami instead. Metadata
-values and log formatting are checked by Rust tests, not the differential harness.
+The Metadata README mentions `rewrite` without a concrete Corefile; those scenarios
+use Kubernetes and whoami instead. Metadata values and log formatting are checked
+by Rust tests, not the differential harness.
 The `loop` scenario compares Responses for a non-looping configuration. The
 looping README example is covered by a binary exit test instead: this harness
 expects both processes to remain available and does not compare exit codes.
+The acl README scenarios use whoami as Next. The harness originates Queries
+from loopback, so non-loopback allow and drop branches require Rust tests.
+The dns64 README scenarios use an inline hosts Backend. The harness sends from
+IPv4 loopback, so synthesis without `allow_ipv4` is covered by Rust tests.
+The siit README scenario uses an inline hosts Backend to exercise the prefix.
+The autopath file example uses the Kubernetes fixture to supply NXDOMAIN and
+positive Responses. The @kubernetes example compares passthrough only: the
+fixture has no Pod with the loopback address used by the harness; Rust tests
+cover verified Pod namespace search using an explicit client address.
+The `rewrite` name, PTR and TTL scenarios use inline hosts records. The CNAME
+scenarios use analogous names from the Kubernetes ExternalName and hosts fixtures;
+the README's literal `my-app.com` example has no matching fixture. The README's
+SERVFAIL-to-NOERROR RCODE examples are tested in Rust: the shared harness has no
+deterministic SERVFAIL backend. `rewrite-rcode` compares a nonmatching NXDOMAIN,
+and `rewrite-rcode-refused` compares a matching REFUSED-to-NOERROR rewrite using ACL.
+The type and EDNS scenarios use whoami and mask its client
+port. The EDNS variable scenario covers QNAME, QTYPE, client IP and protocol.
+The NSID and subnet scenarios compare client Responses; Rust tests also inspect
+the rewritten Query because whoami does not echo those options.
+`rewrite-edns-global` verifies option registration across Server Blocks.
+The `{server_port}` and `{client_port}` examples are covered by Rust tests: the
+processes use different ports. The metadata name example is also covered by Rust
+tests because the Kubernetes fixture has no Pod with the harness's loopback IP.
+The documented imaginary `some-plugin` metadata example cannot run because that
+Plugin does not exist.
+The `rewrite edns0` example without an EDNS Query is not compared: CoreDNS
+returns OPT while Pharos omits it under RFC 6891 §7, and the harness cannot mask
+additional records. A Rust integration test covers this deviation.
 The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
 The bind scenario compares Responses on 127.0.0.1 with an excluded IPv6 address;
 the harness cannot send Queries to another bind address or scrape metrics.

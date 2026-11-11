@@ -8,7 +8,7 @@ use pharos_server::{Context, Error, Metadata, Next, Outcome, Phase, Plugin, Prot
 
 struct Answer(Outcome);
 impl Next for Answer {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         self.0
     }
 }

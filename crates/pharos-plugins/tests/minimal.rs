@@ -99,7 +99,7 @@ struct Reply<'a> {
 }
 
 impl Next for Reply<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         cx.response.extend_from_slice(self.wire);
         self.outcome
     }

@@ -1,0 +1,2 @@
+srv.coredns.rocks. A IN udp +bufsize=1232
+srv.coredns.rocks. AAAA IN tcp +bufsize=1232

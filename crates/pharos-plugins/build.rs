@@ -35,6 +35,11 @@ fn main() {
     );
     for name in &enabled {
         let ty = match *name {
+            "acl" => "acl::Acl",
+            "dns64" => "dns64::Dns64",
+            "siit" => "siit::Siit",
+            "rewrite" => "rewrite::Rewrite",
+            "autopath" => "autopath::AutoPath",
             "root" => "std::path::PathBuf",
             "cancel" => "cancel::Cancel",
             "timeouts" => "timeouts::Timeouts",
@@ -71,6 +76,11 @@ fn main() {
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
+            "acl" => "setup_acl",
+            "dns64" => "setup_dns64",
+            "siit" => "setup_siit",
+            "rewrite" => "setup_rewrite",
+            "autopath" => "setup_autopath",
             "root" => "setup_root",
             "cancel" => "setup_cancel",
             "timeouts" => "setup_timeouts",
@@ -208,6 +218,10 @@ fn main() {
         };
         writeln!(code, "struct Next{i}<'a>(&'a Chain);\nimpl pharos_server::Next for Next{i}<'_> {{ async fn run(self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ {test_hook} self.0.serve_{next}(cx).await }} }}").unwrap();
     }
+    let code = code.replace(
+        "pharos_server::Context<'_>",
+        "pharos_server::Context<'_, '_>",
+    );
     fs::write(
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("plugins.rs"),
         code,

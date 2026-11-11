@@ -59,6 +59,10 @@ struct RegistryInner {
     statuses: Mutex<BTreeMap<StatusKey, Arc<AtomicU64>>>,
     proxies: Mutex<BTreeMap<(String, String), Arc<Proxy>>>,
     caches: Mutex<BTreeMap<Key, Arc<Cache>>>,
+    acl: Mutex<BTreeMap<Key, Arc<[AtomicU64; 4]>>>,
+    dns64: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
+    siit: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
+    autopath: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
     hosts: Mutex<BTreeMap<String, Arc<HostsGauge>>>,
     shed: Mutex<BTreeMap<String, Arc<ShedCounters>>>,
     hosts_timestamp: Arc<AtomicU64>,
@@ -89,6 +93,16 @@ pub struct ForwardMetrics(Arc<ForwardCounters>);
 /// Cache metrics with labels resolved once during setup.
 #[derive(Clone)]
 pub struct CacheMetrics(Arc<Cache>);
+
+/// ACL counters with labels resolved during setup.
+#[derive(Clone, Debug)]
+pub struct AclMetrics(Arc<[AtomicU64; 4]>);
+
+impl AclMetrics {
+    pub fn increment(&self, action: usize) {
+        self.0[action].fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug, Default)]
 struct HostsGauge {
@@ -342,6 +356,10 @@ impl Registry {
             statuses: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             caches: Mutex::new(BTreeMap::new()),
+            acl: Mutex::new(BTreeMap::new()),
+            dns64: Mutex::new(BTreeMap::new()),
+            siit: Mutex::new(BTreeMap::new()),
+            autopath: Mutex::new(BTreeMap::new()),
             hosts: Mutex::new(BTreeMap::new()),
             shed: Mutex::new(BTreeMap::new()),
             hosts_timestamp: Arc::new(AtomicU64::new(0)),
@@ -391,6 +409,51 @@ impl Registry {
                 .entry((server.into(), zones.into(), view.into()))
                 .or_default(),
         ))
+    }
+
+    pub fn acl(&self, server: &str, zone: &str, view: &str) -> AclMetrics {
+        let mut metrics = self.0.acl.lock().unwrap();
+        AclMetrics(Arc::clone(
+            metrics
+                .entry((server.into(), zone.into(), view.into()))
+                .or_default(),
+        ))
+    }
+
+    /// Resolve the DNS64 counter for a Listener during setup.
+    pub fn dns64(&self, server: &str) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.0
+                .dns64
+                .lock()
+                .unwrap()
+                .entry(server.into())
+                .or_default(),
+        )
+    }
+
+    /// Resolve the SIIT counter for a Listener during setup.
+    pub fn siit(&self, server: &str) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.0
+                .siit
+                .lock()
+                .unwrap()
+                .entry(server.into())
+                .or_default(),
+        )
+    }
+
+    /// Resolve the autopath counter for a Listener during setup.
+    pub fn autopath(&self, server: &str) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.0
+                .autopath
+                .lock()
+                .unwrap()
+                .entry(server.into())
+                .or_default(),
+        )
     }
 
     pub fn hosts(&self, path: &str) -> HostsMetrics {
@@ -618,6 +681,106 @@ impl Registry {
         out.push_str("} 1\n");
 
         self.encode_caches(out);
+        let acl = self.0.acl.lock().unwrap();
+        for (index, name, help) in [
+            (0, "allowed", "Counter of DNS requests being allowed."),
+            (1, "blocked", "Counter of DNS requests being blocked."),
+            (2, "filtered", "Counter of DNS requests being filtered."),
+            (3, "dropped", "Counter of DNS requests being dropped."),
+        ] {
+            if !acl
+                .values()
+                .any(|counters| counters[index].load(Ordering::Relaxed) != 0)
+            {
+                continue;
+            }
+            let metric = format!("acl_{name}_requests_total");
+            header(out, &metric, help, "counter");
+            for ((server, zone, view), counters) in acl.iter() {
+                let count = counters[index].load(Ordering::Relaxed);
+                if count == 0 {
+                    continue;
+                }
+                if index == 0 {
+                    sample(out, &metric, &[("server", server), ("view", view)], count);
+                } else {
+                    sample(
+                        out,
+                        &metric,
+                        &[("server", server), ("view", view), ("zone", zone)],
+                        count,
+                    );
+                }
+            }
+        }
+        drop(acl);
+        let dns64 = self.0.dns64.lock().unwrap();
+        if dns64
+            .values()
+            .any(|counter| counter.load(Ordering::Relaxed) != 0)
+        {
+            header(
+                out,
+                "dns64_requests_translated_total",
+                "Counter of DNS requests translated by dns64.",
+                "counter",
+            );
+            for (server, counter) in dns64.iter() {
+                let count = counter.load(Ordering::Relaxed);
+                if count != 0 {
+                    sample(
+                        out,
+                        "dns64_requests_translated_total",
+                        &[("server", server)],
+                        count,
+                    );
+                }
+            }
+        }
+        drop(dns64);
+        let siit = self.0.siit.lock().unwrap();
+        if siit
+            .values()
+            .any(|counter| counter.load(Ordering::Relaxed) != 0)
+        {
+            header(
+                out,
+                "siit_requests_translated_total",
+                "Counter of DNS requests translated by siit.",
+                "counter",
+            );
+            for (server, counter) in siit.iter() {
+                let count = counter.load(Ordering::Relaxed);
+                if count != 0 {
+                    sample(
+                        out,
+                        "siit_requests_translated_total",
+                        &[("server", server)],
+                        count,
+                    );
+                }
+            }
+        }
+        drop(siit);
+        let autopath = self.0.autopath.lock().unwrap();
+        if autopath
+            .values()
+            .any(|counter| counter.load(Ordering::Relaxed) != 0)
+        {
+            header(
+                out,
+                "autopath_success_total",
+                "Counter of requests that did autopath.",
+                "counter",
+            );
+            for (server, counter) in autopath.iter() {
+                let count = counter.load(Ordering::Relaxed);
+                if count != 0 {
+                    sample(out, "autopath_success_total", &[("server", server)], count);
+                }
+            }
+        }
+        drop(autopath);
         let hosts = self.0.hosts.lock().unwrap();
         if !hosts.is_empty() {
             if hosts

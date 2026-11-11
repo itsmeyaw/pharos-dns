@@ -3,7 +3,7 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
 };
 
-use crate::{BuildError, NameRef, RdataWriter, Type};
+use crate::{BuildError, MessageBuffer, NameRef, RdataWriter, Type};
 
 // shortcut: reject unsupported name-bearing types until their names can be relocated.
 fn unsupported_name_type(rtype: Type) -> bool {
@@ -23,7 +23,6 @@ fn unsupported_name_type(rtype: Type) -> bool {
             | Type::PX
             | Type::NXT
             | Type::KX
-            | Type::DNAME
             | Type::IPSECKEY
             | Type::HIP
             | Type::TALINK
@@ -329,8 +328,8 @@ fn display_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     Ok(())
 }
 
-fn write_character_string(
-    writer: &mut RdataWriter<'_, '_>,
+fn write_character_string<B: MessageBuffer>(
+    writer: &mut RdataWriter<'_, '_, B>,
     bytes: &[u8],
 ) -> Result<(), BuildError> {
     let len = u8::try_from(bytes.len()).map_err(|_| BuildError::InvalidRdata)?;
@@ -472,6 +471,7 @@ pub enum Rdata<'a> {
     Aaaa(Ipv6Addr),
     Ns(NameRef<'a>),
     Cname(NameRef<'a>),
+    Dname(NameRef<'a>),
     Ptr(NameRef<'a>),
     Mx {
         preference: u16,
@@ -662,7 +662,7 @@ impl<'a> Rdata<'a> {
             Type::AAAA => Ok(Self::Aaaa(Ipv6Addr::from(
                 <[u8; 16]>::try_from(bytes).map_err(|_| RdataError)?,
             ))),
-            Type::NS | Type::CNAME | Type::PTR => {
+            Type::NS | Type::CNAME | Type::DNAME | Type::PTR => {
                 let name = NameRef::parse(wire, offset).map_err(|_| RdataError)?;
                 if name.wire_len() != len {
                     return Err(RdataError);
@@ -670,6 +670,7 @@ impl<'a> Rdata<'a> {
                 Ok(match rtype {
                     Type::NS => Self::Ns(name),
                     Type::CNAME => Self::Cname(name),
+                    Type::DNAME => Self::Dname(name),
                     _ => Self::Ptr(name),
                 })
             }
@@ -972,6 +973,7 @@ impl<'a> Rdata<'a> {
             Self::Aaaa(_) => Type::AAAA,
             Self::Ns(_) => Type::NS,
             Self::Cname(_) => Type::CNAME,
+            Self::Dname(_) => Type::DNAME,
             Self::Ptr(_) => Type::PTR,
             Self::Mx { .. } => Type::MX,
             Self::Soa { .. } => Type::SOA,
@@ -1000,11 +1002,16 @@ impl<'a> Rdata<'a> {
     }
 
     /// Writes this data with a Message builder's RDATA hook.
-    pub fn write(&self, writer: &mut RdataWriter<'_, '_>) -> Result<(), BuildError> {
+    pub fn write<B: MessageBuffer>(
+        &self,
+        writer: &mut RdataWriter<'_, '_, B>,
+    ) -> Result<(), BuildError> {
         match self {
             Self::A(addr) => writer.write_bytes(&addr.octets()),
             Self::Aaaa(addr) => writer.write_bytes(&addr.octets()),
             Self::Ns(name) | Self::Cname(name) | Self::Ptr(name) => writer.write_name(*name),
+            // RFC 6672 §2.4: DNAME target names must not be compressed.
+            Self::Dname(name) => writer.write_uncompressed_name(*name),
             Self::Mx {
                 preference,
                 exchange,
@@ -1257,6 +1264,7 @@ impl<'a> Rdata<'a> {
                             | Type::AAAA
                             | Type::NS
                             | Type::CNAME
+                            | Type::DNAME
                             | Type::PTR
                             | Type::MX
                             | Type::SOA
@@ -1294,7 +1302,9 @@ impl fmt::Display for Rdata<'_> {
         match self {
             Self::A(addr) => write!(f, "{addr}"),
             Self::Aaaa(addr) => write!(f, "{addr}"),
-            Self::Ns(name) | Self::Cname(name) | Self::Ptr(name) => write!(f, "{name}"),
+            Self::Ns(name) | Self::Cname(name) | Self::Dname(name) | Self::Ptr(name) => {
+                write!(f, "{name}")
+            }
             Self::Mx {
                 preference,
                 exchange,

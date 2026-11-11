@@ -13,7 +13,7 @@ enum TestPlugin {
 }
 
 impl Chain for TestPlugin {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         let question = cx.query.questions().next().unwrap();
         let target: Name;
         let captured = match self {

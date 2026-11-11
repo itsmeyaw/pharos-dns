@@ -1,0 +1,7 @@
+.:{port} {
+    rewrite name suffix .schmoogle.com. .google.com.
+    hosts empty.hosts {
+        192.0.2.10 www.google.com
+        reload 0
+    }
+}

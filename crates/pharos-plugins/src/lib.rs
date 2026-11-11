@@ -13,8 +13,12 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-acl")]
+pub mod acl;
 #[cfg(feature = "plugin-any")]
 pub mod any;
+#[cfg(feature = "plugin-autopath")]
+pub mod autopath;
 #[cfg(feature = "plugin-bind")]
 pub mod bind;
 #[cfg(feature = "plugin-bufsize")]
@@ -27,6 +31,8 @@ pub mod cancel;
 pub mod chaos;
 #[cfg(feature = "plugin-debug")]
 pub mod debug;
+#[cfg(feature = "plugin-dns64")]
+pub mod dns64;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 #[cfg(feature = "plugin-header")]
@@ -55,6 +61,10 @@ pub mod minimal;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 pub mod proxy;
+#[cfg(feature = "plugin-rewrite")]
+pub mod rewrite;
+#[cfg(feature = "plugin-siit")]
+pub mod siit;
 
 #[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]
 mod self_lookup_test;
@@ -175,7 +185,11 @@ pub fn servers_with_registry(
         #[cfg(any(
             feature = "plugin-forward",
             feature = "plugin-cache",
-            feature = "plugin-local"
+            feature = "plugin-local",
+            feature = "plugin-acl",
+            feature = "plugin-dns64",
+            feature = "plugin-siit",
+            feature = "plugin-autopath"
         ))]
         let mut block = block;
         #[cfg(feature = "plugin-forward")]
@@ -280,6 +294,47 @@ pub fn servers_with_registry(
         if let Some(cache) = &mut block.config.cache {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             cache.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-acl")]
+        if let Some(acl) = &mut block.config.acl {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            acl.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-dns64")]
+        if let Some(dns64) = &mut block.config.dns64 {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            dns64.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-siit")]
+        if let Some(siit) = &mut block.config.siit {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            siit.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-autopath")]
+        if let Some(provider) = block
+            .config
+            .autopath
+            .as_ref()
+            .and_then(|plugin| plugin.provider.as_deref())
+            && provider != "kubernetes"
+        {
+            let mut found = false;
+            pharos_server::Chain::visit_enabled(&block.config, &mut |name| {
+                found |= name == provider
+            });
+            if found {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("autopath: {provider} does not implement AutoPather"),
+                ));
+            }
+        }
+        #[cfg(feature = "plugin-autopath")]
+        if let Some(autopath) = &mut block.config.autopath {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            autopath.set_metrics(&metrics, &listeners);
+            #[cfg(feature = "plugin-kubernetes")]
+            autopath.bind_kubernetes(block.config.kubernetes.as_ref());
         }
         #[cfg(feature = "plugin-multisocket")]
         let workers = block.config.multisocket.flatten();
@@ -512,7 +567,7 @@ pub struct Unimplemented;
 impl pharos_server::Plugin for Unimplemented {
     async fn serve<N: pharos_server::Next + Send>(
         &self,
-        _cx: &mut pharos_server::Context<'_>,
+        _cx: &mut pharos_server::Context<'_, '_>,
         _next: N,
     ) -> pharos_server::Outcome {
         pharos_server::Outcome::Error(pharos_server::Error::NotImplemented)
@@ -796,6 +851,46 @@ fn setup_errors(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 fn setup_unimplemented(cursor: &mut Cursor<'_>, _: &mut BlockContext<Chain>) -> Result<(), Error> {
     cursor.next();
     Err(cursor.error(format!("{}: plugin is not implemented", cursor.val())))
+}
+
+#[cfg(feature = "plugin-acl")]
+fn setup_acl(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    let domains = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.as_str())
+        .collect::<Vec<_>>();
+    block.config.acl = Some(acl::Acl::parse(cursor, &domains)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-dns64")]
+fn setup_dns64(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.dns64 = Some(dns64::Dns64::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-siit")]
+fn setup_siit(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.siit = Some(siit::Siit::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-rewrite")]
+fn setup_rewrite(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.rewrite = Some(rewrite::Rewrite::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-autopath")]
+fn setup_autopath(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    let domains = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.as_str())
+        .collect::<Vec<_>>();
+    block.config.autopath = Some(autopath::AutoPath::parse(cursor, &domains)?);
+    Ok(())
 }
 
 #[cfg(feature = "plugin-kubernetes")]

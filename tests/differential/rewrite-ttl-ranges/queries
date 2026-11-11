@@ -1,0 +1,4 @@
+range.example. A IN udp
+cap.example. A IN udp
+floor.example. A IN tcp
+fixed.example. A IN tcp

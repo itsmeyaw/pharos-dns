@@ -78,7 +78,7 @@ impl LoadBalance {
 }
 
 impl Plugin for LoadBalance {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let outcome = next.run(cx).await;
         if outcome == Outcome::Response {
             shuffle(

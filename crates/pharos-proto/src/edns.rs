@@ -1,6 +1,24 @@
-use std::fmt;
+use std::{
+    fmt,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crate::{BuildError, EdnsOption, EdnsOptions, Message, MessageBuilder, Opcode, Rcode, Record};
+
+static REGISTERED_OPTIONS: [AtomicU64; 1024] = [const { AtomicU64::new(0) }; 1024];
+
+/// Register an EDNS option for copying from Queries to Responses across Server Blocks.
+pub fn register_edns_option(code: u16) {
+    let code = usize::from(code);
+    REGISTERED_OPTIONS[code / 64].fetch_or(1_u64 << (code % 64), Ordering::Release);
+}
+
+/// Whether an EDNS option has been registered by a configured Plugin.
+#[must_use]
+pub fn edns_option_registered(code: u16) -> bool {
+    let code = usize::from(code);
+    REGISTERED_OPTIONS[code / 64].load(Ordering::Acquire) & (1_u64 << (code % 64)) != 0
+}
 
 impl Message<'_> {
     /// Builds CoreDNS's BADVERS Response for a Query with a nonzero EDNS version.
@@ -140,7 +158,20 @@ impl<'a> Opt<'a> {
             source,
             supported,
             copy_all: existing.is_some(),
+            registered: false,
         }
+    }
+
+    /// Apply SizeAndDo using process-wide registered option codes.
+    #[must_use]
+    pub fn response_registered(
+        self,
+        existing: Option<Opt<'a>>,
+        rcode: Rcode,
+    ) -> ResponseOpt<'a, 'static> {
+        let mut response = self.response(existing, &[], rcode);
+        response.registered = true;
+        response
     }
 }
 
@@ -150,6 +181,7 @@ pub struct ResponseOpt<'a, 'b> {
     source: Opt<'a>,
     supported: &'b [u16],
     copy_all: bool,
+    registered: bool,
 }
 
 impl ResponseOpt<'_, '_> {
@@ -161,7 +193,10 @@ impl ResponseOpt<'_, '_> {
                 let len = usize::from(u16::from_be_bytes([rest[2], rest[3]])) + 4;
                 let (option, tail) = rest.split_at(len);
                 rest = tail;
-                if self.copy_all || self.supported.contains(&code) {
+                if self.copy_all
+                    || self.supported.contains(&code)
+                    || (self.registered && edns_option_registered(code))
+                {
                     return Some(option);
                 }
             }

@@ -12,7 +12,7 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-fn render(format: &str, cx: &Context<'_>, outcome: Outcome) -> String {
+fn render(format: &str, cx: &Context<'_, '_>, outcome: Outcome) -> String {
     let mut output = String::new();
     Format::compile(format).format(&mut output, cx, outcome, Duration::from_millis(125));
     output

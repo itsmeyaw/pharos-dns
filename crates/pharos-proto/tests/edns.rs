@@ -15,6 +15,17 @@ fn message(section: usize, records: &[&[u8]]) -> Vec<u8> {
 }
 
 #[test]
+fn registered_option_codes_are_copied_into_responses() {
+    let options = EdnsOptions::parse(b"\xfe\xc4\0\x03old").unwrap();
+    let opt = Opt::new(1232, 0, 0, 0, options);
+    assert!(!pharos_proto::edns_option_registered(65220));
+    assert_eq!(opt.response_registered(None, Rcode::NOERROR).wire_len(), 11);
+    pharos_proto::register_edns_option(65220);
+    assert!(pharos_proto::edns_option_registered(65220));
+    assert_eq!(opt.response_registered(None, Rcode::NOERROR).wire_len(), 18);
+}
+
+#[test]
 fn size_and_version_follow_coredns() {
     for (size, expected) in [
         (0, 512),

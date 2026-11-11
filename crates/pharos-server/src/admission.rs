@@ -1,6 +1,8 @@
 use pharos_proto::{Class, Message, MessageBuilder, Opcode, Rcode};
 
 /// Query admission result. `Respond` writes to the supplied Response buffer.
+// Keep the Message inline: boxing it would allocate for every Query.
+#[allow(clippy::large_enum_variant)]
 pub enum Admission<'a> {
     Query(Message<'a>),
     Respond,

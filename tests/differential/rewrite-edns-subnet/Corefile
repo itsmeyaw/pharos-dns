@@ -1,0 +1,4 @@
+.:{port} {
+    rewrite edns0 subnet set 24 56
+    whoami
+}

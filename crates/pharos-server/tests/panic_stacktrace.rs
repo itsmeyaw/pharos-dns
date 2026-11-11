@@ -8,7 +8,7 @@ use std::{process::Command, sync::Arc};
 struct PanicChain(bool);
 
 impl Chain for PanicChain {
-    async fn serve(&self, _: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
         panic_at_origin()
     }
     fn is_empty(&self) -> bool {
@@ -32,7 +32,7 @@ fn chain_stacktrace_is_forwarded_by_arc() {
 
 struct CaughtPanic;
 impl Chain for CaughtPanic {
-    async fn serve(&self, _: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
         let _ = std::panic::catch_unwind(panic_at_origin);
         Outcome::Drop
     }

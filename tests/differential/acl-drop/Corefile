@@ -1,0 +1,6 @@
+.:{port} {
+    acl {
+        drop net 192.0.2.0/24
+    }
+    whoami
+}

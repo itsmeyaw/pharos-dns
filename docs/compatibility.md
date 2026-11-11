@@ -1,9 +1,28 @@
 # CoreDNS compatibility
 
+## acl
+
+- For a Query without EDNS, Pharos omits the OPT record from blocked and
+  filtered Responses as required by RFC 6891 §7. CoreDNS sends its EDE OPT
+  even when the Query did not include an OPT record.
+
 ## any
 
 - Like CoreDNS, `any` synthesizes its HINFO before consulting a Backend, even for a CNAME or signed Zone; it cannot include an RRSIG when DO is set (RFC 8482 §4.2).
 - The UDP caller must supply a Response buffer with enough capacity; otherwise Pharos returns an error instead of allocating on the UDP Query path.
+
+## autopath
+
+- Search-path Self Lookups allocate; issue #86 tracks allocation-free Self Lookup.
+- Search-path Self Lookups re-enter the Listener rather than CoreDNS's Next,
+  so earlier Plugins, routing, Response limits and error handling also apply.
+  After an unwritten first outcome, SERVFAIL, REFUSED, FORMERR and NOTIMP
+  Self Lookup Responses are treated as unwritten: Listener synthesis obscures
+  whether a later Plugin actually wrote such a Response.
+- Resolver files must be UTF-8. Search suffixes that cannot be represented as
+  DNS wire names are treated as the root suffix; CoreDNS accepts arbitrary text.
+- A Response containing RDATA that cannot be decoded and relocated by Pharos
+  fails rather than being rebuilt by CoreDNS's DNS library.
 
 ## bind
 
@@ -54,6 +73,16 @@
 - Pharos disables panic containment on all Listeners when any Server Block enables `debug`; CoreDNS disables it for the Listener that includes that block, while debug logging is process-wide.
 - An uncontained Rust panic terminates its Tokio task rather than necessarily terminating the process as an unhandled Go goroutine panic does. The `errors` Plugin does not add panic recovery, matching CoreDNS v1.15.0 despite its debug README.
 - Debug logging is enabled after Listeners start and is reset when a Reload without `debug` succeeds; CoreDNS enables it when constructing its Listener and does not clear its global flag on Reload.
+
+## dns64
+
+- AAAA synthesis uses a Self Lookup that allocates per Query; issue #86 tracks
+  allocation-free Self Lookup. Queries that do not require synthesis do not
+  allocate in this Plugin.
+- The A Self Lookup passes through the Listener's normal size and EDNS
+  handling, unlike CoreDNS's in-process capture, so its result may be truncated
+  before synthesis. An unsupported name-bearing or malformed record in that
+  result produces SERVFAIL rather than being copied into the Response.
 
 ## dnssec
 
@@ -241,6 +270,25 @@
 - Candidate setup can register metric series before a failed Reload is rolled back.
 - Shutdown waits for Queries on replaced states to finish, so a stuck Query can delay processing subsequent signals.
 
+## rewrite
+
+- CNAME Self Lookup allocates per Query; issue #86 tracks allocation-free Self Lookup.
+- The CNAME rewrite depth limit counts all Self Lookups, including those from other Plugins; CoreDNS counts only CNAME rewrites.
+- EDNS rewrites use preallocated scratch storage and serialize Queries at the same Self Lookup depth; independent depths use separate buffers.
+- If the original Query had no OPT record, Pharos omits OPT from the Response as required by RFC 6891 §7. CoreDNS can return an OPT created by `rewrite edns0` to that client.
+- Regex rules use Rust regex syntax rather than Go RE2; character classes such as `\d` and `\w` are Unicode-aware by default, unlike Go. Regex captures allocate per Query.
+- Regex matchers share a preallocated, synchronized cache per pattern, so concurrent matches of the same pattern briefly serialize.
+- TTL rewrites leave OPT's extended RCODE, version and flags untouched as required by RFC 6891 §6.1.3; CoreDNS applies its TTL rule to OPT records as well.
+- Rebuilding a rewritten Query or Response rejects malformed or unsupported name-bearing RDATA with SERVFAIL instead of copying it as CoreDNS does.
+
+## siit
+
+- AAAA Self Lookup allocates per Query; issue #86 tracks allocation-free Self
+  Lookup. Queries that do not need it do not allocate in this Plugin.
+- Self Lookup uses Listener size and EDNS handling, which can truncate the
+  intermediate Response. Unsupported name-bearing or malformed records in a
+  synthesized or error Response produce SERVFAIL rather than being copied.
+
 ## sign
 
 - The shared signer has the same key and canonical-RDATA restrictions listed under `dnssec`.
@@ -270,7 +318,7 @@
 
 ## General
 
-- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `siit` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - A first Zone record with an omitted owner is rejected: miekg/dns accepts it with an empty owner, which cannot be encoded as a valid DNS name without inventing one.
 - Zone records whose parsed data cannot be encoded on the wire are rejected. miekg/dns can accept such records during parsing, including invalid base64, duplicate SVCB keys and RDATA over 65,535 octets, but then fails to pack them.
@@ -307,6 +355,8 @@
 
 ## Server
 
+- The Rust `Server` API stores its Router in an `Arc`; callers adding blocks after construction must obtain unique access with `Arc::get_mut`.
+- The Rust Plugin API's `Context` has separate Query and Metadata lifetimes to support allocation-free internal Query rewrites.
 - Without `multisocket`, Pharos uses the CPU-quota-aware worker count for UDP; CoreDNS uses one socket.
 - CoreDNS v1.15.0 uses miekg/dns v1.1.73.
 - TSIG accepts RFC 8945-permitted truncated MACs and enforces their minimum length and optional local policy; miekg/dns v1.1.73's default provider compares only full-length MACs.

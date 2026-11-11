@@ -1,0 +1,4 @@
+.:{port} {
+    rewrite type ANY HINFO
+    whoami
+}

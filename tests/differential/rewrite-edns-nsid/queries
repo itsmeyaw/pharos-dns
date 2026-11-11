@@ -1,0 +1,2 @@
+example.org. A IN udp +nsid
+example.org. AAAA IN tcp +nsid

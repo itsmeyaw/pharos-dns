@@ -31,7 +31,7 @@ fn coredns_setup_rejects_arguments_and_block_options() {
 struct NextOutcome(Outcome);
 
 impl Next for NextOutcome {
-    async fn run(self, _: &mut Context<'_>) -> Outcome {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         self.0
     }
 }

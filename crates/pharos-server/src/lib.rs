@@ -50,14 +50,14 @@ mod udp_linux;
 
 /// A statically dispatched continuation of the Plugin Chain.
 pub trait Next {
-    fn run(self, cx: &mut Context<'_>) -> impl Future<Output = Outcome> + Send;
+    fn run(self, cx: &mut Context<'_, '_>) -> impl Future<Output = Outcome> + Send;
 }
 
 /// A Plugin may await Next and inspect or modify its outcome and Response.
 pub trait Plugin {
     fn serve<N: Next + Send>(
         &self,
-        cx: &mut Context<'_>,
+        cx: &mut Context<'_, '_>,
         next: N,
     ) -> impl Future<Output = Outcome> + Send;
 
@@ -191,6 +191,8 @@ impl<'a> Metadata<'a> {
         metadata.self_lookup = handle.map(|handle| SelfLookupState {
             server: handle,
             depth: handle.depth,
+            siit: handle.siit,
+            autopath: handle.autopath,
         });
         metadata
     }
@@ -311,23 +313,63 @@ pub trait MetadataSource: Send + Sync {
 }
 
 /// Borrowed Query state and reusable, preallocated Response buffer.
-pub struct Context<'a> {
-    pub query: Message<'a>,
+pub struct Context<'q, 'a> {
+    pub query: Message<'q>,
     pub client: SocketAddr,
     /// Listener address; wildcard addresses are not resolved per Query.
     pub local: SocketAddr,
     pub transport: Transport,
     pub protocol: Protocol,
-    pub domain: &'a Name,
+    pub domain: &'q Name,
     pub metadata: Metadata<'a>,
-    pub response: &'a mut Vec<u8>,
+    pub response: &'q mut Vec<u8>,
     pub max_response_size: usize,
+}
+
+struct NestedContext<'s, 'q, 'a> {
+    parent_query: &'s mut Message<'q>,
+    parent_metadata: &'s mut Metadata<'a>,
+    child: Context<'s, 'a>,
+}
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for NestedContext<'_, '_, '_> {
+    fn drop(&mut self) {
+        let mut query = self.parent_query.with_flags(self.child.query.flags());
+        if let (Some(parent), Some(child)) = (
+            self.parent_query.questions().next(),
+            self.child.query.questions().next(),
+        ) {
+            if !parent.name.labels().eq(child.name.labels()) {
+                query = query.with_question_name(child.name);
+            }
+            if parent.qtype != child.qtype {
+                query = query.with_question_type(child.qtype);
+            }
+            if parent.qclass != child.qclass {
+                query = query.with_question_class(child.qclass);
+            }
+        }
+        if let Some(opt) = self.child.query.opt() {
+            query = query.with_udp_payload_limit(opt.udp_payload_size());
+        }
+        *self.parent_query = query;
+        std::mem::swap(self.parent_metadata, &mut self.child.metadata);
+    }
 }
 
 /// The Listener state and depth associated with a Query.
 struct SelfLookupState<'a> {
     server: &'a dyn SelfLookupServer,
     depth: u8,
+    siit: bool,
+    autopath: bool,
 }
 
 // Type erasure keeps Context nongeneric without allocating on ordinary Queries.
@@ -338,6 +380,7 @@ trait SelfLookupServer: Sync {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
+        flags: (bool, bool),
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
 
@@ -353,6 +396,7 @@ trait OwnedSelfLookupServer: Send + Sync {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
+        flags: (bool, bool),
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
 }
@@ -361,6 +405,8 @@ trait OwnedSelfLookupServer: Send + Sync {
 pub struct SelfLookupHandle {
     server: Arc<dyn OwnedSelfLookupServer>,
     depth: u8,
+    siit: bool,
+    autopath: bool,
 }
 
 impl SelfLookupServer for SelfLookupHandle {
@@ -370,9 +416,10 @@ impl SelfLookupServer for SelfLookupHandle {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
+        flags: (bool, bool),
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
-        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, response)
+        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, flags, response)
     }
 
     fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
@@ -380,18 +427,103 @@ impl SelfLookupServer for SelfLookupHandle {
     }
 }
 
-impl Context<'_> {
+impl Context<'_, '_> {
+    /// Return the nesting depth of this Query's Self Lookup, or zero for an external Query.
+    #[must_use]
+    pub fn self_lookup_depth(&self) -> u8 {
+        self.metadata
+            .self_lookup
+            .as_ref()
+            .map_or(0, |state| state.depth)
+    }
+
+    /// Run Next with temporary Query bytes while preserving Metadata and Response state.
+    pub async fn run_with_query<N: Next + Send>(&mut self, wire: &[u8], next: N) -> Outcome {
+        let Ok(query) = Message::parse(wire) else {
+            return Outcome::Error(Error::InvalidQuery);
+        };
+        let metadata = std::mem::replace(&mut self.metadata, Metadata::new(&mut []));
+        let mut nested = NestedContext {
+            parent_query: &mut self.query,
+            parent_metadata: &mut self.metadata,
+            child: Context {
+                query,
+                client: self.client,
+                local: self.local,
+                transport: self.transport,
+                protocol: self.protocol,
+                domain: self.domain,
+                metadata,
+                response: self.response,
+                max_response_size: self.max_response_size,
+            },
+        };
+        next.run(&mut nested.child).await
+    }
     /// Retain this Query's Listener state for a detached task, if available.
     pub fn self_lookup_handle(&self) -> Option<SelfLookupHandle> {
         let state = self.metadata.self_lookup.as_ref()?;
         Some(SelfLookupHandle {
             server: state.server.owned()?,
             depth: state.depth,
+            siit: state.siit,
+            autopath: state.autopath,
         })
     }
 
     /// Route a new Query through this Query's Listener and capture its Response.
     pub async fn self_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+        self.self_lookup_inner(self.query, name, qtype, false, false)
+            .await
+    }
+
+    /// Route a Self Lookup using a temporary Query's fields and options.
+    pub async fn self_lookup_with_query(
+        &self,
+        query: Message<'_>,
+        name: &Name,
+        qtype: Type,
+    ) -> Result<Vec<u8>, Error> {
+        self.self_lookup_inner(query, name, qtype, false, false)
+            .await
+    }
+
+    /// Re-enter for SIIT synthesis, preventing recursive SIIT interception.
+    pub async fn siit_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+        self.self_lookup_inner(self.query, name, qtype, true, false)
+            .await
+    }
+
+    /// Re-enter for search-path completion without recursively restarting it.
+    pub async fn autopath_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+        self.self_lookup_inner(self.query, name, qtype, false, true)
+            .await
+    }
+
+    /// Whether this Query descends from a search-path lookup.
+    pub fn autopath_lookup_active(&self) -> bool {
+        self.metadata
+            .self_lookup
+            .as_ref()
+            .is_some_and(|state| state.autopath)
+    }
+
+    /// Whether this Query descends from a SIIT synthesis lookup.
+    pub fn siit_lookup_active(&self) -> bool {
+        self.metadata
+            .self_lookup
+            .as_ref()
+            .is_some_and(|state| state.siit)
+    }
+
+    async fn self_lookup_inner(
+        &self,
+        source: Message<'_>,
+        name: &Name,
+        qtype: Type,
+        siit: bool,
+        autopath: bool,
+    ) -> Result<Vec<u8>, Error> {
         let state = self
             .metadata
             .self_lookup
@@ -400,10 +532,36 @@ impl Context<'_> {
         if state.depth >= 10 {
             return Err(Error::SelfLookupDepth);
         }
-        let query = self
-            .query
-            .with_question(name, qtype)
-            .map_err(Error::Build)?;
+        let query = source.with_question(name, qtype).map_err(Error::Build)?;
+        if let Some(server) = state.server.owned()
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
+            let peer = self.client;
+            let protocol = self.protocol;
+            let depth = state.depth + 1;
+            let siit = siit || state.siit;
+            let autopath = autopath || state.autopath;
+            // shortcut: Self Lookup spawns an allocated task to bound recursive stack use; remove with #86.
+            let mut task = AbortOnDrop(tokio::spawn(async move {
+                let mut response = Vec::with_capacity(usize::from(u16::MAX));
+                let action = server
+                    .lookup(
+                        &query,
+                        peer,
+                        protocol,
+                        depth,
+                        (siit, autopath),
+                        &mut response,
+                    )
+                    .await;
+                (action, response)
+            }));
+            return match (&mut task.0).await {
+                Ok((Action::Respond, response)) => Ok(response),
+                Ok((Action::Drop, _)) => Err(Error::SelfLookupDropped),
+                Err(_) => Err(Error::PluginPanic),
+            };
+        }
         let mut response = Vec::with_capacity(usize::from(u16::MAX));
         match state
             .server
@@ -412,6 +570,7 @@ impl Context<'_> {
                 self.client,
                 self.protocol,
                 state.depth + 1,
+                (siit || state.siit, autopath || state.autopath),
                 &mut response,
             )
             .await

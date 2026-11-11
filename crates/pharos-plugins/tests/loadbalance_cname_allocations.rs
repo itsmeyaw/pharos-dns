@@ -20,7 +20,7 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 struct Reply<'a>(&'a [u8]);
 impl Next for Reply<'_> {
-    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         cx.response.clear();
         cx.response.extend_from_slice(self.0);
         Outcome::Response
@@ -32,7 +32,7 @@ struct Routed {
     wire: Vec<u8>,
 }
 impl pharos_server::Chain for Routed {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         self.chain
             .loadbalance
             .as_ref()

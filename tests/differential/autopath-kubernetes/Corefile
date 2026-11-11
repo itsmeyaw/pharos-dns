@@ -1,0 +1,8 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    autopath @kubernetes
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+        pods verified
+    }
+}

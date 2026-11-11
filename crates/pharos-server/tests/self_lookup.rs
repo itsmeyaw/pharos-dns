@@ -13,6 +13,74 @@ use tokio::sync::Notify;
 
 static DEPTH_VISITS: AtomicUsize = AtomicUsize::new(0);
 
+struct DropSignal(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+struct CancelChain {
+    started: Arc<Notify>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Chain for CancelChain {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        if cx.domain.to_string() == "example." {
+            let _ = cx.self_lookup(&"b.other.".parse().unwrap(), Type::A).await;
+            Outcome::Drop
+        } else {
+            let _guard = DropSignal(Arc::clone(&self.dropped));
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn cancelling_shared_lookup_aborts_its_child_task() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut router = Router::default();
+    for domain in ["example.", "other."] {
+        router.add(
+            key,
+            domain.parse().unwrap(),
+            Some(CancelChain {
+                started: Arc::clone(&started),
+                dropped: Arc::clone(&dropped),
+            }),
+            vec![],
+        );
+    }
+    let server = Arc::new(Server::new(router, key));
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01a\x07example\0\0\x01\0\x01";
+    let mut response = Vec::with_capacity(65535);
+    let mut outer = Box::pin(Handler::handle_shared(
+        &server,
+        wire,
+        "127.0.0.1:1234".parse().unwrap(),
+        Protocol::Udp,
+        &mut response,
+    ));
+    tokio::select! { _ = started.notified() => {}, _ = &mut outer => panic!("lookup finished") }
+    drop(outer);
+    for _ in 0..100 {
+        if dropped.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("cancelled lookup remained active");
+}
+
 enum TestChain {
     Lookup,
     Answer,
@@ -20,7 +88,7 @@ enum TestChain {
 }
 
 impl Chain for TestChain {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         match self {
             Self::Lookup => {
                 let name: Name = "b.other.".parse().unwrap();
@@ -101,6 +169,31 @@ fn server(first: TestChain) -> Server<TestChain> {
     Server::new(router, key)
 }
 
+#[test]
+fn shared_self_lookup_can_be_polled_without_tokio_runtime() {
+    use std::{
+        future::Future,
+        task::{Context as TaskContext, Poll, Waker},
+    };
+    let server = Arc::new(server(TestChain::Lookup));
+    let query = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\x01\x01a\x07example\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\x80\0\0\x06\xfd\xe9\0\x02\xc0\x01";
+    let mut response = vec![42];
+    let future = Handler::handle_shared(
+        &server,
+        query,
+        "192.0.2.10:1234".parse().unwrap(),
+        Protocol::Tcp,
+        &mut response,
+    );
+    let mut future = std::pin::pin!(future);
+    assert_eq!(
+        future
+            .as_mut()
+            .poll(&mut TaskContext::from_waker(Waker::noop())),
+        Poll::Ready(Action::Respond)
+    );
+}
+
 #[tokio::test]
 async fn self_lookup_routes_and_captures_without_touching_client_response() {
     let query = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\x01\x01a\x07example\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\x80\0\0\x06\xfd\xe9\0\x02\xc0\x01";
@@ -145,7 +238,7 @@ struct ReloadChain {
 }
 
 impl Chain for ReloadChain {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         let question = cx.query.questions().next().unwrap();
         if cx.domain.to_string() == "example." {
             self.start.notify_one();
@@ -250,7 +343,7 @@ async fn self_lookup_uses_state_held_before_reload() {
 struct DetachedDepth(Arc<AtomicUsize>);
 
 impl Chain for DetachedDepth {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         let visit = self.0.fetch_add(1, Ordering::SeqCst) + 1;
         if visit > 11 {
             return Outcome::Unanswered(Rcode::REFUSED);
@@ -337,7 +430,7 @@ struct CountOwners {
 }
 
 impl Chain for CountOwners {
-    async fn serve(&self, _: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
         self.observed
             .store(self.server.strong_count(), Ordering::SeqCst);
         Outcome::Unanswered(Rcode::REFUSED)

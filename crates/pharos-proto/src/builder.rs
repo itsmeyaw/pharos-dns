@@ -1,9 +1,74 @@
-use std::fmt;
+use std::{
+    fmt,
+    ops::{Deref, DerefMut},
+};
 
 use crate::{Class, NameRef, ResponseOpt, Type};
 
 const MIN_MESSAGE_SIZE: usize = 512;
 const COMPRESSION_SLOTS: usize = 128;
+
+/// Storage used by a DNS Message builder.
+pub trait MessageBuffer: Deref<Target = [u8]> + DerefMut {
+    fn clear_buffer(&mut self);
+    fn append_buffer(&mut self, bytes: &[u8]);
+    fn truncate_buffer(&mut self, len: usize);
+    fn max_capacity(&self) -> usize;
+}
+
+impl MessageBuffer for Vec<u8> {
+    fn clear_buffer(&mut self) {
+        self.clear();
+    }
+    fn append_buffer(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+    fn truncate_buffer(&mut self, len: usize) {
+        self.truncate(len);
+    }
+    fn max_capacity(&self) -> usize {
+        usize::MAX
+    }
+}
+
+/// Fixed caller-provided storage for a Message builder.
+pub struct FixedBuffer<'a> {
+    bytes: &'a mut [u8],
+    len: usize,
+}
+impl<'a> FixedBuffer<'a> {
+    #[must_use]
+    pub fn new(bytes: &'a mut [u8]) -> Self {
+        Self { bytes, len: 0 }
+    }
+}
+impl Deref for FixedBuffer<'_> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+impl DerefMut for FixedBuffer<'_> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes[..self.len]
+    }
+}
+impl MessageBuffer for FixedBuffer<'_> {
+    fn clear_buffer(&mut self) {
+        self.len = 0;
+    }
+    fn append_buffer(&mut self, bytes: &[u8]) {
+        let end = self.len + bytes.len();
+        self.bytes[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+    }
+    fn truncate_buffer(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
+    fn max_capacity(&self) -> usize {
+        self.bytes.len()
+    }
+}
 
 /// A failure to construct a DNS Message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,8 +128,8 @@ impl Section {
 /// Entries must be added in Question, Answer, Authority, Additional order.
 /// A `false` result means the size limit was reached and the builder has stopped.
 /// The first entry that does not fit is rolled back and TC is set.
-pub struct MessageBuilder<'a> {
-    wire: &'a mut Vec<u8>,
+pub struct MessageBuilder<'a, B: MessageBuffer = Vec<u8>> {
+    wire: &'a mut B,
     max_size: usize,
     reserved: usize,
     counts: [u16; 4],
@@ -74,25 +139,21 @@ pub struct MessageBuilder<'a> {
     offset_count: usize,
 }
 
-impl<'a> MessageBuilder<'a> {
+impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
     /// Clears `wire`, retaining its capacity, and writes a header with raw flags.
     /// Invalid maximum sizes leave the buffer unchanged. The caller must encode
     /// opcode, RCODE and other flags in their respective header bit positions.
     /// Maximum sizes below 512 octets are treated as 512.
-    pub fn new(
-        wire: &'a mut Vec<u8>,
-        max_size: usize,
-        id: u16,
-        flags: u16,
-    ) -> Result<Self, BuildError> {
-        if max_size > usize::from(u16::MAX) {
+    pub fn new(wire: &'a mut B, max_size: usize, id: u16, flags: u16) -> Result<Self, BuildError> {
+        if max_size > usize::from(u16::MAX) || max_size.max(MIN_MESSAGE_SIZE) > wire.max_capacity()
+        {
             return Err(BuildError::InvalidMaxSize);
         }
-        wire.clear();
+        wire.clear_buffer();
         // RFC 1035 §4.1.1: the header starts with ID, flags, and four section counts.
-        wire.extend_from_slice(&id.to_be_bytes());
-        wire.extend_from_slice(&flags.to_be_bytes());
-        wire.extend_from_slice(&[0; 8]);
+        wire.append_buffer(&id.to_be_bytes());
+        wire.append_buffer(&flags.to_be_bytes());
+        wire.append_buffer(&[0; 8]);
         Ok(Self {
             wire,
             max_size: max_size.max(MIN_MESSAGE_SIZE),
@@ -118,28 +179,6 @@ impl<'a> MessageBuilder<'a> {
     /// Reserves the exact space needed for a Response OPT before adding records.
     pub fn reserve_response_opt(&mut self, opt: &ResponseOpt<'_, '_>) -> Result<(), BuildError> {
         self.reserve(opt.wire_len())
-    }
-
-    /// Appends the reserved Response OPT even if earlier records were truncated.
-    pub fn finish_with_response_opt(
-        mut self,
-        opt: &ResponseOpt<'_, '_>,
-    ) -> Result<&'a mut Vec<u8>, BuildError> {
-        let error = if opt.wire_len() > self.reserved {
-            Some(BuildError::SizeLimit)
-        } else {
-            self.check_count(3).err()
-        };
-        if let Some(error) = error {
-            let _ = self.finish();
-            return Err(error);
-        }
-        if let Err(error) = opt.encode(self.wire) {
-            let _ = self.finish();
-            return Err(error);
-        }
-        self.counts[3] += 1;
-        Ok(self.finish())
     }
 
     /// Adds a Question. If it cannot fit, it is rolled back, TC is set, and writing stops.
@@ -197,7 +236,7 @@ impl<'a> MessageBuilder<'a> {
         rtype: Type,
         class: Class,
         ttl: u32,
-        write: impl FnOnce(&mut RdataWriter<'_, 'a>) -> Result<(), BuildError>,
+        write: impl FnOnce(&mut RdataWriter<'_, 'a, B>) -> Result<(), BuildError>,
     ) -> Result<bool, BuildError> {
         if self.stopped {
             return Ok(false);
@@ -230,7 +269,7 @@ impl<'a> MessageBuilder<'a> {
     /// Appends one pre-encoded OPT record from the reserved space and finishes.
     /// The record must have an uncompressed root owner and a complete RDATA field.
     /// On error, the buffer contains the completed Message without the OPT.
-    pub fn finish_with_opt(mut self, opt: &[u8]) -> Result<&'a mut Vec<u8>, BuildError> {
+    pub fn finish_with_opt(mut self, opt: &[u8]) -> Result<&'a mut B, BuildError> {
         let error = if opt.len() > self.reserved {
             Some(BuildError::SizeLimit)
         } else if opt.len() < 11
@@ -245,14 +284,14 @@ impl<'a> MessageBuilder<'a> {
             let _ = self.finish();
             return Err(error);
         }
-        self.wire.extend_from_slice(opt);
+        self.wire.append_buffer(opt);
         self.counts[3] += 1;
         Ok(self.finish())
     }
 
     /// Completes the header and returns the caller's buffer.
     #[must_use]
-    pub fn finish(self) -> &'a mut Vec<u8> {
+    pub fn finish(self) -> &'a mut B {
         for (index, count) in self.counts.iter().enumerate() {
             self.wire[4 + index * 2..6 + index * 2].copy_from_slice(&count.to_be_bytes());
         }
@@ -281,7 +320,7 @@ impl<'a> MessageBuilder<'a> {
                 Ok(true)
             }
             Err(error) => {
-                self.wire.truncate(start);
+                self.wire.truncate_buffer(start);
                 self.offset_count = slots;
                 if error != BuildError::SizeLimit {
                     return Err(error);
@@ -298,7 +337,7 @@ impl<'a> MessageBuilder<'a> {
         if bytes.len() > self.max_size - self.reserved - self.wire.len() {
             return Err(BuildError::SizeLimit);
         }
-        self.wire.extend_from_slice(bytes);
+        self.wire.append_buffer(bytes);
         Ok(())
     }
 
@@ -339,12 +378,36 @@ impl<'a> MessageBuilder<'a> {
     }
 }
 
-/// A bounded RDATA writer that can encode compressed names in the Message.
-pub struct RdataWriter<'b, 'a> {
-    builder: &'b mut MessageBuilder<'a>,
+impl<'a> MessageBuilder<'a, Vec<u8>> {
+    /// Appends the reserved Response OPT even if earlier records were truncated.
+    pub fn finish_with_response_opt(
+        mut self,
+        opt: &ResponseOpt<'_, '_>,
+    ) -> Result<&'a mut Vec<u8>, BuildError> {
+        let error = if opt.wire_len() > self.reserved {
+            Some(BuildError::SizeLimit)
+        } else {
+            self.check_count(3).err()
+        };
+        if let Some(error) = error {
+            let _ = self.finish();
+            return Err(error);
+        }
+        if let Err(error) = opt.encode(self.wire) {
+            let _ = self.finish();
+            return Err(error);
+        }
+        self.counts[3] += 1;
+        Ok(self.finish())
+    }
 }
 
-impl RdataWriter<'_, '_> {
+/// A bounded RDATA writer that can encode compressed names in the Message.
+pub struct RdataWriter<'b, 'a, B: MessageBuffer = Vec<u8>> {
+    builder: &'b mut MessageBuilder<'a, B>,
+}
+
+impl<B: MessageBuffer> RdataWriter<'_, '_, B> {
     /// Writes literal bytes; callers are responsible for their RDATA format.
     pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), BuildError> {
         self.builder.write_bytes(bytes)

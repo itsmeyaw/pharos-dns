@@ -1,6 +1,22 @@
 use pharos_proto::Message;
 
 #[test]
+fn rewritten_question_preserves_names_compressed_against_its_fields() {
+    use pharos_proto::{Class, Type};
+    // The second QNAME points at the original first QTYPE's zero high octet.
+    let wire = b"\0\x01\x01\0\0\x02\0\0\0\0\0\0\0\0\x01\0\x01\xc0\x0d\0\x01\0\x01";
+    let message = Message::parse(wire).unwrap().with_question_type(Type(257));
+    let mut out = Vec::with_capacity(512);
+    message.copy_wire(&mut out);
+    let decoded = Message::parse(&out).unwrap();
+    let mut questions = decoded.questions();
+    assert_eq!(questions.next().unwrap().qtype, Type(257));
+    let second = questions.next().unwrap();
+    assert_eq!(second.name.to_string(), ".");
+    assert_eq!(second.qclass, Class::IN);
+}
+
+#[test]
 fn authenticated_query_view_does_not_mutate_wire() {
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
     let original = Message::parse(wire).unwrap();

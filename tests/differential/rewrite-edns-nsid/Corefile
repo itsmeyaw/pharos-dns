@@ -1,0 +1,4 @@
+.:{port} {
+    rewrite edns0 nsid set
+    whoami
+}

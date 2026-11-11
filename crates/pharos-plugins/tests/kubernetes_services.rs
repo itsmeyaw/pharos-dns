@@ -22,7 +22,7 @@ enum TruncatedRoute {
 }
 
 impl pharos_server::Chain for TruncatedRoute {
-    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         match self {
             Self::Kubernetes(chain) => chain.serve(cx).await,
             Self::Target => {
@@ -43,8 +43,24 @@ impl pharos_server::Chain for TruncatedRoute {
     }
 }
 
-#[tokio::test]
-async fn services_are_answered_from_watched_kubernetes_objects() {
+#[test]
+fn services_are_answered_from_watched_kubernetes_objects() {
+    // This fixture holds many distinct Plugin Chain futures in one test future.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(services_scenario())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn services_scenario() {
     let mut local_ips: Vec<std::net::IpAddr> = nix::ifaddrs::getifaddrs()
         .unwrap()
         .filter_map(|entry| {

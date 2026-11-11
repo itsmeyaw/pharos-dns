@@ -99,7 +99,7 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Errors, Error> {
 }
 
 impl Plugin for Errors {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let outcome = next.run(cx).await;
         if let Outcome::Error(error) = outcome {
             cx.metadata

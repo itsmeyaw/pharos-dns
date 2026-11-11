@@ -8,6 +8,29 @@ fn name(value: &str) -> Name {
 }
 
 #[test]
+fn parses_absolute_names_into_caller_buffer() {
+    for value in [".", "example.com.", r"a\.b.\\.\001."] {
+        let expected = name(value);
+        let mut buffer = [0; 255];
+        let actual = Name::parse_absolute_into(value, &mut buffer).unwrap();
+        assert_eq!(actual, expected.as_wire(), "{value}");
+    }
+    for value in [
+        "",
+        "relative",
+        "a..b.",
+        r"\256.",
+        &format!("{}.example.", "a".repeat(64)),
+    ] {
+        let mut buffer = [0; 255];
+        assert!(
+            Name::parse_absolute_into(value, &mut buffer).is_err(),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn parses_and_prints_miekg_escapes() {
     let value = name(r"a\.b.\\.\001.");
 
@@ -264,7 +287,13 @@ proptest! {
     #[test]
     fn hostile_input_never_panics(message in prop::collection::vec(any::<u8>(), 0..300), offset in any::<usize>(), text in ".{0,300}") {
         let _ = NameRef::parse(&message, offset);
-        let _ = text.parse::<Name>();
+        let owned = text.parse::<Name>();
+        let mut buffer = [0; 255];
+        let borrowed = Name::parse_absolute_into(&text, &mut buffer);
+        prop_assert_eq!(borrowed.is_ok(), owned.is_ok());
+        if let (Ok(wire), Ok(name)) = (borrowed, owned) {
+            prop_assert_eq!(wire, name.as_wire());
+        }
         let _ = Name::parse(&text, &name("."));
     }
 }

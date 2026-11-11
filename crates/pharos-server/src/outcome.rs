@@ -78,7 +78,9 @@ fn scrub(
     });
     let rcode = message.rcode();
     // RFC 6891 §6.1.1: an EDNS request requires an OPT record in the response.
-    let response_opt = query.opt().map(|opt| opt.response(existing, &[], rcode));
+    let response_opt = query
+        .opt()
+        .map(|opt| opt.response_registered(existing, rcode));
     let opt_len = response_opt.map_or(0, |opt| opt.wire_len());
     // RFC 6891 §7: a truncated EDNS response must retain the question and OPT record.
     let budget = limit

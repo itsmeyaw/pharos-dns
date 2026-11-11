@@ -1706,6 +1706,7 @@ dependencies = [
  "pharos-proto",
  "pharos-server",
  "regex",
+ "regex-automata",
  "stats_alloc",
  "tokio",
 ]

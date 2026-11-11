@@ -13,7 +13,7 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 struct Refuse(bool);
 impl Chain for Refuse {
-    async fn serve(&self, _: &mut Context<'_>) -> Outcome {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Unanswered(Rcode::REFUSED)
     }
     fn is_empty(&self) -> bool {
