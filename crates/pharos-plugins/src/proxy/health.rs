@@ -175,6 +175,7 @@ impl Drop for Health {
 }
 
 async fn check(config: &HealthConfig) -> io::Result<()> {
+    // RFC 5452 §9.2: outgoing queries use unpredictable IDs.
     let mut id = [0; 2];
     getrandom::getrandom(&mut id).map_err(|_| io::Error::other("random ID generation failed"))?;
     let mut query = Vec::with_capacity(12 + config.domain.as_wire().len() + 4);
