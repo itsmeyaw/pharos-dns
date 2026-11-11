@@ -57,8 +57,11 @@ impl Oracle {
 }
 
 fn has_generate(zone: &[u8]) -> bool {
-    zone.split(|&b| b == b'\n')
-        .any(|line| line.to_ascii_uppercase().starts_with(b"$GENERATE"))
+    // Decision 1: a CR outside quotes is dropped, so it can split the directive name.
+    zone.split(|&b| b == b'\n').any(|line| {
+        let line: Vec<u8> = line.iter().copied().filter(|&b| b != b'\r').collect();
+        line.to_ascii_uppercase().starts_with(b"$GENERATE")
+    })
 }
 
 fn without_comments(zone: &[u8]) -> Vec<u8> {
