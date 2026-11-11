@@ -166,3 +166,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 - Copyright (c) 2018-2025, NLnet Labs. All rights reserved.
 - The fixed-size name compression table follows the StaticCompressor reference design.
 - EDNS differential tests in `crates/pharos-proto` use domain as a reference.
+
+## Kubernetes and k3s
+
+- Sources: https://github.com/kubernetes/kubernetes and https://github.com/k3s-io/k3s
+- License: Apache-2.0
+- Copyright The Kubernetes Authors and k3s contributors
+- Default Corefile fixtures under `crates/pharos/tests/fixtures/corefiles` follow the versions identified in each file; the Helm fixture follows https://github.com/coredns/helm (Apache-2.0).

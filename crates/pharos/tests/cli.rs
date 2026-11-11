@@ -109,6 +109,58 @@ fn check_uses_the_same_corefile_lookup_order_as_startup() {
 }
 
 #[test]
+fn check_accepts_upstream_default_corefiles() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/corefiles");
+    for (file, expected) in [
+        (
+            "kubeadm",
+            &[
+                "Negative Responses use the SOA MINIMUM",
+                "API client creation and kubeconfig validation",
+            ][..],
+        ),
+        (
+            "addon",
+            &[
+                "Negative Responses use the SOA MINIMUM",
+                "API client creation and kubeconfig validation",
+            ][..],
+        ),
+        (
+            "helm",
+            &[
+                "Negative Responses use the SOA MINIMUM",
+                "API client creation and kubeconfig validation",
+            ][..],
+        ),
+        (
+            "k3s",
+            &[
+                "Negative Responses use the SOA MINIMUM",
+                "API client creation and kubeconfig validation",
+                "Relative hosts file paths resolve against the working directory",
+            ][..],
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .arg("check")
+            .arg("--conf")
+            .arg(dir.join(file))
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{file}: {}\n{text}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for entry in expected {
+            assert!(text.contains(entry), "{file}: missing {entry}\n{text}");
+        }
+    }
+}
+
+#[test]
 fn version_uses_pharos_identity() {
     for flag in ["--version", "-V"] {
         let output = Command::new(env!("CARGO_BIN_EXE_pharos"))
