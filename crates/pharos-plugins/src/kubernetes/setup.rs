@@ -557,3 +557,19 @@ fn valid_value(value: &str) -> bool {
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))))
 }
+
+pub(crate) fn setup(cursor: &mut pharos_corefile::Cursor<'_>, block: &mut pharos_corefile::BlockContext<crate::Chain>) -> Result<(), pharos_corefile::Error> {
+    use crate::kubernetes;
+
+    let domains = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.as_str())
+        .collect::<Vec<_>>();
+    let config = kubernetes::setup::parse(cursor, &domains)?;
+    let plugin = kubernetes::Kubernetes::with_listen_addresses(config, &block.listen_addresses)
+        .map_err(|error| cursor.error(error))?;
+    plugin.register_hooks(&mut block.config.lifecycle);
+    block.config.kubernetes = Some(plugin);
+    Ok(())
+}

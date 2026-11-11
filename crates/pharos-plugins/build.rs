@@ -108,7 +108,7 @@ fn main() {
             "nsid" => "setup_nsid",
             "reload" => "setup_reload",
             "errors" => "errors::setup::setup",
-            "kubernetes" => "setup_kubernetes",
+            "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",
         };
         let once = matches!(
