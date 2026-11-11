@@ -28,6 +28,7 @@
 - Reload timing setup and tests follow CoreDNS v1.15.0's `plugin/reload`.
 - EDNS helpers and tests in `crates/pharos-proto` follow CoreDNS v1.15.0's `plugin/pkg/edns` and `request`.
 - TSIG key-file parsing and tests follow CoreDNS v1.15.0's `plugin/tsig/setup.go`.
+- TSIG unsupported-algorithm error handling and its regression test follow CoreDNS v1.15.0's `plugin/tsig/tsig.go`.
 - Self Lookup Query copying follows CoreDNS v1.15.0's `request.NewWithQuestion`.
 - Self Lookup routing and capture follow CoreDNS v1.15.0's `plugin/pkg/upstream` and `plugin/pkg/nonwriter`.
 - Response Type and Class classification and tests follow CoreDNS v1.15.0's `plugin/pkg/response`.

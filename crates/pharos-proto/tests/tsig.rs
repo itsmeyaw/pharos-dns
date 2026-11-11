@@ -134,6 +134,32 @@ fn unsupported_and_unconfigured_algorithms_are_distinguished() {
 }
 
 #[test]
+fn stream_rejects_unsupported_and_unconfigured_algorithms() {
+    let key = TsigKey::new(
+        "testkey.".parse().unwrap(),
+        TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let query_mac = [42; 32];
+    let mut signer = TsigStream::new(&key, &query_mac);
+    let mut first = hex("000180000000000000000000");
+    let mut second = first.clone();
+    signer.sign(&mut first, 1000, 300).unwrap();
+    signer.sign(&mut second, 1000, 300).unwrap();
+    let offset = second
+        .windows(11)
+        .position(|window| window == b"hmac-sha256")
+        .unwrap();
+    for (suffix, expected) in [(b"999", TsigError::BadSig), (b"512", TsigError::BadKey)] {
+        let mut changed = second.clone();
+        changed[offset + 8..offset + 11].copy_from_slice(suffix);
+        let mut verifier = TsigStream::new(&key, &query_mac);
+        verifier.verify(&first, 1000, 0).unwrap();
+        assert_eq!(verifier.verify(&changed, 1000, 0).unwrap_err(), expected);
+    }
+}
+
+#[test]
 fn stream_chains_every_response_and_requires_signed_endpoints() {
     let key = TsigKey::new(
         "testkey.".parse().unwrap(),

@@ -89,7 +89,7 @@ impl TsigKey {
     }
 
     fn check_key(&self, owner: NameRef<'_>, algorithm: NameRef<'_>) -> Result<(), TsigError> {
-        // RFC 8945 §5.2.1: check the key and its configured algorithm before the MAC.
+        // RFC 8945 §5.2.1: key checks precede the MAC; CoreDNS maps unknown algorithms to BADSIG.
         if owner != self.name {
             return Err(TsigError::BadKey);
         }
