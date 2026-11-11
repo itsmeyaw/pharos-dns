@@ -66,6 +66,7 @@ impl Plugin for Local {
         // RFC 6761 §6.3: localhost and its subdomains resolve to loopback.
         let special =
             count > 1 && (eq(count - 1, b"localhost") || (self.prefix && eq(0, b"localhost")));
+        // RFC 6303 §4.2: serve the 0 and 127 IPv4 reverse Domains locally.
         let zone_start = if count > 0 && eq(count - 1, b"localhost") {
             Some(count - 1)
         } else if count >= 3
@@ -107,7 +108,7 @@ impl Plugin for Local {
             && eq(3, b"127")
             && eq(4, b"in-addr")
             && eq(5, b"arpa");
-        // RFC 1035 §4.1.2: select records matching the Question type.
+        // RFC 1034 §4.3.2: select records matching the Question type.
         let answer_type = if special || localhost_apex {
             match question.qtype {
                 Type::A | Type::AAAA => Some(question.qtype),
@@ -148,7 +149,7 @@ impl Plugin for Local {
                     return Err(Error::ResponseBufferTooSmall);
                 }
             }
-            // RFC 1035 §4.1.1: copy the opcode and Query recursion flags into the Response.
+            // RFC 1035 §4.1.1 and RFC 4035 §3.2.1: mark a Response and copy opcode, RD and CD.
             let mut flags = 0x8000 | (cx.query.flags() & 0x7800) | if nxdomain { 3 } else { 0 };
             if cx.query.opcode() == Opcode::QUERY {
                 flags |= cx.query.flags() & 0x0110;
