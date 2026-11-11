@@ -22,6 +22,7 @@ fn main() {
     );
     for name in &enabled {
         let ty = match *name {
+            "acl" => "acl::Acl",
             "any" => "any::Any",
             "chaos" => "chaos::Chaos",
             "cache" => "cache::Cache",
@@ -53,6 +54,7 @@ fn main() {
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
+            "acl" => "setup_acl",
             "any" => "setup_any",
             "chaos" => "setup_chaos",
             "cache" => "setup_cache",
