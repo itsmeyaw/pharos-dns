@@ -28,6 +28,13 @@ fn rfc_4509_dnskey_and_ds_vector() {
     assert_eq!(&cds[4..], ds_digest(&owner, &rdata, DigestType::Sha256));
     assert_eq!(cds_rdata(&owner, &[0, 0, 3], DigestType::Sha1), None);
     assert_eq!(
+        ds_digest(&owner, &rdata, DigestType::Sha1),
+        [
+            0x2b, 0xb1, 0x83, 0xaf, 0x5f, 0x22, 0x58, 0x81, 0x79, 0xa5, 0x3b, 0x0a, 0x98, 0x63,
+            0x1f, 0xad, 0x1a, 0x29, 0x21, 0x18
+        ]
+    );
+    assert_eq!(
         ds_digest(&owner, &rdata, DigestType::Sha256),
         [
             0xd4, 0xb7, 0xd5, 0x20, 0xe7, 0xbb, 0x5f, 0x0f, 0x67, 0x67, 0x4a, 0x0c, 0xce, 0xb1,
@@ -35,6 +42,13 @@ fn rfc_4509_dnskey_and_ds_vector() {
             0x46, 0x9d, 0xa5, 0x0a,
         ]
     );
+}
+
+#[test]
+fn key_tag_handles_rsa_md5_and_bad_lengths() {
+    assert_eq!(key_tag(&[0, 0, 3]), None);
+    assert_eq!(key_tag(&[0, 0, 3, 1, 0x12, 0x34, 0x56]), Some(0x1234));
+    assert_eq!(key_tag(&vec![0; 65536]), None);
 }
 
 #[test]
