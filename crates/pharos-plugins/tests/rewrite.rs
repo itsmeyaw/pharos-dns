@@ -519,6 +519,10 @@ async fn coredns_edns_nsid_and_subnet_rewrite() {
             "rewrite edns0 subnet set 24 56",
             &b"\0\x08\0\x07\0\x01\x18\0\xc0\0\x02"[..],
         ),
+        (
+            "rewrite edns0 subnet set 25 57",
+            &b"\0\x08\0\x08\0\x01\x19\0\xc0\0\x02\x80"[..],
+        ),
     ] {
         let config = format!(".:53 {{\n {rule}\n}}");
         let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
@@ -560,6 +564,51 @@ async fn coredns_edns_nsid_and_subnet_rewrite() {
             "{rule}"
         );
     }
+}
+
+#[tokio::test]
+async fn coredns_edns_subnet_uses_ipv6_prefix_and_masks_host_bits() {
+    let config = ".:53 {\n rewrite edns0 subnet set 24 56\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "[2001:db8:abcd:1234::1]:1234".parse().unwrap(),
+        local: "[::1]:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(
+                &mut cx,
+                InspectOptionBytes(b"\0\x08\0\x0b\0\x02\x38\0\x20\x01\x0d\xb8\xab\xcd\x12")
+            )
+            .await,
+        Outcome::Drop
+    );
 }
 
 struct InspectMaybeOptions(Option<&'static [u8]>);
