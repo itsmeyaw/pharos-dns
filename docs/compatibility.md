@@ -30,7 +30,8 @@
 
 ## dnssec
 
-- Signing with RSASHA1 (algorithms 5 and 7) is unavailable: aws-lc-rs does not expose RSA/SHA-1 signing. RSA private keys below 2048 bits are rejected by aws-lc-rs.
+- Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as unsigned. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
+- RSA private keys below 2048 bits are rejected by aws-lc-rs; CoreDNS accepts them.
 - Key files currently require a standalone DNSKEY record with an absolute owner, IN class if specified, and a numeric TTL; the complete zone-file grammar is not supported.
 - Canonical signing rejects A6 and legacy name-bearing RDATA that `pharos-proto` cannot safely relocate, rather than signing them as CoreDNS does.
 - Constructing a black-lie NSEC allocates; callers must check that its span does not cover an existing name and convert NXDOMAIN to NODATA.

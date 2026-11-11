@@ -192,7 +192,7 @@ fn loads_generated_rsa_bind_and_pkcs8() {
     let loaded = parse_key_pair(&public, &private).unwrap();
     assert!(parse_pkcs8(&public, encoded.as_ref()).is_ok());
     assert!(parse_pkcs8(&public, &loaded.private.to_pkcs8_der().unwrap()).is_ok());
-    for algorithm in [5, 7, 8, 10] {
+    for algorithm in [8, 10] {
         let public = public.replace(" 3 8 ", &format!(" 3 {algorithm} "));
         let private = private.replace("Algorithm: 8", &format!("Algorithm: {algorithm}"));
         assert!(parse_key_pair(&public, &private).is_ok());
@@ -263,4 +263,19 @@ fn loads_key_pair_from_paths() {
     let pair = KeyPair::from_files(format!("{base}.key"), format!("{base}.private")).unwrap();
     assert_eq!(pair.public.algorithm, 13);
     assert!(KeyPair::from_files(format!("{base}.key"), "missing.private").is_err());
+}
+
+#[test]
+fn sha1_algorithms_are_refused_with_rollover_hint() {
+    for algorithm in [5, 7] {
+        let public = format!("example.org. 3600 IN DNSKEY 257 3 {algorithm} AwEAAQ==");
+        let private = format!("Private-key-format: v1.3\nAlgorithm: {algorithm} (RSASHA1)\n");
+        for error in [
+            parse_key_pair(&public, &private).err().unwrap().to_string(),
+            parse_pkcs8(&public, b"").err().unwrap().to_string(),
+        ] {
+            assert!(error.contains("RFC 9905"), "{error}");
+            assert!(error.contains("rollover"), "{error}");
+        }
+    }
 }

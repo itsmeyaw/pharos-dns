@@ -64,6 +64,17 @@ fn invalid(message: &str) -> KeyError {
     KeyError(message.to_owned())
 }
 
+fn refuse_sha1(algorithm: u8) -> Result<(), KeyError> {
+    // RFC 9905 §2: RSASHA1 and RSASHA1-NSEC3-SHA1 MUST NOT be used to create RRSIG records.
+    if matches!(algorithm, 5 | 7) {
+        return Err(KeyError(format!(
+            "DNSSEC algorithm {algorithm} (SHA-1) must not be used for signing (RFC 9905 §2); \
+             perform an algorithm rollover to 8, 13 or 15 (RFC 6781 §4.1.4)"
+        )));
+    }
+    Ok(())
+}
+
 impl KeyPair {
     /// Reads a `.key` file and a BIND `.private` file.
     pub fn from_files(
@@ -79,6 +90,7 @@ impl KeyPair {
 /// Parses one DNSKEY record and its BIND v1.2/v1.3 private key.
 pub fn parse_key_pair(public: &str, private: &str) -> Result<KeyPair, KeyError> {
     let public = parse_dnskey(public)?;
+    refuse_sha1(public.algorithm)?;
     let mut fields = HashMap::new();
     for line in private.lines() {
         let line = line.split(';').next().unwrap_or("").trim();
@@ -115,7 +127,7 @@ pub fn parse_key_pair(public: &str, private: &str) -> Result<KeyPair, KeyError> 
             .map_err(|_| invalid("invalid private-key base64"))
     };
     let private = match algorithm {
-        5 | 7 | 8 | 10 => {
+        8 | 10 => {
             // RFC 8017 Appendix A.1.2: RSAPrivateKey is a sequence of nine integers.
             let mut body = vec![2, 1, 0];
             for name in [
@@ -166,6 +178,7 @@ pub fn parse_key_pair(public: &str, private: &str) -> Result<KeyPair, KeyError> 
 /// Parses a DNSKEY record with an unencrypted PKCS#8 DER or PEM private key.
 pub fn parse_pkcs8(public: &str, private: &[u8]) -> Result<KeyPair, KeyError> {
     let public = parse_dnskey(public)?;
+    refuse_sha1(public.algorithm)?;
     // RFC 7468 §10: a PKCS#8 PEM uses the PRIVATE KEY textual label.
     let decoded;
     let private = if private.starts_with(b"-----BEGIN") {
@@ -185,7 +198,7 @@ pub fn parse_pkcs8(public: &str, private: &[u8]) -> Result<KeyPair, KeyError> {
     };
     // RFC 5958 §2: the algorithm identifier determines the private key representation.
     let private = match public.algorithm {
-        5 | 7 | 8 | 10 => PrivateKey::Rsa(
+        8 | 10 => PrivateKey::Rsa(
             signature::RsaKeyPair::from_pkcs8(private)
                 .map_err(|_| invalid("invalid RSA PKCS#8"))?,
         ),
