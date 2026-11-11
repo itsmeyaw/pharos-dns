@@ -3,6 +3,7 @@
 mod local;
 mod name;
 mod reverse;
+mod scratch;
 pub mod setup;
 
 use pharos_kubernetes::{
@@ -24,6 +25,7 @@ struct State {
     controller: Mutex<Option<Controller>>,
     cache: RwLock<Cache>,
     metrics: Mutex<pharos_server::metrics::Registry>,
+    scratch: scratch::Pool,
 }
 
 #[derive(Default)]
@@ -406,8 +408,8 @@ fn visit_ns(
 ) {
     let mut found = false;
     for local in locals {
-        let local_text = local.to_string();
-        for ep in index.endpoints_by_ip_unfiltered(&local_text) {
+        let local_text = scratch::IpText::new(*local);
+        for ep in index.endpoints_by_ip_unfiltered(local_text.as_str()) {
             found = true;
             let Some(svc) = index.service_unfiltered(&ep.namespace, &ep.service_name) else {
                 continue;
@@ -497,7 +499,7 @@ impl pharos_server::Plugin for Kubernetes {
         let reverse_ip = (q.qtype == Type::PTR)
             .then(|| reverse::address(&labels[..count]))
             .flatten()
-            .map(|ip| ip.to_string());
+            .map(scratch::IpText::new);
         let count = count - zone.label_count();
         let mut zone_wire = [0u8; 255];
         let mut zone_len = 0;
@@ -522,7 +524,8 @@ impl pharos_server::Plugin for Kubernetes {
         let primary =
             NameRef::parse(self.zones[self.config.primary_zone_index].as_wire(), 0).unwrap();
         let exists = if let Some(ip) = &reverse_ip {
-            store.with_read(|index| visit_reverse(index, ip, primary, &self.config, |_| {}))
+            store
+                .with_read(|index| visit_reverse(index, ip.as_str(), primary, &self.config, |_| {}))
         } else if q.qtype == Type::SOA
             || count == 1 && labels[0] == b"dns-version" && q.qtype == Type::TXT
             || q.qtype != Type::TXT
@@ -622,6 +625,7 @@ impl pharos_server::Plugin for Kubernetes {
                 return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
             }
         }
+        let mut scratch = self.state.scratch.lease();
         let result = (|| -> Result<(), BuildError> {
             let mut b = MessageBuilder::new(
                 cx.response,
@@ -640,20 +644,9 @@ impl pharos_server::Plugin for Kubernetes {
             let mut answers = 0usize;
             if exists && let Some(ip) = &reverse_ip {
                 let mut error = None;
-                let mut position = 0;
                 store.with_read(|index| {
-                    visit_reverse(index, ip, primary, &self.config, |target| {
-                        let current = position;
-                        position += 1;
-                        let mut before = 0;
-                        let mut seen = false;
-                        visit_reverse(index, ip, primary, &self.config, |previous| {
-                            if before < current && previous == target {
-                                seen = true;
-                            }
-                            before += 1;
-                        });
-                        if !seen && error.is_none() {
+                    visit_reverse(index, ip.as_str(), primary, &self.config, |target| {
+                        if error.is_none() && scratch.names.insert(scratch::Name::new(target)) {
                             match b.record_with(
                                 Section::Answer,
                                 q.name,
@@ -685,20 +678,9 @@ impl pharos_server::Plugin for Kubernetes {
             }
             if count == 0 && q.qtype == Type::NS {
                 let mut err = None;
-                let mut position = 0;
                 store.with_read(|i| {
                     visit_ns(i, ns_ips, zone_ref, &self.config, |ns, _| {
-                        let current = position;
-                        position += 1;
-                        let mut seen = false;
-                        let mut before = 0;
-                        visit_ns(i, ns_ips, zone_ref, &self.config, |old, _| {
-                            if before < current && old.labels().eq(ns.labels()) {
-                                seen = true;
-                            }
-                            before += 1;
-                        });
-                        if !seen && err.is_none() {
+                        if err.is_none() && scratch.names.insert(scratch::Name::new(ns)) {
                             match b.record_with(
                                 Section::Answer,
                                 q.name,
@@ -897,36 +879,20 @@ impl pharos_server::Plugin for Kubernetes {
                 store.with_read(|i| -> Result<(), BuildError> {
                     let mut total = 0usize;
                     visit(i, req, &self.config, |_, _, _| total += 1);
-                    let mut ordinal = 0usize;
                     let mut write_error = None;
                     let mut stopped = false;
                     visit(i, req, &self.config, |ip, port, endpoint| {
-                        let position = ordinal;
-                        ordinal += 1;
                         if stopped || write_error.is_some() {
                             return;
                         }
-                        let Ok(ip) = ip.parse::<IpAddr>() else {
+                        let ip_text = ip;
+                        let Ok(ip) = ip_text.parse::<IpAddr>() else {
                             return;
                         };
-                        let mut seen = false;
-                        let mut before = 0usize;
-                        visit(i, req, &self.config, |old_ip, old_port, old_endpoint| {
-                            if before < position
-                                && (if q.qtype == Type::SRV {
-                                    old_port.port == port.port && old_endpoint == endpoint
-                                } else {
-                                    old_ip.parse::<IpAddr>() == Ok(ip)
-                                })
-                            {
-                                seen = true;
-                            }
-                            before += 1;
-                        });
-                        if seen {
-                            return;
-                        }
                         let result = if q.qtype == Type::A || q.qtype == Type::AAAA {
+                            if !scratch.addresses.insert(scratch::Address::new(ip_text)) {
+                                return;
+                            }
                             match ip {
                                 IpAddr::V4(ip) if q.qtype == Type::A => b.record(
                                     Section::Answer,
@@ -961,6 +927,12 @@ impl pharos_server::Plugin for Kubernetes {
                             let Some(target) = child(&parts[start..], zone_ref, &mut wire) else {
                                 return;
                             };
+                            if !scratch
+                                .srv
+                                .insert((scratch::Name::new(target), port.port as u16))
+                            {
+                                return;
+                            }
                             let weight = (100 / total.max(1)).max(1) as u16;
                             b.record_with(
                                 Section::Answer,
@@ -989,29 +961,14 @@ impl pharos_server::Plugin for Kubernetes {
                     }
                     if !stopped && q.qtype == Type::SRV && answers > 0 {
                         let mut error = None;
-                        let mut ordinal = 0usize;
                         visit(i, req, &self.config, |ip, port, endpoint| {
-                            let position = ordinal;
-                            ordinal += 1;
                             if stopped || error.is_some() || port.port < 0 {
                                 return;
                             }
-                            let Ok(ip) = ip.parse::<IpAddr>() else { return };
-                            let mut seen = false;
-                            let mut before = 0usize;
-                            visit(i, req, &self.config, |old_ip, old_port, old_endpoint| {
-                                if before < position
-                                    && old_port.port >= 0
-                                    && old_endpoint == endpoint
-                                    && old_ip.parse::<IpAddr>() == Ok(ip)
-                                {
-                                    seen = true;
-                                }
-                                before += 1;
-                            });
-                            if seen {
+                            let ip_text = ip;
+                            let Ok(ip) = ip_text.parse::<IpAddr>() else {
                                 return;
-                            }
+                            };
                             let mut wire = [0; 255];
                             let mut parts = [&[][..]; 4];
                             let start = if let Some(endpoint) = endpoint {
@@ -1026,6 +983,12 @@ impl pharos_server::Plugin for Kubernetes {
                             let Some(target) = child(&parts[start..], zone_ref, &mut wire) else {
                                 return;
                             };
+                            if !scratch.extra.insert((
+                                scratch::Name::new(target),
+                                scratch::Address::new(ip_text),
+                            )) {
+                                return;
+                            }
                             let result = match ip {
                                 IpAddr::V4(ip) => b.record(
                                     Section::Additional,
