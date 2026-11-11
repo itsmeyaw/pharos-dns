@@ -34,7 +34,7 @@ fn check_sets_up_without_listening_and_reports_applicable_deviations() {
         "kubernetes",
         "Negative Responses use the SOA MINIMUM",
         "API client creation",
-        "Only `bind`",
+        "Other built-in Directives are disabled by default",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
@@ -138,7 +138,7 @@ fn check_accepts_upstream_default_corefiles() {
             &[
                 "Negative Responses use the SOA MINIMUM",
                 "API client creation and kubeconfig validation",
-                "Relative hosts file paths resolve against the working directory",
+                "Pharos discards names that are not valid DNS names or UTF-8",
             ][..],
         ),
     ] {
