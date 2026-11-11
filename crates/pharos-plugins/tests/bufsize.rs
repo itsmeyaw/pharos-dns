@@ -81,6 +81,41 @@ async fn listener_uses_clamped_opt_for_udp_and_tcp_responses() {
     }
 }
 
+#[cfg(feature = "plugin-hosts")]
+#[tokio::test]
+async fn clamped_udp_response_truncates_but_tcp_does_not() {
+    use pharos_plugins::servers;
+    use pharos_server::{Action, Handler};
+
+    let mut source = String::from(".:53 {\n bufsize 512\n hosts /nonexistent {\n");
+    for n in 1..=80 {
+        source.push_str(&format!(" 192.0.2.{n} large.example\n"));
+    }
+    source.push_str(" }\n}");
+    let blocks = parse("Corefile", &source).unwrap();
+    let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let server = servers.values().next().unwrap();
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\x05large\x07example\0\0\x01\0\x01\0\0\x29\x10\0\0\0\0\0\0\0";
+    for protocol in [Protocol::Udp, Protocol::Tcp] {
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    wire,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    protocol,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+        let message = Message::parse(&response).unwrap();
+        assert_eq!(message.opt().unwrap().udp_payload_size(), 512);
+        assert_eq!(message.tc(), protocol == Protocol::Udp);
+        assert_eq!(response.len() <= 512, protocol == Protocol::Udp);
+    }
+}
+
 #[cfg(feature = "plugin-forward")]
 #[tokio::test]
 async fn forward_sends_clamped_wire_query_to_upstream() {
@@ -129,12 +164,14 @@ async fn forward_sends_clamped_wire_query_to_upstream() {
 
 struct Inspect {
     expected: Option<u16>,
+    max_response_size: usize,
     outcome: Outcome,
 }
 
 impl Next for Inspect {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {
         assert_eq!(cx.query.opt().map(|o| o.udp_payload_size()), self.expected);
+        assert_eq!(cx.max_response_size, self.max_response_size);
         let mut wire = Vec::new();
         cx.query.copy_wire(&mut wire);
         assert_eq!(
@@ -151,11 +188,19 @@ impl Next for Inspect {
 #[tokio::test]
 async fn coredns_clamps_only_larger_opt_and_preserves_outcome() {
     let chain = configured("bufsize 1024").unwrap();
-    for (requested, expected, outcome) in [
-        (Some(1152_u16), Some(1024), Outcome::Response),
-        (Some(896), Some(896), Outcome::Drop),
-        (Some(1024), Some(1024), Outcome::Unanswered(Rcode::REFUSED)),
+    for (protocol, requested, expected, outcome) in [
+        (Protocol::Udp, Some(1152_u16), Some(1024), Outcome::Response),
+        (Protocol::Tcp, Some(1152), Some(1024), Outcome::Response),
+        (Protocol::Udp, Some(896), Some(896), Outcome::Drop),
+        (Protocol::Udp, Some(1), Some(1), Outcome::Drop),
         (
+            Protocol::Udp,
+            Some(1024),
+            Some(1024),
+            Outcome::Unanswered(Rcode::REFUSED),
+        ),
+        (
+            Protocol::Udp,
             None,
             None,
             Outcome::Error(pharos_server::Error::NoNextPlugin),
@@ -193,18 +238,34 @@ async fn coredns_clamps_only_larger_opt_and_preserves_outcome() {
             client: "127.0.0.1:53".parse().unwrap(),
             local: "127.0.0.1:53".parse().unwrap(),
             transport: Transport::Dns,
-            protocol: Protocol::Udp,
+            protocol,
             domain: &domain,
             metadata: Metadata::new(&mut slots),
             response: &mut response,
-            max_response_size: 4096,
+            max_response_size: if protocol == Protocol::Udp {
+                usize::from(requested.unwrap_or(512).max(512))
+            } else {
+                usize::from(u16::MAX)
+            },
+        };
+        let max_response_size = if protocol == Protocol::Udp {
+            usize::from(expected.unwrap_or(512).max(512))
+        } else {
+            usize::from(u16::MAX)
         };
         assert_eq!(
             chain
                 .bufsize
                 .as_ref()
                 .unwrap()
-                .serve(&mut cx, Inspect { expected, outcome })
+                .serve(
+                    &mut cx,
+                    Inspect {
+                        expected,
+                        max_response_size,
+                        outcome
+                    }
+                )
                 .await,
             outcome
         );
