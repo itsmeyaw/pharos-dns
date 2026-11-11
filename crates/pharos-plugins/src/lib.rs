@@ -670,11 +670,7 @@ fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std
 
 
 
-#[cfg(feature = "plugin-timeouts")]
-fn setup_timeouts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.timeouts = Some(timeouts::parse(cursor)?);
-    Ok(())
-}
+
 
 
 

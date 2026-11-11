@@ -83,7 +83,7 @@ fn main() {
             "autopath" => "autopath::setup::setup",
             "root" => "root::setup::setup",
             "cancel" => "cancel::setup::setup",
-            "timeouts" => "setup_timeouts",
+            "timeouts" => "timeouts::setup::setup",
             "debug" => "debug::setup::setup",
             "shed" => "shed::setup::setup",
             "any" => "any::setup::setup",

@@ -1,5 +1,7 @@
 //! Connection timeout Directive configuration.
 
+pub(crate) mod setup;
+
 use pharos_corefile::{Cursor, Error};
 use std::time::Duration;
 
