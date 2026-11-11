@@ -190,6 +190,7 @@ impl<'a> Metadata<'a> {
         metadata.self_lookup = handle.map(|handle| SelfLookupState {
             server: handle,
             depth: handle.depth,
+            siit: handle.siit,
         });
         metadata
     }
@@ -327,6 +328,7 @@ pub struct Context<'a> {
 struct SelfLookupState<'a> {
     server: &'a dyn SelfLookupServer,
     depth: u8,
+    siit: bool,
 }
 
 // Type erasure keeps Context nongeneric without allocating on ordinary Queries.
@@ -337,6 +339,7 @@ trait SelfLookupServer: Sync {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
+        siit: bool,
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
 
@@ -352,6 +355,7 @@ trait OwnedSelfLookupServer: Send + Sync {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
+        siit: bool,
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
 }
@@ -360,6 +364,7 @@ trait OwnedSelfLookupServer: Send + Sync {
 pub struct SelfLookupHandle {
     server: Arc<dyn OwnedSelfLookupServer>,
     depth: u8,
+    siit: bool,
 }
 
 impl SelfLookupServer for SelfLookupHandle {
@@ -369,9 +374,10 @@ impl SelfLookupServer for SelfLookupHandle {
         peer: SocketAddr,
         protocol: Protocol,
         depth: u8,
+        siit: bool,
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
-        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, response)
+        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, siit, response)
     }
 
     fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
@@ -386,11 +392,34 @@ impl Context<'_> {
         Some(SelfLookupHandle {
             server: state.server.owned()?,
             depth: state.depth,
+            siit: state.siit,
         })
     }
 
     /// Route a new Query through this Query's Listener and capture its Response.
     pub async fn self_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+        self.self_lookup_inner(name, qtype, false).await
+    }
+
+    /// Re-enter for SIIT synthesis, preventing recursive SIIT interception.
+    pub async fn siit_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+        self.self_lookup_inner(name, qtype, true).await
+    }
+
+    /// Whether this Query descends from a SIIT synthesis lookup.
+    pub fn siit_lookup_active(&self) -> bool {
+        self.metadata
+            .self_lookup
+            .as_ref()
+            .is_some_and(|state| state.siit)
+    }
+
+    async fn self_lookup_inner(
+        &self,
+        name: &Name,
+        qtype: Type,
+        siit: bool,
+    ) -> Result<Vec<u8>, Error> {
         let state = self
             .metadata
             .self_lookup
@@ -411,6 +440,7 @@ impl Context<'_> {
                 self.client,
                 self.protocol,
                 state.depth + 1,
+                siit || state.siit,
                 &mut response,
             )
             .await

@@ -3,7 +3,10 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use pharos_corefile::{Cursor, Error};
-use pharos_server::{Context, Next, Outcome, Plugin};
+use pharos_proto::{
+    Class, Message, MessageBuilder, Opcode, ResponseType, Section, Type, typify_response,
+};
+use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin, Protocol};
 
 #[derive(Debug)]
 pub struct Siit {
@@ -69,10 +72,145 @@ impl Siit {
         }
         Ok(result)
     }
+
+    fn translate(&self, bytes: &[u8]) -> Option<[u8; 4]> {
+        let addr: [u8; 16] = bytes.try_into().ok()?;
+        let ip = Ipv6Addr::from(addr);
+        if ip.to_ipv4_mapped().is_some() {
+            return None;
+        }
+        // RFC 7757 §3.3.2: an explicit address mapping takes precedence.
+        if let Some((_, v4)) = self.eam.iter().find(|(v6, _)| *v6 == ip) {
+            return Some(v4.octets());
+        }
+        let prefix_len = usize::from(self.prefix_len / 8);
+        // RFC 6052 §2.2: the reserved u octet must be zero.
+        if addr[..prefix_len] != self.prefix[..prefix_len] || addr[8] != 0 {
+            return None;
+        }
+        let mut v4 = [0; 4];
+        let mut index = prefix_len;
+        for byte in &mut v4 {
+            if index == 8 {
+                index += 1;
+            }
+            *byte = addr[index];
+            index += 1;
+        }
+        Some(v4)
+    }
 }
 
 impl Plugin for Siit {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
-        next.run(cx).await
+        let Some(question) = cx.query.questions().next() else {
+            return next.run(cx).await;
+        };
+        // RFC 6147 §5.1: only IN A Queries are eligible for synthesis.
+        if cx.siit_lookup_active() || question.qtype != Type::A || question.qclass != Class::IN {
+            return next.run(cx).await;
+        }
+        let outcome = next.run(cx).await;
+        if outcome != Outcome::Response {
+            return outcome;
+        }
+        let original = match Message::parse(cx.response) {
+            Ok(message) => message,
+            Err(_) => return Outcome::Error(ServerError::InvalidQuery),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+            });
+        if original.tc()
+            || typify_response(Some(&original), now) == ResponseType::NxDomain
+            || original.answers().any(|rr| rr.rtype == Type::A)
+        {
+            return outcome;
+        }
+        // RFC 6147 §5.1.7: use the negative SOA TTL or 600 seconds as a cap.
+        let soa_ttl = original
+            .authorities()
+            .filter(|rr| rr.rtype == Type::SOA)
+            .last()
+            .map_or(600, |rr| rr.ttl);
+        let name = question.name.to_name();
+        // shortcut: Self Lookup allocates; remove when issue #86 makes it allocation-free.
+        let wire = match cx.siit_lookup(&name, Type::AAAA).await {
+            Ok(wire) => wire,
+            Err(error) => return Outcome::Error(error),
+        };
+        let response = match Message::parse(&wire) {
+            Ok(message) => message,
+            Err(_) => return Outcome::Error(ServerError::InvalidQuery),
+        };
+        let success = response.rcode().0 == 0;
+        if success
+            && !response
+                .answers()
+                .any(|rr| rr.rtype == Type::AAAA && self.translate(rr.rdata).is_some())
+        {
+            return outcome;
+        }
+        let result = (|| {
+            let max = cx.max_response_size.max(512);
+            if cx.response.capacity() < max {
+                if cx.protocol == Protocol::Tcp {
+                    cx.response.reserve(max.saturating_sub(cx.response.len()));
+                } else {
+                    return Err(ServerError::ResponseBufferTooSmall);
+                }
+            }
+            // RFC 1035 §4.1.1: retain the client's original Question and transaction ID.
+            let flags = 0x8000
+                | (cx.query.flags() & 0x7800)
+                | if cx.query.opcode() == Opcode::QUERY {
+                    cx.query.flags() & 0x0110
+                } else {
+                    0
+                }
+                | (response.flags() & 0x068f);
+            let mut builder = MessageBuilder::new(cx.response, max, cx.query.id(), flags)
+                .map_err(ServerError::Build)?;
+            builder
+                .question(question.name, question.qtype, question.qclass)
+                .map_err(ServerError::Build)?;
+            for (section, records) in [
+                (Section::Answer, response.answers()),
+                (Section::Authority, response.authorities()),
+                (Section::Additional, response.additionals()),
+            ] {
+                for rr in records {
+                    if success && section == Section::Answer && rr.rtype == Type::AAAA {
+                        if let Some(v4) = self.translate(rr.rdata) {
+                            builder
+                                .record(
+                                    section,
+                                    rr.name,
+                                    Type::A,
+                                    rr.class,
+                                    rr.ttl.min(soa_ttl),
+                                    &v4,
+                                )
+                                .map_err(ServerError::Build)?;
+                        }
+                    } else {
+                        let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+                        builder
+                            .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
+                                data.write(writer)
+                            })
+                            .map_err(ServerError::Build)?;
+                    }
+                }
+            }
+            let _ = builder.finish();
+            Ok(())
+        })();
+        match result {
+            Ok(()) => Outcome::Response,
+            Err(error) => Outcome::Error(error),
+        }
     }
 }
