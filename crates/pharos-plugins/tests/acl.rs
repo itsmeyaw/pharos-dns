@@ -27,6 +27,15 @@ async fn coredns_acl_serve_dns_cases() {
     // Each entry contains the Directive, Server Block domain, Query domain,
     // client, type, and expected action: 0=Next, 1=block, 2=filter, 3=drop.
     let cases = [
+        // CoreDNS TestNormalize: host bits in a CIDR remain part of its subnet.
+        (
+            "acl example.org {\n block net 10.218.10.8/24\n}",
+            ".",
+            "www.example.org.",
+            "10.218.10.9",
+            Type::A,
+            1,
+        ),
         (
             "acl example.org {\n block type A net 192.168.0.0/16\n}",
             ".",
