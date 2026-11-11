@@ -1972,6 +1972,52 @@ async fn coredns_exact_name_rewrites_query_and_auto_reverts_response() {
     );
 }
 
+#[tokio::test]
+async fn coredns_auto_rewrite_keeps_question_case_but_lowercases_answer() {
+    let config = ".:53 {\n rewrite name foo.example. internal.example.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "FoO.Example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain.rewrite.as_ref().unwrap().serve(&mut cx, Answer).await,
+        Outcome::Response
+    );
+    let response = Message::parse(cx.response).unwrap();
+    assert_eq!(
+        response.questions().next().unwrap().name.to_string(),
+        "FoO.Example."
+    );
+    assert_eq!(
+        response.answers().next().unwrap().name.to_string(),
+        "foo.example."
+    );
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/rcode_test.go.
 #[tokio::test]
 async fn coredns_rcode_rewrites_unanswered_response() {

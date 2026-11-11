@@ -1003,6 +1003,12 @@ fn apply_history<'a>(
         else {
             continue;
         };
+        let mut before_wire = [0; 255];
+        let Some(before_len) = copy_name(before.name, &mut before_wire) else {
+            return source;
+        };
+        before_wire[..before_len].make_ascii_lowercase();
+        let before_name = NameRef::parse(&before_wire[..before_len], 0).expect("validated name");
         let suffix = match (&rules[index].matcher, auto) {
             (Matcher::Suffix(from), true) => Some((target.as_str(), from.as_str())),
             _ => None,
@@ -1011,7 +1017,7 @@ fn apply_history<'a>(
         let mut mapped = [0; 255];
         let result = apply_answer(
             name,
-            (after.name, before.name),
+            (after.name, before_name),
             suffix,
             *auto,
             answers,
@@ -1792,6 +1798,9 @@ impl Plugin for Rewrite {
                 let Action::Cname(matcher, replacement) = &rule.action else {
                     continue;
                 };
+                if cx.self_lookup_depth() > 8 {
+                    continue;
+                }
                 if !matches.as_deref().map_or_else(
                     || active_at(&self.rules, index, original_query, &cx.metadata),
                     |bits| bits[index] != 0,
@@ -1808,9 +1817,6 @@ impl Plugin for Rewrite {
                     cname_replacement(matcher, replacement, value)
                 });
                 if let Some((from, target)) = matched {
-                    if cx.self_lookup_depth() > 8 {
-                        continue;
-                    }
                     let Some(question) = rewritten_query.questions().next() else {
                         return outcome;
                     };
