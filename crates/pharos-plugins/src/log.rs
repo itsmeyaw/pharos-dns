@@ -99,8 +99,10 @@ impl Plugin for Log {
         let start = Instant::now();
         let outcome = next.run(cx).await;
         let (kind, class, bit) = classify(cx, outcome);
-        cx.metadata.insert("log/type", kind);
-        cx.metadata.insert("log/class", class);
+        if cx.metadata.enabled() {
+            cx.metadata.insert("log/type", kind);
+            cx.metadata.insert("log/class", class);
+        }
         if rule.classes & (1 | bit) != 0 {
             BUFFER.with_borrow_mut(|buffer| {
                 buffer.clear();

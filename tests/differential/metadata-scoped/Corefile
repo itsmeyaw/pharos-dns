@@ -1,0 +1,5 @@
+.:{port} {
+    metadata example.org example.net
+    log . "{/forward/upstream} {/log/type}"
+    whoami
+}

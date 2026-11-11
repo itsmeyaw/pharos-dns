@@ -1663,6 +1663,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pharos-dnssec"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "pharos-proto",
+]
+
+[[package]]
 name = "pharos-kubernetes"
 version = "0.1.0"
 dependencies = [
@@ -1705,6 +1714,8 @@ dependencies = [
 name = "pharos-proto"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
  "criterion",
  "domain",
  "hickory-proto",

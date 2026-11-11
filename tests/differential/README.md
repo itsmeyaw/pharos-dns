@@ -63,6 +63,10 @@ The `local` README and prefix-off scenarios use `whoami` as Next to compare
 both intercepted Queries and those passed through.
 The three `header` README scenarios use `whoami` as the Backend and compare
 Responses over UDP and TCP; Rust tests also inspect forwarded Queries.
+The metadata scenarios compare DNS Responses with inherited and explicit Domains.
+The README mentions `rewrite` without a concrete Corefile; that Plugin is not
+implemented yet, so the scenarios use Kubernetes and whoami instead. Metadata
+values and log formatting are checked by Rust tests, not the differential harness.
 The `loop` scenario compares Responses for a non-looping configuration. The
 looping README example is covered by a binary exit test instead: this harness
 expects both processes to remain available and does not compare exit codes.

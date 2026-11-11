@@ -45,6 +45,14 @@
 - An overlong version with explicit authors produces a Plugin error and SERVFAIL rather than CoreDNS's failed write; UDP callers must supply a sufficiently large Response buffer, as with `whoami`.
 - When building a Response with many authors, Pharos truncates to the Query's limit before Listener processing; CoreDNS builds the full Response first. Plugins earlier in the chain can therefore observe a truncated Response.
 
+## dnssec
+
+- Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as unsigned. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
+- RSA private keys below 2048 bits are rejected by aws-lc-rs; CoreDNS accepts them.
+- Key files currently require a standalone DNSKEY record with an absolute owner, IN class if specified, and a numeric TTL; the complete zone-file grammar is not supported.
+- Canonical signing rejects A6 and legacy name-bearing RDATA that `pharos-proto` cannot safely relocate, rather than signing them as CoreDNS does.
+- Constructing a black-lie NSEC allocates; callers must check that its span does not cover an existing name and convert NXDOMAIN to NODATA.
+
 ## errors
 
 - The `errors` Plugin uses Rust's `regex` syntax rather than Go's RE2 syntax. For example, `\w`, `\d`, `\s` and word boundaries are Unicode-aware in Rust but ASCII-only in Go; some expressions are accepted by only one engine.
@@ -161,6 +169,14 @@
 - Zone Transfer streams are not yet served and are logged as a Message-less outcome.
 - The formatter cannot expand compressed names in unsupported RDATA when calculating Message size.
 
+## metadata
+
+- Invalid configured Domains that cannot be normalized or represented as DNS names are ignored; CoreDNS retains some malformed Domain strings.
+- Query-derived Kubernetes values use ASCII lowercasing and require UTF-8; CoreDNS uses Go's Unicode lowercasing and DNS presentation escaping.
+- The fixed copied-value buffer is limited to 12 labels and 1,024 bytes; CoreDNS's map is unbounded. Kubernetes client Pod labels use a shared snapshot and are not subject to this limit.
+- Collection currently runs after routing, so future View filters will need to collect Metadata before evaluating expressions, as CoreDNS does.
+- Kubernetes multicluster labels use the matched Kubernetes Domain; CoreDNS's server collection leaves the request's Zone empty, so it may parse these labels as ordinary service/port names.
+
 ## loop
 
 - The `loop` Plugin probes only the first Domain in a Server Block at startup and after Reload, as CoreDNS does.
@@ -218,6 +234,11 @@
 - Candidate setup can register metric series before a failed Reload is rolled back.
 - Shutdown waits for Queries on replaced states to finish, so a stuck Query can delay processing subsequent signals.
 
+## sign
+
+- The shared signer has the same key and canonical-RDATA restrictions listed under `dnssec`.
+- NSEC3 chain construction supports complete chains only, not opt-out.
+
 ## whoami
 
 - Whoami reports an error if adding the protocol label would make its SRV owner name exceed the DNS name length limit. CoreDNS ignores the resulting write error.
@@ -261,6 +282,17 @@
 
 - Without `multisocket`, Pharos uses the CPU-quota-aware worker count for UDP; CoreDNS uses one socket.
 - CoreDNS v1.15.0 uses miekg/dns v1.1.73.
+- TSIG accepts RFC 8945-permitted truncated MACs and enforces their minimum length and optional local policy; miekg/dns v1.1.73's default provider compares only full-length MACs.
+- TSIG rejects misplaced, duplicate, non-ANY, nonzero-TTL, or malformed TSIG records and compressed algorithm names; miekg/dns does not enforce all of these checks.
+- TSIG maps an unsupported algorithm on a known key to BADSIG, as CoreDNS does, rather than RFC 8945's BADKEY. Each `TsigKey` is pinned to one supported algorithm; CoreDNS accepts any supported algorithm for a configured secret.
+- Stream verification includes unsigned intermediate Messages in the running MAC and requires signed first and last Messages, following RFC 8945; miekg/dns does not accumulate unsigned intermediates.
+- Subsequent stream TSIGs with an Error or Other Data are rejected because those fields are not authenticated by the stream MAC; miekg/dns does not reject them.
+- Stream signatures reject decreasing Time Signed values; miekg/dns does not track previous times. The stream API also permits callers to feed unsigned intermediate Messages for legacy interoperability, although RFC 8945 requires senders to sign every Response.
+- TSIG uses the supplied zero Time Signed or Fudge literally; miekg/dns substitutes the current time or 300 seconds. Signed NOTAUTH Responses can be verified by Pharos, whereas miekg/dns rejects NOTAUTH before checking the MAC.
+- BADTIME Responses retain the Query's Fudge as RFC 8945 requires; CoreDNS's TSIG Plugin defaults it to 300 seconds.
+- TSIG error Responses retain the Query TSIG's Original ID; CoreDNS's TSIG Plugin uses the Response header ID.
+- TSIG key-file parsing takes UTF-8 input, reads lines beyond Go's 64 KiB scanner limit, and uses Rust Unicode lowercasing, which can differ from Go for names such as a word-final capital sigma. CoreDNS can silently stop reading an overlong key-file line.
+- TSIG Response signing and verification require a valid-length Query MAC. The RFC 8945 exception for a signed Response to an unsigned TKEY Query is not supported by this API; miekg/dns allows generating a Response without a Query MAC.
 - Pharos rejects compression pointers that do not point backwards, while miekg/dns follows them until its hop limit.
 - Pharos also rejects targets whose encoding overlaps the pointer; miekg/dns accepts them.
 - Pharos permits up to 255 pointer hops; miekg/dns permits 126.

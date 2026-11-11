@@ -32,6 +32,7 @@ fn main() {
             "multisocket" => "Option<usize>",
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
+            "metadata" => "metadata::Metadata",
             "loop" => "r#loop::Loop",
             "prometheus" => "prometheus::Prometheus",
             "ready" => "ready::Ready",
@@ -62,6 +63,7 @@ fn main() {
             "multisocket" => "setup_multisocket",
             "whoami" => "setup_whoami",
             "log" => "setup_log",
+            "metadata" => "setup_metadata",
             "loop" => "setup_loop",
             "prometheus" => "setup_prometheus",
             "ready" => "setup_ready",
@@ -79,6 +81,7 @@ fn main() {
         let once = matches!(
             *name,
             "cache"
+                | "metadata"
                 | "prometheus"
                 | "ready"
                 | "errors"
@@ -120,7 +123,16 @@ fn main() {
         }
         code.push_str("}\n");
     }
-    code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_0(cx) }\n");
+    code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { ");
+    if enabled.contains(&"metadata") {
+        code.push_str("cx.metadata.set_enabled(self.metadata.is_some()); ");
+    } else {
+        code.push_str("cx.metadata.set_enabled(false); ");
+    }
+    if enabled.contains(&"metadata") && enabled.contains(&"kubernetes") {
+        code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) && let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); } ");
+    }
+    code.push_str("self.serve_0(cx) }\n");
     if let Some(index) = enabled.iter().position(|name| *name == "cache") {
         writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ #[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] if let Some(plugin) = &self.self_lookup_test {{ return plugin.serve(cx).await; }} self.serve_{}(cx).await }}", index + 1).unwrap();
     }

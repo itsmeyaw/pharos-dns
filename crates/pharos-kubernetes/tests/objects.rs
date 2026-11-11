@@ -2,6 +2,26 @@ use k8s_openapi::api::{core::v1, discovery::v1::EndpointSlice};
 use pharos_kubernetes::object::{Endpoints, Pod, Service};
 use serde_json::json;
 
+// Derived from CoreDNS v1.15.0 plugin/kubernetes/metadata_test.go.
+#[test]
+fn pod_metadata_exposes_namespace_name_and_labels() {
+    let input: v1::Pod = serde_json::from_value(json!({
+        "metadata":{"name":"foo", "namespace":"podns", "labels":{"app.kubernetes.io/name":"foo", "bar":"baz"}}
+    })).unwrap();
+    let pod = std::sync::Arc::new(Pod::from(input));
+    let mut slots = [];
+    let mut metadata = pharos_server::Metadata::new(&mut slots);
+    metadata.set_source(pod);
+    assert_eq!(metadata.get("kubernetes/client-namespace"), Some("podns"));
+    assert_eq!(metadata.get("kubernetes/client-pod-name"), Some("foo"));
+    assert_eq!(
+        metadata.get("kubernetes/client-label/app.kubernetes.io/name"),
+        Some("foo")
+    );
+    assert_eq!(metadata.get("kubernetes/client-label/bar"), Some("baz"));
+    assert_eq!(metadata.get("kubernetes/client-label/missing"), None);
+}
+
 #[test]
 fn service_import_keeps_cluster_ips_ports_and_type() {
     let input: kube::core::DynamicObject = serde_json::from_value(json!({
