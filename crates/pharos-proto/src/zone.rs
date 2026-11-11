@@ -330,10 +330,11 @@ impl<R: BufRead> ZoneParser<R> {
             }
         };
         reject_quote(&tokens[0])?;
-        // RFC 1035 §5.1: other entries starting with '$' are owner names, as in miekg/dns.
-        if ["$ORIGIN", "$TTL", "$INCLUDE", "$GENERATE"]
-            .iter()
-            .any(|directive| tokens[0].eq_ignore_ascii_case(directive))
+        // RFC 1035 §5.1: a leading blank denotes an inherited owner, not a control entry.
+        if !inherited
+            && ["$ORIGIN", "$TTL", "$INCLUDE", "$GENERATE"]
+                .iter()
+                .any(|directive| tokens[0].eq_ignore_ascii_case(directive))
         {
             if tokens[0].eq_ignore_ascii_case("$ORIGIN") {
                 if tokens.len() != 2 {

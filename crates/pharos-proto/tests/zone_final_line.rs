@@ -81,6 +81,20 @@ fn generate_with_empty_template_yields_no_records() {
 }
 
 #[test]
+fn indented_directives_are_not_control_entries() {
+    // RFC 1035 §5.1: an entry starting with a blank inherits its owner.
+    for zone in [
+        b" $GENERATE 0-1 \n".as_slice(),
+        b"\t$GENERATE 1-1 x IN A 192.0.2.1\n",
+        b" $TTL 60\na IN A 192.0.2.1\n",
+        b" $ORIGIN foo.\na IN A 192.0.2.1\n",
+        b"a IN A 192.0.2.1\n $TTL 60\n",
+    ] {
+        assert!(parse(zone).is_err(), "{zone:?}");
+    }
+}
+
+#[test]
 fn parentheses_do_not_end_an_item() {
     // RFC 1035 §5.1: only tabs and spaces delimit items; parentheses only join lines.
     assert_eq!(
