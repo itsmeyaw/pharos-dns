@@ -1,0 +1,7 @@
+.:{port} {
+    rewrite name regex (.*)-(us-west-1)\.coredns\.rocks {1}.service.{2}.consul answer name (.*)\.service\.(us-west-1)\.consul {1}-{2}.coredns.rocks
+    hosts empty.hosts {
+        192.0.2.10 ftp.service.us-west-1.consul
+        reload 0
+    }
+}

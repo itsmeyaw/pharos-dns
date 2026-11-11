@@ -1,0 +1,7 @@
+.:{port} {
+    rewrite ttl regex (.*)\.coredns\.rocks 15
+    hosts empty.hosts {
+        192.0.2.10 ftp.coredns.rocks
+        reload 0
+    }
+}

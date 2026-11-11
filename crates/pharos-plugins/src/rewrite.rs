@@ -883,6 +883,7 @@ impl Plugin for Rewrite {
                 }
             }
             if matched && rule.stop {
+                response_rules = true;
                 end = index + 1;
                 break;
             }
