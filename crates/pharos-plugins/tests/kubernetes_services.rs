@@ -430,6 +430,55 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             0,
         ),
         (
+            "alias.prod.svc.cluster.local.",
+            Type::TXT,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "alias.prod.svc.cluster.local.",
+            Type::SRV,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "alias.prod.svc.cluster.local.",
+            Type::HTTPS,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "alias.prod.svc.cluster.local.",
+            Type::MX,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "alias.prod.svc.cluster.local.",
+            Type::SOA,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "alias.prod.svc.cluster.local.",
+            Type::NS,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "internal.prod.svc.cluster.local.",
+            Type::TXT,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
             "sub.alias.prod.svc.cluster.local.",
             Type::A,
             Rcode::NXDOMAIN,
@@ -543,6 +592,18 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
         );
         assert!(message.aa());
         let qname = name.to_string();
+        // ExternalName rows: only the CNAME is checked.
+        if (qname.starts_with("alias.") || qname.starts_with("internal."))
+            && !matches!(kind, Type::A | Type::AAAA)
+            && answers == 1
+        {
+            let rr = message.answers().next().unwrap();
+            assert!(
+                matches!(rr.data().unwrap(), Rdata::Cname(_)),
+                "{qname} {kind:?}"
+            );
+            continue;
+        }
         if kind == Type::PTR && answers == 1 {
             let Rdata::Ptr(target) = message.answers().next().unwrap().data().unwrap() else {
                 panic!("not PTR")
