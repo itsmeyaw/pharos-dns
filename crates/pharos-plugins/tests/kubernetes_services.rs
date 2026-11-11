@@ -59,7 +59,7 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
                 } else if request.contains("/endpointslices") {
                     (
                         "EndpointSliceList",
-                        r#"[{"metadata":{"name":"one","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.0.1.2"],"hostname":"one","targetRef":{"name":"ignored"},"zone":"us.a"}]},{"metadata":{"name":"two","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.3"],"targetRef":{"name":"pod-two"},"zone":"us.b"}]},{"metadata":{"name":"v6","namespace":"prod","labels":{"kubernetes.io/service-name":"v6head"}},"addressType":"IPv6","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["2001:db8::1"],"zone":"us.a"}]},{"metadata":{"name":"dns","namespace":"prod","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["192.0.2.30"]}]}]"#,
+                        r#"[{"metadata":{"name":"one","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.0.1.2"],"hostname":"one","targetRef":{"name":"ignored"},"zone":"us.a"}]},{"metadata":{"name":"two","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.3"],"targetRef":{"name":"pod-two"},"zone":"us.b"}]},{"metadata":{"name":"v6","namespace":"prod","labels":{"kubernetes.io/service-name":"v6head"}},"addressType":"IPv6","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["2001:db8::1"],"zone":"us.a"}]},{"metadata":{"name":"dns","namespace":"prod","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["192.0.2.30"]}]},{"metadata":{"name":"duplicate-one","namespace":"prod","labels":{"kubernetes.io/service-name":"dupa"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"same"}]},{"metadata":{"name":"duplicate-two","namespace":"prod","labels":{"kubernetes.io/service-name":"dupa"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"same"}]},{"metadata":{"name":"other","namespace":"prod","labels":{"kubernetes.io/service-name":"dupb"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"other"}]}]"#,
                     )
                 } else if request.contains("/api/v1/pods") {
                     (
@@ -97,7 +97,7 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
     };
     let ready = ready_address.map_or_else(String::new, |address| format!(" ready {address}\n"));
     let text = format!(
-        ".:53 {{\n{hosts}{ready} kubernetes cluster.local {{\n  endpoint http://{address}\n  startup_timeout 3s\n  ignore empty_service\n  zonal\n  pods insecure\n  endpoint_pod_names\n }}\n}}"
+        ".:53 {{\n{hosts}{ready} kubernetes cluster.local in-addr.arpa ip6.arpa {{\n  endpoint http://{address}\n  startup_timeout 3s\n  ignore empty_service\n  zonal\n  pods insecure\n  endpoint_pod_names\n }}\n}}"
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
     let chain = &blocks[0].config;
@@ -109,6 +109,26 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
     let root: Name = ".".parse().unwrap();
     for (name, kind, code, answers, extra) in [
         ("web.prod.svc.cluster.local.", Type::A, Rcode::NOERROR, 1, 0),
+        ("1.0.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 1, 0),
+        ("2.1.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 1, 0),
+        ("3.1.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 1, 0),
+        ("4.1.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 2, 0),
+        ("8.0.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 1, 0),
+        ("9.0.0.10.in-addr.arpa.", Type::PTR, Rcode::NXDOMAIN, 0, 0),
+        (
+            "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.",
+            Type::PTR,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "2.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.",
+            Type::PTR,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
         (
             "web.prod.svc.cluster.local.",
             Type::ANY,
@@ -364,6 +384,10 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             0,
         ),
         ("cluster.local.", Type::SOA, Rcode::NOERROR, 1, 0),
+        ("cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
+        ("svc.cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
+        ("prod.svc.cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
+        ("ns.dns.cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
         (
             "missing.prod.svc.cluster.local.",
             Type::SOA,
@@ -430,6 +454,39 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
         );
         assert!(message.aa());
         let qname = name.to_string();
+        if kind == Type::PTR && answers == 1 {
+            let Rdata::Ptr(target) = message.answers().next().unwrap().data().unwrap() else {
+                panic!("not PTR")
+            };
+            let expected = match qname.as_str() {
+                "1.0.0.10.in-addr.arpa." => "web.prod.svc.cluster.local.",
+                "2.1.0.10.in-addr.arpa." => "one.head.prod.svc.cluster.local.",
+                "3.1.0.10.in-addr.arpa." => "pod-two.head.prod.svc.cluster.local.",
+                "8.0.0.10.in-addr.arpa." => "dead.prod.svc.cluster.local.",
+                "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa." => {
+                    "web.prod.svc.cluster.local."
+                }
+                _ => panic!("unexpected PTR query"),
+            };
+            assert_eq!(target.to_string(), expected);
+        }
+        if qname == "4.1.0.10.in-addr.arpa." {
+            let mut targets: Vec<_> = message
+                .answers()
+                .map(|rr| match rr.data().unwrap() {
+                    Rdata::Ptr(target) => target.to_string(),
+                    _ => panic!("not PTR"),
+                })
+                .collect();
+            targets.sort();
+            assert_eq!(
+                targets,
+                [
+                    "other.dupb.prod.svc.cluster.local.",
+                    "same.dupa.prod.svc.cluster.local."
+                ]
+            );
+        }
         if qname == "us.a.pin._zone.head.prod.svc.cluster.local." && kind == Type::A {
             assert_eq!(message.answers().next().unwrap().rdata, [10, 0, 1, 2]);
         }
@@ -549,7 +606,11 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             else {
                 panic!("not SOA")
             };
-            let zone = if name.to_string().contains("Cluster.Local.") {
+            let zone = if name.to_string().ends_with(".in-addr.arpa.") {
+                "in-addr.arpa."
+            } else if name.to_string().ends_with(".ip6.arpa.") {
+                "ip6.arpa."
+            } else if name.to_string().contains("Cluster.Local.") {
                 "Cluster.Local."
             } else {
                 "cluster.local."
@@ -804,6 +865,8 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             Rcode::NXDOMAIN,
         ),
         ("noendpoints", "web.prod.svc.cluster.local.", Rcode::NOERROR),
+        ("noendpoints", "1.0.0.10.in-addr.arpa.", Rcode::NOERROR),
+        ("noendpoints", "2.1.0.10.in-addr.arpa.", Rcode::NXDOMAIN),
         (
             "noendpoints",
             "us.a.pin._zone.head.prod.svc.cluster.local.",
@@ -816,7 +879,7 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
         ),
     ] {
         let text = format!(
-            ".:53 {{\n kubernetes cluster.local {{\n endpoint http://{address}\n {options}\n }}\n}}"
+            ".:53 {{\n kubernetes cluster.local in-addr.arpa {{\n endpoint http://{address}\n {options}\n }}\n}}"
         );
         let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
         let chain = &blocks[0].config;
@@ -827,7 +890,11 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
         builder
             .question(
                 NameRef::parse(name.as_wire(), 0).unwrap(),
-                Type::A,
+                if qname.ends_with(".in-addr.arpa.") {
+                    Type::PTR
+                } else {
+                    Type::A
+                },
                 Class::IN,
             )
             .unwrap();
@@ -851,6 +918,52 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             expected,
             "{options} {qname}"
         );
+        chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+    }
+    #[cfg(feature = "plugin-whoami")]
+    {
+        let text = format!(
+            ".:53 {{\n kubernetes cluster.local in-addr.arpa {{\n endpoint http://{address}\n fallthrough in-addr.arpa\n }}\n whoami\n}}"
+        );
+        let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        let chain = &blocks[0].config;
+        chain.lifecycle.run(Phase::Startup).await.unwrap();
+        for (name, kind, code, additional) in [
+            ("9.0.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 2),
+            (
+                "missing.prod.svc.cluster.local.",
+                Type::A,
+                Rcode::NXDOMAIN,
+                0,
+            ),
+        ] {
+            let name: Name = name.parse().unwrap();
+            let mut query = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x100).unwrap();
+            builder
+                .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
+                .unwrap();
+            let _ = builder.finish();
+            let mut response = Vec::with_capacity(512);
+            let mut slots = [None; 8];
+            let mut cx = Context {
+                query: Message::parse(&query).unwrap(),
+                client: "127.0.0.1:1234".parse().unwrap(),
+                local: "127.0.0.1:53".parse().unwrap(),
+                transport: Transport::Dns,
+                protocol: Protocol::Udp,
+                domain: &root,
+                metadata: Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size: 512,
+            };
+            assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+            let message = Message::parse(&response).unwrap();
+            assert_eq!(
+                (message.rcode(), message.additional_count()),
+                (code, additional)
+            );
+        }
         chain.lifecycle.run(Phase::Shutdown).await.unwrap();
     }
     task.abort();

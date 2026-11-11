@@ -1,6 +1,7 @@
 //! Kubernetes authoritative DNS backend.
 
 mod name;
+mod reverse;
 pub mod setup;
 
 use pharos_kubernetes::{
@@ -220,6 +221,64 @@ fn endpoint_label<'a>(
     &buf[..n]
 }
 
+fn visit_reverse(
+    index: &Index,
+    ip: &str,
+    zone: NameRef<'_>,
+    config: &setup::Config,
+    mut visit: impl FnMut(NameRef<'_>),
+) -> bool {
+    let exposed =
+        |namespace: &str| config.namespaces.is_empty() || index.namespace(namespace).is_some();
+    if let Some(service) = index
+        .services_by_ip(ip)
+        .find(|service| exposed(&service.namespace))
+    {
+        let mut wire = [0; 255];
+        if let Some(target) = child(
+            &[
+                service.name.as_bytes(),
+                service.namespace.as_bytes(),
+                b"svc",
+            ],
+            zone,
+            &mut wire,
+        ) {
+            visit(target);
+            return true;
+        }
+        return false;
+    }
+    let mut found = false;
+    for endpoints in index.endpoints_by_ip(ip) {
+        if !exposed(&endpoints.namespace) {
+            continue;
+        }
+        for address in &endpoints.addresses {
+            if address.ip != ip {
+                continue;
+            }
+            let mut label = [0; 64];
+            let hostname = endpoint_label(address, config.endpoint_pod_names, &mut label);
+            let mut wire = [0; 255];
+            if let Some(target) = child(
+                &[
+                    hostname,
+                    endpoints.service_name.as_bytes(),
+                    endpoints.namespace.as_bytes(),
+                    b"svc",
+                ],
+                zone,
+                &mut wire,
+            ) {
+                visit(target);
+                found = true;
+            }
+        }
+    }
+    found
+}
+
 fn visit(
     index: &Index,
     req: &name::Request<'_>,
@@ -432,6 +491,10 @@ impl pharos_server::Plugin for Kubernetes {
             labels[count] = label;
             count += 1;
         }
+        let reverse_ip = (q.qtype == Type::PTR)
+            .then(|| reverse::address(&labels[..count]))
+            .flatten()
+            .map(|ip| ip.to_string());
         let count = count - zone.label_count();
         let mut zone_wire = [0u8; 255];
         let mut zone_len = 0;
@@ -453,20 +516,24 @@ impl pharos_server::Plugin for Kubernetes {
         let store = store.unwrap_or_default();
         let mut external = None;
         let mut pod = None;
-        let exists = if q.qtype == Type::SOA
-            || count == 0
-            || count == 1
-                && (labels[0] == b"svc"
-                    || labels[0] == b"pod"
-                    || labels[0] == b"dns-version" && q.qtype == Type::TXT)
-            || count == 2 && labels[0] == b"ns" && labels[1] == b"dns"
+        let primary =
+            NameRef::parse(self.zones[self.config.primary_zone_index].as_wire(), 0).unwrap();
+        let exists = if let Some(ip) = &reverse_ip {
+            store.with_read(|index| visit_reverse(index, ip, primary, &self.config, |_| {}))
+        } else if q.qtype == Type::SOA
+            || count == 1 && labels[0] == b"dns-version" && q.qtype == Type::TXT
+            || q.qtype != Type::TXT
+                && (count == 0
+                    || count == 1 && (labels[0] == b"svc" || labels[0] == b"pod")
+                    || count == 2 && labels[0] == b"ns" && labels[1] == b"dns")
         {
             true
         } else if let Some(req) = &req {
             if req.kind == b"svc" && req.service.is_empty() {
-                std::str::from_utf8(req.namespace)
-                    .ok()
-                    .is_some_and(|ns| store.with_read(|i| i.namespace(ns).is_some()))
+                q.qtype != Type::TXT
+                    && std::str::from_utf8(req.namespace)
+                        .ok()
+                        .is_some_and(|ns| store.with_read(|i| i.namespace(ns).is_some()))
             } else if req.kind == b"svc" {
                 store.with_read(|i| {
                     let ok = visit(i, req, &self.config, |_, _, _| {});
@@ -484,7 +551,8 @@ impl pharos_server::Plugin for Kubernetes {
                 })
             } else if req.kind == b"pod" {
                 if req.service.is_empty() {
-                    self.config.pod_mode != "disabled"
+                    q.qtype != Type::TXT
+                        && self.config.pod_mode != "disabled"
                         && std::str::from_utf8(req.namespace)
                             .ok()
                             .is_some_and(|ns| store.with_read(|i| i.namespace(ns).is_some()))
@@ -573,6 +641,41 @@ impl pharos_server::Plugin for Kubernetes {
             )?;
             b.question(q.name, q.qtype, q.qclass)?;
             let mut answers = 0usize;
+            if exists && let Some(ip) = &reverse_ip {
+                let mut error = None;
+                let mut position = 0;
+                store.with_read(|index| {
+                    visit_reverse(index, ip, primary, &self.config, |target| {
+                        let current = position;
+                        position += 1;
+                        let mut before = 0;
+                        let mut seen = false;
+                        visit_reverse(index, ip, primary, &self.config, |previous| {
+                            if before < current && previous == target {
+                                seen = true;
+                            }
+                            before += 1;
+                        });
+                        if !seen && error.is_none() {
+                            match b.record_with(
+                                Section::Answer,
+                                q.name,
+                                Type::PTR,
+                                Class::IN,
+                                self.config.ttl,
+                                |writer| writer.write_name(target),
+                            ) {
+                                Ok(true) => answers += 1,
+                                Ok(false) => {}
+                                Err(err) => error = Some(err),
+                            }
+                        }
+                    });
+                });
+                if let Some(err) = error {
+                    return Err(err);
+                }
+            }
             if count == 0 && q.qtype == Type::SOA {
                 soa(
                     &mut b,
