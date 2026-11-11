@@ -2985,6 +2985,67 @@ async fn coredns_metadata_replacement_rows() {
     }
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_metadata_test.go TestRegexNameMetadataSkippedAndInvalid.
+#[tokio::test]
+async fn coredns_metadata_skip_and_invalid_rows() {
+    let config = r".:53 {
+ rewrite name regex ^([^.]+)\.example\.$ {1}.{test/value}. metadata answer auto
+ rewrite name exact web.example. fallback.example.
+}";
+    for (incoming, value, expected) in [
+        ("web.example.", String::new(), Some("fallback.example.")),
+        ("other.test.", "unused".to_owned(), Some("other.test.")),
+        ("web.example.", "invalid..name".to_owned(), None),
+        ("web.example.", "a".repeat(64), None),
+    ] {
+        let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = incoming.parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        cx.metadata.insert("test/value", &value);
+        let outcome = chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, InspectName(expected.unwrap_or("must-not-run")))
+            .await;
+        if expected.is_some() {
+            assert_eq!(outcome, Outcome::Drop);
+        } else {
+            assert!(matches!(outcome, Outcome::Error(_)));
+            assert_eq!(
+                cx.query.questions().next().unwrap().name.to_string(),
+                incoming
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn coredns_invalid_metadata_name_restores_original_question() {
     let config = r".:53 {
