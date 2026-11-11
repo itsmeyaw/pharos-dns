@@ -102,7 +102,7 @@ fn main() {
             "ready" => "setup_ready",
             "forward" => "forward::setup::setup",
             "health" => "health::setup::setup",
-            "hosts" => "setup_hosts",
+            "hosts" => "hosts::setup::setup",
             "loadbalance" => "setup_loadbalance",
             "local" => "setup_local",
             "nsid" => "setup_nsid",

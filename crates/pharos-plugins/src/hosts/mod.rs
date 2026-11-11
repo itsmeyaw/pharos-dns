@@ -1,5 +1,7 @@
 //! Hosts Directive configuration.
 
+pub(crate) mod setup;
+
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},

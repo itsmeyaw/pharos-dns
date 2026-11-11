@@ -691,18 +691,7 @@ fn setup_multisocket(
 
 
 
-#[cfg(feature = "plugin-hosts")]
-fn setup_hosts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let domains = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.as_str())
-        .collect::<Vec<_>>();
-    let hosts = hosts::Hosts::parse_with_root(cursor, &domains, root_path(&block.config))?;
-    hosts.register_hooks(&mut block.config.lifecycle);
-    block.config.hosts = Some(hosts);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-loadbalance")]
 fn setup_loadbalance(
