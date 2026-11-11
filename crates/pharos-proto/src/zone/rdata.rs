@@ -7,6 +7,7 @@ use crate::{Name, Type};
 /// backslash escapes preserved, as produced by the Zone lexer.
 pub fn parse_rdata(rtype: Type, fields: &[&str], origin: &Name) -> Result<Vec<u8>, String> {
     // RFC 3597 §5: generic RDATA can represent any RR type, including known types.
+    // shortcut: generic known-type data is not decoded; validate it for miekg parity.
     if fields.first() == Some(&r"\#") {
         if fields.len() < 2 {
             return Err("missing generic RDATA length".into());
