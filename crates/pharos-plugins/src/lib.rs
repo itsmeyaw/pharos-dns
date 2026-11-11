@@ -616,16 +616,7 @@ fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
 
 
 
-#[cfg(feature = "plugin-metadata")]
-fn setup_metadata(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let domains = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.as_str())
-        .collect::<Vec<_>>();
-    block.config.metadata = Some(metadata::parse(cursor, &domains)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-prometheus")]
 fn setup_prometheus(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

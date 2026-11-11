@@ -1,5 +1,7 @@
 //! Per-Query Metadata collection.
 
+pub(crate) mod setup;
+
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::Name;
 #[cfg(feature = "plugin-kubernetes")]
