@@ -220,7 +220,7 @@ impl<C: Chain> Server<C> {
         lookup_server: &dyn crate::SelfLookupServer,
     ) -> Action {
         let start = Instant::now();
-        let query = match admit(wire, self.allow_non_in, response) {
+        let mut query = match admit(wire, self.allow_non_in, response) {
             Admission::Query(query) => query,
             Admission::Respond => {
                 if let Ok(query) = pharos_proto::Message::parse(wire) {
@@ -278,6 +278,9 @@ impl<C: Chain> Server<C> {
                     chain.stacktrace(),
                 )
                 .await;
+                if let Some(opt) = context.query.opt() {
+                    query = query.with_udp_payload_limit(opt.udp_payload_size());
+                }
                 producer = context
                     .metadata
                     .get(crate::metrics::WRITER_METADATA)

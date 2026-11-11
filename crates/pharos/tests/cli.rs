@@ -34,7 +34,7 @@ fn check_sets_up_without_listening_and_reports_applicable_deviations() {
         "kubernetes",
         "Negative Responses use the SOA MINIMUM",
         "API client creation",
-        "Only `bind`",
+        "Only `any`",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }

@@ -22,8 +22,13 @@ fn main() {
     );
     for name in &enabled {
         let ty = match *name {
+            "any" => "any::Any",
+            "chaos" => "chaos::Chaos",
             "cache" => "cache::Cache",
             "bind" => "()",
+            "bufsize" => "bufsize::Bufsize",
+            "header" => "header::Header",
+            "minimal" => "minimal::Minimal",
             "multisocket" => "Option<usize>",
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
@@ -36,6 +41,8 @@ fn main() {
             "hosts" => "hosts::Hosts",
             "kubernetes" => "kubernetes::Kubernetes",
             "loadbalance" => "loadbalance::LoadBalance",
+            "local" => "local::Local",
+            "nsid" => "nsid::Nsid",
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",
             _ => "Unimplemented",
@@ -46,8 +53,13 @@ fn main() {
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
+            "any" => "setup_any",
+            "chaos" => "setup_chaos",
             "cache" => "setup_cache",
             "bind" => "setup_bind",
+            "bufsize" => "setup_bufsize",
+            "header" => "setup_header",
+            "minimal" => "setup_minimal",
             "multisocket" => "setup_multisocket",
             "whoami" => "setup_whoami",
             "log" => "setup_log",
@@ -59,6 +71,8 @@ fn main() {
             "health" => "setup_health",
             "hosts" => "setup_hosts",
             "loadbalance" => "setup_loadbalance",
+            "local" => "setup_local",
+            "nsid" => "setup_nsid",
             "reload" => "setup_reload",
             "errors" => "setup_errors",
             "kubernetes" => "setup_kubernetes",
@@ -74,6 +88,7 @@ fn main() {
                 | "reload"
                 | "hosts"
                 | "loop"
+                | "nsid"
                 | "kubernetes"
         );
         writeln!(

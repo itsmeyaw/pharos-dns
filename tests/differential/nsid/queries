@@ -1,0 +1,3 @@
+whoami.example.org. A IN udp +nsid +bufsize=4096
+whoami.example.org. A IN tcp +nsid +bufsize=4096
+whoami.example.org. A IN udp +bufsize=4096

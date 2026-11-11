@@ -13,12 +13,20 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-any")]
+pub mod any;
 #[cfg(feature = "plugin-bind")]
 pub mod bind;
+#[cfg(feature = "plugin-bufsize")]
+pub mod bufsize;
 #[cfg(feature = "plugin-cache")]
 pub mod cache;
+#[cfg(feature = "plugin-chaos")]
+pub mod chaos;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
+#[cfg(feature = "plugin-header")]
+pub mod header;
 #[cfg(any(
     feature = "plugin-health",
     feature = "plugin-errors",
@@ -34,6 +42,12 @@ pub mod hosts;
 pub mod kubernetes;
 #[cfg(feature = "plugin-loadbalance")]
 pub mod loadbalance;
+#[cfg(feature = "plugin-local")]
+pub mod local;
+#[cfg(feature = "plugin-minimal")]
+pub mod minimal;
+#[cfg(feature = "plugin-nsid")]
+pub mod nsid;
 pub mod proxy;
 
 #[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]
@@ -106,10 +120,13 @@ pub fn servers_with_registry(
     blocks: Vec<BlockContext<Chain>>,
     metrics: pharos_server::metrics::Registry,
 ) -> io::Result<(Servers, Lifecycle)> {
-    let mut groups: HashMap<ListenerKey, (Router<Arc<Chain>>, Option<usize>)> = HashMap::new();
+    type ListenerGroup = (Router<Arc<Chain>>, Option<usize>, bool);
+    let mut groups: HashMap<ListenerKey, ListenerGroup> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
+    #[cfg(feature = "plugin-local")]
+    let _ = metrics.local();
     #[cfg(feature = "plugin-health")]
     metrics.enable_health_metrics();
     #[cfg(feature = "plugin-prometheus")]
@@ -130,11 +147,19 @@ pub fn servers_with_registry(
         });
     }
     for block in blocks {
-        #[cfg(any(feature = "plugin-forward", feature = "plugin-cache"))]
+        #[cfg(any(
+            feature = "plugin-forward",
+            feature = "plugin-cache",
+            feature = "plugin-local"
+        ))]
         let mut block = block;
         #[cfg(feature = "plugin-forward")]
         if let Some(forward) = &mut block.config.forward {
             forward.set_metrics(&metrics);
+        }
+        #[cfg(feature = "plugin-local")]
+        if let Some(local) = &mut block.config.local {
+            local.set_metrics(&metrics);
         }
         #[cfg(feature = "plugin-hosts")]
         if let Some(hosts) = &block.config.hosts {
@@ -236,6 +261,10 @@ pub fn servers_with_registry(
         #[cfg(not(feature = "plugin-multisocket"))]
         let workers = None;
         let chain = Arc::new(block.config);
+        #[cfg(feature = "plugin-chaos")]
+        let allow_non_in = chain.chaos.is_some();
+        #[cfg(not(feature = "plugin-chaos"))]
+        let allow_non_in = false;
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &chain.cache {
             cache.bind(&chain);
@@ -255,22 +284,23 @@ pub fn servers_with_registry(
             chain.collect_readiness(&ready_state);
         }
         for (listener, domain) in routes {
-            groups
+            let group = groups
                 .entry(listener)
-                .or_insert_with(|| (Router::default(), workers))
-                .0
-                .add(
-                    listener,
-                    domain,
-                    (!empty).then(|| Arc::clone(&chain)),
-                    vec![],
-                );
+                .or_insert_with(|| (Router::default(), workers, false));
+            group.2 |= allow_non_in;
+            group.0.add(
+                listener,
+                domain,
+                (!empty).then(|| Arc::clone(&chain)),
+                vec![],
+            );
         }
     }
     let servers = groups
         .into_iter()
-        .map(|(key, (router, workers))| {
+        .map(|(key, (router, workers, allow_non_in))| {
             let mut server = Server::with_registry(router, key, metrics.clone());
+            server.allow_non_in = allow_non_in;
             if let Some(workers) = workers {
                 server.udp_workers = workers;
             }
@@ -442,6 +472,28 @@ impl pharos_server::Plugin for Unimplemented {
     }
 }
 
+#[cfg(feature = "plugin-any")]
+fn setup_any(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    cursor.next();
+    if cursor.next_arg() {
+        return Err(cursor.arg_err());
+    }
+    block.config.any = Some(any::Any);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-chaos")]
+fn setup_chaos(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.chaos = Some(chaos::Chaos::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-local")]
+fn setup_local(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.local = Some(local::Local::parse(cursor)?);
+    Ok(())
+}
+
 #[cfg(feature = "plugin-whoami")]
 fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     cursor.next();
@@ -449,6 +501,34 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
         return Err(cursor.arg_err());
     }
     block.config.whoami = Some(whoami::Whoami);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-minimal")]
+fn setup_minimal(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    cursor.next();
+    if cursor.next_arg() {
+        return Err(cursor.arg_err());
+    }
+    block.config.minimal = Some(minimal::Minimal);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-nsid")]
+fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.nsid = Some(nsid::Nsid::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-bufsize")]
+fn setup_bufsize(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.bufsize = Some(bufsize::Bufsize::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-header")]
+fn setup_header(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.header = Some(header::Header::parse(cursor)?);
     Ok(())
 }
 

@@ -1,11 +1,20 @@
 # CoreDNS compatibility
 
+## any
+
+- Like CoreDNS, `any` synthesizes its HINFO before consulting a Backend, even for a CNAME or signed Zone; it cannot include an RRSIG when DO is set (RFC 8482 §4.2).
+- The UDP caller must supply a Response buffer with enough capacity; otherwise Pharos returns an error instead of allocating on the UDP Query path.
+
 ## bind
 
 - Interface enumeration uses `getifaddrs`; scoped IPv6 Listener labels use the numeric interface index rather than CoreDNS's interface name.
 - Unspecified addresses are labelled as unbound addresses.
 - An unbound Listener and an explicit `bind ::` on the same port share one Listener. CoreDNS groups them separately, so its competing sockets can direct Queries to the wrong Server Block.
 - Reload binds new Listeners before removing old ones, so switching between a wildcard and a specific address on the same port can fail rather than replacing the socket.
+
+## bufsize
+
+- When forwarding a Query with a compression pointer into the OPT CLASS bytes, Pharos rewrites those bytes in the original encoding; CoreDNS re-encodes the decoded Message and preserves the pointed-to name.
 
 ## cache
 
@@ -17,7 +26,7 @@
 - On a miss, Queries whose encoded names point into the header, or whose non-OPT RDATA might contain a compression pointer, also bypass the cache rather than changing AD.
 - Opaque EDNS option data is not treated as name compression.
 - On a hit, Pharos rewrites the Question's case in the stored wire Message; record names compressed against it therefore acquire the current Query's case, whereas CoreDNS rebuilds records from the cached Response.
-- If a UDP caller's Response buffer is too small for a cached Message, Pharos falls through to Next instead of growing it on the hit; TCP buffers are grown as needed.
+- If a UDP caller's Response buffer is too small for a cached Message, Pharos falls through to Next instead of growing it on the hit.
 - TSIG-signed Queries and Responses bypass caching so that ID, flags and TTL rewrites cannot invalidate their signatures.
 - Wildcard source Metadata is not saved with cache entries.
 - Background refreshes use a fresh Metadata map and retain Listener state for Self Lookup.
@@ -27,6 +36,14 @@
 - A refresh is not stored if a newer cache entry was installed while it was in flight.
 - A hit that launches a background refresh allocates for the task and its Query and Response buffers; ordinary warmed hits do not allocate.
 - Cache metric series are initialized at setup, including zero-valued series; CoreDNS initializes individual labelled series on first use.
+
+## chaos
+
+- The default version is `Pharos-<version>` and the default authors are Pharos authors rather than CoreDNS's identity (ADR-0003).
+- The hostname is captured at setup, not on each Query; changing the system hostname requires Reload.
+- Author records use a different per-second shuffle generator than CoreDNS, so their order and the subset in a truncated Response can differ; simultaneous `authors.bind` Queries share a lock.
+- An overlong version with explicit authors produces a Plugin error and SERVFAIL rather than CoreDNS's failed write; UDP callers must supply a sufficiently large Response buffer, as with `whoami`.
+- When building a Response with many authors, Pharos truncates to the Query's limit before Listener processing; CoreDNS builds the full Response first. Plugins earlier in the chain can therefore observe a truncated Response.
 
 ## dnssec
 
@@ -66,6 +83,12 @@
 - Upstream Metadata uses the normalized numeric socket address, which may differ from CoreDNS's configured address text.
 - Health checks start on exchange failure, and proxy connections and checks are stopped on Shutdown.
 - Forward reuses Upstream Response buffers from a pool; a new buffer is allocated when concurrent Queries exceed the pool's previous high-water mark, and the pool retains that peak allocation until the Plugin is dropped.
+
+## header
+
+- Header rules modify encoded Response flags in place; a compressed name pointing into the changed header bytes can therefore decode differently than CoreDNS's re-encoded Response. Query views retain their original name bytes until forwarded, rather than re-encoding them.
+- Forwarding a Query with changed flags returns FORMERR when the existing forwarding safety check cannot rule out compression pointers into the header or opaque RDATA. CoreDNS re-encodes its decoded Query instead.
+- Response rules apply only to a Response returned by Next; Listener-synthesized Responses for errors or unanswered outcomes are not modified, following the explicit Plugin outcome contract.
 
 ## health
 
@@ -128,6 +151,12 @@
 - Successful reloads are not logged.
 - When both policies are configured, subnet preference runs after weighted selection, as in CoreDNS, and can change which address appears first.
 
+## local
+
+- The localhost interception debug log can be enabled through the process logging API; the `debug` Directive is not implemented yet. Unlike CoreDNS, logged Query names retain their original case.
+- UDP callers must supply a sufficiently large Response buffer.
+- DNS names are matched as wire labels with ASCII case folding, rather than CoreDNS's lowercased presentation strings.
+
 ## log
 
 - The `log` Plugin's body uses CoreDNS's common format by default, preceded by Pharos's timestamp and `INFO log:` rather than CoreDNS's `[INFO]` prefix.
@@ -155,11 +184,24 @@
 - Probe Queries may allocate while running concurrently with UDP reception; ordinary Queries do not.
 - Like CoreDNS, a configured port 0 is probed as port 0 rather than the actual ephemeral Listener port.
 
+## minimal
+
+- Pharos edits the encoded Response in place rather than re-encoding it. It leaves a Positive Response unchanged when a retained Question or Answer name references header counts, or an Answer's compressible RDATA is malformed, to avoid corrupting names.
+- Nonstandard compression in opaque RDATA is not detected; CoreDNS re-encodes the record types it understands.
+- The Listener adds an OPT back to EDNS Responses after `minimal` removes it, as required by RFC 6891 §6.1.1; CoreDNS's Listener also controls the final OPT.
+
 ## multisocket
 
 - With `multisocket` and no argument, Pharos uses that same worker count rather than Go's GOMAXPROCS, and does not honor the `GOMAXPROCS` environment variable.
 - Pharos always uses one TCP listening socket per Listener; CoreDNS opens one per configured server. These differences affect performance, not Responses.
 - Changing the UDP count on Reload briefly stages new reuseport sockets before replacing the old ones; Queries arriving during staging or rollback can be lost.
+
+## nsid
+
+- With `nsid` enabled, unsolicited NSID options in Responses from Next are removed as required by RFC 5001 §2.2; CoreDNS passes them through.
+- Adding NSID requires sufficient preallocated Response buffer capacity and a Message of at most 65,535 octets; otherwise the Plugin returns an error, answered as SERVFAIL. CoreDNS allocates when encoding and may instead fail to write an oversized Response.
+- If the Question and NSID-bearing OPT cannot fit the negotiated Response limit, the Listener returns SERVFAIL; CoreDNS retains the OPT even when the resulting Response exceeds that limit.
+- If the Response OPT precedes other Additional records, Pharos drops those records and sets TC before modifying NSID to avoid invalidating compression pointers; CoreDNS re-encodes them. This is the same restriction as Listener scrubbing.
 
 ## prometheus
 
@@ -204,7 +246,7 @@
 
 ## General
 
-- Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI

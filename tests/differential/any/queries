@@ -1,0 +1,9 @@
+example.org. ANY IN udp
+example.org. ANY IN tcp
+example.org. ANY IN udp +dnssec
+example.org. ANY CH udp +norec
+example.org. A IN udp
+example.org. AAAA IN tcp
+example.org. MX IN udp
+example.org. TXT IN udp
+example.org. CNAME IN udp

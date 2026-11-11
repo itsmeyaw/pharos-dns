@@ -1,0 +1,4 @@
+example.org:{port} {
+    whoami
+    nsid Use The Force
+}

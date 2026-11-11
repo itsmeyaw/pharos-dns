@@ -1,0 +1,7 @@
+.:{port} {
+    header {
+        response set ra aa
+        response clear rd
+    }
+    whoami
+}

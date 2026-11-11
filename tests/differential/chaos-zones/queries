@@ -1,0 +1,7 @@
+version.bind. TXT CH udp
+version.server. TXT CH tcp
+authors.bind. TXT CH udp
+hostname.bind. TXT CH udp
+id.server. TXT CH tcp
+version.bind. SRV CH udp
+version.bind. TXT IN udp
