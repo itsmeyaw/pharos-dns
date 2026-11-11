@@ -1,5 +1,7 @@
 //! Readiness endpoint configuration and state.
 
+pub(crate) mod setup;
+
 use std::{collections::BTreeMap, sync::Mutex};
 
 use pharos_corefile::{Cursor, Error};

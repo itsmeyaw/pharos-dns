@@ -610,11 +610,7 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 
 
 
-#[cfg(feature = "plugin-ready")]
-fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.ready = Some(ready::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-reload")]
 fn setup_reload(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

@@ -99,7 +99,7 @@ fn main() {
             "metadata" => "metadata::setup::setup",
             "loop" => "r#loop::setup::setup",
             "prometheus" => "prometheus::setup::setup",
-            "ready" => "setup_ready",
+            "ready" => "ready::setup::setup",
             "forward" => "forward::setup::setup",
             "health" => "health::setup::setup",
             "hosts" => "hosts::setup::setup",
