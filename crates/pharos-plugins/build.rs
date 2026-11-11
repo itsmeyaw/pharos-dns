@@ -82,7 +82,7 @@ fn main() {
             "rewrite" => "setup_rewrite",
             "autopath" => "autopath::setup::setup",
             "root" => "setup_root",
-            "cancel" => "setup_cancel",
+            "cancel" => "cancel::setup::setup",
             "timeouts" => "setup_timeouts",
             "debug" => "setup_debug",
             "shed" => "setup_shed",

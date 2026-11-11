@@ -777,11 +777,7 @@ fn setup_root(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
     Ok(())
 }
 
-#[cfg(feature = "plugin-cancel")]
-fn setup_cancel(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.cancel = Some(cancel::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-timeouts")]
 fn setup_timeouts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
