@@ -1,5 +1,6 @@
 //! Health endpoint configuration.
 
+#[cfg(feature = "plugin-health")]
 pub(crate) mod setup;
 
 use std::time::Duration;
