@@ -52,6 +52,7 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         ("rewrite name prefix www api", "www.example."),
         ("rewrite name substring example internal", "www.example."),
         ("rewrite name other. internal.", "example."),
+        ("rewrite cname old.example. new.example.", "example."),
     ] {
         let config = format!(".:53 {{\n {rule}\n}}");
         let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())

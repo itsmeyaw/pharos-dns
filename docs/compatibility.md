@@ -252,6 +252,7 @@
 
 ## rewrite
 
+- CNAME Self Lookup allocates per Query; issue #86 tracks allocation-free Self Lookup.
 - Regex rules use Rust regex syntax rather than Go RE2; character classes such as `\d` and `\w` are Unicode-aware by default, unlike Go. Regex captures allocate per Query.
 - TTL rewrites leave OPT's extended RCODE, version and flags untouched as required by RFC 6891 §6.1.3; CoreDNS applies its TTL rule to OPT records as well.
 

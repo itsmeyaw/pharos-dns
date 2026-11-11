@@ -22,6 +22,7 @@ enum Action {
     Type(Type, Type),
     Class(Class, Class),
     Name(String, bool, Option<Vec<NamePart>>, Vec<AnswerRule>),
+    Cname(String, Option<Name>),
 }
 
 #[derive(Debug)]
@@ -95,6 +96,26 @@ impl Rewrite {
             let Some((kind, args)) = args.split_first() else {
                 return Err(cursor.arg_err());
             };
+            if kind.eq_ignore_ascii_case("cname") {
+                let (from, to) = match args {
+                    [from, to] => (from, to),
+                    [mode, from, to] if mode.eq_ignore_ascii_case("exact") => (from, to),
+                    _ => return Err(cursor.arg_err()),
+                };
+                let normal = |value: &str| {
+                    let mut value = value.to_ascii_lowercase();
+                    if !value.ends_with('.') {
+                        value.push('.');
+                    }
+                    value
+                };
+                rules.push(Rule {
+                    matcher: Matcher::Any,
+                    action: Action::Cname(normal(from), normal(to).parse().ok()),
+                    stop,
+                });
+                continue;
+            }
             if kind.eq_ignore_ascii_case("name") {
                 let (mode, from, to, extra) = match args {
                     [from, to] => ("exact", from, to, &[][..]),
@@ -556,6 +577,7 @@ impl Plugin for Rewrite {
         let mut suffix = None;
         let mut answer_auto = false;
         let mut selected_answers = &[][..];
+        let mut cname = None;
         'rules: for (index, rule) in self.rules.iter().enumerate() {
             let mut current_name = NameText {
                 bytes: [0; 1024],
@@ -689,6 +711,10 @@ impl Plugin for Rewrite {
                     true
                 }
                 Action::Name(..) => false,
+                Action::Cname(ref from, ref to) => {
+                    cname = to.as_ref().map(|to| (from.as_str(), to));
+                    true
+                }
                 _ => rule.matcher.matches(name),
             };
             if matched && rule.stop {
@@ -698,6 +724,126 @@ impl Plugin for Rewrite {
         }
         let rewritten_query = cx.query;
         let outcome = next.run(cx).await;
+        if outcome == Outcome::Response
+            && let Some((from, target)) = cname
+        {
+            let Ok(response) = Message::parse(cx.response) else {
+                return outcome;
+            };
+            let matched = response.answers().any(|rr| {
+                let Ok(Rdata::Cname(value)) = rr.data() else {
+                    return false;
+                };
+                let mut text = NameText {
+                    bytes: [0; 1024],
+                    len: 0,
+                };
+                write!(text, "{value}").is_ok() && &text.bytes[..text.len] == from.as_bytes()
+            });
+            if matched {
+                let Some(question) = rewritten_query.questions().next() else {
+                    return outcome;
+                };
+                // shortcut: CNAME Self Lookup allocates; remove when issue #86 makes it allocation-free.
+                if let Ok(wire) = cx.self_lookup(target, question.qtype).await
+                    && let Ok(lookup) = Message::parse(&wire)
+                {
+                    let mut scratch = [0u8; 65535];
+                    if cx.response.len() > scratch.len() {
+                        return Outcome::Error(ServerError::InvalidQuery);
+                    }
+                    scratch[..cx.response.len()].copy_from_slice(cx.response);
+                    let Ok(response) = Message::parse(&scratch[..cx.response.len()]) else {
+                        return Outcome::Error(ServerError::InvalidQuery);
+                    };
+                    let flags = (response.flags() & !0x0200) | (lookup.flags() & 0x0200);
+                    let Ok(mut builder) = MessageBuilder::new(
+                        cx.response,
+                        cx.max_response_size.max(512),
+                        response.id(),
+                        flags,
+                    ) else {
+                        return Outcome::Error(ServerError::ResponseBufferTooSmall);
+                    };
+                    for q in response.questions() {
+                        if builder.question(q.name, q.qtype, q.qclass).is_err() {
+                            return Outcome::Error(ServerError::InvalidQuery);
+                        }
+                    }
+                    for rr in response.answers() {
+                        let Ok(data) = rr.data() else {
+                            return Outcome::Error(ServerError::InvalidQuery);
+                        };
+                        if let Rdata::Cname(value) = data {
+                            let mut text = NameText {
+                                bytes: [0; 1024],
+                                len: 0,
+                            };
+                            let replace = write!(text, "{value}").is_ok()
+                                && &text.bytes[..text.len] == from.as_bytes();
+                            let value = if replace {
+                                NameRef::parse(target.as_wire(), 0).expect("configured name")
+                            } else {
+                                value
+                            };
+                            if builder
+                                .record_with(
+                                    Section::Answer,
+                                    rr.name,
+                                    rr.rtype,
+                                    rr.class,
+                                    rr.ttl,
+                                    |w| Rdata::Cname(value).write(w),
+                                )
+                                .is_err()
+                            {
+                                return Outcome::Error(ServerError::InvalidQuery);
+                            }
+                            if replace {
+                                break;
+                            }
+                        }
+                    }
+                    for rr in lookup.answers() {
+                        let Ok(data) = rr.data() else {
+                            return Outcome::Error(ServerError::InvalidQuery);
+                        };
+                        if builder
+                            .record_with(
+                                Section::Answer,
+                                rr.name,
+                                rr.rtype,
+                                rr.class,
+                                rr.ttl,
+                                |w| data.write(w),
+                            )
+                            .is_err()
+                        {
+                            return Outcome::Error(ServerError::InvalidQuery);
+                        }
+                    }
+                    for (section, records) in [
+                        (Section::Authority, response.authorities()),
+                        (Section::Additional, response.additionals()),
+                    ] {
+                        for rr in records {
+                            let Ok(data) = rr.data() else {
+                                return Outcome::Error(ServerError::InvalidQuery);
+                            };
+                            if builder
+                                .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |w| {
+                                    data.write(w)
+                                })
+                                .is_err()
+                            {
+                                return Outcome::Error(ServerError::InvalidQuery);
+                            }
+                        }
+                    }
+                    let _ = builder.finish();
+                }
+            }
+        }
         let rewrite_rcode = |mut code: u16| {
             for rule in self.rules[..end]
                 .iter()
