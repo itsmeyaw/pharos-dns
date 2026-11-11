@@ -13,6 +13,74 @@ use tokio::sync::Notify;
 
 static DEPTH_VISITS: AtomicUsize = AtomicUsize::new(0);
 
+struct DropSignal(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+struct CancelChain {
+    started: Arc<Notify>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Chain for CancelChain {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        if cx.domain.to_string() == "example." {
+            let _ = cx.self_lookup(&"b.other.".parse().unwrap(), Type::A).await;
+            Outcome::Drop
+        } else {
+            let _guard = DropSignal(Arc::clone(&self.dropped));
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn cancelling_shared_lookup_aborts_its_child_task() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut router = Router::default();
+    for domain in ["example.", "other."] {
+        router.add(
+            key,
+            domain.parse().unwrap(),
+            Some(CancelChain {
+                started: Arc::clone(&started),
+                dropped: Arc::clone(&dropped),
+            }),
+            vec![],
+        );
+    }
+    let server = Arc::new(Server::new(router, key));
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01a\x07example\0\0\x01\0\x01";
+    let mut response = Vec::with_capacity(65535);
+    let mut outer = Box::pin(Handler::handle_shared(
+        &server,
+        wire,
+        "127.0.0.1:1234".parse().unwrap(),
+        Protocol::Udp,
+        &mut response,
+    ));
+    tokio::select! { _ = started.notified() => {}, _ = &mut outer => panic!("lookup finished") }
+    drop(outer);
+    for _ in 0..100 {
+        if dropped.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("cancelled lookup remained active");
+}
+
 enum TestChain {
     Lookup,
     Answer,
