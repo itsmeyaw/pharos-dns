@@ -192,10 +192,14 @@ impl<R: BufRead> ZoneParser<R> {
                         return Err(self.error(self.line, i + 1, "incomplete escape"));
                     }
                     i += 1;
-                    raw.extend([b'\\', line[i]]);
-                    if line[i] >= 128 {
+                    if line[i] == b'\r' && !quote {
+                        raw.push(b'\\');
+                        token.push('\\');
+                    } else if line[i] >= 128 {
+                        raw.extend([b'\\', line[i]]);
                         write!(token, "\\{:03}", line[i]).expect("writing to a String");
                     } else {
+                        raw.extend([b'\\', line[i]]);
                         token.push('\\');
                         token.push(char::from(line[i]));
                     }

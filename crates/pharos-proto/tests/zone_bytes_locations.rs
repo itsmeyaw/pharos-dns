@@ -45,6 +45,13 @@ fn quoted_newlines_carriage_returns_and_short_escapes_are_literal() {
 }
 
 #[test]
+fn escaped_carriage_return_outside_quotes_matches_miekg() {
+    assert!(parser(b"a\\\r 60 A 192.0.2.1\n").next().unwrap().is_err());
+    let record = parser(b"a\\\rX 60 A 192.0.2.1\n").next().unwrap().unwrap();
+    assert_eq!(record.owner.as_wire(), b"\x02aX\0");
+}
+
+#[test]
 fn naptr_requires_quoted_character_strings() {
     let valid = b"a 60 NAPTR 1 2 \"s\" \"SIP\" \"\" .\n";
     assert!(parser(valid).next().unwrap().is_ok());
