@@ -161,7 +161,7 @@ pub fn black_lie(
         return Err(DenialError::OutOfZone);
     }
     let at_apex = qname == apex;
-    let delegation = !at_apex && (kind == BlackLieKind::Referral || qtype == Type::DS);
+    let zone_cut = !at_apex && (kind == BlackLieKind::Referral || qtype == Type::DS);
     let mut types = vec![
         Type::A,
         Type::HINFO,
@@ -180,15 +180,16 @@ pub fn black_lie(
     ];
     if at_apex {
         types.extend([Type::NS, Type::SOA, Type::MX, Type::DNSKEY]);
-    } else if delegation {
+    } else if zone_cut {
         types.push(Type::NS);
     }
-    if !delegation && kind == BlackLieKind::Negative && qtype != Type::NSEC {
+    if !zone_cut && kind == BlackLieKind::Negative && qtype != Type::NSEC {
         types.retain(|t| *t != qtype);
     }
     // RFC 4470 §3: synthetic NSEC spans must not cover existing names.
     let mut wire = qname.as_wire().to_vec();
     if kind == BlackLieKind::Referral && !at_apex {
+        // Append a zero octet to the first label for a minimal Referral span.
         let len = usize::from(wire[0]);
         if len == 63 {
             return Err(DenialError::NameTooLong);
