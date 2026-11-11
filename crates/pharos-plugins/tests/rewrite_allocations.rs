@@ -111,6 +111,44 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         ("rewrite name prefix www api", "www.example."),
         ("rewrite name substring example internal", "www.example."),
         ("rewrite name other. internal.", "example."),
+        (
+            r"rewrite name regex ^(other)\.example\.$ {1}.internal.",
+            "example.",
+        ),
+        (
+            r"rewrite name regex ^(.*)\.other\.$ {1}.internal.",
+            "example.",
+        ),
+        (
+            r"rewrite ttl regex ^([a-z]{1,8}\.){1,8}example\.$ 30",
+            "www.example.",
+        ),
+        (r"rewrite ttl regex \bexample\b 30", "www.example."),
+        (
+            r"rewrite ttl regex ^(alpha|beta|gamma|delta)\.example\.$ 30",
+            "beta.example.",
+        ),
+        (
+            r"rewrite ttl regex ^((a|b|c|d)?)+\.example\.$ 30",
+            "bbb.example.",
+        ),
+        (r"rewrite ttl regex ^(.*)\.example\.$ 30", "www.example."),
+        (
+            r"rewrite rcode regex ^(.*)\.example\.$ SERVFAIL NOERROR",
+            "www.example.",
+        ),
+        (
+            r"rewrite name regex ^(.*)\.example\.$ internal.",
+            "www.example.",
+        ),
+        (
+            r"rewrite name exact example. internal. answer name internal\. public.",
+            "example.",
+        ),
+        (
+            r"rewrite name exact example. internal. answer name other\. public.",
+            "example.",
+        ),
         ("rewrite cname old.example. new.example.", "example."),
         ("rewrite edns0 local set 0xffee abcd", "example."),
         ("rewrite edns0 local set 0xffee abcd revert", "example."),
@@ -338,4 +376,44 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         (0, 0),
         "non-matching CNAME target"
     );
+    for rule in [
+        format!(
+            r"rewrite name exact {long} internal. answer value other\.example\. public.example."
+        ),
+        format!(
+            r"rewrite name exact {long} internal. answer value missing\.example\. public.example."
+        ),
+    ] {
+        let config = format!(".:53 {{\n {rule}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        let region = Region::new(GLOBAL);
+        let future = chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, OtherCname(&target));
+        let mut future = std::pin::pin!(future);
+        assert_eq!(
+            future.as_mut().poll(&mut task),
+            Poll::Ready(Outcome::Response)
+        );
+        let stats = region.change();
+        assert_eq!((stats.allocations, stats.reallocations), (0, 0), "{rule}");
+    }
 }

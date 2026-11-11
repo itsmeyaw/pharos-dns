@@ -62,7 +62,7 @@ enum EdnsAction {
 #[derive(Debug)]
 struct AnswerRule {
     value: bool,
-    pattern: regex::Regex,
+    pattern: RegexMatcher,
     replacement: String,
 }
 
@@ -80,7 +80,74 @@ enum Matcher {
     Prefix(String),
     Suffix(String),
     Substring(String),
-    Regex(regex::Regex),
+    Regex(Box<RegexMatcher>),
+}
+
+#[derive(Debug)]
+struct RegexMatcher {
+    captures: regex::Regex,
+    vm: regex_automata::nfa::thompson::pikevm::PikeVM,
+    cache: std::sync::Mutex<regex_automata::nfa::thompson::pikevm::Cache>,
+}
+
+impl RegexMatcher {
+    fn new(pattern: &str) -> Result<Self, String> {
+        use regex_automata::nfa::thompson::{Builder, NFA, State, WhichCaptures, pikevm::PikeVM};
+        let captures = regex::Regex::new(pattern).map_err(|error| error.to_string())?;
+        let vm = PikeVM::builder()
+            .thompson(NFA::config().which_captures(WhichCaptures::None))
+            .build(pattern)
+            .map_err(|error| error.to_string())?;
+        // Each NFA epsilon edge can enqueue at most once per closure.
+        let stack_bound = 1 + vm
+            .get_nfa()
+            .states()
+            .iter()
+            .map(|state| match state {
+                State::Union { alternates } => alternates.len().saturating_sub(1),
+                State::BinaryUnion { .. } => 1,
+                _ => 0,
+            })
+            .sum::<usize>();
+        let mut builder = Builder::new();
+        builder.start_pattern().map_err(|error| error.to_string())?;
+        let fail = builder.add_fail().map_err(|error| error.to_string())?;
+        let end = builder.add_match().map_err(|error| error.to_string())?;
+        let mut alternatives = vec![fail; stack_bound];
+        alternatives.push(end);
+        let start = builder
+            .add_union(alternatives)
+            .map_err(|error| error.to_string())?;
+        builder
+            .finish_pattern(start)
+            .map_err(|error| error.to_string())?;
+        let nfa = builder
+            .build(start, start)
+            .map_err(|error| error.to_string())?;
+        let warmer = PikeVM::new_from_nfa(nfa).map_err(|error| error.to_string())?;
+        let mut cache = warmer.create_cache();
+        let _ = warmer.is_match(&mut cache, "");
+        cache.reset(&vm);
+        let cache = std::sync::Mutex::new(cache);
+        drop(cache.lock().expect("new regex cache"));
+        Ok(Self {
+            captures,
+            vm,
+            cache,
+        })
+    }
+
+    fn is_match(&self, text: &str) -> bool {
+        self.vm
+            .is_match(&mut self.cache.lock().expect("regex cache"), text)
+    }
+}
+
+impl std::ops::Deref for RegexMatcher {
+    type Target = regex::Regex;
+    fn deref(&self) -> &Self::Target {
+        &self.captures
+    }
 }
 
 impl Matcher {
@@ -270,9 +337,9 @@ impl Rewrite {
                         if lower.len() > 10_000 {
                             return Err(cursor.error("regex pattern too long"));
                         }
-                        Matcher::Regex(
-                            regex::Regex::new(&lower).map_err(|_| cursor.error("invalid regex"))?,
-                        )
+                        Matcher::Regex(Box::new(
+                            RegexMatcher::new(&lower).map_err(|_| cursor.error("invalid regex"))?,
+                        ))
                     }
                     _ => return Err(cursor.error("invalid CNAME match type")),
                 };
@@ -335,14 +402,14 @@ impl Rewrite {
                             return Err(cursor.error("regex pattern too long"));
                         }
                         let pattern =
-                            regex::Regex::new(from).map_err(|_| cursor.error("invalid regex"))?;
+                            RegexMatcher::new(from).map_err(|_| cursor.error("invalid regex"))?;
                         let used = (0..=100)
                             .filter(|index| to.contains(&format!("{{{index}}}")))
                             .count();
                         if !metadata && used > pattern.captures_len() - 1 {
                             return Err(cursor.error("too many capture groups"));
                         }
-                        Matcher::Regex(pattern)
+                        Matcher::Regex(Box::new(pattern))
                     }
                     _ => return Err(cursor.error("invalid name match type")),
                 };
@@ -437,7 +504,9 @@ impl Rewrite {
                 if name.len() > 10_000 {
                     return Err(cursor.error("regex pattern too long"));
                 }
-                Matcher::Regex(regex::Regex::new(name).map_err(|_| cursor.error("invalid regex"))?)
+                Matcher::Regex(Box::new(
+                    RegexMatcher::new(name).map_err(|_| cursor.error("invalid regex"))?,
+                ))
             } else {
                 let mut name = name.to_ascii_lowercase();
                 if !name.ends_with('.') {
@@ -535,7 +604,7 @@ fn answer_rules(args: &[String]) -> Option<(bool, Vec<AnswerRule>)> {
         if from.len() > 10_000 {
             return None;
         }
-        let pattern = regex::Regex::new(from).ok()?;
+        let pattern = RegexMatcher::new(from).ok()?;
         let used = (0..=100)
             .filter(|number| to.contains(&format!("{{{number}}}")))
             .count();
@@ -847,23 +916,43 @@ fn apply_answer<'a>(
             Ok(source)
         };
     }
-    // shortcut: explicit answer regex captures allocate, outside the non-regex path.
-    let mut text = source.to_string();
+    let mut text = NameText {
+        bytes: [0; 1024],
+        len: 0,
+    };
+    write!(text, "{source}").map_err(|_| ServerError::InvalidQuery)?;
     for rule in answers.iter().rev().filter(|rule| rule.value == value) {
-        let Some(captures) = rule.pattern.captures(&text) else {
+        let current =
+            std::str::from_utf8(&text.bytes[..text.len]).map_err(|_| ServerError::InvalidQuery)?;
+        if !rule.pattern.is_match(current) {
             continue;
-        };
-        let mut replacement = rule.replacement.clone();
-        for (index, capture) in captures.iter().enumerate() {
-            replacement = replacement.replace(
-                &format!("{{{index}}}"),
-                capture.map_or("", |value| value.as_str()),
-            );
         }
-        text = replacement;
+        let mut next = NameText {
+            bytes: [0; 1024],
+            len: 0,
+        };
+        if has_capture_reference(&rule.replacement, rule.pattern.captures_len()) {
+            // shortcut: explicit answer capture substitutions allocate; replace when capture storage is reusable.
+            let captures = rule.pattern.captures(current).expect("matched regex");
+            let mut replacement = rule.replacement.clone();
+            for (index, capture) in captures.iter().enumerate() {
+                replacement = replacement.replace(
+                    &format!("{{{index}}}"),
+                    capture.map_or("", |value| value.as_str()),
+                );
+            }
+            next.write_str(&replacement)
+                .map_err(|_| ServerError::InvalidQuery)?;
+        } else {
+            next.write_str(&rule.replacement)
+                .map_err(|_| ServerError::InvalidQuery)?;
+        }
+        text = next;
     }
     let mut intermediate = [0; 255];
-    let wire = Name::parse_absolute_into(&text, &mut intermediate)
+    let text =
+        std::str::from_utf8(&text.bytes[..text.len]).map_err(|_| ServerError::InvalidQuery)?;
+    let wire = Name::parse_absolute_into(text, &mut intermediate)
         .map_err(|_| ServerError::InvalidQuery)?;
     let current = NameRef::parse(wire, 0).expect("validated name");
     let mut mapped_buffer = [0; 255];
@@ -884,6 +973,18 @@ fn apply_answer<'a>(
     }
     buffer[len] = 0;
     Ok(NameRef::parse(&buffer[..=len], 0).expect("validated name"))
+}
+
+fn has_capture_reference(value: &str, captures: usize) -> bool {
+    value.split('{').skip(1).any(|part| {
+        let Some((number, _)) = part.split_once('}') else {
+            return false;
+        };
+        !number.is_empty()
+            && (number == "0" || !number.starts_with('0'))
+            && number.bytes().all(|byte| byte.is_ascii_digit())
+            && number.parse::<usize>().is_ok_and(|index| index < captures)
+    })
 }
 
 fn apply_rule(
@@ -944,46 +1045,52 @@ fn apply_rule(
                     result
                 }
                 Matcher::Regex(pattern) => {
-                    // shortcut: regex captures allocate; non-regex rules remain allocation-free.
-                    let captures = pattern.captures(name).expect("matched regex");
-                    if let Some(parts) = parts {
-                        let mut result = Ok(());
-                        for part in parts {
-                            match part {
-                                NamePart::Literal(value) => {
-                                    result = result.and_then(|()| text.write_str(value))
-                                }
-                                NamePart::Capture(index) => {
-                                    result = result.and_then(|()| {
-                                        text.write_str(
-                                            captures.get(*index).map_or("", |value| value.as_str()),
-                                        )
-                                    })
-                                }
-                                NamePart::Label(label) => {
-                                    if !metadata.enabled() {
-                                        return Ok(false);
+                    if parts.is_none() && !has_capture_reference(target, pattern.captures_len()) {
+                        text.write_str(target)
+                    } else {
+                        // shortcut: regex captures allocate; non-regex rules remain allocation-free.
+                        let captures = pattern.captures(name).expect("matched regex");
+                        if let Some(parts) = parts {
+                            let mut result = Ok(());
+                            for part in parts {
+                                match part {
+                                    NamePart::Literal(value) => {
+                                        result = result.and_then(|()| text.write_str(value))
                                     }
-                                    let Some(value) =
-                                        metadata.get(label).filter(|value| !value.is_empty())
-                                    else {
-                                        return Ok(false);
-                                    };
-                                    result =
-                                        result.and_then(|()| text.write_str(&value.to_lowercase()));
+                                    NamePart::Capture(index) => {
+                                        result = result.and_then(|()| {
+                                            text.write_str(
+                                                captures
+                                                    .get(*index)
+                                                    .map_or("", |value| value.as_str()),
+                                            )
+                                        })
+                                    }
+                                    NamePart::Label(label) => {
+                                        if !metadata.enabled() {
+                                            return Ok(false);
+                                        }
+                                        let Some(value) =
+                                            metadata.get(label).filter(|value| !value.is_empty())
+                                        else {
+                                            return Ok(false);
+                                        };
+                                        result = result
+                                            .and_then(|()| text.write_str(&value.to_lowercase()));
+                                    }
                                 }
                             }
+                            result
+                        } else {
+                            let mut replacement = target.clone();
+                            for (index, value) in captures.iter().enumerate() {
+                                replacement = replacement.replace(
+                                    &format!("{{{index}}}"),
+                                    value.map_or("", |value| value.as_str()),
+                                );
+                            }
+                            text.write_str(&replacement)
                         }
-                        result
-                    } else {
-                        let mut replacement = target.clone();
-                        for (index, value) in captures.iter().enumerate() {
-                            replacement = replacement.replace(
-                                &format!("{{{index}}}"),
-                                value.map_or("", |value| value.as_str()),
-                            );
-                        }
-                        text.write_str(&replacement)
                     }
                 }
                 Matcher::Any => unreachable!("validated name matcher"),
@@ -2235,5 +2342,42 @@ impl Plugin for Rewrite {
             }
         }
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RegexMatcher;
+
+    #[test]
+    fn cached_regex_matches_the_capture_engine() {
+        for pattern in [
+            r"^(.*)\.example\.$",
+            r"^([a-z]{1,8}\.){1,8}example\.$",
+            r"\bexample\b",
+            r"^(alpha|beta|gamma|delta)\.example\.$",
+            r"^((a|b|c|d)?)+\.example\.$",
+            r"(?i:k)\.example\.$",
+            r"\p{Greek}+",
+        ] {
+            let matcher = RegexMatcher::new(pattern).unwrap();
+            let reference = regex::Regex::new(pattern).unwrap();
+            for name in [
+                ".",
+                "example.",
+                "www.example.",
+                "beta.example.",
+                "bbb.example.",
+                "K.example.",
+                "other.test.",
+                "\\195\\169.example.",
+            ] {
+                assert_eq!(
+                    matcher.is_match(name),
+                    reference.is_match(name),
+                    "{pattern} {name}"
+                );
+            }
+        }
     }
 }

@@ -13,6 +13,7 @@ pharos-proto = { path = "../pharos-proto" }
 pharos-server = { path = "../pharos-server" }
 pharos-kubernetes = { path = "../pharos-kubernetes", optional = true }
 regex = { version = "1", optional = true }
+regex-automata = { version = "0.4", optional = true }
 arc-swap = "1"
 nix = { version = "0.31", features = ["net", "socket", "hostname"] }
 
@@ -55,7 +56,7 @@ plugin-any = []
 plugin-chaos = []
 plugin-loadbalance = []
 plugin-tsig = []
-plugin-rewrite = ["dep:regex"]
+plugin-rewrite = ["dep:regex", "dep:regex-automata"]
 plugin-autopath = []
 plugin-acl = []
 plugin-cache = []
