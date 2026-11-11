@@ -126,3 +126,46 @@ async fn hostname_aliases_and_default_identity() {
         Message::parse(&b).unwrap().answers().next().unwrap().rdata
     );
 }
+
+#[tokio::test]
+async fn coredns_trims_and_deduplicates_setup_values() {
+    let long = "x".repeat(260);
+    let single = configured(&format!("chaos {long}")).unwrap();
+    let (_, wire) = query(&single, "version.bind.", Type::TXT, Class::CH).await;
+    let answer = Message::parse(&wire).unwrap().answers().next().unwrap();
+    assert_eq!(answer.rdata.len(), 256);
+    assert_eq!(answer.rdata[0], 255);
+
+    let chain = configured(&format!("chaos v2 {long} {long} {}", "y".repeat(260))).unwrap();
+    let (_, wire) = query(&chain, "authors.bind.", Type::TXT, Class::CH).await;
+    let message = Message::parse(&wire).unwrap();
+    assert_eq!(message.answer_count(), 1);
+    assert!(message.tc());
+
+    let chain = configured(&format!("chaos {long} author")).unwrap();
+    assert!(matches!(
+        query(&chain, "version.bind.", Type::TXT, Class::CH).await.0,
+        Outcome::Error(_)
+    ));
+}
+
+#[cfg(feature = "plugin-whoami")]
+#[tokio::test]
+async fn chaos_enables_non_in_for_all_blocks_on_listener() {
+    use pharos_plugins::servers;
+    use pharos_server::{Action, Handler};
+    let source = "version.bind:53 {\n chaos v1 author\n}\nother.example:53 {\n whoami\n}";
+    let blocks = parse("Corefile", source).unwrap();
+    let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let server = servers.values().next().unwrap();
+    for name in ["version.bind.", "other.example."] {
+        let name: Name = name.parse().unwrap();
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+        builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::TXT, Class::CH).unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(server.handle(&wire, "127.0.0.1:1234".parse().unwrap(), Protocol::Udp, &mut response).await, Action::Respond);
+        assert_eq!(Message::parse(&response).unwrap().rcode(), pharos_proto::Rcode::NOERROR);
+    }
+}
