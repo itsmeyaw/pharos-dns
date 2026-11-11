@@ -1,5 +1,7 @@
 //! Root Directive configuration.
 
+pub(crate) mod setup;
+
 use std::{io, path::PathBuf};
 
 use pharos_corefile::{Cursor, Error};

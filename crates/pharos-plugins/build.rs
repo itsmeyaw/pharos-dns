@@ -81,7 +81,7 @@ fn main() {
             "siit" => "setup_siit",
             "rewrite" => "rewrite::setup::setup",
             "autopath" => "autopath::setup::setup",
-            "root" => "setup_root",
+            "root" => "root::setup::setup",
             "cancel" => "cancel::setup::setup",
             "timeouts" => "setup_timeouts",
             "debug" => "debug::setup::setup",

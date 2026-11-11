@@ -666,11 +666,7 @@ fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std
     clean
 }
 
-#[cfg(feature = "plugin-root")]
-fn setup_root(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.root = Some(root::parse(cursor)?);
-    Ok(())
-}
+
 
 
 
