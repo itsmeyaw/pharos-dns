@@ -20,8 +20,9 @@ struct Oracle {
 
 impl Oracle {
     fn start() -> Self {
-        let path = std::env::var_os("PHAROS_ZONE_ORACLE")
-            .expect("set PHAROS_ZONE_ORACLE to the zone-oracle binary (cargo xtask fuzz does this)");
+        let path = std::env::var_os("PHAROS_ZONE_ORACLE").expect(
+            "set PHAROS_ZONE_ORACLE to the zone-oracle binary (cargo xtask fuzz does this)",
+        );
         let mut child = Command::new(path)
             .arg("--batch")
             .stdin(Stdio::piped())
@@ -30,7 +31,11 @@ impl Oracle {
             .expect("start zone oracle");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        Self { _child: child, stdin, stdout }
+        Self {
+            _child: child,
+            stdin,
+            stdout,
+        }
     }
 
     fn parse(&mut self, zone: &[u8]) -> String {
@@ -42,7 +47,9 @@ impl Oracle {
         }
         self.stdin.flush().unwrap();
         let mut length = [0; 4];
-        self.stdout.read_exact(&mut length).expect("oracle response");
+        self.stdout
+            .read_exact(&mut length)
+            .expect("oracle response");
         let mut response = vec![0; u32::from_be_bytes(length) as usize];
         self.stdout.read_exact(&mut response).unwrap();
         String::from_utf8(response).expect("oracle response is ASCII")
@@ -82,10 +89,42 @@ fn without_comments(zone: &[u8]) -> Vec<u8> {
     result
 }
 
+fn space_numeric_apl_at_line_end(zone: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(zone.len());
+    // RFC 3597 §2 and RFC 3123 §4: numeric TYPE42 also permits an empty APL.
+    for line in zone.split_inclusive(|&b| b == b'\n') {
+        let end = line
+            .iter()
+            .rposition(|&b| b != b'\n' && b != b'\r')
+            .map_or(0, |i| i + 1);
+        let start = line[..end]
+            .iter()
+            .rposition(|&b| b == b' ' || b == b'\t')
+            .map_or(0, |i| i + 1);
+        let token = &line[start..end];
+        let numeric_apl = token
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"TYPE"))
+            && token[4..].iter().all(u8::is_ascii_digit)
+            && token[4..]
+                .iter()
+                .copied()
+                .skip_while(|&b| b == b'0')
+                .eq(b"42".iter().copied());
+        result.extend_from_slice(&line[..end]);
+        if numeric_apl {
+            result.push(b' ');
+        }
+        result.extend_from_slice(&line[end..]);
+    }
+    result
+}
+
 // miekg/dns re-parses a $GENERATE template without a final newline and accepts an
 // unterminated quote there (documented deviations).
 fn generate_line_error(zone: &[u8], error: &str) -> bool {
-    has_generate(zone) && (error.contains("unterminated record") || error.contains("invalid $GENERATE"))
+    has_generate(zone)
+        && (error.contains("unterminated record") || error.contains("invalid $GENERATE"))
 }
 
 fn pharos(zone: &[u8]) -> String {
@@ -94,9 +133,14 @@ fn pharos(zone: &[u8]) -> String {
         // Documented deviations: Pharos rejects missing RDATA fields, unmatched ')' and
         // unterminated quotes.
         Err(error)
-            if ["missing ", "fields, got", "unbalanced parentheses", "unterminated record"]
-                .iter()
-                .any(|message| error.to_string().contains(message))
+            if [
+                "missing ",
+                "fields, got",
+                "unbalanced parentheses",
+                "unterminated record",
+            ]
+            .iter()
+            .any(|message| error.to_string().contains(message))
                 || generate_line_error(zone, &error.to_string()) =>
         {
             "documented_reject\n".to_owned()
@@ -163,10 +207,26 @@ fuzz_target!(|zone: &[u8]| {
             return;
         }
     }
+    // Documented deviation: numeric APL types need a blank before a line end in miekg/dns.
+    if actual.starts_with("accept\n") && expected == "reject\n" {
+        let spaced = space_numeric_apl_at_line_end(zone);
+        if spaced != zone {
+            let mut spaced_expected = oracle.parse(&spaced);
+            if spaced_expected != actual && !spaced.ends_with(b"\n") {
+                spaced_expected = oracle.parse(&[&spaced[..], b"\n"].concat());
+            }
+            if spaced_expected == actual {
+                return;
+            }
+        }
+    }
     // Documented deviation: Pharos parses a missing final newline as if it were present.
     if actual != expected && !zone.ends_with(b"\n") {
         let expected = oracle.parse(&[zone, b"\n"].concat());
-        assert_eq!(actual, expected, "Pharos and miekg/dns (with final newline) disagree");
+        assert_eq!(
+            actual, expected,
+            "Pharos and miekg/dns (with final newline) disagree"
+        );
         return;
     }
     assert_eq!(actual, expected, "Pharos and miekg/dns disagree");

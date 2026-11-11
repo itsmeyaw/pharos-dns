@@ -157,6 +157,8 @@ fn records_without_rdata_are_rejected() {
     assert_eq!(parse(b"a IN TYPE65400 \\# 0\n"), Ok(vec![(65400, vec![])]));
     // RFC 3123 §4: an APL RR may hold zero items.
     assert_eq!(parse(b"a IN APL\n"), Ok(vec![(42, vec![])]));
+    // RFC 3597 §2: TYPE42 is an alternative spelling of APL.
+    assert_eq!(parse(b"a IN TYPE42\n"), Ok(vec![(42, vec![])]));
 }
 
 #[test]
