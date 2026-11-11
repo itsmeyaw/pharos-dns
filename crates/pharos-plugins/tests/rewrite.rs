@@ -4132,52 +4132,54 @@ async fn coredns_auto_rewrite_keeps_question_case_but_lowercases_answer() {
 // Derived from CoreDNS v1.15.0 plugin/rewrite/rcode_test.go.
 #[tokio::test]
 async fn coredns_rcode_rewrites_unanswered_response() {
-    for code in [
-        Rcode::FORMERR,
-        Rcode::SERVFAIL,
-        Rcode::REFUSED,
-        Rcode::NOTIMP,
-    ] {
-        let text = format!(".:53 {{\n rewrite rcode example. {} NOERROR\n}}", code.0);
-        let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives())
-            .unwrap()
-            .remove(0)
-            .config;
-        let name: Name = "example.".parse().unwrap();
-        let root: Name = ".".parse().unwrap();
-        let mut wire = Vec::with_capacity(512);
-        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
-        b.question(
-            NameRef::parse(name.as_wire(), 0).unwrap(),
-            Type::A,
-            Class::IN,
-        )
-        .unwrap();
-        let _ = b.finish();
-        let mut response = Vec::with_capacity(512);
-        let mut slots = [];
-        let mut cx = Context {
-            query: Message::parse(&wire).unwrap(),
-            client: "127.0.0.1:1234".parse().unwrap(),
-            local: "127.0.0.1:53".parse().unwrap(),
-            transport: Transport::Dns,
-            protocol: Protocol::Udp,
-            domain: &root,
-            metadata: Metadata::new(&mut slots),
-            response: &mut response,
-            max_response_size: 512,
-        };
-        let outcome = chain
-            .rewrite
-            .as_ref()
-            .unwrap()
-            .serve(&mut cx, Unanswered(code))
-            .await;
-        assert!(
-            outcome == Outcome::Unanswered(Rcode::NOERROR)
-                || (outcome == Outcome::Response
-                    && Message::parse(cx.response).unwrap().rcode() == Rcode::NOERROR)
-        );
+    for mode in ["stop", "continue"] {
+        for code in [
+            Rcode::FORMERR,
+            Rcode::SERVFAIL,
+            Rcode::REFUSED,
+            Rcode::NOTIMP,
+        ] {
+            let text = format!(
+                ".:53 {{\n rewrite {mode} rcode example. {} NOERROR\n}}",
+                code.0
+            );
+            let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives())
+                .unwrap()
+                .remove(0)
+                .config;
+            let name: Name = "example.".parse().unwrap();
+            let root: Name = ".".parse().unwrap();
+            let mut wire = Vec::with_capacity(512);
+            let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+            b.question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+            let _ = b.finish();
+            let mut response = Vec::with_capacity(512);
+            let mut slots = [];
+            let mut cx = Context {
+                query: Message::parse(&wire).unwrap(),
+                client: "127.0.0.1:1234".parse().unwrap(),
+                local: "127.0.0.1:53".parse().unwrap(),
+                transport: Transport::Dns,
+                protocol: Protocol::Udp,
+                domain: &root,
+                metadata: Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size: 512,
+            };
+            let outcome = chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, Unanswered(code))
+                .await;
+            assert_eq!(outcome, Outcome::Response, "{mode} {code}");
+            assert_eq!(Message::parse(cx.response).unwrap().rcode(), Rcode::NOERROR);
+        }
     }
 }
 
