@@ -13,6 +13,7 @@ struct Scripted {
     initial_tc: bool,
     initial_a: bool,
     secondary: u16,
+    secondary_flags: u16,
     addresses: Vec<std::net::Ipv6Addr>,
 }
 
@@ -34,7 +35,12 @@ impl Next for Backend<'_> {
         } else {
             self.0.initial
         };
-        let flags = 0x85a0
+        let flags = 0x8120
+            | if secondary {
+                self.0.secondary_flags
+            } else {
+                0x0480
+            }
             | code
             | if !secondary && self.0.initial_tc {
                 0x200
@@ -98,6 +104,7 @@ async fn query(
     initial_tc: bool,
     initial_a: bool,
     secondary: u16,
+    secondary_flags: u16,
     addresses: &[&str],
 ) -> Vec<u8> {
     let text = format!(".:53 {{\n siit {{\n {settings}\n }}\n}}");
@@ -111,6 +118,7 @@ async fn query(
         initial_tc,
         initial_a,
         secondary,
+        secondary_flags,
         addresses: addresses.iter().map(|s| s.parse().unwrap()).collect(),
     };
     let key = pharos_server::ListenerKey {
@@ -154,6 +162,7 @@ async fn coredns_siit_translation_fallback_and_eam() {
         false,
         false,
         0,
+        0x0480,
         &["2001:db8::1", "64:ff9b::192.0.2.1", "64:ff9b::192.0.2.42"],
     )
     .await;
@@ -165,7 +174,7 @@ async fn coredns_siit_translation_fallback_and_eam() {
     assert_eq!(answers[0].rdata, &[203, 0, 113, 9]);
     assert_eq!(answers[1].rdata, &[192, 0, 2, 42]);
     assert!(answers.iter().all(|rr| rr.rtype == Type::A && rr.ttl == 70));
-    assert_eq!(m.flags() & 0x0420, 0x0400);
+    assert_eq!(m.flags() & 0x04a0, 0x0480);
 
     for (initial, tc, a, secondary, addresses, expected_code, expected_answers) in [
         (3, false, false, 0, vec!["64:ff9b::192.0.2.1"], 3, 0),
@@ -176,7 +185,7 @@ async fn coredns_siit_translation_fallback_and_eam() {
         (0, false, false, 2, vec![], 2, 0),
         (0, false, false, 3, vec![], 3, 0),
     ] {
-        let wire = query("", initial, tc, a, secondary, &addresses).await;
+        let wire = query("", initial, tc, a, secondary, 0x0480, &addresses).await;
         let m = Message::parse(&wire).unwrap();
         assert_eq!(m.rcode(), Rcode(expected_code));
         assert_eq!(m.answers().count(), expected_answers);
@@ -187,12 +196,27 @@ async fn coredns_siit_translation_fallback_and_eam() {
             assert_eq!(m.flags() & 0x0480, 0x0480);
         }
     }
-    let wire = query("", 5, false, false, 0, &["64:ff9b::192.0.2.1"]).await;
-    assert_eq!(
-        Message::parse(&wire).unwrap().answers().next().unwrap().ttl,
-        600
-    );
-    let wire = query("", 0, false, false, 0x200, &["64:ff9b::192.0.2.1"]).await;
+    for initial in [2, 5] {
+        let wire = query(
+            "",
+            initial,
+            false,
+            false,
+            0,
+            0x0480,
+            &["64:ff9b::192.0.2.1"],
+        )
+        .await;
+        assert_eq!(
+            Message::parse(&wire).unwrap().answers().next().unwrap().ttl,
+            600
+        );
+    }
+    for flags in [0, 0x80, 0x400, 0x480] {
+        let wire = query("", 0, false, false, 0, flags, &["64:ff9b::192.0.2.1"]).await;
+        assert_eq!(Message::parse(&wire).unwrap().flags() & 0x4a0, flags);
+    }
+    let wire = query("", 0, false, false, 0x200, 0x0480, &["64:ff9b::192.0.2.1"]).await;
     assert!(Message::parse(&wire).unwrap().tc());
 }
 
@@ -213,6 +237,7 @@ async fn siit_rfc6052_vectors() {
             false,
             false,
             0,
+            0x0480,
             &[address],
         )
         .await;
@@ -229,6 +254,7 @@ async fn siit_rfc6052_vectors() {
         false,
         false,
         0,
+        0x0480,
         &["2001:db8:122:344:ffc0:2:2100:0"],
     )
     .await;
