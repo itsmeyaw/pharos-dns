@@ -53,6 +53,8 @@ pub mod minimal;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 pub mod proxy;
+#[cfg(feature = "plugin-rewrite")]
+pub mod rewrite;
 #[cfg(feature = "plugin-siit")]
 pub mod siit;
 
@@ -713,6 +715,12 @@ fn setup_dns64(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
 #[cfg(feature = "plugin-siit")]
 fn setup_siit(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.siit = Some(siit::Siit::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-rewrite")]
+fn setup_rewrite(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.rewrite = Some(rewrite::Rewrite::parse(cursor)?);
     Ok(())
 }
 
