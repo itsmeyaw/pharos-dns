@@ -32,6 +32,12 @@
 
 - On expiry Pharos drops the Next future and the Response. CoreDNS only signals context cancellation, so Plugins that ignore the context may continue and write a Response.
 
+## debug
+
+- Pharos disables panic containment on all Listeners when any Server Block enables `debug`; CoreDNS disables it for the Listener that includes that block, while debug logging is process-wide.
+- An uncontained Rust panic terminates its Tokio task rather than necessarily terminating the process as an unhandled Go goroutine panic does. The `errors` Plugin does not add panic recovery, matching CoreDNS v1.15.0 despite its debug README.
+- Debug logging is enabled after Listeners start and is reset when a Reload without `debug` succeeds; CoreDNS enables it when constructing its Listener and does not clear its global flag on Reload.
+
 ## dnssec
 
 - Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as unsigned. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
@@ -44,7 +50,6 @@
 
 - The `errors` Plugin uses Rust's `regex` syntax rather than Go's RE2 syntax. For example, `\w`, `\d`, `\s` and word boundaries are Unicode-aware in Rust but ASCII-only in Go; some expressions are accepted by only one engine.
 - Rust's regex compiler also imposes its own compiled-size limit.
-- Pharos emits `debug` consolidation messages without CoreDNS's separate debug switch.
 - The Plugin contract represents an error as SERVFAIL without an independent RCODE, so error logs always report `2`.
 - Rust panic traces and Pharos's text/JSON logging format differ from CoreDNS's Go stack and log format.
 - Pharos selects `stacktrace` per routed Server Block; CoreDNS's last Server Block setting applies to the whole Listener.
@@ -215,7 +220,7 @@
 
 ## General
 
-- Only `root`, `cancel`, `timeouts`, `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI

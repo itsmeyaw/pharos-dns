@@ -19,6 +19,8 @@ pub mod bind;
 pub mod cache;
 #[cfg(feature = "plugin-cancel")]
 pub mod cancel;
+#[cfg(feature = "plugin-debug")]
+pub mod debug;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 #[cfg(any(
@@ -117,6 +119,14 @@ pub fn servers_with_registry(
     type Group = (Router<Arc<Chain>>, Option<usize>, pharos_server::TcpOptions);
     let mut groups: HashMap<ListenerKey, Group> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
+    #[cfg(feature = "plugin-debug")]
+    let debug = blocks.iter().any(|block| block.config.debug.is_some());
+    #[cfg(not(feature = "plugin-debug"))]
+    let debug = false;
+    lifecycle.register_sync(pharos_server::Phase::Started, move || {
+        pharos_server::logging::set_debug(debug);
+        Ok(())
+    });
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
     #[cfg(feature = "plugin-health")]
@@ -299,6 +309,7 @@ pub fn servers_with_registry(
         .map(|(key, (router, workers, tcp_options))| {
             let mut server = Server::with_registry(router, key, metrics.clone());
             server.tcp_options = tcp_options;
+            server.debug = debug;
             if let Some(workers) = workers {
                 server.udp_workers = workers;
             }
@@ -658,6 +669,17 @@ fn setup_cancel(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 #[cfg(feature = "plugin-timeouts")]
 fn setup_timeouts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.timeouts = Some(timeouts::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-debug")]
+fn setup_debug(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    while cursor.next() {
+        if cursor.next_arg() {
+            return Err(cursor.arg_err());
+        }
+    }
+    block.config.debug = Some(());
     Ok(())
 }
 
