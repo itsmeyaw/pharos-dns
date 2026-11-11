@@ -70,3 +70,11 @@ fn only_space_and_tab_are_blanks_and_carriage_returns_are_discarded() {
         assert_eq!(parse(zone), expected, "{zone:?}");
     }
 }
+
+#[test]
+fn generate_with_empty_template_yields_no_records() {
+    assert_eq!(parse(b"$GENERATE 0-1 \n"), Ok(vec![]));
+    assert_eq!(parse(b"$GENERATE 0-1 ;c\n"), parse(b"$GENERATE 0-1 \n"));
+    assert!(parse(b"$GENERATE 0-1\n").is_err());
+    assert!(parse(b"$GENERATE 0-1 a\n").is_err());
+}

@@ -366,7 +366,7 @@ impl<R: BufRead> ZoneParser<R> {
                 child.include_allowed = true;
                 self.child = Some(Box::new(child));
             } else if tokens[0].eq_ignore_ascii_case("$GENERATE") {
-                if tokens.len() < 4 {
+                if tokens.len() < 2 {
                     return Err(err("invalid $GENERATE"));
                 }
                 let (range, step) = tokens[1].split_once('/').unwrap_or((&tokens[1].text, "1"));
@@ -382,6 +382,12 @@ impl<R: BufRead> ZoneParser<R> {
                     .map_err(|_| err_at(1, "invalid generate step"))?;
                 if start < 0 || end < start || step <= 0 || (end - start) / step > 65535 {
                     return Err(err_at(1, "invalid generate range"));
+                }
+                if tokens.len() == 2 && tokens[1].followed_by_blank {
+                    return Ok(None);
+                }
+                if tokens.len() < 4 {
+                    return Err(err("invalid $GENERATE"));
                 }
                 self.generate = Some(Generate {
                     current: start,
