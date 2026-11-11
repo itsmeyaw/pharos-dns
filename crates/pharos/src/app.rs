@@ -145,6 +145,7 @@ pub fn check(options: &Options) -> Result<(), String> {
         keys.join(", "),
         directives.iter().copied().collect::<Vec<_>>().join(", ")
     );
+    // ADR-0007: Plugin-specific compatibility notes live with each Plugin.
     let plugin_sections: Vec<_> = pharos_plugins::COMPATIBILITY
         .iter()
         .flat_map(|(name, document)| {
