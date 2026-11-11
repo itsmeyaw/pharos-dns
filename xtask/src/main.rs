@@ -5,6 +5,7 @@ mod compare;
 mod coredns;
 mod differential;
 mod e2e;
+mod hickory;
 mod query;
 
 use std::{
@@ -31,6 +32,16 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        [command] if command == "hickory" => match hickory::build(root()) {
+            Ok(path) => {
+                println!("{}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        },
         [command] if command == "diff" => diff(false),
         [command, flag] if command == "diff" && flag == "--self-test" => diff(true),
         [command] if command == "e2e" => e2e(false),
@@ -46,7 +57,7 @@ fn main() -> ExitCode {
         },
         _ => {
             eprintln!(
-                "usage: cargo xtask check | coredns | diff [--self-test] | e2e [--keep] | fuzz [--short] | bench [--corefile <path>] [--save-baseline <name> | --baseline <name>]"
+                "usage: cargo xtask check | coredns | hickory | diff [--self-test] | e2e [--keep] | fuzz [--short] | bench [--corefile <path>] [--save-baseline <name> | --baseline <name>]"
             );
             ExitCode::FAILURE
         }

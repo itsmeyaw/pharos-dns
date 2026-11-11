@@ -7,8 +7,11 @@ is missing, the micro-benchmarks still run and the macro-benchmark is skipped.
 `cargo xtask check` compiles benches with Clippy but does not run them.
 
 The macro-benchmark builds Pharos in release mode and starts it with a
-`whoami` Plugin. It also runs CoreDNS v1.15.0 if cached by `cargo xtask coredns`;
-CoreDNS is informational. Both receive the same Corefile and Query list.
+`whoami` Plugin. It also runs CoreDNS v1.15.0 if cached by `cargo xtask coredns`
+and Hickory DNS 0.26.3 if cached by `cargo xtask hickory`; both are informational.
+CoreDNS receives the same Corefile and Query list. Hickory has no `whoami`, so it
+answers the same Queries from small authoritative zones generated under
+`target/bench/hickory/`, and ignores `--corefile`.
 Use `cargo xtask bench --corefile path/to/Corefile` to override the default.
 Use `{port}` in explicit Listener ports so each server gets a free port; relative
 paths inside the Corefile are resolved from the Corefile's directory.
