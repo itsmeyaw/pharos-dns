@@ -54,12 +54,12 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
                 let (kind, items) = if request.contains("/api/v1/services") {
                     (
                         "ServiceList",
-                        r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"clusterIPs":["10.0.0.1","2001:db8::1"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}},{"metadata":{"name":"head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"dead","namespace":"prod"},"spec":{"clusterIP":"10.0.0.8"}},{"metadata":{"name":"v6head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"alias","namespace":"prod"},"spec":{"type":"ExternalName","externalName":"example.org"}},{"metadata":{"name":"internal","namespace":"prod"},"spec":{"type":"ExternalName","externalName":"web.prod.svc.cluster.local"}}]"#,
+                        r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"clusterIPs":["10.0.0.1","2001:db8::1"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}},{"metadata":{"name":"head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"pool","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"dead","namespace":"prod"},"spec":{"clusterIP":"10.0.0.8"}},{"metadata":{"name":"v6head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"alias","namespace":"prod"},"spec":{"type":"ExternalName","externalName":"example.org"}},{"metadata":{"name":"internal","namespace":"prod"},"spec":{"type":"ExternalName","externalName":"web.prod.svc.cluster.local"}}]"#,
                     )
                 } else if request.contains("/endpointslices") {
                     (
                         "EndpointSliceList",
-                        r#"[{"metadata":{"name":"one","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.0.1.2"],"hostname":"one","targetRef":{"name":"ignored"},"zone":"us.a"}]},{"metadata":{"name":"two","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.3"],"targetRef":{"name":"pod-two"},"zone":"us.b"}]},{"metadata":{"name":"v6","namespace":"prod","labels":{"kubernetes.io/service-name":"v6head"}},"addressType":"IPv6","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["2001:db8::1"],"zone":"us.a"}]},{"metadata":{"name":"dns","namespace":"prod","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["192.0.2.30"]}]},{"metadata":{"name":"duplicate-one","namespace":"prod","labels":{"kubernetes.io/service-name":"dupa"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"same"}]},{"metadata":{"name":"duplicate-two","namespace":"prod","labels":{"kubernetes.io/service-name":"dupa"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"same"}]},{"metadata":{"name":"other","namespace":"prod","labels":{"kubernetes.io/service-name":"dupb"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"other"}]}]"#,
+                        r#"[{"metadata":{"name":"one","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.0.1.2"],"hostname":"one","targetRef":{"name":"ignored"},"zone":"us.a"}]},{"metadata":{"name":"two","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.3"],"targetRef":{"name":"pod-two"},"zone":"us.b"}]},{"metadata":{"name":"pool","namespace":"prod","labels":{"kubernetes.io/service-name":"pool"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.0.5.1"],"hostname":"a","zone":"us.a"},{"addresses":["10.0.5.2"],"hostname":"b","zone":"us.a"},{"addresses":["10.0.5.3"],"hostname":"c","zone":"us.b"}]},{"metadata":{"name":"v6","namespace":"prod","labels":{"kubernetes.io/service-name":"v6head"}},"addressType":"IPv6","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["2001:db8::2"],"zone":"us.a"}]},{"metadata":{"name":"dns","namespace":"prod","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["192.0.2.30"]}]},{"metadata":{"name":"duplicate-one","namespace":"prod","labels":{"kubernetes.io/service-name":"dupa"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"same"}]},{"metadata":{"name":"duplicate-two","namespace":"prod","labels":{"kubernetes.io/service-name":"dupa"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"same"}]},{"metadata":{"name":"other","namespace":"prod","labels":{"kubernetes.io/service-name":"dupb"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"other"}]}]"#,
                     )
                 } else if request.contains("/api/v1/pods") {
                     (
@@ -110,6 +110,8 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
     for (name, kind, code, answers, extra) in [
         ("web.prod.svc.cluster.local.", Type::A, Rcode::NOERROR, 1, 0),
         ("1.0.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 1, 0),
+        ("1.0.0.10.in-addr.arpa.", Type::A, Rcode::NXDOMAIN, 0, 0),
+        ("9.0.0.10.in-addr.arpa.", Type::SOA, Rcode::NOERROR, 0, 0),
         ("2.1.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 1, 0),
         ("3.1.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 1, 0),
         ("4.1.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 2, 0),
@@ -124,6 +126,13 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
         ),
         (
             "2.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.",
+            Type::PTR,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "3.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.",
             Type::PTR,
             Rcode::NXDOMAIN,
             0,
@@ -272,6 +281,20 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             1,
         ),
         (
+            "us.a.prefer._zone.pool.prod.svc.cluster.local.",
+            Type::SRV,
+            Rcode::NOERROR,
+            2,
+            2,
+        ),
+        (
+            "us.c.prefer._zone.pool.prod.svc.cluster.local.",
+            Type::SRV,
+            Rcode::NOERROR,
+            3,
+            3,
+        ),
+        (
             "us.c.prefer._zone.head.prod.svc.cluster.local.",
             Type::SRV,
             Rcode::NOERROR,
@@ -377,6 +400,20 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             0,
         ),
         (
+            "sub.alias.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
+        (
+            "_http._tcp.alias.prod.svc.cluster.local.",
+            Type::SRV,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
+        (
             "dns-version.cluster.local.",
             Type::TXT,
             Rcode::NOERROR,
@@ -384,6 +421,10 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             0,
         ),
         ("cluster.local.", Type::SOA, Rcode::NOERROR, 1, 0),
+        ("cluster.local.", Type::A, Rcode::NOERROR, 0, 0),
+        ("cluster.local.", Type::AAAA, Rcode::NOERROR, 0, 0),
+        ("cluster.local.", Type::HINFO, Rcode::NOERROR, 0, 0),
+        ("cluster.local.", Type::SRV, Rcode::NOERROR, 0, 0),
         ("cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
         ("svc.cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
         ("prod.svc.cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
@@ -466,6 +507,9 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
                 "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa." => {
                     "web.prod.svc.cluster.local."
                 }
+                "2.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa." => {
+                    "2001-db8--2.v6head.prod.svc.cluster.local."
+                }
                 _ => panic!("unexpected PTR query"),
             };
             assert_eq!(target.to_string(), expected);
@@ -493,7 +537,7 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
         if qname == "us.a.pin._zone.v6head.prod.svc.cluster.local." && kind == Type::AAAA {
             assert_eq!(
                 message.answers().next().unwrap().rdata,
-                "2001:db8::1"
+                "2001:db8::2"
                     .parse::<std::net::Ipv6Addr>()
                     .unwrap()
                     .octets()
@@ -512,9 +556,18 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             assert_eq!((weight, port), (100, 8080));
             assert_eq!(
                 target.to_string(),
-                "2001-db8--1.v6head.prod.svc.cluster.local."
+                "2001-db8--2.v6head.prod.svc.cluster.local."
             );
             assert_eq!(message.additionals().next().unwrap().rtype, Type::AAAA);
+        }
+        if qname.contains(".pool.") && kind == Type::SRV {
+            let weight = if qname.starts_with("us.a.") { 50 } else { 33 };
+            for record in message.answers() {
+                assert!(
+                    matches!(record.data(), Ok(Rdata::Srv { weight: actual, port: 8080, .. }) if actual == weight)
+                );
+            }
+            assert!(message.additionals().all(|record| record.rtype == Type::A));
         }
         if qname == "us.c.prefer._zone.head.prod.svc.cluster.local." && kind == Type::A {
             let ips: Vec<_> = message.answers().map(|rr| rr.rdata.to_vec()).collect();
@@ -544,6 +597,7 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             && answers > 0
             && !name.to_string().contains(".pod.")
             && !name.to_string().contains(".v6head.")
+            && !name.to_string().contains(".pool.")
         {
             let record = message.answers().next().unwrap();
             assert_eq!(

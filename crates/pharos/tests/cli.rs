@@ -88,6 +88,7 @@ fn plugins_list_enabled_directives() {
         .unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("whoami\n"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("kubernetes\n"));
 }
 
 #[test]
