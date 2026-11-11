@@ -58,6 +58,33 @@ impl Handler for Echo {
     }
 }
 
+#[tokio::test]
+async fn wildcard_listener_uses_one_dual_stack_address() {
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        return;
+    }
+    let listener = Listener::bind("[::]:0".parse().unwrap(), Echo)
+        .await
+        .unwrap();
+    let address = listener.local_addr();
+    assert!(
+        address.is_ipv6(),
+        "wildcard must use an IPv6 socket: {address}"
+    );
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket
+        .send_to(b"query", ("127.0.0.1", address.port()))
+        .await
+        .unwrap();
+    let mut response = [0; 32];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&response[..len], b"query");
+    listener.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udp_queries_receive_responses() {
     let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Echo)
