@@ -58,6 +58,7 @@ pub struct Server<C> {
     pub key: ListenerKey,
     pub allow_non_in: bool,
     pub debug: bool,
+    pub udp_workers: usize,
     pub logger: fn(Error),
     metrics: Registry,
     dropped: Option<BlockMetrics>,
@@ -93,6 +94,7 @@ impl<C: Chain> Server<C> {
             key,
             allow_non_in: false,
             debug: false,
+            udp_workers: crate::quota::worker_count(),
             logger: log_error,
             metrics,
             dropped,
@@ -113,6 +115,9 @@ fn log_plugin_error(plugin: &str, error: Error) {
 }
 
 impl<C: Chain> Handler for Server<C> {
+    fn udp_workers(&self) -> usize {
+        self.udp_workers
+    }
     fn parallel_query(
         &self,
         wire: &[u8],

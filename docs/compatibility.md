@@ -93,9 +93,31 @@ them in the Corefile but rejects them when creating the API client. Pharos
 treats non-positive `startup_timeout` as an immediate timeout; CoreDNS's
 startup ticker panics for those values.
 
-Only `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
+Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
+
+## Multisocket
+
+Without `multisocket`, Pharos uses the CPU-quota-aware worker count for UDP;
+CoreDNS uses one socket. With `multisocket` and no argument, Pharos uses that
+same worker count rather than Go's GOMAXPROCS, and does not honor the
+`GOMAXPROCS` environment variable. Pharos always uses one TCP listening socket
+per Listener; CoreDNS opens one per configured server. These differences affect
+performance, not Responses. Changing the UDP count on Reload briefly stages
+new reuseport sockets before replacing the old ones; Queries arriving during
+staging or rollback can be lost.
+
+## Bind
+
+Interface enumeration uses `getifaddrs`; scoped IPv6 Listener labels use the
+numeric interface index rather than CoreDNS's interface name. Unspecified
+addresses are labelled as unbound addresses. An unbound Listener and an
+explicit `bind ::` on the same port share one Listener. CoreDNS groups them
+separately, so its competing sockets can direct Queries to the wrong Server
+Block. Reload binds new Listeners before removing old ones, so switching between
+a wildcard and a specific address on the same port can fail rather than replacing
+the socket.
 
 The `loop` Plugin probes only the first Domain in a Server Block at startup
 and after Reload, as CoreDNS does.
@@ -196,7 +218,7 @@ selection, as in CoreDNS, and can change which address appears first.
 
 Like CoreDNS, HTTP Listeners close and reopen on Reload; probes and scrapes can
 briefly fail, and re-opening an old Listener can fail if another process takes
-its port. DNS Listeners with unchanged keys keep their sockets. New Listeners
+its port. DNS Listeners with unchanged keys and UDP counts keep their sockets. New Listeners
 are bound before existing handlers are swapped; separate Listeners are swapped
 individually rather than in one process-wide atomic operation.
 

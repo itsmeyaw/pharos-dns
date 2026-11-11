@@ -1,11 +1,13 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     fs,
+    hash::{Hash, Hasher},
     io::{Read, Write},
     net::{TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, Instant},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    time::{Duration, Instant, SystemTime},
 };
 
 use pharos_proto::{Message, Rdata};
@@ -135,13 +137,9 @@ impl Drop for Server {
     }
 }
 
-// shortcut: another process can take the port before a server binds; the scenario then fails at startup, add a retry if it gets flaky.
+// shortcut: another process can bind the port before startup; pass bound sockets to servers when supported.
 pub(crate) fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    // Check both Transports; sockets are released before the Listener starts.
-    UdpSocket::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
-    Ok(port)
+    reserve_port()?.port()
 }
 
 struct ReservedPort {
@@ -159,10 +157,28 @@ impl ReservedPort {
 }
 
 fn reserve_port() -> Result<ReservedPort, String> {
-    let tcp = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let port = tcp.local_addr().map_err(|e| e.to_string())?.port();
-    let udp = UdpSocket::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
-    Ok(ReservedPort { tcp, _udp: udp })
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let ipv6_tcp = TcpListener::bind("[::]:0").is_ok();
+    let ipv6_udp = UdpSocket::bind("[::]:0").is_ok();
+    for _ in 0..1000 {
+        let mut hash = DefaultHasher::new();
+        std::process::id().hash(&mut hash);
+        NEXT.fetch_add(1, Ordering::Relaxed).hash(&mut hash);
+        SystemTime::now().hash(&mut hash);
+        // Stay below the default ephemeral ranges on macOS and Linux.
+        let port = 10_000 + (hash.finish() % 22_768) as u16;
+        if (ipv6_tcp && TcpListener::bind(("::", port)).is_err())
+            || (ipv6_udp && UdpSocket::bind(("::", port)).is_err())
+        {
+            continue;
+        }
+        if let Ok(tcp) = TcpListener::bind(("0.0.0.0", port))
+            && let Ok(udp) = UdpSocket::bind(("0.0.0.0", port))
+        {
+            return Ok(ReservedPort { tcp, _udp: udp });
+        }
+    }
+    Err("could not find a free server port after 1000 attempts".into())
 }
 
 fn copy_fixtures(source: &Path, target: &Path) -> Result<(), String> {
@@ -205,7 +221,15 @@ fn start(
             corefile
                 .replace("{port}", &port.to_string())
                 .replace("{port2}", &port2.to_string())
-                .replace("{metrics_port}", &metrics_port.to_string()),
+                .replace("{metrics_port}", &metrics_port.to_string())
+                .replace(
+                    "{loopback}",
+                    if cfg!(target_os = "macos") {
+                        "lo0"
+                    } else {
+                        "lo"
+                    },
+                ),
         )
         .map_err(|e| e.to_string())?;
         Some(conf)
@@ -364,9 +388,13 @@ fn wait_for_kubernetes(
 fn start_kubernetes_api(root: &Path, temp: &Path) -> Result<Server, String> {
     let config = temp.join("kubeconfig");
     let log = fs::File::create(temp.join("kubernetes-api.log")).map_err(|e| e.to_string())?;
+    let port = reserve_port()?;
+    let number = port.port()?;
+    drop(port);
     let mut server = Server(
         Command::new(root.join("target/debug/examples/differential"))
             .arg(&config)
+            .arg(number.to_string())
             .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
             .stderr(Stdio::from(log))
             .spawn()
@@ -443,7 +471,7 @@ fn scenario(
         |port: &Option<ReservedPort>| port.as_ref().map_or(Ok(0), ReservedPort::port);
     let (pp2_num, cp2_num) = (optional_port(&pp2)?, optional_port(&cp2)?);
     let (pm_num, cm_num) = (optional_port(&pm)?, optional_port(&cm)?);
-    // shortcut: ports can be taken during startup; inherit sockets when supported.
+    // shortcut: another process can bind the port before startup; pass bound sockets to servers when supported.
     drop((pp, pp2, pm));
     let mut p = start(
         pharos,
@@ -552,7 +580,18 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
     let mut failures = Vec::new();
     for path in paths {
         let name = path.file_name().unwrap().to_string_lossy();
-        match scenario(&path, &pharos, coredns, &docs, self_test) {
+        // Ports are released before servers start, so another process can take one; retry once with fresh ports.
+        let result = match scenario(&path, &pharos, coredns, &docs, self_test) {
+            Err(error)
+                if error
+                    .to_ascii_lowercase()
+                    .contains("address already in use") =>
+            {
+                scenario(&path, &pharos, coredns, &docs, self_test)
+            }
+            result => result,
+        };
+        match result {
             Ok(count) => println!("{name:<24} {count:>7}  PASS"),
             Err(error) => {
                 println!("{name:<24} {:>7}  FAIL", "-");
@@ -678,7 +717,12 @@ mod tests {
     #[test]
     fn substitutes_dns_upstream_and_metrics_ports_for_each_server() {
         let temp = TempDir::new().unwrap();
-        let config = ".:{port} {\n    forward . 127.0.0.1:{port2}\n    prometheus localhost:{metrics_port}\n}\n";
+        let config = ".:{port} {\n    forward . 127.0.0.1:{port2}\n    prometheus localhost:{metrics_port}\n}\n# {loopback}\n";
+        let loopback = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
         let pharos = temp.0.join("pharos");
         let coredns = temp.0.join("coredns");
         std::fs::create_dir(&pharos).unwrap();
@@ -705,11 +749,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             std::fs::read_to_string(pharos.join("Corefile")).unwrap(),
-            ".:1001 {\n    forward . 127.0.0.1:1003\n    prometheus localhost:1002\n}\n"
+            format!(
+                ".:1001 {{\n    forward . 127.0.0.1:1003\n    prometheus localhost:1002\n}}\n# {loopback}\n"
+            )
         );
         assert_eq!(
             std::fs::read_to_string(coredns.join("Corefile")).unwrap(),
-            ".:2001 {\n    forward . 127.0.0.1:2003\n    prometheus localhost:2002\n}\n"
+            format!(
+                ".:2001 {{\n    forward . 127.0.0.1:2003\n    prometheus localhost:2002\n}}\n# {loopback}\n"
+            )
         );
     }
 
@@ -719,8 +767,10 @@ mod tests {
         let second = reserve_port().unwrap();
         let port = first.port().unwrap();
         assert_ne!(port, second.port().unwrap());
-        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
-        assert!(std::net::UdpSocket::bind(("127.0.0.1", port)).is_err());
+        assert!((10_000..=32_767).contains(&port));
+        assert!((10_000..=32_767).contains(&second.port().unwrap()));
+        assert!(std::net::TcpListener::bind(("0.0.0.0", port)).is_err());
+        assert!(std::net::UdpSocket::bind(("0.0.0.0", port)).is_err());
     }
 
     #[test]

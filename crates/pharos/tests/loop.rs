@@ -1,9 +1,11 @@
 #![forbid(unsafe_code)]
 
+mod support;
+
 use std::{
     fs,
     io::Read,
-    net::{TcpListener, UdpSocket},
+    net::UdpSocket,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -18,11 +20,7 @@ impl Drop for Process {
 }
 
 fn start(backend: &str) -> (Process, u16, std::path::PathBuf) {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = support::free_port();
     let dir = std::env::temp_dir().join(format!("pharos-loop-{}-{port}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let backend = backend.replace("{port}", &port.to_string());

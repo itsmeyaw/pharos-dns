@@ -11,6 +11,59 @@ struct Echo;
 
 struct AsyncEcho;
 
+struct ClientEcho(tokio::sync::watch::Sender<bool>);
+
+impl Handler for ClientEcho {
+    fn parallel_query(
+        &self,
+        query: &[u8],
+        peer: SocketAddr,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        assert_eq!(
+            peer.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        (query == b"parallel").then(|| self.0.subscribe())
+    }
+
+    async fn handle(
+        &self,
+        _: &[u8],
+        peer: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        response.extend_from_slice(peer.ip().to_string().as_bytes());
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn wildcard_udp_passes_native_peer_to_both_handler_paths() {
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        return;
+    }
+    let (sender, _) = tokio::sync::watch::channel(false);
+    let listener = Listener::bind("[::]:0".parse().unwrap(), ClientEcho(sender))
+        .await
+        .unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for query in [b"normal".as_slice(), b"parallel"] {
+        socket
+            .send_to(query, ("127.0.0.1", listener.local_addr().port()))
+            .await
+            .unwrap();
+        let mut response = [0; 64];
+        let (len, _) =
+            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&response[..len], b"127.0.0.1");
+    }
+    listener.shutdown().await.unwrap();
+}
+
 impl Handler for AsyncEcho {
     async fn handle(
         &self,
@@ -56,6 +109,33 @@ impl Handler for Echo {
         response.extend_from_slice(query);
         Action::Respond
     }
+}
+
+#[tokio::test]
+async fn wildcard_listener_uses_one_dual_stack_address() {
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        return;
+    }
+    let listener = Listener::bind("[::]:0".parse().unwrap(), Echo)
+        .await
+        .unwrap();
+    let address = listener.local_addr();
+    assert!(
+        address.is_ipv6(),
+        "wildcard must use an IPv6 socket: {address}"
+    );
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket
+        .send_to(b"query", ("127.0.0.1", address.port()))
+        .await
+        .unwrap();
+    let mut response = [0; 32];
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&response[..len], b"query");
+    listener.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -99,7 +99,9 @@ pub(crate) fn spawn<H: Handler>(
             };
             for index in 0..count {
                 if let Some((length, peer)) = peers[index] {
-                    if let Some(cancelled) = handler.parallel_query(&buffers[index][..length], peer)
+                    let client = crate::canonical_peer(peer);
+                    if let Some(cancelled) =
+                        handler.parallel_query(&buffers[index][..length], client)
                     {
                         crate::udp::spawn_parallel(
                             Arc::clone(&socket),
@@ -115,7 +117,7 @@ pub(crate) fn spawn<H: Handler>(
                     if H::handle_shared(
                         &handler,
                         &buffers[index][..length],
-                        peer,
+                        client,
                         Protocol::Udp,
                         &mut response,
                     )

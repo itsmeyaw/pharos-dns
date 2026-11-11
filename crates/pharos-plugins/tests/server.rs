@@ -26,6 +26,71 @@ fn query(name: &str) -> Vec<u8> {
 
 #[tokio::test]
 #[cfg(feature = "plugin-prometheus")]
+async fn wildcard_whoami_preserves_native_client_addresses() {
+    let blocks = parse("Corefile", ".:0 {\n prometheus\n whoami\n}").unwrap();
+    let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (key, server) = servers.into_iter().next().unwrap();
+    let mut metrics = String::new();
+    server.metrics().encode(&mut metrics);
+    assert!(metrics.contains("server=\"dns://:0\""), "{metrics}");
+    let listener = Listener::bind(key.address, server).await.unwrap();
+    let port = listener.local_addr().port();
+    let ipv6 = std::net::TcpListener::bind("[::1]:0").is_ok();
+    for (source, destination, record_type, expected) in [
+        (
+            "127.0.0.1:0",
+            format!("127.0.0.1:{port}"),
+            pharos_proto::Type::A,
+            vec![127, 0, 0, 1],
+        ),
+        (
+            "[::1]:0",
+            format!("[::1]:{port}"),
+            pharos_proto::Type::AAAA,
+            std::net::Ipv6Addr::LOCALHOST.octets().to_vec(),
+        ),
+    ] {
+        if source.starts_with('[') && !ipv6 {
+            continue;
+        }
+        let udp = UdpSocket::bind(source).await.unwrap();
+        udp.send_to(&query("a."), &destination).await.unwrap();
+        let mut wire = [0; 512];
+        let (len, _) = timeout(Duration::from_secs(2), udp.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        let message = Message::parse(&wire[..len]).unwrap();
+        let address = message.additionals().next().unwrap();
+        assert_eq!(
+            (address.rtype, address.rdata),
+            (record_type, expected.as_slice())
+        );
+
+        let mut tcp = TcpStream::connect(&destination).await.unwrap();
+        let query = query("a.");
+        tcp.write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        tcp.write_all(&query).await.unwrap();
+        let len = timeout(Duration::from_secs(2), tcp.read_u16())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut wire = vec![0; usize::from(len)];
+        tcp.read_exact(&mut wire).await.unwrap();
+        let message = Message::parse(&wire).unwrap();
+        let address = message.additionals().next().unwrap();
+        assert_eq!(
+            (address.rtype, address.rdata),
+            (record_type, expected.as_slice())
+        );
+    }
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[cfg(feature = "plugin-prometheus")]
 async fn listeners_share_metrics_and_attribute_whoami_responses() {
     let blocks = parse("Corefile", ".:1053 dns://.:1054 {\n prometheus\n whoami\n}").unwrap();
     let configs = configure::<Chain>(&blocks, directives()).unwrap();

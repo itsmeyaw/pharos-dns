@@ -341,12 +341,21 @@ fn api_response(path: &str, query: Option<&str>) -> Response<Body> {
     )
 }
 
+async fn bind_api(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind(("127.0.0.1", port)).await
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::args()
-        .nth(1)
-        .ok_or("usage: differential <kubeconfig>")?;
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let mut args = std::env::args().skip(1);
+    let path = args
+        .next()
+        .ok_or("usage: differential <kubeconfig> <port>")?;
+    let port = args.next().ok_or("missing port")?.parse::<u16>()?;
+    if port == 0 || args.next().is_some() {
+        return Err("invalid port or unexpected argument".into());
+    }
+    let listener = bind_api(port).await?;
     let url = format!("http://{}", listener.local_addr()?);
     let config = json!({"apiVersion":"v1","kind":"Config","clusters":[{"name":"fixture","cluster":{"server":url}}],"contexts":[{"name":"fixture","context":{"cluster":"fixture","user":"fixture"}}],"current-context":"fixture","users":[{"name":"fixture","user":{}}]});
     let path = Path::new(&path);
@@ -363,6 +372,15 @@ mod tests {
     use super::api_response;
     use http_body_util::BodyExt;
     use serde_json::Value;
+
+    #[tokio::test]
+    async fn fixture_binds_the_requested_port() {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let listener = super::bind_api(port).await.unwrap();
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+    }
 
     async fn list(path: &str, query: Option<&str>) -> Value {
         let response = api_response(path, query);

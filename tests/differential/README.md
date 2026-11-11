@@ -9,7 +9,8 @@ Each scenario is a directory containing:
 
 - `Corefile`: the same configuration for both processes; `{port}` is replaced
   by the chosen Listener port, `{port2}` by a second DNS Listener port, and
-  `{metrics_port}` by a distinct free port for each process. Omit it to exercise each built-in default in an empty working
+  `{metrics_port}` by a distinct free port for each process. `{loopback}` is
+  `lo0` on macOS and `lo` elsewhere. Omit it to exercise each built-in default in an empty working
   directory.
 - `{kubeconfig}` starts one standalone Rust fixture API for the scenario and
   substitutes the same absolute kubeconfig path for both processes. The harness
@@ -56,6 +57,8 @@ The `loop` scenario compares Responses for a non-looping configuration. The
 looping README example is covered by a binary exit test instead: this harness
 expects both processes to remain available and does not compare exit codes.
 The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
+The bind scenario compares Responses on 127.0.0.1 with an excluded IPv6 address;
+the harness cannot send Queries to another bind address or scrape metrics.
 The Reload README scenarios use `whoami` instead of the unimplemented `erratic`
 backend and compare DNS Responses rather than reload timing.
 

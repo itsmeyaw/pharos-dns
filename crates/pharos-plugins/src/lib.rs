@@ -9,10 +9,12 @@ use pharos_server::{Lifecycle, ListenerKey, Router, Server, Transport};
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-bind")]
+pub mod bind;
 #[cfg(feature = "plugin-cache")]
 pub mod cache;
 #[cfg(feature = "plugin-errors")]
@@ -102,7 +104,7 @@ pub fn servers_with_registry(
     blocks: Vec<BlockContext<Chain>>,
     metrics: pharos_server::metrics::Registry,
 ) -> io::Result<(Servers, Lifecycle)> {
-    let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
+    let mut groups: HashMap<ListenerKey, (Router<Arc<Chain>>, Option<usize>)> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
@@ -187,17 +189,29 @@ pub fn servers_with_registry(
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener Domain")
             })?;
             for address in &addresses {
-                let ip: IpAddr = if address.is_empty() {
-                    Ipv4Addr::UNSPECIFIED.into()
-                } else {
-                    address.parse().map_err(|_| {
+                let socket = if address.is_empty() {
+                    SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port)
+                } else if let Some((ip, interface)) = address.split_once('%') {
+                    let ip: Ipv6Addr = ip.parse().map_err(|_| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
-                    })?
+                    })?;
+                    let scope = nix::net::if_::if_nametoindex(interface)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                    SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope))
+                } else {
+                    let ip: IpAddr = address.parse().map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
+                    })?;
+                    let ip = match ip {
+                        IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
+                        ip => ip,
+                    };
+                    SocketAddr::new(ip, port)
                 };
                 routes.push((
                     ListenerKey {
                         transport: Transport::Dns,
-                        address: SocketAddr::new(ip, port),
+                        address: socket,
                     },
                     domain.clone(),
                 ));
@@ -214,6 +228,10 @@ pub fn servers_with_registry(
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             cache.set_metrics(&metrics, &listeners);
         }
+        #[cfg(feature = "plugin-multisocket")]
+        let workers = block.config.multisocket.flatten();
+        #[cfg(not(feature = "plugin-multisocket"))]
+        let workers = None;
         let chain = Arc::new(block.config);
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &chain.cache {
@@ -234,17 +252,27 @@ pub fn servers_with_registry(
             chain.collect_readiness(&ready_state);
         }
         for (listener, domain) in routes {
-            groups.entry(listener).or_default().add(
-                listener,
-                domain,
-                (!empty).then(|| Arc::clone(&chain)),
-                vec![],
-            );
+            groups
+                .entry(listener)
+                .or_insert_with(|| (Router::default(), workers))
+                .0
+                .add(
+                    listener,
+                    domain,
+                    (!empty).then(|| Arc::clone(&chain)),
+                    vec![],
+                );
         }
     }
     let servers = groups
         .into_iter()
-        .map(|(key, router)| (key, Server::with_registry(router, key, metrics.clone())))
+        .map(|(key, (router, workers))| {
+            let mut server = Server::with_registry(router, key, metrics.clone());
+            if let Some(workers) = workers {
+                server.udp_workers = workers;
+            }
+            (key, server)
+        })
         .collect();
     #[cfg(feature = "plugin-health")]
     for (address, lameduck) in health_addresses {
@@ -464,6 +492,36 @@ fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
 #[cfg(feature = "plugin-reload")]
 fn setup_reload(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.reload = Some(reload::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-bind")]
+fn setup_bind(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.listen_addresses = bind::parse(cursor)?;
+    block.config.bind = Some(());
+    Ok(())
+}
+
+#[cfg(feature = "plugin-multisocket")]
+fn setup_multisocket(
+    cursor: &mut Cursor<'_>,
+    block: &mut BlockContext<Chain>,
+) -> Result<(), Error> {
+    cursor.next();
+    let args = cursor.remaining_args();
+    if args.len() > 1 || cursor.next() {
+        return Err(cursor.arg_err());
+    }
+    let count = args
+        .first()
+        .map(|arg| {
+            arg.parse::<usize>()
+                .ok()
+                .filter(|count| (1..=1024).contains(count))
+                .ok_or_else(|| cursor.error("invalid socket count"))
+        })
+        .transpose()?;
+    block.config.multisocket = Some(count);
     Ok(())
 }
 

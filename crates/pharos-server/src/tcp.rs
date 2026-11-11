@@ -37,7 +37,7 @@ pub(crate) fn spawn<H: Handler>(
                     match accepted {
                         Ok((stream, peer)) => {
                             connections.spawn(serve(
-                                stream, peer, Arc::clone(&handler),
+                                stream, crate::canonical_peer(peer), Arc::clone(&handler),
                                 connections_stop.clone(),
                             ));
                         }

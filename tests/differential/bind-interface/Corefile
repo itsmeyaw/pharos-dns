@@ -1,0 +1,6 @@
+.:{port} {
+    bind {loopback} {
+        except ::1
+    }
+    whoami
+}

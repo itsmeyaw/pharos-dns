@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod support;
+
 use std::{
     fs,
     io::{Read, Write},
@@ -15,6 +17,67 @@ impl Drop for Process {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+#[test]
+fn multisocket_serves_udp_and_tcp() {
+    let dir = std::env::temp_dir().join(format!("pharos-multisocket-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let port = support::free_port();
+    fs::write(
+        dir.join("Corefile"),
+        format!(".:{port} {{\n multisocket 3\n whoami\n}}\n"),
+    )
+    .unwrap();
+    let pidfile = dir.join("pid");
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .current_dir(&dir)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !pidfile.exists() {
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "server exited early"
+        );
+        assert!(Instant::now() < deadline, "server did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let query = [
+        0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1,
+    ];
+    let address = ("127.0.0.1", port);
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    udp.send_to(&query, address).unwrap();
+    let mut response = [0; 1024];
+    let n = udp.recv(&mut response).unwrap();
+    assert!(n > 12 && response[..n].windows(4).any(|w| w == b"_udp"));
+    let mut tcp = TcpStream::connect(address).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    tcp.write_all(&(query.len() as u16).to_be_bytes()).unwrap();
+    tcp.write_all(&query).unwrap();
+    let mut len = [0; 2];
+    tcp.read_exact(&mut len).unwrap();
+    let mut response = vec![0; u16::from_be_bytes(len) as usize];
+    tcp.read_exact(&mut response).unwrap();
+    assert!(response.windows(4).any(|w| w == b"_tcp"));
+    drop(tcp);
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &process.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(process.0.wait().unwrap().code(), Some(0));
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -35,15 +98,12 @@ fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
     }
     let dir = std::env::temp_dir().join(format!("pharos-health-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let sockets: Vec<_> = (0..3)
-        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    let ports: Vec<_> = sockets
-        .iter()
-        .map(|socket| socket.local_addr().unwrap().port())
-        .collect();
-    let (dns, ready, health) = (ports[0], ports[1], ports[2]);
-    drop(sockets);
+    let (dns, ready, health) = (
+        support::free_port(),
+        support::free_port(),
+        support::free_port(),
+    );
+    assert!(dns != ready && dns != health && ready != health);
     let config = format!(
         ".:{dns} {{\n ready 127.0.0.1:{ready}\n health 127.0.0.1:{health} {{\n lameduck 3s\n }}\n whoami\n}}\n"
     );
@@ -112,11 +172,7 @@ fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
 fn default_server_answers_udp_and_tcp_then_removes_pidfile() {
     let dir = std::env::temp_dir().join(format!("pharos-e2e-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = support::free_port();
     let pidfile = dir.join("pharos.pid");
     let mut process = Process(
         Command::new(env!("CARGO_BIN_EXE_pharos"))
@@ -146,7 +202,9 @@ fn default_server_answers_udp_and_tcp_then_removes_pidfile() {
     udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     udp.send_to(&query, &address).unwrap();
     let mut response = [0; 1024];
-    let n = udp.recv(&mut response).unwrap();
+    let n = udp
+        .recv(&mut response)
+        .unwrap_or_else(|e| panic!("UDP port {port}: {e}"));
     assert!(n > 12 && response[2] & 0x80 != 0 && response[3] & 0x0f == 0);
     assert!(response[..n].windows(4).any(|w| w == b"_udp"));
     assert!(response[..n].windows(4).any(|w| w == [127, 0, 0, 1]));
@@ -155,7 +213,8 @@ fn default_server_answers_udp_and_tcp_then_removes_pidfile() {
     tcp.write_all(&(query.len() as u16).to_be_bytes()).unwrap();
     tcp.write_all(&query).unwrap();
     let mut len = [0; 2];
-    tcp.read_exact(&mut len).unwrap();
+    tcp.read_exact(&mut len)
+        .unwrap_or_else(|e| panic!("TCP port {port}: {e}"));
     let mut response = vec![0; u16::from_be_bytes(len) as usize];
     tcp.read_exact(&mut response).unwrap();
     assert!(response.len() > 12 && response[2] & 0x80 != 0 && response[3] & 0x0f == 0);
@@ -202,11 +261,7 @@ fn explicit_corefile_uses_default_port_quiet_and_signals() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("config"), ". {\nwhoami\n}\n").unwrap();
     fs::write(dir.join("Corefile"), ". {\nunknown\n}\n").unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = support::free_port();
     let pidfile = dir.join("pid");
     let mut process = Process(
         Command::new(env!("CARGO_BIN_EXE_pharos"))
@@ -278,11 +333,7 @@ fn explicit_corefile_uses_default_port_quiet_and_signals() {
 fn long_quiet_flag_suppresses_startup() {
     let dir = std::env::temp_dir().join(format!("pharos-quiet-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = support::free_port();
     let pid = dir.join("pid");
     let mut process = Process(
         Command::new(env!("CARGO_BIN_EXE_pharos"))
@@ -340,15 +391,14 @@ fn long_quiet_flag_suppresses_startup() {
 fn explicit_port_overrides_flag_and_interrupt_exits_cleanly() {
     let dir = std::env::temp_dir().join(format!("pharos-port-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let port = support::free_port();
     let unused = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
         .port();
+    assert_ne!(port, unused);
     fs::write(dir.join("config"), format!(".:{port} {{\nwhoami\n}}\n")).unwrap();
-    drop(listener);
     let pid = dir.join("pid");
     let mut process = Process(
         Command::new(env!("CARGO_BIN_EXE_pharos"))
@@ -399,11 +449,7 @@ fn explicit_port_overrides_flag_and_interrupt_exits_cleanly() {
 
 #[test]
 fn pidfile_write_failure_is_logged_and_server_keeps_running() {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = support::free_port();
     let mut process = Process(
         Command::new(env!("CARGO_BIN_EXE_pharos"))
             .args([
@@ -476,11 +522,7 @@ fn empty_corefiles_use_the_default_server() {
         if file != "stdin" {
             fs::write(dir.join(file), content).unwrap();
         }
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = support::free_port();
         let mut command = Command::new(env!("CARGO_BIN_EXE_pharos"));
         command
             .current_dir(&dir)
