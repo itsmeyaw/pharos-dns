@@ -7,7 +7,7 @@ pub mod setup;
 use pharos_kubernetes::{
     Controller,
     object::{EndpointAddress, Port},
-    store::Index,
+    store::{Index, Store},
 };
 use pharos_proto::{
     BuildError, Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type,
@@ -15,13 +15,20 @@ use pharos_proto::{
 use pharos_server::{Context, Next, Outcome, Phase, Protocol};
 use std::{
     net::IpAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 #[derive(Default)]
 struct State {
     controller: Mutex<Option<Controller>>,
+    cache: RwLock<Cache>,
     metrics: Mutex<pharos_server::metrics::Registry>,
+}
+
+#[derive(Default)]
+struct Cache {
+    store: Option<Store>,
+    sync: Option<Arc<dyn pharos_server::Readiness>>,
 }
 
 pub struct Kubernetes {
@@ -71,19 +78,30 @@ impl Kubernetes {
             let state = state.clone();
             let config = config.clone();
             async move {
-                let registry = state.metrics.lock().unwrap().clone();
-                let client = config
-                    .client_config()
-                    .client(&registry)
-                    .await
-                    .map_err(std::io::Error::other)?;
-                let controller = Controller::start_with_metrics(
-                    client,
-                    config.watch_config(),
-                    registry.kubernetes(),
-                );
-                controller.wait_for_sync(config.startup_timeout).await;
+                let previous = state.controller.lock().unwrap().take();
+                let controller = if let Some(controller) = previous {
+                    controller.restart().await
+                } else {
+                    let registry = state.metrics.lock().unwrap().clone();
+                    let client = config
+                        .client_config()
+                        .client(&registry)
+                        .await
+                        .map_err(std::io::Error::other)?;
+                    Controller::start_with_metrics(
+                        client,
+                        config.watch_config(),
+                        registry.kubernetes(),
+                    )
+                };
+                let sync = controller.sync_status();
+                let store = controller.store();
                 *state.controller.lock().unwrap() = Some(controller);
+                *state.cache.write().unwrap() = Cache {
+                    store: Some(store),
+                    sync: Some(sync.clone()),
+                };
+                Controller::wait_for_sync_status(sync.as_ref(), config.startup_timeout).await;
                 Ok(())
             }
         };
@@ -91,10 +109,13 @@ impl Kubernetes {
         lifecycle.register(Phase::RestartFailed, start);
         let state = self.state.clone();
         let stop = move || {
+            state.cache.write().unwrap().sync = None;
             let controller = state.controller.lock().unwrap().take();
+            let state = state.clone();
             async move {
                 if let Some(mut controller) = controller {
                     controller.stop().await;
+                    *state.controller.lock().unwrap() = Some(controller);
                 }
                 Ok(())
             }
@@ -507,10 +528,10 @@ impl pharos_server::Plugin for Kubernetes {
         let zone_ref = NameRef::parse(&zone_wire[..zone_len + 1], 0).unwrap();
         let req = name::parse(&labels[..count], self.config.zonal);
         let (store, synced) = {
-            let guard = self.state.controller.lock().unwrap();
+            let guard = self.state.cache.read().unwrap();
             (
-                guard.as_ref().map(Controller::store),
-                guard.as_ref().is_some_and(Controller::has_synced),
+                guard.store.clone(),
+                guard.sync.as_ref().is_some_and(|sync| sync.ready()),
             )
         };
         let store = store.unwrap_or_default();
@@ -897,17 +918,16 @@ impl pharos_server::Plugin for Kubernetes {
                 && req.kind == b"svc"
                 && !req.service.is_empty()
             {
-                let mut total = 0usize;
-                store.with_read(|i| {
+                store.with_read(|i| -> Result<(), BuildError> {
+                    let mut total = 0usize;
                     visit(i, req, &self.config, |_, _, _| total += 1);
-                });
-                let mut ordinal = 0usize;
-                let mut write_error = None;
-                store.with_read(|i| {
+                    let mut ordinal = 0usize;
+                    let mut write_error = None;
+                    let mut stopped = false;
                     visit(i, req, &self.config, |ip, port, endpoint| {
                         let position = ordinal;
                         ordinal += 1;
-                        if write_error.is_some() {
+                        if stopped || write_error.is_some() {
                             return;
                         }
                         let Ok(ip) = ip.parse::<IpAddr>() else {
@@ -984,22 +1004,20 @@ impl pharos_server::Plugin for Kubernetes {
                         };
                         match result {
                             Ok(true) => answers += 1,
-                            Ok(false) => {}
+                            Ok(false) => stopped = true,
                             Err(e) => write_error = Some(e),
                         }
                     });
-                });
-                if let Some(err) = write_error {
-                    return Err(err);
-                }
-                if q.qtype == Type::SRV && answers > 0 {
-                    let mut error = None;
-                    let mut ordinal = 0usize;
-                    store.with_read(|i| {
+                    if let Some(err) = write_error {
+                        return Err(err);
+                    }
+                    if !stopped && q.qtype == Type::SRV && answers > 0 {
+                        let mut error = None;
+                        let mut ordinal = 0usize;
                         visit(i, req, &self.config, |ip, port, endpoint| {
                             let position = ordinal;
                             ordinal += 1;
-                            if error.is_some() || port.port < 0 {
+                            if stopped || error.is_some() || port.port < 0 {
                                 return;
                             }
                             let Ok(ip) = ip.parse::<IpAddr>() else { return };
@@ -1050,15 +1068,18 @@ impl pharos_server::Plugin for Kubernetes {
                                     &ip.octets(),
                                 ),
                             };
-                            if let Err(e) = result {
-                                error = Some(e);
+                            match result {
+                                Ok(true) => {}
+                                Ok(false) => stopped = true,
+                                Err(e) => error = Some(e),
                             }
                         });
-                    });
-                    if let Some(err) = error {
-                        return Err(err);
+                        if let Some(err) = error {
+                            return Err(err);
+                        }
                     }
-                }
+                    Ok(())
+                })?;
             }
             if answers == 0 {
                 soa(
@@ -1082,10 +1103,11 @@ impl pharos_server::Plugin for Kubernetes {
 impl pharos_server::Readiness for Kubernetes {
     fn ready(&self) -> bool {
         self.state
-            .controller
-            .try_lock()
-            .ok()
-            .and_then(|controller| controller.as_ref().map(Controller::has_synced))
-            .unwrap_or(false)
+            .cache
+            .read()
+            .unwrap()
+            .sync
+            .as_ref()
+            .is_some_and(|sync| sync.ready())
     }
 }

@@ -59,6 +59,14 @@ pub struct Controller {
     metrics: Option<KubernetesMetrics>,
 }
 
+struct SyncStatus(Vec<Arc<AtomicBool>>);
+
+impl pharos_server::Readiness for SyncStatus {
+    fn ready(&self) -> bool {
+        self.0.iter().all(|synced| synced.load(Ordering::Acquire))
+    }
+}
+
 impl Controller {
     pub fn start(client: Client, config: WatchConfig) -> Self {
         let store = Store::new(
@@ -269,12 +277,37 @@ impl Controller {
     pub fn store(&self) -> Store {
         self.store.clone()
     }
+    pub fn sync_status(&self) -> Arc<dyn pharos_server::Readiness> {
+        Arc::new(SyncStatus(self.synced.clone()))
+    }
+    /// Stop the previous watchers and start new ones against the existing cache.
+    pub async fn restart(mut self) -> Self {
+        self.stop().await;
+        Self::start_with_store(
+            self.client.clone(),
+            self.config.clone(),
+            self.store.clone(),
+            self.metrics.clone(),
+        )
+    }
     pub fn has_synced(&self) -> bool {
         self.synced
             .iter()
             .all(|synced| synced.load(Ordering::Acquire))
     }
     pub async fn wait_for_sync(&self, timeout: Duration) {
+        Self::wait_for_sync_status(self.sync_status().as_ref(), timeout).await;
+    }
+    pub async fn stop(&mut self) {
+        for task in self.tasks.drain(..) {
+            task.abort();
+            let _ = task.await;
+        }
+        for synced in &self.synced {
+            synced.store(false, Ordering::Release);
+        }
+    }
+    pub async fn wait_for_sync_status(status: &dyn pharos_server::Readiness, timeout: Duration) {
         let mut check = tokio::time::interval_at(
             tokio::time::Instant::now() + Duration::from_millis(100),
             Duration::from_millis(100),
@@ -287,19 +320,13 @@ impl Controller {
         pin_mut!(deadline);
         loop {
             tokio::select! {
-                _ = check.tick() => if self.has_synced() { return; },
+                _ = check.tick() => if status.ready() { return; },
                 _ = log.tick() => pharos_server::logging::log("INFO", "kubernetes", "waiting for Kubernetes API before starting server"),
                 _ = &mut deadline => {
                     pharos_server::logging::log("WARN", "kubernetes", "starting server with unsynced Kubernetes API");
                     return;
                 }
             }
-        }
-    }
-    pub async fn stop(&mut self) {
-        for task in self.tasks.drain(..) {
-            task.abort();
-            let _ = task.await;
         }
     }
 }
