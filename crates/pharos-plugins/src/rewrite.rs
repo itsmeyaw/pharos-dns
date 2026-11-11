@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{
-    Class, Message, MessageBuilder, MessageMut, Name, NameRef, Rcode, Rdata, Section, Type,
+    Class, Message, MessageBuilder, MessageMut, Name, NameRef, Rdata, Section, Type,
 };
 use pharos_server::{Context, Error as ServerError, Metadata, Next, Outcome, Plugin};
 
@@ -863,6 +863,7 @@ impl Plugin for Rewrite {
         };
         let mut end = self.rules.len();
         let mut name_rewritten = false;
+        let mut response_rules = false;
         let mut cname = None;
         for (index, rule) in self.rules.iter().enumerate() {
             let matched = match apply_rule(rule, &mut cx.query, &cx.metadata) {
@@ -873,8 +874,13 @@ impl Plugin for Rewrite {
                 match &rule.action {
                     Action::Name(_, auto, _, answers) => {
                         name_rewritten |= *auto || !answers.is_empty();
+                        response_rules |= *auto || !answers.is_empty();
                     }
-                    Action::Cname(matcher, to) => cname = Some((matcher, to.as_str())),
+                    Action::Cname(matcher, to) => {
+                        cname = Some((matcher, to.as_str()));
+                        response_rules = true;
+                    }
+                    Action::Ttl(..) | Action::Rcode(..) => response_rules = true,
                     _ => {}
                 }
             }
@@ -1015,7 +1021,59 @@ impl Plugin for Rewrite {
             code
         };
         if let Outcome::Unanswered(code) = outcome {
-            return Outcome::Unanswered(Rcode(rewrite_rcode(code.0)));
+            if !response_rules {
+                return outcome;
+            }
+            let code = rewrite_rcode(code.0);
+            // RFC 1035 §4.1.1: a Response copies the Query opcode, RD and CD bits.
+            let flags = 0x8000
+                | (original_query.flags() & 0x7800)
+                | if original_query.opcode() == pharos_proto::Opcode::QUERY {
+                    original_query.flags() & 0x0110
+                } else {
+                    0
+                }
+                | (code & 15);
+            let Some(question) = original_query.questions().next() else {
+                return Outcome::Error(ServerError::InvalidQuery);
+            };
+            let Ok(mut builder) = MessageBuilder::new(
+                cx.response,
+                cx.max_response_size.max(512),
+                original_query.id(),
+                flags,
+            ) else {
+                return Outcome::Error(ServerError::ResponseBufferTooSmall);
+            };
+            if builder
+                .question(question.name, question.qtype, question.qclass)
+                .is_err()
+            {
+                return Outcome::Error(ServerError::InvalidQuery);
+            }
+            if code > 15 {
+                let Some(opt) = original_query.opt() else {
+                    return Outcome::Error(ServerError::InvalidQuery);
+                };
+                let root = NameRef::parse(&[0], 0).expect("root name");
+                // RFC 6891 §6.1.3: extended RCODE bits are carried in the OPT TTL field.
+                let ttl = (u32::from(code >> 4) << 24) | u32::from(opt.flags());
+                if builder
+                    .record(
+                        Section::Additional,
+                        root,
+                        Type::OPT,
+                        Class(opt.udp_payload_size()),
+                        ttl,
+                        &[],
+                    )
+                    .is_err()
+                {
+                    return Outcome::Error(ServerError::InvalidQuery);
+                }
+            }
+            let _ = builder.finish();
+            return Outcome::Response;
         }
         if outcome == Outcome::Response
             && let Ok(response) = Message::parse(cx.response)

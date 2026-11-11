@@ -137,6 +137,62 @@ impl Next for Unanswered {
     }
 }
 
+struct RcodeChain(pharos_plugins::rewrite::Rewrite);
+impl pharos_server::Chain for RcodeChain {
+    async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
+        self.0.serve(cx, Unanswered(Rcode::SERVFAIL)).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn coredns_rcode_rewrite_returns_a_response_for_unanswered_success() {
+    let config = ".:53 {\n rewrite rcode example. SERVFAIL NOERROR\n}";
+    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(RcodeChain(chain.rewrite.take().unwrap())),
+        vec![],
+    );
+    let server = pharos_server::Server::new(router, key);
+    let name: Name = "example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        pharos_server::Handler::handle(
+            &server,
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        )
+        .await,
+        pharos_server::Action::Respond
+    );
+    let response = Message::parse(&response).unwrap();
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    assert_eq!(response.question_count(), 1);
+}
+
 struct InspectQuestion(Type, Class);
 impl Next for InspectQuestion {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {
