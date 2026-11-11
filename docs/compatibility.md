@@ -97,10 +97,10 @@
 - Glue for NS answers and `ns.dns.<zone>` addresses are deduplicated (RFC 2181 §5); CoreDNS repeats glue when a local address is in several EndpointSlices of one Service.
 - The initial list is a consistent paginated list of 500 objects per page (kube-runtime default), served from etcd; CoreDNS uses a streaming WatchList or a `resourceVersion=0` read from the API server's cache. This never returns older data, but costs more etcd load when many DNS Pods restart together.
 - The CA file is read once when the API client is created; a rotated CA needs a restart.
-- Shared with CoreDNS v1.15.0, against the standards: an ExternalName name returns its CNAME only for CNAME and A/AAAA queries; other types get NODATA (RFC 1034 §4.3.2; #43).
-- Shared with CoreDNS v1.15.0: names with no records of their own (`dns.<zone>`, `_tcp.<service>.<namespace>.svc.<zone>`, and TXT at the zone, `svc.<zone>` and `<namespace>.svc.<zone>`) get NXDOMAIN instead of NODATA (RFC 8020; #43).
-- Shared with CoreDNS v1.15.0: `dns-version.<zone>` A and non-PTR queries for existing reverse names get NXDOMAIN instead of NODATA (RFC 2308 §2.2; #43).
-- Shared with CoreDNS v1.15.0: a SOA query for a name that does not exist gets NOERROR instead of NXDOMAIN (RFC 2308; #43).
+- An ExternalName name returns its CNAME for every query type (RFC 1034 §4.3.2 step 3a). CoreDNS returns it only for CNAME, A and AAAA queries and answers NODATA for other types such as TXT, SRV, MX and HTTPS (`kubernetes.go:116-121,168-185`). Pharos follows the CNAME only for A and AAAA, as CoreDNS does; for other types the client follows it.
+- Shared with CoreDNS v1.15.0: names with no records of their own (`dns.<zone>`, `_tcp.<service>.<namespace>.svc.<zone>`, and TXT at the zone, `svc.<zone>` and `<namespace>.svc.<zone>`) get NXDOMAIN instead of NODATA (RFC 8020; kept for CoreDNS parity, #43).
+- Shared with CoreDNS v1.15.0: `dns-version.<zone>` A and non-PTR queries for existing reverse names get NXDOMAIN instead of NODATA (RFC 2308 §2.2; kept for CoreDNS parity, #43).
+- Shared with CoreDNS v1.15.0: a SOA query for a name that does not exist gets NOERROR instead of NXDOMAIN (RFC 2308; kept for CoreDNS parity, #43).
 - Shared with CoreDNS v1.15.0: `dns-version` in a multicluster zone returns `1.1.0`; the multicluster DNS specification 1.0.0 (KEP-1645) says `1.0.0`.
 - Shared with CoreDNS v1.15.0: a ServiceImport without ports gets NXDOMAIN for A/AAAA, and a ServiceImport port without a protocol never matches `_tcp`; the MCS API defaults the protocol to TCP only in its documentation.
 - Shared with CoreDNS v1.15.0: ANY queries get NODATA, even at the zone (RFC 8482 §4 recommends at least one RRset).
