@@ -68,3 +68,90 @@ fn coredns_ttl_setup_cases() {
         }
     }
 }
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_test.go TestNewNameRule.
+#[test]
+fn coredns_name_setup_cases() {
+    for (args, valid) in [
+        ("exact srv3.coredns.rocks srv4.coredns.rocks", true),
+        ("srv1.coredns.rocks srv2.coredns.rocks", true),
+        ("suffix coredns.rocks coredns.rocks.", true),
+        ("suffix coredns.rocks. coredns.rocks", true),
+        ("suffix coredns.rocks. coredns.rocks.", true),
+        ("regex srv1.coredns.rocks 10", true),
+        ("regex (.*).coredns.rocks 10", true),
+        ("regex (.*).coredns.rocks {1}.coredns.rocks", true),
+        ("regex (.*).coredns.rocks {1}.{2}.coredns.rocks", false),
+        (
+            "regex staging.mydomain.com aws-loadbalancer-id.us-east-1.elb.amazonaws.com",
+            true,
+        ),
+        ("suffix staging.mydomain.com coredns.rock answer", false),
+        (
+            "suffix staging.mydomain.com coredns.rock answer name",
+            false,
+        ),
+        (
+            "suffix staging.mydomain.com coredns.rock answer other",
+            false,
+        ),
+        ("suffix staging.mydomain.com coredns.rock answer auto", true),
+        ("regex staging.mydomain.com coredns.rock answer auto", true),
+        ("regex staging.mydomain.com coredns.rock answer name", false),
+        (
+            "regex staging.mydomain.com coredns.rock answer name coredns.rock staging.mydomain.com",
+            true,
+        ),
+        (
+            "regex staging.mydomain.com coredns.rock answer name (.*).coredns.rock {1}.{2}.staging.mydomain.com",
+            false,
+        ),
+        (
+            "regex staging.mydomain.com coredns.rock answer name (.*).coredns.rock {1}.staging.mydomain.com name (.*).coredns.rock {1}.staging.mydomain.com",
+            true,
+        ),
+        (
+            "regex staging.mydomain.com coredns.rock answer name (.*).coredns.rock {1}.staging.mydomain.com answer name (.*).coredns.rock {1}.staging.mydomain.com",
+            true,
+        ),
+        (
+            "regex staging.mydomain.com coredns.rock answer name (.*).coredns.rock {1}.staging.mydomain.com name (.*).coredns.rock",
+            false,
+        ),
+        (
+            "regex staging.mydomain.com coredns.rock answer name (.*).coredns.rock {1}.staging.mydomain.com value (.*).coredns.rock {1}.staging.mydomain.com",
+            true,
+        ),
+        (
+            "regex staging.mydomain.com coredns.rock answer name (.*).coredns.rock {1}.staging.mydomain.com answer value (.*).coredns.rock {1}.staging.mydomain.com",
+            true,
+        ),
+        (
+            "regex staging.mydomain.com coredns.rock answer name (.*).coredns.rock {1}.staging.mydomain.com value (.*).coredns.rock",
+            false,
+        ),
+        (
+            "suffix staging.mydomain.com. coredns.rock. answer value (.*).coredns.rock {1}.staging.mydomain.com value (.*).coredns.rock {1}.staging.mydomain.com",
+            true,
+        ),
+        (
+            "suffix staging.mydomain.com. coredns.rock. answer value (.*).coredns.rock {1}.staging.mydomain.com answer value (.*).coredns.rock {1}.staging.mydomain.com",
+            true,
+        ),
+        (
+            "suffix staging.mydomain.com. coredns.rock. answer value (.*).coredns.rock {1}.staging.mydomain.com name (.*).coredns.rock {1}.staging.mydomain.com",
+            true,
+        ),
+        (
+            "suffix staging.mydomain.com. coredns.rock. answer value (.*).coredns.rock {1}.staging.mydomain.com value (.*).coredns.rock",
+            false,
+        ),
+    ] {
+        for mode in ["stop", "continue"] {
+            let text = format!(".:53 {{\n rewrite {mode} name {args}\n}}");
+            let result = parse("Corefile", &text)
+                .and_then(|blocks| configure::<Chain>(&blocks, directives()));
+            assert_eq!(result.is_ok(), valid, "{mode} {args}: {result:?}");
+        }
+    }
+}
