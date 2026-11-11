@@ -3,11 +3,16 @@
 use pharos_corefile::{Cursor, Error as CorefileError};
 use pharos_proto::{Class, MessageBuilder, Opcode, Section, Type};
 use pharos_server::{Context, Error, Next, Outcome, Plugin, Protocol};
+use std::{
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug)]
 pub struct Chaos {
     version: Vec<u8>,
     authors: Vec<Vec<u8>>,
+    order: Mutex<Vec<usize>>,
     hostname: Vec<u8>,
 }
 
@@ -46,8 +51,12 @@ impl Chaos {
             .map(|h| h.into_encoded_bytes())
             .unwrap_or_else(|| b"localhost".to_vec());
         hostname.truncate(255);
+        let order = Mutex::new((0..authors.len()).collect());
+        // Initialize platforms' lazy mutex allocation at setup, not on the first Query.
+        drop(order.lock().unwrap_or_else(|e| e.into_inner()));
         Ok(Self {
             version: version.to_vec(),
+            order,
             authors,
             hostname,
         })
@@ -68,11 +77,13 @@ impl Plugin for Chaos {
         else {
             return next.run(cx).await;
         };
+        let is_authors =
+            first.eq_ignore_ascii_case(b"authors") && second.eq_ignore_ascii_case(b"bind");
         let values = if first.eq_ignore_ascii_case(b"version")
             && (second.eq_ignore_ascii_case(b"bind") || second.eq_ignore_ascii_case(b"server"))
         {
             std::slice::from_ref(&self.version)
-        } else if first.eq_ignore_ascii_case(b"authors") && second.eq_ignore_ascii_case(b"bind") {
+        } else if is_authors {
             &self.authors
         } else if (first.eq_ignore_ascii_case(b"hostname") && second.eq_ignore_ascii_case(b"bind"))
             || (first.eq_ignore_ascii_case(b"id") && second.eq_ignore_ascii_case(b"server"))
@@ -99,7 +110,20 @@ impl Plugin for Chaos {
             builder
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(Error::Build)?;
-            for value in values {
+            let mut order =
+                is_authors.then(|| self.order.lock().unwrap_or_else(|e| e.into_inner()));
+            if let Some(order) = &mut order {
+                for (i, index) in order.iter_mut().enumerate() {
+                    *index = i;
+                }
+                let seed = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                shuffle(order, seed);
+            }
+            for i in 0..values.len() {
+                let value = &values[order.as_ref().map_or(i, |order| order[i])];
                 // RFC 1035 §3.3.14: TXT RDATA contains a length-prefixed character-string.
                 let len = u8::try_from(value.len())
                     .map_err(|_| Error::Build(pharos_proto::BuildError::InvalidRdata))?;
@@ -127,6 +151,16 @@ impl Plugin for Chaos {
             Ok(()) => Outcome::Response,
             Err(error) => Outcome::Error(error),
         }
+    }
+}
+
+fn shuffle(order: &mut [usize], seed: u64) {
+    let mut state = seed ^ 0x9e3779b97f4a7c15;
+    for i in (1..order.len()).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        order.swap(i, (state % (i as u64 + 1)) as usize);
     }
 }
 

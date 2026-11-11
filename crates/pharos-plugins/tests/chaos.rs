@@ -162,11 +162,30 @@ async fn chaos_enables_non_in_for_all_blocks_on_listener() {
         let name: Name = name.parse().unwrap();
         let mut wire = Vec::new();
         let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
-        builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::TXT, Class::CH).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::TXT,
+                Class::CH,
+            )
+            .unwrap();
         let _ = builder.finish();
         let mut response = Vec::with_capacity(65535);
-        assert_eq!(server.handle(&wire, "127.0.0.1:1234".parse().unwrap(), Protocol::Udp, &mut response).await, Action::Respond);
-        assert_eq!(Message::parse(&response).unwrap().rcode(), pharos_proto::Rcode::NOERROR);
+        assert_eq!(
+            server
+                .handle(
+                    &wire,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+        assert_eq!(
+            Message::parse(&response).unwrap().rcode(),
+            pharos_proto::Rcode::NOERROR
+        );
     }
 }
 
@@ -176,7 +195,10 @@ async fn authors_are_shuffled_without_losing_records() {
     let chain = configured(&format!("chaos v1 {}", authors.join(" "))).unwrap();
     let (_, wire) = query(&chain, "authors.bind.", Type::TXT, Class::CH).await;
     let message = Message::parse(&wire).unwrap();
-    let order = message.answers().map(|rr| std::str::from_utf8(&rr.rdata[1..]).unwrap().to_owned()).collect::<Vec<_>>();
+    let order = message
+        .answers()
+        .map(|rr| std::str::from_utf8(&rr.rdata[1..]).unwrap().to_owned())
+        .collect::<Vec<_>>();
     let mut sorted = order.clone();
     sorted.sort();
     assert_eq!(sorted, authors);
