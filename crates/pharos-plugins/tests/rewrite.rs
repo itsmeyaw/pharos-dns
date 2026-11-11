@@ -2209,6 +2209,8 @@ async fn coredns_edns_local_variables_and_metadata() {
             Some(&b"\xff\xee\0\x06Team-A"[..]),
         ),
         ("test/label", None, None),
+        ("test/empty", Some(""), None),
+        ("test/does-not-exist", None, None),
     ] {
         let config = format!(".:53 {{\n rewrite edns0 local set 0xffee {{{variable}}}\n}}");
         let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
@@ -2240,7 +2242,7 @@ async fn coredns_edns_local_variables_and_metadata() {
             max_response_size: 512,
         };
         if let Some(value) = value {
-            cx.metadata.insert("test/label", value);
+            cx.metadata.insert(variable, value);
         }
         assert_eq!(
             chain
