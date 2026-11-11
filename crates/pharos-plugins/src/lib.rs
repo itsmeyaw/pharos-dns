@@ -574,15 +574,7 @@ impl pharos_server::Plugin for Unimplemented {
     }
 }
 
-#[cfg(feature = "plugin-any")]
-fn setup_any(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if cursor.next_arg() {
-        return Err(cursor.arg_err());
-    }
-    block.config.any = Some(any::Any);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-chaos")]
 fn setup_chaos(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

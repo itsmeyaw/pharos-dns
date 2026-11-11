@@ -86,7 +86,7 @@ fn main() {
             "timeouts" => "setup_timeouts",
             "debug" => "setup_debug",
             "shed" => "setup_shed",
-            "any" => "setup_any",
+            "any" => "any::setup::setup",
             "chaos" => "setup_chaos",
             "cache" => "setup_cache",
             "bind" => "setup_bind",

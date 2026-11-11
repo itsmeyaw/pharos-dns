@@ -1,3 +1,5 @@
+pub(crate) mod setup;
+
 use pharos_proto::{Class, MessageBuilder, Opcode, Section, Type};
 use pharos_server::{Context, Error, Next, Outcome, Plugin, Protocol};
 
