@@ -58,7 +58,7 @@ impl Config {
             namespace_label_selector: self.namespace_label_selector.clone(),
             pods_verified: self.pod_mode == "verified",
             endpoints: self.endpoints,
-            ..Default::default()
+            zonal: self.zonal,
         }
     }
 }
@@ -257,6 +257,9 @@ fn parse_float32(input: &str) -> Option<f32> {
     } else {
         (false, input.strip_prefix('+').unwrap_or(input))
     };
+    if body.starts_with(['+', '-']) {
+        return None;
+    }
     if body.eq_ignore_ascii_case("nan") {
         return (body.len() == input.len()).then_some(f32::NAN);
     }

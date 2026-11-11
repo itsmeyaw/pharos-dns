@@ -59,3 +59,64 @@ fn endpoint_slice_ignores_unsupported_address_types() {
     .unwrap();
     assert!(Endpoints::from(input).addresses.is_empty());
 }
+
+#[test]
+fn endpoint_zones_are_optional_and_only_retain_ready_addresses() {
+    let input: EndpointSlice = serde_json::from_value(json!({
+        "metadata":{"name":"slice", "namespace":"prod"},
+        "addressType":"IPv4",
+        "endpoints":[
+            {"addresses":["10.0.0.1", "10.0.0.2"], "zone":"US-West-2A"},
+            {"addresses":["10.0.0.3"], "zone":"us-west-2b", "conditions":{"ready":false}},
+            {"addresses":["10.0.0.4"]},
+            {"addresses":["10.0.0.5"], "zone":"", "conditions":{"ready":true}},
+            {"addresses":["10.0.0.1"], "zone":"US-West-2B"},
+            {"addresses":["10.0.0.2"]}
+        ]
+    }))
+    .unwrap();
+    assert!(Endpoints::from(input.clone()).zones.is_none());
+    let ep = Endpoints::from_slice_with_zones(input);
+    let zones = ep.zones.as_ref().unwrap();
+    assert_eq!(zones.len(), 3);
+    assert_eq!(zones.get("10.0.0.1").unwrap(), "us-west-2b");
+    assert_eq!(zones.get("10.0.0.2").unwrap(), "us-west-2a");
+    assert_eq!(zones.get("10.0.0.5").unwrap(), "");
+    assert!(!zones.contains_key("10.0.0.3"));
+    assert!(!zones.contains_key("10.0.0.4"));
+    assert_eq!(ep.clone().zones, ep.zones);
+    let mut changed = ep.clone();
+    changed
+        .zones
+        .as_mut()
+        .unwrap()
+        .insert("10.0.0.1".into(), "other".into());
+    assert_ne!(changed, ep);
+
+    let no_zone: EndpointSlice = serde_json::from_value(json!({
+        "addressType":"IPv6", "endpoints":[{"addresses":["fd00::1"]}]
+    }))
+    .unwrap();
+    assert!(Endpoints::from_slice_with_zones(no_zone).zones.is_none());
+    let ipv6: EndpointSlice = serde_json::from_value(json!({
+        "addressType":"IPv6", "endpoints":[{"addresses":["fd00::1"], "zone":"West"}]
+    }))
+    .unwrap();
+    assert_eq!(
+        Endpoints::from_slice_with_zones(ipv6)
+            .zones
+            .unwrap()
+            .get("fd00::1")
+            .unwrap(),
+        "west"
+    );
+    let unsupported: EndpointSlice = serde_json::from_value(json!({
+        "addressType":"FQDN", "endpoints":[{"addresses":["example.org"], "zone":"west"}]
+    }))
+    .unwrap();
+    assert!(
+        Endpoints::from_slice_with_zones(unsupported)
+            .zones
+            .is_none()
+    );
+}

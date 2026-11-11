@@ -1,6 +1,6 @@
 //! Compact Kubernetes objects retained by the DNS store.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use k8s_openapi::api::{core::v1, discovery::v1::EndpointSlice};
 
@@ -102,10 +102,22 @@ pub struct Endpoints {
     pub service_name: Arc<str>,
     pub addresses: Vec<EndpointAddress>,
     pub ports: Vec<Port>,
+    /// Address-to-zone mappings, allocated only when zonal is enabled and a zone is present.
+    pub zones: Option<Box<HashMap<String, String>>>,
 }
 
 impl From<EndpointSlice> for Endpoints {
     fn from(input: EndpointSlice) -> Self {
+        Self::from_slice(input, false)
+    }
+}
+
+impl Endpoints {
+    pub fn from_slice_with_zones(input: EndpointSlice) -> Self {
+        Self::from_slice(input, true)
+    }
+
+    fn from_slice(input: EndpointSlice, with_zones: bool) -> Self {
         let service_name = input
             .metadata
             .labels
@@ -127,6 +139,7 @@ impl From<EndpointSlice> for Endpoints {
             ports.push(Port::sentinel());
         }
         let mut addresses = Vec::new();
+        let mut zones: Option<Box<HashMap<String, String>>> = None;
         for endpoint in input.endpoints.unwrap_or_default() {
             if input.address_type != "IPv4" && input.address_type != "IPv6" {
                 continue;
@@ -142,6 +155,11 @@ impl From<EndpointSlice> for Endpoints {
                 .filter(|name| name.len() < 64)
                 .unwrap_or_default();
             for ip in endpoint.addresses {
+                if let Some(zone) = endpoint.zone.as_ref().filter(|_| with_zones) {
+                    zones
+                        .get_or_insert_with(Default::default)
+                        .insert(ip.clone(), zone.to_lowercase());
+                }
                 addresses.push(EndpointAddress {
                     ip,
                     hostname: hostname.clone(),
@@ -157,6 +175,7 @@ impl From<EndpointSlice> for Endpoints {
             service_name,
             addresses,
             ports,
+            zones,
         }
     }
 }

@@ -160,6 +160,36 @@ fn matching(request: &name::Request<'_>, port: &Port) -> bool {
                 .eq_ignore_ascii_case(port.protocol.as_bytes()))
 }
 
+fn pod_ip(index: &Index, req: &name::Request<'_>, config: &setup::Config) -> Option<IpAddr> {
+    if config.pod_mode == "disabled" {
+        return None;
+    }
+    let namespace = std::str::from_utf8(req.namespace).ok()?;
+    if index.namespace(namespace).is_none() || req.service.len() > 63 {
+        return None;
+    }
+    let ipv4 = req.service.iter().filter(|&&b| b == b'-').count() == 3
+        && !req.service.windows(2).any(|w| w == b"--");
+    let mut buf = [0; 63];
+    for (i, &byte) in req.service.iter().enumerate() {
+        buf[i] = if byte == b'-' {
+            if ipv4 { b'.' } else { b':' }
+        } else {
+            byte
+        };
+    }
+    let text = std::str::from_utf8(&buf[..req.service.len()]).ok()?;
+    let ip = text.parse().ok()?;
+    if config.pod_mode == "verified"
+        && !index
+            .pods_by_ip(text)
+            .any(|pod| pod.namespace.as_ref().eq_ignore_ascii_case(namespace))
+    {
+        return None;
+    }
+    Some(ip)
+}
+
 fn endpoint_label<'a>(
     address: &'a EndpointAddress,
     pod_names: bool,
@@ -217,8 +247,7 @@ fn visit(
     {
         return false;
     }
-    // shortcut: zonal endpoint selection is stage 3; do not return unfiltered addresses for pinned names.
-    if !req.zone.is_empty() {
+    if !req.zone.is_empty() && !svc.headless() {
         return false;
     }
     if svc.service_type == "ExternalName" {
@@ -228,10 +257,30 @@ fn visit(
             && !svc.external_name.is_empty()
             && svc.external_name.parse::<IpAddr>().is_err();
     }
-    let mut found = false;
+    let mut found = !req.zone.is_empty();
     if svc.headless() || !req.endpoint.is_empty() {
+        let zone_matches = |ep: &pharos_kubernetes::object::Endpoints, addr: &EndpointAddress| {
+            ep.zones
+                .as_ref()
+                .and_then(|zones| zones.get(&addr.ip))
+                .is_some_and(|zone| {
+                    zone.as_bytes()
+                        .split(|b| *b == b'.')
+                        .eq(req.zone.iter().copied())
+                })
+        };
+        let filter_zone = !req.zone.is_empty()
+            && (!req.prefer
+                || index.endpoints(namespace, service).any(|ep| {
+                    ep.addresses.iter().any(|addr| {
+                        zone_matches(ep, addr) && ep.ports.iter().any(|port| matching(req, port))
+                    })
+                }));
         for ep in index.endpoints(namespace, service) {
             for addr in &ep.addresses {
+                if filter_zone && !zone_matches(ep, addr) {
+                    continue;
+                }
                 let mut buf = [0; 64];
                 let label = endpoint_label(addr, config.endpoint_pod_names, &mut buf);
                 if !req.endpoint.is_empty() && !req.endpoint.eq_ignore_ascii_case(label) {
@@ -403,6 +452,7 @@ impl pharos_server::Plugin for Kubernetes {
         };
         let store = store.unwrap_or_default();
         let mut external = None;
+        let mut pod = None;
         let exists = if q.qtype == Type::SOA
             || count == 0
             || count == 1
@@ -432,6 +482,16 @@ impl pharos_server::Plugin for Kubernetes {
                     }
                     ok
                 })
+            } else if req.kind == b"pod" {
+                if req.service.is_empty() {
+                    self.config.pod_mode != "disabled"
+                        && std::str::from_utf8(req.namespace)
+                            .ok()
+                            .is_some_and(|ns| store.with_read(|i| i.namespace(ns).is_some()))
+                } else {
+                    pod = store.with_read(|i| pod_ip(i, req, &self.config));
+                    pod.is_some()
+                }
             } else {
                 false
             }
@@ -633,6 +693,69 @@ impl pharos_server::Plugin for Kubernetes {
                     b"\x051.1.0",
                 )?;
                 answers += 1;
+            }
+            if let Some(ip) = pod {
+                if q.qtype == Type::SRV
+                    && let Some(req) = &req
+                {
+                    let mut wire = [0; 255];
+                    if let Some(target) =
+                        child(&[req.service, req.namespace, b"pod"], zone_ref, &mut wire)
+                        && b.record_with(
+                            Section::Answer,
+                            q.name,
+                            Type::SRV,
+                            Class::IN,
+                            self.config.ttl,
+                            |w| {
+                                w.write_bytes(&[0, 0, 0, 100, 0, 0])?;
+                                w.write_uncompressed_name(target)
+                            },
+                        )?
+                    {
+                        answers += 1;
+                        match ip {
+                            IpAddr::V4(ip) => b.record(
+                                Section::Additional,
+                                target,
+                                Type::A,
+                                Class::IN,
+                                self.config.ttl,
+                                &ip.octets(),
+                            )?,
+                            IpAddr::V6(ip) => b.record(
+                                Section::Additional,
+                                target,
+                                Type::AAAA,
+                                Class::IN,
+                                self.config.ttl,
+                                &ip.octets(),
+                            )?,
+                        };
+                    }
+                }
+                let result = match ip {
+                    IpAddr::V4(ip) if q.qtype == Type::A => b.record(
+                        Section::Answer,
+                        q.name,
+                        Type::A,
+                        Class::IN,
+                        self.config.ttl,
+                        &ip.octets(),
+                    )?,
+                    IpAddr::V6(ip) if q.qtype == Type::AAAA => b.record(
+                        Section::Answer,
+                        q.name,
+                        Type::AAAA,
+                        Class::IN,
+                        self.config.ttl,
+                        &ip.octets(),
+                    )?,
+                    _ => false,
+                };
+                if result {
+                    answers += 1;
+                }
             }
             if let Some(target) = &target
                 && (q.qtype == Type::CNAME || chased.is_some())

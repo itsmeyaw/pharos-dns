@@ -118,7 +118,7 @@ fn parses_coredns_options() {
     let watch = k.watch_config();
     assert_eq!(watch.namespaces.len(), 2);
     assert_eq!(watch.label_selector, k.label_selector);
-    assert!(watch.pods_verified && watch.endpoints);
+    assert!(watch.pods_verified && watch.endpoints && watch.zonal);
 }
 
 #[test]
@@ -301,6 +301,11 @@ fn qps_follows_go_float32_syntax_range_and_rounding() {
         );
     }
     for input in [
+        "--1",
+        "++1",
+        "--0",
+        "+-0",
+        "-+0",
         "1e39",
         "-1e39",
         "3.4028236e38",

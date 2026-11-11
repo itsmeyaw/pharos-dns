@@ -54,12 +54,17 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
                 let (kind, items) = if request.contains("/api/v1/services") {
                     (
                         "ServiceList",
-                        r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"clusterIPs":["10.0.0.1","2001:db8::1"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}},{"metadata":{"name":"head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"dead","namespace":"prod"},"spec":{"clusterIP":"10.0.0.8"}},{"metadata":{"name":"alias","namespace":"prod"},"spec":{"type":"ExternalName","externalName":"example.org"}},{"metadata":{"name":"internal","namespace":"prod"},"spec":{"type":"ExternalName","externalName":"web.prod.svc.cluster.local"}}]"#,
+                        r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"clusterIPs":["10.0.0.1","2001:db8::1"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}},{"metadata":{"name":"head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"dead","namespace":"prod"},"spec":{"clusterIP":"10.0.0.8"}},{"metadata":{"name":"v6head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"alias","namespace":"prod"},"spec":{"type":"ExternalName","externalName":"example.org"}},{"metadata":{"name":"internal","namespace":"prod"},"spec":{"type":"ExternalName","externalName":"web.prod.svc.cluster.local"}}]"#,
                     )
                 } else if request.contains("/endpointslices") {
                     (
                         "EndpointSliceList",
-                        r#"[{"metadata":{"name":"one","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.0.1.2"],"hostname":"one"}]},{"metadata":{"name":"two","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.3"],"hostname":"two"}]},{"metadata":{"name":"dns","namespace":"prod","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["192.0.2.30"]}]}]"#,
+                        r#"[{"metadata":{"name":"one","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.0.1.2"],"hostname":"one","targetRef":{"name":"ignored"},"zone":"us.a"}]},{"metadata":{"name":"two","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.3"],"targetRef":{"name":"pod-two"},"zone":"us.b"}]},{"metadata":{"name":"v6","namespace":"prod","labels":{"kubernetes.io/service-name":"v6head"}},"addressType":"IPv6","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["2001:db8::1"],"zone":"us.a"}]},{"metadata":{"name":"dns","namespace":"prod","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["192.0.2.30"]}]}]"#,
+                    )
+                } else if request.contains("/api/v1/pods") {
+                    (
+                        "PodList",
+                        r#"[{"metadata":{"name":"pod-one","namespace":"prod"},"status":{"podIPs":[{"ip":"10.0.1.2"}]}}]"#,
                     )
                 } else {
                     ("NamespaceList", r#"[{"metadata":{"name":"prod"}}]"#)
@@ -92,7 +97,7 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
     };
     let ready = ready_address.map_or_else(String::new, |address| format!(" ready {address}\n"));
     let text = format!(
-        ".:53 {{\n{hosts}{ready} kubernetes cluster.local {{\n  endpoint http://{address}\n  startup_timeout 3s\n  ignore empty_service\n }}\n}}"
+        ".:53 {{\n{hosts}{ready} kubernetes cluster.local {{\n  endpoint http://{address}\n  startup_timeout 3s\n  ignore empty_service\n  zonal\n  pods insecure\n  endpoint_pod_names\n }}\n}}"
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
     let chain = &blocks[0].config;
@@ -104,6 +109,169 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
     let root: Name = ".".parse().unwrap();
     for (name, kind, code, answers, extra) in [
         ("web.prod.svc.cluster.local.", Type::A, Rcode::NOERROR, 1, 0),
+        (
+            "web.prod.svc.cluster.local.",
+            Type::ANY,
+            Rcode::NOERROR,
+            0,
+            0,
+        ),
+        (
+            "missing.prod.svc.cluster.local.",
+            Type::ANY,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
+        (
+            "10-0-1-2.prod.pod.cluster.local.",
+            Type::A,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "10-0-1-2.prod.pod.cluster.local.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            0,
+            0,
+        ),
+        (
+            "10-0-1-2.prod.pod.cluster.local.",
+            Type::SRV,
+            Rcode::NOERROR,
+            1,
+            1,
+        ),
+        (
+            "2001-db8--1.prod.pod.cluster.local.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "bad.prod.pod.cluster.local.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
+        (
+            "10-0-1-2.missing.pod.cluster.local.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
+        ("prod.pod.cluster.local.", Type::A, Rcode::NOERROR, 0, 0),
+        (
+            "pod-two.head.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "ignored.head.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
+        (
+            "*.head.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
+        ("*.prod.svc.cluster.local.", Type::A, Rcode::NXDOMAIN, 0, 0),
+        (
+            "us.a.pin._zone.head.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "us.c.pin._zone.head.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NOERROR,
+            0,
+            0,
+        ),
+        (
+            "us.c.pin._zone.head.prod.svc.cluster.local.",
+            Type::TXT,
+            Rcode::NOERROR,
+            0,
+            0,
+        ),
+        (
+            "us.c.prefer._zone.head.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NOERROR,
+            2,
+            0,
+        ),
+        (
+            "us.a.pin._zone.head.prod.svc.cluster.local.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            0,
+            0,
+        ),
+        (
+            "us.a.pin._zone.v6head.prod.svc.cluster.local.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            1,
+            0,
+        ),
+        (
+            "us.a.pin._zone.v6head.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NOERROR,
+            0,
+            0,
+        ),
+        (
+            "us.a.pin._zone.v6head.prod.svc.cluster.local.",
+            Type::SRV,
+            Rcode::NOERROR,
+            1,
+            1,
+        ),
+        (
+            "us.a.pin._zone.head.prod.svc.cluster.local.",
+            Type::SRV,
+            Rcode::NOERROR,
+            1,
+            1,
+        ),
+        (
+            "us.c.prefer._zone.head.prod.svc.cluster.local.",
+            Type::SRV,
+            Rcode::NOERROR,
+            1,
+            1,
+        ),
+        (
+            "us.a.pin._zone.web.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
+        (
+            "us.a.pin._zone.missing.prod.svc.cluster.local.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            0,
+            0,
+        ),
         (
             "WEB.prod.svc.cluster.local.",
             Type::AAAA,
@@ -261,6 +429,41 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             "{name} {kind:?}"
         );
         assert!(message.aa());
+        let qname = name.to_string();
+        if qname == "us.a.pin._zone.head.prod.svc.cluster.local." && kind == Type::A {
+            assert_eq!(message.answers().next().unwrap().rdata, [10, 0, 1, 2]);
+        }
+        if qname == "us.a.pin._zone.v6head.prod.svc.cluster.local." && kind == Type::AAAA {
+            assert_eq!(
+                message.answers().next().unwrap().rdata,
+                "2001:db8::1"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets()
+            );
+        }
+        if qname == "us.a.pin._zone.v6head.prod.svc.cluster.local." && kind == Type::SRV {
+            let Rdata::Srv {
+                weight,
+                port,
+                target,
+                ..
+            } = message.answers().next().unwrap().data().unwrap()
+            else {
+                panic!("not SRV")
+            };
+            assert_eq!((weight, port), (100, 8080));
+            assert_eq!(
+                target.to_string(),
+                "2001-db8--1.v6head.prod.svc.cluster.local."
+            );
+            assert_eq!(message.additionals().next().unwrap().rtype, Type::AAAA);
+        }
+        if qname == "us.c.prefer._zone.head.prod.svc.cluster.local." && kind == Type::A {
+            let ips: Vec<_> = message.answers().map(|rr| rr.rdata.to_vec()).collect();
+            assert!(ips.contains(&vec![10, 0, 1, 2]));
+            assert!(ips.contains(&vec![10, 0, 1, 3]));
+        }
         if answers > 0 {
             assert_eq!(
                 message.answers().next().unwrap().name.to_string(),
@@ -280,7 +483,11 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
                 }
             );
         }
-        if kind == Type::SRV && answers > 0 {
+        if kind == Type::SRV
+            && answers > 0
+            && !name.to_string().contains(".pod.")
+            && !name.to_string().contains(".v6head.")
+        {
             let record = message.answers().next().unwrap();
             assert_eq!(
                 record.rdata[6] & 0xc0,
@@ -300,7 +507,9 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             let lower = name.to_string().to_ascii_lowercase();
             assert_eq!(
                 weight,
-                if lower.starts_with("web.") {
+                if lower.starts_with("us.c.prefer.") {
+                    50
+                } else if lower.starts_with("web.") {
                     25
                 } else if lower.contains("web.") || lower.starts_with("head.") {
                     50
@@ -573,6 +782,77 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
     assert!(response.tc());
     assert_eq!(response.answers().next().unwrap().rtype, Type::CNAME);
     lifecycle.run(Phase::Shutdown).await.unwrap();
+    for (options, qname, expected) in [
+        (
+            "pods verified",
+            "10-0-1-2.prod.pod.cluster.local.",
+            Rcode::NOERROR,
+        ),
+        (
+            "pods verified",
+            "10-0-1-3.prod.pod.cluster.local.",
+            Rcode::NXDOMAIN,
+        ),
+        (
+            "pods disabled",
+            "10-0-1-2.prod.pod.cluster.local.",
+            Rcode::NXDOMAIN,
+        ),
+        (
+            "noendpoints",
+            "head.prod.svc.cluster.local.",
+            Rcode::NXDOMAIN,
+        ),
+        ("noendpoints", "web.prod.svc.cluster.local.", Rcode::NOERROR),
+        (
+            "noendpoints",
+            "us.a.pin._zone.head.prod.svc.cluster.local.",
+            Rcode::NXDOMAIN,
+        ),
+        (
+            "namespaces other",
+            "web.prod.svc.cluster.local.",
+            Rcode::NXDOMAIN,
+        ),
+    ] {
+        let text = format!(
+            ".:53 {{\n kubernetes cluster.local {{\n endpoint http://{address}\n {options}\n }}\n}}"
+        );
+        let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        let chain = &blocks[0].config;
+        chain.lifecycle.run(Phase::Startup).await.unwrap();
+        let name: Name = qname.parse().unwrap();
+        let mut query = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+        assert_eq!(
+            Message::parse(&response).unwrap().rcode(),
+            expected,
+            "{options} {qname}"
+        );
+        chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+    }
     task.abort();
     missing_name_is_servfail_before_cache_sync().await;
 }

@@ -686,6 +686,63 @@ async fn controller_applies_list_watch_updates_and_deletions() {
 }
 
 #[tokio::test]
+async fn zonal_watch_retains_zones_on_list_update_and_relist() {
+    assert!(!WatchConfig::default().zonal);
+    for zonal in [false, true] {
+        let server = FakeServer::start().await;
+        let path = "/apis/discovery.k8s.io/v1/endpointslices";
+        let slice = |version: &str, zone: &str| {
+            json!({
+                "apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice",
+                "metadata":{"name":"slice", "namespace":"prod", "resourceVersion":version,
+                    "labels":{"kubernetes.io/service-name":"web"}},
+                "addressType":"IPv4", "endpoints":[{"addresses":["10.0.1.1"], "zone":zone}]
+            })
+        };
+        server
+            .lists
+            .lock()
+            .unwrap()
+            .insert(path.into(), json!([slice("1", "Zone-A")]));
+        let client =
+            kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+        let mut controller = Controller::start(
+            client,
+            WatchConfig {
+                zonal,
+                ..Default::default()
+            },
+        );
+        let store = controller.store();
+        until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 3).await;
+        let check = |version: &str, zone: &str| {
+            store.with_read(|index| {
+                index.endpoints("prod", "web").next().is_some_and(|ep| {
+                    ep.version == version
+                        && ep
+                            .zones
+                            .as_ref()
+                            .and_then(|zones| zones.get("10.0.1.1"))
+                            .map(String::as_str)
+                            == zonal.then_some(zone)
+                })
+            })
+        };
+        assert!(check("1", "zone-a"));
+        server.send(path, "MODIFIED", slice("2", "Zone-B"));
+        until(|| check("2", "zone-b")).await;
+        server
+            .lists
+            .lock()
+            .unwrap()
+            .insert(path.into(), json!([slice("3", "Zone-C")]));
+        server.send(path, "ERROR", json!({"apiVersion":"v1", "kind":"Status", "status":"Failure", "reason":"Expired", "message":"resource version too old", "code":410}));
+        until(|| check("3", "zone-c")).await;
+        controller.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn controller_only_watches_verified_pods_and_sends_selectors() {
     let server = FakeServer::start().await;
     let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();

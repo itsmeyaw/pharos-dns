@@ -163,6 +163,35 @@ mod tests {
     }
 
     #[test]
+    fn serial_tracks_zone_only_endpoint_changes() {
+        let store = Store::default();
+        let mut endpoint = slice("one", "10.0.1.1");
+        endpoint.version = "1".into();
+        endpoint.zones = Some(Box::new(
+            [(String::from("10.0.1.1"), String::from("zone-a"))].into(),
+        ));
+        store.apply_endpoints(endpoint.clone());
+        store.0.write().unwrap().serial = 1;
+        endpoint.version = "2".into();
+        endpoint
+            .zones
+            .as_mut()
+            .unwrap()
+            .insert("10.0.1.1".into(), "zone-b".into());
+        store.apply_endpoints(endpoint.clone());
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+        store.0.write().unwrap().serial = 1;
+        endpoint.version = "3".into();
+        endpoint
+            .zones
+            .as_mut()
+            .unwrap()
+            .insert("10.0.1.1".into(), "zone-c".into());
+        store.replace_endpoints(vec![endpoint], |_| ());
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+    }
+
+    #[test]
     fn terminating_pod_relist_keeps_previous_record_until_delete() {
         let store = Store::default();
         let pod = Pod {
@@ -577,6 +606,7 @@ fn endpoints_changed(old: Option<&Endpoints>, new: &Endpoints) -> bool {
     old.is_none_or(|old| {
         old.version != new.version
             && (old.ports != new.ports
+                || old.zones != new.zones
                 || old.addresses.len() != new.addresses.len()
                 || old
                     .addresses

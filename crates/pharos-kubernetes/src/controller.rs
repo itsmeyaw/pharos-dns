@@ -19,10 +19,12 @@ use kube::{
 use serde::de::DeserializeOwned;
 use tokio::task::JoinHandle;
 
+use crate::object::Endpoints;
 use crate::store::{Index, Store};
 use pharos_server::metrics::KubernetesMetrics;
 
 pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+type Conversion<K, T> = (fn(&K) -> Option<SliceLatency>, fn(K) -> T);
 
 /// Values supplied by the kubernetes Plugin's Corefile configuration.
 #[derive(Clone, Debug)]
@@ -32,6 +34,7 @@ pub struct WatchConfig {
     pub namespace_label_selector: Option<String>,
     pub pods_verified: bool,
     pub endpoints: bool,
+    pub zonal: bool,
 }
 
 impl Default for WatchConfig {
@@ -42,6 +45,7 @@ impl Default for WatchConfig {
             namespace_label_selector: None,
             pods_verified: false,
             endpoints: true,
+            zonal: false,
         }
     }
 }
@@ -100,7 +104,7 @@ impl Controller {
             Store::apply_service,
             Store::delete_service,
             |store, objects, _, _| store.replace_services(objects),
-            |_| None,
+            (|_| None, Into::into),
         );
         if config.endpoints {
             this.watch(
@@ -109,7 +113,14 @@ impl Controller {
                 Store::apply_endpoints,
                 Store::delete_endpoints,
                 replace_endpoint_batch,
-                endpoint_latency,
+                (
+                    endpoint_latency,
+                    if config.zonal {
+                        Endpoints::from_slice_with_zones
+                    } else {
+                        Endpoints::from
+                    },
+                ),
             );
         }
         if config.pods_verified {
@@ -125,7 +136,7 @@ impl Controller {
                 Store::apply_pod,
                 Store::delete_pod,
                 |store, objects, _, _| store.replace_pods(objects),
-                |_| None,
+                (|_| None, Into::into),
             );
         }
         let ns_config = watcher::Config {
@@ -138,7 +149,7 @@ impl Controller {
             Store::apply_namespace,
             |store, _, name| store.delete_namespace(name),
             |store, objects, _, _| store.replace_namespaces(objects),
-            |_| None,
+            (|_| None, Into::into),
         );
         this
     }
@@ -191,11 +202,12 @@ impl Controller {
         apply: fn(&Store, T),
         delete: fn(&Store, &str, &str),
         replace: fn(&Store, Vec<T>, Vec<SliceLatency>, Option<&KubernetesMetrics>),
-        observe: fn(&K) -> Option<SliceLatency>,
+        conversion: Conversion<K, T>,
     ) where
         K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
-        T: From<K> + Send + 'static,
+        T: Send + 'static,
     {
+        let (observe, convert) = conversion;
         let store = self.store.clone();
         let metrics = self.metrics.clone();
         let synced = Arc::new(AtomicBool::new(false));
@@ -217,7 +229,7 @@ impl Controller {
                         {
                             list_latencies.push(latency);
                         }
-                        initial.push(object.into());
+                        initial.push(convert(object));
                     }
                     Ok(Event::InitDone) => {
                         replace(
@@ -230,7 +242,7 @@ impl Controller {
                     }
                     Ok(Event::Apply(object)) => {
                         let latency = metrics.is_some().then(|| observe(&object)).flatten();
-                        apply(&store, object.into());
+                        apply(&store, convert(object));
                         record_latency(&store, metrics.as_ref(), latency);
                     }
                     Ok(Event::Delete(object)) => {
