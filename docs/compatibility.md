@@ -1,5 +1,10 @@
 # CoreDNS compatibility
 
+## any
+
+- Like CoreDNS, `any` synthesizes its HINFO before consulting a Backend, even for a CNAME or signed Zone; it cannot include an RRSIG when DO is set (RFC 8482 §4.2).
+- The UDP caller must supply a Response buffer with enough capacity; otherwise Pharos returns an error instead of allocating on the UDP Query path. TCP buffers can grow, as with `whoami`.
+
 ## bind
 
 - Interface enumeration uses `getifaddrs`; scoped IPv6 Listener labels use the numeric interface index rather than CoreDNS's interface name.
@@ -194,7 +199,7 @@
 
 ## General
 
-- Only `bind`, `bufsize`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `any`, `bind`, `bufsize`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI

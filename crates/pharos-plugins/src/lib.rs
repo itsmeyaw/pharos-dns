@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-any")]
+pub mod any;
 #[cfg(feature = "plugin-bind")]
 pub mod bind;
 #[cfg(feature = "plugin-bufsize")]
@@ -442,6 +444,16 @@ impl pharos_server::Plugin for Unimplemented {
     ) -> pharos_server::Outcome {
         pharos_server::Outcome::Error(pharos_server::Error::NotImplemented)
     }
+}
+
+#[cfg(feature = "plugin-any")]
+fn setup_any(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    cursor.next();
+    if !cursor.remaining_args().is_empty() || cursor.next_block() {
+        return Err(cursor.arg_err());
+    }
+    block.config.any = Some(any::Any);
+    Ok(())
 }
 
 #[cfg(feature = "plugin-whoami")]

@@ -22,6 +22,7 @@ fn main() {
     );
     for name in &enabled {
         let ty = match *name {
+            "any" => "any::Any",
             "cache" => "cache::Cache",
             "bind" => "()",
             "bufsize" => "bufsize::Bufsize",
@@ -47,6 +48,7 @@ fn main() {
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
+            "any" => "setup_any",
             "cache" => "setup_cache",
             "bind" => "setup_bind",
             "bufsize" => "setup_bufsize",
