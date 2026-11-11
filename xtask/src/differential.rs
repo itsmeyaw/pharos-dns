@@ -133,7 +133,7 @@ impl Drop for Server {
     }
 }
 
-// shortcut: another process can take the port before a server binds; the scenario then fails at startup, add a retry if it gets flaky.
+// shortcut: another process can take the port before a server binds; the runner retries such a scenario once, inherit sockets if retries still fail.
 pub(crate) fn free_port() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -438,7 +438,18 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
     let mut failures = Vec::new();
     for path in paths {
         let name = path.file_name().unwrap().to_string_lossy();
-        match scenario(&path, &pharos, coredns, &docs, self_test) {
+        // Ports are released before servers start, so another process can take one; retry once with fresh ports.
+        let result = match scenario(&path, &pharos, coredns, &docs, self_test) {
+            Err(error)
+                if error
+                    .to_ascii_lowercase()
+                    .contains("address already in use") =>
+            {
+                scenario(&path, &pharos, coredns, &docs, self_test)
+            }
+            result => result,
+        };
+        match result {
             Ok(count) => println!("{name:<24} {count:>7}  PASS"),
             Err(error) => {
                 println!("{name:<24} {:>7}  FAIL", "-");
