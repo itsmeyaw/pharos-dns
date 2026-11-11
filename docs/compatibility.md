@@ -16,6 +16,9 @@
 - Search-path Self Lookups allocate; issue #86 tracks allocation-free Self Lookup.
 - Search-path Self Lookups re-enter the Listener rather than CoreDNS's Next,
   so earlier Plugins, routing, Response limits and error handling also apply.
+  After an unwritten first outcome, SERVFAIL, REFUSED, FORMERR and NOTIMP
+  Self Lookup Responses are treated as unwritten: Listener synthesis obscures
+  whether a later Plugin actually wrote such a Response.
 
 ## bind
 

@@ -236,7 +236,9 @@ impl Plugin for AutoPath {
             let Ok(response) = Message::parse(&reply) else {
                 return Outcome::Error(ServerError::InvalidQuery);
             };
-            if response.rcode() == Rcode::NXDOMAIN {
+            if response.rcode() == Rcode::NXDOMAIN
+                || (outcome != Outcome::Response && matches!(response.rcode().0, 1 | 2 | 4 | 5))
+            {
                 continue;
             }
             self.count(cx.local);

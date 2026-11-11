@@ -105,6 +105,90 @@ impl Next for DropFirstBackend {
     }
 }
 
+struct NoAnswer(
+    pharos_plugins::autopath::AutoPath,
+    bool,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+);
+impl pharos_server::Chain for NoAnswer {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, NoAnswerBackend(self.1, &self.2)).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct NoAnswerBackend<'a>(bool, &'a std::sync::atomic::AtomicUsize);
+impl Next for NoAnswerBackend<'_> {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.0 {
+            Outcome::Drop
+        } else {
+            Outcome::Unanswered(Rcode::SERVFAIL)
+        }
+    }
+}
+
+// Derived from CoreDNS TestAutoPathNoAnswer and TestAutoPathNilMsgFromNext.
+#[tokio::test]
+async fn coredns_unwritten_replies_keep_the_first_outcome() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/autopath-search.conf"
+    );
+    let config = format!(".:53 {{\n autopath {path}\n}}");
+    for drop in [true, false] {
+        let mut chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let key = ListenerKey {
+            transport: Transport::Dns,
+            address: "127.0.0.1:53".parse().unwrap(),
+        };
+        let mut router = Router::default();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        router.add(
+            key,
+            ".".parse().unwrap(),
+            Some(NoAnswer(
+                chain.autopath.take().unwrap(),
+                drop,
+                calls.clone(),
+            )),
+            vec![],
+        );
+        let server = Server::new(router, key);
+        let name: Name = "c.example.org.".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        b.question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(65535);
+        let action = server
+            .handle(
+                &wire,
+                "127.0.0.1:1".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await;
+        if drop {
+            assert_eq!(action, Action::Drop);
+        } else {
+            assert_eq!(action, Action::Respond);
+            assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::SERVFAIL);
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 4);
+    }
+}
+
 #[tokio::test]
 async fn coredns_search_continues_after_unwritten_first_reply() {
     let path = concat!(
