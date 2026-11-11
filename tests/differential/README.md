@@ -76,7 +76,8 @@ The dns64 README scenarios use an inline hosts Backend. The harness sends from
 IPv4 loopback, so synthesis without `allow_ipv4` is covered by Rust tests.
 The siit README scenario uses an inline hosts Backend to exercise the prefix.
 The `rewrite` name, PTR and TTL scenarios use inline hosts records. The CNAME
-scenario combines the Kubernetes ExternalName fixture with hosts. The README's
+scenarios use analogous names from the Kubernetes ExternalName and hosts fixtures;
+the README's literal `my-app.com` example has no matching fixture. The README's
 SERVFAIL-to-NOERROR RCODE examples are tested in Rust: the shared harness has no
 deterministic SERVFAIL backend. `rewrite-rcode` compares a nonmatching NXDOMAIN,
 and `rewrite-rcode-refused` compares a matching REFUSED-to-NOERROR rewrite using ACL.

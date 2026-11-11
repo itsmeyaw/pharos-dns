@@ -1,0 +1,7 @@
+.:{port} {
+    rewrite name example.net example.org
+    hosts empty.hosts {
+        192.0.2.10 example.org
+        reload 0
+    }
+}

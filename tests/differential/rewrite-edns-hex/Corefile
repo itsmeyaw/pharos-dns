@@ -1,0 +1,4 @@
+.:{port} {
+    rewrite edns0 local set 0xffee 0x61626364
+    whoami
+}
