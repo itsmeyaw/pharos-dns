@@ -2,6 +2,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::{Name, Type};
 
+const INVALID_ESCAPE: &str = "invalid escape in numeric field";
+
 mod advanced;
 mod legacy;
 
@@ -9,27 +11,40 @@ mod legacy;
 /// `fields` are whitespace-separated tokens with surrounding quotes removed and
 /// backslash escapes preserved, as produced by the Zone lexer.
 pub fn parse_rdata(rtype: Type, fields: &[&str], origin: &Name) -> Result<Vec<u8>, String> {
-    parse_rdata_located(rtype, fields, origin).map_err(|(_, message)| message)
+    parse_rdata_located(rtype, fields, &[], origin).map_err(|(_, message)| message)
 }
 
+/// `bad[i]` marks fields whose invalid digit escape the lexer already dropped (`\9` -> `9`).
 pub(crate) fn parse_rdata_located(
     rtype: Type,
     fields: &[&str],
+    bad: &[bool],
     origin: &Name,
 ) -> Result<Vec<u8>, (usize, String)> {
     let mut index = 0;
-    parse_rdata_inner(rtype, fields, origin, &mut index).map_err(|message| (index, message))
+    parse_rdata_inner(rtype, fields, bad, origin, &mut index).map_err(|message| (index, message))
 }
 
 fn parse_rdata_inner(
     rtype: Type,
     fields: &[&str],
+    bad: &[bool],
     origin: &Name,
     index: &mut usize,
 ) -> Result<Vec<u8>, String> {
     macro_rules! at {
         ($i:expr, $expr:expr) => {{
             *index = $i;
+            $expr
+        }};
+    }
+    // RFC 1035 §5.1: `\` plus one or two digits is no escape, so a numeric field cannot hold it.
+    macro_rules! num {
+        ($i:expr, $expr:expr) => {{
+            *index = $i;
+            if bad.get($i).copied().unwrap_or(false) {
+                return Err(INVALID_ESCAPE.into());
+            }
             $expr
         }};
     }
@@ -43,15 +58,15 @@ fn parse_rdata_inner(
             *index = fields.len();
             return Err("missing generic RDATA length".into());
         }
-        let len: u16 = at!(1, number(fields[1]))?;
+        let len: u16 = num!(1, number(fields[1]))?;
         let data = at!(hex_error_index(fields, 2), hex(&fields[2..].concat()))?;
         if data.len() != usize::from(len) {
             return Err("generic RDATA length mismatch".into());
         }
         return generic_rdata(rtype, &data);
     }
-    if let Some(result) =
-        legacy::parse(rtype, fields, origin).or_else(|| advanced::parse(rtype, fields, origin))
+    if let Some(result) = legacy::parse(rtype, fields, bad, origin)
+        .or_else(|| advanced::parse(rtype, fields, bad, origin))
     {
         return result.map_err(|(field, message)| {
             *index = field;
@@ -89,22 +104,18 @@ fn parse_rdata_inner(
         }
         Type::MX => {
             at!(fields.len().min(2), count(fields, 2))?;
-            at!(0, put16(&mut out, fields[0]))?;
+            num!(0, put16(&mut out, fields[0]))?;
             at!(1, name(&mut out, fields[1], origin))?;
         }
         Type::SOA => {
             at!(fields.len().min(7), count(fields, 7))?;
             at!(0, name(&mut out, fields[0], origin))?;
             at!(1, name(&mut out, fields[1], origin))?;
-            at!(2, put32(&mut out, fields[2]))?;
+            num!(2, put32(&mut out, fields[2]))?;
             // RFC 2308 §4: SOA timers accept TTL unit suffixes; the serial remains decimal.
             for (i, field) in fields[3..].iter().enumerate() {
-                *index = i + 3;
-                out.extend(
-                    super::parse_ttl(field)
-                        .ok_or("invalid SOA timer")?
-                        .to_be_bytes(),
-                );
+                let timer = num!(i + 3, super::parse_ttl(&decode_escapes(field)));
+                out.extend(timer.ok_or("invalid SOA timer")?.to_be_bytes());
             }
         }
         // RFC 4408 §3.1.1: the obsolete SPF RR type has the same format as TXT.
@@ -151,14 +162,14 @@ fn parse_rdata_inner(
         Type::SRV => {
             at!(fields.len().min(4), count(fields, 4))?;
             for (i, field) in fields[..3].iter().enumerate() {
-                at!(i, put16(&mut out, field))?;
+                num!(i, put16(&mut out, field))?;
             }
             at!(3, name(&mut out, fields[3], origin))?;
         }
         Type::NAPTR => {
             at!(fields.len().min(6), count(fields, 6))?;
-            at!(0, put16(&mut out, fields[0]))?;
-            at!(1, put16(&mut out, fields[1]))?;
+            num!(0, put16(&mut out, fields[0]))?;
+            num!(1, put16(&mut out, fields[1]))?;
             for (i, field) in fields[2..5].iter().enumerate() {
                 at!(i + 2, character_string(&mut out, field))?;
             }
@@ -167,7 +178,7 @@ fn parse_rdata_inner(
         // RFC 8659 §4: CAA has flags, a length-prefixed tag, and an unframed value.
         Type::CAA => {
             at!(fields.len().min(3), count(fields, 3))?;
-            let flag = at!(0, number(fields[0]))?;
+            let flag = num!(0, number(fields[0]))?;
             let tag = at!(1, unescape(fields[1]))?;
             if tag.is_empty() {
                 return Err("invalid CAA tag".into());
@@ -183,8 +194,8 @@ fn parse_rdata_inner(
         // RFC 7553 §4: URI has two 16-bit integers followed by target octets.
         Type::URI => {
             at!(fields.len().min(3), count(fields, 3))?;
-            at!(0, put16(&mut out, fields[0]))?;
-            at!(1, put16(&mut out, fields[1]))?;
+            num!(0, put16(&mut out, fields[0]))?;
+            num!(1, put16(&mut out, fields[1]))?;
             out.extend(at!(2, unescape(fields[2]))?);
         }
         // RFC 4034 §5 and RFC 7344 §4: DS/CDS digest is hexadecimal.
@@ -193,9 +204,9 @@ fn parse_rdata_inner(
                 *index = fields.len();
                 return Err("missing DS fields".into());
             }
-            at!(0, put16(&mut out, fields[0]))?;
-            out.push(at!(1, dnssec_algorithm(fields[1], true))?);
-            out.push(at!(2, number(fields[2]))?);
+            num!(0, put16(&mut out, fields[0]))?;
+            out.push(num!(1, dnssec_algorithm(fields[1], true))?);
+            out.push(num!(2, number(fields[2]))?);
             out.extend(at!(hex_error_index(fields, 3), hex(&fields[3..].concat()))?);
         }
         // RFC 4034 §2 and RFC 7344 §4: DNSKEY/CDNSKEY public keys use base64.
@@ -204,9 +215,9 @@ fn parse_rdata_inner(
                 *index = fields.len();
                 return Err("missing DNSKEY fields".into());
             }
-            at!(0, put16(&mut out, fields[0]))?;
-            out.push(at!(1, number(fields[1]))?);
-            out.push(at!(2, number(fields[2]))?);
+            num!(0, put16(&mut out, fields[0]))?;
+            out.push(num!(1, number(fields[1]))?);
+            out.push(num!(2, number(fields[2]))?);
             out.extend(at!(
                 base64_error_index(fields, 3),
                 base64(&fields[3..].concat())
@@ -220,7 +231,7 @@ fn parse_rdata_inner(
                 return Err("missing association data".into());
             }
             for (i, field) in fields[..prefix].iter().enumerate() {
-                out.push(at!(i, number(field))?);
+                out.push(num!(i, number(field))?);
             }
             out.extend(at!(
                 hex_error_index(fields, prefix),
@@ -233,9 +244,9 @@ fn parse_rdata_inner(
                 *index = fields.len();
                 return Err("missing ZONEMD fields".into());
             }
-            at!(0, put32(&mut out, fields[0]))?;
-            out.push(at!(1, number(fields[1]))?);
-            out.push(at!(2, number(fields[2]))?);
+            num!(0, put32(&mut out, fields[0]))?;
+            out.push(num!(1, number(fields[1]))?);
+            out.push(num!(2, number(fields[2]))?);
             let digest = at!(hex_error_index(fields, 3), hex(&fields[3..].concat()))?;
             out.extend(digest);
         }
@@ -246,12 +257,12 @@ fn parse_rdata_inner(
                 return Err("missing RRSIG fields".into());
             }
             out.extend(at!(0, type_code(fields[0]))?.to_be_bytes());
-            out.push(at!(1, dnssec_algorithm(fields[1], false))?);
-            out.push(at!(2, number(fields[2]))?);
-            at!(3, put32(&mut out, fields[3]))?;
-            out.extend(at!(4, timestamp(fields[4]))?.to_be_bytes());
-            out.extend(at!(5, timestamp(fields[5]))?.to_be_bytes());
-            at!(6, put16(&mut out, fields[6]))?;
+            out.push(num!(1, dnssec_algorithm(fields[1], false))?);
+            out.push(num!(2, number(fields[2]))?);
+            num!(3, put32(&mut out, fields[3]))?;
+            out.extend(num!(4, timestamp(fields[4]))?.to_be_bytes());
+            out.extend(num!(5, timestamp(fields[5]))?.to_be_bytes());
+            num!(6, put16(&mut out, fields[6]))?;
             at!(7, name(&mut out, fields[7], origin))?;
             out.extend(at!(
                 base64_error_index(fields, 8),
@@ -276,9 +287,9 @@ fn parse_rdata_inner(
                 *index = fields.len().min(required);
                 return Err("invalid NSEC3 fields".into());
             }
-            out.push(at!(0, number(fields[0]))?);
-            out.push(at!(1, number(fields[1]))?);
-            at!(2, put16(&mut out, fields[2]))?;
+            out.push(num!(0, number(fields[0]))?);
+            out.push(num!(1, number(fields[1]))?);
+            num!(2, put16(&mut out, fields[2]))?;
             *index = 3;
             let salt = if fields[3] == "-" {
                 Vec::new()
@@ -302,7 +313,7 @@ fn parse_rdata_inner(
                 *index = fields.len();
                 return Err("missing SVCB priority or target".into());
             }
-            at!(0, put16(&mut out, fields[0]))?;
+            num!(0, put16(&mut out, fields[0]))?;
             at!(1, name(&mut out, fields[1], origin))?;
             *index = 2.min(fields.len());
             svc_params(&mut out, &fields[2..], index)?;
@@ -314,13 +325,13 @@ fn parse_rdata_inner(
                 return Err("invalid TSIG fields".into());
             }
             at!(0, name(&mut out, fields[0], origin))?;
-            let time = at!(1, timestamp64(fields[1]))?;
+            let time = num!(1, timestamp64(fields[1]))?;
             if time >= 1 << 48 {
                 return Err("TSIG time out of range".into());
             }
             out.extend(&time.to_be_bytes()[2..]);
-            at!(2, put16(&mut out, fields[2]))?;
-            let mac_len = at!(3, number::<u16>(fields[3]))?;
+            num!(2, put16(&mut out, fields[2]))?;
+            let mac_len = num!(3, number::<u16>(fields[3]))?;
             let has_mac_field = mac_len != 0 || fields[4].is_empty();
             let mac = if has_mac_field {
                 at!(4, hex(fields[4]))?
@@ -330,7 +341,7 @@ fn parse_rdata_inner(
             if usize::from(mac_len) != mac.len() {
                 return Err("TSIG MAC length mismatch".into());
             }
-            at!(3, put16(&mut out, fields[3]))?;
+            num!(3, put16(&mut out, fields[3]))?;
             out.extend(mac);
             let rest_start = 4 + usize::from(has_mac_field);
             let rest = &fields[rest_start..];
@@ -338,16 +349,16 @@ fn parse_rdata_inner(
                 *index = fields.len();
                 return Err("invalid TSIG fields".into());
             }
-            at!(rest_start, put16(&mut out, rest[0]))?;
-            at!(rest_start + 1, put16(&mut out, rest[1]))?;
+            num!(rest_start, put16(&mut out, rest[0]))?;
+            num!(rest_start + 1, put16(&mut out, rest[1]))?;
             let other = at!(
                 rest_start + 3.min(rest.len()),
                 hex(rest.get(3).copied().unwrap_or(""))
             )?;
-            if usize::from(at!(rest_start + 2, number::<u16>(rest[2]))?) != other.len() {
+            if usize::from(num!(rest_start + 2, number::<u16>(rest[2]))?) != other.len() {
                 return Err("TSIG other length mismatch".into());
             }
-            at!(rest_start + 2, put16(&mut out, rest[2]))?;
+            num!(rest_start + 2, put16(&mut out, rest[2]))?;
             out.extend(other);
         }
         _ => {
@@ -739,7 +750,36 @@ fn hex_error_index(fields: &[&str], start: usize) -> usize {
         .map_or_else(|| fields.len().saturating_sub(1).max(start), |i| start + i)
 }
 
+// RFC 1035 §5.1: `\DDD` is the octet with that decimal value and `\X` is X.
+fn decode_escapes(value: &str) -> std::borrow::Cow<'_, str> {
+    if !value.contains('\\') {
+        return value.into();
+    }
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 == bytes.len() {
+            out.push(char::from(bytes[i]));
+            i += 1;
+        } else if let Some(d) = bytes
+            .get(i + 1..i + 4)
+            .filter(|d| d.iter().all(u8::is_ascii_digit))
+        {
+            let n =
+                u16::from(d[0] - b'0') * 100 + u16::from(d[1] - b'0') * 10 + u16::from(d[2] - b'0');
+            out.push(char::from(n as u8));
+            i += 4;
+        } else {
+            out.push(char::from(bytes[i + 1]));
+            i += 2;
+        }
+    }
+    out.into()
+}
+
 fn number<T: std::str::FromStr>(value: &str) -> Result<T, String> {
+    let value = &*decode_escapes(value);
     if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
         return Err(format!("invalid integer {value}"));
     }
@@ -1049,7 +1089,14 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
                     return Err("SvcParam must be empty".into());
                 }
             }
-            3 => put16(&mut data, value.ok_or("missing port")?)?,
+            3 => {
+                let port = value.ok_or("missing port")?;
+                // RFC 1035 §5.1: a numeric port cannot hold a malformed digit escape.
+                if super::has_invalid_digit_escape(port) {
+                    return Err(INVALID_ESCAPE.into());
+                }
+                put16(&mut data, port)?;
+            }
             4 => {
                 for ip in value.ok_or("missing IPv4 hints")?.split(',') {
                     data.extend(
@@ -1172,7 +1219,9 @@ mod tests {
             (Type::SRV, vec!["1", "2", "3"], 3),
         ] {
             assert_eq!(
-                parse_rdata_located(rtype, &fields, &origin).unwrap_err().0,
+                parse_rdata_located(rtype, &fields, &[], &origin)
+                    .unwrap_err()
+                    .0,
                 expected
             );
         }

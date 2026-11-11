@@ -8,6 +8,7 @@ use super::{
 pub(super) fn parse(
     rtype: Type,
     fields: &[&str],
+    bad: &[bool],
     origin: &Name,
 ) -> Option<Result<Vec<u8>, (usize, String)>> {
     let mut out = Vec::new();
@@ -15,6 +16,15 @@ pub(super) fn parse(
     macro_rules! at {
         ($i:expr, $expr:expr) => {{
             index = $i;
+            $expr
+        }};
+    }
+    macro_rules! num {
+        ($i:expr, $expr:expr) => {{
+            index = $i;
+            if bad.get($i).copied().unwrap_or(false) {
+                return Err(super::INVALID_ESCAPE.into());
+            }
             $expr
         }};
     }
@@ -35,13 +45,13 @@ pub(super) fn parse(
             // RFC 1183 §§1,3.3, RFC 2230 §2 and RFC 6742 §3.4: a preference precedes a name.
             Type::RT | Type::AFSDB | Type::KX | Type::LP => {
                 at!(fields.len().min(2), count(fields, 2))?;
-                at!(0, put16(&mut out, fields[0]))?;
+                num!(0, put16(&mut out, fields[0]))?;
                 at!(1, name(&mut out, fields[1], origin))?;
             }
             // RFC 2163 §4: PX has a preference and two mapping names.
             Type::PX => {
                 at!(fields.len().min(3), count(fields, 3))?;
-                at!(0, put16(&mut out, fields[0]))?;
+                num!(0, put16(&mut out, fields[0]))?;
                 at!(1, name(&mut out, fields[1], origin))?;
                 at!(2, name(&mut out, fields[2], origin))?;
             }
@@ -110,7 +120,7 @@ pub(super) fn parse(
             // RFC 6742 §§3.1-3.3: ILNP records pair a preference with a fixed-size identifier.
             Type::NID | Type::L64 => {
                 at!(fields.len().min(2), count(fields, 2))?;
-                at!(0, put16(&mut out, fields[0]))?;
+                num!(0, put16(&mut out, fields[0]))?;
                 index = 1;
                 let b = fields[1].as_bytes();
                 // miekg's stringToNodeID accepts trailing bytes and only requires one colon.
@@ -127,7 +137,7 @@ pub(super) fn parse(
             }
             Type::L32 => {
                 at!(fields.len().min(2), count(fields, 2))?;
-                at!(0, put16(&mut out, fields[0]))?;
+                num!(0, put16(&mut out, fields[0]))?;
                 index = 1;
                 let ip: std::net::IpAddr = fields[1].parse().map_err(|_| "invalid L32 address")?;
                 let ip = match ip {
@@ -139,7 +149,7 @@ pub(super) fn parse(
             // RFC 1035 §3.3: numeric fields are encoded in network byte order.
             Type::UID | Type::GID => {
                 at!(fields.len().min(1), count(fields, 1))?;
-                at!(0, put32(&mut out, fields[0]))?;
+                num!(0, put32(&mut out, fields[0]))?;
             }
             Type::UINFO => {
                 let chunks = text_chunks(fields, &mut index)?;
@@ -169,9 +179,9 @@ pub(super) fn parse(
                     index = fields.len();
                     return Err("missing key fields".into());
                 }
-                at!(0, put16(&mut out, fields[0]))?;
-                out.push(at!(1, number(fields[1]))?);
-                out.push(at!(2, number(fields[2]))?);
+                num!(0, put16(&mut out, fields[0]))?;
+                out.push(num!(1, number(fields[1]))?);
+                out.push(num!(2, number(fields[2]))?);
                 out.extend(binary(fields, 3, true, out.len(), &mut index)?);
             }
             // RFC 4431 §3 and RFC 4034 §5.1: DLV and TA share the DS wire layout.
@@ -180,19 +190,23 @@ pub(super) fn parse(
                     index = fields.len();
                     return Err("missing digest fields".into());
                 }
-                at!(0, put16(&mut out, fields[0]))?;
-                out.push(at!(1, dnssec_algorithm(fields[1], true))?);
-                out.push(at!(2, number(fields[2]))?);
+                num!(0, put16(&mut out, fields[0]))?;
+                out.push(num!(1, dnssec_algorithm(fields[1], true))?);
+                out.push(num!(2, number(fields[2]))?);
                 out.extend(binary(fields, 3, false, out.len(), &mut index)?);
             }
             // RFC 2535 §4.1: SIG uses the same field layout as RRSIG.
             Type::SIG => {
-                out =
-                    super::parse_rdata_located(Type::RRSIG, &fields[..fields.len().min(8)], origin)
-                        .map_err(|(i, error)| {
-                            index = i;
-                            error
-                        })?;
+                out = super::parse_rdata_located(
+                    Type::RRSIG,
+                    &fields[..fields.len().min(8)],
+                    bad,
+                    origin,
+                )
+                .map_err(|(i, error)| {
+                    index = i;
+                    error
+                })?;
                 out.extend(binary(fields, 8, true, out.len(), &mut index)?);
             }
             // RFC 4034 §4.1.2: miekg encodes NXT using NSEC's windowed bitmap.
@@ -315,7 +329,7 @@ mod tests {
             (Type::SIG, &["A", "8"][..], 2),
         ] {
             assert_eq!(
-                parse(rtype, fields, &origin).unwrap().unwrap_err().0,
+                parse(rtype, fields, &[], &origin).unwrap().unwrap_err().0,
                 expected,
                 "{rtype}"
             );
@@ -335,7 +349,7 @@ mod tests {
             (Type::ISDN, &["x", long.as_str(), "x"][..], 2),
         ] {
             assert_eq!(
-                parse(rtype, fields, &origin).unwrap().unwrap_err().0,
+                parse(rtype, fields, &[], &origin).unwrap().unwrap_err().0,
                 expected,
                 "{rtype}"
             );

@@ -490,6 +490,7 @@ impl<R: BufRead> ZoneParser<R> {
                     | Type::UINFO
             );
         let mut normalized = Vec::new();
+        let mut bad = Vec::new();
         let mut field_tokens = Vec::new();
         for (index, token) in tokens[i..].iter().enumerate() {
             let svc_param = !generic && (rtype == Type::SVCB || rtype == Type::HTTPS) && index >= 2;
@@ -516,10 +517,12 @@ impl<R: BufRead> ZoneParser<R> {
             }
             if split_strings {
                 for part in parts {
+                    bad.push(has_invalid_digit_escape(part));
                     normalized.push(normalize_escapes(part));
                     field_tokens.push(i + index);
                 }
             } else {
+                bad.push(!svc_param && has_invalid_digit_escape(&token.text));
                 normalized.push(if svc_param {
                     token.text.clone()
                 } else {
@@ -537,7 +540,7 @@ impl<R: BufRead> ZoneParser<R> {
         {
             return Err(err_at(i + 2 + index, "invalid SvcParam escape"));
         }
-        let rdata = rdata::parse_rdata_located(rtype, &fields, &self.origin).map_err(
+        let rdata = rdata::parse_rdata_located(rtype, &fields, &bad, &self.origin).map_err(
             |(index, message)| {
                 err_at(
                     field_tokens.get(index).copied().unwrap_or(tokens.len()),
@@ -609,6 +612,28 @@ fn normalize_escapes(value: &str) -> String {
         }
     }
     output
+}
+
+// RFC 1035 §5.1: `\` followed by digits is an escape only when it is a full `\DDD`.
+fn has_invalid_digit_escape(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            i += 1;
+        } else if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+            if !bytes
+                .get(i + 1..i + 4)
+                .is_some_and(|d| d.iter().all(u8::is_ascii_digit))
+            {
+                return true;
+            }
+            i += 4;
+        } else {
+            i += 2;
+        }
+    }
+    false
 }
 
 // RFC 9460 §2.1: SvcParam decimal escapes must encode a single octet.

@@ -7,6 +7,7 @@ use super::{base64, bitmap, dnssec_algorithm, hex, name, number, put16, put32, t
 pub(super) fn parse(
     rtype: Type,
     fields: &[&str],
+    bad: &[bool],
     origin: &Name,
 ) -> Option<Result<Vec<u8>, (usize, String)>> {
     let mut out = Vec::new();
@@ -14,6 +15,15 @@ pub(super) fn parse(
     macro_rules! at {
         ($i:expr, $expr:expr) => {{
             index = $i;
+            $expr
+        }};
+    }
+    macro_rules! num {
+        ($i:expr, $expr:expr) => {{
+            index = $i;
+            if bad.get($i).copied().unwrap_or(false) {
+                return Err(super::INVALID_ESCAPE.into());
+            }
             $expr
         }};
     }
@@ -29,6 +39,10 @@ pub(super) fn parse(
         match rtype {
             // RFC 1876 §§2-3: LOC coordinates and precision are encoded in centimeters.
             Type::LOC => {
+                if bad.iter().any(|&b| b) {
+                    index = bad.iter().position(|&b| b).unwrap_or(0);
+                    return Err(super::INVALID_ESCAPE.into());
+                }
                 let mut i = 0;
                 let lat = coordinate(fields, &mut i, &mut index, 90, "N", "S")?;
                 let lon = coordinate(fields, &mut i, &mut index, 180, "E", "W")?;
@@ -63,7 +77,7 @@ pub(super) fn parse(
             }
             // RFC 8005 §5: HIP stores the HIT and public-key lengths before their octets.
             Type::HIP => {
-                let algorithm = at!(0, number(field!(0, "missing HIP algorithm")))?;
+                let algorithm = num!(0, number(field!(0, "missing HIP algorithm")))?;
                 let hit_field = field!(1, "missing HIP HIT");
                 if hit_field.is_empty() {
                     index = 1;
@@ -101,11 +115,11 @@ pub(super) fn parse(
                     "IACPKIX" => 8,
                     "URI" => 253,
                     "OID" => 254,
-                    value => at!(0, number::<u16>(value))?,
+                    value => num!(0, number::<u16>(value))?,
                 };
                 out.extend(cert_type.to_be_bytes());
-                at!(1, put16(&mut out, field!(1, "missing CERT key tag")))?;
-                out.push(at!(
+                num!(1, put16(&mut out, field!(1, "missing CERT key tag")))?;
+                out.push(num!(
                     2,
                     dnssec_algorithm(field!(2, "missing CERT algorithm"), false)
                 )?);
@@ -121,8 +135,8 @@ pub(super) fn parse(
             }
             // RFC 7477 §2.1: CSYNC ends with an NSEC-format type bitmap.
             Type::CSYNC => {
-                at!(0, put32(&mut out, field!(0, "missing CSYNC serial")))?;
-                at!(1, put16(&mut out, field!(1, "missing CSYNC flags")))?;
+                num!(0, put32(&mut out, field!(0, "missing CSYNC serial")))?;
+                num!(1, put16(&mut out, field!(1, "missing CSYNC flags")))?;
                 for (offset, field) in fields[2..].iter().enumerate() {
                     at!(offset + 2, type_code(field))?;
                 }
@@ -130,20 +144,23 @@ pub(super) fn parse(
             }
             // RFC 4025 §2 and RFC 8777 §4: gateway type determines the address encoding.
             Type::IPSECKEY | Type::AMTRELAY => {
-                out.push(at!(0, number(field!(0, "missing gateway precedence")))?);
+                out.push(num!(0, number(field!(0, "missing gateway precedence")))?);
                 let (kind, gateway) = if rtype == Type::IPSECKEY {
-                    let kind = at!(1, number(field!(1, "missing gateway type")))?;
+                    let kind = num!(1, number(field!(1, "missing gateway type")))?;
                     out.push(kind);
-                    out.push(at!(2, number(field!(2, "missing IPSECKEY algorithm")))?);
+                    out.push(num!(2, number(field!(2, "missing IPSECKEY algorithm")))?);
                     (kind, fields.get(3).copied().unwrap_or(""))
                 } else {
                     index = 1;
+                    if bad.get(1).copied().unwrap_or(false) {
+                        return Err(super::INVALID_ESCAPE.into());
+                    }
                     let discovery = match field!(1, "missing AMTRELAY discovery") {
                         "0" => 0,
                         "1" => 0x80,
                         _ => return Err("invalid discovery".into()),
                     };
-                    let kind: u8 = at!(2, number(field!(2, "missing gateway type")))?;
+                    let kind: u8 = num!(2, number(field!(2, "missing gateway type")))?;
                     out.push(discovery | kind);
                     (kind & 0x7f, fields.get(3).copied().unwrap_or(""))
                 };
@@ -171,6 +188,10 @@ pub(super) fn parse(
             }
             // RFC 3123 §4: APL prefixes are masked and stripped of trailing zero octets.
             Type::APL => {
+                if bad.iter().any(|&b| b) {
+                    index = bad.iter().position(|&b| b).unwrap_or(0);
+                    return Err(super::INVALID_ESCAPE.into());
+                }
                 for (field_index, field) in fields.iter().enumerate() {
                     at!(field_index, apl(&mut out, field))?;
                     at!(field_index, check_size(&out))?;
@@ -185,11 +206,11 @@ pub(super) fn parse(
                 }
                 at!(0, name(&mut out, algorithm, origin))?;
                 out.extend([0; 12]);
-                let key_len: u8 = at!(1, number(field!(1, "missing TKEY key length")))?;
+                let key_len: u8 = num!(1, number(field!(1, "missing TKEY key length")))?;
                 out.extend(u16::from(key_len).to_be_bytes());
                 out.extend(at!(2, hex(field!(2, "missing TKEY key")))?);
                 at!(2, check_size(&out))?;
-                let other_len: u8 = at!(3, number(field!(3, "missing TKEY other length")))?;
+                let other_len: u8 = num!(3, number(field!(3, "missing TKEY other length")))?;
                 out.extend(u16::from(other_len).to_be_bytes());
                 at!(3, check_size(&out))?;
                 out.extend(at!(4, hex(field!(4, "missing TKEY other data")))?);
@@ -568,15 +589,30 @@ mod tests {
         let origin: Name = ".".parse().unwrap();
         let huge_hex = "ab".repeat(65_536);
         let hip = ["2", huge_hex.as_str(), "AQID", "extra."];
-        assert_eq!(parse(Type::HIP, &hip, &origin).unwrap().unwrap_err().0, 1);
+        assert_eq!(
+            parse(Type::HIP, &hip, &[], &origin).unwrap().unwrap_err().0,
+            1
+        );
         let tkey = [".", "1", huge_hex.as_str(), "1", "ff"];
-        assert_eq!(parse(Type::TKEY, &tkey, &origin).unwrap().unwrap_err().0, 2);
+        assert_eq!(
+            parse(Type::TKEY, &tkey, &[], &origin)
+                .unwrap()
+                .unwrap_err()
+                .0,
+            2
+        );
         let huge_base64 = "AAAA".repeat(21_845);
         let cert = ["PKIX", "1", "8", huge_base64.as_str(), "AAAA"];
-        assert_eq!(parse(Type::CERT, &cert, &origin).unwrap().unwrap_err().0, 3);
+        assert_eq!(
+            parse(Type::CERT, &cert, &[], &origin)
+                .unwrap()
+                .unwrap_err()
+                .0,
+            3
+        );
         let apl = vec!["1:0.0.0.0/0"; 16_385];
         assert_eq!(
-            parse(Type::APL, &apl, &origin).unwrap().unwrap_err().0,
+            parse(Type::APL, &apl, &[], &origin).unwrap().unwrap_err().0,
             16_383
         );
     }

@@ -268,3 +268,26 @@ fn escaped_blank_does_not_split_hinfo_into_empty_cpu() {
     assert!(parse(b"a IN HINFO \\ b\n").is_err());
     assert!(parse(b"a IN HINFO x\\ b\n").is_err());
 }
+
+#[test]
+fn numeric_fields_decode_valid_escapes_and_reject_invalid_ones() {
+    // RFC 1035 §5.1: `\DDD` is one octet and `\` plus one or two digits is malformed.
+    for zone in [
+        "n IN CSYNC 2 \\9\n",
+        "n IN MX \\1 a\n",
+        "n IN MX \\12x a\n",
+        "n IN SOA a b \\2 1 1 1 1\n",
+        "n IN SOA a b 1 \\1 1 1 1\n",
+        "n IN SVCB 1 . port=\\1\n",
+        "n IN AMTRELAY 1 \\1 1 192.0.2.1\n",
+        "n IN SRV \\1 1 1 a\n",
+    ] {
+        assert!(parse(zone.as_bytes()).is_err(), "{zone:?}");
+    }
+    assert_eq!(parse(b"n IN MX \\049\\048 a\n"), parse(b"n IN MX 10 a\n"));
+    assert!(parse(b"n IN MX \\049\\048 a\n").is_ok());
+    assert_eq!(
+        parse(b"n IN SOA a b \\050 1\\115 1 1 1\n"),
+        parse(b"n IN SOA a b 2 1s 1 1 1\n")
+    );
+}
