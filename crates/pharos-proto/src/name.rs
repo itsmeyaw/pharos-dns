@@ -61,6 +61,68 @@ impl fmt::Display for NameError {
 impl std::error::Error for NameError {}
 
 impl Name {
+    /// Parse an absolute presentation name into caller-provided wire storage.
+    pub fn parse_absolute_into<'a>(
+        value: &str,
+        output: &'a mut [u8; 255],
+    ) -> Result<&'a [u8], NameError> {
+        if !is_absolute(value) {
+            return Err(NameError::RelativeName);
+        }
+        if value == "." {
+            output[0] = 0;
+            return Ok(&output[..1]);
+        }
+        let bytes = &value.as_bytes()[..value.len() - 1];
+        let mut position = 0;
+        let mut len = 1;
+        let mut label = 0;
+        while position < bytes.len() {
+            let mut byte = bytes[position];
+            position += 1;
+            if byte == b'.' {
+                if len == label + 1 {
+                    return Err(NameError::EmptyLabel);
+                }
+                output[label] =
+                    u8::try_from(len - label - 1).map_err(|_| NameError::LabelTooLong)?;
+                label = len;
+                len += 1;
+                if len > output.len() {
+                    return Err(NameError::NameTooLong);
+                }
+                continue;
+            }
+            // RFC 4343 §2.1: escapes encode literal octets or three decimal digits.
+            if byte == b'\\' {
+                byte = *bytes.get(position).ok_or(NameError::InvalidEscape)?;
+                if let Some(digits) = bytes
+                    .get(position..position + 3)
+                    .filter(|digits| digits.iter().all(u8::is_ascii_digit))
+                {
+                    let number = u16::from(digits[0] - b'0') * 100
+                        + u16::from(digits[1] - b'0') * 10
+                        + u16::from(digits[2] - b'0');
+                    byte = u8::try_from(number).map_err(|_| NameError::InvalidEscape)?;
+                    position += 3;
+                } else {
+                    position += 1;
+                }
+            }
+            if len - label > MAX_LABEL_LEN {
+                return Err(NameError::LabelTooLong);
+            }
+            *output.get_mut(len).ok_or(NameError::NameTooLong)? = byte;
+            len += 1;
+        }
+        if len == label + 1 {
+            return Err(NameError::EmptyLabel);
+        }
+        output[label] = (len - label - 1) as u8;
+        *output.get_mut(len).ok_or(NameError::NameTooLong)? = 0;
+        Ok(&output[..=len])
+    }
+
     /// Parses a presentation name, resolving relative names against `origin`.
     pub fn parse(value: &str, origin: &Origin) -> Result<Self, NameError> {
         // RFC 1035 §5.1: @ denotes the current origin; relative names append it.
