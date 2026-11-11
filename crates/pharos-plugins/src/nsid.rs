@@ -95,9 +95,8 @@ fn update_nsid(cx: &mut Context<'_>, data: Option<&[u8]>) -> Result<(), Error> {
     let (start, old_end) = record.map_or((cx.response.len(), cx.response.len()), |(_, rr)| {
         (rr.rdata_offset, rr.rdata_offset + rr.rdata.len())
     });
-    let new_len = old_end
-        .checked_sub(old_end - start)
-        .and_then(|n| n.checked_add(len + if record.is_none() { 11 } else { 0 }))
+    let new_len = start
+        .checked_add(len + if record.is_none() { 11 } else { 0 })
         .filter(|n| *n <= 65535 && *n <= cx.response.capacity())
         .ok_or(Error::ResponseBufferTooSmall)?;
     if record.is_none() {
