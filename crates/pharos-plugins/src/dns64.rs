@@ -3,7 +3,8 @@
 use std::net::Ipv6Addr;
 
 use pharos_corefile::{Cursor, Error};
-use pharos_server::{Context, Next, Outcome, Plugin};
+use pharos_proto::{Class, Message, MessageBuilder, Opcode, Rcode, Section, Type};
+use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin, Protocol};
 
 #[derive(Debug)]
 pub struct Dns64 {
@@ -70,6 +71,114 @@ fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Erro
 
 impl Plugin for Dns64 {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
-        next.run(cx).await
+        let Some(question) = cx.query.questions().next() else {
+            return next.run(cx).await;
+        };
+        // RFC 6147 §5.1: DNS64 applies to IN AAAA Queries from IPv6 clients.
+        if question.qtype != Type::AAAA
+            || question.qclass != Class::IN
+            || (!self.allow_ipv4
+                && (cx.client.is_ipv4() || cx.client.ip().to_canonical().is_ipv4()))
+        {
+            return next.run(cx).await;
+        }
+        let outcome = next.run(cx).await;
+        if outcome != Outcome::Response {
+            return outcome;
+        }
+        let original = match Message::parse(cx.response) {
+            Ok(message) => message,
+            Err(_) => return Outcome::Error(ServerError::InvalidQuery),
+        };
+        if (original.rcode() == Rcode::NXDOMAIN && original.answer_count() == 0)
+            || (!self.translate_all && original.answers().any(|rr| rr.rtype == Type::AAAA))
+        {
+            return outcome;
+        }
+        // RFC 6147 §5.1.7: cap synthesized TTL at the negative SOA TTL or 600 seconds.
+        let soa_ttl = original
+            .authorities()
+            .filter(|rr| rr.rtype == Type::SOA)
+            .last()
+            .map_or(600, |rr| rr.ttl);
+        let name = question.name.to_name();
+        // shortcut: Self Lookup allocates; remove when issue #86 makes it allocation-free.
+        let lookup = match cx.self_lookup(&name, Type::A).await {
+            Ok(wire) => wire,
+            Err(error) => return Outcome::Error(error),
+        };
+        let response = match Message::parse(&lookup) {
+            Ok(message) => message,
+            Err(_) => return Outcome::Error(ServerError::InvalidQuery),
+        };
+        let result = (|| {
+            let max = cx.max_response_size.max(512);
+            if cx.response.capacity() < max {
+                if cx.protocol == Protocol::Tcp {
+                    cx.response.reserve(max.saturating_sub(cx.response.len()));
+                } else {
+                    return Err(ServerError::ResponseBufferTooSmall);
+                }
+            }
+            // RFC 1035 §4.1.1: construct a Response for the original Question.
+            let flags = 0x8000
+                | (cx.query.flags() & 0x7800)
+                | if cx.query.opcode() == Opcode::QUERY {
+                    cx.query.flags() & 0x0110
+                } else {
+                    0
+                }
+                | (response.flags() & 0x020f);
+            let mut builder = MessageBuilder::new(cx.response, max, cx.query.id(), flags)
+                .map_err(ServerError::Build)?;
+            builder
+                .question(question.name, question.qtype, question.qclass)
+                .map_err(ServerError::Build)?;
+            for (section, records) in [
+                (Section::Answer, response.answers()),
+                (Section::Authority, response.authorities()),
+                (Section::Additional, response.additionals()),
+            ] {
+                for rr in records {
+                    if section == Section::Answer && rr.rtype == Type::A {
+                        let ipv4: [u8; 4] =
+                            rr.rdata.try_into().map_err(|_| ServerError::InvalidQuery)?;
+                        let mut ipv6 = self.prefix;
+                        let mut index = usize::from(self.prefix_len / 8);
+                        // RFC 6052 §2.2: byte 8 is reserved unless the prefix is /96.
+                        for byte in ipv4 {
+                            if index == 8 {
+                                index += 1;
+                            }
+                            ipv6[index] = byte;
+                            index += 1;
+                        }
+                        builder
+                            .record(
+                                section,
+                                rr.name,
+                                Type::AAAA,
+                                rr.class,
+                                rr.ttl.min(soa_ttl),
+                                &ipv6,
+                            )
+                            .map_err(ServerError::Build)?;
+                    } else {
+                        let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+                        builder
+                            .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
+                                data.write(writer)
+                            })
+                            .map_err(ServerError::Build)?;
+                    }
+                }
+            }
+            let _ = builder.finish();
+            Ok(())
+        })();
+        match result {
+            Ok(()) => Outcome::Response,
+            Err(error) => Outcome::Error(error),
+        }
     }
 }
