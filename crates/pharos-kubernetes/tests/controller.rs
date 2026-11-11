@@ -910,6 +910,47 @@ async fn namespace_label_selector_restricts_service_and_endpoint_lookups() {
 }
 
 #[tokio::test]
+async fn service_imports_ignore_namespace_label_selector() {
+    let server = FakeServer::start().await;
+    let imports = "/apis/multicluster.x-k8s.io/v1alpha1/serviceimports";
+    server.lists.lock().unwrap().extend([
+        (
+            "/api/v1/namespaces".to_owned(),
+            json!([{"metadata":{"name":"prod","resourceVersion":"1","labels":{"team":"dns"}}}]),
+        ),
+        (
+            imports.to_owned(),
+            json!([{"metadata":{"name":"web","namespace":"prod","resourceVersion":"1"},"spec":{"type":"ClusterSetIP","ips":["10.3.0.1"]}}]),
+        ),
+    ]);
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(
+        client,
+        WatchConfig {
+            namespace_label_selector: Some("team=dns".into()),
+            multicluster: true,
+            ..Default::default()
+        },
+    );
+    until(|| controller.has_synced()).await;
+    assert!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|uri| uri.starts_with(imports))
+            .all(|uri| !uri.contains("labelSelector"))
+    );
+    assert!(
+        controller
+            .store()
+            .with_read(|index| index.service_import("prod", "web").is_some())
+    );
+    controller.stop().await;
+}
+
+#[tokio::test]
 async fn upstream_default_processor_service_and_terminating_pod() {
     let server = FakeServer::start().await;
     let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();

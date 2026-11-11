@@ -177,12 +177,11 @@ impl Controller {
                 &GroupVersionKind::gvk("multicluster.x-k8s.io", "v1alpha1", "ServiceImport"),
                 "serviceimports",
             );
+            // CoreDNS matches ServiceImport labels against `namespace_labels`; that
+            // hides imports in exposed Namespaces, so namespace filtering happens at lookup.
             this.watch(
                 Api::<DynamicObject>::all_with(client.clone(), &resource),
-                watcher::Config {
-                    label_selector: config.namespace_label_selector.clone(),
-                    ..Default::default()
-                },
+                watcher::Config::default(),
                 Store::apply_service_import,
                 Store::delete_service_import,
                 |store, objects, _, _| store.replace_service_imports(objects),

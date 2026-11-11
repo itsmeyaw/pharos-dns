@@ -89,6 +89,9 @@ CoreDNS parses `NaN` and positive infinity for `apiserver_qps`; Pharos accepts
 them in the Corefile but rejects them when creating the API client. Pharos
 treats non-positive `startup_timeout` as an immediate timeout; CoreDNS's
 startup ticker panics for those values.
+With `namespace_labels` and `multicluster`, Pharos watches all ServiceImports
+and exposes those in matching Namespaces; CoreDNS matches the ServiceImports'
+own labels against `namespace_labels`, hiding imports in exposed Namespaces.
 
 Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
