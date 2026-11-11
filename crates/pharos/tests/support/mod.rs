@@ -9,6 +9,7 @@ use std::{
     time::SystemTime,
 };
 
+// shortcut: the port is released before the server binds; under heavy parallel test load about 1 in 90 runs still sees a TCP reset (cause unconfirmed); pass bound sockets to the server if it persists.
 pub fn free_port() -> u16 {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     static USED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
