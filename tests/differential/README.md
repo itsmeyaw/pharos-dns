@@ -77,7 +77,7 @@ IPv4 loopback, so synthesis without `allow_ipv4` is covered by Rust tests.
 The siit README scenario uses an inline hosts Backend to exercise the prefix.
 The `rewrite-name-auto` scenario uses an inline hosts Backend for the README's
 suffix and automatic answer rewrite example. `rewrite-regex` and `rewrite-ttl`
-also use hosts; `rewrite-type` and `rewrite-edns-local` use whoami and mask its
+also use hosts; `rewrite-type`, `rewrite-edns-local` and `rewrite-edns-revert` use whoami and mask its
 client port.
 The `rewrite edns0` example without an EDNS Query is not compared: CoreDNS
 returns OPT while Pharos omits it under RFC 6891 §7, and the harness cannot mask
