@@ -937,10 +937,17 @@ fn states_at<'a>(
     index: usize,
     mut query: Message<'a>,
     metadata: &Metadata<'_>,
+    recorded: Option<&[u8]>,
 ) -> Option<(Message<'a>, Message<'a>)> {
     for (position, rule) in rules.iter().enumerate().take(index + 1) {
         let before = query;
-        let matched = apply_rule(rule, &mut query, metadata).ok()?;
+        let matched = if recorded.is_some_and(|bits| bits[position] == 0) {
+            false
+        } else if matches!(rule.action, Action::Edns(..)) {
+            recorded.is_none_or(|bits| bits[position] != 0)
+        } else {
+            apply_rule(rule, &mut query, metadata).ok()?
+        };
         if position == index {
             return matched.then_some((before, query));
         }
@@ -970,11 +977,12 @@ fn apply_history<'a>(
     source: NameRef<'a>,
     original: Message<'_>,
     metadata: &Metadata<'_>,
-    rules: &[Rule],
+    rules: (&[Rule], Option<&[u8]>),
     end: usize,
     value: bool,
     output: &'a mut [u8; 255],
 ) -> NameRef<'a> {
+    let (rules, recorded) = rules;
     let mut current = [0; 255];
     let Some(mut len) = copy_name(source, &mut current) else {
         return source;
@@ -986,7 +994,7 @@ fn apply_history<'a>(
         if !auto && answers.is_empty() {
             continue;
         }
-        let Some((before, after)) = states_at(rules, index, original, metadata) else {
+        let Some((before, after)) = states_at(rules, index, original, metadata, recorded) else {
             continue;
         };
         let (Some(before), Some(after)) = (before.questions().next(), after.questions().next())
@@ -1504,6 +1512,7 @@ fn build_reverted_response(
     cx: &mut Context<'_, '_>,
     original_query: Message<'_>,
     rules: &[Rule],
+    recorded: Option<&[u8]>,
     end: usize,
 ) -> Result<(), ServerError> {
     let mut scratch = [0u8; 65535];
@@ -1543,7 +1552,7 @@ fn build_reverted_response(
                 rr.name,
                 original_query,
                 &cx.metadata,
-                rules,
+                (rules, recorded),
                 end,
                 false,
                 &mut owner_buffer,
@@ -1556,7 +1565,7 @@ fn build_reverted_response(
                         $value,
                         original_query,
                         &cx.metadata,
-                        rules,
+                        (rules, recorded),
                         end,
                         true,
                         &mut value_buffer,
@@ -1762,7 +1771,10 @@ impl Plugin for Rewrite {
         }
         let rewrite_rcode = |mut code: u16| {
             for (index, rule) in self.rules[..end].iter().enumerate().rev() {
-                if !active_at(&self.rules, index, original_query, &cx.metadata) {
+                if !matches.as_deref().map_or_else(
+                    || active_at(&self.rules, index, original_query, &cx.metadata),
+                    |bits| bits[index] != 0,
+                ) {
                     continue;
                 }
                 if let Action::Rcode(from, to) = rule.action
@@ -1856,7 +1868,10 @@ impl Plugin for Rewrite {
             // RFC 6891 §6.1.3: OPT's TTL field contains EDNS metadata, not a TTL.
             response.rewrite_ttls(|mut ttl| {
                 for (index, rule) in self.rules[..end].iter().enumerate().rev() {
-                    if !active_at(&self.rules, index, original_query, &cx.metadata) {
+                    if !matches.as_deref().map_or_else(
+                        || active_at(&self.rules, index, original_query, &cx.metadata),
+                        |bits| bits[index] != 0,
+                    ) {
                         continue;
                     }
                     if let Action::Ttl(min, max) = rule.action {
@@ -1867,7 +1882,9 @@ impl Plugin for Rewrite {
             });
         }
         if outcome == Outcome::Response && response_rules {
-            if let Err(error) = build_reverted_response(cx, original_query, &self.rules, end) {
+            if let Err(error) =
+                build_reverted_response(cx, original_query, &self.rules, matches.as_deref(), end)
+            {
                 return Outcome::Error(error);
             }
         }

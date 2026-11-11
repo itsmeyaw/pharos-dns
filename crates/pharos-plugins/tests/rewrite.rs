@@ -299,6 +299,93 @@ async fn coredns_edns_local_append_replace_and_unset() {
 }
 
 #[tokio::test]
+async fn coredns_ignored_edns_replace_does_not_stop_later_rules() {
+    let config = ".:53 {\n rewrite edns0 local replace 0xffee data\n rewrite ttl example. 30\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain.rewrite.as_ref().unwrap().serve(&mut cx, Answer).await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    assert_eq!(message.answers().next().unwrap().ttl, 30);
+}
+
+#[tokio::test]
+async fn coredns_ignored_edns_replace_does_not_block_name_reversion() {
+    let config =
+        ".:53 {\n rewrite edns0 local replace 0xffee data\n rewrite name a.example. b.example.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "a.example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, ExpectNameAnswer("b.example."))
+            .await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    assert_eq!(
+        message.answers().next().unwrap().name.to_string(),
+        "a.example."
+    );
+}
+
+#[tokio::test]
 async fn coredns_edns_nsid_and_subnet_rewrite() {
     for (rule, expected) in [
         ("rewrite edns0 nsid set", &b"\0\x03\0\0"[..]),
