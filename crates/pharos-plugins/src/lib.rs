@@ -195,6 +195,7 @@ pub fn servers_with_registry(
                     let ip: Ipv6Addr = ip.parse().map_err(|_| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
                     })?;
+                    // POSIX.1-2024 if_nametoindex: map an interface name to its index.
                     let scope = nix::net::if_::if_nametoindex(interface)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
                     SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope))

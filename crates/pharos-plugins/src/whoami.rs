@@ -36,6 +36,7 @@ fn response(context: &mut Context<'_>) -> Result<(), Error> {
             return Err(Error::ResponseBufferTooSmall);
         }
     }
+    // RFC 1035 §3.1: encoded domain names are limited to 255 octets.
     let mut srv_name = [0_u8; 255];
     let label = match context.protocol {
         Protocol::Udp => b"_udp",

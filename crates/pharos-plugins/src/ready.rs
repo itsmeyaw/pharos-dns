@@ -73,6 +73,7 @@ impl State {
 
     pub fn response(&self) -> (u16, String) {
         let mut state = self.0.lock().unwrap();
+        // RFC 9110 §15.6.4: 503 indicates temporary inability to handle requests.
         if state.shutting_down {
             return (503, "Shutting down".into());
         }
