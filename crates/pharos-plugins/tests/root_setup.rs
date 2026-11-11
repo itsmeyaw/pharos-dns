@@ -20,11 +20,19 @@ fn accepts_coredns_root_paths_and_rejects_invalid_setup() {
     for text in [
         "root",
         "root {\n /tmp\n}",
-        "root /tmp\n root /tmp",
         "root bad\0path",
     ] {
         assert!(configure_root(text).is_err(), "accepted {text:?}");
     }
+}
+
+#[test]
+fn repeated_root_uses_last_path() {
+    let blocks = configure_root("root /tmp/first\n root /tmp/last").unwrap();
+    assert_eq!(
+        blocks[0].config.root.as_deref(),
+        Some(std::path::Path::new("/tmp/last"))
+    );
 }
 
 #[cfg(all(feature = "plugin-hosts", feature = "plugin-loadbalance"))]

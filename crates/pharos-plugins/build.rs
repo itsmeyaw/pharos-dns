@@ -89,8 +89,7 @@ fn main() {
         };
         let once = matches!(
             *name,
-            "root"
-                | "cache"
+            "cache"
                 | "shed"
                 | "metadata"
                 | "prometheus"
