@@ -2045,12 +2045,16 @@ impl Plugin for Rewrite {
                 let Ok(response) = Message::parse(cx.response) else {
                     return outcome;
                 };
-                let matched = response.answers().find_map(|rr| {
-                    let Ok(Rdata::Cname(value)) = rr.data() else {
-                        return None;
-                    };
-                    cname_replacement(matcher, replacement, value)
-                });
+                let matched = response
+                    .authorities()
+                    .chain(response.answers())
+                    .chain(response.additionals())
+                    .find_map(|rr| {
+                        let Ok(Rdata::Cname(value)) = rr.data() else {
+                            return None;
+                        };
+                        cname_replacement(matcher, replacement, value)
+                    });
                 if let Some((from, target)) = matched {
                     let Some(question) = rewritten_query.questions().next() else {
                         return outcome;
