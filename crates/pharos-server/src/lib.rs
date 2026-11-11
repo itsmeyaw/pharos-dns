@@ -387,13 +387,14 @@ pub struct Listener {
 
 impl Listener {
     pub async fn bind<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
-        Self::bind_with_ipv6(address, handler, bind_ipv6_dual).await
+        Self::bind_with_ipv6(address, handler, bind_ipv6_dual, udp::bind).await
     }
 
     async fn bind_with_ipv6<H: Handler>(
         address: SocketAddr,
         handler: H,
         bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
+        bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
     ) -> io::Result<Self> {
         let wildcard = address.is_ipv6() && address.ip().is_unspecified();
         let mut ipv4_only = false;
@@ -421,7 +422,7 @@ impl Listener {
             };
             let bound = tcp.local_addr()?;
             let sockets = (0..workers)
-                .map(|_| udp::bind(bound))
+                .map(|_| bind_udp(bound))
                 .collect::<io::Result<Vec<_>>>();
             match sockets {
                 Ok(sockets) => break (tcp, bound, sockets),
@@ -514,7 +515,9 @@ fn ipv6_unavailable(error: &io::Error) -> bool {
 
 #[cfg(test)]
 mod wildcard_tests {
-    use super::{Action, Handler, Listener, Protocol, canonical_peer, optional_ipv6};
+    use super::{
+        Action, Handler, Listener, Protocol, bind_ipv6_dual, canonical_peer, optional_ipv6, udp,
+    };
     use std::{
         io,
         net::{Ipv6Addr, SocketAddr, SocketAddrV6},
@@ -565,14 +568,8 @@ mod wildcard_tests {
         }
     }
 
-    #[tokio::test]
-    async fn wildcard_falls_back_to_ipv4_when_ipv6_is_unavailable() {
-        fn unavailable(_: SocketAddr) -> io::Result<tokio::net::TcpListener> {
-            Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT))
-        }
-        let listener = Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, unavailable)
-            .await
-            .unwrap();
+    async fn assert_ipv4_fallback(listener: Listener) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         assert!(listener.local_addr().is_ipv4());
         let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         socket
@@ -588,7 +585,52 @@ mod wildcard_tests {
         .unwrap()
         .unwrap();
         assert_eq!(&response[..len], b"query");
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", listener.local_addr().port()))
+            .await
+            .unwrap();
+        tcp.write_u16(5).await.unwrap();
+        tcp.write_all(b"query").await.unwrap();
+        let len = tokio::time::timeout(std::time::Duration::from_secs(2), tcp.read_u16())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len, 5);
+        let mut response = [0; 5];
+        tcp.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"query");
+        drop(tcp);
         listener.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wildcard_falls_back_to_ipv4_when_ipv6_tcp_is_unavailable() {
+        fn unavailable(_: SocketAddr) -> io::Result<tokio::net::TcpListener> {
+            Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT))
+        }
+        let listener =
+            Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, unavailable, udp::bind)
+                .await
+                .unwrap();
+        assert_ipv4_fallback(listener).await;
+    }
+
+    #[tokio::test]
+    async fn wildcard_falls_back_to_ipv4_when_ipv6_udp_is_unavailable() {
+        if std::net::TcpListener::bind("[::1]:0").is_err() {
+            return;
+        }
+        fn unavailable(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
+            if address.is_ipv6() {
+                Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
+            } else {
+                udp::bind(address)
+            }
+        }
+        let listener =
+            Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, bind_ipv6_dual, unavailable)
+                .await
+                .unwrap();
+        assert_ipv4_fallback(listener).await;
     }
 }
 
