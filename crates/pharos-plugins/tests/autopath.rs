@@ -189,6 +189,56 @@ async fn coredns_unwritten_replies_keep_the_first_outcome() {
     }
 }
 
+// Derived from CoreDNS TestInSearchPath; equal first suffix fails TrimZone.
+#[tokio::test]
+async fn coredns_first_search_suffix_membership() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/autopath-kubernetes-search.conf"
+    );
+    let config = format!(".:53 {{\n autopath {path}\n}}");
+    let blocks = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap();
+    let plugin = blocks[0].config.autopath.as_ref().unwrap();
+    let root: Name = ".".parse().unwrap();
+    for (name, expected) in [
+        ("google.com.", Outcome::Response),
+        (
+            "default.svc.cluster.local.",
+            Outcome::Error(pharos_server::Error::InvalidQuery),
+        ),
+        (
+            "a.default.svc.cluster.local.",
+            Outcome::Error(pharos_server::Error::SelfLookupUnavailable),
+        ),
+        ("a.b.svc.cluster.local.", Outcome::Response),
+    ] {
+        let name: Name = name.parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        b.question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(plugin.serve(&mut cx, Backend).await, expected);
+    }
+}
+
 #[tokio::test]
 async fn coredns_search_continues_after_unwritten_first_reply() {
     let path = concat!(

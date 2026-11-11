@@ -170,6 +170,9 @@ impl Plugin for AutoPath {
         {
             return next.run(cx).await;
         }
+        if first.labels().count() == question.name.labels().count() {
+            return Outcome::Error(ServerError::InvalidQuery);
+        }
         let outcome = next.run(cx).await;
         if matches!(outcome, Outcome::Error(_) | Outcome::Stream(_)) {
             return outcome;
