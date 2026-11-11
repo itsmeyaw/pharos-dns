@@ -557,6 +557,19 @@ impl Plugin for Rewrite {
         let mut answer_auto = false;
         let mut selected_answers = &[][..];
         'rules: for (index, rule) in self.rules.iter().enumerate() {
+            let mut current_name = NameText {
+                bytes: [0; 1024],
+                len: 0,
+            };
+            let Some(question) = cx.query.questions().next() else {
+                break;
+            };
+            if write!(current_name, "{}", question.name).is_err() {
+                break;
+            }
+            current_name.bytes[..current_name.len].make_ascii_lowercase();
+            let name = std::str::from_utf8(&current_name.bytes[..current_name.len])
+                .expect("DNS presentation is UTF-8");
             let matched = match rule.action {
                 Action::Type(from, to)
                     if from.0 != 0
