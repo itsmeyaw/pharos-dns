@@ -634,6 +634,97 @@ struct ReverterFixture {
     kind: Type,
     count: usize,
 }
+
+struct RemapFixture;
+impl Next for RemapFixture {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        for value in [
+            "example.com.",
+            "sub.example.com.",
+            "a.b.example.com.",
+            "notexample.com.",
+            "example.net.",
+            "com.",
+        ] {
+            let owner: Name = value.parse().unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    NameRef::parse(owner.as_wire(), 0).unwrap(),
+                    Type::A,
+                    Class::IN,
+                    5,
+                    &[127, 0, 0, 1],
+                )
+                .unwrap();
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_test.go TestRemapStringRewriter.
+#[tokio::test]
+async fn coredns_remap_name_boundary_rows() {
+    let config = ".:53 {\n rewrite name example.org. example.com.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.org.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, RemapFixture)
+            .await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    let actual: Vec<_> = message
+        .answers()
+        .map(|record| record.name.to_string())
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            "example.org.",
+            "sub.example.org.",
+            "a.b.example.org.",
+            "notexample.com.",
+            "example.net.",
+            "com."
+        ]
+    );
+}
 impl Next for ReverterFixture {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
