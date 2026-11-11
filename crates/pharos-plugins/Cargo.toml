@@ -22,7 +22,7 @@ stats_alloc = "0.1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [features]
-default = ["plugin-any", "plugin-bind", "plugin-bufsize", "plugin-cache", "plugin-errors", "plugin-forward", "plugin-health", "plugin-hosts", "plugin-kubernetes", "plugin-loadbalance", "plugin-log", "plugin-loop", "plugin-multisocket", "plugin-nsid", "plugin-prometheus", "plugin-ready", "plugin-reload", "plugin-whoami"]
+default = ["plugin-any", "plugin-bind", "plugin-bufsize", "plugin-cache", "plugin-chaos", "plugin-errors", "plugin-forward", "plugin-health", "plugin-hosts", "plugin-kubernetes", "plugin-loadbalance", "plugin-log", "plugin-loop", "plugin-multisocket", "plugin-nsid", "plugin-prometheus", "plugin-ready", "plugin-reload", "plugin-whoami"]
 plugin-root = []
 plugin-metadata = []
 plugin-geoip = []

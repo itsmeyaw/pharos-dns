@@ -21,6 +21,8 @@ pub mod bind;
 pub mod bufsize;
 #[cfg(feature = "plugin-cache")]
 pub mod cache;
+#[cfg(feature = "plugin-chaos")]
+pub mod chaos;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 #[cfg(any(
@@ -453,6 +455,12 @@ fn setup_any(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result
         return Err(cursor.arg_err());
     }
     block.config.any = Some(any::Any);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-chaos")]
+fn setup_chaos(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.chaos = Some(chaos::Chaos::parse(cursor)?);
     Ok(())
 }
 

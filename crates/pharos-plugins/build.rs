@@ -23,6 +23,7 @@ fn main() {
     for name in &enabled {
         let ty = match *name {
             "any" => "any::Any",
+            "chaos" => "chaos::Chaos",
             "cache" => "cache::Cache",
             "bind" => "()",
             "bufsize" => "bufsize::Bufsize",
@@ -49,6 +50,7 @@ fn main() {
     for name in &enabled {
         let setup = match *name {
             "any" => "setup_any",
+            "chaos" => "setup_chaos",
             "cache" => "setup_cache",
             "bind" => "setup_bind",
             "bufsize" => "setup_bufsize",
