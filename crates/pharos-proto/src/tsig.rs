@@ -140,7 +140,7 @@ impl TsigKey {
         }
     }
 
-    /// Appends a full-length TSIG to a Message, chaining the Query MAC for a Response.
+    /// Appends a full-length TSIG to a Message, chaining the verified Query MAC for a Response.
     /// Set a Response's header ID to the original Query ID before signing.
     pub fn sign(
         &self,
@@ -421,6 +421,7 @@ pub struct TsigStream<'a> {
 }
 
 impl<'a> TsigStream<'a> {
+    /// Start a Response stream using a previously verified Query MAC.
     #[must_use]
     pub fn new(key: &'a TsigKey, query_mac: &'a [u8]) -> Self {
         Self {
