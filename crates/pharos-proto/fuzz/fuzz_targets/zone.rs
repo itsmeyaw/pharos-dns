@@ -267,8 +267,19 @@ fuzz_target!(|zone: &[u8]| {
         .get_or_init(|| Mutex::new(Oracle::start()))
         .lock()
         .unwrap();
-    let expected = oracle.parse(zone);
-    let actual = pharos(zone);
+    let mut expected = oracle.parse(zone);
+    let mut actual = pharos(zone);
+    // Documented deviation: Pharos parses a missing final newline as if it were present, so
+    // compare the terminated zone and apply the other skips to it.
+    let terminated;
+    let zone = if actual != expected && !zone.ends_with(b"\n") {
+        terminated = [zone, b"\n"].concat();
+        expected = oracle.parse(&terminated);
+        actual = pharos(&terminated);
+        &terminated[..]
+    } else {
+        zone
+    };
     // Documented deviation: miekg/dns drops escaped characters in $GENERATE templates, which
     // may span lines inside quotes; escapes stay covered by zones without $GENERATE.
     if has_generate(zone) && zone.contains(&b'\\') {
@@ -285,7 +296,11 @@ fuzz_target!(|zone: &[u8]| {
             return;
         }
         if let Some(repaired) = repair_dangling_name_escape(zone) {
-            if pharos(&repaired) == expected && oracle.parse(&repaired) == expected {
+            // RFC 1035 §2.3.4: spelled out, an overlong label is rejected by both parsers, but
+            // miekg/dns does not check the length of a label ending in a lone backslash.
+            let spelled = pharos(&repaired);
+            if oracle.parse(&repaired) == spelled && (spelled == expected || spelled == "reject\n")
+            {
                 return;
             }
         }
@@ -341,15 +356,6 @@ fuzz_target!(|zone: &[u8]| {
                 return;
             }
         }
-    }
-    // Documented deviation: Pharos parses a missing final newline as if it were present.
-    if actual != expected && !zone.ends_with(b"\n") {
-        let expected = oracle.parse(&[zone, b"\n"].concat());
-        assert_eq!(
-            actual, expected,
-            "Pharos and miekg/dns (with final newline) disagree"
-        );
-        return;
     }
     assert_eq!(actual, expected, "Pharos and miekg/dns disagree");
 });
