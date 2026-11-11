@@ -348,3 +348,75 @@ async fn coredns_edns_multiple_rules_rows() {
         );
     }
 }
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rewrite_test.go TestRewriteEDNS0Revert.
+#[tokio::test]
+async fn coredns_edns_revert_rows() {
+    for (rule, appended, expected) in [
+        ("local set 0xffee 0xabcdef revert", &b""[..], &b""[..]),
+        (
+            "local append 0xffee abcdefghijklmnop revert",
+            &b""[..],
+            &b""[..],
+        ),
+        (
+            "local replace 0xffee abcdefghijklmnop revert",
+            &b""[..],
+            &b""[..],
+        ),
+        ("nsid set revert", &b""[..], &b""[..]),
+        ("nsid append revert", &b""[..], &b""[..]),
+        ("nsid replace", &b""[..], &b""[..]),
+        (
+            "local set 0xffee 0xabcd revert",
+            &b"\xff\xed\0\x03\xab\xcd\xef"[..],
+            &b"\xff\xed\0\x03\xab\xcd\xef"[..],
+        ),
+        (
+            "local replace 0xffee abcdefghijklmnop",
+            &b"\xff\xef\0\x03\xab\xcd\xef"[..],
+            &b"\xff\xef\0\x03\xab\xcd\xef"[..],
+        ),
+    ] {
+        let config = format!(".:53 {{\n rewrite edns0 {rule}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = "example.com.".parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "10.240.0.1:40212".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain.rewrite.as_ref().unwrap().serve(&mut cx, Echo).await,
+            Outcome::Response,
+            "{rule}"
+        );
+        let response = Message::parse(cx.response).unwrap();
+        let mut actual = response.opt().unwrap().options().as_bytes().to_vec();
+        // The upstream test appends fromOpts after ServeDNS rather than to the Query.
+        actual.extend_from_slice(appended);
+        assert_eq!(actual, expected, "{rule}");
+    }
+}
