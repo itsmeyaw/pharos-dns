@@ -36,6 +36,8 @@ The `loop` scenario compares Responses for a non-looping configuration. The
 looping README example is covered by a binary exit test instead: this harness
 expects both processes to remain available and does not compare exit codes.
 The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
+The bind scenario compares Responses on 127.0.0.1 with an excluded IPv6 address;
+the harness cannot send Queries to another bind address or scrape metrics.
 The Reload README scenarios use `whoami` instead of the unimplemented `erratic`
 backend and compare DNS Responses rather than reload timing.
 
