@@ -2186,6 +2186,153 @@ impl Next for AliasedAnswer {
     }
 }
 
+struct ValueAnswer<'a> {
+    data: pharos_proto::Rdata<'a>,
+    extra_owner: NameRef<'a>,
+}
+impl Next for ValueAnswer<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        assert_eq!(q.name.to_string(), "my.cluster.local.");
+        let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        b.question(q.name, q.qtype, q.qclass).unwrap();
+        b.record_with(
+            Section::Answer,
+            q.name,
+            self.data.rtype(),
+            Class::IN,
+            60,
+            |w| self.data.write(w),
+        )
+        .unwrap();
+        b.record(
+            Section::Additional,
+            self.extra_owner,
+            Type::A,
+            Class::IN,
+            60,
+            &[192, 0, 2, 1],
+        )
+        .unwrap();
+        let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/reverter_test.go valueTests.
+#[tokio::test]
+async fn coredns_answer_value_rewrites_name_bearing_record_types() {
+    use pharos_proto::Rdata;
+    let target: Name = "target.cluster.local.".parse().unwrap();
+    let hostmaster: Name = "admin.cluster.local.".parse().unwrap();
+    let target_ref = NameRef::parse(target.as_wire(), 0).unwrap();
+    let hostmaster_ref = NameRef::parse(hostmaster.as_wire(), 0).unwrap();
+    for data in [
+        Rdata::Cname(target_ref),
+        Rdata::Dname(target_ref),
+        Rdata::Ns(target_ref),
+        Rdata::Ptr(target_ref),
+        Rdata::Mx {
+            preference: 1,
+            exchange: target_ref,
+        },
+        Rdata::Srv {
+            priority: 0,
+            weight: 100,
+            port: 100,
+            target: target_ref,
+        },
+        Rdata::Soa {
+            mname: target_ref,
+            rname: hostmaster_ref,
+            serial: 1,
+            refresh: 2,
+            retry: 3,
+            expire: 4,
+            minimum: 5,
+        },
+        Rdata::Naptr {
+            order: 100,
+            preference: 10,
+            flags: b"S",
+            services: b"SIP+D2U",
+            regexp: b"",
+            replacement: target_ref,
+        },
+    ] {
+        for rules in [
+            r"rewrite name suffix .domain.uk .cluster.local answer auto answer value (.*)\.cluster\.local {1}.domain.uk",
+            "rewrite continue name suffix .domain.uk .domain.us answer auto\n rewrite name suffix .domain.us .cluster.local answer auto",
+        ] {
+            let config = format!(".:53 {{\n {rules}\n}}");
+            let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+                .unwrap()
+                .remove(0)
+                .config;
+            let name: Name = "my.domain.uk.".parse().unwrap();
+            let root: Name = ".".parse().unwrap();
+            let mut wire = Vec::with_capacity(512);
+            let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+            b.question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                data.rtype(),
+                Class::IN,
+            )
+            .unwrap();
+            let _ = b.finish();
+            let mut response = Vec::with_capacity(512);
+            let mut slots = [];
+            let mut cx = Context {
+                query: Message::parse(&wire).unwrap(),
+                client: "127.0.0.1:1234".parse().unwrap(),
+                local: "127.0.0.1:53".parse().unwrap(),
+                transport: Transport::Dns,
+                protocol: Protocol::Udp,
+                domain: &root,
+                metadata: Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size: 512,
+            };
+            assert_eq!(
+                chain
+                    .rewrite
+                    .as_ref()
+                    .unwrap()
+                    .serve(
+                        &mut cx,
+                        ValueAnswer {
+                            data,
+                            extra_owner: target_ref
+                        }
+                    )
+                    .await,
+                Outcome::Response
+            );
+            let response = Message::parse(cx.response).unwrap();
+            let answer = response.answers().next().unwrap().data().unwrap();
+            let target = match answer {
+                Rdata::Cname(value)
+                | Rdata::Dname(value)
+                | Rdata::Ns(value)
+                | Rdata::Ptr(value) => value,
+                Rdata::Mx { exchange, .. } => exchange,
+                Rdata::Srv { target, .. } => target,
+                Rdata::Soa { mname, rname, .. } => {
+                    assert_eq!(rname.to_string(), "admin.cluster.local.");
+                    mname
+                }
+                Rdata::Naptr { replacement, .. } => replacement,
+                _ => panic!("unexpected record"),
+            };
+            assert_eq!(target.to_string(), "target.domain.uk.");
+            assert_eq!(
+                response.additionals().next().unwrap().name.to_string(),
+                "target.domain.uk."
+            );
+        }
+    }
+}
+
 struct DnameAnswer;
 impl Next for DnameAnswer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
