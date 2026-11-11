@@ -36,10 +36,14 @@ fn defaults_and_ttl_match_coredns() {
 }
 
 #[test]
-fn setup_does_not_claim_to_serve() {
+fn setup_registers_backend_and_validates_options() {
     let blocks = parse("Corefile", ".:53 {\n kubernetes cluster.local\n}").unwrap();
-    let err = configure::<Chain>(&blocks, directives()).unwrap_err();
-    assert!(err.message.contains("not implemented"), "{err}");
+    assert!(
+        configure::<Chain>(&blocks, directives()).unwrap()[0]
+            .config
+            .kubernetes
+            .is_some()
+    );
     let blocks = parse(
         "Corefile",
         ".:53 {\n kubernetes cluster.local {\n  pods invalid\n }\n}",
@@ -233,9 +237,101 @@ fn multicluster_validates_before_not_implemented() {
             .message
             .contains("#41")
     );
-    assert!(config("kubernetes cluster.local {\n multicluster bad..zone\n}").is_err());
+    for zones in ["bad..zone", "bad..zone cluster.local"] {
+        let error = config(&format!(
+            "kubernetes cluster.local {{\n multicluster {zones}\n}}"
+        ))
+        .unwrap_err();
+        assert!(
+            error.message.contains("not implemented") && error.message.contains("#41"),
+            "{error}"
+        );
+    }
     let invalid =
         config("kubernetes cluster.local {\n multicluster cluster.local\n zonal\n noendpoints\n}")
             .unwrap_err();
     assert!(invalid.message.contains("zonal requires"), "{invalid}");
+}
+
+#[test]
+fn qps_follows_go_float32_syntax_range_and_rounding() {
+    for (input, expected) in [
+        ("0x1p4", 16.0f32.to_bits()),
+        ("0X1.8P2", 6.0f32.to_bits()),
+        ("0x_1p2", 4.0f32.to_bits()),
+        ("1_2.5", 12.5f32.to_bits()),
+        ("0x1p1_0", 1024.0f32.to_bits()),
+        ("0x1.000001p0", 1.0f32.to_bits()),
+        ("0x1.000003p0", 0x3f800002),
+        ("0x1p-150", 0),
+        ("0x1.000001p-150", 1),
+        ("0x1p-149", 1),
+        ("0x1.fffffep127", f32::MAX.to_bits()),
+        ("0x0p999999999", 0),
+        ("3.4028235e38", f32::MAX.to_bits()),
+        ("1e-9999", 0),
+        ("-1e-9999", (-0.0f32).to_bits()),
+    ] {
+        let parsed = config(&format!(
+            "kubernetes cluster.local {{\n apiserver_qps {input}\n}}"
+        ))
+        .unwrap_or_else(|error| panic!("{input}: {error}"));
+        assert_eq!(parsed.api_qps.to_bits(), expected, "{input}");
+    }
+    for input in ["NaN", "nan", "NAN"] {
+        assert!(
+            config(&format!(
+                "kubernetes cluster.local {{\n apiserver_qps {input}\n}}"
+            ))
+            .unwrap()
+            .api_qps
+            .is_nan(),
+            "{input}"
+        );
+    }
+    for input in ["+Inf", "Infinity", "infinity"] {
+        assert_eq!(
+            config(&format!(
+                "kubernetes cluster.local {{\n apiserver_qps {input}\n}}"
+            ))
+            .unwrap()
+            .api_qps,
+            f32::INFINITY,
+            "{input}"
+        );
+    }
+    for input in [
+        "1e39",
+        "-1e39",
+        "3.4028236e38",
+        "0x1.ffffffp127",
+        "0x1p999999999",
+        "-Inf",
+        "+NaN",
+        "1__2",
+        "1e_3",
+        "0x1",
+        "0x.p0",
+        "0x1_p2",
+        "0x1p_2",
+    ] {
+        assert!(
+            config(&format!(
+                "kubernetes cluster.local {{\n apiserver_qps {input}\n}}"
+            ))
+            .is_err(),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn startup_timeout_accepts_zero_and_clamps_negative_values() {
+    for input in ["0", "0s", "-0", "-0s", "-5s", "-1h30m"] {
+        let result = config(&format!(
+            "kubernetes cluster.local {{\n startup_timeout {input}\n}}"
+        ))
+        .unwrap_or_else(|error| panic!("{input}: {error}"));
+        assert_eq!(result.startup_timeout, std::time::Duration::ZERO, "{input}");
+    }
 }

@@ -183,12 +183,6 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
             }
             "multicluster" => {
                 multicluster_configured = true;
-                if args
-                    .iter()
-                    .any(|arg| pharos_corefile::normalize_domain(arg).is_empty())
-                {
-                    return Err(cursor.error("invalid multicluster zone"));
-                }
                 multicluster = origins_from_args_or_server_block(
                     &args.iter().map(String::as_str).collect::<Vec<_>>(),
                     &[],
@@ -205,9 +199,9 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
                 if args.len() != 1 {
                     return Err(cursor.arg_err());
                 }
-                let value: f32 = args[0]
-                    .parse()
-                    .map_err(|_| cursor.error("invalid apiserver_qps"))?;
+                // ClientConfig rejects non-finite QPS even though CoreDNS accepts it here.
+                let value =
+                    parse_float32(&args[0]).ok_or_else(|| cursor.error("invalid apiserver_qps"))?;
                 if value < 0.0 {
                     return Err(cursor.error("apiserver_qps must be >= 0"));
                 }
@@ -255,6 +249,140 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
         return Err(cursor.error("multicluster is not implemented (#41)"));
     }
     Ok(config)
+}
+
+fn parse_float32(input: &str) -> Option<f32> {
+    let (negative, body) = if let Some(body) = input.strip_prefix('-') {
+        (true, body)
+    } else {
+        (false, input.strip_prefix('+').unwrap_or(input))
+    };
+    if body.eq_ignore_ascii_case("nan") {
+        return (body.len() == input.len()).then_some(f32::NAN);
+    }
+    if body.eq_ignore_ascii_case("inf") || body.eq_ignore_ascii_case("infinity") {
+        return Some(if negative {
+            f32::NEG_INFINITY
+        } else {
+            f32::INFINITY
+        });
+    }
+    let hex = body.starts_with("0x") || body.starts_with("0X");
+    let exponent = body.bytes().position(|b| matches!(b, b'p' | b'P'));
+    let bytes = body.as_bytes();
+    for (i, &byte) in bytes.iter().enumerate() {
+        if byte != b'_' {
+            continue;
+        }
+        let is_digit = |b: u8| {
+            if hex && exponent.is_none_or(|e| i < e) {
+                b.is_ascii_hexdigit()
+            } else {
+                b.is_ascii_digit()
+            }
+        };
+        if !(hex && i == 2 || i > 0 && is_digit(bytes[i - 1]))
+            || !bytes.get(i + 1).is_some_and(|&b| is_digit(b))
+        {
+            return None;
+        }
+    }
+    let cleaned = body.replace('_', "");
+    if hex {
+        return parse_hex_float32(&cleaned[2..], negative);
+    }
+    let value = cleaned.parse::<f32>().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    Some(if negative { -value } else { value })
+}
+
+fn parse_hex_float32(input: &str, negative: bool) -> Option<f32> {
+    let (mantissa, exponent) = input.split_once(['p', 'P'])?;
+    let (exp_negative, exponent) = if let Some(rest) = exponent.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, exponent.strip_prefix('+').unwrap_or(exponent))
+    };
+    if exponent.is_empty() || !exponent.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let exponent = exponent.bytes().fold(0i64, |n, b| {
+        n.saturating_mul(10).saturating_add(i64::from(b - b'0'))
+    });
+    let exponent = if exp_negative { -exponent } else { exponent };
+    let mut digits = Vec::new();
+    let mut point = None;
+    for byte in mantissa.bytes() {
+        if byte == b'.' && point.is_none() {
+            point = Some(digits.len());
+        } else {
+            digits.push((byte as char).to_digit(16)? as u8);
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    let sign = if negative { 1 << 31 } else { 0 };
+    let Some(first) = digits.iter().position(|&digit| digit != 0) else {
+        return Some(f32::from_bits(sign));
+    };
+    let integer_digits = point.unwrap_or(digits.len());
+    let offset = (integer_digits as i64)
+        .saturating_sub(first as i64)
+        .saturating_sub(1)
+        .saturating_mul(4);
+    let mut exponent = exponent
+        .saturating_add(offset)
+        .saturating_add(i64::from(digits[first].ilog2()));
+    if exponent > 127 {
+        return None;
+    }
+    if exponent < -150 {
+        return Some(f32::from_bits(sign));
+    }
+    // Round directly to float32 to avoid double-rounding hexadecimal halfway values.
+    let precision = if exponent >= -126 {
+        24
+    } else {
+        (exponent + 150) as usize
+    };
+    let mut value = 0u32;
+    let mut count = 0usize;
+    let mut round = false;
+    let mut sticky = false;
+    for (i, &digit) in digits[first..].iter().enumerate() {
+        let high = if i == 0 { digit.ilog2() } else { 3 };
+        for bit in (0..=high).rev() {
+            let set = digit & (1 << bit) != 0;
+            if count < precision {
+                value = (value << 1) | u32::from(set);
+            } else if count == precision {
+                round = set;
+            } else {
+                sticky |= set;
+            }
+            count += 1;
+        }
+    }
+    if count < precision {
+        value <<= precision - count;
+    }
+    if round && (sticky || value & 1 != 0) {
+        value += 1;
+    }
+    if exponent >= -126 {
+        if value == 1 << 24 {
+            value >>= 1;
+            exponent += 1;
+        }
+        if exponent > 127 {
+            return None;
+        }
+        value = (((exponent + 127) as u32) << 23) | (value & 0x7f_ffff);
+    }
+    Some(f32::from_bits(sign | value))
 }
 
 fn is_reverse(zone: &str) -> bool {
@@ -391,8 +519,8 @@ fn valid_key(key: &str) -> bool {
     let (prefix, name) = key
         .split_once('/')
         .map_or((None, key), |(prefix, name)| (Some(prefix), name));
-    if let Some(prefix) = prefix {
-        if prefix.len() > 253
+    if let Some(prefix) = prefix
+        && (prefix.len() > 253
             || prefix.is_empty()
             || !prefix.split('.').all(|part| {
                 !part.is_empty()
@@ -407,10 +535,9 @@ fn valid_key(key: &str) -> bool {
                     && part
                         .bytes()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-            })
-        {
-            return false;
-        }
+            }))
+    {
+        return false;
     }
     !name.is_empty() && valid_value(name)
 }

@@ -31,6 +31,7 @@ fn main() {
             "forward" => "forward::Forward",
             "health" => "health::Health",
             "hosts" => "hosts::Hosts",
+            "kubernetes" => "kubernetes::Kubernetes",
             "loadbalance" => "loadbalance::LoadBalance",
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",

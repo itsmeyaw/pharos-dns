@@ -1,1 +1,865 @@
+//! Kubernetes authoritative DNS backend.
+
+mod name;
 pub mod setup;
+
+use pharos_kubernetes::{
+    Controller,
+    object::{EndpointAddress, Port},
+    store::Index,
+};
+use pharos_proto::{
+    BuildError, Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type,
+};
+use pharos_server::{Context, Next, Outcome, Phase, Protocol};
+use std::{
+    net::IpAddr,
+    sync::{Arc, Mutex},
+};
+
+#[derive(Default)]
+struct State {
+    controller: Mutex<Option<Controller>>,
+    metrics: Mutex<pharos_server::metrics::Registry>,
+}
+
+pub struct Kubernetes {
+    config: Arc<setup::Config>,
+    zones: Vec<Name>,
+    fallthrough: Vec<Name>,
+    state: Arc<State>,
+}
+
+impl std::fmt::Debug for Kubernetes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Kubernetes")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Kubernetes {
+    pub fn new(config: setup::Config) -> Result<Self, String> {
+        let zones = config
+            .zones
+            .iter()
+            .map(|z| z.parse::<Name>().map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        let fallthrough = config
+            .fallthrough
+            .domains
+            .iter()
+            .map(|z| z.parse::<Name>().map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            config: Arc::new(config),
+            zones,
+            fallthrough,
+            state: Arc::default(),
+        })
+    }
+
+    pub(crate) fn set_metrics(&self, registry: &pharos_server::metrics::Registry) {
+        *self.state.metrics.lock().unwrap() = registry.clone();
+    }
+
+    pub(crate) fn register_hooks(&self, lifecycle: &mut pharos_server::Lifecycle) {
+        let state = self.state.clone();
+        let config = self.config.clone();
+        let start = move || {
+            let state = state.clone();
+            let config = config.clone();
+            async move {
+                let registry = state.metrics.lock().unwrap().clone();
+                let client = config
+                    .client_config()
+                    .client(&registry)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                let controller = Controller::start_with_metrics(
+                    client,
+                    config.watch_config(),
+                    registry.kubernetes(),
+                );
+                controller.wait_for_sync(config.startup_timeout).await;
+                *state.controller.lock().unwrap() = Some(controller);
+                Ok(())
+            }
+        };
+        lifecycle.register(Phase::Startup, start.clone());
+        lifecycle.register(Phase::RestartFailed, start);
+        let state = self.state.clone();
+        let stop = move || {
+            let controller = state.controller.lock().unwrap().take();
+            async move {
+                if let Some(mut controller) = controller {
+                    controller.stop().await;
+                }
+                Ok(())
+            }
+        };
+        lifecycle.register(Phase::Restart, stop.clone());
+        lifecycle.register(Phase::Shutdown, stop);
+    }
+}
+
+fn contains(name: NameRef<'_>, zone: &Name) -> bool {
+    let z = NameRef::parse(zone.as_wire(), 0).unwrap();
+    let n = name.labels().count();
+    let count = z.labels().count();
+    n >= count
+        && name
+            .labels()
+            .skip(n - count)
+            .zip(z.labels())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+fn child<'a>(prefix: &[&[u8]], zone: NameRef<'_>, wire: &'a mut [u8; 255]) -> Option<NameRef<'a>> {
+    let mut n = 0;
+    for label in prefix.iter().copied().chain(zone.labels()) {
+        if label.is_empty() || label.len() > 63 || n + label.len() + 2 > 255 {
+            return None;
+        }
+        wire[n] = label.len() as u8;
+        n += 1;
+        wire[n..n + label.len()].copy_from_slice(label);
+        n += label.len();
+    }
+    wire[n] = 0;
+    NameRef::parse(&wire[..n + 1], 0).ok()
+}
+
+fn soa(
+    builder: &mut MessageBuilder<'_>,
+    section: Section,
+    zone: NameRef<'_>,
+    ttl: u32,
+    serial: u32,
+) -> Result<(), BuildError> {
+    let mut ns_wire = [0; 255];
+    let mut host_wire = [0; 255];
+    let ns = child(&[b"ns", b"dns"], zone, &mut ns_wire).ok_or(BuildError::InvalidRdata)?;
+    let host = child(&[b"hostmaster"], zone, &mut host_wire).ok_or(BuildError::InvalidRdata)?;
+    builder.record_with(section, zone, Type::SOA, Class::IN, ttl.min(300), |w| {
+        w.write_name(ns)?;
+        w.write_name(host)?;
+        for number in [serial, 7200, 1800, 86400, ttl] {
+            w.write_bytes(&number.to_be_bytes())?;
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn matching(request: &name::Request<'_>, port: &Port) -> bool {
+    (request.port.is_empty() || request.port.eq_ignore_ascii_case(port.name.as_bytes()))
+        && (request.protocol.is_empty()
+            || request
+                .protocol
+                .eq_ignore_ascii_case(port.protocol.as_bytes()))
+}
+
+fn endpoint_label<'a>(
+    address: &'a EndpointAddress,
+    pod_names: bool,
+    buf: &'a mut [u8; 64],
+) -> &'a [u8] {
+    if !address.hostname.is_empty() {
+        return address.hostname.as_bytes();
+    }
+    if pod_names && !address.target_ref_name.is_empty() {
+        return address.target_ref_name.as_bytes();
+    }
+    let bytes = address.ip.as_bytes();
+    if bytes.len() + 1 > buf.len() {
+        return b"";
+    }
+    for (i, byte) in bytes.iter().enumerate() {
+        buf[i] = if *byte == b'.' || *byte == b':' {
+            b'-'
+        } else {
+            *byte
+        };
+    }
+    let mut n = bytes.len();
+    if bytes.last() == Some(&b':') {
+        buf[n] = b'0';
+        n += 1;
+    }
+    &buf[..n]
+}
+
+fn visit(
+    index: &Index,
+    req: &name::Request<'_>,
+    config: &setup::Config,
+    mut f: impl FnMut(&str, &Port, Option<&[u8]>),
+) -> bool {
+    let Ok(namespace) = std::str::from_utf8(req.namespace) else {
+        return false;
+    };
+    let Ok(service) = std::str::from_utf8(req.service) else {
+        return false;
+    };
+    if index.namespace(namespace).is_none() {
+        return false;
+    }
+    let Some(svc) = index.service(namespace, service) else {
+        return false;
+    };
+    if config.ignore_empty_service
+        && !svc.headless()
+        && svc.service_type != "ExternalName"
+        && !index
+            .endpoints(namespace, service)
+            .any(|e| !e.addresses.is_empty())
+    {
+        return false;
+    }
+    // shortcut: zonal endpoint selection is stage 3; do not return unfiltered addresses for pinned names.
+    if !req.zone.is_empty() {
+        return false;
+    }
+    if svc.service_type == "ExternalName" {
+        return req.endpoint.is_empty()
+            && req.port.is_empty()
+            && req.protocol.is_empty()
+            && !svc.external_name.is_empty()
+            && svc.external_name.parse::<IpAddr>().is_err();
+    }
+    let mut found = false;
+    if svc.headless() || !req.endpoint.is_empty() {
+        for ep in index.endpoints(namespace, service) {
+            for addr in &ep.addresses {
+                let mut buf = [0; 64];
+                let label = endpoint_label(addr, config.endpoint_pod_names, &mut buf);
+                if !req.endpoint.is_empty() && !req.endpoint.eq_ignore_ascii_case(label) {
+                    continue;
+                }
+                for port in &ep.ports {
+                    if matching(req, port) {
+                        found = true;
+                        f(&addr.ip, port, Some(label));
+                    }
+                }
+            }
+        }
+    } else {
+        for port in &svc.ports {
+            if matching(req, port) {
+                found = true;
+                for ip in &svc.cluster_ips {
+                    f(ip, port, None);
+                }
+            }
+        }
+    }
+    found
+}
+
+fn visit_ns(
+    index: &Index,
+    locals: &[IpAddr],
+    zone: NameRef<'_>,
+    config: &setup::Config,
+    mut f: impl FnMut(NameRef<'_>, IpAddr),
+) {
+    let mut found = false;
+    for local in locals {
+        let local_text = local.to_string();
+        for ep in index.endpoints_by_ip(&local_text) {
+            found = true;
+            let Some(svc) = index.service(&ep.namespace, &ep.service_name) else {
+                continue;
+            };
+            if svc.headless() {
+                for addr in &ep.addresses {
+                    let Ok(ip) = addr.ip.parse() else { continue };
+                    let mut label = [0; 64];
+                    let hostname = endpoint_label(addr, config.endpoint_pod_names, &mut label);
+                    let mut wire = [0; 255];
+                    if let Some(target) = child(
+                        &[
+                            hostname,
+                            svc.name.as_bytes(),
+                            svc.namespace.as_bytes(),
+                            b"svc",
+                        ],
+                        zone,
+                        &mut wire,
+                    ) {
+                        f(target, ip);
+                    }
+                }
+            } else {
+                for addr in &svc.cluster_ips {
+                    let Ok(ip) = addr.parse() else { continue };
+                    let mut wire = [0; 255];
+                    if let Some(target) = child(
+                        &[svc.name.as_bytes(), svc.namespace.as_bytes(), b"svc"],
+                        zone,
+                        &mut wire,
+                    ) {
+                        f(target, ip);
+                    }
+                }
+            }
+        }
+    }
+    if !found {
+        let mut wire = [0; 255];
+        if let Some(target) = child(&[b"ns", b"dns"], zone, &mut wire) {
+            for local in locals {
+                f(target, *local);
+            }
+        }
+    }
+}
+
+fn local_addresses(local: IpAddr) -> Vec<IpAddr> {
+    if local.is_loopback() {
+        return Vec::new();
+    }
+    if !local.is_unspecified() {
+        return vec![local];
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        nix::ifaddrs::getifaddrs()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let address = item.address?;
+                address
+                    .as_sockaddr_in()
+                    .map(|a| IpAddr::V4(a.ip()))
+                    .or_else(|| address.as_sockaddr_in6().map(|a| IpAddr::V6(a.ip())))
+            })
+            .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+            .collect()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Vec::new()
+    }
+}
+
+impl pharos_server::Plugin for Kubernetes {
+    fn readiness(&self) -> Option<&dyn pharos_server::Readiness> {
+        Some(self)
+    }
+
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+        let Some(q) = cx.query.questions().next() else {
+            return next.run(cx).await;
+        };
+        let Some(zone) = self
+            .zones
+            .iter()
+            .filter(|z| contains(q.name, z))
+            .max_by_key(|z| z.label_count())
+        else {
+            return next.run(cx).await;
+        };
+        if q.qtype == Type::AXFR || q.qtype == Type::IXFR {
+            return Outcome::Unanswered(Rcode::REFUSED);
+        }
+        let mut lower = [0u8; 255];
+        let mut n = 0;
+        for label in q.name.labels() {
+            lower[n] = label.len() as u8;
+            n += 1;
+            for b in label {
+                lower[n] = b.to_ascii_lowercase();
+                n += 1;
+            }
+        }
+        n += 1;
+        let lower_name = NameRef::parse(&lower[..n], 0).unwrap();
+        let mut labels = [&[][..]; 127];
+        let mut count = 0;
+        for label in lower_name.labels() {
+            labels[count] = label;
+            count += 1;
+        }
+        let count = count - zone.label_count();
+        let mut zone_wire = [0u8; 255];
+        let mut zone_len = 0;
+        for label in q.name.labels().skip(count) {
+            zone_wire[zone_len] = label.len() as u8;
+            zone_len += 1;
+            zone_wire[zone_len..zone_len + label.len()].copy_from_slice(label);
+            zone_len += label.len();
+        }
+        let zone_ref = NameRef::parse(&zone_wire[..zone_len + 1], 0).unwrap();
+        let req = name::parse(&labels[..count], self.config.zonal);
+        let (store, synced) = {
+            let guard = self.state.controller.lock().unwrap();
+            (
+                guard.as_ref().map(Controller::store),
+                guard.as_ref().is_some_and(Controller::has_synced),
+            )
+        };
+        let store = store.unwrap_or_default();
+        let mut external = None;
+        let exists = if q.qtype == Type::SOA
+            || count == 0
+            || count == 1
+                && (labels[0] == b"svc"
+                    || labels[0] == b"pod"
+                    || labels[0] == b"dns-version" && q.qtype == Type::TXT)
+            || count == 2 && labels[0] == b"ns" && labels[1] == b"dns"
+        {
+            true
+        } else if let Some(req) = &req {
+            if req.kind == b"svc" && req.service.is_empty() {
+                std::str::from_utf8(req.namespace)
+                    .ok()
+                    .is_some_and(|ns| store.with_read(|i| i.namespace(ns).is_some()))
+            } else if req.kind == b"svc" {
+                store.with_read(|i| {
+                    let ok = visit(i, req, &self.config, |_, _, _| {});
+                    if ok
+                        && let (Ok(ns), Ok(svc)) = (
+                            std::str::from_utf8(req.namespace),
+                            std::str::from_utf8(req.service),
+                        )
+                        && let Some(service) = i.service(ns, svc)
+                        && service.service_type == "ExternalName"
+                    {
+                        external = Some(service.external_name.clone());
+                    }
+                    ok
+                })
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !exists && self.fallthrough.iter().any(|z| contains(q.name, z)) {
+            return next.run(cx).await;
+        }
+        let code = if exists {
+            Rcode::NOERROR
+        } else if synced {
+            Rcode::NXDOMAIN
+        } else {
+            Rcode::SERVFAIL
+        };
+        let target = external.as_ref().and_then(|s| {
+            let fqdn = if s.ends_with('.') {
+                s.clone()
+            } else {
+                format!("{s}.")
+            };
+            fqdn.parse::<Name>().ok()
+        });
+        let mut truncated = false;
+        let chased = if matches!(q.qtype, Type::A | Type::AAAA)
+            && target.as_ref().is_some_and(|t| {
+                NameRef::parse(t.as_wire(), 0).is_ok_and(|name| name != lower_name)
+            }) {
+            if let Some(target) = &target {
+                let result = cx.self_lookup(target, q.qtype).await.ok();
+                truncated = result
+                    .as_deref()
+                    .and_then(|wire| Message::parse(wire).ok())
+                    .is_some_and(|message| message.tc());
+                if NameRef::parse(target.as_wire(), 0).is_ok_and(|name| contains(name, zone)) {
+                    result.filter(|wire| {
+                        Message::parse(wire).is_ok_and(|msg| {
+                            msg.rcode() == Rcode::NOERROR && msg.answer_count() > 0
+                        })
+                    })
+                } else {
+                    result
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let ns_ips = if count == 0 && q.qtype == Type::NS
+            || count == 2 && labels[0] == b"ns" && labels[1] == b"dns"
+        {
+            local_addresses(cx.local.ip())
+        } else {
+            Vec::new()
+        };
+        let max = cx.max_response_size.max(512);
+        if cx.response.capacity() < max {
+            if cx.protocol == Protocol::Tcp {
+                cx.response.reserve(max - cx.response.len());
+            } else {
+                return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
+            }
+        }
+        let result = (|| -> Result<(), BuildError> {
+            let mut b = MessageBuilder::new(
+                cx.response,
+                max,
+                cx.query.id(),
+                0x8400
+                    | (cx.query.flags() & 0x7910)
+                    | code.0
+                    | if truncated && chased.is_some() {
+                        0x0200
+                    } else {
+                        0
+                    },
+            )?;
+            b.question(q.name, q.qtype, q.qclass)?;
+            let mut answers = 0usize;
+            if count == 0 && q.qtype == Type::SOA {
+                soa(
+                    &mut b,
+                    Section::Answer,
+                    zone_ref,
+                    self.config.ttl,
+                    store.with_read(Index::serial),
+                )?;
+                answers += 1;
+            }
+            if count == 0 && q.qtype == Type::NS {
+                let mut err = None;
+                let mut position = 0;
+                store.with_read(|i| {
+                    visit_ns(i, &ns_ips, zone_ref, &self.config, |ns, _| {
+                        let current = position;
+                        position += 1;
+                        let mut seen = false;
+                        let mut before = 0;
+                        visit_ns(i, &ns_ips, zone_ref, &self.config, |old, _| {
+                            if before < current && old.labels().eq(ns.labels()) {
+                                seen = true;
+                            }
+                            before += 1;
+                        });
+                        if !seen && err.is_none() {
+                            match b.record_with(
+                                Section::Answer,
+                                q.name,
+                                Type::NS,
+                                Class::IN,
+                                self.config.ttl,
+                                |w| w.write_name(ns),
+                            ) {
+                                Ok(true) => answers += 1,
+                                Ok(false) => {}
+                                Err(e) => err = Some(e),
+                            }
+                        }
+                    })
+                });
+                if let Some(e) = err {
+                    return Err(e);
+                }
+                store.with_read(|i| {
+                    visit_ns(i, &ns_ips, zone_ref, &self.config, |ns, ip| {
+                        if err.is_some() {
+                            return;
+                        }
+                        let result = match ip {
+                            IpAddr::V4(ip) => b.record(
+                                Section::Additional,
+                                ns,
+                                Type::A,
+                                Class::IN,
+                                self.config.ttl,
+                                &ip.octets(),
+                            ),
+                            IpAddr::V6(ip) => b.record(
+                                Section::Additional,
+                                ns,
+                                Type::AAAA,
+                                Class::IN,
+                                self.config.ttl,
+                                &ip.octets(),
+                            ),
+                        };
+                        if let Err(e) = result {
+                            err = Some(e);
+                        }
+                    })
+                });
+                if let Some(e) = err {
+                    return Err(e);
+                }
+            }
+            if count == 2 && labels[0] == b"ns" && labels[1] == b"dns" {
+                let mut err = None;
+                store.with_read(|i| {
+                    visit_ns(i, &ns_ips, zone_ref, &self.config, |_, ip| {
+                        let result = match ip {
+                            IpAddr::V4(ip) if q.qtype == Type::A => b.record(
+                                Section::Answer,
+                                q.name,
+                                Type::A,
+                                Class::IN,
+                                self.config.ttl,
+                                &ip.octets(),
+                            ),
+                            IpAddr::V6(ip) if q.qtype == Type::AAAA => b.record(
+                                Section::Answer,
+                                q.name,
+                                Type::AAAA,
+                                Class::IN,
+                                self.config.ttl,
+                                &ip.octets(),
+                            ),
+                            _ => return,
+                        };
+                        match result {
+                            Ok(true) => answers += 1,
+                            Ok(false) => {}
+                            Err(e) => err = Some(e),
+                        }
+                    })
+                });
+                if let Some(e) = err {
+                    return Err(e);
+                }
+            }
+            if count == 1 && labels[0] == b"dns-version" && q.qtype == Type::TXT {
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::TXT,
+                    Class::IN,
+                    28800,
+                    b"\x051.1.0",
+                )?;
+                answers += 1;
+            }
+            if let Some(target) = &target
+                && (q.qtype == Type::CNAME || chased.is_some())
+            {
+                let target_ref = NameRef::parse(target.as_wire(), 0).unwrap();
+                b.record_with(
+                    Section::Answer,
+                    q.name,
+                    Type::CNAME,
+                    Class::IN,
+                    self.config.ttl,
+                    |w| w.write_name(target_ref),
+                )?;
+                answers += 1;
+                if let Some(wire) = &chased
+                    && let Ok(message) = Message::parse(wire)
+                {
+                    for rr in message.answers() {
+                        if let Ok(data) = rr.data() {
+                            b.record_with(
+                                Section::Answer,
+                                rr.name,
+                                rr.rtype,
+                                rr.class,
+                                rr.ttl,
+                                |w| data.write(w),
+                            )?;
+                            answers += 1;
+                        }
+                    }
+                }
+            }
+            if exists
+                && external.is_none()
+                && let Some(req) = &req
+                && req.kind == b"svc"
+                && !req.service.is_empty()
+            {
+                let mut total = 0usize;
+                store.with_read(|i| {
+                    visit(i, req, &self.config, |_, _, _| total += 1);
+                });
+                let mut ordinal = 0usize;
+                let mut write_error = None;
+                store.with_read(|i| {
+                    visit(i, req, &self.config, |ip, port, endpoint| {
+                        let position = ordinal;
+                        ordinal += 1;
+                        if write_error.is_some() {
+                            return;
+                        }
+                        let Ok(ip) = ip.parse::<IpAddr>() else {
+                            return;
+                        };
+                        let mut seen = false;
+                        let mut before = 0usize;
+                        visit(i, req, &self.config, |old_ip, old_port, old_endpoint| {
+                            if before < position
+                                && (if q.qtype == Type::SRV {
+                                    old_port.port == port.port && old_endpoint == endpoint
+                                } else {
+                                    old_ip.parse::<IpAddr>() == Ok(ip)
+                                })
+                            {
+                                seen = true;
+                            }
+                            before += 1;
+                        });
+                        if seen {
+                            return;
+                        }
+                        let result = if q.qtype == Type::A || q.qtype == Type::AAAA {
+                            match ip {
+                                IpAddr::V4(ip) if q.qtype == Type::A => b.record(
+                                    Section::Answer,
+                                    q.name,
+                                    Type::A,
+                                    Class::IN,
+                                    self.config.ttl,
+                                    &ip.octets(),
+                                ),
+                                IpAddr::V6(ip) if q.qtype == Type::AAAA => b.record(
+                                    Section::Answer,
+                                    q.name,
+                                    Type::AAAA,
+                                    Class::IN,
+                                    self.config.ttl,
+                                    &ip.octets(),
+                                ),
+                                _ => return,
+                            }
+                        } else if q.qtype == Type::SRV && port.port >= 0 {
+                            let mut wire = [0; 255];
+                            let mut parts = [&[][..]; 4];
+                            let start = if let Some(endpoint) = endpoint {
+                                parts[0] = endpoint;
+                                0
+                            } else {
+                                1
+                            };
+                            parts[1] = req.service;
+                            parts[2] = req.namespace;
+                            parts[3] = b"svc";
+                            let Some(target) = child(&parts[start..], zone_ref, &mut wire) else {
+                                return;
+                            };
+                            let weight = (100 / total.max(1)).max(1) as u16;
+                            b.record_with(
+                                Section::Answer,
+                                q.name,
+                                Type::SRV,
+                                Class::IN,
+                                self.config.ttl,
+                                |w| {
+                                    w.write_bytes(&0u16.to_be_bytes())?;
+                                    w.write_bytes(&weight.to_be_bytes())?;
+                                    w.write_bytes(&(port.port as u16).to_be_bytes())?;
+                                    w.write_uncompressed_name(target)
+                                },
+                            )
+                        } else {
+                            return;
+                        };
+                        match result {
+                            Ok(true) => answers += 1,
+                            Ok(false) => {}
+                            Err(e) => write_error = Some(e),
+                        }
+                    });
+                });
+                if let Some(err) = write_error {
+                    return Err(err);
+                }
+                if q.qtype == Type::SRV && answers > 0 {
+                    let mut error = None;
+                    let mut ordinal = 0usize;
+                    store.with_read(|i| {
+                        visit(i, req, &self.config, |ip, port, endpoint| {
+                            let position = ordinal;
+                            ordinal += 1;
+                            if error.is_some() || port.port < 0 {
+                                return;
+                            }
+                            let Ok(ip) = ip.parse::<IpAddr>() else { return };
+                            let mut seen = false;
+                            let mut before = 0usize;
+                            visit(i, req, &self.config, |old_ip, old_port, old_endpoint| {
+                                if before < position
+                                    && old_port.port >= 0
+                                    && old_endpoint == endpoint
+                                    && old_ip.parse::<IpAddr>() == Ok(ip)
+                                {
+                                    seen = true;
+                                }
+                                before += 1;
+                            });
+                            if seen {
+                                return;
+                            }
+                            let mut wire = [0; 255];
+                            let mut parts = [&[][..]; 4];
+                            let start = if let Some(endpoint) = endpoint {
+                                parts[0] = endpoint;
+                                0
+                            } else {
+                                1
+                            };
+                            parts[1] = req.service;
+                            parts[2] = req.namespace;
+                            parts[3] = b"svc";
+                            let Some(target) = child(&parts[start..], zone_ref, &mut wire) else {
+                                return;
+                            };
+                            let result = match ip {
+                                IpAddr::V4(ip) => b.record(
+                                    Section::Additional,
+                                    target,
+                                    Type::A,
+                                    Class::IN,
+                                    self.config.ttl,
+                                    &ip.octets(),
+                                ),
+                                IpAddr::V6(ip) => b.record(
+                                    Section::Additional,
+                                    target,
+                                    Type::AAAA,
+                                    Class::IN,
+                                    self.config.ttl,
+                                    &ip.octets(),
+                                ),
+                            };
+                            if let Err(e) = result {
+                                error = Some(e);
+                            }
+                        });
+                    });
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                }
+            }
+            if answers == 0 {
+                soa(
+                    &mut b,
+                    Section::Authority,
+                    zone_ref,
+                    self.config.ttl,
+                    store.with_read(Index::serial),
+                )?;
+            }
+            let _ = b.finish();
+            Ok(())
+        })();
+        result.map_or_else(
+            |e| Outcome::Error(pharos_server::Error::Build(e)),
+            |()| Outcome::Response,
+        )
+    }
+}
+
+impl pharos_server::Readiness for Kubernetes {
+    fn ready(&self) -> bool {
+        self.state
+            .controller
+            .try_lock()
+            .ok()
+            .and_then(|controller| controller.as_ref().map(Controller::has_synced))
+            .unwrap_or(false)
+    }
+}

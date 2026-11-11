@@ -86,6 +86,108 @@ mod tests {
         store.apply_endpoints(slice);
         store.with_read(|index| assert_eq!(index.endpoints_by_ip("10.0.1.1").count(), 1));
     }
+
+    #[test]
+    fn serial_tracks_dns_changes_but_not_namespace_or_metadata_updates() {
+        let store = Store::default();
+        assert_eq!(store.with_read(|index| index.serial()), 0);
+        store.apply_service(service("10.0.0.1"));
+        assert_ne!(store.with_read(|index| index.serial()), 0);
+        store.0.write().unwrap().serial = 1;
+        let mut unchanged = service("10.0.0.1");
+        unchanged.version = "updated".into();
+        store.apply_service(unchanged);
+        store.apply_namespace(Namespace {
+            name: "prod".into(),
+            version: "1".into(),
+        });
+        assert_eq!(store.with_read(|index| index.serial()), 1);
+        let mut same_version = service("10.0.0.1");
+        same_version.version = "updated".into();
+        same_version.external_name = "ignored.example".into();
+        store.apply_service(same_version);
+        assert_eq!(store.with_read(|index| index.serial()), 1);
+        let mut external_only = service("10.0.0.1");
+        external_only.version = "external".into();
+        external_only.external_name = "ignored.example".into();
+        external_only.external_ips.push("192.0.2.2".into());
+        store.apply_service(external_only);
+        assert_eq!(store.with_read(|index| index.serial()), 1);
+        let mut changed = service("10.0.0.1");
+        changed.version = "different".into();
+        changed.external_name = "other.example".into();
+        store.apply_service(changed);
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+        store.0.write().unwrap().serial = 1;
+        store.replace_services(Vec::new());
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+    }
+
+    #[test]
+    fn serial_tracks_endpoint_and_pod_changes_across_relists() {
+        let store = Store::default();
+        let mut endpoint = slice("one", "10.0.1.1");
+        endpoint.version = "1".into();
+        store.apply_endpoints(endpoint.clone());
+        store.0.write().unwrap().serial = 1;
+        endpoint.version = "2".into();
+        endpoint.addresses[0].target_ref_name = "renamed".into();
+        store.apply_endpoints(endpoint.clone());
+        store.replace_endpoints(vec![endpoint.clone()], |_| ());
+        assert_eq!(store.with_read(|index| index.serial()), 1);
+        endpoint.version = "3".into();
+        endpoint.addresses[0].hostname = "node".into();
+        store.apply_endpoints(endpoint);
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+
+        let mut pod = Pod {
+            version: "1".into(),
+            name: "pod".into(),
+            namespace: "prod".into(),
+            ips: vec!["10.0.0.1".into()],
+            deleting: false,
+        };
+        store.apply_pod(pod.clone());
+        store.0.write().unwrap().serial = 1;
+        pod.version = "2".into();
+        store.apply_pod(pod.clone());
+        store.replace_pods(vec![pod.clone()]);
+        assert_eq!(store.with_read(|index| index.serial()), 1);
+        pod.version = "3".into();
+        pod.ips.push("10.0.0.2".into());
+        store.apply_pod(pod);
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+        store.0.write().unwrap().serial = 1;
+        store.replace_pods(Vec::new());
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+    }
+
+    #[test]
+    fn terminating_pod_relist_keeps_previous_record_until_delete() {
+        let store = Store::default();
+        let pod = Pod {
+            version: "1".into(),
+            name: "pod".into(),
+            namespace: "prod".into(),
+            ips: vec!["10.0.0.1".into()],
+            deleting: false,
+        };
+        store.apply_pod(pod.clone());
+        store.0.write().unwrap().serial = 1;
+        let mut terminating = pod;
+        terminating.version = "2".into();
+        terminating.deleting = true;
+        store.replace_pods(vec![terminating]);
+        store.with_read(|index| {
+            assert_eq!(index.pods_by_ip("10.0.0.1").count(), 1);
+            assert_eq!(index.serial(), 1);
+        });
+        store.replace_pods(Vec::new());
+        store.with_read(|index| {
+            assert_eq!(index.pods_by_ip("10.0.0.1").count(), 0);
+            assert_ne!(index.serial(), 1);
+        });
+    }
 }
 // Incremental indices shared by watchers and DNS readers.
 
@@ -101,6 +203,7 @@ type Grouped<T> = HashMap<Arc<str>, Reverse<T>>;
 
 #[derive(Default)]
 pub struct Index {
+    serial: u32,
     allowed_namespaces: HashSet<Arc<str>>,
     require_namespace: bool,
     services: Names<Service>,
@@ -152,6 +255,18 @@ fn lookup_reverse<'a, T>(map: &'a Reverse<T>, key: &str) -> impl Iterator<Item =
 }
 
 impl Index {
+    /// Unix timestamp of the latest change visible to Kubernetes DNS.
+    pub fn serial(&self) -> u32 {
+        self.serial
+    }
+
+    fn mark_modified(&mut self) {
+        self.serial = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+    }
+
     fn namespace_allowed(&self, name: &str) -> bool {
         (self.allowed_namespaces.is_empty() || self.allowed_namespaces.contains(name))
             && (!self.require_namespace || self.namespaces.contains_key(name))
@@ -315,13 +430,32 @@ impl Store {
         read(&self.0.read().unwrap())
     }
     pub(crate) fn apply_service(&self, object: Service) {
-        self.0.write().unwrap().apply_service(object);
+        let mut index = self.0.write().unwrap();
+        if service_changed(
+            index.service_unfiltered(&object.namespace, &object.name),
+            &object,
+        ) {
+            index.mark_modified();
+        }
+        index.apply_service(object);
     }
     pub(crate) fn delete_service(&self, namespace: &str, name: &str) {
-        self.0.write().unwrap().delete_service(namespace, name);
+        let mut index = self.0.write().unwrap();
+        index.mark_modified();
+        index.delete_service(namespace, name);
     }
     pub(crate) fn replace_services(&self, objects: Vec<Service>) {
         let mut index = self.0.write().unwrap();
+        if index.services.values().map(HashMap::len).sum::<usize>() != objects.len()
+            || objects.iter().any(|object| {
+                service_changed(
+                    index.service_unfiltered(&object.namespace, &object.name),
+                    object,
+                )
+            })
+        {
+            index.mark_modified();
+        }
         index.services.clear();
         index.service_ips.clear();
         index.service_external_ips.clear();
@@ -330,10 +464,19 @@ impl Store {
         }
     }
     pub(crate) fn apply_endpoints(&self, object: Endpoints) {
-        self.0.write().unwrap().apply_endpoints(object);
+        let mut index = self.0.write().unwrap();
+        if endpoints_changed(
+            by_name(&index.slices, &object.namespace, &object.name).map(Arc::as_ref),
+            &object,
+        ) {
+            index.mark_modified();
+        }
+        index.apply_endpoints(object);
     }
     pub(crate) fn delete_endpoints(&self, namespace: &str, name: &str) {
-        self.0.write().unwrap().delete_endpoints(namespace, name);
+        let mut index = self.0.write().unwrap();
+        index.mark_modified();
+        index.delete_endpoints(namespace, name);
     }
     pub(crate) fn replace_endpoints<R>(
         &self,
@@ -341,6 +484,16 @@ impl Store {
         read: impl FnOnce(&Index) -> R,
     ) -> R {
         let mut index = self.0.write().unwrap();
+        if index.slices.values().map(HashMap::len).sum::<usize>() != objects.len()
+            || objects.iter().any(|object| {
+                endpoints_changed(
+                    by_name(&index.slices, &object.namespace, &object.name).map(Arc::as_ref),
+                    object,
+                )
+            })
+        {
+            index.mark_modified();
+        }
         index.slices.clear();
         index.endpoints.clear();
         index.endpoint_ips.clear();
@@ -350,13 +503,45 @@ impl Store {
         read(&index)
     }
     pub(crate) fn apply_pod(&self, object: Pod) {
-        self.0.write().unwrap().apply_pod(object);
+        let mut index = self.0.write().unwrap();
+        if !object.deleting
+            && pod_changed(
+                by_name(&index.pods, &object.namespace, &object.name).map(Arc::as_ref),
+                &object,
+            )
+        {
+            index.mark_modified();
+        }
+        index.apply_pod(object);
     }
     pub(crate) fn delete_pod(&self, namespace: &str, name: &str) {
-        self.0.write().unwrap().delete_pod(namespace, name);
+        let mut index = self.0.write().unwrap();
+        index.mark_modified();
+        index.delete_pod(namespace, name);
     }
     pub(crate) fn replace_pods(&self, objects: Vec<Pod>) {
         let mut index = self.0.write().unwrap();
+        let objects: Vec<_> = objects
+            .into_iter()
+            .filter_map(|object| {
+                if object.deleting {
+                    by_name(&index.pods, &object.namespace, &object.name)
+                        .map(|previous| previous.as_ref().clone())
+                } else {
+                    Some(object)
+                }
+            })
+            .collect();
+        if index.pods.values().map(HashMap::len).sum::<usize>() != objects.len()
+            || objects.iter().any(|object| {
+                pod_changed(
+                    by_name(&index.pods, &object.namespace, &object.name).map(Arc::as_ref),
+                    object,
+                )
+            })
+        {
+            index.mark_modified();
+        }
         index.pods.clear();
         index.pod_ips.clear();
         for object in objects {
@@ -379,4 +564,28 @@ impl Store {
             .map(|object| (object.name.clone(), object))
             .collect();
     }
+}
+
+fn service_changed(old: Option<&Service>, new: &Service) -> bool {
+    old.is_none_or(|old| {
+        old.version != new.version
+            && (old.external_name != new.external_name || old.ports != new.ports)
+    })
+}
+
+fn endpoints_changed(old: Option<&Endpoints>, new: &Endpoints) -> bool {
+    old.is_none_or(|old| {
+        old.version != new.version
+            && (old.ports != new.ports
+                || old.addresses.len() != new.addresses.len()
+                || old
+                    .addresses
+                    .iter()
+                    .zip(&new.addresses)
+                    .any(|(a, b)| a.ip != b.ip || a.hostname != b.hostname))
+    })
+}
+
+fn pod_changed(old: Option<&Pod>, new: &Pod) -> bool {
+    old.is_none_or(|old| old.version != new.version && old.ips != new.ips)
 }
