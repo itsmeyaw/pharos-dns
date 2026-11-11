@@ -579,14 +579,14 @@ fn remap_response<'a>(
 
 fn apply_answer<'a>(
     source: NameRef<'a>,
-    from: NameRef<'_>,
-    to: NameRef<'_>,
+    names: (NameRef<'_>, NameRef<'_>),
     suffix: Option<(&str, &str)>,
     auto: bool,
     answers: &[AnswerRule],
     value: bool,
     buffer: &'a mut [u8; 255],
 ) -> NameRef<'a> {
+    let (from, to) = names;
     if !answers.iter().any(|rule| rule.value == value) {
         return if auto {
             remap_response(source, from, to, suffix, buffer)
@@ -1011,8 +1011,7 @@ impl Plugin for Rewrite {
                     let mut owner_buffer = [0; 255];
                     let owner = apply_answer(
                         rr.name,
-                        rewritten.name,
-                        original.name,
+                        (rewritten.name, original.name),
                         suffix,
                         answer_auto,
                         selected_answers,
@@ -1027,8 +1026,7 @@ impl Plugin for Rewrite {
                         ($value:expr) => {
                             apply_answer(
                                 $value,
-                                rewritten.name,
-                                original.name,
+                                (rewritten.name, original.name),
                                 suffix,
                                 answer_auto,
                                 selected_answers,
