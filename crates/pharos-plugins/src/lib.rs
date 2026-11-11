@@ -610,16 +610,7 @@ fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
 
 
 
-#[cfg(feature = "plugin-loop")]
-fn setup_loop(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if cursor.next_arg() {
-        return Err(cursor.arg_err());
-    }
-    let domain = block.keys().first().map_or(".", |key| key.domain.as_str());
-    block.config.r#loop = Some(r#loop::Loop::new(domain));
-    Ok(())
-}
+
 
 
 

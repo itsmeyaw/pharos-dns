@@ -97,7 +97,7 @@ fn main() {
             "whoami" => "setup_whoami",
             "log" => "log::setup::setup",
             "metadata" => "setup_metadata",
-            "loop" => "setup_loop",
+            "loop" => "r#loop::setup::setup",
             "prometheus" => "setup_prometheus",
             "ready" => "setup_ready",
             "forward" => "forward::setup::setup",

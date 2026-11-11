@@ -1,5 +1,7 @@
 //! Detect forwarding loops during startup.
 
+pub(crate) mod setup;
+
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
 use pharos_server::{Context, Lifecycle, Next, Outcome, Phase, Plugin};
 use std::{
