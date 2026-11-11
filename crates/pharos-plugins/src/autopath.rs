@@ -23,25 +23,30 @@ pub struct AutoPath {
 
 impl AutoPath {
     pub(crate) fn parse(cursor: &mut Cursor<'_>, domains: &[&str]) -> Result<Self, Error> {
-        cursor.next();
-        let args = cursor.remaining_args();
-        let (source, zones) = args.split_last().ok_or_else(|| cursor.arg_err())?;
         let mut search = Vec::new();
-        let provider = if let Some(provider) = source.strip_prefix('@') {
-            Some(provider.to_owned())
-        } else {
-            let file =
-                std::fs::read_to_string(source).map_err(|err| cursor.error(err.to_string()))?;
-            search = parse_resolv(&file);
-            search.push(None);
-            None
-        };
-        let domains = origins_from_args_or_server_block(
-            &zones.iter().map(String::as_str).collect::<Vec<_>>(),
-            domains,
-        );
+        let mut provider = None;
+        let mut configured_domains = Vec::new();
+        while cursor.next() {
+            let args = cursor.remaining_args();
+            let (source, zones) = args.split_last().ok_or_else(|| cursor.arg_err())?;
+            if let Some(name) = source.strip_prefix('@') {
+                provider = Some(name.to_owned());
+            } else {
+                let file =
+                    std::fs::read_to_string(source).map_err(|err| cursor.error(err.to_string()))?;
+                search = parse_resolv(&file);
+                search.push(None);
+            }
+            configured_domains = origins_from_args_or_server_block(
+                &zones.iter().map(String::as_str).collect::<Vec<_>>(),
+                domains,
+            );
+        }
         Ok(Self {
-            domains: domains.iter().filter_map(|d| d.parse().ok()).collect(),
+            domains: configured_domains
+                .iter()
+                .filter_map(|d| d.parse().ok())
+                .collect(),
             search,
             provider,
             metrics: Vec::new(),
@@ -52,7 +57,7 @@ impl AutoPath {
 
     #[cfg(feature = "plugin-kubernetes")]
     pub(crate) fn bind_kubernetes(&mut self, kubernetes: Option<&crate::kubernetes::Kubernetes>) {
-        if self.provider.as_deref() == Some("kubernetes") {
+        if self.provider.as_deref() == Some("kubernetes") && kubernetes.is_some() {
             self.kubernetes = kubernetes.cloned();
             if let Ok(file) = std::fs::read_to_string("/etc/resolv.conf") {
                 self.search = parse_resolv(&file);
@@ -124,29 +129,23 @@ impl Plugin for AutoPath {
         let mut namespace_wire = [0u8; 255];
         #[cfg(feature = "plugin-kubernetes")]
         let mut service_wire = [0u8; 255];
-        if self.provider.is_some() {
-            #[cfg(feature = "plugin-kubernetes")]
-            {
-                let Some((pod, zone)) =
-                    self.kubernetes.as_ref().and_then(|k| k.autopath_client(cx))
-                else {
-                    return next.run(cx).await;
-                };
-                let Some(namespace) = prefix_zone(
-                    &[pod.namespace.as_bytes(), b"svc"],
-                    zone,
-                    &mut namespace_wire,
-                ) else {
-                    return next.run(cx).await;
-                };
-                let Some(service) = prefix_zone(&[b"svc"], zone, &mut service_wire) else {
-                    return next.run(cx).await;
-                };
-                dynamic = [namespace, service, zone.as_wire()];
-                dynamic_len = 3;
-            }
-            #[cfg(not(feature = "plugin-kubernetes"))]
-            return next.run(cx).await;
+        #[cfg(feature = "plugin-kubernetes")]
+        if let Some(kubernetes) = &self.kubernetes {
+            let Some((pod, zone)) = kubernetes.autopath_client(cx) else {
+                return next.run(cx).await;
+            };
+            let Some(namespace) = prefix_zone(
+                &[pod.namespace.as_bytes(), b"svc"],
+                zone,
+                &mut namespace_wire,
+            ) else {
+                return next.run(cx).await;
+            };
+            let Some(service) = prefix_zone(&[b"svc"], zone, &mut service_wire) else {
+                return next.run(cx).await;
+            };
+            dynamic = [namespace, service, zone.as_wire()];
+            dynamic_len = 3;
         }
         let paths = dynamic[..dynamic_len].iter().copied().chain(
             self.search
