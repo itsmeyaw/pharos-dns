@@ -1,0 +1,4 @@
+www.example.org. A IN udp
+www.example.org. A IN tcp
+example.org. TXT IN udp
+www.example.org. A IN udp +dnssec +bufsize=1232

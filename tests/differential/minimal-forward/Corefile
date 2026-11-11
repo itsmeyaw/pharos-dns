@@ -1,0 +1,11 @@
+example.org:{port} {
+    forward . 127.0.0.1:{port2}
+    minimal
+}
+.:{port2} {
+    hosts empty.hosts {
+        192.0.2.30 www.example.org
+        fallthrough
+    }
+    whoami
+}

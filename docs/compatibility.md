@@ -162,6 +162,12 @@
 - Probe Queries may allocate while running concurrently with UDP reception; ordinary Queries do not.
 - Like CoreDNS, a configured port 0 is probed as port 0 rather than the actual ephemeral Listener port.
 
+## minimal
+
+- Pharos edits the encoded Response in place rather than re-encoding it. It leaves a Positive Response unchanged when a retained Question or Answer name references header counts, or an Answer's compressible RDATA is malformed, to avoid corrupting names.
+- Nonstandard compression in opaque RDATA is not detected; CoreDNS re-encodes the record types it understands.
+- The Listener adds an OPT back to EDNS Responses after `minimal` removes it, as required by RFC 6891 §6.1.1; CoreDNS's Listener also controls the final OPT.
+
 ## multisocket
 
 - With `multisocket` and no argument, Pharos uses that same worker count rather than Go's GOMAXPROCS, and does not honor the `GOMAXPROCS` environment variable.
@@ -213,7 +219,7 @@
 
 ## General
 
-- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI
