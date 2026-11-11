@@ -228,6 +228,13 @@ fn has_unexpected_rdata_quote(zone: &[u8]) -> bool {
         .is_err_and(|error| error.message == "unexpected quote in RDATA")
 }
 
+fn has_hinfo_split_escape(zone: &[u8]) -> bool {
+    let origin: Name = ORIGIN.parse().unwrap();
+    ZoneParser::new(Cursor::new(zone), origin, "fuzz.zone")
+        .collect::<Result<Vec<_>, _>>()
+        .is_err_and(|error| error.message == "trailing escape")
+}
+
 fn pharos(zone: &[u8]) -> String {
     let origin: Name = ORIGIN.parse().unwrap();
     match ZoneParser::new(Cursor::new(zone), origin, "fuzz.zone").collect::<Result<Vec<_>, _>>() {
@@ -316,6 +323,13 @@ fuzz_target!(|zone: &[u8]| {
         }
         // miekg/dns treats a dangling X25 escape as an empty address, unlike its TXT parser.
         if expected.contains("\t19\t") && has_dangling_escape(zone) {
+            return;
+        }
+        // RFC 1035 §5.1: miekg/dns splits a lone HINFO or ISDN string at an escaped blank and
+        // accepts the lone backslash left behind as an empty string; Pharos rejects it.
+        if (expected.contains("\t13\t") || expected.contains("\t20\t"))
+            && has_hinfo_split_escape(zone)
+        {
             return;
         }
     }

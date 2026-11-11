@@ -261,3 +261,10 @@ fn quoted_strings_are_not_domain_names() {
     // RFC 1035 §3.3.7: MINFO RDATA contains two domain names, not character-strings.
     assert!(parse(b"k IN MINFO \"\" \n").is_err());
 }
+
+#[test]
+fn escaped_blank_does_not_split_hinfo_into_empty_cpu() {
+    // RFC 1035 §5.1: `\X` needs a character X, so a lone backslash is not an empty string.
+    assert!(parse(b"a IN HINFO \\ b\n").is_err());
+    assert!(parse(b"a IN HINFO x\\ b\n").is_err());
+}
