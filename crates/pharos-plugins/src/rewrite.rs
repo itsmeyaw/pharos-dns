@@ -769,19 +769,19 @@ fn remap<'a>(
     from: NameRef<'_>,
     to: NameRef<'_>,
     buffer: &'a mut [u8; 255],
-) -> NameRef<'a> {
+) -> Result<NameRef<'a>, ServerError> {
     let count = source.labels().count();
     let suffix = from.labels().count();
     if count < suffix
         || (suffix == 0 && count != 0)
         || !source.labels().skip(count - suffix).eq(from.labels())
     {
-        return source;
+        return Ok(source);
     }
     let mut len = 0;
     for label in source.labels().take(count - suffix).chain(to.labels()) {
         if len + 1 + label.len() >= buffer.len() {
-            return source;
+            return Err(ServerError::InvalidQuery);
         }
         buffer[len] = label.len() as u8;
         len += 1;
@@ -789,7 +789,7 @@ fn remap<'a>(
         len += label.len();
     }
     buffer[len] = 0;
-    NameRef::parse(&buffer[..=len], 0).expect("valid remapped name")
+    Ok(NameRef::parse(&buffer[..=len], 0).expect("valid remapped name"))
 }
 
 fn remap_response<'a>(
@@ -798,7 +798,7 @@ fn remap_response<'a>(
     to: NameRef<'_>,
     suffix: Option<(&str, &str)>,
     buffer: &'a mut [u8; 255],
-) -> NameRef<'a> {
+) -> Result<NameRef<'a>, ServerError> {
     let Some((old, new)) = suffix else {
         return remap(source, from, to, buffer);
     };
@@ -807,11 +807,11 @@ fn remap_response<'a>(
         len: 0,
     };
     if write!(text, "{source}").is_err() {
-        return source;
+        return Err(ServerError::InvalidQuery);
     }
     let text = std::str::from_utf8(&text.bytes[..text.len]).expect("DNS presentation is UTF-8");
     let Some(prefix) = text.strip_suffix(old) else {
-        return source;
+        return Ok(source);
     };
     let mut rewritten = NameText {
         bytes: [0; 1024],
@@ -822,14 +822,12 @@ fn remap_response<'a>(
         .and_then(|()| rewritten.write_str(new))
         .is_err()
     {
-        return source;
+        return Err(ServerError::InvalidQuery);
     }
     let text =
         std::str::from_utf8(&rewritten.bytes[..rewritten.len]).expect("DNS presentation is UTF-8");
-    match Name::parse_absolute_into(text, buffer) {
-        Ok(wire) => NameRef::parse(wire, 0).expect("validated name"),
-        Err(_) => source,
-    }
+    let wire = Name::parse_absolute_into(text, buffer).map_err(|_| ServerError::InvalidQuery)?;
+    Ok(NameRef::parse(wire, 0).expect("validated name"))
 }
 
 fn apply_answer<'a>(
@@ -840,13 +838,13 @@ fn apply_answer<'a>(
     answers: &[AnswerRule],
     value: bool,
     buffer: &'a mut [u8; 255],
-) -> NameRef<'a> {
+) -> Result<NameRef<'a>, ServerError> {
     let (from, to) = names;
     if !answers.iter().any(|rule| rule.value == value) {
         return if auto {
             remap_response(source, from, to, suffix, buffer)
         } else {
-            source
+            Ok(source)
         };
     }
     // shortcut: explicit answer regex captures allocate, outside the non-regex path.
@@ -865,20 +863,19 @@ fn apply_answer<'a>(
         text = replacement;
     }
     let mut intermediate = [0; 255];
-    let Ok(wire) = Name::parse_absolute_into(&text, &mut intermediate) else {
-        return source;
-    };
+    let wire = Name::parse_absolute_into(&text, &mut intermediate)
+        .map_err(|_| ServerError::InvalidQuery)?;
     let current = NameRef::parse(wire, 0).expect("validated name");
     let mut mapped_buffer = [0; 255];
     let mapped = if auto {
-        remap_response(current, from, to, suffix, &mut mapped_buffer)
+        remap_response(current, from, to, suffix, &mut mapped_buffer)?
     } else {
         current
     };
     let mut len = 0;
     for label in mapped.labels() {
         if len + label.len() + 1 >= buffer.len() {
-            return source;
+            return Err(ServerError::InvalidQuery);
         }
         buffer[len] = label.len() as u8;
         len += 1;
@@ -886,7 +883,7 @@ fn apply_answer<'a>(
         len += label.len();
     }
     buffer[len] = 0;
-    NameRef::parse(&buffer[..=len], 0).expect("validated name")
+    Ok(NameRef::parse(&buffer[..=len], 0).expect("validated name"))
 }
 
 fn apply_rule(
@@ -1086,11 +1083,11 @@ fn apply_history<'a, 'q>(
     end: usize,
     value: bool,
     output: &'a mut [u8; 255],
-) -> NameRef<'a> {
+) -> Result<NameRef<'a>, ServerError> {
     let (rules, recorded, history) = rules;
     let mut current = [0; 255];
     let Some(mut len) = copy_name(source, &mut current) else {
-        return source;
+        return Err(ServerError::InvalidQuery);
     };
     for index in (0..end).rev() {
         let Action::Name(target, auto, _, answers) = &rules[index].action else {
@@ -1109,7 +1106,7 @@ fn apply_history<'a, 'q>(
         };
         let mut before_wire = [0; 255];
         let Some(before_len) = copy_name(before.name, &mut before_wire) else {
-            return source;
+            return Err(ServerError::InvalidQuery);
         };
         before_wire[..before_len].make_ascii_lowercase();
         let before_name = NameRef::parse(&before_wire[..before_len], 0).expect("validated name");
@@ -1127,16 +1124,16 @@ fn apply_history<'a, 'q>(
             answers,
             value,
             &mut mapped,
-        );
+        )?;
         let mut next = [0; 255];
         let Some(next_len) = copy_name(result, &mut next) else {
-            return source;
+            return Err(ServerError::InvalidQuery);
         };
         current = next;
         len = next_len;
     }
     output[..len].copy_from_slice(&current[..len]);
-    NameRef::parse(&output[..len], 0).expect("validated name")
+    Ok(NameRef::parse(&output[..len], 0).expect("validated name"))
 }
 
 struct EdnsState<'a> {
@@ -1767,7 +1764,7 @@ fn build_reverted_response<'q>(
                 end,
                 false,
                 &mut owner_buffer,
-            );
+            )?;
             let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
             let mut value_buffer = [0; 255];
             macro_rules! map {
@@ -1780,7 +1777,7 @@ fn build_reverted_response<'q>(
                         end,
                         true,
                         &mut value_buffer,
-                    )
+                    )?
                 };
             }
             let data = match data {

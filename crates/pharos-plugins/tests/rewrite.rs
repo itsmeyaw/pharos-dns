@@ -2777,6 +2777,45 @@ async fn coredns_explicit_answer_name_and_value_rules() {
 }
 
 #[tokio::test]
+async fn invalid_answer_replacement_does_not_silently_preserve_old_name() {
+    let config = r".:53 {
+ rewrite name exact example. internal. answer name (.*)internal\. {1}bad..name.
+}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert!(matches!(
+        chain.rewrite.as_ref().unwrap().serve(&mut cx, Answer).await,
+        Outcome::Error(_)
+    ));
+}
+
+#[tokio::test]
 async fn coredns_type_and_class_rewrite_question() {
     for (rules, expected_type, expected_class) in [
         ("rewrite type A AAAA", Type::AAAA, Class::IN),
