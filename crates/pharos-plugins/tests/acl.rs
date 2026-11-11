@@ -40,6 +40,13 @@ async fn coredns_acl_matches_ordered_policies_and_response_codes() {
             17,
         ),
         ("block type AAAA", "127.0.0.1:53", Type::A, None, 0),
+        (
+            "block net * net 192.168.1.0/24",
+            "127.0.0.1:53",
+            Type::A,
+            Some(Rcode::REFUSED),
+            15,
+        ),
         ("drop", "127.0.0.1:53", Type::A, None, 0),
     ] {
         let text = format!(".:53 {{\n acl {{\n {directive}\n }}\n}}");

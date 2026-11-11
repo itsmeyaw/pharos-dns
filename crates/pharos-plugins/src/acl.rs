@@ -57,6 +57,7 @@ impl Acl {
                 let mut networks = Vec::new();
                 let mut seen_type = false;
                 let mut seen_net = false;
+                let mut all_networks = false;
                 let mut index = 0;
                 while index < args.len() {
                     let section = args[index].to_ascii_lowercase();
@@ -93,6 +94,7 @@ impl Acl {
                         for token in &args[start..index] {
                             if token == "*" {
                                 networks.clear();
+                                all_networks = true;
                                 break;
                             }
                             let (ip, prefix) = token
@@ -110,7 +112,9 @@ impl Acl {
                             if prefix > max {
                                 return Err(cursor.error("invalid acl prefix"));
                             }
-                            networks.push((ip, prefix));
+                            if !all_networks {
+                                networks.push((ip, prefix));
+                            }
                         }
                     }
                 }
