@@ -612,11 +612,7 @@ fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
 
 
 
-#[cfg(feature = "plugin-header")]
-fn setup_header(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.header = Some(header::Header::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-loop")]
 fn setup_loop(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

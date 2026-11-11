@@ -91,7 +91,7 @@ fn main() {
             "cache" => "cache::setup::setup",
             "bind" => "bind::setup::setup",
             "bufsize" => "bufsize::setup::setup",
-            "header" => "setup_header",
+            "header" => "header::setup::setup",
             "minimal" => "setup_minimal",
             "multisocket" => "setup_multisocket",
             "whoami" => "setup_whoami",
