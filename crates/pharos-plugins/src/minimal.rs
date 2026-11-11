@@ -45,6 +45,7 @@ impl Plugin for Minimal {
         {
             return outcome;
         }
+        // RFC 1035 §4.1.1: section counts describe the records in each Message section.
         let end = message
             .authorities()
             .next()

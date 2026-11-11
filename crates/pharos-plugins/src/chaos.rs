@@ -101,6 +101,7 @@ impl Plugin for Chaos {
                     return Err(Error::ResponseBufferTooSmall);
                 }
             }
+            // RFC 1035 §4.1.1: mark a Response and preserve the Query opcode and flags.
             let mut flags = 0x8000 | (cx.query.flags() & 0x7800);
             if cx.query.opcode() == Opcode::QUERY {
                 flags |= cx.query.flags() & 0x0110;

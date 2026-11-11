@@ -90,6 +90,7 @@ fn update_nsid(cx: &mut Context<'_>, data: Option<&[u8]>) -> Result<(), Error> {
     if !found && let Some(data) = data {
         append_option(&mut options, &mut len, data)?;
     }
+    // RFC 6891 §6.1.2: OPT RDLENGTH is the combined length of its options.
     let len_wire = u16::try_from(len).map_err(|_| Error::ResponseBufferTooSmall)?;
     let (start, old_end) = record.map_or((cx.response.len(), cx.response.len()), |(_, rr)| {
         (rr.rdata_offset, rr.rdata_offset + rr.rdata.len())

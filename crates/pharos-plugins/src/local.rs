@@ -66,7 +66,6 @@ impl Plugin for Local {
         // RFC 6761 §6.3: localhost and its subdomains resolve to loopback.
         let special =
             count > 1 && (eq(count - 1, b"localhost") || (self.prefix && eq(0, b"localhost")));
-        // RFC 6303 §4: serve the local IPv4 reverse Domains without forwarding.
         let zone_start = if count > 0 && eq(count - 1, b"localhost") {
             Some(count - 1)
         } else if count >= 3
@@ -108,6 +107,7 @@ impl Plugin for Local {
             && eq(3, b"127")
             && eq(4, b"in-addr")
             && eq(5, b"arpa");
+        // RFC 1035 §4.1.2: select records matching the Question type.
         let answer_type = if special || localhost_apex {
             match question.qtype {
                 Type::A | Type::AAAA => Some(question.qtype),
@@ -121,7 +121,9 @@ impl Plugin for Local {
         } else {
             None
         };
+        // RFC 2308 §2: distinguish name errors from existing names without matching records.
         let nxdomain = !special && !apex && !reverse_ptr;
+        // RFC 1035 §3.1: encode Domain names as length-prefixed labels ending in zero.
         let mut origin = [0u8; 255];
         let mut len = 0;
         if !special {
