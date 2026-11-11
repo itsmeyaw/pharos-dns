@@ -713,11 +713,7 @@ fn setup_siit(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
     Ok(())
 }
 
-#[cfg(feature = "plugin-rewrite")]
-fn setup_rewrite(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.rewrite = Some(rewrite::Rewrite::parse(cursor)?);
-    Ok(())
-}
+
 
 
 

@@ -1,5 +1,7 @@
 //! Internal Query and Response rewriting.
 
+pub(crate) mod setup;
+
 use std::fmt::Write;
 
 use pharos_corefile::{Cursor, Error};

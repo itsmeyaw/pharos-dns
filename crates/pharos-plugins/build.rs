@@ -79,7 +79,7 @@ fn main() {
             "acl" => "acl::setup::setup",
             "dns64" => "dns64::setup::setup",
             "siit" => "setup_siit",
-            "rewrite" => "setup_rewrite",
+            "rewrite" => "rewrite::setup::setup",
             "autopath" => "autopath::setup::setup",
             "root" => "setup_root",
             "cancel" => "cancel::setup::setup",
