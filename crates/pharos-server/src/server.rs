@@ -218,8 +218,10 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             allow_non_in: self.allow_non_in,
             debug: self.debug,
             udp_workers: self.udp_workers,
+            tcp_options: self.tcp_options,
             logger: self.logger,
             metrics: self.metrics.clone(),
+            shed: self.shed.clone(),
             dropped: self.dropped.clone(),
         }))
     }

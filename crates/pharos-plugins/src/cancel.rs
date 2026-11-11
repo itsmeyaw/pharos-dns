@@ -26,7 +26,7 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Cancel, Error> {
 }
 
 impl Plugin for Cancel {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         tokio::time::timeout(self.timeout, next.run(cx))
             .await
             .unwrap_or(Outcome::Drop)
