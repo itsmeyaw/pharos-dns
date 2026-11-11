@@ -189,6 +189,7 @@
 - Zone parsing uses temporary allocations for tokens and RDATA fields; it reads incrementally but does not yet meet the no-temporary-per-record allocation goal.
 - Zone-file RDATA presentation supports A, AAAA, NS, CNAME, DNAME, PTR, MX, SOA, TXT, SPF, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SMIMEA, SSHFP and ZONEMD. Other types require RFC 3597 generic RDATA.
 - Presentation parsing rejects invalid base64 immediately and rejects ZONEMD digests shorter than 12 octets; miekg/dns accepts those strings during zone parsing.
+- Generic `\#` RDATA is checked for its declared length but not decoded against known types; miekg/dns rejects some malformed typed values such as one-octet A data.
 - A Zone record without any current or explicit TTL is rejected even when a class is present; miekg/dns can accept the class-first form with TTL zero.
 
 ## CLI
