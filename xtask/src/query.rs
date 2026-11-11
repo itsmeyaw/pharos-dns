@@ -20,6 +20,7 @@ pub(crate) struct Query {
     edns: bool,
     dnssec: bool,
     nsid: bool,
+    options: Vec<(u16, Vec<u8>)>,
     bufsize: u16,
     edns_version: u8,
 }
@@ -92,6 +93,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         edns: false,
         dnssec: false,
         nsid: false,
+        options: Vec::new(),
         bufsize: 1232,
         edns_version: 0,
     };
@@ -115,6 +117,29 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
             _ if lower.starts_with("+ednsversion=") => {
                 query.edns_version =
                     decimal(&lower[13..]).ok_or_else(|| format!("invalid flag: {flag}"))?;
+                query.edns = true;
+            }
+            _ if lower.starts_with("+ednsoption=") => {
+                let (code, hex) = lower[12..]
+                    .split_once(':')
+                    .ok_or_else(|| format!("invalid flag: {flag}"))?;
+                let code = decimal::<u16>(code).ok_or_else(|| format!("invalid flag: {flag}"))?;
+                let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+                if !remainder.is_empty() {
+                    return Err(format!("invalid flag: {flag}"));
+                }
+                let data = pairs
+                    .iter()
+                    .map(|pair| {
+                        let text = std::str::from_utf8(pair)
+                            .map_err(|_| format!("invalid flag: {flag}"))?;
+                        u8::from_str_radix(text, 16).map_err(|_| format!("invalid flag: {flag}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if data.len() > usize::from(u16::MAX) {
+                    return Err(format!("invalid flag: {flag}"));
+                }
+                query.options.push((code, data));
                 query.edns = true;
             }
             _ if lower.starts_with("+opcode=") => {
@@ -150,8 +175,17 @@ impl Query {
         }
         if self.edns {
             // RFC 5001 §2.2: a Query requests NSID with an empty option payload.
-            let options = EdnsOptions::parse(if self.nsid { &[0, 3, 0, 0] } else { &[] })
-                .map_err(|err| err.to_string())?;
+            let mut raw_options = Vec::new();
+            if self.nsid {
+                raw_options.extend_from_slice(&[0, 3, 0, 0]);
+            }
+            // RFC 6891 §6.1.2: each option is encoded as code, length, and data.
+            for (code, data) in &self.options {
+                raw_options.extend_from_slice(&code.to_be_bytes());
+                raw_options.extend_from_slice(&(data.len() as u16).to_be_bytes());
+                raw_options.extend_from_slice(data);
+            }
+            let options = EdnsOptions::parse(&raw_options).map_err(|err| err.to_string())?;
             let opt = Opt::new(
                 self.bufsize,
                 0,
@@ -178,6 +212,27 @@ impl Query {
 mod tests {
     use super::{Transport, parse};
     use pharos_proto::{Class, Message, Opcode, Type};
+
+    #[test]
+    fn builds_queries_with_custom_edns_options() {
+        let query = parse("example. A IN udp +ednsoption=65518:61626364").unwrap();
+        let wire = query.wire().unwrap();
+        let message = Message::parse(&wire).unwrap();
+        assert_eq!(
+            message.opt().unwrap().options().as_bytes(),
+            b"\xff\xee\0\x04abcd"
+        );
+        for flag in [
+            "+ednsoption=65536:00",
+            "+ednsoption=1:0",
+            "+ednsoption=1:gg",
+        ] {
+            assert!(
+                parse(&format!("example. A IN udp {flag}")).is_err(),
+                "{flag}"
+            );
+        }
+    }
 
     #[test]
     fn builds_plain_query_and_preserves_original_line() {
