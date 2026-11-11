@@ -289,6 +289,8 @@ pub fn servers_with_registry(
         if let Some(autopath) = &mut block.config.autopath {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             autopath.set_metrics(&metrics, &listeners);
+            #[cfg(feature = "plugin-kubernetes")]
+            autopath.bind_kubernetes(block.config.kubernetes.as_ref());
         }
         #[cfg(feature = "plugin-multisocket")]
         let workers = block.config.multisocket.flatten();

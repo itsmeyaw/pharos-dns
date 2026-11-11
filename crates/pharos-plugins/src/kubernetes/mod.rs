@@ -37,6 +37,7 @@ struct Cache {
     sync: Option<Arc<dyn pharos_server::Readiness>>,
 }
 
+#[derive(Clone)]
 pub struct Kubernetes {
     config: Arc<setup::Config>,
     zones: Vec<Name>,
@@ -55,6 +56,25 @@ impl std::fmt::Debug for Kubernetes {
 }
 
 impl Kubernetes {
+    #[cfg(feature = "plugin-autopath")]
+    pub(crate) fn autopath_client(
+        &self,
+        cx: &Context<'_, '_>,
+    ) -> Option<(Arc<pharos_kubernetes::object::Pod>, &Name)> {
+        if self.config.pod_mode != "verified" {
+            return None;
+        }
+        let q = cx.query.questions().next()?;
+        let zone = self
+            .zones
+            .iter()
+            .filter(|zone| contains(q.name, zone))
+            .max_by_key(|zone| zone.label_count())?;
+        let ip = scratch::IpText::new(cx.client.ip());
+        let store = self.state.cache.read().unwrap().store.clone()?;
+        let pod = store.with_read(|index| index.pod_snapshot_by_ip(ip.as_str()))?;
+        Some((pod, zone))
+    }
     #[cfg(feature = "plugin-metadata")]
     pub(crate) fn collect_metadata(&self, cx: &mut Context<'_, '_>) {
         if self.config.pod_mode == "verified" {

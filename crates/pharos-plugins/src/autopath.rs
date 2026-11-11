@@ -15,9 +15,10 @@ use std::{
 pub struct AutoPath {
     pub(crate) domains: Vec<Name>,
     pub(crate) search: Vec<Option<Name>>,
-    #[allow(dead_code)]
     pub(crate) provider: Option<String>,
     metrics: Vec<(SocketAddr, Arc<AtomicU64>)>,
+    #[cfg(feature = "plugin-kubernetes")]
+    kubernetes: Option<crate::kubernetes::Kubernetes>,
 }
 
 impl AutoPath {
@@ -60,7 +61,36 @@ impl AutoPath {
             search: search.iter().map(|s| s.parse().ok()).collect(),
             provider,
             metrics: Vec::new(),
+            #[cfg(feature = "plugin-kubernetes")]
+            kubernetes: None,
         })
+    }
+
+    #[cfg(feature = "plugin-kubernetes")]
+    pub(crate) fn bind_kubernetes(&mut self, kubernetes: Option<&crate::kubernetes::Kubernetes>) {
+        if self.provider.as_deref() == Some("kubernetes") {
+            self.kubernetes = kubernetes.cloned();
+            if let Ok(file) = std::fs::read_to_string("/etc/resolv.conf") {
+                let mut search = Vec::new();
+                for line in file.lines() {
+                    let fields = line.split_whitespace().collect::<Vec<_>>();
+                    match fields.first().copied() {
+                        Some("domain") => {
+                            search = fields.get(1).into_iter().map(|s| (*s).to_owned()).collect()
+                        }
+                        Some("search") => {
+                            search = fields[1..].iter().map(|s| (*s).to_owned()).collect()
+                        }
+                        _ => {}
+                    }
+                }
+                self.search = search
+                    .iter()
+                    .map(|s| format!("{}.", s.trim_end_matches('.')).parse().ok())
+                    .collect();
+            }
+            self.search.push(None);
+        }
     }
 
     pub(crate) fn set_metrics(
@@ -92,11 +122,50 @@ impl Plugin for AutoPath {
         let Some(question) = query.questions().next() else {
             return next.run(cx).await;
         };
+        let mut dynamic = [&[][..]; 3];
+        let mut dynamic_len = 0;
+        #[cfg(feature = "plugin-kubernetes")]
+        let mut namespace_wire = [0u8; 255];
+        #[cfg(feature = "plugin-kubernetes")]
+        let mut service_wire = [0u8; 255];
+        if self.provider.is_some() {
+            #[cfg(feature = "plugin-kubernetes")]
+            {
+                let Some((pod, zone)) =
+                    self.kubernetes.as_ref().and_then(|k| k.autopath_client(cx))
+                else {
+                    return next.run(cx).await;
+                };
+                let Some(namespace) = prefix_zone(
+                    &[pod.namespace.as_bytes(), b"svc"],
+                    zone,
+                    &mut namespace_wire,
+                ) else {
+                    return next.run(cx).await;
+                };
+                let Some(service) = prefix_zone(&[b"svc"], zone, &mut service_wire) else {
+                    return next.run(cx).await;
+                };
+                dynamic = [namespace, service, zone.as_wire()];
+                dynamic_len = 3;
+            }
+            #[cfg(not(feature = "plugin-kubernetes"))]
+            return next.run(cx).await;
+        }
+        let paths = dynamic[..dynamic_len].iter().copied().chain(
+            self.search
+                .iter()
+                .map(|name| name.as_ref().map_or(&[0][..], Name::as_wire)),
+        );
+        let Some(first) = paths
+            .clone()
+            .next()
+            .and_then(|name| NameRef::parse(name, 0).ok())
+        else {
+            return next.run(cx).await;
+        };
         if cx.autopath_lookup_active()
-            || self.search.is_empty()
-            || self.search[0]
-                .as_ref()
-                .is_none_or(|first| !within(question.name, first))
+            || !within_ref(question.name, first)
             || !self.domains.iter().any(|zone| within(question.name, zone))
         {
             return next.run(cx).await;
@@ -105,15 +174,15 @@ impl Plugin for AutoPath {
         if outcome != Outcome::Response {
             return outcome;
         }
-        let Ok(first) = Message::parse(cx.response) else {
+        let Ok(first_response) = Message::parse(cx.response) else {
             return Outcome::Error(ServerError::InvalidQuery);
         };
-        if first.rcode() != Rcode::NXDOMAIN {
+        if first_response.rcode() != Rcode::NXDOMAIN {
             self.count(cx.local);
             return outcome;
         }
         let original = cx.response.clone();
-        let first_labels = self.search[0].as_ref().map_or(0, Name::label_count);
+        let first_labels = first.labels().count();
         let base_labels = question.name.labels().count().saturating_sub(first_labels);
         let mut wire = [0u8; 255];
         let mut used = 0;
@@ -123,8 +192,7 @@ impl Plugin for AutoPath {
             wire[used..used + label.len()].copy_from_slice(label);
             used += label.len();
         }
-        for suffix in &self.search[1..] {
-            let suffix = suffix.as_ref().map_or(&[0][..], Name::as_wire);
+        for suffix in paths.skip(1) {
             if used + suffix.len() > wire.len() {
                 continue;
             }
@@ -158,6 +226,10 @@ impl Plugin for AutoPath {
 
 fn within(name: NameRef<'_>, domain: &Name) -> bool {
     let suffix = NameRef::parse(domain.as_wire(), 0).unwrap();
+    within_ref(name, suffix)
+}
+
+fn within_ref(name: NameRef<'_>, suffix: NameRef<'_>) -> bool {
     let count = name.labels().count();
     let suffix_count = suffix.labels().count();
     // RFC 4343 §3: DNS names compare ASCII case-insensitively, label by label.
@@ -167,6 +239,26 @@ fn within(name: NameRef<'_>, domain: &Name) -> bool {
             .skip(count - suffix_count)
             .zip(suffix.labels())
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+#[cfg(feature = "plugin-kubernetes")]
+fn prefix_zone<'a>(labels: &[&[u8]], zone: &Name, wire: &'a mut [u8; 255]) -> Option<&'a [u8]> {
+    let mut used = 0;
+    // RFC 1035 §3.1: labels and complete wire names have bounded lengths.
+    for label in labels {
+        if label.is_empty()
+            || label.len() > 63
+            || used + 1 + label.len() + zone.as_wire().len() > wire.len()
+        {
+            return None;
+        }
+        wire[used] = label.len() as u8;
+        used += 1;
+        wire[used..used + label.len()].copy_from_slice(label);
+        used += label.len();
+    }
+    wire[used..used + zone.as_wire().len()].copy_from_slice(zone.as_wire());
+    Some(&wire[..used + zone.as_wire().len()])
 }
 
 fn rebuild(cx: &mut Context<'_, '_>, response: &Message<'_>) -> Result<(), ServerError> {
