@@ -689,11 +689,7 @@ fn setup_multisocket(
 
 
 
-#[cfg(feature = "plugin-health")]
-fn setup_health(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.health = Some(health::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-hosts")]
 fn setup_hosts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

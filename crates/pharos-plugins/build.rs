@@ -101,7 +101,7 @@ fn main() {
             "prometheus" => "setup_prometheus",
             "ready" => "setup_ready",
             "forward" => "forward::setup::setup",
-            "health" => "setup_health",
+            "health" => "health::setup::setup",
             "hosts" => "setup_hosts",
             "loadbalance" => "setup_loadbalance",
             "local" => "setup_local",
