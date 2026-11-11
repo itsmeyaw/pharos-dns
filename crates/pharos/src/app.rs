@@ -92,6 +92,11 @@ fn prepare(
     for block in &blocks {
         for key in block.keys() {
             for address in &block.listen_addresses {
+                let address = if address.contains(':') {
+                    format!("[{address}]")
+                } else {
+                    address.clone()
+                };
                 domains
                     .entry(format!("{address}:{}", key.port))
                     .or_default()
@@ -378,6 +383,23 @@ mod tests {
     use std::{cell::RefCell, io};
 
     use super::{corefile_hash, digest_hex, interval, shutdown};
+
+    #[test]
+    fn startup_domains_render_bound_ipv6_addresses() {
+        let (_, _, domains, _, _) = super::prepare(
+            &crate::Options::default(),
+            "Corefile",
+            ".:1053 {\n bind ::1\n whoami\n}",
+            &pharos_server::metrics::Registry::default(),
+        )
+        .unwrap();
+        let (address, names) = domains.first_key_value().unwrap();
+        let names: Vec<_> = names.iter().map(String::as_str).collect();
+        assert_eq!(
+            pharos_server::startup_domains("", address, &names),
+            ".:1053 on ::1\n"
+        );
+    }
 
     #[test]
     fn hash_preserves_line_boundaries_that_change_directive_arguments() {

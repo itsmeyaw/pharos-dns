@@ -81,9 +81,20 @@ response body. Kube's internal retries are counted once per request rather
 than once per attempt as in client-go.
 Client-side rate-limit waits are capped at 100 years for extremely small QPS.
 
-Only `cache`, `errors`, `forward`, `health`, `hosts`, `loadbalance`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
+Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `loadbalance`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
+
+## Bind
+
+Interface enumeration uses `getifaddrs`; scoped IPv6 Listener labels use the
+numeric interface index rather than CoreDNS's interface name. Unspecified
+addresses are labelled as unbound addresses. An unbound Listener and an
+explicit `bind ::` on the same port share one Listener. CoreDNS groups them
+separately, so its competing sockets can direct Queries to the wrong Server
+Block. Reload binds new Listeners before removing old ones, so switching between
+a wildcard and a specific address on the same port can fail rather than replacing
+the socket.
 
 The `loop` Plugin probes only the first Domain in a Server Block at startup
 and after Reload, as CoreDNS does.

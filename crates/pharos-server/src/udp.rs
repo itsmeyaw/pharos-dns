@@ -29,7 +29,7 @@ pub(crate) fn spawn_parallel<H: Handler>(
         tokio::select! {
             _ = shutdown.changed() => {},
             _ = cancelled.changed() => {},
-            action = handler.handle(&query, peer, Protocol::Udp, &mut response) => {
+            action = handler.handle(&query, crate::canonical_peer(peer), Protocol::Udp, &mut response) => {
                 if action == Action::Respond && let Err(error) = socket.send_to(&response, peer).await {
                     crate::logging::log("ERROR", "server", &format!("UDP Response to {peer} failed: {error}"));
                 }
@@ -44,6 +44,9 @@ pub(crate) fn bind(address: SocketAddr) -> io::Result<StdUdpSocket> {
         Type::DGRAM,
         Some(SocketProtocol::UDP),
     )?;
+    if address.is_ipv6() {
+        socket.set_only_v6(!address.ip().is_unspecified())?;
+    }
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;
@@ -78,12 +81,13 @@ pub(crate) fn spawn<H: Handler>(
                             continue;
                         }
                     };
-                    if let Some(cancelled) = handler.parallel_query(&query[..length], peer) {
+                    let client = crate::canonical_peer(peer);
+                    if let Some(cancelled) = handler.parallel_query(&query[..length], client) {
                         spawn_parallel(Arc::clone(&socket), Arc::clone(&handler), &query[..length], peer, shutdown.clone(), cancelled);
                         continue;
                     }
                     response.clear();
-                    if H::handle_shared(&handler, &query[..length], peer, Protocol::Udp, &mut response).await == Action::Respond
+                    if H::handle_shared(&handler, &query[..length], client, Protocol::Udp, &mut response).await == Action::Respond
                         && let Err(error) = socket.send_to(&response, peer).await {
                         crate::logging::log("ERROR", "server", &format!("UDP Response to {peer} failed: {error}"));
                     }

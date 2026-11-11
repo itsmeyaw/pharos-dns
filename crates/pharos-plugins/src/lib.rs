@@ -9,10 +9,12 @@ use pharos_server::{Lifecycle, ListenerKey, Router, Server, Transport};
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
     sync::Arc,
 };
 
+#[cfg(feature = "plugin-bind")]
+pub mod bind;
 #[cfg(feature = "plugin-cache")]
 pub mod cache;
 #[cfg(feature = "plugin-errors")]
@@ -180,17 +182,29 @@ pub fn servers_with_registry(
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener Domain")
             })?;
             for address in &addresses {
-                let ip: IpAddr = if address.is_empty() {
-                    Ipv4Addr::UNSPECIFIED.into()
-                } else {
-                    address.parse().map_err(|_| {
+                let socket = if address.is_empty() {
+                    SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port)
+                } else if let Some((ip, interface)) = address.split_once('%') {
+                    let ip: Ipv6Addr = ip.parse().map_err(|_| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
-                    })?
+                    })?;
+                    let scope = nix::net::if_::if_nametoindex(interface)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                    SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope))
+                } else {
+                    let ip: IpAddr = address.parse().map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
+                    })?;
+                    let ip = match ip {
+                        IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
+                        ip => ip,
+                    };
+                    SocketAddr::new(ip, port)
                 };
                 routes.push((
                     ListenerKey {
                         transport: Transport::Dns,
-                        address: SocketAddr::new(ip, port),
+                        address: socket,
                     },
                     domain.clone(),
                 ));
@@ -457,6 +471,13 @@ fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
 #[cfg(feature = "plugin-reload")]
 fn setup_reload(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.reload = Some(reload::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-bind")]
+fn setup_bind(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.listen_addresses = bind::parse(cursor)?;
+    block.config.bind = Some(());
     Ok(())
 }
 

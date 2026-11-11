@@ -9,7 +9,7 @@ use std::{
     fmt,
     future::Future,
     io,
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     pin::Pin,
     sync::Arc,
     time::Duration,
@@ -335,6 +335,14 @@ pub struct ListenerKey {
     pub address: SocketAddr,
 }
 
+fn canonical_peer(mut peer: SocketAddr) -> SocketAddr {
+    let ip = peer.ip().to_canonical();
+    if ip != peer.ip() {
+        peer.set_ip(ip);
+    }
+    peer
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Respond,
@@ -379,24 +387,54 @@ pub struct Listener {
 
 impl Listener {
     pub async fn bind<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
+        Self::bind_with_ipv6(address, handler, bind_ipv6_dual, udp::bind).await
+    }
+
+    async fn bind_with_ipv6<H: Handler>(
+        address: SocketAddr,
+        handler: H,
+        bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
+        bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
+    ) -> io::Result<Self> {
+        let wildcard = address.is_ipv6() && address.ip().is_unspecified();
+        let mut ipv4_only = false;
+        let workers = quota::worker_count();
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
         let mut attempts = if address.port() == 0 { 16 } else { 1 };
-        let (tcp, address, first) = loop {
-            let tcp = TcpListener::bind(address).await?;
+        let (tcp, address, sockets) = loop {
+            let tcp = if wildcard && !ipv4_only {
+                match optional_ipv6(bind_ipv6(address)) {
+                    Ok(Some(tcp)) => tcp,
+                    Ok(None) => {
+                        ipv4_only = true;
+                        continue;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts > 1 => {
+                        attempts -= 1;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else if ipv4_only {
+                TcpListener::bind((Ipv4Addr::UNSPECIFIED, address.port())).await?
+            } else {
+                TcpListener::bind(address).await?
+            };
             let bound = tcp.local_addr()?;
-            match udp::bind(bound) {
-                Ok(udp) => break (tcp, bound, udp),
+            let sockets = (0..workers)
+                .map(|_| bind_udp(bound))
+                .collect::<io::Result<Vec<_>>>();
+            match sockets {
+                Ok(sockets) => break (tcp, bound, sockets),
+                Err(error) if wildcard && bound.is_ipv6() && ipv6_unavailable(&error) => {
+                    ipv4_only = true;
+                }
                 Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts > 1 => {
                     attempts -= 1;
                 }
                 Err(error) => return Err(error),
             }
         };
-        let mut sockets = Vec::new();
-        sockets.push(first);
-        for _ in 1..quota::worker_count() {
-            sockets.push(udp::bind(address)?);
-        }
         let (stop, receiver) = watch::channel(false);
         let handler = Arc::new(handler);
         let mut tasks = sockets
@@ -445,6 +483,165 @@ impl Listener {
             }
         }
         result
+    }
+}
+
+fn bind_ipv6_dual(address: SocketAddr) -> io::Result<TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_only_v6(false)?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    socket.listen(1024)?;
+    TcpListener::from_std(socket.into())
+}
+
+fn optional_ipv6<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if ipv6_unavailable(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn ipv6_unavailable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AddrNotAvailable
+        || error.raw_os_error() == Some(libc::EAFNOSUPPORT)
+}
+
+#[cfg(test)]
+mod wildcard_tests {
+    use super::{
+        Action, Handler, Listener, Protocol, bind_ipv6_dual, canonical_peer, optional_ipv6, udp,
+    };
+    use std::{
+        io,
+        net::{Ipv6Addr, SocketAddr, SocketAddrV6},
+    };
+
+    #[test]
+    fn canonical_peer_preserves_native_ipv6_scope() {
+        let scoped = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1".parse::<Ipv6Addr>().unwrap(),
+            53,
+            7,
+            3,
+        ));
+        assert_eq!(canonical_peer(scoped), scoped);
+        assert_eq!(
+            canonical_peer("[::ffff:127.0.0.1]:53".parse().unwrap()),
+            "127.0.0.1:53".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn unavailable_ipv6_falls_back_but_other_errors_remain_errors() {
+        assert_eq!(
+            optional_ipv6::<()>(Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT))).unwrap(),
+            None
+        );
+        assert_eq!(
+            optional_ipv6::<()>(Err(io::Error::from(io::ErrorKind::AddrNotAvailable))).unwrap(),
+            None
+        );
+        assert_eq!(optional_ipv6(Ok(7)).unwrap(), Some(7));
+        assert!(
+            optional_ipv6::<()>(Err(io::Error::new(io::ErrorKind::AddrInUse, "occupied"))).is_err()
+        );
+    }
+
+    struct Echo;
+    impl Handler for Echo {
+        async fn handle(
+            &self,
+            query: &[u8],
+            _: SocketAddr,
+            _: Protocol,
+            response: &mut Vec<u8>,
+        ) -> Action {
+            response.extend_from_slice(query);
+            Action::Respond
+        }
+    }
+
+    async fn assert_ipv4_fallback(listener: Listener) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        assert!(listener.local_addr().is_ipv4());
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket
+            .send_to(b"query", ("127.0.0.1", listener.local_addr().port()))
+            .await
+            .unwrap();
+        let mut response = [0; 16];
+        let (len, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.recv_from(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&response[..len], b"query");
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", listener.local_addr().port()))
+            .await
+            .unwrap();
+        tcp.write_u16(5).await.unwrap();
+        tcp.write_all(b"query").await.unwrap();
+        let len = tokio::time::timeout(std::time::Duration::from_secs(2), tcp.read_u16())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len, 5);
+        let mut response = [0; 5];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tcp.read_exact(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&response, b"query");
+        drop(tcp);
+        listener.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wildcard_falls_back_to_ipv4_when_ipv6_tcp_is_unavailable() {
+        fn unavailable(_: SocketAddr) -> io::Result<tokio::net::TcpListener> {
+            Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT))
+        }
+        let listener =
+            Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, unavailable, udp::bind)
+                .await
+                .unwrap();
+        assert_ipv4_fallback(listener).await;
+    }
+
+    #[tokio::test]
+    async fn wildcard_falls_back_to_ipv4_when_ipv6_udp_is_unavailable() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static TRIED_IPV6_UDP: AtomicBool = AtomicBool::new(false);
+        if std::net::TcpListener::bind("[::1]:0").is_err() {
+            return;
+        }
+        fn unavailable(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
+            if address.is_ipv6() {
+                TRIED_IPV6_UDP.store(true, Ordering::Relaxed);
+                Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
+            } else {
+                udp::bind(address)
+            }
+        }
+        let listener =
+            Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, bind_ipv6_dual, unavailable)
+                .await
+                .unwrap();
+        assert!(TRIED_IPV6_UDP.load(Ordering::Relaxed));
+        assert_ipv4_fallback(listener).await;
     }
 }
 
