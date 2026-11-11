@@ -49,11 +49,34 @@ impl Oracle {
     }
 }
 
+// miekg/dns re-parses a $GENERATE template without a final newline (documented deviation),
+// and accepts an unterminated quote there.
+fn generate_line_error(zone: &[u8], error: &str) -> bool {
+    let mut parts = error.splitn(4, ':');
+    let line = parts.nth(1).and_then(|line| line.parse::<usize>().ok());
+    let message = parts.nth(1).unwrap_or_default();
+    let on_generate = line
+        .and_then(|line| zone.split(|&b| b == b'\n').nth(line - 1))
+        .is_some_and(|text| text.to_ascii_uppercase().starts_with(b"$GENERATE"));
+    on_generate
+        && ["unterminated record", "invalid $GENERATE"]
+            .iter()
+            .any(|known| message.contains(known))
+}
+
 fn pharos(zone: &[u8]) -> String {
     let origin: Name = ORIGIN.parse().unwrap();
     match ZoneParser::new(Cursor::new(zone), origin, "fuzz.zone").collect::<Result<Vec<_>, _>>() {
-        // Documented deviation: Pharos rejects records without RDATA; miekg/dns accepts them.
-        Err(error) if error.to_string().contains("missing RDATA") => "missing_rdata\n".to_owned(),
+        // Documented deviations: Pharos rejects missing RDATA fields, unmatched ')' and
+        // unterminated quotes in $GENERATE.
+        Err(error)
+            if ["missing RDATA", "fields, got", "missing association data", "unbalanced parentheses"]
+                .iter()
+                .any(|message| error.to_string().contains(message))
+                || generate_line_error(zone, &error.to_string()) =>
+        {
+            "documented_reject\n".to_owned()
+        }
         Err(_) => "reject\n".to_owned(),
         Ok(records) => {
             let mut result = String::from("accept\n");
@@ -80,7 +103,14 @@ fuzz_target!(|zone: &[u8]| {
         .unwrap();
     let expected = oracle.parse(zone);
     let actual = pharos(zone);
-    if actual == "missing_rdata\n" {
+    // Documented deviation: miekg/dns drops escaped characters in $GENERATE templates.
+    if zone
+        .split(|&b| b == b'\n')
+        .any(|line| line.to_ascii_uppercase().starts_with(b"$GENERATE") && line.contains(&b'\\'))
+    {
+        return;
+    }
+    if actual == "documented_reject\n" {
         return;
     }
     // Documented deviations (docs/compatibility.md): Pharos rejects zones that miekg/dns

@@ -77,6 +77,7 @@ fn generate_with_empty_template_yields_no_records() {
     assert_eq!(parse(b"$GENERATE 0-1 ;c\n"), parse(b"$GENERATE 0-1 \n"));
     assert!(parse(b"$GENERATE 0-1\n").is_err());
     assert!(parse(b"$GENERATE 0-1 a\n").is_err());
+    assert!(parse(b"$GENERATE 1-2 N TXT \"x\ny IN A 192.0.2.1\n").is_err());
 }
 
 #[test]
@@ -91,6 +92,19 @@ fn parentheses_do_not_end_an_item() {
         parse(b"a IN A 19(2.0.2.1\n)\n"),
         parse(b"a IN A 192.0.2.1\n")
     );
+    assert_eq!(
+        parse(b"a IN A (192.0.2\n.1)\n"),
+        parse(b"a IN A 192.0.2.1\n")
+    );
+    assert_eq!(
+        parse(b"a IN TXT (x\ny)\n"),
+        Ok(vec![(16, b"\x02xy".to_vec())])
+    );
+    assert_eq!(
+        parse(b"a IN TXT (x;c\ny)\n"),
+        Ok(vec![(16, b"\x01x\x01y".to_vec())])
+    );
+    assert!(parse(b"a IN MX (10\nmx)\n").is_err());
     for zone in [
         b"a IN A(192.0.2.1)\n".as_slice(),
         b"a(IN A 192.0.2.1)\n",
@@ -117,6 +131,13 @@ fn records_without_rdata_are_rejected() {
     ] {
         assert!(parse(zone).is_err(), "{zone:?}");
     }
+    for zone in [
+        b"a IN SOA ns h 3\n".as_slice(),
+        b"a IN SSHFP 1 2\n",
+        b"a IN TLSA 3 1 1\n",
+    ] {
+        assert!(parse(zone).is_err(), "{zone:?}");
+    }
     assert_eq!(parse(b"a IN TYPE65400 \\# 0\n"), Ok(vec![(65400, vec![])]));
     // RFC 3123 §4: an APL RR may hold zero items.
     assert_eq!(parse(b"a IN APL\n"), Ok(vec![(42, vec![])]));
@@ -129,4 +150,25 @@ fn unknown_dollar_word_is_an_owner_name() {
     assert_eq!(parse(b"$FOO IN A 192.0.2.1\n"), a);
     assert_eq!(parse(b"$ IN A 192.0.2.1\n"), a);
     assert!(parse(b"$TTL\n").is_err());
+}
+
+#[test]
+fn unmatched_closing_parenthesis_is_rejected() {
+    // RFC 1035 §5.1: parentheses group data across lines, so each ')' closes a '('.
+    for zone in [
+        b"e 0 NSEC = A x)\n".as_slice(),
+        b"e 0 CSYNC 1 0 )\n",
+        b"a IN TXT x)\n",
+    ] {
+        assert!(parse(zone).is_err(), "{zone:?}");
+    }
+}
+
+#[test]
+fn generate_template_escapes_keep_their_meaning() {
+    // RFC 1035 §5.1: \X is X and \DDD is the octet DDD.
+    assert_eq!(
+        parse(b"$GENERATE 1-1 n TXT \\t \\065 \\$\n"),
+        Ok(vec![(16, b"\x01t\x01A\x01$".to_vec())])
+    );
 }

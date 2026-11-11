@@ -215,6 +215,19 @@ impl<R: BufRead> ZoneParser<R> {
                     quote = !quote;
                     active = true;
                 } else if !quote && b == b';' {
+                    // miekg/dns ends the item at a comment, also inside parentheses.
+                    if active {
+                        tokens.push(Token {
+                            text: std::mem::take(&mut token),
+                            line: position.0,
+                            column: position.1,
+                            followed_by_blank: false,
+                            columns: std::mem::take(&mut columns),
+                            raw: std::mem::take(&mut raw),
+                            quotes: std::mem::take(&mut quotes),
+                        });
+                        active = false;
+                    }
                     self.entry_end = (self.line, column);
                     break;
                 } else if !quote && (b == b'(' || b == b')') {
@@ -225,7 +238,9 @@ impl<R: BufRead> ZoneParser<R> {
                     } else if parens.pop().is_none() {
                         return Err(self.error(self.line, column, "unbalanced parentheses"));
                     }
-                } else if !quote && matches!(b, b' ' | b'\t' | b'\n') {
+                // RFC 1035 §5.1: within parentheses a line end is not recognized, so it is dropped.
+                } else if !quote && (matches!(b, b' ' | b'\t') || (b == b'\n' && parens.is_empty()))
+                {
                     if active {
                         tokens.push(Token {
                             text: std::mem::take(&mut token),
