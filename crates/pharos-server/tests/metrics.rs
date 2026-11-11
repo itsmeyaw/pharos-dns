@@ -24,6 +24,7 @@ fn migration_table_matches_all_registry_metric_families() {
     proxy.connection_cache("udp").miss();
     proxy.healthcheck_failure();
     registry.forward();
+    registry.local();
     registry.enable_health_metrics();
     registry.observe_health(0.001, true);
     registry.reload_failed();
