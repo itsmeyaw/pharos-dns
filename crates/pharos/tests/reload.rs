@@ -1,9 +1,11 @@
 #![forbid(unsafe_code)]
 
+mod support;
+
 use std::{
     fs,
     io::{Read, Write},
-    net::{TcpListener, TcpStream, UdpSocket},
+    net::{TcpStream, UdpSocket},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -55,12 +57,8 @@ fn reload_version(port: u16) -> Option<String> {
 fn comments_and_whitespace_do_not_trigger_reload() {
     let dir = std::env::temp_dir().join(format!("pharos-reload-whitespace-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let sockets: Vec<_> = (0..2)
-        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    let dns = sockets[0].local_addr().unwrap().port();
-    let metrics = sockets[1].local_addr().unwrap().port();
-    drop(sockets);
+    let (dns, metrics) = (support::free_port(), support::free_port());
+    assert_ne!(dns, metrics);
     let file = dir.join("Corefile");
     let body = format!(".:{dns} {{\n reload 2s 0\n prometheus 127.0.0.1:{metrics}\n whoami\n}}\n");
     fs::write(&file, &body).unwrap();
@@ -117,11 +115,7 @@ fn comments_and_whitespace_do_not_trigger_reload() {
 fn sigusr1_reloads_without_reload_directive() {
     let dir = std::env::temp_dir().join(format!("pharos-reload-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = support::free_port();
     let corefile = dir.join("Corefile");
     fs::write(&corefile, format!(".:{port} {{\nwhoami\n}}\n")).unwrap();
     let pidfile = dir.join("pid");
@@ -176,12 +170,8 @@ fn sigusr1_reloads_without_reload_directive() {
 fn invalid_reload_restores_http_and_keeps_dns() {
     let dir = std::env::temp_dir().join(format!("pharos-reload-invalid-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let ports: Vec<_> = (0..2)
-        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    let dns = ports[0].local_addr().unwrap().port();
-    let metrics = ports[1].local_addr().unwrap().port();
-    drop(ports);
+    let (dns, metrics) = (support::free_port(), support::free_port());
+    assert_ne!(dns, metrics);
     let file = dir.join("Corefile");
     fs::write(
         &file,
@@ -263,12 +253,8 @@ fn failed_sigusr1_does_not_increment_reload_metrics() {
         std::process::id()
     ));
     fs::create_dir_all(&dir).unwrap();
-    let sockets: Vec<_> = (0..2)
-        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    let dns = sockets[0].local_addr().unwrap().port();
-    let metrics = sockets[1].local_addr().unwrap().port();
-    drop(sockets);
+    let (dns, metrics) = (support::free_port(), support::free_port());
+    assert_ne!(dns, metrics);
     let file = dir.join("Corefile");
     fs::write(
         &file,
@@ -337,11 +323,7 @@ fn failed_sigusr1_does_not_increment_reload_metrics() {
 fn reload_directive_polls_for_changed_corefile() {
     let dir = std::env::temp_dir().join(format!("pharos-reload-poll-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = support::free_port();
     let file = dir.join("Corefile");
     let backend = dir.join("backend.override");
     fs::write(&backend, "whoami\n").unwrap();

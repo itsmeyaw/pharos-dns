@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+mod support;
+
 use std::{
     fs,
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
@@ -40,11 +42,7 @@ fn answers(address: SocketAddr) -> bool {
 #[test]
 fn unbound_listener_serves_both_address_families() {
     let ipv6 = TcpListener::bind("[::1]:0").is_ok();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = support::free_port();
     let dir = std::env::temp_dir().join(format!("pharos-bind-wildcard-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("Corefile"), format!(".:{port} {{\n whoami\n}}\n")).unwrap();
@@ -81,11 +79,7 @@ fn unbound_listener_serves_both_address_families() {
 #[test]
 fn loopback_except_and_reload_change_listeners() {
     let ipv6 = TcpListener::bind("[::1]:0").is_ok();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = support::free_port();
     let dir = std::env::temp_dir().join(format!("pharos-bind-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let corefile = dir.join("Corefile");
