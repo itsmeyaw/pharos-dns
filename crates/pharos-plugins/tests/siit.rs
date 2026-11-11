@@ -34,7 +34,7 @@ impl Next for Backend<'_> {
         } else {
             self.0.initial
         };
-        let flags = 0x8580
+        let flags = 0x85a0
             | code
             | if !secondary && self.0.initial_tc {
                 0x200
@@ -55,6 +55,17 @@ impl Next for Backend<'_> {
                 )
                 .unwrap();
             }
+            if code & 0xf != 0 {
+                b.record(
+                    Section::Authority,
+                    q.name,
+                    Type::SOA,
+                    Class::IN,
+                    3600,
+                    &[0; 22],
+                )
+                .unwrap();
+            }
         } else if self.0.initial_a {
             b.record(
                 Section::Answer,
@@ -65,7 +76,7 @@ impl Next for Backend<'_> {
                 &[127, 0, 0, 1],
             )
             .unwrap();
-        } else {
+        } else if self.0.initial == 0 {
             b.record(
                 Section::Authority,
                 q.name,
@@ -161,6 +172,7 @@ async fn coredns_siit_translation_fallback_and_eam() {
         (0, true, false, 0, vec!["64:ff9b::192.0.2.1"], 0, 0),
         (0, false, true, 0, vec!["64:ff9b::192.0.2.1"], 0, 1),
         (0, false, false, 0, vec!["2001:db8::1"], 0, 0),
+        (0, false, false, 0, vec![], 0, 0),
         (0, false, false, 2, vec![], 2, 0),
         (0, false, false, 3, vec![], 3, 0),
     ] {
@@ -170,7 +182,18 @@ async fn coredns_siit_translation_fallback_and_eam() {
         assert_eq!(m.answers().count(), expected_answers);
         assert_eq!(m.tc(), tc);
         assert_eq!(m.questions().next().unwrap().qtype, Type::A);
+        if secondary == 2 || secondary == 3 {
+            assert_eq!(m.authorities().next().unwrap().ttl, 3600);
+            assert_eq!(m.flags() & 0x0480, 0x0480);
+        }
     }
+    let wire = query("", 5, false, false, 0, &["64:ff9b::192.0.2.1"]).await;
+    assert_eq!(
+        Message::parse(&wire).unwrap().answers().next().unwrap().ttl,
+        600
+    );
+    let wire = query("", 0, false, false, 0x200, &["64:ff9b::192.0.2.1"]).await;
+    assert!(Message::parse(&wire).unwrap().tc());
 }
 
 // RFC 6052 §2.2 Table 1: independent address mapping vectors.
@@ -200,6 +223,16 @@ async fn siit_rfc6052_vectors() {
             "{prefix}"
         );
     }
+    let wire = query(
+        "ipv6_prefix 2001:db8:122:344::/64",
+        0,
+        false,
+        false,
+        0,
+        &["2001:db8:122:344:ffc0:2:2100:0"],
+    )
+    .await;
+    assert_eq!(Message::parse(&wire).unwrap().answers().count(), 0);
 }
 
 #[cfg(feature = "plugin-hosts")]
