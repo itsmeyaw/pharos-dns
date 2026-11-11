@@ -579,9 +579,9 @@ pub(crate) fn run(root: &Path, keep: bool) -> Result<(), String> {
         "-l",
         "k8s-app=kube-dns",
         "-o",
-        "jsonpath={.items[*].metadata.name}",
+        "jsonpath={range .items[*]}{.metadata.name}{\" \"}{.spec.containers[0].image}{\" \"}{.metadata.deletionTimestamp}{\"\\n\"}{end}",
     ])?;
-    let pods: Vec<_> = pods.split_whitespace().map(str::to_owned).collect();
+    let pods = pharos_pods(&pods)?;
     if pods.is_empty() {
         return Err("no DNS Pods after rollout".into());
     }
@@ -643,6 +643,19 @@ pub(crate) fn run(root: &Path, keep: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn pharos_pods(input: &str) -> Result<Vec<String>, String> {
+    let mut pods = Vec::new();
+    for line in input.lines().filter(|line| !line.trim().is_empty()) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            [name, image] if *image == IMAGE => pods.push((*name).to_owned()),
+            [_, _] | [_, _, _] => {}
+            _ => return Err(format!("invalid DNS Pod listing: {line}")),
+        }
+    }
+    Ok(pods)
+}
+
 fn deployment_patch() -> &'static str {
     r#"[{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"pharos-e2e:local"},{"op":"replace","path":"/spec/template/spec/containers/0/args/0","value":"--conf"}]"#
 }
@@ -679,7 +692,9 @@ fn normalize(input: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{deployment_patch, json_string, matches_required, normalize, reload_corefile};
+    use super::{
+        deployment_patch, json_string, matches_required, normalize, pharos_pods, reload_corefile,
+    };
 
     #[test]
     fn normalizes_ttl_and_record_order_but_keeps_status_and_sections() {
@@ -722,5 +737,12 @@ mod tests {
         assert!(!matches_required(answer, "10.96.0.1"));
         assert!(matches_required(answer, "in a 10.96.0.10"));
         assert!(!matches_required(answer, "answer name. in a 10.96.0.1"));
+    }
+
+    #[test]
+    fn selects_only_nonterminating_pharos_pods() {
+        let pods = "new pharos-e2e:local \nold coredns:v1.12 2026-01-01T00:00:00Z\nretiring pharos-e2e:local 2026-01-01T00:00:00Z\n";
+        assert_eq!(pharos_pods(pods).unwrap(), vec!["new"]);
+        assert!(pharos_pods("invalid\n").is_err());
     }
 }
