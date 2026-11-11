@@ -186,7 +186,6 @@
 - Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - Zone files must be UTF-8; miekg/dns accepts arbitrary input bytes. Most parser errors identify the record's starting line and column 1 rather than pinpointing the bad field.
-- Zone parsing uses temporary allocations for tokens and RDATA fields; it reads incrementally but does not yet meet the no-temporary-per-record allocation goal.
 - Zone-file RDATA presentation supports A, AAAA, NS, CNAME, DNAME, PTR, MX, SOA, TXT, SPF, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SMIMEA, SSHFP and ZONEMD. Other types require RFC 3597 generic RDATA.
 - Presentation parsing rejects invalid base64 immediately and rejects ZONEMD digests shorter than 12 octets; miekg/dns accepts those strings during zone parsing.
 - Generic `\#` RDATA is checked for its declared length but not decoded against known types; miekg/dns rejects some malformed typed values such as one-octet A data.
