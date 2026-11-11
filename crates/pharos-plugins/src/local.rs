@@ -85,12 +85,11 @@ impl Plugin for Local {
         }
         if special {
             if pharos_server::logging::debug_enabled() {
-                pharos_server::logging::log(
-                    "DEBUG",
+                pharos_server::logging::log_debug(
                     "local",
-                    &format!(
-                        "Intercepting localhost query for {:?} {}, from {}",
-                        question.name.to_string().to_ascii_lowercase(),
+                    format_args!(
+                        "Intercepting localhost query for \"{}\" {}, from {}",
+                        question.name,
                         question.qtype,
                         cx.client.ip()
                     ),

@@ -59,13 +59,25 @@ fn local_debug_logging_does_not_allocate_per_query() {
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01a\x09localhost\0\0\x01\0\x01";
     let mut response = Vec::with_capacity(512);
     let mut slots = [];
-    let mut cx = Context { query: Message::parse(wire).unwrap(), client: "127.0.0.1:1234".parse().unwrap(), local: "127.0.0.1:53".parse().unwrap(), transport: Transport::Dns, protocol: Protocol::Udp, domain: &domain, metadata: Metadata::new(&mut slots), response: &mut response, max_response_size: 512 };
+    let mut cx = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
     pharos_server::logging::set_debug_enabled(true);
     for round in 0..2 {
         let region = Region::new(GLOBAL);
         let future = configured[0].config.serve(&mut cx);
         let mut future = std::pin::pin!(future);
-        let result = future.as_mut().poll(&mut TaskContext::from_waker(Waker::noop()));
+        let result = future
+            .as_mut()
+            .poll(&mut TaskContext::from_waker(Waker::noop()));
         let stats = region.change();
         assert_eq!(result, Poll::Ready(Outcome::Response));
         if round == 1 {

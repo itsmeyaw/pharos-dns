@@ -145,7 +145,7 @@
 
 ## local
 
-- The localhost interception debug log can be enabled through the process logging API; the `debug` Directive is not implemented yet. Enabled debug logging allocates to format each entry.
+- The localhost interception debug log can be enabled through the process logging API; the `debug` Directive is not implemented yet. Unlike CoreDNS, logged Query names retain their original case.
 - UDP callers must supply a sufficiently large Response buffer; TCP buffers can grow.
 - DNS names are matched as wire labels with ASCII case folding, rather than CoreDNS's lowercased presentation strings.
 
