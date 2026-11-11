@@ -3093,6 +3093,111 @@ async fn coredns_legacy_regex_keeps_metadata_label_literal() {
     );
 }
 
+struct ConcurrentMetadataAnswer(String);
+impl Next for ConcurrentMetadataAnswer {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        assert_eq!(
+            cx.query.questions().next().unwrap().name.to_string(),
+            self.0
+        );
+        tokio::task::yield_now().await;
+        let q = cx.query.questions().next().unwrap();
+        let target: Name = format!("child.{}", self.0).parse().unwrap();
+        let target = NameRef::parse(target.as_wire(), 0).unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        builder
+            .record_with(Section::Answer, q.name, Type::CNAME, Class::IN, 30, |w| {
+                w.write_name(target)
+            })
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                target,
+                Type::A,
+                Class::IN,
+                30,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_metadata_test.go TestRegexNameMetadataConcurrentResponses.
+#[tokio::test]
+async fn coredns_metadata_rewrites_are_per_query_when_concurrent() {
+    let config = r".:53 {
+ rewrite name regex ^([^.]+)\.example\.$ {1}.{test/namespace}.svc.cluster.local. metadata answer auto
+}";
+    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let plugin = std::sync::Arc::new(chain.rewrite.take().unwrap());
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..32 {
+        let plugin = std::sync::Arc::clone(&plugin);
+        tasks.spawn(async move {
+            let namespace = format!("team-{index}");
+            let rewritten = format!("web.{namespace}.svc.cluster.local.");
+            let name: Name = "web.example.".parse().unwrap();
+            let root: Name = ".".parse().unwrap();
+            let mut wire = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+            builder
+                .question(
+                    NameRef::parse(name.as_wire(), 0).unwrap(),
+                    Type::A,
+                    Class::IN,
+                )
+                .unwrap();
+            let _ = builder.finish();
+            let mut response = Vec::with_capacity(512);
+            let mut slots = [None];
+            let mut cx = Context {
+                query: Message::parse(&wire).unwrap(),
+                client: "127.0.0.1:1234".parse().unwrap(),
+                local: "127.0.0.1:53".parse().unwrap(),
+                transport: Transport::Dns,
+                protocol: Protocol::Udp,
+                domain: &root,
+                metadata: Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size: 512,
+            };
+            cx.metadata.insert("test/namespace", &namespace);
+            assert_eq!(
+                plugin
+                    .serve(&mut cx, ConcurrentMetadataAnswer(rewritten))
+                    .await,
+                Outcome::Response
+            );
+            let response = Message::parse(cx.response).unwrap();
+            assert_eq!(
+                response.questions().next().unwrap().name.to_string(),
+                "web.example."
+            );
+            let mut answers = response.answers();
+            let first = answers.next().unwrap();
+            assert_eq!(first.name.to_string(), "web.example.");
+            let pharos_proto::Rdata::Cname(target) = first.data().unwrap() else {
+                panic!("expected CNAME")
+            };
+            assert_eq!(target.to_string(), "child.web.example.");
+            assert_eq!(
+                answers.next().unwrap().name.to_string(),
+                "child.web.example."
+            );
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn coredns_invalid_metadata_name_restores_original_question() {
     let config = r".:53 {
