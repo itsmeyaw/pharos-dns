@@ -22,6 +22,9 @@ use tokio::{
     sync::{Semaphore, mpsc},
 };
 
+#[path = "../../pharos/tests/support/mod.rs"]
+mod support;
+
 type Watches = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>;
 type Requests = Arc<Mutex<Vec<String>>>;
 
@@ -40,7 +43,9 @@ struct FakeServer {
 
 impl FakeServer {
     async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", support::free_port()))
+            .await
+            .unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let watches: Watches = Arc::default();
         let requests: Requests = Arc::default();
@@ -826,4 +831,392 @@ async fn namespace_label_selector_restricts_service_and_endpoint_lookups() {
         assert_eq!(index.endpoints_by_ip("10.0.1.1").count(), 0);
     });
     controller.stop().await;
+}
+
+#[tokio::test]
+async fn upstream_default_processor_service_and_terminating_pod() {
+    let server = FakeServer::start().await;
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(
+        client,
+        WatchConfig {
+            pods_verified: true,
+            ..Default::default()
+        },
+    );
+    let store = controller.store();
+    until(|| controller.has_synced() && server.watches.lock().unwrap().len() == 4).await;
+
+    let service = |name: &str, version: &str, ip: &str| {
+        json!({
+            "apiVersion":"v1", "kind":"Service",
+            "metadata":{"name":name,"namespace":"prod","resourceVersion":version},
+            "spec":{"clusterIP":ip,"clusterIPs":[ip],"ports":[{"port":80}]}
+        })
+    };
+    for (name, ip) in [("service1", "1.2.3.4"), ("service2", "5.6.7.8")] {
+        server.send("/api/v1/services", "ADDED", service(name, "2", ip));
+    }
+    until(|| {
+        store.with_read(|index| {
+            index.service("prod", "service1").is_some()
+                && index.service("prod", "service2").is_some()
+        })
+    })
+    .await;
+    let mut updated_cluster_ip = service("service1", "3", "1.2.3.4");
+    updated_cluster_ip["spec"]["clusterIP"] = json!("1.2.3.5");
+    server.send("/api/v1/services", "MODIFIED", updated_cluster_ip);
+    until(|| {
+        store.with_read(|index| {
+            index
+                .service("prod", "service1")
+                .is_some_and(|svc| svc.version == "3" && svc.cluster_ips == ["1.2.3.4"])
+        })
+    })
+    .await;
+    server.send(
+        "/api/v1/services",
+        "MODIFIED",
+        service("service1", "4", "1.2.3.5"),
+    );
+    until(|| {
+        store.with_read(|index| {
+            index
+                .service("prod", "service1")
+                .is_some_and(|svc| svc.cluster_ips == ["1.2.3.5"])
+        })
+    })
+    .await;
+    server.send(
+        "/api/v1/services",
+        "DELETED",
+        service("service2", "4", "5.6.7.8"),
+    );
+    until(|| store.with_read(|index| index.service("prod", "service2").is_none())).await;
+
+    let pod = |version: &str, deleting: bool| {
+        json!({
+            "apiVersion":"v1", "kind":"Pod",
+            "metadata":{"name":"pod1","namespace":"prod","resourceVersion":version,
+                "deletionTimestamp": if deleting { Some("2024-01-01T00:00:00Z") } else { None }},
+            "status":{"podIPs":[{"ip":"10.0.2.1"}]}
+        })
+    };
+    server.send("/api/v1/pods", "ADDED", pod("2", false));
+    until(|| store.with_read(|index| index.pods_by_ip("10.0.2.1").count() == 1)).await;
+    server.send("/api/v1/pods", "MODIFIED", pod("3", true));
+    server.send("/api/v1/pods", "ADDED", json!({
+        "apiVersion":"v1", "kind":"Pod", "metadata":{"name":"marker","namespace":"prod","resourceVersion":"4"},
+        "status":{"podIPs":[{"ip":"10.0.2.2"}]}
+    }));
+    until(|| store.with_read(|index| index.pods_by_ip("10.0.2.2").count() == 1)).await;
+    store.with_read(|index| {
+        let retained = index.pods_by_ip("10.0.2.1").next().unwrap();
+        assert_eq!(retained.version, "2");
+        assert!(!retained.deleting);
+    });
+    server.send("/api/v1/pods", "DELETED", pod("3", true));
+    until(|| store.with_read(|index| index.pods_by_ip("10.0.2.1").count() == 0)).await;
+
+    // kube-runtime reconciles a missed delete when the next list completes.
+    server
+        .lists
+        .lock()
+        .unwrap()
+        .insert("/api/v1/services".into(), json!([]));
+    server.send(
+        "/api/v1/services",
+        "ERROR",
+        json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Expired","code":410}),
+    );
+    until(|| store.with_read(|index| index.service("prod", "service1").is_none())).await;
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn upstream_namespace_cases() {
+    for (allowed, name, configured, valid) in [
+        (vec!["foobar"], "foobar", true, true),
+        (vec!["foobar"], "nsnoexist", false, false),
+        (vec![], "foobar", true, true),
+        (vec![], "nsnoexist", true, false),
+    ] {
+        let server = FakeServer::start().await;
+        server.lists.lock().unwrap().insert(
+            "/api/v1/namespaces".into(),
+            json!([{"metadata":{"name":"foobar"}}]),
+        );
+        server.lists.lock().unwrap().insert(
+            "/api/v1/services".into(),
+            json!([
+                {"metadata":{"name":"web","namespace":"foobar"},"spec":{"clusterIP":"10.0.0.1"}},
+                {"metadata":{"name":"web","namespace":"nsnoexist"},"spec":{"clusterIP":"10.0.0.2"}}
+            ]),
+        );
+        let client =
+            kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+        let mut controller = Controller::start(
+            client,
+            WatchConfig {
+                namespaces: allowed.into_iter().map(String::from).collect(),
+                ..Default::default()
+            },
+        );
+        until(|| controller.has_synced()).await;
+        controller.store().with_read(|index| {
+            assert_eq!(
+                index.service(name, "web").is_some(),
+                configured,
+                "configured {name}"
+            );
+            assert_eq!(index.namespace(name).is_some(), valid, "valid {name}");
+        });
+        controller.stop().await;
+    }
+}
+
+#[test]
+fn upstream_metric_labels_preserve_valid_utf8() {
+    let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+    for host in ["example.com", "例え.jp", ""] {
+        registry.kubernetes().request("GET", host).result("200");
+    }
+    let mut output = String::new();
+    registry.encode(&mut output);
+    for host in ["example.com", "例え.jp", ""] {
+        assert!(
+            output.contains(&format!("host=\"{host}\"")),
+            "{host:?}: {output}"
+        );
+    }
+}
+
+// CoreDNS object/metrics_test.go TestEndpointLatencyRecorder_record.
+#[tokio::test]
+async fn upstream_endpoint_latency_recorder_rows() {
+    for (name, cluster_ip, annotated, expected_label, expected_count) in [
+        (
+            "headless annotated",
+            Some("None"),
+            true,
+            "headless_with_selector",
+            1,
+        ),
+        ("cluster annotated", Some("10.0.0.1"), true, "cluster_ip", 1),
+        (
+            "headless no annotation",
+            Some("None"),
+            false,
+            "headless_with_selector",
+            0,
+        ),
+        (
+            "cluster no annotation",
+            Some("10.0.0.1"),
+            false,
+            "cluster_ip",
+            0,
+        ),
+        ("missing service", None, true, "cluster_ip", 0),
+    ] {
+        let server = FakeServer::start().await;
+        let endpoints_path = "/apis/discovery.k8s.io/v1/endpointslices";
+        let gate = Arc::new(Semaphore::new(0));
+        server
+            .path_gates
+            .lock()
+            .unwrap()
+            .insert(endpoints_path.into(), gate.clone());
+        let services = cluster_ip.map_or_else(
+            || json!([]),
+            |ip| {
+                json!([
+                    {"metadata":{"name":"web","namespace":"prod"},"spec":{"clusterIP":ip}}
+                ])
+            },
+        );
+        server
+            .lists
+            .lock()
+            .unwrap()
+            .insert("/api/v1/services".into(), services);
+        let mut slice = json!({
+            "metadata":{"name":"slice","namespace":"prod","labels":{"kubernetes.io/service-name":"web"}},
+            "addressType":"IPv4", "endpoints":[{"addresses":["10.0.0.2"]}]
+        });
+        if annotated {
+            slice["metadata"]["annotations"] =
+                json!({"endpoints.kubernetes.io/last-change-trigger-time":"2024-01-01T00:00:00Z"});
+        }
+        server
+            .lists
+            .lock()
+            .unwrap()
+            .insert(endpoints_path.into(), json!([slice]));
+        let registry = pharos_server::metrics::Registry::new("test", "test", "test");
+        let client =
+            kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+        let mut controller =
+            Controller::start_with_metrics(client, WatchConfig::default(), registry.kubernetes());
+        if cluster_ip.is_some() {
+            until(|| {
+                controller
+                    .store()
+                    .with_read(|index| index.service("prod", "web").is_some())
+            })
+            .await;
+        }
+        gate.add_permits(1);
+        until(|| controller.has_synced()).await;
+        let mut output = String::new();
+        registry.encode(&mut output);
+        let sample = format!(
+            "pharos_kubernetes_dns_programming_duration_seconds_count{{service_kind=\"{expected_label}\"}} {expected_count}"
+        );
+        if expected_count == 0 {
+            assert!(
+                !output.contains("pharos_kubernetes_dns_programming_duration_seconds_count"),
+                "{name}: {output}"
+            );
+        } else {
+            assert!(output.contains(&sample), "{name}: {output}");
+        }
+        controller.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn upstream_endpoint_equivalence_updates_serial_only_for_dns_changes() {
+    let cases = [
+        (
+            "identical",
+            json!([{"addresses":["10.0.0.1"],"hostname":"a"}]),
+            json!([{"name":"http","port":80,"protocol":"TCP"}]),
+            false,
+        ),
+        (
+            "different address count",
+            json!([]),
+            json!([{"name":"http","port":80,"protocol":"TCP"}]),
+            true,
+        ),
+        (
+            "different port count",
+            json!([{"addresses":["10.0.0.1"],"hostname":"a"}]),
+            json!([]),
+            true,
+        ),
+        (
+            "different ip",
+            json!([{"addresses":["10.0.0.2"],"hostname":"a"}]),
+            json!([{"name":"http","port":80,"protocol":"TCP"}]),
+            true,
+        ),
+        (
+            "different hostname",
+            json!([{"addresses":["10.0.0.1"],"hostname":"b"}]),
+            json!([{"name":"http","port":80,"protocol":"TCP"}]),
+            true,
+        ),
+        (
+            "different port number",
+            json!([{"addresses":["10.0.0.1"],"hostname":"a"}]),
+            json!([{"name":"http","port":8080,"protocol":"TCP"}]),
+            true,
+        ),
+        (
+            "different port protocol",
+            json!([{"addresses":["10.0.0.1"],"hostname":"a"}]),
+            json!([{"name":"http","port":80,"protocol":"UDP"}]),
+            true,
+        ),
+    ];
+    futures::future::join_all(cases.into_iter().map(
+        |(name, endpoints, ports, changed)| async move {
+            let server = FakeServer::start().await;
+            let path = "/apis/discovery.k8s.io/v1/endpointslices";
+            let slice = |version: &str, endpoints: Value, ports: Value| {
+                json!({
+                    "apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice",
+                    "metadata":{"name":"slice","namespace":"prod","resourceVersion":version,
+                        "labels":{"kubernetes.io/service-name":"web"}},
+                    "addressType":"IPv4", "endpoints":endpoints, "ports":ports
+                })
+            };
+            server.lists.lock().unwrap().insert(
+                path.into(),
+                json!([slice(
+                    "1",
+                    json!([{"addresses":["10.0.0.1"],"hostname":"a"}]),
+                    json!([{"name":"http","port":80,"protocol":"TCP"}])
+                )]),
+            );
+            let client =
+                kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+            let mut controller = Controller::start(client, WatchConfig::default());
+            let store = controller.store();
+            until(|| controller.has_synced() && server.watches.lock().unwrap().contains_key(path))
+                .await;
+            let serial = store.with_read(|index| index.serial());
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            server.send(path, "MODIFIED", slice("2", endpoints, ports));
+            until(|| {
+                store.with_read(|index| {
+                    index
+                        .endpoints("prod", "web")
+                        .next()
+                        .is_some_and(|ep| ep.version == "2")
+                })
+            })
+            .await;
+            assert_eq!(
+                store.with_read(|index| index.serial() != serial),
+                changed,
+                "{name}"
+            );
+            controller.stop().await;
+        },
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn upstream_endpoint_equivalence_add_and_remove() {
+    futures::future::join_all(["ADDED", "DELETED"].into_iter().map(|event| async move {
+        let server = FakeServer::start().await;
+        let path = "/apis/discovery.k8s.io/v1/endpointslices";
+        let slice = json!({"apiVersion":"discovery.k8s.io/v1", "kind":"EndpointSlice",
+            "metadata":{"name":"slice","namespace":"prod","resourceVersion":"2",
+                "labels":{"kubernetes.io/service-name":"web"}},
+            "addressType":"IPv4", "endpoints":[{"addresses":["10.0.0.1"]}],
+            "ports":[{"name":"http","port":80,"protocol":"TCP"}]
+        });
+        server.lists.lock().unwrap().insert(
+            path.into(),
+            if event == "ADDED" {
+                json!([])
+            } else {
+                json!([slice.clone()])
+            },
+        );
+        let client =
+            kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+        let mut controller = Controller::start(client, WatchConfig::default());
+        let store = controller.store();
+        until(|| controller.has_synced() && server.watches.lock().unwrap().contains_key(path))
+            .await;
+        let serial = store.with_read(|index| index.serial());
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        server.send(path, event, slice);
+        until(|| {
+            store.with_read(|index| {
+                (index.endpoints("prod", "web").count() == 1) == (event == "ADDED")
+            })
+        })
+        .await;
+        assert_ne!(store.with_read(|index| index.serial()), serial, "{event}");
+        controller.stop().await;
+    }))
+    .await;
 }

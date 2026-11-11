@@ -51,7 +51,13 @@ async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
         })
         .collect::<Vec<_>>()
         .join(",");
-    let dns = local_ip.map_or_else(String::new, |ip| format!(r#",{{"metadata":{{"name":"dns","namespace":"prod","labels":{{"kubernetes.io/service-name":"dns"}}}},"addressType":"IPv4","endpoints":[{{"addresses":["{ip}"],"hostname":"ns"}},{{"addresses":["{ip}"],"hostname":"ns"}},{{"addresses":["{ip}"],"hostname":"ns"}}]}}"#));
+    let dns = local_ip.map_or_else(String::new, |ip| {
+        let endpoints = (0..5000)
+            .map(|i| format!(r#"{{"addresses":["{ip}"],"hostname":"node{}"}}"#, i % 100))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#",{{"metadata":{{"name":"dns","namespace":"prod","labels":{{"kubernetes.io/service-name":"dns"}}}},"addressType":"IPv4","endpoints":[{endpoints}]}}"#)
+    });
     let slices = format!(
         r#"[{{"metadata":{{"name":"large","namespace":"prod","labels":{{"kubernetes.io/service-name":"large"}}}},"addressType":"IPv4","ports":[{{"name":"http","protocol":"TCP","port":80}}],"endpoints":[{endpoints}]}},{{"metadata":{{"name":"many","namespace":"prod","labels":{{"kubernetes.io/service-name":"many"}}}},"addressType":"IPv4","ports":[{{"name":"http","protocol":"TCP","port":80}}],"endpoints":[{many}]}},{{"metadata":{{"name":"reverse","namespace":"prod","labels":{{"kubernetes.io/service-name":"reverse"}}}},"addressType":"IPv4","endpoints":[{reverse}]}},{{"metadata":{{"name":"v6","namespace":"prod","labels":{{"kubernetes.io/service-name":"v6"}}}},"addressType":"IPv6","ports":[{{"name":"http","protocol":"TCP","port":80}}],"endpoints":[{{"addresses":["2001:db8::1"],"hostname":"same"}},{{"addresses":["2001:0db8::1"],"hostname":"same"}}]}},{{"metadata":{{"name":"weight-ports","namespace":"prod","labels":{{"kubernetes.io/service-name":"weight"}}}},"addressType":"IPv4","ports":[{{"name":"http","protocol":"TCP","port":80}}],"endpoints":[{{"addresses":["10.3.0.1"],"hostname":"same"}},{{"addresses":["10.3.0.2"],"hostname":"same"}}]}},{{"metadata":{{"name":"weight-sentinel","namespace":"prod","labels":{{"kubernetes.io/service-name":"weight"}}}},"addressType":"IPv4","endpoints":[{{"addresses":["10.3.0.3"],"hostname":"same"}}]}}{dns}]"#
     );
@@ -216,12 +222,18 @@ async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
                 ));
             }
             5 if local_ip.is_some() => {
-                assert_eq!(message.answer_count(), 1);
-                assert_eq!(message.additional_count(), 3);
-                let Rdata::Ns(target) = message.answers().next().unwrap().data().unwrap() else {
-                    panic!("expected NS")
-                };
-                assert_eq!(target.to_string(), "ns.dns.prod.svc.cluster.local.");
+                assert_eq!(message.answer_count(), 100);
+                assert!(message.tc());
+                assert!(message.additional_count() > 0 && message.additional_count() < 5000);
+                for (i, rr) in message.answers().enumerate() {
+                    let Rdata::Ns(target) = rr.data().unwrap() else {
+                        panic!("expected NS")
+                    };
+                    assert_eq!(
+                        target.to_string(),
+                        format!("node{i}.dns.prod.svc.cluster.local.")
+                    );
+                }
                 for rr in message.additionals() {
                     assert_eq!(rr.data().unwrap(), Rdata::A(local_ip.unwrap()));
                 }

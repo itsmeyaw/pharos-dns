@@ -58,7 +58,107 @@ pub(super) fn parse<'a>(labels: &'a [&'a [u8]], zonal: bool) -> Option<Request<'
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{Request, parse};
+
+    fn coredns_string(request: &Request<'_>) -> String {
+        [
+            request.port,
+            request.protocol,
+            request.endpoint,
+            &[][..],
+            request.service,
+            request.namespace,
+            request.kind,
+        ]
+        .map(|value| std::str::from_utf8(value).unwrap())
+        .join(".")
+    }
+
+    // CoreDNS parse_test.go TestParseRequest; row 6 is multicluster (#41).
+    #[test]
+    fn coredns_request_table() {
+        let cases: &[(&[&[u8]], bool, &str, &str)] = &[
+            (
+                &[b"_http", b"_tcp", b"webs", b"mynamespace", b"svc"],
+                false,
+                "http.tcp...webs.mynamespace.svc",
+                "",
+            ),
+            (
+                &[b"1-2-3-4", b"webs", b"mynamespace", b"svc"],
+                false,
+                "..1-2-3-4..webs.mynamespace.svc",
+                "",
+            ),
+            (&[], false, "......", ""),
+            (&[b"svc"], false, "......", ""),
+            (&[b"pod"], false, "......", ""),
+            (
+                &[b"", b"", b"webs", b"mynamespace", b"svc"],
+                false,
+                "....webs.mynamespace.svc",
+                "",
+            ),
+            (
+                &[
+                    b"us-west-2a",
+                    b"pin",
+                    b"_zone",
+                    b"webs",
+                    b"mynamespace",
+                    b"svc",
+                ],
+                true,
+                "....webs.mynamespace.svc",
+                "us-west-2a",
+            ),
+            (
+                &[
+                    b"us-west-2a",
+                    b"prefer",
+                    b"_zone",
+                    b"webs",
+                    b"mynamespace",
+                    b"svc",
+                ],
+                true,
+                "....webs.mynamespace.svc",
+                "us-west-2a",
+            ),
+            (
+                &[
+                    b"corp",
+                    b"example",
+                    b"com",
+                    b"pin",
+                    b"_zone",
+                    b"webs",
+                    b"mynamespace",
+                    b"svc",
+                ],
+                true,
+                "....webs.mynamespace.svc",
+                "corp.example.com",
+            ),
+            (
+                &[b"us-west-2a", b"_zone", b"webs", b"mynamespace", b"svc"],
+                true,
+                "us-west-2a.zone...webs.mynamespace.svc",
+                "",
+            ),
+        ];
+        for (index, (labels, zonal, expected, expected_zone)) in cases.iter().enumerate() {
+            let request = parse(labels, *zonal).unwrap_or_else(|| panic!("row {index}"));
+            let zone = request
+                .zone
+                .iter()
+                .map(|label| std::str::from_utf8(label).unwrap())
+                .collect::<Vec<_>>()
+                .join(".");
+            assert_eq!(coredns_string(&request), *expected, "row {index}");
+            assert_eq!(zone, *expected_zone, "row {index}");
+        }
+    }
 
     // Adapted from CoreDNS v1.15.0 plugin/kubernetes/parse_test.go.
     #[test]

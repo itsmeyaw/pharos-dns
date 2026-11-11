@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn readiness_probe_queries_the_ready_endpoint() {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = super::reserve_port().unwrap().tcp;
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();

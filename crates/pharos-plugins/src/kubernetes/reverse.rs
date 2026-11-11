@@ -2,6 +2,13 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+pub(super) fn is_reverse(labels: &[&[u8]]) -> bool {
+    labels.len() > 2
+        && labels[labels.len() - 1].eq_ignore_ascii_case(b"arpa")
+        && (labels[labels.len() - 2].eq_ignore_ascii_case(b"in-addr")
+            || labels[labels.len() - 2].eq_ignore_ascii_case(b"ip6"))
+}
+
 pub(super) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
     let (suffix, body) = labels.split_last()?;
     if !suffix.eq_ignore_ascii_case(b"arpa") {
@@ -41,7 +48,7 @@ pub(super) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
 
 #[cfg(test)]
 mod tests {
-    use super::address;
+    use super::{address, is_reverse};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -55,6 +62,14 @@ mod tests {
             None
         );
         assert_eq!(address(&[b"4", b"3", b"2", b"in-addr", b"arpa"]), None);
+    }
+
+    #[test]
+    fn reverse_detection_requires_a_label_before_the_arpa_suffix() {
+        assert!(is_reverse(&[b"svc", b"0", b"10", b"in-addr", b"arpa"]));
+        assert!(is_reverse(&[b"1", b"ip6", b"arpa"]));
+        assert!(!is_reverse(&[b"in-addr", b"arpa"]));
+        assert!(!is_reverse(&[b"ip6", b"arpa"]));
     }
 
     #[test]

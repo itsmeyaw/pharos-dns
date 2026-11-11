@@ -7,15 +7,18 @@ pub(super) fn snapshot(hosts: &[String]) -> Vec<IpAddr> {
         nix::ifaddrs::getifaddrs()
             .into_iter()
             .flatten()
-            .filter_map(|entry| {
-                let address = entry.address?;
-                address
-                    .as_sockaddr_in()
-                    .map(|ip| IpAddr::V4(ip.ip()))
-                    .or_else(|| address.as_sockaddr_in6().map(|ip| IpAddr::V6(ip.ip())))
-            })
+            .filter_map(interface_ip)
             .collect()
     })
+}
+
+fn interface_ip(entry: nix::ifaddrs::InterfaceAddress) -> Option<IpAddr> {
+    entry.netmask?;
+    let address = entry.address?;
+    address
+        .as_sockaddr_in()
+        .map(|ip| IpAddr::V4(ip.ip()))
+        .or_else(|| address.as_sockaddr_in6().map(|ip| IpAddr::V6(ip.ip())))
 }
 
 pub(super) fn select(hosts: &[String], interfaces: impl FnOnce() -> Vec<IpAddr>) -> Vec<IpAddr> {
@@ -65,6 +68,30 @@ mod tests {
         assert_eq!(
             addresses,
             ["192.0.2.1", "2001:db8::1", "192.0.2.1"].map(|value| value.parse::<IpAddr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn interface_without_netmask_is_not_a_coredns_host() {
+        let address: std::net::SocketAddr = "192.0.2.1:0".parse().unwrap();
+        let mut entry = nix::ifaddrs::InterfaceAddress {
+            interface_name: "test".into(),
+            flags: nix::net::if_::InterfaceFlags::empty(),
+            address: Some(address.into()),
+            netmask: None,
+            broadcast: None,
+            destination: None,
+        };
+        assert_eq!(super::interface_ip(entry.clone()), None);
+        entry.netmask = Some(
+            "255.255.255.0:0"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        );
+        assert_eq!(
+            super::interface_ip(entry),
+            Some("192.0.2.1".parse().unwrap())
         );
     }
 

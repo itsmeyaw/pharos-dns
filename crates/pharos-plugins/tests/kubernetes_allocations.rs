@@ -2,6 +2,9 @@
 #![cfg(feature = "plugin-kubernetes")]
 #![recursion_limit = "512"]
 
+#[path = "../../pharos/tests/support/mod.rs"]
+mod support;
+
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers_with_registry};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Type};
@@ -15,7 +18,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[tokio::test(flavor = "current_thread")]
 async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", support::free_port()))
+        .await
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
         loop {

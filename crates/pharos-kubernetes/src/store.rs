@@ -217,6 +217,61 @@ mod tests {
             assert_ne!(index.serial(), 1);
         });
     }
+
+    // CoreDNS controller_test.go TestServiceModified; external-zone flags belong to k8s_external.
+    #[test]
+    fn coredns_service_modified_internal_rows() {
+        let mut base = service("10.0.0.1");
+        base.version = "1".into();
+        let mut same = base.clone();
+        same.version = "2".into();
+        let mut external_ip = same.clone();
+        external_ip.external_ips = vec!["192.0.2.2".into()];
+        let mut external_name = same.clone();
+        external_name.external_name = "target.example".into();
+        let mut port_name = same.clone();
+        port_name.ports[0].name = "other".into();
+        let mut extra_port = port_name.clone();
+        extra_port.ports.push(port_name.ports[0].clone());
+        for (name, old, new, expected) in [
+            ("add", None, &same, true),
+            ("add with external IP", None, &external_ip, true),
+            ("same", Some(&base), &same, false),
+            ("external IP", Some(&base), &external_ip, false),
+            ("external name", Some(&base), &external_name, true),
+            ("port name", Some(&base), &port_name, true),
+            ("port count", Some(&base), &extra_port, true),
+        ] {
+            assert_eq!(super::service_changed(old, new), expected, "{name}");
+        }
+    }
+
+    // CoreDNS controller_test.go TestPodModified.
+    #[test]
+    fn coredns_pod_modified_rows() {
+        for (old, new, changed) in [
+            (&["10.240.0.1"][..], &["10.240.0.1"][..], false),
+            (&[][..], &["10.240.0.1"][..], true),
+            (&["10.240.0.1"][..], &["10.240.0.2"][..], true),
+            (
+                &["10.240.0.1", "fd00::1"][..],
+                &["10.240.0.1", "fd00::1"][..],
+                false,
+            ),
+        ] {
+            let pod = |version: &str, ips: &[&str]| Pod {
+                version: version.into(),
+                name: "dns-test".into(),
+                namespace: "testns".into(),
+                ips: ips.iter().map(|ip| (*ip).to_owned()).collect(),
+                deleting: false,
+            };
+            assert_eq!(
+                super::pod_changed(Some(&pod("1", old)), &pod("2", new)),
+                changed
+            );
+        }
+    }
 }
 // Incremental indices shared by watchers and DNS readers.
 

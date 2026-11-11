@@ -1,5 +1,8 @@
 //! Kubernetes authoritative DNS backend.
 
+#[cfg(test)]
+#[allow(unused_attributes)]
+mod authority_test;
 mod local;
 mod name;
 mod reverse;
@@ -496,6 +499,7 @@ impl pharos_server::Plugin for Kubernetes {
             labels[count] = label;
             count += 1;
         }
+        let reverse_name = reverse::is_reverse(&labels[..count]);
         let reverse_ip = (q.qtype == Type::PTR)
             .then(|| reverse::address(&labels[..count]))
             .flatten()
@@ -535,7 +539,9 @@ impl pharos_server::Plugin for Kubernetes {
         {
             true
         } else if let Some(req) = &req {
-            if req.kind == b"svc" && req.service.is_empty() {
+            if reverse_name && !req.kind.is_empty() {
+                false
+            } else if req.kind == b"svc" && req.service.is_empty() {
                 q.qtype != Type::TXT
                     && std::str::from_utf8(req.namespace)
                         .ok()

@@ -2,6 +2,9 @@
 #![cfg(feature = "plugin-kubernetes")]
 #![recursion_limit = "512"]
 
+#[path = "../../pharos/tests/support/mod.rs"]
+mod support;
+
 use std::{
     sync::{
         Arc,
@@ -27,7 +30,9 @@ async fn api() -> (
     Arc<AtomicUsize>,
     tokio::task::JoinHandle<()>,
 ) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", support::free_port()))
+        .await
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let (gate, _) = watch::channel(false);
     let rx = gate.subscribe();

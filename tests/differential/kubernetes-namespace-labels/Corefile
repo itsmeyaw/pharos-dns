@@ -1,6 +1,6 @@
 .:{port} {
     ready 127.0.0.1:{metrics_port}
-    kubernetes cluster.local {
+    kubernetes cluster.local in-addr.arpa {
         kubeconfig {kubeconfig}
         namespace_labels team=dns
     }

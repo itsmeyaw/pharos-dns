@@ -4,6 +4,9 @@
 
 #[path = "support/api.rs"]
 mod api;
+#[cfg(test)]
+#[path = "../../pharos/tests/support/mod.rs"]
+mod test_support;
 
 use std::{collections::HashMap, convert::Infallible, io::Write as _, path::Path};
 
@@ -375,9 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn fixture_binds_the_requested_port() {
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
+        let port = super::test_support::free_port();
         let listener = super::bind_api(port).await.unwrap();
         assert_eq!(listener.local_addr().unwrap().port(), port);
     }
@@ -524,7 +525,10 @@ mod tests {
     async fn shared_http_server_serves_filtered_lists() {
         use std::io::{Read, Write};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener =
+            tokio::net::TcpListener::bind(("127.0.0.1", super::test_support::free_port()))
+                .await
+                .unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let _ = super::api::serve(listener, api_response).await;

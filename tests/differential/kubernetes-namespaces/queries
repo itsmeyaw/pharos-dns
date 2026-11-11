@@ -1,3 +1,5 @@
 web.default.svc.cluster.local. A IN udp
 hidden.other.svc.cluster.local. A IN tcp
+12.0.96.10.in-addr.arpa. PTR IN tcp
+10.0.96.10.in-addr.arpa. PTR IN udp
 headless.default.svc.cluster.local. A IN udp
