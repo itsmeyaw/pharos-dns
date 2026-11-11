@@ -247,6 +247,7 @@ fn dangling_name_escapes_are_rejected() {
         b"(x\\\\\\\n IN A 192.0.2.1)".as_slice(),
         br"$ORIGIN \\\",
         b"a IN NS x\\\\\\",
+        b"u IN TYPE19\t\\",
     ] {
         for end in [b"".as_slice(), b"\n"] {
             let zone = [body, end].concat();
