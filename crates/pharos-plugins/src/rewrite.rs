@@ -15,6 +15,15 @@ struct Rule {
     stop: bool,
 }
 
+type NameHistory<'q> = [(usize, Message<'q>, Message<'q>)];
+type RuleHistory<'a, 'q> = (&'a [Rule], Option<&'a [u8]>, &'a NameHistory<'q>);
+type EdnsHistory<'a, 'q> = (
+    &'a [Rule],
+    &'a [u8],
+    &'a [EdnsSnapshot],
+    &'a NameHistory<'q>,
+);
+
 #[derive(Debug)]
 enum Action {
     Ttl(u32, u32),
@@ -1001,7 +1010,7 @@ fn active_at<'q>(
     index: usize,
     mut query: Message<'q>,
     metadata: &Metadata<'_>,
-    history: &[(usize, Message<'q>, Message<'q>)],
+    history: &NameHistory<'q>,
 ) -> bool {
     for (position, rule) in rules.iter().enumerate().take(index + 1) {
         let matched =
@@ -1027,7 +1036,7 @@ fn states_at<'a>(
     mut query: Message<'a>,
     metadata: &Metadata<'_>,
     recorded: Option<&[u8]>,
-    history: &[(usize, Message<'a>, Message<'a>)],
+    history: &NameHistory<'a>,
 ) -> Option<(Message<'a>, Message<'a>)> {
     for (position, rule) in rules.iter().enumerate().take(index + 1) {
         let mut before = query;
@@ -1073,7 +1082,7 @@ fn apply_history<'a, 'q>(
     source: NameRef<'a>,
     original: Message<'q>,
     metadata: &Metadata<'_>,
-    rules: (&[Rule], Option<&[u8]>, &[(usize, Message<'q>, Message<'q>)]),
+    rules: RuleHistory<'_, 'q>,
     end: usize,
     value: bool,
     output: &'a mut [u8; 255],
@@ -1542,12 +1551,7 @@ fn revert_edns_response<'q>(
     cx: &mut Context<'_, '_>,
     original: Message<'q>,
     query_options: &[u8],
-    sources: (
-        &[Rule],
-        &[u8],
-        &[EdnsSnapshot],
-        &[(usize, Message<'q>, Message<'q>)],
-    ),
+    sources: EdnsHistory<'_, 'q>,
     end: usize,
 ) -> Result<(), ServerError> {
     let (rules, matched, snapshots, name_history) = sources;
@@ -1701,7 +1705,7 @@ fn build_reverted_response<'q>(
     original_query: Message<'q>,
     rules: &[Rule],
     recorded: Option<&[u8]>,
-    history: &[(usize, Message<'q>, Message<'q>)],
+    history: &NameHistory<'q>,
     end: usize,
     rcode: u16,
 ) -> Result<(), ServerError> {
