@@ -3046,6 +3046,53 @@ async fn coredns_metadata_skip_and_invalid_rows() {
     }
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_metadata_test.go TestRegexNameMetadataLegacyLiteral.
+#[tokio::test]
+async fn coredns_legacy_regex_keeps_metadata_label_literal() {
+    let config = r".:53 {
+ rewrite name regex ^(.*)\.$ {1}.{test/Value}.
+}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [None];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    cx.metadata.insert("test/value", "changed");
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, InspectName("example.{test/value}."))
+            .await,
+        Outcome::Drop
+    );
+}
+
 #[tokio::test]
 async fn coredns_invalid_metadata_name_restores_original_question() {
     let config = r".:53 {
