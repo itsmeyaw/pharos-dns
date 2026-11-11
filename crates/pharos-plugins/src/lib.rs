@@ -583,7 +583,8 @@ fn setup_kubernetes(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
         .map(|key| key.domain.as_str())
         .collect::<Vec<_>>();
     let config = kubernetes::setup::parse(cursor, &domains)?;
-    let plugin = kubernetes::Kubernetes::new(config).map_err(|error| cursor.error(error))?;
+    let plugin = kubernetes::Kubernetes::with_listen_addresses(config, &block.listen_addresses)
+        .map_err(|error| cursor.error(error))?;
     plugin.register_hooks(&mut block.config.lifecycle);
     block.config.kubernetes = Some(plugin);
     Ok(())

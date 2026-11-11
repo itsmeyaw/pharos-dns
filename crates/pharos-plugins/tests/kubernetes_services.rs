@@ -2,6 +2,9 @@
 #![cfg(feature = "plugin-kubernetes")]
 #![recursion_limit = "512"]
 
+#[path = "../../pharos/tests/support/mod.rs"]
+mod support;
+
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Type};
@@ -42,7 +45,29 @@ impl pharos_server::Chain for TruncatedRoute {
 
 #[tokio::test]
 async fn services_are_answered_from_watched_kubernetes_objects() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_ips: Vec<std::net::IpAddr> = nix::ifaddrs::getifaddrs()
+        .unwrap()
+        .filter_map(|entry| {
+            let address = entry.address?;
+            address
+                .as_sockaddr_in()
+                .map(|ip| std::net::IpAddr::V4(ip.ip()))
+                .or_else(|| {
+                    address
+                        .as_sockaddr_in6()
+                        .map(|ip| std::net::IpAddr::V6(ip.ip()))
+                })
+        })
+        .filter(|ip| !ip.is_loopback())
+        .collect();
+    let v4_count = local_ips
+        .iter()
+        .filter(|ip| ip.is_ipv4())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", support::free_port()))
+        .await
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
         loop {
@@ -90,8 +115,10 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
         ""
     };
     let ready_address = if cfg!(feature = "plugin-ready") {
-        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        Some(socket.local_addr().unwrap())
+        Some(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            support::free_port(),
+        )))
     } else {
         None
     };
@@ -436,8 +463,20 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             0,
             0,
         ),
-        ("cluster.local.", Type::NS, Rcode::NOERROR, 1, 2),
-        ("Cluster.Local.", Type::NS, Rcode::NOERROR, 1, 2),
+        (
+            "cluster.local.",
+            Type::NS,
+            Rcode::NOERROR,
+            u16::from(!local_ips.is_empty()),
+            local_ips.len() as u16,
+        ),
+        (
+            "Cluster.Local.",
+            Type::NS,
+            Rcode::NOERROR,
+            u16::from(!local_ips.is_empty()),
+            local_ips.len() as u16,
+        ),
         ("Cluster.Local.", Type::SOA, Rcode::NOERROR, 1, 0),
         (
             "missing.prod.svc.Cluster.Local.",
@@ -446,7 +485,13 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             0,
             0,
         ),
-        ("ns.dns.cluster.local.", Type::A, Rcode::NOERROR, 1, 0),
+        (
+            "ns.dns.cluster.local.",
+            Type::A,
+            Rcode::NOERROR,
+            v4_count as u16,
+            0,
+        ),
         (
             "missing.prod.svc.cluster.local.",
             Type::A,
@@ -469,7 +514,7 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
             .unwrap();
         let _ = builder.finish();
-        let mut response = Vec::with_capacity(512);
+        let mut response = Vec::with_capacity(4096);
         let mut slots = [None; 8];
         let mut cx = Context {
             query: Message::parse(&wire).unwrap(),
@@ -480,7 +525,7 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
             domain: &root,
             metadata: Metadata::new(&mut slots),
             response: &mut response,
-            max_response_size: 512,
+            max_response_size: 4096,
         };
         assert_eq!(chain.serve(&mut cx).await, Outcome::Response, "{name}");
         let message = Message::parse(&response).unwrap();
@@ -580,16 +625,16 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
                 name.to_string()
             );
         }
-        if kind == Type::NS {
+        if kind == Type::NS && answers > 0 {
             let Rdata::Ns(ns) = message.answers().next().unwrap().data().unwrap() else {
                 panic!("not NS")
             };
             assert_eq!(
                 ns.to_string(),
                 if name.to_string().contains("Cluster.Local.") {
-                    "web.prod.svc.Cluster.Local."
+                    "ns.dns.Cluster.Local."
                 } else {
-                    "web.prod.svc.cluster.local."
+                    "ns.dns.cluster.local."
                 }
             );
         }
@@ -707,44 +752,27 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
     let wildcard = Message::parse(&response).unwrap();
     for record in wildcard.additionals() {
         match record.data().unwrap() {
-            Rdata::A(ip) => assert!(!ip.is_loopback() && !ip.is_unspecified()),
-            Rdata::Aaaa(ip) => assert!(!ip.is_loopback() && !ip.is_unspecified()),
+            Rdata::A(ip) => assert!(!ip.is_loopback()),
+            Rdata::Aaaa(ip) => assert!(!ip.is_loopback()),
             _ => panic!("unexpected NS additional"),
         }
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        let local = nix::ifaddrs::getifaddrs()
-            .unwrap()
-            .filter_map(|item| {
-                let address = item.address?;
-                address
-                    .as_sockaddr_in()
-                    .map(|a| std::net::IpAddr::V4(a.ip()))
-                    .or_else(|| {
-                        address
-                            .as_sockaddr_in6()
-                            .map(|a| std::net::IpAddr::V6(a.ip()))
-                    })
-            })
-            .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
-            .collect::<Vec<_>>();
-        if !local.contains(&"192.0.2.30".parse().unwrap()) {
-            assert_eq!(wildcard.answer_count(), u16::from(!local.is_empty()));
-            assert_eq!(
-                wildcard.tc(),
-                usize::from(wildcard.additional_count()) < local.len()
-            );
-            for (rr, expected) in wildcard.additionals().zip(&local) {
-                let actual = match rr.data().unwrap() {
-                    Rdata::A(ip) => std::net::IpAddr::V4(ip),
-                    Rdata::Aaaa(ip) => std::net::IpAddr::V6(ip),
-                    _ => unreachable!(),
-                };
-                assert_eq!(&actual, expected);
-            }
+    if !local_ips.contains(&"192.0.2.30".parse().unwrap()) {
+        assert_eq!(wildcard.answer_count(), u16::from(!local_ips.is_empty()));
+        assert_eq!(
+            wildcard.tc(),
+            usize::from(wildcard.additional_count()) < local_ips.len()
+        );
+        for (rr, expected) in wildcard.additionals().zip(&local_ips) {
+            let actual = match rr.data().unwrap() {
+                Rdata::A(ip) => std::net::IpAddr::V4(ip),
+                Rdata::Aaaa(ip) => std::net::IpAddr::V6(ip),
+                _ => unreachable!(),
+            };
+            assert_eq!(&actual, expected);
         }
     }
+    let wildcard_response = response.clone();
     let mut slots = [None; 8];
     let mut cx = Context {
         query: Message::parse(&wire).unwrap(),
@@ -758,7 +786,10 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
         max_response_size: 512,
     };
     assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
-    assert_eq!(Message::parse(&response).unwrap().answer_count(), 0);
+    assert_eq!(
+        response, wildcard_response,
+        "NS addresses must not depend on the Query's Listener address"
+    );
 
     let mut queries = Vec::new();
     for (name, kind) in [
@@ -1025,7 +1056,9 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
 }
 
 async fn missing_name_is_servfail_before_cache_sync() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", support::free_port()))
+        .await
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let text = format!(
         ".:53 {{\n kubernetes cluster.local {{\n  endpoint http://{address}\n  startup_timeout 0s\n }}\n}}"

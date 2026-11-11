@@ -1,5 +1,6 @@
 //! Kubernetes authoritative DNS backend.
 
+mod local;
 mod name;
 mod reverse;
 pub mod setup;
@@ -35,6 +36,7 @@ pub struct Kubernetes {
     config: Arc<setup::Config>,
     zones: Vec<Name>,
     fallthrough: Vec<Name>,
+    local_ips: Vec<IpAddr>,
     state: Arc<State>,
 }
 
@@ -48,6 +50,13 @@ impl std::fmt::Debug for Kubernetes {
 
 impl Kubernetes {
     pub fn new(config: setup::Config) -> Result<Self, String> {
+        Self::with_listen_addresses(config, &[])
+    }
+
+    pub(crate) fn with_listen_addresses(
+        config: setup::Config,
+        listen_addresses: &[String],
+    ) -> Result<Self, String> {
         let zones = config
             .zones
             .iter()
@@ -63,6 +72,7 @@ impl Kubernetes {
             config: Arc::new(config),
             zones,
             fallthrough,
+            local_ips: local::snapshot(listen_addresses),
             state: Arc::default(),
         })
     }
@@ -446,34 +456,6 @@ fn visit_ns(
     }
 }
 
-fn local_addresses(local: IpAddr) -> Vec<IpAddr> {
-    if local.is_loopback() {
-        return Vec::new();
-    }
-    if !local.is_unspecified() {
-        return vec![local];
-    }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        nix::ifaddrs::getifaddrs()
-            .into_iter()
-            .flatten()
-            .filter_map(|item| {
-                let address = item.address?;
-                address
-                    .as_sockaddr_in()
-                    .map(|a| IpAddr::V4(a.ip()))
-                    .or_else(|| address.as_sockaddr_in6().map(|a| IpAddr::V6(a.ip())))
-            })
-            .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
-            .collect()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Vec::new()
-    }
-}
-
 impl pharos_server::Plugin for Kubernetes {
     fn readiness(&self) -> Option<&dyn pharos_server::Readiness> {
         Some(self)
@@ -631,13 +613,7 @@ impl pharos_server::Plugin for Kubernetes {
         } else {
             None
         };
-        let ns_ips = if count == 0 && q.qtype == Type::NS
-            || count == 2 && labels[0] == b"ns" && labels[1] == b"dns"
-        {
-            local_addresses(cx.local.ip())
-        } else {
-            Vec::new()
-        };
+        let ns_ips = &self.local_ips;
         let max = cx.max_response_size.max(512);
         if cx.response.capacity() < max {
             if cx.protocol == Protocol::Tcp {
@@ -711,12 +687,12 @@ impl pharos_server::Plugin for Kubernetes {
                 let mut err = None;
                 let mut position = 0;
                 store.with_read(|i| {
-                    visit_ns(i, &ns_ips, zone_ref, &self.config, |ns, _| {
+                    visit_ns(i, ns_ips, zone_ref, &self.config, |ns, _| {
                         let current = position;
                         position += 1;
                         let mut seen = false;
                         let mut before = 0;
-                        visit_ns(i, &ns_ips, zone_ref, &self.config, |old, _| {
+                        visit_ns(i, ns_ips, zone_ref, &self.config, |old, _| {
                             if before < current && old.labels().eq(ns.labels()) {
                                 seen = true;
                             }
@@ -742,7 +718,7 @@ impl pharos_server::Plugin for Kubernetes {
                     return Err(e);
                 }
                 store.with_read(|i| {
-                    visit_ns(i, &ns_ips, zone_ref, &self.config, |ns, ip| {
+                    visit_ns(i, ns_ips, zone_ref, &self.config, |ns, ip| {
                         if err.is_some() {
                             return;
                         }
@@ -776,7 +752,7 @@ impl pharos_server::Plugin for Kubernetes {
             if count == 2 && labels[0] == b"ns" && labels[1] == b"dns" {
                 let mut err = None;
                 store.with_read(|i| {
-                    visit_ns(i, &ns_ips, zone_ref, &self.config, |_, ip| {
+                    visit_ns(i, ns_ips, zone_ref, &self.config, |_, ip| {
                         let result = match ip {
                             IpAddr::V4(ip) if q.qtype == Type::A => b.record(
                                 Section::Answer,

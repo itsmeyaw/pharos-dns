@@ -71,8 +71,7 @@ types other than IPv4 or IPv6; CoreDNS retains them.
 The `kubernetes` Plugin rejects `multicluster` with a not-implemented error;
 Multi-Cluster Services are tracked in #41.
 API client creation and kubeconfig validation occur during Startup rather than
-Corefile setup. NS fallback addresses are read from interfaces per Query rather
-than once at Startup, so interface changes can affect answers without Reload.
+Corefile setup.
 Kubeconfig OIDC credentials use the configured ID token without refreshing it;
 CoreDNS includes the client-go OIDC authentication provider.
 Kubeconfig proxy URLs are not supported; CoreDNS can connect through them.
