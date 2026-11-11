@@ -255,3 +255,9 @@ fn dangling_name_escapes_are_rejected() {
         }
     }
 }
+
+#[test]
+fn quoted_strings_are_not_domain_names() {
+    // RFC 1035 §3.3.7: MINFO RDATA contains two domain names, not character-strings.
+    assert!(parse(b"k IN MINFO \"\" \n").is_err());
+}
