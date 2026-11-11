@@ -1,6 +1,6 @@
 //! Cache configuration and DNS Response storage.
 
-mod setup;
+pub(crate) mod setup;
 mod store;
 
 use std::{

@@ -633,16 +633,7 @@ fn setup_loop(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
     Ok(())
 }
 
-#[cfg(feature = "plugin-cache")]
-fn setup_cache(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let zones = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.clone())
-        .collect::<Vec<_>>();
-    block.config.cache = Some(cache::Cache::parse(cursor, &zones)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-log")]
 fn setup_log(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

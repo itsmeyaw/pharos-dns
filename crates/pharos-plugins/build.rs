@@ -88,7 +88,7 @@ fn main() {
             "shed" => "setup_shed",
             "any" => "any::setup::setup",
             "chaos" => "setup_chaos",
-            "cache" => "setup_cache",
+            "cache" => "cache::setup::setup",
             "bind" => "bind::setup::setup",
             "bufsize" => "bufsize::setup::setup",
             "header" => "setup_header",
