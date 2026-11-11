@@ -7,16 +7,16 @@ use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type};
 use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 
-struct AliasChain(pharos_plugins::rewrite::Rewrite);
+struct AliasChain(pharos_plugins::rewrite::Rewrite, &'static str);
 impl pharos_server::Chain for AliasChain {
     async fn serve(&self, cx: &mut Context<'_>) -> Outcome {
-        self.0.serve(cx, AliasBackend).await
+        self.0.serve(cx, AliasBackend(self.1)).await
     }
     fn is_empty(&self) -> bool {
         false
     }
 }
-struct AliasBackend;
+struct AliasBackend(&'static str);
 impl Next for AliasBackend {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
@@ -30,7 +30,7 @@ impl Next for AliasBackend {
             })
             .unwrap();
         } else {
-            assert_eq!(q.name.to_string(), "new.example.");
+            assert_eq!(q.name.to_string(), self.0);
             b.record(
                 Section::Answer,
                 q.name,
@@ -49,54 +49,65 @@ impl Next for AliasBackend {
 // Derived from CoreDNS v1.15.0 plugin/rewrite/cname_target_test.go.
 #[tokio::test]
 async fn coredns_cname_rewrite_follows_target_through_self_lookup() {
-    let config = ".:53 {\n rewrite cname old.example. new.example.\n}";
-    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
-        .unwrap()
-        .remove(0)
-        .config;
-    let key = pharos_server::ListenerKey {
-        transport: Transport::Dns,
-        address: "127.0.0.1:53".parse().unwrap(),
-    };
-    let mut router = pharos_server::Router::default();
-    router.add(
-        key,
-        ".".parse().unwrap(),
-        Some(AliasChain(chain.rewrite.take().unwrap())),
-        vec![],
-    );
-    let server = pharos_server::Server::new(router, key);
-    let name: Name = "alias.example.".parse().unwrap();
-    let mut wire = Vec::with_capacity(512);
-    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
-    b.question(
-        NameRef::parse(name.as_wire(), 0).unwrap(),
-        Type::A,
-        Class::IN,
-    )
-    .unwrap();
-    let _ = b.finish();
-    let mut response = Vec::with_capacity(65535);
-    assert_eq!(
-        pharos_server::Handler::handle(
-            &server,
-            &wire,
-            "127.0.0.1:1234".parse().unwrap(),
-            Protocol::Udp,
-            &mut response
+    for (rule, expected) in [
+        ("rewrite cname old.example. new.example.", "new.example."),
+        ("rewrite cname suffix .example. .other.", "old.other."),
+        ("rewrite cname prefix old new", "new.example."),
+        ("rewrite cname substring ld.ex k.ex", "ok.example."),
+        (
+            r"rewrite cname regex (.*)\.example\. {1}.other.",
+            "old.other.",
+        ),
+    ] {
+        let config = format!(".:53 {{\n {rule}\n}}");
+        let mut chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let key = pharos_server::ListenerKey {
+            transport: Transport::Dns,
+            address: "127.0.0.1:53".parse().unwrap(),
+        };
+        let mut router = pharos_server::Router::default();
+        router.add(
+            key,
+            ".".parse().unwrap(),
+            Some(AliasChain(chain.rewrite.take().unwrap(), expected)),
+            vec![],
+        );
+        let server = pharos_server::Server::new(router, key);
+        let name: Name = "alias.example.".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        b.question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
         )
-        .await,
-        pharos_server::Action::Respond
-    );
-    let message = Message::parse(&response).unwrap();
-    let mut answers = message.answers();
-    let pharos_proto::Rdata::Cname(target) = answers.next().unwrap().data().unwrap() else {
-        panic!("expected CNAME")
-    };
-    assert_eq!(target.to_string(), "new.example.");
-    let answer = answers.next().unwrap();
-    assert_eq!(answer.name.to_string(), "new.example.");
-    assert_eq!(answer.rdata, &[192, 0, 2, 1]);
+        .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            pharos_server::Handler::handle(
+                &server,
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+            pharos_server::Action::Respond
+        );
+        let message = Message::parse(&response).unwrap();
+        let mut answers = message.answers();
+        let pharos_proto::Rdata::Cname(target) = answers.next().unwrap().data().unwrap() else {
+            panic!("expected CNAME")
+        };
+        assert_eq!(target.to_string(), expected);
+        let answer = answers.next().unwrap();
+        assert_eq!(answer.name.to_string(), expected);
+        assert_eq!(answer.rdata, &[192, 0, 2, 1]);
+    }
 }
 
 struct Answer;

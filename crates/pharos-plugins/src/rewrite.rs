@@ -22,7 +22,7 @@ enum Action {
     Type(Type, Type),
     Class(Class, Class),
     Name(String, bool, Option<Vec<NamePart>>, Vec<AnswerRule>),
-    Cname(String, Option<Name>),
+    Cname(Matcher, String),
 }
 
 #[derive(Debug)]
@@ -97,9 +97,9 @@ impl Rewrite {
                 return Err(cursor.arg_err());
             };
             if kind.eq_ignore_ascii_case("cname") {
-                let (from, to) = match args {
-                    [from, to] => (from, to),
-                    [mode, from, to] if mode.eq_ignore_ascii_case("exact") => (from, to),
+                let (mode, from, to) = match args {
+                    [from, to] => ("exact", from, to),
+                    [mode, from, to] => (mode.as_str(), from, to),
                     _ => return Err(cursor.arg_err()),
                 };
                 let normal = |value: &str| {
@@ -109,9 +109,30 @@ impl Rewrite {
                     }
                     value
                 };
+                let lower = from.to_ascii_lowercase();
+                let matcher = match mode.to_ascii_lowercase().as_str() {
+                    "exact" => Matcher::Exact(normal(from)),
+                    "prefix" => Matcher::Prefix(lower),
+                    "suffix" => Matcher::Suffix(lower),
+                    "substring" => Matcher::Substring(lower),
+                    "regex" => {
+                        if lower.len() > 10_000 {
+                            return Err(cursor.error("regex pattern too long"));
+                        }
+                        Matcher::Regex(
+                            regex::Regex::new(&lower).map_err(|_| cursor.error("invalid regex"))?,
+                        )
+                    }
+                    _ => return Err(cursor.error("invalid CNAME match type")),
+                };
+                let replacement = if mode.eq_ignore_ascii_case("exact") {
+                    normal(to)
+                } else {
+                    to.to_ascii_lowercase()
+                };
                 rules.push(Rule {
                     matcher: Matcher::Any,
-                    action: Action::Cname(normal(from), normal(to).parse().ok()),
+                    action: Action::Cname(matcher, replacement),
                     stop,
                 });
                 continue;
@@ -432,6 +453,62 @@ impl std::fmt::Write for NameText {
     }
 }
 
+fn cname_replacement(
+    matcher: &Matcher,
+    replacement: &str,
+    value: NameRef<'_>,
+) -> Option<(NameText, Name)> {
+    let mut source = NameText {
+        bytes: [0; 1024],
+        len: 0,
+    };
+    write!(source, "{value}").ok()?;
+    let input = std::str::from_utf8(&source.bytes[..source.len]).ok()?;
+    if !matcher.matches(input) {
+        return None;
+    }
+    let mut text = NameText {
+        bytes: [0; 1024],
+        len: 0,
+    };
+    match matcher {
+        Matcher::Exact(_) => text.write_str(replacement).ok()?,
+        Matcher::Prefix(from) => {
+            text.write_str(replacement).ok()?;
+            text.write_str(input.strip_prefix(from)?).ok()?;
+        }
+        Matcher::Suffix(from) => {
+            text.write_str(input.strip_suffix(from)?).ok()?;
+            text.write_str(replacement).ok()?;
+        }
+        Matcher::Substring(from) => {
+            for (index, part) in input.split(from).enumerate() {
+                if index > 0 {
+                    text.write_str(replacement).ok()?;
+                }
+                text.write_str(part).ok()?;
+            }
+        }
+        Matcher::Regex(pattern) => {
+            // shortcut: regex captures allocate; non-regex rules remain allocation-free.
+            let captures = pattern.captures(input)?;
+            let mut result = replacement.to_owned();
+            for (index, capture) in captures.iter().enumerate() {
+                result = result.replace(
+                    &format!("{{{index}}}"),
+                    capture.map_or("", |value| value.as_str()),
+                );
+            }
+            text.write_str(&result).ok()?;
+        }
+        Matcher::Any => return None,
+    }
+    let text = std::str::from_utf8(&text.bytes[..text.len]).ok()?;
+    let mut wire = [0; 255];
+    let wire = Name::parse_absolute_into(text, &mut wire).ok()?;
+    Some((source, NameRef::parse(wire, 0).ok()?.to_name()))
+}
+
 fn remap<'a>(
     source: NameRef<'a>,
     from: NameRef<'_>,
@@ -711,8 +788,8 @@ impl Plugin for Rewrite {
                     true
                 }
                 Action::Name(..) => false,
-                Action::Cname(ref from, ref to) => {
-                    cname = to.as_ref().map(|to| (from.as_str(), to));
+                Action::Cname(ref matcher, ref to) => {
+                    cname = Some((matcher, to.as_str()));
                     true
                 }
                 _ => rule.matcher.matches(name),
@@ -725,27 +802,23 @@ impl Plugin for Rewrite {
         let rewritten_query = cx.query;
         let outcome = next.run(cx).await;
         if outcome == Outcome::Response
-            && let Some((from, target)) = cname
+            && let Some((matcher, replacement)) = cname
         {
             let Ok(response) = Message::parse(cx.response) else {
                 return outcome;
             };
-            let matched = response.answers().any(|rr| {
+            let matched = response.answers().find_map(|rr| {
                 let Ok(Rdata::Cname(value)) = rr.data() else {
-                    return false;
+                    return None;
                 };
-                let mut text = NameText {
-                    bytes: [0; 1024],
-                    len: 0,
-                };
-                write!(text, "{value}").is_ok() && &text.bytes[..text.len] == from.as_bytes()
+                cname_replacement(matcher, replacement, value)
             });
-            if matched {
+            if let Some((from, target)) = matched {
                 let Some(question) = rewritten_query.questions().next() else {
                     return outcome;
                 };
                 // shortcut: CNAME Self Lookup allocates; remove when issue #86 makes it allocation-free.
-                if let Ok(wire) = cx.self_lookup(target, question.qtype).await
+                if let Ok(wire) = cx.self_lookup(&target, question.qtype).await
                     && let Ok(lookup) = Message::parse(&wire)
                 {
                     let mut scratch = [0u8; 65535];
@@ -780,7 +853,7 @@ impl Plugin for Rewrite {
                                 len: 0,
                             };
                             let replace = write!(text, "{value}").is_ok()
-                                && &text.bytes[..text.len] == from.as_bytes();
+                                && text.bytes[..text.len] == from.bytes[..from.len];
                             let value = if replace {
                                 NameRef::parse(target.as_wire(), 0).expect("configured name")
                             } else {
