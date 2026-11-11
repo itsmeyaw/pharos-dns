@@ -224,3 +224,18 @@ fn escape_survives_a_stray_carriage_return() {
     assert!(parse(b"1 IN TXT \\\r \n").is_err());
     assert!(parse(b"1 IN TXT \\\r\"x\"\n").is_err());
 }
+
+#[test]
+fn dangling_name_escapes_are_rejected() {
+    // RFC 1035 §5.1: a backslash escape requires a following character.
+    for body in [
+        b"(x\\\\\\\n IN A 192.0.2.1)".as_slice(),
+        br"$ORIGIN \\\",
+        b"a IN NS x\\\\\\",
+    ] {
+        for end in [b"".as_slice(), b"\n"] {
+            let zone = [body, end].concat();
+            assert!(parse(&zone).is_err(), "{zone:?}");
+        }
+    }
+}
