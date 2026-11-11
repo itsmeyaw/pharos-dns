@@ -630,6 +630,64 @@ impl Next for Unanswered {
     }
 }
 
+struct EmptyServfail;
+impl Next for EmptyServfail {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let question = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8182).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rcode_test.go TestRCodeRewriteEmptyResponse.
+#[tokio::test]
+async fn coredns_rcode_rewrites_empty_response() {
+    let config = ".:53 {\n rewrite rcode example. SERVFAIL NOERROR\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, EmptyServfail)
+            .await,
+        Outcome::Response
+    );
+    assert_eq!(Message::parse(cx.response).unwrap().rcode(), Rcode::NOERROR);
+}
+
 struct RcodeChain(pharos_plugins::rewrite::Rewrite);
 impl pharos_server::Chain for RcodeChain {
     async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
