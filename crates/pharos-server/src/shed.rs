@@ -66,17 +66,18 @@ impl ShedStack {
 
     pub(crate) async fn checkout_wait(&self) -> Vec<u8> {
         loop {
+            let notified = self.free_notify.notified();
             if let Some(data) = self.checkout() {
                 return data;
             }
-            self.free_notify.notified().await;
+            notified.await;
         }
     }
 
     pub(crate) fn release(&self, mut data: Vec<u8>) {
         data.clear();
         self.inner.lock().unwrap().free.push(data);
-        self.free_notify.notify_one();
+        self.free_notify.notify_waiters();
     }
 
     pub(crate) fn full(&self) -> bool {
@@ -99,7 +100,7 @@ impl ShedStack {
             self.metrics.response_drop();
             evicted.clear();
             inner.free.push(evicted);
-            self.free_notify.notify_one();
+            self.free_notify.notify_waiters();
         } else {
             inner.size += 1;
         }
@@ -246,6 +247,33 @@ mod tests {
             output.contains("reason=\"response\",server=\"dns://:53\"} 2"),
             "{output}"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_buffer_waiters_all_wake_after_release() {
+        let registry = Registry::new("v", "r", "rust");
+        let stack = Arc::new(ShedStack::new(1, registry.shed("dns://:53")));
+        let held = (0..3)
+            .map(|_| stack.checkout().unwrap())
+            .collect::<Vec<_>>();
+        let one = tokio::spawn({
+            let stack = Arc::clone(&stack);
+            async move { stack.checkout_wait().await }
+        });
+        let two = tokio::spawn({
+            let stack = Arc::clone(&stack);
+            async move { stack.checkout_wait().await }
+        });
+        tokio::task::yield_now().await;
+        for data in held {
+            stack.release(data);
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            one.await.unwrap();
+            two.await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
