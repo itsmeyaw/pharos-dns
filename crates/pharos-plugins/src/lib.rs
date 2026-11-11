@@ -163,7 +163,8 @@ pub fn servers_with_registry(
             feature = "plugin-local",
             feature = "plugin-acl",
             feature = "plugin-dns64",
-            feature = "plugin-siit"
+            feature = "plugin-siit",
+            feature = "plugin-autopath"
         ))]
         let mut block = block;
         #[cfg(feature = "plugin-forward")]
@@ -283,6 +284,11 @@ pub fn servers_with_registry(
         if let Some(siit) = &mut block.config.siit {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             siit.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-autopath")]
+        if let Some(autopath) = &mut block.config.autopath {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            autopath.set_metrics(&metrics, &listeners);
         }
         #[cfg(feature = "plugin-multisocket")]
         let workers = block.config.multisocket.flatten();

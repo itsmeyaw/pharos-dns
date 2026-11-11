@@ -62,6 +62,7 @@ struct RegistryInner {
     acl: Mutex<BTreeMap<Key, Arc<[AtomicU64; 4]>>>,
     dns64: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
     siit: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
+    autopath: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
     hosts: Mutex<BTreeMap<String, Arc<HostsGauge>>>,
     hosts_timestamp: Arc<AtomicU64>,
     forward: Arc<ForwardCounters>,
@@ -338,6 +339,7 @@ impl Registry {
             acl: Mutex::new(BTreeMap::new()),
             dns64: Mutex::new(BTreeMap::new()),
             siit: Mutex::new(BTreeMap::new()),
+            autopath: Mutex::new(BTreeMap::new()),
             hosts: Mutex::new(BTreeMap::new()),
             hosts_timestamp: Arc::new(AtomicU64::new(0)),
             forward: Arc::new(ForwardCounters::default()),
@@ -414,6 +416,18 @@ impl Registry {
         Arc::clone(
             self.0
                 .siit
+                .lock()
+                .unwrap()
+                .entry(server.into())
+                .or_default(),
+        )
+    }
+
+    /// Resolve the autopath counter for a Listener during setup.
+    pub fn autopath(&self, server: &str) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.0
+                .autopath
                 .lock()
                 .unwrap()
                 .entry(server.into())
@@ -692,6 +706,25 @@ impl Registry {
             }
         }
         drop(siit);
+        let autopath = self.0.autopath.lock().unwrap();
+        if autopath
+            .values()
+            .any(|counter| counter.load(Ordering::Relaxed) != 0)
+        {
+            header(
+                out,
+                "autopath_success_total",
+                "Counter of requests that did autopath.",
+                "counter",
+            );
+            for (server, counter) in autopath.iter() {
+                let count = counter.load(Ordering::Relaxed);
+                if count != 0 {
+                    sample(out, "autopath_success_total", &[("server", server)], count);
+                }
+            }
+        }
+        drop(autopath);
         let hosts = self.0.hosts.lock().unwrap();
         if !hosts.is_empty() {
             if hosts

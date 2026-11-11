@@ -118,3 +118,48 @@ async fn coredns_autopath_search_and_passthrough() {
         }
     }
 }
+
+#[cfg(feature = "plugin-whoami")]
+#[tokio::test]
+async fn autopath_counts_non_nxdomain_search_responses() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/autopath-search.conf"
+    );
+    let config = format!(".:53 {{\n autopath {path}\n whoami\n}}");
+    let (mut listeners, _) = pharos_plugins::servers(
+        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap(),
+    )
+    .unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    for query in ["inside.example.org.", "outside.example.com."] {
+        let name: Name = query.parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        b.question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &wire,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+    }
+    let mut output = String::new();
+    server.metrics().encode(&mut output);
+    assert!(
+        output.contains("pharos_autopath_success_total{server=\"dns://:53\"} 1"),
+        "{output}"
+    );
+}

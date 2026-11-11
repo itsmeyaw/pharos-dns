@@ -3,6 +3,13 @@
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type};
 use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin, Protocol};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 #[derive(Debug)]
 pub struct AutoPath {
@@ -10,6 +17,7 @@ pub struct AutoPath {
     pub(crate) search: Vec<Option<Name>>,
     #[allow(dead_code)]
     pub(crate) provider: Option<String>,
+    metrics: Vec<(SocketAddr, Arc<AtomicU64>)>,
 }
 
 impl AutoPath {
@@ -51,7 +59,30 @@ impl AutoPath {
             domains: domains.iter().filter_map(|d| d.parse().ok()).collect(),
             search: search.iter().map(|s| s.parse().ok()).collect(),
             provider,
+            metrics: Vec::new(),
         })
+    }
+
+    pub(crate) fn set_metrics(
+        &mut self,
+        registry: &pharos_server::metrics::Registry,
+        listeners: &[pharos_server::ListenerKey],
+    ) {
+        for listener in listeners {
+            let address = listener.address;
+            let server = if address.ip().is_unspecified() {
+                format!("dns://:{}", address.port())
+            } else {
+                format!("dns://{address}")
+            };
+            self.metrics.push((address, registry.autopath(&server)));
+        }
+    }
+
+    fn count(&self, local: SocketAddr) {
+        if let Some((_, counter)) = self.metrics.iter().find(|(address, _)| *address == local) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -78,6 +109,7 @@ impl Plugin for AutoPath {
             return Outcome::Error(ServerError::InvalidQuery);
         };
         if first.rcode() != Rcode::NXDOMAIN {
+            self.count(cx.local);
             return outcome;
         }
         let original = cx.response.clone();
@@ -112,6 +144,7 @@ impl Plugin for AutoPath {
             if response.rcode() == Rcode::NXDOMAIN {
                 continue;
             }
+            self.count(cx.local);
             return match rebuild(cx, &response) {
                 Ok(()) => Outcome::Response,
                 Err(error) => Outcome::Error(error),
