@@ -9,7 +9,9 @@ use std::{
 };
 
 use pharos_corefile::{Cursor, Error};
-use pharos_proto::{Class, Message, MessageBuilder, Opcode, Rcode, Section, Type};
+use pharos_proto::{
+    Class, Message, MessageBuilder, Opcode, ResponseType, Section, Type, typify_response,
+};
 use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin, Protocol};
 
 #[derive(Debug)]
@@ -114,7 +116,12 @@ impl Plugin for Dns64 {
             Ok(message) => message,
             Err(_) => return Outcome::Error(ServerError::InvalidQuery),
         };
-        if (original.rcode() == Rcode::NXDOMAIN && original.answer_count() == 0)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+            });
+        if typify_response(Some(&original), now) == ResponseType::NxDomain
             || (!self.translate_all && original.answers().any(|rr| rr.rtype == Type::AAAA))
         {
             return outcome;

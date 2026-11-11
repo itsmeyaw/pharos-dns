@@ -167,6 +167,73 @@ struct FakeNext {
     has_aaaa: bool,
 }
 
+struct ExpiredNx;
+impl Next for ExpiredNx {
+    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8103).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        let sig = b"\0\x02\x08\0\0\0\0\x3c\0\0\0\x96\0\0\0\x32\0\x01\0";
+        builder
+            .record(Section::Authority, q.name, Type::RRSIG, Class::IN, 60, sig)
+            .unwrap();
+        builder
+            .record(
+                Section::Additional,
+                NameRef::parse(&[0], 0).unwrap(),
+                Type::OPT,
+                Class(1232),
+                0x8000,
+                &[],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn dns64_classifies_expired_signed_nxdomain_like_coredns() {
+    let blocks = parse("Corefile", ". {\n dns64\n}").unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let domain: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(domain.as_wire(), 0).unwrap(),
+            Type::AAAA,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "[::1]:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .dns64
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, ExpiredNx)
+            .await,
+        Outcome::Error(Error::SelfLookupUnavailable)
+    );
+}
+
 impl Next for FakeNext {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
