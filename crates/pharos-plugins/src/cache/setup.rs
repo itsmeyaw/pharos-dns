@@ -337,6 +337,21 @@ fn duration(value: &str) -> Option<i64> {
     }
 }
 
+pub(crate) fn setup(
+    cursor: &mut pharos_corefile::Cursor<'_>,
+    block: &mut pharos_corefile::BlockContext<crate::Chain>,
+) -> Result<(), pharos_corefile::Error> {
+    use crate::cache;
+
+    let zones = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.clone())
+        .collect::<Vec<_>>();
+    block.config.cache = Some(cache::Cache::parse(cursor, &zones)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

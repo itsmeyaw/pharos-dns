@@ -58,6 +58,8 @@ pub mod loadbalance;
 pub mod local;
 #[cfg(feature = "plugin-minimal")]
 pub mod minimal;
+#[cfg(feature = "plugin-multisocket")]
+pub mod multisocket;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 pub mod proxy;
@@ -75,7 +77,7 @@ pub mod forward;
 #[cfg(feature = "plugin-log")]
 pub mod log;
 #[cfg(feature = "plugin-log")]
-pub mod log_format;
+pub use log::format as log_format;
 #[cfg(feature = "plugin-loop")]
 pub mod r#loop;
 #[cfg(feature = "plugin-metadata")]
@@ -96,6 +98,45 @@ pub mod timeouts;
 pub mod whoami;
 
 include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
+
+/// Plugin-specific CoreDNS compatibility notes in their documented order.
+pub const COMPATIBILITY: &[(&str, &str)] = &[
+    ("acl", include_str!("acl/README.md")),
+    ("any", include_str!("any/README.md")),
+    ("autopath", include_str!("autopath/README.md")),
+    ("bind", include_str!("bind/README.md")),
+    ("bufsize", include_str!("bufsize/README.md")),
+    ("cache", include_str!("cache/README.md")),
+    ("cancel", include_str!("cancel/README.md")),
+    ("chaos", include_str!("chaos/README.md")),
+    ("debug", include_str!("debug/README.md")),
+    ("dns64", include_str!("dns64/README.md")),
+    ("dnssec", include_str!("dnssec/README.md")),
+    ("errors", include_str!("errors/README.md")),
+    ("forward", include_str!("forward/README.md")),
+    ("header", include_str!("header/README.md")),
+    ("health", include_str!("health/README.md")),
+    ("hosts", include_str!("hosts/README.md")),
+    ("kubernetes", include_str!("kubernetes/README.md")),
+    ("loadbalance", include_str!("loadbalance/README.md")),
+    ("local", include_str!("local/README.md")),
+    ("log", include_str!("log/README.md")),
+    ("metadata", include_str!("metadata/README.md")),
+    ("loop", include_str!("loop/README.md")),
+    ("minimal", include_str!("minimal/README.md")),
+    ("multisocket", include_str!("multisocket/README.md")),
+    ("nsid", include_str!("nsid/README.md")),
+    ("prometheus", include_str!("prometheus/README.md")),
+    ("ready", include_str!("ready/README.md")),
+    ("reload", include_str!("reload/README.md")),
+    ("rewrite", include_str!("rewrite/README.md")),
+    ("siit", include_str!("siit/README.md")),
+    ("sign", include_str!("sign/README.md")),
+    ("root", include_str!("root/README.md")),
+    ("shed", include_str!("shed/README.md")),
+    ("timeouts", include_str!("timeouts/README.md")),
+    ("whoami", include_str!("whoami/README.md")),
+];
 
 #[cfg(any(
     feature = "plugin-health",
@@ -574,189 +615,6 @@ impl pharos_server::Plugin for Unimplemented {
     }
 }
 
-#[cfg(feature = "plugin-any")]
-fn setup_any(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if cursor.next_arg() {
-        return Err(cursor.arg_err());
-    }
-    block.config.any = Some(any::Any);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-chaos")]
-fn setup_chaos(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.chaos = Some(chaos::Chaos::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-local")]
-fn setup_local(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.local = Some(local::Local::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-whoami")]
-fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if cursor.next_arg() {
-        return Err(cursor.arg_err());
-    }
-    block.config.whoami = Some(whoami::Whoami);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-minimal")]
-fn setup_minimal(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if cursor.next_arg() {
-        return Err(cursor.arg_err());
-    }
-    block.config.minimal = Some(minimal::Minimal);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-nsid")]
-fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.nsid = Some(nsid::Nsid::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-bufsize")]
-fn setup_bufsize(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.bufsize = Some(bufsize::Bufsize::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-header")]
-fn setup_header(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.header = Some(header::Header::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-loop")]
-fn setup_loop(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if cursor.next_arg() {
-        return Err(cursor.arg_err());
-    }
-    let domain = block.keys().first().map_or(".", |key| key.domain.as_str());
-    block.config.r#loop = Some(r#loop::Loop::new(domain));
-    Ok(())
-}
-
-#[cfg(feature = "plugin-cache")]
-fn setup_cache(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let zones = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.clone())
-        .collect::<Vec<_>>();
-    block.config.cache = Some(cache::Cache::parse(cursor, &zones)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-log")]
-fn setup_log(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.log = Some(log::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-metadata")]
-fn setup_metadata(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let domains = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.as_str())
-        .collect::<Vec<_>>();
-    block.config.metadata = Some(metadata::parse(cursor, &domains)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-prometheus")]
-fn setup_prometheus(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.prometheus = Some(prometheus::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-ready")]
-fn setup_ready(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.ready = Some(ready::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-reload")]
-fn setup_reload(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.reload = Some(reload::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-bind")]
-fn setup_bind(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.listen_addresses = bind::parse(cursor)?;
-    block.config.bind = Some(());
-    Ok(())
-}
-
-#[cfg(feature = "plugin-multisocket")]
-fn setup_multisocket(
-    cursor: &mut Cursor<'_>,
-    block: &mut BlockContext<Chain>,
-) -> Result<(), Error> {
-    cursor.next();
-    let args = cursor.remaining_args();
-    if args.len() > 1 || cursor.next() {
-        return Err(cursor.arg_err());
-    }
-    let count = args
-        .first()
-        .map(|arg| {
-            arg.parse::<usize>()
-                .ok()
-                .filter(|count| (1..=1024).contains(count))
-                .ok_or_else(|| cursor.error("invalid socket count"))
-        })
-        .transpose()?;
-    block.config.multisocket = Some(count);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-forward")]
-fn setup_forward(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.forward = Some(forward::Forward::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-health")]
-fn setup_health(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.health = Some(health::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-hosts")]
-fn setup_hosts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let domains = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.as_str())
-        .collect::<Vec<_>>();
-    let hosts = hosts::Hosts::parse_with_root(cursor, &domains, root_path(&block.config))?;
-    hosts.register_hooks(&mut block.config.lifecycle);
-    block.config.hosts = Some(hosts);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-loadbalance")]
-fn setup_loadbalance(
-    cursor: &mut Cursor<'_>,
-    block: &mut BlockContext<Chain>,
-) -> Result<(), Error> {
-    let plugin = loadbalance::LoadBalance::parse(cursor, root_path(&block.config))?;
-    plugin.register_hooks(&mut block.config.lifecycle);
-    block.config.loadbalance = Some(plugin);
-    Ok(())
-}
-
 #[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     #[cfg(feature = "plugin-root")]
@@ -797,113 +655,8 @@ fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std
     clean
 }
 
-#[cfg(feature = "plugin-root")]
-fn setup_root(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.root = Some(root::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-cancel")]
-fn setup_cancel(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.cancel = Some(cancel::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-timeouts")]
-fn setup_timeouts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.timeouts = Some(timeouts::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-debug")]
-fn setup_debug(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    while cursor.next() {
-        if cursor.next_arg() {
-            return Err(cursor.arg_err());
-        }
-    }
-    block.config.debug = Some(());
-    Ok(())
-}
-
-#[cfg(feature = "plugin-shed")]
-fn setup_shed(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if !cursor.remaining_args().is_empty() || cursor.next_block() {
-        return Err(cursor.arg_err());
-    }
-    if block.keys().iter().any(|key| key.transport != "dns") {
-        return Err(cursor.error("shed requires plain DNS"));
-    }
-    block.config.shed = Some(shed::Shed);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-errors")]
-fn setup_errors(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let plugin = errors::parse(cursor)?;
-    plugin.register_shutdown(&mut block.config.lifecycle);
-    block.config.errors = Some(plugin);
-    Ok(())
-}
-
 #[allow(dead_code)]
 fn setup_unimplemented(cursor: &mut Cursor<'_>, _: &mut BlockContext<Chain>) -> Result<(), Error> {
     cursor.next();
     Err(cursor.error(format!("{}: plugin is not implemented", cursor.val())))
-}
-
-#[cfg(feature = "plugin-acl")]
-fn setup_acl(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let domains = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.as_str())
-        .collect::<Vec<_>>();
-    block.config.acl = Some(acl::Acl::parse(cursor, &domains)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-dns64")]
-fn setup_dns64(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.dns64 = Some(dns64::Dns64::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-siit")]
-fn setup_siit(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.siit = Some(siit::Siit::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-rewrite")]
-fn setup_rewrite(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.rewrite = Some(rewrite::Rewrite::parse(cursor)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-autopath")]
-fn setup_autopath(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let domains = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.as_str())
-        .collect::<Vec<_>>();
-    block.config.autopath = Some(autopath::AutoPath::parse(cursor, &domains)?);
-    Ok(())
-}
-
-#[cfg(feature = "plugin-kubernetes")]
-fn setup_kubernetes(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let domains = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.as_str())
-        .collect::<Vec<_>>();
-    let config = kubernetes::setup::parse(cursor, &domains)?;
-    let plugin = kubernetes::Kubernetes::with_listen_addresses(config, &block.listen_addresses)
-        .map_err(|error| cursor.error(error))?;
-    plugin.register_hooks(&mut block.config.lifecycle);
-    block.config.kubernetes = Some(plugin);
-    Ok(())
 }

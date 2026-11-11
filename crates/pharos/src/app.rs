@@ -145,12 +145,21 @@ pub fn check(options: &Options) -> Result<(), String> {
         keys.join(", "),
         directives.iter().copied().collect::<Vec<_>>().join(", ")
     );
-    let sections = crate::compatibility::parse(include_str!("../compatibility.md"));
-    for (heading, bullets) in sections
+    // ADR-0007: Plugin-specific compatibility notes live with each Plugin.
+    let plugin_sections: Vec<_> = pharos_plugins::COMPATIBILITY
+        .iter()
+        .flat_map(|(name, document)| {
+            crate::compatibility::parse(document)
+                .into_iter()
+                .filter(move |(heading, _)| heading == name)
+        })
+        .collect();
+    let general_sections = crate::compatibility::parse(include_str!("../compatibility.md"));
+    for (heading, bullets) in plugin_sections
         .iter()
         .filter(|(heading, _)| directives.contains(heading))
         .chain(
-            sections
+            general_sections
                 .iter()
                 .filter(|(heading, _)| heading.chars().next().is_some_and(char::is_uppercase)),
         )

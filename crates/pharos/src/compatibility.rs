@@ -1,8 +1,8 @@
 #[test]
 fn compatibility_document_has_parseable_sections() {
-    let directives = include_str!("../../pharos-plugins/plugin.cfg")
-        .lines()
-        .filter_map(|line| line.split_once(':').map(|(name, _)| name))
+    let directives = pharos_plugins::COMPATIBILITY
+        .iter()
+        .map(|(name, _)| *name)
         .collect::<Vec<_>>();
     let general = [
         "General",
@@ -14,7 +14,8 @@ fn compatibility_document_has_parseable_sections() {
     ];
     let mut in_section = false;
     let mut in_bullet = false;
-    for line in include_str!("../compatibility.md").lines() {
+    let index = include_str!("../compatibility.md");
+    for line in index.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
             assert!(
                 directives.contains(&heading) || general.contains(&heading),
@@ -32,6 +33,31 @@ fn compatibility_document_has_parseable_sections() {
                 );
             }
         }
+    }
+    for (name, document) in pharos_plugins::COMPATIBILITY {
+        assert!(index.contains(&format!(
+            "## {name}\n\n- [{name} Plugin notes](../crates/pharos-plugins/src/{name}/README.md)"
+        )), "missing index entry for {name}");
+        let sections = parse(document);
+        assert_eq!(sections.first().map(|(heading, _)| heading), Some(name));
+        let mut in_bullet = false;
+        for line in document
+            .lines()
+            .skip_while(|line| *line != format!("## {name}"))
+        {
+            if line.starts_with("## ") && line != format!("## {name}") {
+                break;
+            }
+            if line.starts_with("- ") {
+                in_bullet = true;
+            } else if !line.trim().is_empty() && !line.starts_with("## ") {
+                assert!(
+                    in_bullet && line.starts_with("  "),
+                    "line outside bullet: {line}"
+                );
+            }
+        }
+        assert!(!sections[0].1.is_empty(), "no bullets for {name}");
     }
 }
 
