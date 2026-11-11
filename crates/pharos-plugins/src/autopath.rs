@@ -122,8 +122,14 @@ impl Plugin for AutoPath {
         let Some(question) = query.questions().next() else {
             return next.run(cx).await;
         };
+        #[cfg(feature = "plugin-kubernetes")]
         let mut dynamic = [&[][..]; 3];
+        #[cfg(not(feature = "plugin-kubernetes"))]
+        let dynamic = [&[][..]; 3];
+        #[cfg(feature = "plugin-kubernetes")]
         let mut dynamic_len = 0;
+        #[cfg(not(feature = "plugin-kubernetes"))]
+        let dynamic_len = 0;
         #[cfg(feature = "plugin-kubernetes")]
         let mut namespace_wire = [0u8; 255];
         #[cfg(feature = "plugin-kubernetes")]
