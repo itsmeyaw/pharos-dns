@@ -57,10 +57,11 @@ exercise the public Plugin/Next contract; `rewrite.rs`, `rewrite_setup.rs`,
 
 - CoreDNS injects `NoRevertPolicy` or `NoRestorePolicy` directly into a Go test
   object. These are not Corefile options. Pharos checks the rewritten Question at
-  `Next` and checks the Response using the production restoration policy instead
-  of exposing extra configuration solely for tests. In `valueTests` the seven
-  `noRevert` duplicate rows therefore share their input fixtures with the seven
-  production-policy rows rather than asserting the unsupported test-only policy.
+  `Next`, checks the raw backend Response before returning it, and checks the final
+  Response using the production restoration policy instead of exposing extra
+  configuration solely for tests. In `valueTests` the seven `noRevert` duplicate
+  rows share their input fixtures with the seven production-policy rows; their
+  unmodified fields are checked at the backend boundary.
 - Two `TestNewRule` rows pass an invalid UTF-8 byte directly to a private Go
   constructor. Rust's public parser takes `&str`; the setup test checks those exact
   byte strings cannot enter that seam. This is not a claim about imported Corefile
