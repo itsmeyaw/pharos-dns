@@ -1,0 +1,6 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+        kubeconfig {kubeconfig}
+    }
+}

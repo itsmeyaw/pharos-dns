@@ -1,0 +1,6 @@
+web.default.svc.cluster.local. A IN udp
+10.0.96.10.in-addr.arpa. PTR IN udp
+11.0.96.10.in-addr.arpa. PTR IN tcp
+5.0.2.10.in-addr.arpa. PTR IN udp
+99.0.96.10.in-addr.arpa. PTR IN tcp
+1.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa. PTR IN udp

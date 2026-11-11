@@ -2,18 +2,16 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "support/api.rs"]
+mod api;
+
 use std::{alloc::System, convert::Infallible, fmt::Write as _, io::Write as _, time::Duration};
 
+use api::{Body, full};
 use bytes::Bytes;
 use futures::StreamExt;
-use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
-use hyper::{
-    Request, Response,
-    body::{Frame, Incoming},
-    server::conn::http1,
-    service::service_fn,
-};
-use hyper_util::rt::TokioIo;
+use http_body_util::{BodyExt, StreamBody};
+use hyper::{Response, body::Frame};
 use pharos_kubernetes::{ClientConfig, Controller, WatchConfig};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Stats, StatsAlloc};
 use tokio::net::TcpListener;
@@ -22,7 +20,6 @@ use tokio::net::TcpListener;
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const SERVICES: usize = 10_000;
-type Body = BoxBody<Bytes, Infallible>;
 
 #[derive(Clone, Copy)]
 enum Resource {
@@ -101,10 +98,6 @@ fn initial_watch(resource: Resource) -> String {
     }
     writeln!(out, r#"{{"type":"BOOKMARK","object":{{"apiVersion":"{api}","kind":"{kind}","metadata":{{"resourceVersion":"1","annotations":{{"k8s.io/initial-events-end":"true"}}}}}}}}"#).unwrap();
     out
-}
-
-fn full(body: impl Into<Bytes>) -> Body {
-    Full::new(body.into()).boxed()
 }
 
 fn api_response(path: &str, query: Option<&str>) -> Response<Body> {
@@ -193,22 +186,7 @@ async fn serve(address: &str) -> Result<(), Box<dyn std::error::Error>> {
     kubeconfig.flush()?;
     println!("API_URL={url}\nKUBECONFIG={}", kubeconfig.path().display());
     std::io::stdout().flush()?;
-    loop {
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => { result?; break; }
-            result = listener.accept() => {
-                let (socket, _) = result?;
-                tokio::spawn(async move {
-                    let service = service_fn(|request: Request<Incoming>| async move {
-                        eprintln!("{} {}", request.method(), request.uri());
-                        Ok::<_, Infallible>(api_response(request.uri().path(), request.uri().query()))
-                    });
-                    let _ = http1::Builder::new().serve_connection(TokioIo::new(socket), service).await;
-                });
-            }
-        }
-    }
-    Ok(())
+    api::serve(listener, api_response).await
 }
 
 async fn client(url: &str) -> Result<(), Box<dyn std::error::Error>> {
