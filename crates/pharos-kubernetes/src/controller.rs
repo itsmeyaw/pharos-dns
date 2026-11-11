@@ -283,6 +283,7 @@ impl Controller {
                             }
                             initial.push(convert(object));
                         }
+                        // Kubernetes API concepts §Efficient detection of changes: synchronize from a list.
                         Ok(Event::InitDone) => {
                             replace(
                                 &store,

@@ -196,6 +196,7 @@ impl Endpoints {
             if input.address_type != "IPv4" && input.address_type != "IPv6" {
                 continue;
             }
+            // Kubernetes DNS spec 1.1.0 §2.4.1: headless answers use ready endpoint addresses.
             if endpoint.conditions.and_then(|condition| condition.ready) == Some(false) {
                 continue;
             }
@@ -251,6 +252,7 @@ impl From<EndpointSlice> for MultiClusterEndpoints {
                 .unwrap_or_default()
         };
         let import_name = label("multicluster.kubernetes.io/service-name").into();
+        // KEP-1645 MCS DNS spec §2.4.1: endpoint names include their source cluster ID.
         let cluster_id = label("multicluster.kubernetes.io/source-cluster");
         Self {
             endpoints: Endpoints::from(input),
