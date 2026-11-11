@@ -63,7 +63,12 @@ async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
     });
 
     let text = format!(
-        ".:0 {{\n kubernetes cluster.local clusterset.local {{\n  endpoint http://{address}\n  multicluster clusterset.local\n  startup_timeout 3s\n }}\n}}"
+        ".:0 {{\n {}\n kubernetes cluster.local clusterset.local {{\n  endpoint http://{address}\n  multicluster clusterset.local\n  startup_timeout 3s\n }}\n}}",
+        if cfg!(feature = "plugin-metadata") {
+            "metadata"
+        } else {
+            ""
+        }
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
     let (mut servers, lifecycle) =

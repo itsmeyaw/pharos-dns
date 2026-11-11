@@ -267,6 +267,7 @@ pub struct Pod {
     pub version: String,
     pub name: Arc<str>,
     pub namespace: Arc<str>,
+    pub labels: std::collections::BTreeMap<String, String>,
     pub ips: Vec<String>,
     pub deleting: bool,
 }
@@ -277,6 +278,7 @@ impl From<v1::Pod> for Pod {
             version: input.metadata.resource_version.unwrap_or_default(),
             name: input.metadata.name.unwrap_or_default().into(),
             namespace: input.metadata.namespace.unwrap_or_default().into(),
+            labels: input.metadata.labels.unwrap_or_default(),
             ips: input
                 .status
                 .and_then(|status| status.pod_ips)
@@ -285,6 +287,19 @@ impl From<v1::Pod> for Pod {
                 .map(|ip| ip.ip)
                 .collect(),
             deleting: input.metadata.deletion_timestamp.is_some(),
+        }
+    }
+}
+
+impl pharos_server::MetadataSource for Pod {
+    fn get(&self, label: &str) -> Option<&str> {
+        match label {
+            "kubernetes/client-namespace" => Some(&self.namespace),
+            "kubernetes/client-pod-name" => Some(&self.name),
+            _ => self
+                .labels
+                .get(label.strip_prefix("kubernetes/client-label/")?)
+                .map(String::as_str),
         }
     }
 }

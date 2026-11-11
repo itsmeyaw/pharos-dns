@@ -318,8 +318,10 @@ impl Plugin for Forward {
                     }
                     upstream = &stanza.proxies[random(count)];
                 }
-                cx.metadata
-                    .insert_inline("forward/upstream", &upstream.address);
+                if cx.metadata.enabled() {
+                    cx.metadata
+                        .insert_inline("forward/upstream", &upstream.address);
+                }
                 let Some(proxy) = &upstream.proxy else {
                     attempts += 1;
                     if fails >= count {

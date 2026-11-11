@@ -1,0 +1,8 @@
+.:{port} {
+    metadata
+    log . "{/kubernetes/service} {/kubernetes/namespace} {/log/class}"
+    ready 127.0.0.1:{metrics_port}
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+    }
+}

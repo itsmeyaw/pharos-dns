@@ -21,6 +21,7 @@
 - The bind Plugin and tests follow CoreDNS v1.15.0's `plugin/bind`.
 - Multisocket setup and tests follow CoreDNS v1.15.0's `plugin/multisocket` and `core/dnsserver/register.go`.
 - The log Plugin, formatter and tests follow CoreDNS v1.15.0's `plugin/log`, `plugin/pkg/replacer` and `plugin/pkg/response`.
+- The metadata Plugin and tests follow CoreDNS v1.15.0's `plugin/metadata` and `plugin/kubernetes/metadata_test.go`.
 - The prometheus Plugin and tests follow CoreDNS v1.15.0's `plugin/metrics`.
 - The ready Plugin and tests follow CoreDNS v1.15.0's `plugin/ready`.
 - The health Plugin and tests follow CoreDNS v1.15.0's `plugin/health`.
