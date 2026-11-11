@@ -24,6 +24,7 @@ fn main() {
         let ty = match *name {
             "cache" => "cache::Cache",
             "bind" => "()",
+            "multisocket" => "Option<usize>",
             "whoami" => "whoami::Whoami",
             "log" => "log::Log",
             "loop" => "r#loop::Loop",
@@ -45,6 +46,7 @@ fn main() {
         let setup = match *name {
             "cache" => "setup_cache",
             "bind" => "setup_bind",
+            "multisocket" => "setup_multisocket",
             "whoami" => "setup_whoami",
             "log" => "setup_log",
             "loop" => "setup_loop",
@@ -84,7 +86,10 @@ fn main() {
             "fn collect_readiness(self: &std::sync::Arc<Self>, state: &ready::State) {\nlet _ = state;\n",
         );
         for name in &enabled {
-            if matches!(*name, "bind" | "ready" | "health" | "reload") {
+            if matches!(
+                *name,
+                "bind" | "multisocket" | "ready" | "health" | "reload"
+            ) {
                 continue;
             }
             writeln!(code, "if self.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some() {{ let chain = std::sync::Arc::clone(self); state.append({name:?}, move || chain.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some_and(pharos_server::Readiness::ready)); }}").unwrap();
@@ -97,7 +102,10 @@ fn main() {
     }
     for (i, name) in enabled.iter().enumerate() {
         let next = i + 1;
-        if matches!(*name, "bind" | "ready" | "health" | "reload") {
+        if matches!(
+            *name,
+            "bind" | "multisocket" | "ready" | "health" | "reload"
+        ) {
             writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.serve_{next}(cx).await }}").unwrap();
             continue;
         }
@@ -107,7 +115,10 @@ fn main() {
     code.push_str("}\n");
     code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
-        if !matches!(*name, "bind" | "ready" | "health" | "reload") {
+        if !matches!(
+            *name,
+            "bind" | "multisocket" | "ready" | "health" | "reload"
+        ) {
             write!(code, " && self.r#{name}.is_none()").unwrap();
         }
     }
@@ -115,7 +126,10 @@ fn main() {
         " }\nfn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {\nlet _ = &visit;\n",
     );
     for name in &enabled {
-        if !matches!(*name, "bind" | "ready" | "health" | "reload") {
+        if !matches!(
+            *name,
+            "bind" | "multisocket" | "ready" | "health" | "reload"
+        ) {
             writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
         }
     }
@@ -133,7 +147,10 @@ fn main() {
     }
     code.push_str("}\n");
     for (i, name) in enabled.iter().enumerate() {
-        if matches!(*name, "bind" | "ready" | "health" | "reload") {
+        if matches!(
+            *name,
+            "bind" | "multisocket" | "ready" | "health" | "reload"
+        ) {
             continue;
         }
         let next = i + 1;

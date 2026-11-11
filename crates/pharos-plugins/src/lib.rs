@@ -481,6 +481,29 @@ fn setup_bind(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
     Ok(())
 }
 
+#[cfg(feature = "plugin-multisocket")]
+fn setup_multisocket(
+    cursor: &mut Cursor<'_>,
+    block: &mut BlockContext<Chain>,
+) -> Result<(), Error> {
+    cursor.next();
+    let args = cursor.remaining_args();
+    if args.len() > 1 || cursor.next() {
+        return Err(cursor.arg_err());
+    }
+    let count = args
+        .first()
+        .map(|arg| {
+            arg.parse::<usize>()
+                .ok()
+                .filter(|count| (1..=1024).contains(count))
+                .ok_or_else(|| cursor.error("invalid socket count"))
+        })
+        .transpose()?;
+    block.config.multisocket = Some(count);
+    Ok(())
+}
+
 #[cfg(feature = "plugin-forward")]
 fn setup_forward(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.forward = Some(forward::Forward::parse(cursor)?);
