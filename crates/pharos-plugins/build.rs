@@ -78,7 +78,7 @@ fn main() {
         let setup = match *name {
             "acl" => "acl::setup::setup",
             "dns64" => "dns64::setup::setup",
-            "siit" => "setup_siit",
+            "siit" => "siit::setup::setup",
             "rewrite" => "rewrite::setup::setup",
             "autopath" => "autopath::setup::setup",
             "root" => "root::setup::setup",

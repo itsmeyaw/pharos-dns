@@ -1,5 +1,7 @@
 //! SIIT address synthesis.
 
+pub(crate) mod setup;
+
 use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
