@@ -623,6 +623,233 @@ impl Next for Answer {
     }
 }
 
+struct TtlFixture {
+    ttl: u32,
+    count: usize,
+    kind: Type,
+}
+impl Next for TtlFixture {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        for index in 0..self.count {
+            if self.kind == Type::SRV {
+                builder
+                    .record_with(
+                        Section::Answer,
+                        q.name,
+                        Type::SRV,
+                        Class::IN,
+                        self.ttl,
+                        |w| {
+                            w.write_bytes(&[0, 0, 0, 100, 0, 100])?;
+                            w.write_name(q.name)
+                        },
+                    )
+                    .unwrap();
+            } else {
+                let data: &[u8] = if self.kind == Type::HINFO {
+                    b"\x08INTEL-64\x08RHEL 7.5"
+                } else if index == 0 {
+                    &[10, 0, 0, 1]
+                } else {
+                    &[10, 0, 0, 2]
+                };
+                builder
+                    .record(
+                        Section::Answer,
+                        q.name,
+                        self.kind,
+                        Class::IN,
+                        self.ttl,
+                        data,
+                    )
+                    .unwrap();
+            }
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/ttl_test.go TestTtlRewrite.
+#[tokio::test]
+async fn coredns_ttl_answer_rows() {
+    for (rule, name, kind, before, after, count) in [
+        (
+            "srv1.coredns.rocks 1",
+            "srv1.coredns.rocks.",
+            Type::A,
+            5,
+            1,
+            1,
+        ),
+        (
+            "exact srv15.coredns.rocks 15",
+            "srv15.coredns.rocks.",
+            Type::A,
+            5,
+            15,
+            1,
+        ),
+        ("prefix srv30 30", "srv30.coredns.rocks.", Type::A, 5, 30, 1),
+        (
+            "suffix 45.coredns.rocks 45",
+            "srv45.coredns.rocks.",
+            Type::A,
+            5,
+            45,
+            1,
+        ),
+        (
+            "substring rv50 50",
+            "srv50.coredns.rocks.",
+            Type::A,
+            5,
+            50,
+            1,
+        ),
+        (
+            r"regex (srv10)\.(coredns)\.(rocks) 10",
+            "srv10.coredns.rocks.",
+            Type::A,
+            5,
+            10,
+            1,
+        ),
+        (
+            "srv1.coredns.rocks 1",
+            "xmpp.coredns.rocks.",
+            Type::SRV,
+            5,
+            5,
+            1,
+        ),
+        (
+            "exact srv15.coredns.rocks 15",
+            "srv15.coredns.rocks.",
+            Type::HINFO,
+            5,
+            15,
+            1,
+        ),
+        (
+            r"regex (srv20)\.(coredns)\.(rocks) 20",
+            "srv20.coredns.rocks.",
+            Type::A,
+            5,
+            20,
+            2,
+        ),
+        (
+            "range.example.com. 30-300",
+            "range.example.com.",
+            Type::A,
+            5,
+            30,
+            1,
+        ),
+        (
+            "range.example.com. 30-300",
+            "range.example.com.",
+            Type::A,
+            55,
+            55,
+            1,
+        ),
+        (
+            "range.example.com. 30-300",
+            "range.example.com.",
+            Type::A,
+            500,
+            300,
+            1,
+        ),
+        (
+            "ceil.example.com. -11",
+            "ceil.example.com.",
+            Type::A,
+            5,
+            5,
+            1,
+        ),
+        (
+            "ceil.example.com. -11",
+            "ceil.example.com.",
+            Type::A,
+            15,
+            11,
+            1,
+        ),
+        (
+            "floor.example.com. 5-",
+            "floor.example.com.",
+            Type::A,
+            0,
+            5,
+            1,
+        ),
+        (
+            "floor.example.com. 5-",
+            "floor.example.com.",
+            Type::A,
+            30,
+            30,
+            1,
+        ),
+    ] {
+        let config = format!(".:53 {{\n rewrite ttl {rule}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = name.parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(
+                    &mut cx,
+                    TtlFixture {
+                        ttl: before,
+                        count,
+                        kind
+                    }
+                )
+                .await,
+            Outcome::Response,
+            "{rule}"
+        );
+        let message = Message::parse(cx.response).unwrap();
+        assert_eq!(message.answers().count(), count);
+        for record in message.answers() {
+            assert_eq!(record.ttl, after, "{rule}");
+        }
+    }
+}
+
 struct Unanswered(Rcode);
 impl Next for Unanswered {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
