@@ -1,5 +1,7 @@
 //! Debug Message hexdumps.
 
+pub(crate) mod setup;
+
 use std::fmt::Write;
 
 /// Format a Message for Wireshark's text2pcap.

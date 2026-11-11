@@ -781,16 +781,7 @@ fn setup_timeouts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> R
     Ok(())
 }
 
-#[cfg(feature = "plugin-debug")]
-fn setup_debug(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    while cursor.next() {
-        if cursor.next_arg() {
-            return Err(cursor.arg_err());
-        }
-    }
-    block.config.debug = Some(());
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-shed")]
 fn setup_shed(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

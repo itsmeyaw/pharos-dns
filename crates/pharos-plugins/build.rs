@@ -84,7 +84,7 @@ fn main() {
             "root" => "setup_root",
             "cancel" => "cancel::setup::setup",
             "timeouts" => "setup_timeouts",
-            "debug" => "setup_debug",
+            "debug" => "debug::setup::setup",
             "shed" => "setup_shed",
             "any" => "any::setup::setup",
             "chaos" => "chaos::setup::setup",
