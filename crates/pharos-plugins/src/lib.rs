@@ -286,6 +286,25 @@ pub fn servers_with_registry(
             siit.set_metrics(&metrics, &listeners);
         }
         #[cfg(feature = "plugin-autopath")]
+        if let Some(provider) = block
+            .config
+            .autopath
+            .as_ref()
+            .and_then(|plugin| plugin.provider.as_deref())
+            && provider != "kubernetes"
+        {
+            let mut found = false;
+            pharos_server::Chain::visit_enabled(&block.config, &mut |name| {
+                found |= name == provider
+            });
+            if found {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("autopath: {provider} does not implement AutoPather"),
+                ));
+            }
+        }
+        #[cfg(feature = "plugin-autopath")]
         if let Some(autopath) = &mut block.config.autopath {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             autopath.set_metrics(&metrics, &listeners);

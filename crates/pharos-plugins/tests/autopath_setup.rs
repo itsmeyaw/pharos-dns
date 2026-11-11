@@ -30,3 +30,18 @@ fn coredns_autopath_setup_cases() {
         );
     }
 }
+
+// CoreDNS setup resolves @providers after all Plugins have initialized.
+#[cfg(feature = "plugin-whoami")]
+#[test]
+fn autopath_provider_must_implement_autopather_if_present() {
+    for (provider, valid) in [
+        ("@missing", true),
+        ("@kubernetes", true),
+        ("@whoami", false),
+    ] {
+        let text = format!(".:53 {{\n autopath {provider}\n whoami\n}}");
+        let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        assert_eq!(pharos_plugins::servers(blocks).is_ok(), valid, "{provider}");
+    }
+}
