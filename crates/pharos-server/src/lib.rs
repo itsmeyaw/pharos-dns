@@ -596,7 +596,13 @@ mod wildcard_tests {
             .unwrap();
         assert_eq!(len, 5);
         let mut response = [0; 5];
-        tcp.read_exact(&mut response).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tcp.read_exact(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(&response, b"query");
         drop(tcp);
         listener.shutdown().await.unwrap();
@@ -616,11 +622,15 @@ mod wildcard_tests {
 
     #[tokio::test]
     async fn wildcard_falls_back_to_ipv4_when_ipv6_udp_is_unavailable() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static TRIED_IPV6_UDP: AtomicBool = AtomicBool::new(false);
         if std::net::TcpListener::bind("[::1]:0").is_err() {
             return;
         }
         fn unavailable(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
             if address.is_ipv6() {
+                TRIED_IPV6_UDP.store(true, Ordering::Relaxed);
                 Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
             } else {
                 udp::bind(address)
@@ -630,6 +640,7 @@ mod wildcard_tests {
             Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, bind_ipv6_dual, unavailable)
                 .await
                 .unwrap();
+        assert!(TRIED_IPV6_UDP.load(Ordering::Relaxed));
         assert_ipv4_fallback(listener).await;
     }
 }
