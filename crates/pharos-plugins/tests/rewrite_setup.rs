@@ -95,6 +95,31 @@ fn coredns_new_rule_setup_rows() {
                     .and_then(|blocks| configure::<Chain>(&blocks, directives()));
                 assert_eq!(result.is_ok(), variable != "dummy", "{text}: {result:?}");
             }
+            let text = format!(
+                ".:53 {{\n rewrite {mode}edns0 local {action} 0xffee {{server_port}} revert\n}}"
+            );
+            assert!(
+                parse("Corefile", &text)
+                    .and_then(|blocks| configure::<Chain>(&blocks, directives()))
+                    .is_ok(),
+                "{text}"
+            );
+        }
+        for (rule, valid) in [
+            ("edns0 local set invalid-uint {qname}", false),
+            ("edns0 local set 65518 abcdefg", true),
+            ("edns0 local set 0xffee abcdefg", true),
+            ("edns0 local set 0xffee abcdefg revert", true),
+            ("edns0 local append 0xffee abcdefg revert", true),
+            ("edns0 local replace 0xffee abcdefg revert", true),
+            ("edns0 nsid foo", false),
+            ("edns0 subnet append 24 56 revert", true),
+            ("edns0 subnet replace 24 56 revert", true),
+        ] {
+            let text = format!(".:53 {{\n rewrite {mode}{rule}\n}}");
+            let result = parse("Corefile", &text)
+                .and_then(|blocks| configure::<Chain>(&blocks, directives()));
+            assert_eq!(result.is_ok(), valid, "{text}: {result:?}");
         }
     }
 }
