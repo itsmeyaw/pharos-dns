@@ -208,6 +208,14 @@
 
 - The README's TLS Listener example remains unavailable because TLS is deferred to M3; the `file` Plugin is not implemented yet.
 
+## shed
+
+- Rust does not have Go's per-socket fdMutex limit. Pharos uses a single UDP writer with a 1,024-response newest-first stack and tracks query and response drops.
+- Each socket reserves 1,026 full-size UDP Response buffers at startup (about 64 MiB of address space), rather than allocating each queued Response as CoreDNS does.
+- Each Pharos UDP worker processes ordinary Queries serially, so overload can also cause uncounted kernel receive drops before the shed Plugin. Enabling shed uses the portable UDP path instead of Linux's batched receive path.
+- Toggling `shed` on Reload replaces UDP workers; while old sockets drain, a datagram can be delivered to a retiring worker and lost.
+- The README differential scenario substitutes a local Upstream for 8.8.8.8 and uses one socket for determinism.
+
 ## timeouts
 
 - TCP timeouts and `maxtcpqueries` apply per Listener; encrypted Listener transports and their README scenarios are deferred to M3.
@@ -220,7 +228,7 @@
 
 ## General
 
-- Only `root`, `cancel`, `timeouts`, `debug`, `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI

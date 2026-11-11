@@ -38,6 +38,7 @@ pub use outcome::{finish_outcome, response_limit};
 pub use panic::{contain_panic, panics_total};
 mod router;
 mod server;
+mod shed;
 mod startup;
 pub use router::{Router, ServerBlock, ViewFilter};
 pub use server::{Chain, Server};
@@ -466,6 +467,12 @@ impl Default for TcpOptions {
 /// Handlers must not block the runtime; TCP Queries on a connection may run
 /// concurrently.
 pub trait Handler: Send + Sync + 'static {
+    fn shed_metrics(&self) -> Option<metrics::ShedMetrics> {
+        None
+    }
+    fn shed_query(&self, _query: &[u8], _peer: SocketAddr) -> bool {
+        false
+    }
     fn tcp_options(&self) -> TcpOptions {
         TcpOptions::default()
     }
@@ -504,6 +511,7 @@ pub struct Listener {
     tasks: Vec<JoinHandle<io::Result<()>>>,
     udp_stop: watch::Sender<bool>,
     udp_tasks: Vec<JoinHandle<io::Result<()>>>,
+    shed: bool,
 }
 
 impl Listener {
@@ -561,6 +569,7 @@ impl Listener {
         let (stop, receiver) = watch::channel(false);
         let (udp_stop, udp_receiver) = watch::channel(false);
         let handler = Arc::new(handler);
+        let shed = handler.shed_metrics().is_some();
         let udp_tasks = sockets
             .into_iter()
             .map(|socket| {
@@ -579,6 +588,7 @@ impl Listener {
             tasks,
             udp_stop,
             udp_tasks,
+            shed,
         })
     }
 
@@ -1007,7 +1017,8 @@ impl ListenerRegistry {
         for (key, server) in &servers {
             let listener = &self.listeners[key];
             let count = server.udp_workers();
-            if count == listener.udp_tasks.len() {
+            if count == listener.udp_tasks.len() && listener.shed == server.shed_metrics().is_some()
+            {
                 continue;
             }
             let sockets = (0..count)
@@ -1041,6 +1052,7 @@ impl ListenerRegistry {
                 .expect("validated handler");
             let handler = Arc::new(Swappable(Arc::clone(handler)));
             let listener = self.listeners.get_mut(&key).expect("existing Listener");
+            listener.shed = handler.shed_metrics().is_some();
             for task in listener.tasks.split_off(1) {
                 if task.is_finished() {
                     if let Err(error) = task.await.map_err(io::Error::other).and_then(|v| v) {
@@ -1091,6 +1103,12 @@ impl ListenerRegistry {
 struct Swappable<H>(Arc<ArcSwap<H>>);
 
 impl<H: Handler> Handler for Swappable<H> {
+    fn shed_metrics(&self) -> Option<metrics::ShedMetrics> {
+        self.0.load().shed_metrics()
+    }
+    fn shed_query(&self, query: &[u8], peer: SocketAddr) -> bool {
+        self.0.load().shed_query(query, peer)
+    }
     fn tcp_options(&self) -> TcpOptions {
         self.0.load().tcp_options()
     }

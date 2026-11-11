@@ -60,6 +60,7 @@ struct RegistryInner {
     proxies: Mutex<BTreeMap<(String, String), Arc<Proxy>>>,
     caches: Mutex<BTreeMap<Key, Arc<Cache>>>,
     hosts: Mutex<BTreeMap<String, Arc<HostsGauge>>>,
+    shed: Mutex<BTreeMap<String, Arc<ShedCounters>>>,
     hosts_timestamp: Arc<AtomicU64>,
     forward: Arc<ForwardCounters>,
     forward_enabled: AtomicBool,
@@ -98,6 +99,25 @@ struct HostsGauge {
 pub struct HostsMetrics {
     gauge: Arc<HostsGauge>,
     timestamp: Arc<AtomicU64>,
+}
+
+#[derive(Default)]
+struct ShedCounters {
+    query: AtomicU64,
+    response: AtomicU64,
+}
+
+/// Per-Listener shed counters.
+#[derive(Clone)]
+pub struct ShedMetrics(Arc<ShedCounters>);
+
+impl ShedMetrics {
+    pub fn query_drop(&self) {
+        self.0.query.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn response_drop(&self) {
+        self.0.response.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl HostsMetrics {
@@ -321,6 +341,7 @@ impl Registry {
             proxies: Mutex::new(BTreeMap::new()),
             caches: Mutex::new(BTreeMap::new()),
             hosts: Mutex::new(BTreeMap::new()),
+            shed: Mutex::new(BTreeMap::new()),
             hosts_timestamp: Arc::new(AtomicU64::new(0)),
             forward: Arc::new(ForwardCounters::default()),
             forward_enabled: AtomicBool::new(false),
@@ -374,6 +395,17 @@ impl Registry {
             gauge,
             timestamp: Arc::clone(&self.0.hosts_timestamp),
         }
+    }
+
+    pub fn shed(&self, server: &str) -> ShedMetrics {
+        ShedMetrics(Arc::clone(
+            self.0
+                .shed
+                .lock()
+                .unwrap()
+                .entry(server.into())
+                .or_default(),
+        ))
     }
 
     pub fn kubernetes(&self) -> KubernetesMetrics {
@@ -451,6 +483,30 @@ impl Registry {
     /// Append text to `out`; callers can append process metrics to the same buffer.
     pub fn encode(&self, out: &mut String) {
         self.0.kubernetes.encode(out);
+        let shed = self.0.shed.lock().unwrap();
+        if !shed.is_empty() {
+            header(
+                out,
+                "shed_dropped_total",
+                "Counter of queries and responses dropped, per server, by reason.",
+                "counter",
+            );
+            for (server, counter) in shed.iter() {
+                sample(
+                    out,
+                    "shed_dropped_total",
+                    &[("reason", "query"), ("server", server)],
+                    counter.query.load(Ordering::Relaxed),
+                );
+                sample(
+                    out,
+                    "shed_dropped_total",
+                    &[("reason", "response"), ("server", server)],
+                    counter.response.load(Ordering::Relaxed),
+                );
+            }
+        }
+        drop(shed);
         if self.0.reload_enabled.load(Ordering::Relaxed) {
             header(
                 out,

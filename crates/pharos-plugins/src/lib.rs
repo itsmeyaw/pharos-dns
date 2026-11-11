@@ -64,6 +64,8 @@ pub mod ready;
 pub mod reload;
 #[cfg(feature = "plugin-root")]
 pub mod root;
+#[cfg(feature = "plugin-shed")]
+pub mod shed;
 #[cfg(feature = "plugin-timeouts")]
 pub mod timeouts;
 #[cfg(feature = "plugin-whoami")]
@@ -680,6 +682,19 @@ fn setup_debug(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
         }
     }
     block.config.debug = Some(());
+    Ok(())
+}
+
+#[cfg(feature = "plugin-shed")]
+fn setup_shed(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    cursor.next();
+    if !cursor.remaining_args().is_empty() || cursor.next_block() {
+        return Err(cursor.arg_err());
+    }
+    if block.keys().iter().any(|key| key.transport != "dns") {
+        return Err(cursor.error("shed requires plain DNS"));
+    }
+    block.config.shed = Some(shed::Shed);
     Ok(())
 }
 

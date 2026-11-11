@@ -26,6 +26,7 @@ fn main() {
             "cancel" => "cancel::Cancel",
             "timeouts" => "timeouts::Timeouts",
             "debug" => "()",
+            "shed" => "shed::Shed",
             "cache" => "cache::Cache",
             "bind" => "()",
             "multisocket" => "Option<usize>",
@@ -54,6 +55,7 @@ fn main() {
             "cancel" => "setup_cancel",
             "timeouts" => "setup_timeouts",
             "debug" => "setup_debug",
+            "shed" => "setup_shed",
             "cache" => "setup_cache",
             "bind" => "setup_bind",
             "multisocket" => "setup_multisocket",
@@ -76,6 +78,7 @@ fn main() {
             *name,
             "root"
                 | "cache"
+                | "shed"
                 | "metadata"
                 | "prometheus"
                 | "ready"
@@ -181,6 +184,9 @@ fn main() {
     }
     if enabled.contains(&"errors") {
         code.push_str("fn stacktrace(&self) -> bool { self.errors.as_ref().is_some_and(|plugin| plugin.stacktrace) }\n");
+    }
+    if enabled.contains(&"shed") {
+        code.push_str("fn shed_enabled(&self) -> bool { self.shed.is_some() }\n");
     }
     code.push_str("}\n");
     for (i, name) in enabled.iter().enumerate() {

@@ -22,6 +22,9 @@ pub trait Chain: Send + Sync + 'static {
     fn metrics_enabled(&self) -> bool {
         true
     }
+    fn shed_enabled(&self) -> bool {
+        false
+    }
     /// Whether contained Plugin panics should include a stacktrace.
     fn stacktrace(&self) -> bool {
         false
@@ -47,6 +50,9 @@ impl<C: Chain> Chain for Arc<C> {
     fn metrics_enabled(&self) -> bool {
         self.as_ref().metrics_enabled()
     }
+    fn shed_enabled(&self) -> bool {
+        self.as_ref().shed_enabled()
+    }
     fn stacktrace(&self) -> bool {
         self.as_ref().stacktrace()
     }
@@ -63,6 +69,7 @@ pub struct Server<C> {
     pub logger: fn(Error),
     metrics: Registry,
     dropped: Option<BlockMetrics>,
+    shed: Option<crate::metrics::ShedMetrics>,
 }
 
 impl<C: Chain> Server<C> {
@@ -90,6 +97,7 @@ impl<C: Chain> Server<C> {
         let dropped = router
             .metrics_enabled(&key)
             .then(|| metrics.block(&server, "dropped", ""));
+        let shed = router.shed_enabled(&key).then(|| metrics.shed(&server));
         Self {
             router,
             key,
@@ -100,6 +108,7 @@ impl<C: Chain> Server<C> {
             logger: log_error,
             metrics,
             dropped,
+            shed,
         }
     }
 
@@ -117,6 +126,19 @@ fn log_plugin_error(plugin: &str, error: Error) {
 }
 
 impl<C: Chain> Handler for Server<C> {
+    fn shed_metrics(&self) -> Option<crate::metrics::ShedMetrics> {
+        self.shed.clone()
+    }
+    fn shed_query(&self, wire: &[u8], peer: SocketAddr) -> bool {
+        let mut response = Vec::new();
+        let Admission::Query(query) = admit(wire, self.allow_non_in, &mut response) else {
+            return false;
+        };
+        self.router
+            .route(&self.key, query, peer, Protocol::Udp)
+            .and_then(|block| block.chain())
+            .is_some_and(Chain::shed_enabled)
+    }
     fn tcp_options(&self) -> crate::TcpOptions {
         self.tcp_options
     }
