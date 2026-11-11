@@ -2647,6 +2647,168 @@ async fn coredns_non_regex_name_rewrite_modes() {
     }
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_test.go answer tables.
+#[tokio::test]
+async fn coredns_name_answer_rows() {
+    for (rule, incoming, rewritten, answer) in [
+        (
+            "prefix foo bar",
+            "foo.example.com.",
+            "bar.example.com.",
+            "bar.example.com.",
+        ),
+        (
+            "prefix foo. bar.",
+            "foo.example.com.",
+            "bar.example.com.",
+            "bar.example.com.",
+        ),
+        (
+            "suffix com org",
+            "foo.example.com.",
+            "foo.example.org.",
+            "foo.example.org.",
+        ),
+        (
+            "suffix .com .org",
+            "foo.example.com.",
+            "foo.example.org.",
+            "foo.example.org.",
+        ),
+        (
+            "suffix .ingress.coredns.rocks nginx.coredns.rocks",
+            "coredns.ingress.coredns.rocks.",
+            "corednsnginx.coredns.rocks.",
+            "corednsnginx.coredns.rocks.",
+        ),
+        (
+            "prefix foo bar answer auto",
+            "foo.example.com.",
+            "bar.example.com.",
+            "foo.example.com.",
+        ),
+        (
+            "prefix foo. bar. answer auto",
+            "foo.example.com.",
+            "bar.example.com.",
+            "foo.example.com.",
+        ),
+        (
+            "suffix com org answer auto",
+            "foo.example.com.",
+            "foo.example.org.",
+            "foo.example.com.",
+        ),
+        (
+            "suffix .com .org answer auto",
+            "foo.example.com.",
+            "foo.example.org.",
+            "foo.example.com.",
+        ),
+        (
+            "suffix .ingress.coredns.rocks nginx.coredns.rocks answer auto",
+            "coredns.ingress.coredns.rocks.",
+            "corednsnginx.coredns.rocks.",
+            "coredns.ingress.coredns.rocks.",
+        ),
+        (
+            "exact coredns.rocks service.consul answer auto",
+            "coredns.rocks.",
+            "service.consul.",
+            "coredns.rocks.",
+        ),
+        (
+            "exact coredns.rocks. service.consul. answer auto",
+            "coredns.rocks.",
+            "service.consul.",
+            "coredns.rocks.",
+        ),
+        (
+            "exact coredns.rocks service.consul",
+            "coredns.rocks.",
+            "service.consul.",
+            "coredns.rocks.",
+        ),
+        (
+            "exact coredns.rocks. service.consul.",
+            "coredns.rocks.",
+            "service.consul.",
+            "coredns.rocks.",
+        ),
+        (
+            "exact coredns.org. service.consul.",
+            "coredns.rocks.",
+            "coredns.rocks.",
+            "coredns.rocks.",
+        ),
+        (
+            "regex (.*).coredns.rocks {1}.coredns.maps answer auto",
+            "foo.coredns.rocks.",
+            "foo.coredns.maps.",
+            "foo.coredns.rocks.",
+        ),
+        (
+            "regex (.*).coredns.rocks {1}.coredns.maps answer name (.*).coredns.maps {1}.coredns.works",
+            "foo.coredns.rocks.",
+            "foo.coredns.maps.",
+            "foo.coredns.works.",
+        ),
+        (
+            "regex (.*).coredns.rocks {1}.coredns.maps",
+            "foo.coredns.rocks.",
+            "foo.coredns.maps.",
+            "foo.coredns.maps.",
+        ),
+    ] {
+        let config = format!(".:53 {{\n rewrite name {rule}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = incoming.parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, ExpectNameAnswer(rewritten))
+                .await,
+            Outcome::Response,
+            "{rule}"
+        );
+        let response = Message::parse(cx.response).unwrap();
+        assert_eq!(
+            response.answers().next().unwrap().name.to_string(),
+            answer,
+            "{rule}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn coredns_regex_name_capture_rewrite() {
     let config = r".:53 {
