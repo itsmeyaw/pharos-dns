@@ -185,6 +185,9 @@
 
 - Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
+- Zone files must be UTF-8; miekg/dns accepts arbitrary input bytes. Most parser errors identify the record's starting line and column 1 rather than pinpointing the bad field.
+- Zone parsing uses temporary allocations for tokens and RDATA fields; it reads incrementally but does not yet meet the no-temporary-per-record allocation goal.
+- Zone-file RDATA presentation supports A, AAAA, NS, CNAME, PTR, MX, SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SSHFP, ZONEMD and TSIG. Other types require RFC 3597 generic RDATA, and some miekg/dns type mnemonics are not recognized; use `TYPE<number>` for those types.
 
 ## CLI
 
@@ -237,7 +240,7 @@
 - Invalid UTF-8 in Extended DNS Error text is rendered with replacement characters.
 - The requested record-data families are complete: the typed RDATA parser supports A, AAAA, NS, CNAME, PTR, MX, SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SSHFP, ZONEMD and TSIG.
 - Unsupported name-bearing types are rejected by the typed parser; other types remain opaque, preserve their bytes and print in RFC 3597 form rather than using their CoreDNS presentation.
-- Presentation parsing is deferred to the zone-file parsing issue (see the existing `shortcut:` comment in `rdata.rs`).
+- Zone-file presentation parsing is separate from the wire RDATA parser.
 - Unlike miekg/dns, incomplete typed records are rejected rather than accepted as partial values.
 - Pharos rejects a zero-length TXT RDATA, which lacks the required character string; miekg/dns accepts it. TXT strings of length zero are accepted.
 - Pharos rejects empty and non-alphanumeric CAA tags as required by RFC 8659; miekg/dns accepts them.
