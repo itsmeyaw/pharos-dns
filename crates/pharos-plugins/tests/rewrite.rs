@@ -588,6 +588,92 @@ impl Next for EchoOptions {
     }
 }
 
+struct MultiAnswerEcho;
+impl Next for MultiAnswerEcho {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let query = cx.query;
+        let q = query.questions().next().unwrap();
+        let opt = query.opt().unwrap();
+        let mut b = MessageBuilder::new(cx.response, 512, query.id(), 0x8180).unwrap();
+        b.question(q.name, q.qtype, q.qclass).unwrap();
+        for ip in [[192, 0, 2, 1], [192, 0, 2, 2]] {
+            b.record(Section::Answer, q.name, Type::A, Class::IN, 30, &ip)
+                .unwrap();
+        }
+        b.record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(opt.udp_payload_size()),
+            0,
+            opt.options().as_bytes(),
+        )
+        .unwrap();
+        let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn coredns_edns_reverter_applies_once_for_each_response_record() {
+    let config = ".:53 {\n rewrite edns0 local append 0xffee c revert\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    b.record(
+        Section::Additional,
+        NameRef::parse(root.as_wire(), 0).unwrap(),
+        Type::OPT,
+        Class(4096),
+        0,
+        b"\xff\xee\0\x01a\xff\xee\0\x01b",
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, MultiAnswerEcho)
+            .await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(cx.response)
+            .unwrap()
+            .opt()
+            .unwrap()
+            .options()
+            .as_bytes(),
+        b""
+    );
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/edns0_test.go.
 #[tokio::test]
 async fn coredns_edns_revert_restores_original_or_removes_injected_option() {

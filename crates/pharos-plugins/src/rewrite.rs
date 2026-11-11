@@ -1423,31 +1423,41 @@ fn revert_edns_response(
         }
     }
     let mut replay = [0; 65535];
-    for index in (0..end).rev() {
-        let Action::Edns(code, _, action, revert) = &rules[index].action else {
-            continue;
-        };
-        if !*revert || matched[index] == 0 || options.first(*code).is_none() {
-            continue;
-        }
-        let mut previous_options = EdnsState::new(&mut replay, &original);
-        let mut previous_query = original;
-        for earlier in 0..index {
-            if matched[earlier] == 0 {
+    let passes = if response_opt.is_some() {
+        usize::from(response.answer_count())
+            + usize::from(response.authority_count())
+            + usize::from(response.additional_count())
+    } else {
+        usize::from(original.additional_count()).max(1)
+    };
+    for _ in 0..passes {
+        for index in (0..end).rev() {
+            let Action::Edns(code, _, action, revert) = &rules[index].action else {
+                continue;
+            };
+            if !*revert || matched[index] == 0 || options.first(*code).is_none() {
                 continue;
             }
-            if matches!(rules[earlier].action, Action::Edns(..)) {
-                let _ = apply_edns(&rules[earlier], &previous_query, cx, &mut previous_options)?;
-            } else {
-                let _ = apply_rule(&rules[earlier], &mut previous_query, &cx.metadata)?;
+            let mut previous_options = EdnsState::new(&mut replay, &original);
+            let mut previous_query = original;
+            for earlier in 0..index {
+                if matched[earlier] == 0 {
+                    continue;
+                }
+                if matches!(rules[earlier].action, Action::Edns(..)) {
+                    let _ =
+                        apply_edns(&rules[earlier], &previous_query, cx, &mut previous_options)?;
+                } else {
+                    let _ = apply_rule(&rules[earlier], &mut previous_query, &cx.metadata)?;
+                }
             }
-        }
-        if *action == EdnsAction::Append {
-            options.remove_first(*code);
-        } else if let Some(previous) = previous_options.first(*code) {
-            options.apply(*code, previous, EdnsAction::Replace, false)?;
-        } else {
-            options.remove_first(*code);
+            if *action == EdnsAction::Append {
+                options.remove_first(*code);
+            } else if let Some(previous) = previous_options.first(*code) {
+                options.apply(*code, previous, EdnsAction::Replace, false)?;
+            } else {
+                options.remove_first(*code);
+            }
         }
     }
     let mut builder = MessageBuilder::new(
