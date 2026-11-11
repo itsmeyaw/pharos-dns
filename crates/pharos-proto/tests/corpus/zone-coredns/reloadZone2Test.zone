@@ -1,0 +1,3 @@
+miek.nl.		1627	IN	SOA	linode.atoom.net. miek.miek.nl. 1460175182 14400 3600 604800 14400
+miek.nl.		1627	IN	NS	ext.ns.whyscream.net.
+miek.nl.		1627	IN	NS	omval.tednet.nl.

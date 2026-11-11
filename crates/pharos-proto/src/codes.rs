@@ -8,6 +8,13 @@ macro_rules! dns_code {
 
         impl $name {
             $(pub const $constant: Self = Self($value);)*
+
+            /// Finds a known presentation mnemonic, ignoring ASCII case.
+            #[must_use]
+            pub fn from_mnemonic(value: &str) -> Option<Self> {
+                $(if value.eq_ignore_ascii_case($text) { return Some(Self($value)); })*
+                None
+            }
         }
 
         impl fmt::Display for $name {

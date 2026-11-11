@@ -1,0 +1,22 @@
+; Adapted from miekg/dns scan_test.go and parse_test.go.
+$ORIGIN miek.nl.
+$TTL 2H
+@ IN SOA a6.nstld.com. hostmaster.nic.name. (
+    203362132 ; serial
+    5m        ; refresh
+    5m        ; retry
+    2w        ; expire
+    300       ; minimum
+)
+  IN NS b
+a IN A 192.0.2.1
+  1D IN AAAA ::FFFF:127.0.0.1
+alias IN CNAME a
+mail 600 IN MX 10 mailhost
+_sip._tcp IN SRV 1 0 80 server
+t IN TXT "a bc" "abc" "DEF" "" ; comment outside the quotes
+escaped IN TXT "\;\"" "\(a\)" "\048"
+has\046dot IN A 192.0.2.2
+unknown IN TYPE65400 \# 4 000102ff
+$ORIGIN example.org.
+$GENERATE 10-12 foo${2,3,d} IN A 127.0.0.$

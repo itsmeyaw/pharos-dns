@@ -1,0 +1,8 @@
+
+$TTL 30M
+$ORIGIN example.com.
+@	IN SOA ns.example.com. admin.example.com. ( 2024010100 14400 3600 604800 14400 )
+	IN NS  ns.example.com.
+ns	IN A   192.0.2.1
+svc	IN A   192.0.2.10
+_foo	IN SVCB 1 SVC.Example.COM. alpn=h2

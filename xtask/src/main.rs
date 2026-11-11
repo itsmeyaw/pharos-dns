@@ -15,7 +15,7 @@ use std::{
 };
 
 const FORBID_UNSAFE: &str = "#![forbid(unsafe_code)]";
-const FUZZ_TARGETS: &[&str] = &["message", "name", "roundtrip", "differential"];
+const FUZZ_TARGETS: &[&str] = &["message", "name", "roundtrip", "differential", "zone"];
 
 fn main() -> ExitCode {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -117,10 +117,24 @@ fn fuzz(short: bool) -> ExitCode {
         }
     }
 
+    let oracle = root.join("crates/pharos-proto/fuzz/target/zone-oracle");
+    let built = Command::new("go")
+        .args(["build", "-o"])
+        .arg(&oracle)
+        .arg(".")
+        .current_dir(root.join("crates/pharos-proto/tests/fixtures/zone-oracle"))
+        .env("GOWORK", "off")
+        .status();
+    if !matches!(built, Ok(status) if status.success()) {
+        eprintln!("could not build the miekg/dns zone oracle (Go 1.26+ required): {built:?}");
+        return ExitCode::FAILURE;
+    }
+
     let mut children = Vec::new();
     for target in FUZZ_TARGETS {
         match Command::new("cargo")
             .args(fuzz_args(target, short))
+            .env("PHAROS_ZONE_ORACLE", &oracle)
             .current_dir(root.join("crates/pharos-proto"))
             .spawn()
         {
@@ -162,9 +176,14 @@ fn fuzz(short: bool) -> ExitCode {
 fn seed_corpus(root: &Path, target: &str) -> std::io::Result<()> {
     let destination = root.join("crates/pharos-proto/fuzz/corpus").join(target);
     fs::create_dir_all(&destination)?;
-    for entry in fs::read_dir(root.join("crates/pharos-proto/tests/corpus"))? {
+    let (source, seed) = if target == "zone" {
+        ("crates/pharos-proto/tests/corpus/zone-reference", "zone")
+    } else {
+        ("crates/pharos-proto/tests/corpus", "bin")
+    };
+    for entry in fs::read_dir(root.join(source))? {
         let path = entry?.path();
-        if path.extension().is_some_and(|extension| extension == "bin") {
+        if path.extension().is_some_and(|extension| extension == seed) {
             let target = destination.join(path.file_name().unwrap());
             if !target.exists() {
                 fs::copy(path, target)?;
@@ -489,6 +508,23 @@ mod tests {
         seed_corpus(fixture.path(), "message").unwrap();
         assert_eq!(fs::read(target.join("seed.bin")).unwrap(), b"existing");
         assert_eq!(fs::read(source.join("seed.bin")).unwrap(), b"message");
+    }
+
+    #[test]
+    fn zone_target_is_seeded_with_reference_zones() {
+        let fixture = TempFixture::new();
+        let source = fixture
+            .path()
+            .join("crates/pharos-proto/tests/corpus/zone-reference");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("a.zone"), b"a 60 IN A 192.0.2.1\n").unwrap();
+        fs::write(source.join("a.expected"), b"not a seed").unwrap();
+        fs::write(source.parent().unwrap().join("seed.bin"), b"message").unwrap();
+        seed_corpus(fixture.path(), "zone").unwrap();
+        let target = fixture.path().join("crates/pharos-proto/fuzz/corpus/zone");
+        assert!(target.join("a.zone").exists());
+        assert!(!target.join("a.expected").exists());
+        assert!(!target.join("seed.bin").exists());
     }
 
     #[test]

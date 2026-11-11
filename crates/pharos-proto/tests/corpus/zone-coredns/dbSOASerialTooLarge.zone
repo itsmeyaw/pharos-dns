@@ -1,0 +1,13 @@
+
+$TTL         1M
+$ORIGIN      example.org.
+
+@            IN  SOA    ns1.example.com. admin.example.com.  (
+                               202512200817 ; Serial - exceeds 32-bit uint
+                               1200       ; Refresh
+                               144        ; Retry
+                               1814400    ; Expire
+                               2h )       ; Minimum
+@            IN  NS     ns1.example.com.
+
+www          IN  A      192.168.0.14
