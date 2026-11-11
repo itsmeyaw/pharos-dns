@@ -294,13 +294,13 @@ impl<R: BufRead> ZoneParser<R> {
         let rtype = loop {
             let field = tokens.get(i).ok_or_else(|| err("missing record type"))?;
             i += 1;
-            if let Some(rtype) = parse_type(field) {
-                break rtype;
-            }
             if !saw_class && let Some(value) = parse_class(field) {
                 class = value;
                 saw_class = true;
                 continue;
+            }
+            if let Some(rtype) = parse_type(field) {
+                break rtype;
             }
             if !saw_ttl && let Some(value) = parse_ttl(field) {
                 ttl = Some(value);
@@ -415,7 +415,8 @@ fn expand_generate(input: &str, value: i64, end: i64) -> Result<String, String> 
             output.push('$');
         } else {
             let (mut offset, mut width, mut base) = (0_i64, 0_usize, 'd');
-            if chars.peek() == Some(&'{') {
+            let modified = chars.peek() == Some(&'{');
+            if modified {
                 chars.next();
                 let mut modifier = String::new();
                 loop {
@@ -449,9 +450,10 @@ fn expand_generate(input: &str, value: i64, end: i64) -> Result<String, String> 
             }
             let number = value.checked_add(offset).ok_or("invalid offset")?;
             if number < 0
-                || end
-                    .checked_add(offset)
-                    .is_none_or(|n| n > i64::from(i32::MAX))
+                || (modified
+                    && end
+                        .checked_add(offset)
+                        .is_none_or(|n| n > i64::from(i32::MAX)))
             {
                 return Err("invalid offset".into());
             }

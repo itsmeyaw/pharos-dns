@@ -20,6 +20,18 @@ fn parses_origin_ttl_and_inherited_owner() {
 }
 
 #[test]
+fn any_class_is_not_mistaken_for_record_type() {
+    let parser = ZoneParser::new(
+        Cursor::new("a 60 ANY A 192.0.2.1\n"),
+        ".".parse().unwrap(),
+        "any",
+    );
+    let records = parser.collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(records[0].class, Class::ANY);
+    assert_eq!(records[0].rtype, Type::A);
+}
+
+#[test]
 fn handles_multiline_quoting_and_escapes() {
     let input = "$TTL 60\n@ IN TXT ( \"a;b\" ; comment\n \"c\\032d\" )\n";
     let mut parser = ZoneParser::new(Cursor::new(input), "example.".parse().unwrap(), "quoted");
@@ -55,6 +67,15 @@ fn generates_range_with_modifiers() {
         ["host002.example.", "host004.example."]
     );
     assert_eq!(records[1].rdata, [192, 0, 2, 3]);
+}
+
+#[test]
+fn generate_unmodified_values_can_exceed_i32() {
+    let input = "$GENERATE 2147483648-2147483648 host$ 1 A 192.0.2.1\n";
+    let records = ZoneParser::new(Cursor::new(input), "example.".parse().unwrap(), "gen")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(records[0].owner.to_string(), "host2147483648.example.");
 }
 
 #[test]
