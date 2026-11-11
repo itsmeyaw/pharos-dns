@@ -68,6 +68,14 @@ instants, unlike the Go client's synchronized histogram snapshot.
 
 The Kubernetes data crate ignores addresses in EndpointSlices with address
 types other than IPv4 or IPv6; CoreDNS retains them.
+The `kubernetes` Plugin rejects `multicluster` with a not-implemented error;
+Multi-Cluster Services are tracked in #41. Namespace restrictions also apply
+to NS address discovery and reverse answers, whereas CoreDNS can use NS
+endpoints outside the configured Namespaces and can expose reverse names from
+Namespaces excluded by `namespace_labels`.
+API client creation and kubeconfig validation occur during Startup rather than
+Corefile setup. NS fallback addresses are read from interfaces per Query rather
+than once at Startup, so interface changes can affect answers without Reload.
 Kubeconfig OIDC credentials use the configured ID token without refreshing it;
 CoreDNS includes the client-go OIDC authentication provider.
 Kubeconfig proxy URLs are not supported; CoreDNS can connect through them.
@@ -80,8 +88,12 @@ duration ends when response headers arrive, rather than after processing the
 response body. Kube's internal retries are counted once per request rather
 than once per attempt as in client-go.
 Client-side rate-limit waits are capped at 100 years for extremely small QPS.
+CoreDNS parses `NaN` and positive infinity for `apiserver_qps`; Pharos accepts
+them in the Corefile but rejects them when creating the API client. Pharos
+treats non-positive `startup_timeout` as an immediate timeout; CoreDNS's
+startup ticker panics for those values.
 
-Only `cache`, `errors`, `forward`, `health`, `hosts`, `loadbalance`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
+Only `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
 
