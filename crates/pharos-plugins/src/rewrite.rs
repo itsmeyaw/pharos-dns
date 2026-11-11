@@ -4,8 +4,7 @@ use std::fmt::Write;
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{
-    BuildError, Class, FixedBuffer, Message, MessageBuffer, MessageBuilder, MessageMut, Name,
-    NameRef, Rdata, RdataWriter, Section, Type,
+    Class, FixedBuffer, Message, MessageBuilder, MessageMut, Name, NameRef, Rdata, Section, Type,
 };
 use pharos_server::{Context, Error as ServerError, Metadata, Next, Outcome, Plugin};
 
@@ -24,7 +23,15 @@ enum Action {
     Class(Class, Class),
     Name(String, bool, Option<Vec<NamePart>>, Vec<AnswerRule>),
     Cname(Matcher, String),
-    EdnsLocalSet(u16, Vec<u8>),
+    EdnsLocal(u16, Vec<u8>, EdnsAction),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EdnsAction {
+    Set,
+    Append,
+    Replace,
+    Unset,
 }
 
 #[derive(Debug)]
@@ -67,7 +74,13 @@ impl Matcher {
 #[derive(Debug)]
 pub struct Rewrite {
     rules: Vec<Rule>,
-    edns_buffers: Vec<tokio::sync::Mutex<Vec<u8>>>,
+    edns_buffers: Vec<tokio::sync::Mutex<EdnsScratch>>,
+}
+
+#[derive(Debug)]
+struct EdnsScratch {
+    wire: Vec<u8>,
+    matched: Vec<u8>,
 }
 
 impl Rewrite {
@@ -100,12 +113,25 @@ impl Rewrite {
                 return Err(cursor.arg_err());
             };
             if kind.eq_ignore_ascii_case("edns0") {
-                let [typ, action, code, data] = args else {
+                let Some([typ, action, code, rest @ ..]) = args.get(..) else {
                     return Err(cursor.arg_err());
                 };
-                if !typ.eq_ignore_ascii_case("local") || !action.eq_ignore_ascii_case("set") {
+                if !typ.eq_ignore_ascii_case("local") {
                     return Err(cursor.error("unsupported EDNS rule"));
                 }
+                let action = match action.to_ascii_lowercase().as_str() {
+                    "set" => EdnsAction::Set,
+                    "append" => EdnsAction::Append,
+                    "replace" => EdnsAction::Replace,
+                    "unset" => EdnsAction::Unset,
+                    _ => return Err(cursor.error("invalid EDNS action")),
+                };
+                let data = match (action, rest) {
+                    (EdnsAction::Unset, []) => "",
+                    (EdnsAction::Unset, _) => return Err(cursor.arg_err()),
+                    (_, [data]) => data.as_str(),
+                    _ => return Err(cursor.arg_err()),
+                };
                 let code = if let Some(hex) =
                     code.strip_prefix("0x").or_else(|| code.strip_prefix("0X"))
                 {
@@ -132,7 +158,7 @@ impl Rewrite {
                 };
                 rules.push(Rule {
                     matcher: Matcher::Any,
-                    action: Action::EdnsLocalSet(code, data),
+                    action: Action::EdnsLocal(code, data, action),
                     stop,
                 });
                 continue;
@@ -339,11 +365,14 @@ impl Rewrite {
         }
         let edns_buffers = if rules
             .iter()
-            .any(|rule| matches!(rule.action, Action::EdnsLocalSet(..)))
+            .any(|rule| matches!(rule.action, Action::EdnsLocal(..)))
         {
             (0..=10)
                 .map(|_| {
-                    let buffer = tokio::sync::Mutex::new(vec![0; 65535]);
+                    let buffer = tokio::sync::Mutex::new(EdnsScratch {
+                        wire: vec![0; 2 * 65535],
+                        matched: vec![0; rules.len()],
+                    });
                     // Initialize the platform mutex at setup, not on the first Query.
                     drop(buffer.try_lock().expect("new scratch buffer"));
                     buffer
@@ -914,16 +943,69 @@ fn apply_history<'a>(
     NameRef::parse(&output[..len], 0).expect("validated name")
 }
 
-fn edns_query(
-    query: Message<'_>,
-    original_query: Message<'_>,
-    metadata: &Metadata<'_>,
-    rules: &[Rule],
-    end: usize,
-    output: &mut [u8],
-) -> Result<usize, ServerError> {
-    let opt = query.opt();
-    let original = opt.map_or(&[][..], |opt| opt.options().as_bytes());
+struct EdnsState<'a> {
+    bytes: &'a mut [u8],
+    len: usize,
+}
+
+impl<'a> EdnsState<'a> {
+    fn new(bytes: &'a mut [u8], query: &Message<'_>) -> Self {
+        let original = query.opt().map_or(&[][..], |opt| opt.options().as_bytes());
+        bytes[..original.len()].copy_from_slice(original);
+        Self {
+            bytes,
+            len: original.len(),
+        }
+    }
+
+    fn apply(&mut self, code: u16, data: &[u8], action: EdnsAction) -> Result<bool, ServerError> {
+        let mut position = 0;
+        let mut first = None;
+        while position < self.len {
+            let current = u16::from_be_bytes([self.bytes[position], self.bytes[position + 1]]);
+            let len = usize::from(u16::from_be_bytes([
+                self.bytes[position + 2],
+                self.bytes[position + 3],
+            ]));
+            let next = position + 4 + len;
+            if current == code {
+                if action == EdnsAction::Unset {
+                    self.bytes.copy_within(next..self.len, position);
+                    self.len -= next - position;
+                    continue;
+                }
+                first = Some((position, next));
+                break;
+            }
+            position = next;
+        }
+        if action == EdnsAction::Unset {
+            return Ok(true);
+        }
+        if action == EdnsAction::Replace && first.is_none() {
+            return Ok(false);
+        }
+        let (start, old_end) = if action == EdnsAction::Append {
+            (self.len, self.len)
+        } else {
+            first.unwrap_or((self.len, self.len))
+        };
+        let data_len = u16::try_from(data.len()).map_err(|_| ServerError::InvalidQuery)?;
+        let new_end = start + 4 + data.len();
+        let total = self.len - (old_end - start) + 4 + data.len();
+        if total > self.bytes.len() {
+            return Err(ServerError::ResponseBufferTooSmall);
+        }
+        self.bytes.copy_within(old_end..self.len, new_end);
+        self.bytes[start..start + 2].copy_from_slice(&code.to_be_bytes());
+        self.bytes[start + 2..start + 4].copy_from_slice(&data_len.to_be_bytes());
+        self.bytes[start + 4..new_end].copy_from_slice(data);
+        self.len = total;
+        Ok(true)
+    }
+}
+
+fn edns_query(query: Message<'_>, options: &[u8], output: &mut [u8]) -> Result<usize, ServerError> {
     let mut fixed = FixedBuffer::new(output);
     let mut builder = MessageBuilder::new(&mut fixed, 65535, query.id(), query.flags())
         .map_err(ServerError::Build)?;
@@ -945,9 +1027,7 @@ fn edns_query(
             let written = if rr.rtype == Type::OPT {
                 written_opt = true;
                 builder
-                    .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
-                        write_edns_options(writer, original, original_query, metadata, rules, end)
-                    })
+                    .record(section, rr.name, rr.rtype, rr.class, rr.ttl, options)
                     .map_err(ServerError::Build)?
             } else {
                 let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
@@ -966,13 +1046,13 @@ fn edns_query(
         // RFC 6891 §6.1.2: an OPT pseudo-record has a root owner and advertises UDP size.
         let root = NameRef::parse(&[0], 0).expect("root name");
         if !builder
-            .record_with(
+            .record(
                 Section::Additional,
                 root,
                 Type::OPT,
                 Class(4096),
                 0,
-                |writer| write_edns_options(writer, original, original_query, metadata, rules, end),
+                options,
             )
             .map_err(ServerError::Build)?
         {
@@ -980,83 +1060,6 @@ fn edns_query(
         }
     }
     Ok(builder.finish().len())
-}
-
-fn option_contains(mut options: &[u8], code: u16) -> bool {
-    while !options.is_empty() {
-        let current = u16::from_be_bytes([options[0], options[1]]);
-        let len = usize::from(u16::from_be_bytes([options[2], options[3]]));
-        if current == code {
-            return true;
-        }
-        options = &options[4 + len..];
-    }
-    false
-}
-
-fn write_edns_options<B: MessageBuffer>(
-    writer: &mut RdataWriter<'_, '_, B>,
-    original: &[u8],
-    query: Message<'_>,
-    metadata: &Metadata<'_>,
-    rules: &[Rule],
-    end: usize,
-) -> Result<(), BuildError> {
-    let latest = |code| {
-        rules[..end]
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, rule)| {
-                let Action::EdnsLocalSet(candidate, data) = &rule.action else {
-                    return None;
-                };
-                (*candidate == code && active_at(rules, index, query, metadata))
-                    .then_some(data.as_slice())
-            })
-    };
-    let write =
-        |writer: &mut RdataWriter<'_, '_, B>, code: u16, data: &[u8]| -> Result<(), BuildError> {
-            let len = u16::try_from(data.len()).map_err(|_| BuildError::RdataTooLong)?;
-            writer.write_bytes(&code.to_be_bytes())?;
-            writer.write_bytes(&len.to_be_bytes())?;
-            writer.write_bytes(data)
-        };
-    let mut position = 0;
-    while position < original.len() {
-        let code = u16::from_be_bytes([original[position], original[position + 1]]);
-        let len = usize::from(u16::from_be_bytes([
-            original[position + 2],
-            original[position + 3],
-        ]));
-        let next = position + 4 + len;
-        if !option_contains(&original[..position], code)
-            && let Some(data) = latest(code)
-        {
-            write(writer, code, data)?;
-        } else {
-            writer.write_bytes(&original[position..next])?;
-        }
-        position = next;
-    }
-    for (index, rule) in rules[..end].iter().enumerate() {
-        let Action::EdnsLocalSet(code, _) = &rule.action else {
-            continue;
-        };
-        if option_contains(original, *code) || !active_at(rules, index, query, metadata) {
-            continue;
-        }
-        if rules[..index].iter().enumerate().any(|(earlier, rule)| {
-            matches!(&rule.action, Action::EdnsLocalSet(previous, _) if previous == code)
-                && active_at(rules, earlier, query, metadata)
-        }) {
-            continue;
-        }
-        if let Some(data) = latest(*code) {
-            write(writer, *code, data)?;
-        }
-    }
-    Ok(())
 }
 
 #[inline(never)]
@@ -1277,11 +1280,46 @@ impl Plugin for Rewrite {
         let mut response_rules = false;
         let mut rewrite_edns = false;
         let mut cname = None;
+        // shortcut: EDNS Queries serialize per Self Lookup depth until slot-based buffers are available.
+        let mut scratch = if self.edns_buffers.is_empty() {
+            None
+        } else {
+            Some(
+                self.edns_buffers[usize::from(cx.self_lookup_depth()).min(10)]
+                    .lock()
+                    .await,
+            )
+        };
+        let (mut state, output, mut matches) = if let Some(scratch) = &mut scratch {
+            let EdnsScratch { wire, matched } = &mut **scratch;
+            matched.fill(0);
+            let (options, output) = wire.split_at_mut(65535);
+            (
+                Some(EdnsState::new(options, &cx.query)),
+                Some(output),
+                Some(matched.as_mut_slice()),
+            )
+        } else {
+            (None, None, None)
+        };
         for (index, rule) in self.rules.iter().enumerate() {
-            let matched = match apply_rule(rule, &mut cx.query, &cx.metadata) {
+            let applied = match &rule.action {
+                Action::EdnsLocal(code, data, action) => {
+                    rewrite_edns = true;
+                    state
+                        .as_mut()
+                        .expect("EDNS scratch allocated")
+                        .apply(*code, data, *action)
+                }
+                _ => apply_rule(rule, &mut cx.query, &cx.metadata),
+            };
+            let matched = match applied {
                 Ok(matched) => matched,
                 Err(error) => return Outcome::Error(error),
             };
+            if let Some(matches) = &mut matches {
+                matches[index] = u8::from(matched);
+            }
             if matched {
                 match &rule.action {
                     Action::Name(_, auto, _, answers) => {
@@ -1291,7 +1329,7 @@ impl Plugin for Rewrite {
                         cname = Some((matcher, to.as_str()));
                         response_rules = true;
                     }
-                    Action::EdnsLocalSet(..) => rewrite_edns = true,
+                    Action::EdnsLocal(..) => {}
                     Action::Ttl(..) | Action::Rcode(..) => response_rules = true,
                     _ => {}
                 }
@@ -1304,19 +1342,9 @@ impl Plugin for Rewrite {
         }
         let rewritten_query = cx.query;
         let outcome = if rewrite_edns {
-            // shortcut: EDNS Queries serialize per Self Lookup depth until slot-based buffers are available.
-            let mut buffer = self.edns_buffers[usize::from(cx.self_lookup_depth()).min(10)]
-                .lock()
-                .await;
-            let wire = &mut *buffer;
-            let len = match edns_query(
-                cx.query,
-                original_query,
-                &cx.metadata,
-                &self.rules,
-                end,
-                wire,
-            ) {
+            let state = state.as_ref().expect("EDNS state allocated");
+            let wire = output.expect("EDNS output allocated");
+            let len = match edns_query(cx.query, &state.bytes[..state.len], wire) {
                 Ok(len) => len,
                 Err(error) => return Outcome::Error(error),
             };

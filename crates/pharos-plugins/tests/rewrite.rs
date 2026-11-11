@@ -222,6 +222,82 @@ impl Next for InspectLocalOption {
     }
 }
 
+struct InspectOptionBytes(&'static [u8]);
+impl Next for InspectOptionBytes {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        assert_eq!(cx.query.opt().unwrap().options().as_bytes(), self.0);
+        Outcome::Drop
+    }
+}
+
+#[tokio::test]
+async fn coredns_edns_local_append_replace_and_unset() {
+    let initial = b"\xff\xee\0\x01a";
+    for (rule, input, expected) in [
+        (
+            "rewrite edns0 local append 0xffee b",
+            &initial[..],
+            &b"\xff\xee\0\x01a\xff\xee\0\x01b"[..],
+        ),
+        (
+            "rewrite edns0 local replace 0xffee b",
+            &initial[..],
+            &b"\xff\xee\0\x01b"[..],
+        ),
+        ("rewrite edns0 local replace 0xffee b", &b""[..], &b""[..]),
+        ("rewrite edns0 local unset 0xffee", &initial[..], &b""[..]),
+    ] {
+        let config = format!(".:53 {{\n {rule}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = "example.".parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        b.question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+        b.record(
+            Section::Additional,
+            NameRef::parse(root.as_wire(), 0).unwrap(),
+            Type::OPT,
+            Class(4096),
+            0,
+            input,
+        )
+        .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, InspectOptionBytes(expected))
+                .await,
+            Outcome::Drop,
+            "{rule}"
+        );
+    }
+}
+
 struct WaitForever;
 impl Next for WaitForever {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {

@@ -77,6 +77,28 @@ fn edns_hex_data_rejects_non_ascii_without_panicking() {
     assert!(result.is_err());
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rewrite_test.go TestNewRule.
+#[test]
+fn coredns_edns_local_setup_cases() {
+    for (args, valid) in [
+        ("local set 65518 abcdefg", true),
+        ("local set 0xffee 0x61626364", true),
+        ("local append 0xffee abcdefg", true),
+        ("local replace 0xffee abcdefg", true),
+        ("local unset 0xffee", true),
+        ("local set invalid-uint abcdefg", false),
+        ("local unset 0xffee extra", false),
+        ("local unset 0xffee revert", false),
+        ("local foo 0xffee abcdefg", false),
+        ("local set 0xffee 0xabcdefg", false),
+    ] {
+        let text = format!(".:53 {{\n rewrite edns0 {args}\n}}");
+        let result =
+            parse("Corefile", &text).and_then(|blocks| configure::<Chain>(&blocks, directives()));
+        assert_eq!(result.is_ok(), valid, "{args}: {result:?}");
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/name_test.go TestNewNameRule.
 #[test]
 fn coredns_name_setup_cases() {
