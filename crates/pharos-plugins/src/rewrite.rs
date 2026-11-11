@@ -282,7 +282,21 @@ impl Rewrite {
                     value
                 };
                 let matcher = match mode.to_ascii_lowercase().as_str() {
-                    "exact" => Matcher::Exact(normal(from)),
+                    "exact" => {
+                        let pattern = normal(to);
+                        if pattern.len() > 10_000 {
+                            return Err(cursor.error("regex pattern too long"));
+                        }
+                        let pattern = regex::Regex::new(&pattern)
+                            .map_err(|_| cursor.error("invalid regex"))?;
+                        let used = (0..=100)
+                            .filter(|index| from.contains(&format!("{{{index}}}")))
+                            .count();
+                        if used > pattern.captures_len() - 1 {
+                            return Err(cursor.error("too many capture groups"));
+                        }
+                        Matcher::Exact(normal(from))
+                    }
                     "prefix" => Matcher::Prefix(normal(from)),
                     "suffix" => Matcher::Suffix(normal(from)),
                     "substring" => Matcher::Substring(normal(from)),

@@ -241,6 +241,16 @@ fn coredns_name_setup_cases() {
     }
 }
 
+#[test]
+fn coredns_exact_name_validates_destination_regex_at_setup() {
+    let text = ".:53 {\n rewrite name example. [invalid.\n}";
+    assert!(
+        parse("Corefile", text)
+            .and_then(|blocks| configure::<Chain>(&blocks, directives()))
+            .is_err()
+    );
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/name_metadata_test.go.
 #[test]
 fn coredns_name_metadata_validation() {
