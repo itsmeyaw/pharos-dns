@@ -1,5 +1,11 @@
 # CoreDNS compatibility
 
+## acl
+
+- For a Query without EDNS, Pharos omits the OPT record from blocked and
+  filtered Responses as required by RFC 6891 §7. CoreDNS sends its EDE OPT
+  even when the Query did not include an OPT record.
+
 ## any
 
 - Like CoreDNS, `any` synthesizes its HINFO before consulting a Backend, even for a CNAME or signed Zone; it cannot include an RRSIG when DO is set (RFC 8482 §4.2).
