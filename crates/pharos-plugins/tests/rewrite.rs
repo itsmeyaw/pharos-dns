@@ -31,6 +31,117 @@ impl pharos_server::Chain for TruncatedAliasChain {
         false
     }
 }
+
+struct MultiAliasChain(pharos_plugins::rewrite::Rewrite);
+impl pharos_server::Chain for MultiAliasChain {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, MultiAliasBackend).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct MultiAliasBackend;
+impl Next for MultiAliasBackend {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let original = q.name.to_string() == "alias.example.";
+        let hop: Name = "hop.example.".parse().unwrap();
+        let old: Name = "old.example.".parse().unwrap();
+        let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        b.question(q.name, q.qtype, q.qclass).unwrap();
+        if original {
+            b.record_with(Section::Answer, q.name, Type::CNAME, Class::IN, 30, |w| {
+                w.write_name(NameRef::parse(hop.as_wire(), 0).unwrap())
+            })
+            .unwrap();
+            b.record_with(
+                Section::Answer,
+                NameRef::parse(hop.as_wire(), 0).unwrap(),
+                Type::CNAME,
+                Class::IN,
+                40,
+                |w| w.write_name(NameRef::parse(old.as_wire(), 0).unwrap()),
+            )
+            .unwrap();
+            b.record(
+                Section::Answer,
+                NameRef::parse(old.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+                50,
+                &[192, 0, 2, 99],
+            )
+            .unwrap();
+        } else {
+            assert_eq!(q.name.to_string(), "new.example.");
+            let address = if q.qtype == Type::AAAA {
+                &b"\x20\x01\x0d\xb8\0\0\0\0\0\0\0\0\0\0\0\x01"[..]
+            } else {
+                &b"\xc0\0\x02\x01"[..]
+            };
+            b.record(Section::Answer, q.name, q.qtype, Class::IN, 60, address)
+                .unwrap();
+        }
+        let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn coredns_cname_chain_keeps_prior_aliases_and_query_type() {
+    let config = ".:53 {\n rewrite cname old.example. new.example.\n}";
+    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(MultiAliasChain(chain.rewrite.take().unwrap())),
+        vec![],
+    );
+    let server = pharos_server::Server::new(router, key);
+    let name: Name = "alias.example.".parse().unwrap();
+    for qtype in [Type::A, Type::AAAA] {
+        let mut wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        b.question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, Class::IN)
+            .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            pharos_server::Handler::handle(
+                &server,
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+            pharos_server::Action::Respond
+        );
+        let message = Message::parse(&response).unwrap();
+        let mut answers = message.answers();
+        let pharos_proto::Rdata::Cname(first) = answers.next().unwrap().data().unwrap() else {
+            panic!("expected CNAME")
+        };
+        assert_eq!(first.to_string(), "hop.example.");
+        let pharos_proto::Rdata::Cname(second) = answers.next().unwrap().data().unwrap() else {
+            panic!("expected CNAME")
+        };
+        assert_eq!(second.to_string(), "new.example.");
+        let address = answers.next().unwrap();
+        assert_eq!(address.rtype, qtype);
+        assert_eq!(address.name.to_string(), "new.example.");
+        assert!(answers.next().is_none());
+    }
+}
 struct TruncatedAliasBackend;
 impl Next for TruncatedAliasBackend {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
