@@ -1,5 +1,7 @@
 //! Limit the EDNS UDP payload advertised to downstream Plugins.
 
+pub(crate) mod setup;
+
 use pharos_corefile::{Cursor, Error as CorefileError};
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
 

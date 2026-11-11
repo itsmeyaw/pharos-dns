@@ -614,11 +614,7 @@ fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
     Ok(())
 }
 
-#[cfg(feature = "plugin-bufsize")]
-fn setup_bufsize(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.bufsize = Some(bufsize::Bufsize::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-header")]
 fn setup_header(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

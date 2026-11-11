@@ -90,7 +90,7 @@ fn main() {
             "chaos" => "setup_chaos",
             "cache" => "setup_cache",
             "bind" => "bind::setup::setup",
-            "bufsize" => "setup_bufsize",
+            "bufsize" => "bufsize::setup::setup",
             "header" => "setup_header",
             "minimal" => "setup_minimal",
             "multisocket" => "setup_multisocket",
