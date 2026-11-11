@@ -101,7 +101,7 @@ pub fn servers_with_registry(
     blocks: Vec<BlockContext<Chain>>,
     metrics: pharos_server::metrics::Registry,
 ) -> io::Result<(Servers, Lifecycle)> {
-    let mut groups: HashMap<ListenerKey, Router<Arc<Chain>>> = HashMap::new();
+    let mut groups: HashMap<ListenerKey, (Router<Arc<Chain>>, Option<usize>)> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
@@ -221,6 +221,10 @@ pub fn servers_with_registry(
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             cache.set_metrics(&metrics, &listeners);
         }
+        #[cfg(feature = "plugin-multisocket")]
+        let workers = block.config.multisocket.flatten();
+        #[cfg(not(feature = "plugin-multisocket"))]
+        let workers = None;
         let chain = Arc::new(block.config);
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &chain.cache {
@@ -241,17 +245,27 @@ pub fn servers_with_registry(
             chain.collect_readiness(&ready_state);
         }
         for (listener, domain) in routes {
-            groups.entry(listener).or_default().add(
-                listener,
-                domain,
-                (!empty).then(|| Arc::clone(&chain)),
-                vec![],
-            );
+            groups
+                .entry(listener)
+                .or_insert_with(|| (Router::default(), workers))
+                .0
+                .add(
+                    listener,
+                    domain,
+                    (!empty).then(|| Arc::clone(&chain)),
+                    vec![],
+                );
         }
     }
     let servers = groups
         .into_iter()
-        .map(|(key, router)| (key, Server::with_registry(router, key, metrics.clone())))
+        .map(|(key, (router, workers))| {
+            let mut server = Server::with_registry(router, key, metrics.clone());
+            if let Some(workers) = workers {
+                server.udp_workers = workers;
+            }
+            (key, server)
+        })
         .collect();
     #[cfg(feature = "plugin-health")]
     for (address, lameduck) in health_addresses {

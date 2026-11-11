@@ -18,6 +18,71 @@ impl Drop for Process {
 }
 
 #[test]
+fn multisocket_serves_udp_and_tcp() {
+    let dir = std::env::temp_dir().join(format!("pharos-multisocket-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::write(
+        dir.join("Corefile"),
+        format!(".:{port} {{\n multisocket 3\n whoami\n}}\n"),
+    )
+    .unwrap();
+    let pidfile = dir.join("pid");
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_pharos"))
+            .current_dir(&dir)
+            .arg("--pidfile")
+            .arg(&pidfile)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !pidfile.exists() {
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "server exited early"
+        );
+        assert!(Instant::now() < deadline, "server did not start");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let query = [
+        0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1,
+    ];
+    let address = ("127.0.0.1", port);
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    udp.send_to(&query, address).unwrap();
+    let mut response = [0; 1024];
+    let n = udp.recv(&mut response).unwrap();
+    assert!(n > 12 && response[..n].windows(4).any(|w| w == b"_udp"));
+    let mut tcp = TcpStream::connect(address).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    tcp.write_all(&(query.len() as u16).to_be_bytes()).unwrap();
+    tcp.write_all(&query).unwrap();
+    let mut len = [0; 2];
+    tcp.read_exact(&mut len).unwrap();
+    let mut response = vec![0; u16::from_be_bytes(len) as usize];
+    tcp.read_exact(&mut response).unwrap();
+    assert!(response.windows(4).any(|w| w == b"_tcp"));
+    drop(tcp);
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &process.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(process.0.wait().unwrap().code(), Some(0));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
     fn http(port: u16, path: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();

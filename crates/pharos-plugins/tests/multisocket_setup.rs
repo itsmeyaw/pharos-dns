@@ -33,3 +33,17 @@ fn setup_accepts_socket_counts_and_rejects_invalid_directives() {
         );
     }
 }
+
+#[test]
+fn first_server_block_sets_each_listeners_count() {
+    let input = "first.example:1053 {\n multisocket 3\n whoami\n}\nsecond.example:1053 {\n multisocket 5\n whoami\n}\nthird.example:1054 {\n multisocket 2\n whoami\n}";
+    let blocks = parse("Corefile", input).unwrap();
+    let (servers, _) =
+        pharos_plugins::servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    for (key, server) in servers {
+        assert_eq!(
+            server.udp_workers,
+            if key.address.port() == 1053 { 3 } else { 2 }
+        );
+    }
+}

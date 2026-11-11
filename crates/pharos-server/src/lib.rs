@@ -354,6 +354,10 @@ pub enum Action {
 /// Handlers must not block the runtime; TCP Queries on a connection may run
 /// concurrently.
 pub trait Handler: Send + Sync + 'static {
+    /// Number of UDP worker sockets for this Listener.
+    fn udp_workers(&self) -> usize {
+        quota::worker_count()
+    }
     /// Whether this HINFO Query must run concurrently with UDP reception.
     fn parallel_query(&self, _query: &[u8], _peer: SocketAddr) -> Option<watch::Receiver<bool>> {
         None
@@ -387,18 +391,19 @@ pub struct Listener {
 
 impl Listener {
     pub async fn bind<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
-        Self::bind_with_ipv6(address, handler, bind_ipv6_dual, udp::bind).await
+        let workers = handler.udp_workers();
+        Self::bind_with_ipv6(address, handler, workers, bind_ipv6_dual, udp::bind).await
     }
 
     async fn bind_with_ipv6<H: Handler>(
         address: SocketAddr,
         handler: H,
+        workers: usize,
         bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
         bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
     ) -> io::Result<Self> {
         let wildcard = address.is_ipv6() && address.ip().is_unspecified();
         let mut ipv4_only = false;
-        let workers = quota::worker_count();
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
         let mut attempts = if address.port() == 0 { 16 } else { 1 };
         let (tcp, address, sockets) = loop {
@@ -568,6 +573,27 @@ mod wildcard_tests {
         }
     }
 
+    #[tokio::test]
+    async fn listener_binds_the_requested_number_of_udp_sockets() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static BINDS: AtomicUsize = AtomicUsize::new(0);
+        fn counting_bind(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
+            BINDS.fetch_add(1, Ordering::SeqCst);
+            udp::bind(address)
+        }
+        let listener = Listener::bind_with_ipv6(
+            "127.0.0.1:0".parse().unwrap(),
+            Echo,
+            3,
+            bind_ipv6_dual,
+            counting_bind,
+        )
+        .await
+        .unwrap();
+        assert_eq!(BINDS.load(Ordering::SeqCst), 3);
+        listener.shutdown().await.unwrap();
+    }
+
     async fn assert_ipv4_fallback(listener: Listener) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         assert!(listener.local_addr().is_ipv4());
@@ -614,7 +640,7 @@ mod wildcard_tests {
             Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT))
         }
         let listener =
-            Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, unavailable, udp::bind)
+            Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, 1, unavailable, udp::bind)
                 .await
                 .unwrap();
         assert_ipv4_fallback(listener).await;
@@ -636,10 +662,15 @@ mod wildcard_tests {
                 udp::bind(address)
             }
         }
-        let listener =
-            Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, bind_ipv6_dual, unavailable)
-                .await
-                .unwrap();
+        let listener = Listener::bind_with_ipv6(
+            "[::]:0".parse().unwrap(),
+            Echo,
+            1,
+            bind_ipv6_dual,
+            unavailable,
+        )
+        .await
+        .unwrap();
         assert!(TRIED_IPV6_UDP.load(Ordering::Relaxed));
         assert_ipv4_fallback(listener).await;
     }
@@ -778,6 +809,9 @@ impl ListenerRegistry {
 struct Swappable<H>(Arc<ArcSwap<H>>);
 
 impl<H: Handler> Handler for Swappable<H> {
+    fn udp_workers(&self) -> usize {
+        self.0.load().udp_workers()
+    }
     fn parallel_query(&self, query: &[u8], peer: SocketAddr) -> Option<watch::Receiver<bool>> {
         self.0.load().parallel_query(query, peer)
     }
