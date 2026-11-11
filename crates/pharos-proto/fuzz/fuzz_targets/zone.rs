@@ -54,6 +54,34 @@ fn has_generate(zone: &[u8]) -> bool {
         .any(|line| line.to_ascii_uppercase().starts_with(b"$GENERATE"))
 }
 
+fn without_comments(zone: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(zone.len());
+    let (mut quoted, mut escaped, mut comment) = (false, false, false);
+    // RFC 1035 §5.1: unquoted, unescaped semicolons start comments through the line end.
+    for &b in zone {
+        if comment {
+            if b == b'\n' {
+                comment = false;
+                result.push(b);
+            }
+        } else if escaped {
+            result.push(b);
+            escaped = false;
+        } else if b == b'\\' {
+            result.push(b);
+            escaped = true;
+        } else if b == b'"' {
+            result.push(b);
+            quoted = !quoted;
+        } else if b == b';' && !quoted {
+            comment = true;
+        } else {
+            result.push(b);
+        }
+    }
+    result
+}
+
 // miekg/dns re-parses a $GENERATE template without a final newline and accepts an
 // unterminated quote there (documented deviations).
 fn generate_line_error(zone: &[u8], error: &str) -> bool {
@@ -113,8 +141,8 @@ fuzz_target!(|zone: &[u8]| {
         assert_eq!(actual, "reject\n", "miekg/dns: {expected}");
         return;
     }
-    // Documented deviation: miekg/dns needs a blank before ';' to see a type mnemonic.
-    if actual != expected && expected == "reject\n" && zone.contains(&b';') {
+    // Documented deviations: comments can interfere with mnemonic recognition.
+    if actual.starts_with("accept\n") && expected == "reject\n" && zone.contains(&b';') {
         let spaced: Vec<u8> = zone
             .iter()
             .flat_map(|&b| if b == b';' { vec![b' ', b';'] } else { vec![b] })
@@ -124,6 +152,14 @@ fuzz_target!(|zone: &[u8]| {
             spaced_expected = oracle.parse(&[&spaced[..], b"\n"].concat());
         }
         if spaced_expected == actual {
+            return;
+        }
+        let uncommented = without_comments(zone);
+        let mut uncommented_expected = oracle.parse(&uncommented);
+        if uncommented_expected != actual && !uncommented.ends_with(b"\n") {
+            uncommented_expected = oracle.parse(&[&uncommented[..], b"\n"].concat());
+        }
+        if uncommented_expected == actual {
             return;
         }
     }

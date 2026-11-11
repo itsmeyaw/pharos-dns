@@ -197,6 +197,11 @@ fn comment_may_touch_the_type() {
         parse(b"N 1 ( TXT;c\nx )\n"),
         Ok(vec![(16, b"\x01x".to_vec())])
     );
+    // RFC 1035 §3.3.14: a TXT character-string may contain a class mnemonic.
+    assert_eq!(
+        parse(b"a ( IN TXT ;c\nIN )\n"),
+        Ok(vec![(16, b"\x02IN".to_vec())])
+    );
 }
 
 #[test]
