@@ -2907,6 +2907,60 @@ async fn coredns_reverter_restores_a_missing_question() {
     assert_eq!(message.answers().next().unwrap().ttl, 30);
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/reverter_test.go TestResponseReverterRestoresMissingQuestion.
+#[tokio::test]
+async fn coredns_reverter_restores_missing_question_and_answer_name() {
+    let config = ".:53 {\n rewrite name suffix .example.org .example.net answer auto\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "service.example.org.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, NoQuestionAnswer)
+            .await,
+        Outcome::Response
+    );
+    let response = Message::parse(cx.response).unwrap();
+    let question = response.questions().next().unwrap();
+    assert_eq!(
+        (question.name.to_string().as_str(), question.qtype),
+        ("service.example.org.", Type::A)
+    );
+    assert_eq!(
+        response.answers().next().unwrap().name.to_string(),
+        "service.example.org."
+    );
+}
+
 #[tokio::test]
 async fn coredns_continue_applies_and_reverts_names_in_order() {
     let config = ".:53 {\n rewrite continue name a.example. b.example.\n rewrite name b.example. c.example.\n}";
