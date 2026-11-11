@@ -11,3 +11,5 @@ go run /path/to/pharos/crates/pharos-dnssec/tests/interop/verify.go \
 To regenerate vectors, run `cargo test -p pharos-dnssec --test sign emit_miekg_dns_verification_vectors -- --nocapture` and retain only the `PHAROS_SIGN_VECTOR` lines. The Go verifier is not part of the Rust build.
 
 `generated_zone_verifies_with_ldns_when_available` additionally verifies a complete signed Zone if `ldns-verify-zone` is installed.
+
+The `Kpharos-test.example` fixtures were generated with `ldns-keygen -k` using ED25519 and 2048-bit RSASHA256. Their keys are public test data only.

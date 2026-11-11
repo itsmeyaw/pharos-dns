@@ -5,10 +5,41 @@ use aws_lc_rs::{
     signature::{self, KeyPair as _},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use pharos_dnssec::keys::{KeyPair, PrivateKey, parse_key_pair, parse_pkcs8};
+use pharos_dnssec::{
+    digest::{DigestType, ds_digest, key_tag},
+    keys::{KeyPair, PrivateKey, parse_key_pair, parse_pkcs8},
+};
 
 const PUBLIC: &str = include_str!("fixtures/Kmiek.nl.+013+59725.key");
 const PRIVATE: &str = include_str!("fixtures/Kmiek.nl.+013+59725.private");
+
+#[test]
+fn loads_ldns_keygen_bind_files_and_matches_ds() {
+    for (public, private, tag, digest) in [
+        (
+            include_str!("fixtures/Kpharos-test.example.+008+39227.key"),
+            include_str!("fixtures/Kpharos-test.example.+008+39227.private"),
+            39227,
+            "22d72e21f1d953c88bf6a01165d711b5f665fc5d3358e5e63527c5807c4664fa",
+        ),
+        (
+            include_str!("fixtures/Kpharos-test.example.+015+21336.key"),
+            include_str!("fixtures/Kpharos-test.example.+015+21336.private"),
+            21336,
+            "da8b01e8f004d794fed8b169294ab6eea98d2322b8757c8f61f1c1fbd34157b8",
+        ),
+    ] {
+        let pair = parse_key_pair(public, private).unwrap();
+        let mut wire = pair.public.flags.to_be_bytes().to_vec();
+        wire.extend_from_slice(&[pair.public.protocol, pair.public.algorithm]);
+        wire.extend_from_slice(&pair.public.public_key);
+        assert_eq!(key_tag(&wire), Some(tag));
+        let actual = ds_digest(&pair.public.owner, &wire, DigestType::Sha256);
+        let actual: String = actual.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(actual, digest);
+        assert!(parse_pkcs8(public, &pair.private.to_pkcs8_der().unwrap()).is_ok());
+    }
+}
 
 #[test]
 fn loads_coredns_ecdsa_key_pair_and_signs() {
