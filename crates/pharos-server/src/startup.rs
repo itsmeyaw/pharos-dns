@@ -46,6 +46,7 @@ fn preferred(domain: &str) -> bool {
     let Some(domain) = domain.strip_suffix('.') else {
         return false;
     };
+    // RFC 1035 §2.3.1: preferred labels start with a letter and use letters, digits, or hyphens.
     domain.split('.').all(|label| {
         let bytes = label.as_bytes();
         bytes.first().is_some_and(u8::is_ascii_alphabetic)
