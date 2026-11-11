@@ -25,6 +25,8 @@ pub mod bufsize;
 pub mod cache;
 #[cfg(feature = "plugin-chaos")]
 pub mod chaos;
+#[cfg(feature = "plugin-dns64")]
+pub mod dns64;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 #[cfg(feature = "plugin-header")]
@@ -685,6 +687,12 @@ fn setup_acl(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result
         .map(|key| key.domain.as_str())
         .collect::<Vec<_>>();
     block.config.acl = Some(acl::Acl::parse(cursor, &domains)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-dns64")]
+fn setup_dns64(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.dns64 = Some(dns64::Dns64::parse(cursor)?);
     Ok(())
 }
 

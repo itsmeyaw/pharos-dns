@@ -23,6 +23,7 @@ fn main() {
     for name in &enabled {
         let ty = match *name {
             "acl" => "acl::Acl",
+            "dns64" => "dns64::Dns64",
             "any" => "any::Any",
             "chaos" => "chaos::Chaos",
             "cache" => "cache::Cache",
@@ -55,6 +56,7 @@ fn main() {
     for name in &enabled {
         let setup = match *name {
             "acl" => "setup_acl",
+            "dns64" => "setup_dns64",
             "any" => "setup_any",
             "chaos" => "setup_chaos",
             "cache" => "setup_cache",
