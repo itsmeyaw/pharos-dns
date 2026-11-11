@@ -582,15 +582,7 @@ impl pharos_server::Plugin for Unimplemented {
 
 
 
-#[cfg(feature = "plugin-whoami")]
-fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    cursor.next();
-    if cursor.next_arg() {
-        return Err(cursor.arg_err());
-    }
-    block.config.whoami = Some(whoami::Whoami);
-    Ok(())
-}
+
 
 
 

@@ -94,7 +94,7 @@ fn main() {
             "header" => "header::setup::setup",
             "minimal" => "minimal::setup::setup",
             "multisocket" => "multisocket::setup::setup",
-            "whoami" => "setup_whoami",
+            "whoami" => "whoami::setup::setup",
             "log" => "log::setup::setup",
             "metadata" => "metadata::setup::setup",
             "loop" => "r#loop::setup::setup",

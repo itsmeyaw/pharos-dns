@@ -1,3 +1,5 @@
+pub(crate) mod setup;
+
 use pharos_proto::{Class, MessageBuilder, NameRef, Opcode, Section, Type};
 use pharos_server::{Context, Error, Outcome, Protocol};
 use std::net::IpAddr;
