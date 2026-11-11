@@ -1107,6 +1107,156 @@ impl Next for InspectQuestion {
     }
 }
 
+struct InspectFullQuestion(&'static str, Type, Class);
+impl Next for InspectFullQuestion {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        assert_eq!(
+            (q.name.to_string().as_str(), q.qtype, q.qclass),
+            (self.0, self.1, self.2)
+        );
+        Outcome::Drop
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rewrite_test.go TestRewrite.
+#[tokio::test]
+async fn coredns_chained_rule_question_rows() {
+    let config = r".:53 {
+ rewrite name from.nl. to.nl.
+ rewrite name regex (core)\.(dns)\.(rocks)\.(nl) {2}.{1}.{3}.{4} answer name (dns)\.(core)\.(rocks)\.(nl) {2}.{1}.{3}.{4}
+ rewrite name exact from.exact.nl. to.nl.
+ rewrite name prefix prefix to
+ rewrite name suffix .suffix. .nl.
+ rewrite name substring from.substring to
+ rewrite name regex (f.*m)\.regex\.(nl) to.{2}
+ rewrite continue name regex consul\.(rocks) core.dns.{1}
+ rewrite name core.dns.rocks to.nl.
+ rewrite continue class HS CH
+ rewrite class CH IN
+ rewrite type ANY HINFO
+}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    for (incoming, from_type, from_class, expected, to_type, to_class) in [
+        ("from.nl.", Type::A, Class::IN, "to.nl.", Type::A, Class::IN),
+        ("a.nl.", Type::A, Class::IN, "a.nl.", Type::A, Class::IN),
+        ("a.nl.", Type::A, Class::CH, "a.nl.", Type::A, Class::IN),
+        (
+            "a.nl.",
+            Type::ANY,
+            Class::IN,
+            "a.nl.",
+            Type::HINFO,
+            Class::IN,
+        ),
+        (
+            "from.nl.",
+            Type::ANY,
+            Class::IN,
+            "to.nl.",
+            Type::ANY,
+            Class::IN,
+        ),
+        (
+            "from.exact.nl.",
+            Type::A,
+            Class::IN,
+            "to.nl.",
+            Type::A,
+            Class::IN,
+        ),
+        (
+            "prefix.nl.",
+            Type::A,
+            Class::IN,
+            "to.nl.",
+            Type::A,
+            Class::IN,
+        ),
+        (
+            "to.suffix.",
+            Type::A,
+            Class::IN,
+            "to.nl.",
+            Type::A,
+            Class::IN,
+        ),
+        (
+            "from.substring.nl.",
+            Type::A,
+            Class::IN,
+            "to.nl.",
+            Type::A,
+            Class::IN,
+        ),
+        (
+            "from.regex.nl.",
+            Type::A,
+            Class::IN,
+            "to.nl.",
+            Type::A,
+            Class::IN,
+        ),
+        (
+            "consul.rocks.",
+            Type::A,
+            Class::IN,
+            "to.nl.",
+            Type::A,
+            Class::IN,
+        ),
+        ("a.nl.", Type::ANY, Class::CH, "a.nl.", Type::ANY, Class::IN),
+        ("a.nl.", Type::ANY, Class::HS, "a.nl.", Type::ANY, Class::IN),
+        (
+            "core.dns.rocks.nl.",
+            Type::A,
+            Class::IN,
+            "dns.core.rocks.nl.",
+            Type::A,
+            Class::IN,
+        ),
+    ] {
+        let name: Name = incoming.parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                from_type,
+                from_class,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, InspectFullQuestion(expected, to_type, to_class))
+                .await,
+            Outcome::Drop,
+            "{incoming}"
+        );
+    }
+}
+
 struct InspectLocalOption;
 impl Next for InspectLocalOption {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
