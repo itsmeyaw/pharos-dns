@@ -101,6 +101,61 @@ async fn api(
     (format!("http://{address}"), gate, task)
 }
 
+// Derived from CoreDNS v1.15.0 plugin/kubernetes/metadata_test.go TestMetadataPodsVerified.
+#[cfg(all(feature = "plugin-metadata", feature = "plugin-whoami"))]
+#[tokio::test]
+async fn verified_client_pod_metadata_is_collected_outside_kubernetes_domains() {
+    use pharos_server::{Context, Metadata, Transport};
+    let (endpoint, _, task) = api(false).await;
+    let text = format!(
+        ". {{\n metadata\n kubernetes cluster.local {{\n endpoint {endpoint}\n pods verified\n startup_timeout 3s\n }}\n whoami\n}}"
+    );
+    let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    chain.lifecycle.run(Phase::Startup).await.unwrap();
+    let name: Name = "example.com.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [None; 18];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "10.240.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    chain.serve(&mut cx).await;
+    assert_eq!(
+        cx.metadata.get("kubernetes/client-namespace"),
+        Some("podns")
+    );
+    assert_eq!(cx.metadata.get("kubernetes/client-pod-name"), Some("foo"));
+    assert_eq!(
+        cx.metadata
+            .get("kubernetes/client-label/app.kubernetes.io/name"),
+        Some("foo")
+    );
+    assert_eq!(cx.metadata.get("kubernetes/client-label/bar"), Some("baz"));
+    chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+    task.abort();
+}
+
 #[derive(Clone)]
 struct Case {
     id: &'static str,

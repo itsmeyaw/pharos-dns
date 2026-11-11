@@ -54,6 +54,10 @@ They do not compare randomized order or weight distributions.
 The `whoami-log` scenario compares Responses, not log output. The current whoami
 Responses cannot exceed the 512-octet UDP minimum for these short Queries, so
 truncation is not covered.
+The metadata scenarios compare DNS Responses with inherited and explicit Domains.
+The README mentions `rewrite` without a concrete Corefile; that Plugin is not
+implemented yet, so the scenarios use Kubernetes and whoami instead. Metadata
+values and log formatting are checked by Rust tests, not the differential harness.
 The `loop` scenario compares Responses for a non-looping configuration. The
 looping README example is covered by a binary exit test instead: this harness
 expects both processes to remain available and does not compare exit codes.

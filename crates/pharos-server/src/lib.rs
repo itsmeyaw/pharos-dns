@@ -141,6 +141,12 @@ pub struct Metadata<'a> {
     inline_name: Option<&'static str>,
     inline_value: [u8; 64],
     inline_len: usize,
+    // shortcut: 12 copied labels and 1 KiB suffice for Kubernetes; expand for more providers.
+    copied: [Option<(&'static str, usize, usize)>; 12],
+    copied_data: [u8; 1024],
+    copied_len: usize,
+    source: Option<Arc<dyn MetadataSource>>,
+    enabled: bool,
     self_lookup: Option<SelfLookupState<'a>>,
 }
 
@@ -151,8 +157,28 @@ impl<'a> Metadata<'a> {
             inline_name: None,
             inline_value: [0; 64],
             inline_len: 0,
+            copied: [None; 12],
+            copied_data: [0; 1024],
+            copied_len: 0,
+            source: None,
+            enabled: true,
             self_lookup: None,
         }
+    }
+
+    /// Retain an existing shared source of Metadata without allocating per Query.
+    pub fn set_source(&mut self, source: Arc<dyn MetadataSource>) {
+        self.source = Some(source);
+    }
+
+    /// Enable public Plugin Metadata for the current Server Block.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Construct fresh Metadata while retaining detached Self Lookup routing.
@@ -170,25 +196,18 @@ impl<'a> Metadata<'a> {
 
     /// Insert or replace a named value; returns false when no slot is free.
     pub fn insert(&mut self, name: &'a str, value: &'a str) -> bool {
-        if let Some(slot) = self
+        let slot = self
             .slots
-            .iter_mut()
-            .find(|slot| slot.is_some_and(|(existing, _)| existing == name))
-        {
-            *slot = Some((name, value));
-            if self.inline_name == Some(name) {
-                self.inline_name = None;
-            }
-            return true;
+            .iter()
+            .position(|slot| slot.is_some_and(|(existing, _)| existing == name))
+            .or_else(|| self.slots.iter().position(Option::is_none));
+        let Some(slot) = slot else { return false };
+        self.remove_copied(name);
+        if self.inline_name == Some(name) {
+            self.inline_name = None;
         }
-        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
-            *slot = Some((name, value));
-            if self.inline_name == Some(name) {
-                self.inline_name = None;
-            }
-            return true;
-        }
-        false
+        self.slots[slot] = Some((name, value));
+        true
     }
 
     /// Copy a short value whose lifetime is shorter than the Query's.
@@ -198,6 +217,12 @@ impl<'a> Metadata<'a> {
         {
             return false;
         }
+        self.remove_copied(name);
+        for slot in self.slots.iter_mut() {
+            if slot.is_some_and(|(key, _)| key == name) {
+                *slot = None;
+            }
+        }
         // shortcut: one copied value suffices for forward; add slots for other producers.
         self.inline_name = Some(name);
         self.inline_len = value.len();
@@ -205,8 +230,69 @@ impl<'a> Metadata<'a> {
         true
     }
 
+    /// Copy a value from a temporary Plugin buffer without allocating.
+    pub fn insert_copied(&mut self, name: &'static str, value: &str) -> bool {
+        let previous = self
+            .copied
+            .iter()
+            .flatten()
+            .find(|(key, _, _)| *key == name)
+            .map_or(0, |(_, start, end)| end - start);
+        if value.len() > self.copied_data.len() - (self.copied_len - previous) {
+            return false;
+        }
+        let Some(index) = self
+            .copied
+            .iter()
+            .position(|slot| slot.is_none_or(|(key, _, _)| key == name))
+        else {
+            return false;
+        };
+        self.remove_copied(name);
+        if self.inline_name == Some(name) {
+            self.inline_name = None;
+        }
+        for slot in self.slots.iter_mut() {
+            if slot.is_some_and(|(key, _)| key == name) {
+                *slot = None;
+            }
+        }
+        let end = self.copied_len + value.len();
+        self.copied_data[self.copied_len..end].copy_from_slice(value.as_bytes());
+        self.copied[index] = Some((name, self.copied_len, end));
+        self.copied_len = end;
+        true
+    }
+
+    fn remove_copied(&mut self, name: &str) {
+        let Some(index) = self
+            .copied
+            .iter()
+            .position(|slot| slot.is_some_and(|(key, _, _)| key == name))
+        else {
+            return;
+        };
+        let (_, start, end) = self.copied[index].take().unwrap();
+        self.copied_data.copy_within(end..self.copied_len, start);
+        self.copied_len -= end - start;
+        for (_, other_start, other_end) in self.copied.iter_mut().flatten() {
+            if *other_start >= end {
+                *other_start -= end - start;
+                *other_end -= end - start;
+            }
+        }
+    }
+
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
+        if let Some((_, start, end)) = self
+            .copied
+            .iter()
+            .flatten()
+            .find(|(key, _, _)| *key == name)
+        {
+            return std::str::from_utf8(&self.copied_data[*start..*end]).ok();
+        }
         if self.inline_name == Some(name) {
             return std::str::from_utf8(&self.inline_value[..self.inline_len]).ok();
         }
@@ -214,7 +300,13 @@ impl<'a> Metadata<'a> {
             .iter()
             .flatten()
             .find_map(|(key, value)| (*key == name).then_some(*value))
+            .or_else(|| self.source.as_ref().and_then(|source| source.get(name)))
     }
+}
+
+/// A shared source whose values remain valid for a Query.
+pub trait MetadataSource: Send + Sync {
+    fn get(&self, label: &str) -> Option<&str>;
 }
 
 /// Borrowed Query state and reusable, preallocated Response buffer.

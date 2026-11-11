@@ -48,6 +48,8 @@ pub mod log;
 pub mod log_format;
 #[cfg(feature = "plugin-loop")]
 pub mod r#loop;
+#[cfg(feature = "plugin-metadata")]
+pub mod metadata;
 #[cfg(feature = "plugin-prometheus")]
 pub mod prometheus;
 #[cfg(feature = "plugin-ready")]
@@ -475,6 +477,17 @@ fn setup_cache(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
 #[cfg(feature = "plugin-log")]
 fn setup_log(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.log = Some(log::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-metadata")]
+fn setup_metadata(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    let domains = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.as_str())
+        .collect::<Vec<_>>();
+    block.config.metadata = Some(metadata::parse(cursor, &domains)?);
     Ok(())
 }
 

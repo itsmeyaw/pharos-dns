@@ -140,6 +140,14 @@
 - Zone Transfer streams are not yet served and are logged as a Message-less outcome.
 - The formatter cannot expand compressed names in unsupported RDATA when calculating Message size.
 
+## metadata
+
+- Invalid configured Domains that cannot be normalized or represented as DNS names are ignored; CoreDNS retains some malformed Domain strings.
+- Query-derived Kubernetes values use ASCII lowercasing and require UTF-8; CoreDNS uses Go's Unicode lowercasing and DNS presentation escaping.
+- The fixed copied-value buffer is limited to 12 labels and 1,024 bytes; CoreDNS's map is unbounded. Kubernetes client Pod labels use a shared snapshot and are not subject to this limit.
+- Collection currently runs after routing, so future View filters will need to collect Metadata before evaluating expressions, as CoreDNS does.
+- Kubernetes multicluster labels use the matched Kubernetes Domain; CoreDNS's server collection leaves the request's Zone empty, so it may parse these labels as ordinary service/port names.
+
 ## loop
 
 - The `loop` Plugin probes only the first Domain in a Server Block at startup and after Reload, as CoreDNS does.

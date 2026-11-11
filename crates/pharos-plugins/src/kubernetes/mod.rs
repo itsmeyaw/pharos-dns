@@ -55,6 +55,84 @@ impl std::fmt::Debug for Kubernetes {
 }
 
 impl Kubernetes {
+    #[cfg(feature = "plugin-metadata")]
+    pub(crate) fn collect_metadata(&self, cx: &mut Context<'_>) {
+        if self.config.pod_mode == "verified" {
+            let ip = scratch::IpText::new(cx.client.ip());
+            let store = self.state.cache.read().unwrap().store.clone();
+            if let Some(pod) = store
+                .and_then(|store| store.with_read(|index| index.pod_snapshot_by_ip(ip.as_str())))
+            {
+                cx.metadata.set_source(pod);
+            }
+        }
+        let Some(question) = cx.query.questions().next() else {
+            return;
+        };
+        let Some(zone) = self
+            .zones
+            .iter()
+            .filter(|zone| contains(question.name, zone))
+            .max_by_key(|zone| zone.label_count())
+        else {
+            return;
+        };
+        let mut lower = [0u8; 255];
+        let mut len = 0;
+        for label in question.name.labels() {
+            lower[len] = label.len() as u8;
+            len += 1;
+            for byte in label {
+                lower[len] = byte.to_ascii_lowercase();
+                len += 1;
+            }
+        }
+        let name = NameRef::parse(&lower[..=len], 0).unwrap();
+        let mut labels = [&[][..]; 127];
+        let count = name.labels().count() - zone.label_count();
+        for (slot, label) in labels.iter_mut().zip(name.labels().take(count)) {
+            *slot = label;
+        }
+        let multicluster = self.multicluster_zones.contains(zone);
+        let Some(request) =
+            name::parse_multicluster(&labels[..count], self.config.zonal, multicluster)
+        else {
+            cx.metadata
+                .insert("kubernetes/parse-error", "invalid query name");
+            return;
+        };
+        for (key, value) in [
+            ("kubernetes/port-name", request.port),
+            ("kubernetes/protocol", request.protocol),
+            ("kubernetes/endpoint", request.endpoint),
+            ("kubernetes/service", request.service),
+            ("kubernetes/namespace", request.namespace),
+            ("kubernetes/kind", request.kind),
+        ] {
+            if let Ok(value) = std::str::from_utf8(value) {
+                cx.metadata.insert_copied(key, value);
+            }
+        }
+        if multicluster && let Ok(cluster) = std::str::from_utf8(request.cluster) {
+            cx.metadata.insert_copied("kubernetes/cluster", cluster);
+        }
+        if self.config.zonal {
+            let mut zone = [0u8; 255];
+            let mut used = 0;
+            for label in request.zone {
+                if used > 0 {
+                    zone[used] = b'.';
+                    used += 1;
+                }
+                zone[used..used + label.len()].copy_from_slice(label);
+                used += label.len();
+            }
+            if let Ok(value) = std::str::from_utf8(&zone[..used]) {
+                cx.metadata.insert_copied("kubernetes/zone", value);
+            }
+        }
+    }
+
     pub fn new(config: setup::Config) -> Result<Self, String> {
         Self::with_listen_addresses(config, &[])
     }
