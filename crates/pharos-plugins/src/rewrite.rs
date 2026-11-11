@@ -1661,7 +1661,6 @@ impl Plugin for Rewrite {
         let mut end = self.rules.len();
         let mut response_rules = false;
         let mut rewrite_edns = false;
-        let mut cname = None;
         // shortcut: EDNS Queries serialize per Self Lookup depth until slot-based buffers are available.
         let mut scratch = if self.edns_buffers.is_empty() {
             None
@@ -1713,10 +1712,7 @@ impl Plugin for Rewrite {
                     Action::Name(_, auto, _, answers) => {
                         response_rules |= *auto || !answers.is_empty();
                     }
-                    Action::Cname(matcher, to) => {
-                        cname = Some((matcher, to.as_str()));
-                        response_rules = true;
-                    }
+                    Action::Cname(..) => response_rules = true,
                     Action::Edns(_, _, _, revert) => response_rules |= *revert,
                     Action::Ttl(..) | Action::Rcode(..) => response_rules = true,
                     _ => {}
@@ -1755,28 +1751,40 @@ impl Plugin for Rewrite {
         {
             return Outcome::Error(error);
         }
-        if outcome == Outcome::Response
-            && let Some((matcher, replacement)) = cname
-        {
-            let Ok(response) = Message::parse(cx.response) else {
-                return outcome;
-            };
-            let matched = response.answers().find_map(|rr| {
-                let Ok(Rdata::Cname(value)) = rr.data() else {
-                    return None;
+        if outcome == Outcome::Response {
+            for (index, rule) in self.rules[..end].iter().enumerate().rev() {
+                let Action::Cname(matcher, replacement) = &rule.action else {
+                    continue;
                 };
-                cname_replacement(matcher, replacement, value)
-            });
-            if let Some((from, target)) = matched {
-                let Some(question) = rewritten_query.questions().next() else {
+                if !matches.as_deref().map_or_else(
+                    || active_at(&self.rules, index, original_query, &cx.metadata),
+                    |bits| bits[index] != 0,
+                ) {
+                    continue;
+                }
+                let Ok(response) = Message::parse(cx.response) else {
                     return outcome;
                 };
-                // shortcut: CNAME Self Lookup allocates; remove when issue #86 makes it allocation-free.
-                if let Ok(wire) = cx.self_lookup(&target, question.qtype).await
-                    && let Ok(lookup) = Message::parse(&wire)
-                    && let Err(error) = build_cname_response(cx, lookup, &from, &target)
-                {
-                    return Outcome::Error(error);
+                let matched = response.answers().find_map(|rr| {
+                    let Ok(Rdata::Cname(value)) = rr.data() else {
+                        return None;
+                    };
+                    cname_replacement(matcher, replacement, value)
+                });
+                if let Some((from, target)) = matched {
+                    if cx.self_lookup_depth() > 8 {
+                        continue;
+                    }
+                    let Some(question) = rewritten_query.questions().next() else {
+                        return outcome;
+                    };
+                    // shortcut: CNAME Self Lookup allocates; remove when issue #86 makes it allocation-free.
+                    if let Ok(wire) = cx.self_lookup(&target, question.qtype).await
+                        && let Ok(lookup) = Message::parse(&wire)
+                        && let Err(error) = build_cname_response(cx, lookup, &from, &target)
+                    {
+                        return Outcome::Error(error);
+                    }
                 }
             }
         }
