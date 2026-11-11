@@ -82,9 +82,14 @@ impl Rewrite {
                 return Err(cursor.arg_err());
             };
             if kind.eq_ignore_ascii_case("name") {
-                let (mode, from, to) = match args {
-                    [from, to] => ("exact", from, to),
-                    [mode, from, to] => (mode.as_str(), from, to),
+                let (mode, from, to, extra) = match args {
+                    [from, to] => ("exact", from, to, &[][..]),
+                    [mode, from, to, extra @ ..] => (mode.as_str(), from, to, extra),
+                    _ => return Err(cursor.arg_err()),
+                };
+                let auto = match extra {
+                    [] => false,
+                    [answer, auto] if answer == "answer" && auto == "auto" => true,
                     _ => return Err(cursor.arg_err()),
                 };
                 let normal = |value: &str| {
@@ -117,7 +122,7 @@ impl Rewrite {
                 };
                 rules.push(Rule {
                     matcher,
-                    action: Action::Name(normal(to), mode.eq_ignore_ascii_case("exact")),
+                    action: Action::Name(normal(to), auto || mode.eq_ignore_ascii_case("exact")),
                     stop,
                 });
                 continue;
@@ -308,6 +313,46 @@ fn remap<'a>(
     NameRef::parse(&buffer[..=len], 0).expect("valid remapped name")
 }
 
+fn remap_response<'a>(
+    source: NameRef<'a>,
+    from: NameRef<'_>,
+    to: NameRef<'_>,
+    suffix: Option<(&str, &str)>,
+    buffer: &'a mut [u8; 255],
+) -> NameRef<'a> {
+    let Some((old, new)) = suffix else {
+        return remap(source, from, to, buffer);
+    };
+    let mut text = NameText {
+        bytes: [0; 1024],
+        len: 0,
+    };
+    if write!(text, "{source}").is_err() {
+        return source;
+    }
+    let text = std::str::from_utf8(&text.bytes[..text.len]).expect("DNS presentation is UTF-8");
+    let Some(prefix) = text.strip_suffix(old) else {
+        return source;
+    };
+    let mut rewritten = NameText {
+        bytes: [0; 1024],
+        len: 0,
+    };
+    if rewritten
+        .write_str(prefix)
+        .and_then(|()| rewritten.write_str(new))
+        .is_err()
+    {
+        return source;
+    }
+    let text =
+        std::str::from_utf8(&rewritten.bytes[..rewritten.len]).expect("DNS presentation is UTF-8");
+    match Name::parse_absolute_into(text, buffer) {
+        Ok(wire) => NameRef::parse(wire, 0).expect("validated name"),
+        Err(_) => source,
+    }
+}
+
 impl Plugin for Rewrite {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
         let original_query = cx.query;
@@ -325,6 +370,7 @@ impl Plugin for Rewrite {
         let name = std::str::from_utf8(&name.bytes[..name.len]).expect("DNS presentation is UTF-8");
         let mut end = self.rules.len();
         let mut name_rewritten = false;
+        let mut suffix = None;
         for (index, rule) in self.rules.iter().enumerate() {
             let matched = match rule.action {
                 Action::Type(from, to)
@@ -399,6 +445,9 @@ impl Plugin for Rewrite {
                         .query
                         .with_question_name(NameRef::parse(wire, 0).expect("validated name"));
                     name_rewritten |= auto;
+                    if auto && let Matcher::Suffix(from) = &rule.matcher {
+                        suffix = Some((target.as_str(), from.as_str()));
+                    }
                     true
                 }
                 Action::Name(..) => false,
@@ -503,14 +552,26 @@ impl Plugin for Rewrite {
             ] {
                 for rr in records {
                     let mut owner_buffer = [0; 255];
-                    let owner = remap(rr.name, rewritten.name, original.name, &mut owner_buffer);
+                    let owner = remap_response(
+                        rr.name,
+                        rewritten.name,
+                        original.name,
+                        suffix,
+                        &mut owner_buffer,
+                    );
                     let Ok(data) = rr.data() else {
                         return Outcome::Error(ServerError::InvalidQuery);
                     };
                     let mut value_buffer = [0; 255];
                     macro_rules! map {
                         ($value:expr) => {
-                            remap($value, rewritten.name, original.name, &mut value_buffer)
+                            remap_response(
+                                $value,
+                                rewritten.name,
+                                original.name,
+                                suffix,
+                                &mut value_buffer,
+                            )
                         };
                     }
                     let data = match data {

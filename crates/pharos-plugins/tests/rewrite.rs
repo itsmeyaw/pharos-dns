@@ -187,6 +187,79 @@ impl Next for AliasedAnswer {
     }
 }
 
+struct SuffixAnswer;
+impl Next for SuffixAnswer {
+    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        assert_eq!(q.name.to_string(), "www.internal.");
+        let owner: Name = "other.internal.".parse().unwrap();
+        let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        b.question(q.name, q.qtype, q.qclass).unwrap();
+        b.record(
+            Section::Answer,
+            NameRef::parse(owner.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+            60,
+            &[127, 0, 0, 1],
+        )
+        .unwrap();
+        let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn coredns_suffix_answer_auto_rewrites_entire_suffix() {
+    let config = ".:53 {\n rewrite name suffix .external. .internal. answer auto\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "www.external.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, SuffixAnswer)
+            .await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    assert_eq!(
+        message.questions().next().unwrap().name.to_string(),
+        "www.external."
+    );
+    assert_eq!(
+        message.answers().next().unwrap().name.to_string(),
+        "other.external."
+    );
+}
+
 #[tokio::test]
 async fn coredns_exact_auto_rewrites_subdomain_owners_and_values() {
     let config = ".:53 {\n rewrite name example.com. internal.example.\n}";

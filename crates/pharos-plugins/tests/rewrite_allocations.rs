@@ -45,6 +45,10 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         ("rewrite rcode example. SERVFAIL NOERROR", "example."),
         ("rewrite name example. internal.", "example."),
         ("rewrite name suffix .example. .internal.", "www.example."),
+        (
+            "rewrite name suffix .example. .internal. answer auto",
+            "www.example.",
+        ),
         ("rewrite name prefix www api", "www.example."),
         ("rewrite name substring example internal", "www.example."),
         ("rewrite name other. internal.", "example."),
