@@ -62,6 +62,15 @@ fn canonical_rdata_expands_compressed_names_and_only_folds_domain_fields() {
 }
 
 #[test]
+fn canonical_dname_target_is_lowercase() {
+    let target = name("Target.Example.");
+    assert_eq!(
+        canonical_rdata(&Rdata::Dname(name_ref(&target))).unwrap(),
+        b"\x06target\x07example\0"
+    );
+}
+
+#[test]
 fn nsec_and_svcb_names_preserve_case() {
     let next = name("Next.Example.");
     let next = name_ref(&next);
