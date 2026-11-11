@@ -163,5 +163,11 @@ async fn coredns_dns64_synthesizes_prefixes_through_self_lookup() {
             "{prefix}"
         );
         assert_eq!(answer.ttl, 60);
+        let mut metrics = String::new();
+        server.metrics().encode(&mut metrics);
+        assert!(
+            metrics.contains("pharos_dns64_requests_translated_total{server=\"dns://:53\"} 1"),
+            "{metrics}"
+        );
     }
 }

@@ -60,6 +60,7 @@ struct RegistryInner {
     proxies: Mutex<BTreeMap<(String, String), Arc<Proxy>>>,
     caches: Mutex<BTreeMap<Key, Arc<Cache>>>,
     acl: Mutex<BTreeMap<Key, Arc<[AtomicU64; 4]>>>,
+    dns64: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
     hosts: Mutex<BTreeMap<String, Arc<HostsGauge>>>,
     hosts_timestamp: Arc<AtomicU64>,
     forward: Arc<ForwardCounters>,
@@ -334,6 +335,7 @@ impl Registry {
             proxies: Mutex::new(BTreeMap::new()),
             caches: Mutex::new(BTreeMap::new()),
             acl: Mutex::new(BTreeMap::new()),
+            dns64: Mutex::new(BTreeMap::new()),
             hosts: Mutex::new(BTreeMap::new()),
             hosts_timestamp: Arc::new(AtomicU64::new(0)),
             forward: Arc::new(ForwardCounters::default()),
@@ -391,6 +393,18 @@ impl Registry {
                 .entry((server.into(), zone.into(), view.into()))
                 .or_default(),
         ))
+    }
+
+    /// Resolve the DNS64 counter for a Listener during setup.
+    pub fn dns64(&self, server: &str) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.0
+                .dns64
+                .lock()
+                .unwrap()
+                .entry(server.into())
+                .or_default(),
+        )
     }
 
     pub fn hosts(&self, path: &str) -> HostsMetrics {
@@ -616,6 +630,30 @@ impl Registry {
             }
         }
         drop(acl);
+        let dns64 = self.0.dns64.lock().unwrap();
+        if dns64
+            .values()
+            .any(|counter| counter.load(Ordering::Relaxed) != 0)
+        {
+            header(
+                out,
+                "dns64_requests_translated_total",
+                "Counter of DNS requests translated by dns64.",
+                "counter",
+            );
+            for (server, counter) in dns64.iter() {
+                let count = counter.load(Ordering::Relaxed);
+                if count != 0 {
+                    sample(
+                        out,
+                        "dns64_requests_translated_total",
+                        &[("server", server)],
+                        count,
+                    );
+                }
+            }
+        }
+        drop(dns64);
         let hosts = self.0.hosts.lock().unwrap();
         if !hosts.is_empty() {
             if hosts

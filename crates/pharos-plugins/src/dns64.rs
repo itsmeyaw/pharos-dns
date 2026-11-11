@@ -1,6 +1,12 @@
 //! DNS64 address synthesis.
 
-use std::net::Ipv6Addr;
+use std::{
+    net::{Ipv6Addr, SocketAddr},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{Class, Message, MessageBuilder, Opcode, Rcode, Section, Type};
@@ -12,6 +18,7 @@ pub struct Dns64 {
     prefix_len: u8,
     translate_all: bool,
     allow_ipv4: bool,
+    metrics: Vec<(SocketAddr, Arc<AtomicU64>)>,
 }
 
 impl Dns64 {
@@ -21,6 +28,7 @@ impl Dns64 {
             prefix_len: 96,
             translate_all: false,
             allow_ipv4: false,
+            metrics: Vec::new(),
         };
         while cursor.next() {
             let args = cursor.remaining_args();
@@ -47,6 +55,22 @@ impl Dns64 {
             }
         }
         Ok(result)
+    }
+
+    pub(crate) fn set_metrics(
+        &mut self,
+        registry: &pharos_server::metrics::Registry,
+        listeners: &[pharos_server::ListenerKey],
+    ) {
+        for listener in listeners {
+            let address = listener.address;
+            let server = if address.ip().is_unspecified() {
+                format!("dns://:{}", address.port())
+            } else {
+                format!("dns://{address}")
+            };
+            self.metrics.push((address, registry.dns64(&server)));
+        }
     }
 }
 
@@ -177,7 +201,16 @@ impl Plugin for Dns64 {
             Ok(())
         })();
         match result {
-            Ok(()) => Outcome::Response,
+            Ok(()) => {
+                if let Some((_, counter)) = self
+                    .metrics
+                    .iter()
+                    .find(|(address, _)| *address == cx.local)
+                {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                Outcome::Response
+            }
             Err(error) => Outcome::Error(error),
         }
     }

@@ -155,7 +155,8 @@ pub fn servers_with_registry(
             feature = "plugin-forward",
             feature = "plugin-cache",
             feature = "plugin-local",
-            feature = "plugin-acl"
+            feature = "plugin-acl",
+            feature = "plugin-dns64"
         ))]
         let mut block = block;
         #[cfg(feature = "plugin-forward")]
@@ -265,6 +266,11 @@ pub fn servers_with_registry(
         if let Some(acl) = &mut block.config.acl {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             acl.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-dns64")]
+        if let Some(dns64) = &mut block.config.dns64 {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            dns64.set_metrics(&metrics, &listeners);
         }
         #[cfg(feature = "plugin-multisocket")]
         let workers = block.config.multisocket.flatten();
