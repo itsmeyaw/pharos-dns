@@ -1787,7 +1787,7 @@ impl Plugin for Rewrite {
             code
         };
         if let Outcome::Unanswered(code) = outcome {
-            if !response_rules {
+            if !response_rules && !rewrite_edns {
                 return outcome;
             }
             let code = rewrite_rcode(code.0);
@@ -1800,7 +1800,12 @@ impl Plugin for Rewrite {
                     0
                 }
                 | (code & 15);
-            let Some(question) = original_query.questions().next() else {
+            let response_query = if response_rules {
+                original_query
+            } else {
+                rewritten_query
+            };
+            let Some(question) = response_query.questions().next() else {
                 return Outcome::Error(ServerError::InvalidQuery);
             };
             let Ok(mut builder) = MessageBuilder::new(
@@ -1839,6 +1844,19 @@ impl Plugin for Rewrite {
                 }
             }
             let _ = builder.finish();
+            if rewrite_edns
+                && let (Some(matched), Some(state)) = (matches.as_deref(), &state)
+                && let Err(error) = revert_edns_response(
+                    cx,
+                    original_query,
+                    &state.bytes[..state.len],
+                    &self.rules,
+                    matched,
+                    end,
+                )
+            {
+                return Outcome::Error(error);
+            }
             return Outcome::Response;
         }
         if outcome == Outcome::Response

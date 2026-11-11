@@ -28,6 +28,12 @@ impl Next for DropNext {
         Outcome::Drop
     }
 }
+struct FailNext;
+impl Next for FailNext {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+        Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL)
+    }
+}
 impl Next for Answer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let query = cx.query;
@@ -186,5 +192,19 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         (stats.allocations, stats.reallocations),
         (0, 0),
         "contended EDNS scratch"
+    );
+    drop(second_future);
+    let region = Region::new(GLOBAL);
+    let future = plugin.serve(&mut second, FailNext);
+    let mut future = std::pin::pin!(future);
+    assert_eq!(
+        future.as_mut().poll(&mut task),
+        Poll::Ready(Outcome::Response)
+    );
+    let stats = region.change();
+    assert_eq!(
+        (stats.allocations, stats.reallocations),
+        (0, 0),
+        "EDNS unanswered response"
     );
 }
