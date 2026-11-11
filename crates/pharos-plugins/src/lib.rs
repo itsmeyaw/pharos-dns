@@ -691,11 +691,7 @@ fn setup_multisocket(
     Ok(())
 }
 
-#[cfg(feature = "plugin-forward")]
-fn setup_forward(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.forward = Some(forward::Forward::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-health")]
 fn setup_health(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

@@ -1,7 +1,7 @@
 //! Forward Queries to configured Upstreams.
 
 mod resolve;
-mod setup;
+pub(crate) mod setup;
 
 use std::sync::{
     Mutex,

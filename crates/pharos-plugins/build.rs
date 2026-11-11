@@ -100,7 +100,7 @@ fn main() {
             "loop" => "setup_loop",
             "prometheus" => "setup_prometheus",
             "ready" => "setup_ready",
-            "forward" => "setup_forward",
+            "forward" => "forward::setup::setup",
             "health" => "setup_health",
             "hosts" => "setup_hosts",
             "loadbalance" => "setup_loadbalance",
