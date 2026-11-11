@@ -1,0 +1,7 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    autopath my-resolv.conf
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+    }
+}

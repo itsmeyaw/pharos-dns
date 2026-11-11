@@ -75,6 +75,10 @@ from loopback, so non-loopback allow and drop branches require Rust tests.
 The dns64 README scenarios use an inline hosts Backend. The harness sends from
 IPv4 loopback, so synthesis without `allow_ipv4` is covered by Rust tests.
 The siit README scenario uses an inline hosts Backend to exercise the prefix.
+The autopath file example uses the Kubernetes fixture to supply NXDOMAIN and
+positive Responses. The @kubernetes example compares passthrough only: the
+fixture has no Pod with the loopback address used by the harness; Rust tests
+cover verified Pod namespace search using an explicit client address.
 The `rewrite` name, PTR and TTL scenarios use inline hosts records. The CNAME
 scenarios use analogous names from the Kubernetes ExternalName and hosts fixtures;
 the README's literal `my-app.com` example has no matching fixture. The README's
