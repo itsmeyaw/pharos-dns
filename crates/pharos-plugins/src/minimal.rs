@@ -32,7 +32,7 @@ impl Plugin for Minimal {
             return outcome;
         }
         // RFC 1035 §4.1.4: changing header counts must not alter compressed names.
-        // shortcut: retain unsafe encodings until Responses can be re-encoded without allocation.
+        // shortcut: retain Responses with header-count compression references or malformed compressible Answer RDATA, re-encode them without allocation to minimize.
         if message
             .questions()
             .any(|question| references_counts(question.name))
