@@ -1,0 +1,2 @@
+ftp.service.us-west-1.example.org. A IN udp
+ftp.service.us-west-1.example.org. A IN tcp

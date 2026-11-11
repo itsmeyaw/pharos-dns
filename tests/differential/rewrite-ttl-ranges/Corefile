@@ -1,0 +1,10 @@
+.:{port} {
+    rewrite ttl range.example. 30-300
+    rewrite ttl cap.example. -30
+    rewrite ttl floor.example. 30-
+    rewrite ttl fixed.example. 30
+    hosts empty.hosts {
+        192.0.2.10 range.example cap.example floor.example fixed.example
+        reload 0
+    }
+}

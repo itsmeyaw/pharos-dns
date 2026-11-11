@@ -75,10 +75,17 @@ from loopback, so non-loopback allow and drop branches require Rust tests.
 The dns64 README scenarios use an inline hosts Backend. The harness sends from
 IPv4 loopback, so synthesis without `allow_ipv4` is covered by Rust tests.
 The siit README scenario uses an inline hosts Backend to exercise the prefix.
-The `rewrite-name-auto` scenario uses an inline hosts Backend for the README's
-suffix and automatic answer rewrite example. `rewrite-regex` and `rewrite-ttl`
-also use hosts; `rewrite-type`, `rewrite-edns-local` and `rewrite-edns-revert` use whoami and mask its
-client port.
+The `rewrite` name, PTR and TTL scenarios use inline hosts records. The CNAME
+scenario combines the Kubernetes ExternalName fixture with hosts; RCODE uses a
+missing hosts record. The type and EDNS scenarios use whoami and mask its client
+port. The EDNS variable scenario covers QNAME, QTYPE, client IP and protocol.
+The NSID and subnet scenarios compare client Responses; Rust tests also inspect
+the rewritten Query because whoami does not echo those options.
+The `{server_port}` and `{client_port}` examples are covered by Rust tests: the
+processes use different ports. The metadata name example is also covered by Rust
+tests because the Kubernetes fixture has no Pod with the harness's loopback IP.
+The documented imaginary `some-plugin` metadata example cannot run because that
+Plugin does not exist.
 The `rewrite edns0` example without an EDNS Query is not compared: CoreDNS
 returns OPT while Pharos omits it under RFC 6891 §7, and the harness cannot mask
 additional records. A Rust integration test covers this deviation.

@@ -1,0 +1,6 @@
+.:{port} {
+    rewrite rcode regex (.*)\.coredns\.rocks SERVFAIL NOERROR
+    hosts empty.hosts {
+        reload 0
+    }
+}
