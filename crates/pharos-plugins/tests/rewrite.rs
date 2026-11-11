@@ -2926,6 +2926,20 @@ async fn coredns_non_regex_name_rewrite_modes() {
 #[tokio::test]
 async fn coredns_name_answer_rows() {
     for (rule, incoming, rewritten, answer) in [
+        ("prefix prefix to", "prefix.nl.", "to.nl.", "to.nl."),
+        ("suffix .suffix. .nl.", "to.suffix.", "to.nl.", "to.nl."),
+        (
+            "substring from.substring to",
+            "from.substring.nl.",
+            "to.nl.",
+            "to.nl.",
+        ),
+        (
+            r"regex (f.*m)\.regex\.(nl) to.{2}",
+            "from.regex.nl.",
+            "to.nl.",
+            "to.nl.",
+        ),
         (
             "prefix foo bar",
             "foo.example.com.",
