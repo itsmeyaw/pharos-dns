@@ -187,7 +187,7 @@
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - Zone files must be UTF-8; miekg/dns accepts arbitrary input bytes. Most parser errors identify the record's starting line and column 1 rather than pinpointing the bad field.
 - Zone parsing uses temporary allocations for tokens and RDATA fields; it reads incrementally but does not yet meet the no-temporary-per-record allocation goal.
-- Zone-file RDATA presentation supports A, AAAA, NS, CNAME, DNAME, PTR, MX, SOA, TXT, SPF, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SMIMEA, SSHFP, ZONEMD and TSIG. Other types require RFC 3597 generic RDATA, and some miekg/dns type mnemonics are not recognized; use `TYPE<number>` for those types.
+- Zone-file RDATA presentation supports A, AAAA, NS, CNAME, DNAME, PTR, MX, SOA, TXT, SPF, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SMIMEA, SSHFP, ZONEMD and TSIG. Other types require RFC 3597 generic RDATA.
 - Presentation parsing rejects invalid base64 immediately and rejects ZONEMD digests shorter than 12 octets; miekg/dns accepts those strings during zone parsing.
 - A Zone record without any current or explicit TTL is rejected even when a class is present; miekg/dns can accept the class-first form with TTL zero.
 

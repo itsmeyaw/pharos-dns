@@ -518,40 +518,9 @@ fn parse_class(value: &str) -> Option<Class> {
 fn parse_type(value: &str) -> Option<Type> {
     let upper = value.to_ascii_uppercase();
     if let Some(number) = upper.strip_prefix("TYPE") {
-        return number.parse().ok().map(Type);
+        return (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| number.parse().ok().map(Type))
+            .flatten();
     }
-    Some(match upper.as_str() {
-        "A" => Type::A,
-        "NS" => Type::NS,
-        "CNAME" => Type::CNAME,
-        "SOA" => Type::SOA,
-        "PTR" => Type::PTR,
-        "HINFO" => Type::HINFO,
-        "MX" => Type::MX,
-        "TXT" => Type::TXT,
-        "AAAA" => Type::AAAA,
-        "SRV" => Type::SRV,
-        "NAPTR" => Type::NAPTR,
-        "DNAME" => Type::DNAME,
-        "DS" => Type::DS,
-        "CDS" => Type::CDS,
-        "SSHFP" => Type::SSHFP,
-        "RRSIG" => Type::RRSIG,
-        "NSEC" => Type::NSEC,
-        "DNSKEY" => Type::DNSKEY,
-        "CDNSKEY" => Type::CDNSKEY,
-        "NSEC3" => Type::NSEC3,
-        "NSEC3PARAM" => Type::NSEC3PARAM,
-        "TLSA" => Type::TLSA,
-        "ZONEMD" => Type::ZONEMD,
-        "SVCB" => Type::SVCB,
-        "HTTPS" => Type::HTTPS,
-        "TSIG" => Type::TSIG,
-        "URI" => Type::URI,
-        "CAA" => Type::CAA,
-        "SPF" => Type::SPF,
-        "SMIMEA" => Type::SMIMEA,
-        "ANY" => Type::ANY,
-        _ => return None,
-    })
+    Type::from_mnemonic(&upper)
 }

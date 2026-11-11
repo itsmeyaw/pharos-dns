@@ -32,6 +32,18 @@ fn any_class_is_not_mistaken_for_record_type() {
 }
 
 #[test]
+fn known_type_mnemonic_accepts_generic_rdata() {
+    let parser = ZoneParser::new(
+        Cursor::new("a 60 IN MD \\# 1 00\n"),
+        ".".parse().unwrap(),
+        "generic",
+    );
+    let records = parser.collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(records[0].rtype, Type::MD);
+    assert_eq!(records[0].rdata, [0]);
+}
+
+#[test]
 fn handles_multiline_quoting_and_escapes() {
     let input = "$TTL 60\n@ IN TXT ( \"a;b\" ; comment\n \"c\\032d\" )\n";
     let mut parser = ZoneParser::new(Cursor::new(input), "example.".parse().unwrap(), "quoted");
