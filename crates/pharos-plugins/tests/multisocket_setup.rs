@@ -48,3 +48,19 @@ fn first_server_block_sets_each_listeners_count() {
         );
     }
 }
+
+#[test]
+fn first_block_without_multisocket_keeps_the_default_count() {
+    let default = parse("Corefile", "first.example:1053 {\n whoami\n}").unwrap();
+    let (default, _) =
+        pharos_plugins::servers(configure::<Chain>(&default, directives()).unwrap()).unwrap();
+    let expected = default.values().next().unwrap().udp_workers;
+    let shared = parse(
+        "Corefile",
+        "first.example:1053 {\n whoami\n}\nsecond.example:1053 {\n multisocket 1024\n whoami\n}",
+    )
+    .unwrap();
+    let (shared, _) =
+        pharos_plugins::servers(configure::<Chain>(&shared, directives()).unwrap()).unwrap();
+    assert_eq!(shared.values().next().unwrap().udp_workers, expected);
+}
