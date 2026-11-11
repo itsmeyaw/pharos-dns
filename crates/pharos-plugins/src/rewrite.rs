@@ -171,7 +171,9 @@ impl Rewrite {
                         }
                         EdnsValue::Local(
                             hex.as_bytes()
-                                .chunks_exact(2)
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
                                 .map(|pair| {
                                     let pair = std::str::from_utf8(pair)
                                         .map_err(|_| cursor.error("invalid hex data"))?;
@@ -1762,10 +1764,9 @@ impl Plugin for Rewrite {
                 // shortcut: CNAME Self Lookup allocates; remove when issue #86 makes it allocation-free.
                 if let Ok(wire) = cx.self_lookup(&target, question.qtype).await
                     && let Ok(lookup) = Message::parse(&wire)
+                    && let Err(error) = build_cname_response(cx, lookup, &from, &target)
                 {
-                    if let Err(error) = build_cname_response(cx, lookup, &from, &target) {
-                        return Outcome::Error(error);
-                    }
+                    return Outcome::Error(error);
                 }
             }
         }
@@ -1881,12 +1882,12 @@ impl Plugin for Rewrite {
                 ttl
             });
         }
-        if outcome == Outcome::Response && response_rules {
-            if let Err(error) =
+        if outcome == Outcome::Response
+            && response_rules
+            && let Err(error) =
                 build_reverted_response(cx, original_query, &self.rules, matches.as_deref(), end)
-            {
-                return Outcome::Error(error);
-            }
+        {
+            return Outcome::Error(error);
         }
         outcome
     }
