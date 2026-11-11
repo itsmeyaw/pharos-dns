@@ -1,8 +1,8 @@
 //! Source-address access control.
 
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
-use pharos_proto::{Name, Type};
-use pharos_server::{Context, Next, Outcome, Plugin};
+use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Section, Type};
+use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
 use std::net::IpAddr;
 
 #[derive(Debug)]
@@ -23,7 +23,7 @@ struct Policy {
     networks: Vec<(IpAddr, u8)>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum Action {
     Allow,
     Block,
@@ -131,7 +131,105 @@ impl Acl {
 }
 
 impl Plugin for Acl {
-    async fn serve<N: Next + Send>(&self, _cx: &mut Context<'_>, _next: N) -> Outcome {
-        Outcome::Error(pharos_server::Error::NotImplemented)
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
+        let Some(question) = cx.query.questions().next() else {
+            return next.run(cx).await;
+        };
+        let labels = question.name.labels().count();
+        let ip = match cx.client.ip() {
+            IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
+            ip => ip,
+        };
+        for rule in &self.rules {
+            // RFC 4343 §3: DNS name comparisons ignore ASCII letter case.
+            let matches_domain = rule.domains.iter().any(|domain| {
+                let count = domain.label_count();
+                labels >= count
+                    && question
+                        .name
+                        .labels()
+                        .skip(labels - count)
+                        .zip(NameRef::parse(domain.as_wire(), 0).unwrap().labels())
+                        .all(|(left, right)| left.eq_ignore_ascii_case(right))
+            });
+            if !matches_domain {
+                continue;
+            }
+            let action = rule
+                .policies
+                .iter()
+                .find(|policy| {
+                    (policy.types.contains(&Type::NONE) || policy.types.contains(&question.qtype))
+                        && (policy.networks.is_empty()
+                            || policy
+                                .networks
+                                .iter()
+                                .any(|&(network, prefix)| contains(network, prefix, ip)))
+                })
+                .map(|policy| policy.action);
+            match action {
+                Some(Action::Allow) => break,
+                Some(Action::Drop) => return Outcome::Drop,
+                Some(Action::Block | Action::Filter) => {
+                    let blocked = matches!(action, Some(Action::Block));
+                    let result = (|| {
+                        let max = cx.max_response_size.max(512);
+                        if cx.response.capacity() < max {
+                            if cx.protocol == Protocol::Tcp {
+                                cx.response.reserve(max.saturating_sub(cx.response.len()));
+                            } else {
+                                return Err(pharos_server::Error::ResponseBufferTooSmall);
+                            }
+                        }
+                        // RFC 1035 §4.1.1: set QR and copy opcode, RD and CD for QUERY.
+                        let mut flags =
+                            0x8000 | (cx.query.flags() & 0x7800) | if blocked { 5 } else { 0 };
+                        if cx.query.opcode() == Opcode::QUERY {
+                            flags |= cx.query.flags() & 0x0110;
+                        }
+                        let mut builder =
+                            MessageBuilder::new(cx.response, max, cx.query.id(), flags)
+                                .map_err(pharos_server::Error::Build)?;
+                        builder
+                            .question(question.name, question.qtype, question.qclass)
+                            .map_err(pharos_server::Error::Build)?;
+                        // RFC 8914 §4: EDE 15 and 17 indicate Blocked and Filtered respectively.
+                        let ede = [0, 15, 0, 2, 0, if blocked { 15 } else { 17 }];
+                        builder
+                            .record(
+                                Section::Additional,
+                                NameRef::parse(&[0], 0).unwrap(),
+                                Type::OPT,
+                                Class(4096),
+                                0x8000,
+                                &ede,
+                            )
+                            .map_err(pharos_server::Error::Build)?;
+                        let _ = builder.finish();
+                        Ok(())
+                    })();
+                    return match result {
+                        Ok(()) => Outcome::Response,
+                        Err(error) => Outcome::Error(error),
+                    };
+                }
+                None => {}
+            }
+        }
+        next.run(cx).await
+    }
+}
+
+fn contains(network: IpAddr, prefix: u8, client: IpAddr) -> bool {
+    match (network, client) {
+        (IpAddr::V4(net), IpAddr::V4(ip)) => {
+            let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
+            u32::from(net) & mask == u32::from(ip) & mask
+        }
+        (IpAddr::V6(net), IpAddr::V6(ip)) => {
+            let mask = u128::MAX.checked_shl(u32::from(128 - prefix)).unwrap_or(0);
+            u128::from(net) & mask == u128::from(ip) & mask
+        }
+        _ => false,
     }
 }
