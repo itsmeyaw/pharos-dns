@@ -143,6 +143,11 @@ impl FakeServer {
                                         "EndpointSliceList",
                                         json!([{"metadata":{"name":"slice","namespace":"prod","resourceVersion":"1","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.1"]}]}]),
                                     ),
+                                    "/apis/multicluster.x-k8s.io/v1alpha1/serviceimports" => (
+                                        "multicluster.x-k8s.io/v1alpha1",
+                                        "ServiceImportList",
+                                        json!([]),
+                                    ),
                                     _ => ("v1", "PodList", json!([])),
                                 };
                                 let items = if next_page && page_gate.is_some() {
@@ -190,6 +195,77 @@ impl FakeServer {
             .send(format!("{}\n", json!({"type":typ, "object":object})))
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn multicluster_watches_gate_readiness_and_track_changes() {
+    let server = FakeServer::start().await;
+    let path = "/apis/multicluster.x-k8s.io/v1alpha1/serviceimports";
+    let slices = "/apis/discovery.k8s.io/v1/endpointslices";
+    let gate = Arc::new(Semaphore::new(0));
+    server
+        .path_gates
+        .lock()
+        .unwrap()
+        .insert(path.into(), gate.clone());
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(
+        client,
+        WatchConfig {
+            multicluster: true,
+            endpoints: false,
+            ..Default::default()
+        },
+    );
+    let store = controller.store();
+    until(|| {
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.starts_with(path))
+    })
+    .await;
+    assert!(!controller.has_synced());
+    gate.add_permits(1);
+    until(|| {
+        let watches = server.watches.lock().unwrap();
+        controller.has_synced() && watches.contains_key(path) && watches.contains_key(slices)
+    })
+    .await;
+    let import = |version, ip| json!({"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"web","namespace":"prod","resourceVersion":version},"spec":{"type":"ClusterSetIP","ips":[ip]}});
+    server.send(path, "ADDED", import("2", "10.3.0.1"));
+    until(|| store.with_read(|i| i.service_import("prod", "web").is_some())).await;
+    server.send(path, "MODIFIED", import("3", "10.3.0.2"));
+    until(|| {
+        store.with_read(|i| {
+            i.service_import("prod", "web")
+                .is_some_and(|s| s.cluster_ips == ["10.3.0.2"])
+        })
+    })
+    .await;
+    let slice = json!({"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"mc","namespace":"prod","resourceVersion":"2","labels":{"multicluster.kubernetes.io/service-name":"web","multicluster.kubernetes.io/source-cluster":"east"}},"addressType":"IPv4","endpoints":[{"addresses":["10.4.0.1"]}]});
+    server.send(slices, "ADDED", slice.clone());
+    until(|| store.with_read(|i| i.multicluster_endpoints("prod", "web").count() == 1)).await;
+    server.send(slices, "DELETED", slice);
+    server.send(path, "DELETED", import("4", "10.3.0.2"));
+    until(|| {
+        store.with_read(|i| {
+            i.multicluster_endpoints("prod", "web").count() == 0
+                && i.service_import("prod", "web").is_none()
+        })
+    })
+    .await;
+    assert!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.contains("multicluster.kubernetes.io%2Fservice-name"))
+    );
+    controller.stop().await;
 }
 
 #[tokio::test]
@@ -830,6 +906,47 @@ async fn namespace_label_selector_restricts_service_and_endpoint_lookups() {
         assert_eq!(index.endpoints("prod", "web").count(), 0);
         assert_eq!(index.endpoints_by_ip("10.0.1.1").count(), 0);
     });
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn service_imports_ignore_namespace_label_selector() {
+    let server = FakeServer::start().await;
+    let imports = "/apis/multicluster.x-k8s.io/v1alpha1/serviceimports";
+    server.lists.lock().unwrap().extend([
+        (
+            "/api/v1/namespaces".to_owned(),
+            json!([{"metadata":{"name":"prod","resourceVersion":"1","labels":{"team":"dns"}}}]),
+        ),
+        (
+            imports.to_owned(),
+            json!([{"metadata":{"name":"web","namespace":"prod","resourceVersion":"1"},"spec":{"type":"ClusterSetIP","ips":["10.3.0.1"]}}]),
+        ),
+    ]);
+    let client = kube::Client::try_from(kube::Config::new(server.url.parse().unwrap())).unwrap();
+    let mut controller = Controller::start(
+        client,
+        WatchConfig {
+            namespace_label_selector: Some("team=dns".into()),
+            multicluster: true,
+            ..Default::default()
+        },
+    );
+    until(|| controller.has_synced()).await;
+    assert!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|uri| uri.starts_with(imports))
+            .all(|uri| !uri.contains("labelSelector"))
+    );
+    assert!(
+        controller
+            .store()
+            .with_read(|index| index.service_import("prod", "web").is_some())
+    );
     controller.stop().await;
 }
 

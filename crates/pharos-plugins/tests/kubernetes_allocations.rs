@@ -29,7 +29,12 @@ async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
                 let mut request = [0; 4096];
                 let n = socket.read(&mut request).await.unwrap();
                 let request = String::from_utf8_lossy(&request[..n]);
-                let (kind, items) = if request.contains("/api/v1/services") {
+                let (kind, items) = if request.contains("/serviceimports") {
+                    (
+                        "ServiceImportList",
+                        r#"[{"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"web","namespace":"prod"},"spec":{"type":"ClusterSetIP","ips":["10.0.0.2"],"ports":[{"name":"http","protocol":"TCP","port":80}]}}]"#,
+                    )
+                } else if request.contains("/api/v1/services") {
                     (
                         "ServiceList",
                         r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"clusterIPs":["10.0.0.1","2001:db8::1"],"ports":[{"name":"http","protocol":"TCP","port":80}]}}]"#,
@@ -58,7 +63,7 @@ async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
     });
 
     let text = format!(
-        ".:0 {{\n kubernetes cluster.local {{\n  endpoint http://{address}\n  startup_timeout 3s\n }}\n}}"
+        ".:0 {{\n kubernetes cluster.local clusterset.local {{\n  endpoint http://{address}\n  multicluster clusterset.local\n  startup_timeout 3s\n }}\n}}"
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
     let (mut servers, lifecycle) =
@@ -71,6 +76,7 @@ async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
         ("web.prod.svc.cluster.local.", Type::A),
         ("web.prod.svc.cluster.local.", Type::AAAA),
         ("_http._tcp.web.prod.svc.cluster.local.", Type::SRV),
+        ("web.prod.svc.clusterset.local.", Type::A),
     ] {
         let name: Name = name.parse().unwrap();
         let mut query = Vec::with_capacity(512);
@@ -94,10 +100,10 @@ async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
         assert_eq!(message.rcode(), Rcode::NOERROR);
         assert_eq!(message.answer_count(), 1);
         let answer = message.answers().next().unwrap();
-        let expected_name = if index == 2 {
-            "_http._tcp.web.prod.svc.cluster.local."
-        } else {
-            "web.prod.svc.cluster.local."
+        let expected_name = match index {
+            2 => "_http._tcp.web.prod.svc.cluster.local.",
+            3 => "web.prod.svc.clusterset.local.",
+            _ => "web.prod.svc.cluster.local.",
         };
         assert_eq!(answer.name.to_string(), expected_name);
         match index {
@@ -108,6 +114,10 @@ async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
             1 => assert_eq!(
                 answer.data().unwrap(),
                 Rdata::Aaaa("2001:db8::1".parse().unwrap())
+            ),
+            3 => assert_eq!(
+                answer.data().unwrap(),
+                Rdata::A("10.0.0.2".parse().unwrap())
             ),
             _ => {
                 let Rdata::Srv {

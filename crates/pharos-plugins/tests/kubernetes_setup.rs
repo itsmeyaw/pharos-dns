@@ -220,7 +220,7 @@ fn validates_label_selector_grammar() {
 }
 
 #[test]
-fn multicluster_validates_before_not_implemented() {
+fn multicluster_setup_matches_coredns() {
     let invalid =
         config("kubernetes cluster.local {\n multicluster clusterset.local\n}").unwrap_err();
     assert!(invalid.message.contains("not authoritative"), "{invalid}");
@@ -232,27 +232,21 @@ fn multicluster_validates_before_not_implemented() {
         invalid_extra.message.contains("not authoritative"),
         "{invalid_extra}"
     );
-    let unsupported =
+    let configured =
         config("kubernetes cluster.local clusterset.local {\n multicluster clusterset.local\n}")
-            .unwrap_err();
-    assert!(
-        unsupported.message.contains("not implemented") && unsupported.message.contains("#41"),
-        "{unsupported}"
-    );
-    assert!(
-        config("kubernetes cluster.local {\n multicluster\n}")
-            .unwrap_err()
-            .message
-            .contains("#41")
-    );
+            .unwrap();
+    assert_eq!(configured.multicluster_zones, ["clusterset.local."]);
+    assert!(configured.watch_config().multicluster);
+    let empty = config("kubernetes cluster.local {\n multicluster\n}").unwrap();
+    assert!(empty.multicluster_zones.is_empty());
+    assert!(!empty.watch_config().multicluster);
     for zones in ["bad..zone", "bad..zone cluster.local"] {
-        let error = config(&format!(
+        let parsed = config(&format!(
             "kubernetes cluster.local {{\n multicluster {zones}\n}}"
         ))
-        .unwrap_err();
+        .unwrap();
         assert!(
-            error.message.contains("not implemented") && error.message.contains("#41"),
-            "{error}"
+            !parsed.watch_config().multicluster || parsed.multicluster_zones == ["cluster.local."]
         );
     }
     let invalid =

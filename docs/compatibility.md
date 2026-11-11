@@ -80,7 +80,7 @@
 ## kubernetes
 
 - The Kubernetes data crate ignores addresses in EndpointSlices with address types other than IPv4 or IPv6; CoreDNS retains them.
-- The `kubernetes` Plugin rejects `multicluster` with a not-implemented error; Multi-Cluster Services are tracked in #41.
+- With `namespace_labels` and `multicluster`, Pharos watches all ServiceImports and exposes those in matching Namespaces; CoreDNS matches the ServiceImports' own labels against `namespace_labels`, hiding imports in exposed Namespaces.
 - As in CoreDNS v1.15.0, Kubernetes NS discovery snapshots local addresses per Plugin instance.
 - CoreDNS's CIDR-only selection yields no local NS addresses for explicit `bind` IP literals; Pharos matches that behavior.
 - API client creation and kubeconfig validation occur during Startup rather than Corefile setup.

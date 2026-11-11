@@ -7,6 +7,7 @@ use std::{
 #[derive(Debug)]
 pub struct Config {
     pub zones: Vec<String>,
+    pub multicluster_zones: Vec<String>,
     pub primary_zone_index: usize,
     pub ttl: u32,
     pub pod_mode: String,
@@ -59,6 +60,7 @@ impl Config {
             pods_verified: self.pod_mode == "verified",
             endpoints: self.endpoints,
             zonal: self.zonal,
+            multicluster: !self.multicluster_zones.is_empty(),
         }
     }
 }
@@ -76,6 +78,7 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
         .ok_or_else(|| cursor.error("non-reverse zone name must be used"))?;
     let mut config = Config {
         zones,
+        multicluster_zones: Vec::new(),
         primary_zone_index,
         ttl: 5,
         pod_mode: "disabled".into(),
@@ -95,8 +98,6 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
         startup_timeout: Duration::from_secs(5),
         fallthrough: Fallthrough::default(),
     };
-    let mut multicluster = Vec::new();
-    let mut multicluster_configured = false;
     while cursor.next_block() {
         let option = cursor.val().to_owned();
         let args = cursor.remaining_args();
@@ -182,8 +183,7 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
                 config.kubeconfig = Some((args[0].clone(), args.get(1).cloned()));
             }
             "multicluster" => {
-                multicluster_configured = true;
-                multicluster = origins_from_args_or_server_block(
+                config.multicluster_zones = origins_from_args_or_server_block(
                     &args.iter().map(String::as_str).collect::<Vec<_>>(),
                     &[],
                 )
@@ -234,7 +234,7 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
     if !config.namespaces.is_empty() && config.namespace_label_selector.is_some() {
         return Err(cursor.error("namespaces and namespace_labels cannot both be set"));
     }
-    for zone in &multicluster {
+    for zone in &config.multicluster_zones {
         if !config.zones.contains(zone) {
             return Err(cursor.error(format!(
                 "is not authoritative for the multicluster zone {zone} (authoritative zones: {:?})",
@@ -244,9 +244,6 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
     }
     if config.zonal && !config.endpoints {
         return Err(cursor.error("zonal requires the endpoint cache; remove noendpoints"));
-    }
-    if multicluster_configured {
-        return Err(cursor.error("multicluster is not implemented (#41)"));
     }
     Ok(config)
 }

@@ -11,6 +11,7 @@ use futures::{StreamExt, pin_mut};
 use k8s_openapi::api::{core::v1, discovery::v1::EndpointSlice};
 use kube::{
     Api, Client, Resource, ResourceExt,
+    core::{ApiResource, DynamicObject, GroupVersionKind},
     runtime::{
         WatchStreamExt,
         watcher::{self, Event},
@@ -35,6 +36,7 @@ pub struct WatchConfig {
     pub pods_verified: bool,
     pub endpoints: bool,
     pub zonal: bool,
+    pub multicluster: bool,
 }
 
 impl Default for WatchConfig {
@@ -46,6 +48,7 @@ impl Default for WatchConfig {
             pods_verified: false,
             endpoints: true,
             zonal: false,
+            multicluster: false,
         }
     }
 }
@@ -103,7 +106,7 @@ impl Controller {
             metrics,
         };
         let labels = watcher::Config {
-            label_selector: config.label_selector,
+            label_selector: config.label_selector.clone(),
             ..Default::default()
         };
         this.watch(
@@ -136,7 +139,7 @@ impl Controller {
                 field_selector: Some(
                     "status.phase!=Succeeded,status.phase!=Failed,status.phase!=Unknown".into(),
                 ),
-                ..labels
+                ..labels.clone()
             };
             this.watch(
                 Api::<v1::Pod>::all(client.clone()),
@@ -144,6 +147,44 @@ impl Controller {
                 Store::apply_pod,
                 Store::delete_pod,
                 |store, objects, _, _| store.replace_pods(objects),
+                (|_| None, Into::into),
+            );
+        }
+        if config.multicluster {
+            let selector = match &config.label_selector {
+                Some(selector) if !selector.is_empty() => {
+                    format!("{selector},multicluster.kubernetes.io/service-name")
+                }
+                _ => "multicluster.kubernetes.io/service-name".into(),
+            };
+            this.watch(
+                Api::<EndpointSlice>::all(client.clone()),
+                watcher::Config {
+                    label_selector: Some(selector),
+                    ..Default::default()
+                },
+                Store::apply_multicluster_endpoints,
+                Store::delete_multicluster_endpoints,
+                |store, objects, latencies, metrics| {
+                    store.replace_multicluster_endpoints(objects);
+                    for latency in latencies {
+                        record_latency(store, metrics, Some(latency));
+                    }
+                },
+                (endpoint_latency, Into::into),
+            );
+            let resource = ApiResource::from_gvk_with_plural(
+                &GroupVersionKind::gvk("multicluster.x-k8s.io", "v1alpha1", "ServiceImport"),
+                "serviceimports",
+            );
+            // CoreDNS matches ServiceImport labels against `namespace_labels`; that
+            // hides imports in exposed Namespaces, so namespace filtering happens at lookup.
+            this.watch(
+                Api::<DynamicObject>::all_with(client.clone(), &resource),
+                watcher::Config::default(),
+                Store::apply_service_import,
+                Store::delete_service_import,
+                |store, objects, _, _| store.replace_service_imports(objects),
                 (|_| None, Into::into),
             );
         }
@@ -212,7 +253,7 @@ impl Controller {
         replace: fn(&Store, Vec<T>, Vec<SliceLatency>, Option<&KubernetesMetrics>),
         conversion: Conversion<K, T>,
     ) where
-        K: Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
+        K: Resource + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
         T: Send + 'static,
     {
         let (observe, convert) = conversion;

@@ -87,6 +87,58 @@ impl From<v1::Service> for Service {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceImport {
+    pub version: String,
+    pub name: Arc<str>,
+    pub namespace: Arc<str>,
+    pub cluster_ips: Vec<String>,
+    pub service_type: String,
+    pub ports: Vec<Port>,
+}
+
+impl ServiceImport {
+    pub fn headless(&self) -> bool {
+        self.service_type == "Headless"
+    }
+}
+
+impl From<kube::core::DynamicObject> for ServiceImport {
+    fn from(input: kube::core::DynamicObject) -> Self {
+        let spec = &input.data["spec"];
+        let text = |value: &_| -> String {
+            serde_json::Value::as_str(value)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        Self {
+            version: input.metadata.resource_version.unwrap_or_default(),
+            name: input.metadata.name.unwrap_or_default().into(),
+            namespace: input.metadata.namespace.unwrap_or_default().into(),
+            cluster_ips: spec["ips"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(text)
+                .collect(),
+            service_type: text(&spec["type"]),
+            ports: spec["ports"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|port| Port {
+                    name: text(&port["name"]),
+                    protocol: text(&port["protocol"]),
+                    port: port["port"]
+                        .as_i64()
+                        .and_then(|p| i32::try_from(p).ok())
+                        .unwrap_or_default(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EndpointAddress {
     pub ip: String,
     pub hostname: String,
@@ -176,6 +228,34 @@ impl Endpoints {
             addresses,
             ports,
             zones,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultiClusterEndpoints {
+    pub endpoints: Endpoints,
+    pub import_name: Arc<str>,
+    pub cluster_id: String,
+}
+
+impl From<EndpointSlice> for MultiClusterEndpoints {
+    fn from(input: EndpointSlice) -> Self {
+        let label = |key| {
+            input
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(key))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let import_name = label("multicluster.kubernetes.io/service-name").into();
+        let cluster_id = label("multicluster.kubernetes.io/source-cluster");
+        Self {
+            endpoints: Endpoints::from(input),
+            import_name,
+            cluster_id,
         }
     }
 }

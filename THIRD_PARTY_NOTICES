@@ -17,6 +17,7 @@
 - The Kubernetes client, controller, object conversions, metrics and tests follow CoreDNS v1.15.0's `plugin/kubernetes`.
 - The Kubernetes Plugin, name parsing, record synthesis and ported handler, namespace, NS, reverse, informer, controller and metrics tests follow CoreDNS v1.15.0's `plugin/kubernetes`, `plugin/backend_lookup.go` and `plugin/pkg/dnsutil`.
 - The Kubernetes differential scenarios follow CoreDNS v1.15.0's `plugin/kubernetes/README.md`.
+- Multicluster object conversion, watches, query handling and tests follow CoreDNS v1.15.0's `plugin/kubernetes`.
 - The bind Plugin and tests follow CoreDNS v1.15.0's `plugin/bind`.
 - Multisocket setup and tests follow CoreDNS v1.15.0's `plugin/multisocket` and `core/dnsserver/register.go`.
 - The log Plugin, formatter and tests follow CoreDNS v1.15.0's `plugin/log`, `plugin/pkg/replacer` and `plugin/pkg/response`.
