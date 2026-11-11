@@ -250,6 +250,14 @@
 - Candidate setup can register metric series before a failed Reload is rolled back.
 - Shutdown waits for Queries on replaced states to finish, so a stuck Query can delay processing subsequent signals.
 
+## siit
+
+- AAAA Self Lookup allocates per Query; issue #86 tracks allocation-free Self
+  Lookup. Queries that do not need it do not allocate in this Plugin.
+- Self Lookup uses Listener size and EDNS handling, which can truncate the
+  intermediate Response. Unsupported name-bearing or malformed records in a
+  synthesized or error Response produce SERVFAIL rather than being copied.
+
 ## sign
 
 - The shared signer has the same key and canonical-RDATA restrictions listed under `dnssec`.

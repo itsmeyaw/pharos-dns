@@ -74,6 +74,7 @@ The acl README scenarios use whoami as Next. The harness originates Queries
 from loopback, so non-loopback allow and drop branches require Rust tests.
 The dns64 README scenarios use an inline hosts Backend. The harness sends from
 IPv4 loopback, so synthesis without `allow_ipv4` is covered by Rust tests.
+The siit README scenario uses an inline hosts Backend to exercise the prefix.
 The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
 The bind scenario compares Responses on 127.0.0.1 with an excluded IPv6 address;
 the harness cannot send Queries to another bind address or scrape metrics.

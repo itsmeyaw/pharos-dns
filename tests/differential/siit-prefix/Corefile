@@ -1,0 +1,9 @@
+.:{port} {
+    siit {
+        ipv6_prefix 64:1337::/96
+    }
+    hosts empty.hosts {
+        64:1337::192.0.2.10 one.example.org
+        reload 0
+    }
+}
