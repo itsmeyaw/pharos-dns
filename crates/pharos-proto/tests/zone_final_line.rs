@@ -135,6 +135,8 @@ fn records_without_rdata_are_rejected() {
         b"a IN SOA ns h 3\n".as_slice(),
         b"a IN SSHFP 1 2\n",
         b"a IN TLSA 3 1 1\n",
+        b"u IN MX 2\nb\n",
+        b"u IN SVCB 2\nb\n",
     ] {
         assert!(parse(zone).is_err(), "{zone:?}");
     }
@@ -170,5 +172,15 @@ fn generate_template_escapes_keep_their_meaning() {
     assert_eq!(
         parse(b"$GENERATE 1-1 n TXT \\t \\065 \\$\n"),
         Ok(vec![(16, b"\x01t\x01A\x01$".to_vec())])
+    );
+}
+
+#[test]
+fn comment_may_touch_the_type() {
+    // RFC 1035 §5.1: a semicolon starts a comment.
+    assert_eq!(parse(b"N 1 ( TXT;c\nx )\n"), parse(b"N 1 ( TXT ;c\nx )\n"));
+    assert_eq!(
+        parse(b"N 1 ( TXT;c\nx )\n"),
+        Ok(vec![(16, b"\x01x".to_vec())])
     );
 }
