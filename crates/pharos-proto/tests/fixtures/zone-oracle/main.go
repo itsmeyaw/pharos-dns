@@ -79,6 +79,12 @@ func run() error {
 			if _, err := writer.Write(result); err != nil {
 				return err
 			}
+			// The fuzz target waits for each response before sending the next request.
+			if reader.Buffered() == 0 {
+				if err := writer.Flush(); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	if len(os.Args) > 2 {
