@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{
-    Class, FixedBuffer, Message, MessageBuilder, MessageMut, Name, NameRef, Rdata, Section, Type,
+    Class, FixedBuffer, Message, MessageBuilder, Name, NameRef, Rdata, Section, Type,
 };
 use pharos_server::{Context, Error as ServerError, Metadata, Next, Outcome, Plugin};
 
@@ -1526,6 +1526,7 @@ fn build_reverted_response(
     rules: &[Rule],
     recorded: Option<&[u8]>,
     end: usize,
+    rcode: u16,
 ) -> Result<(), ServerError> {
     let mut scratch = [0u8; 65535];
     if cx.response.len() > scratch.len() {
@@ -1542,7 +1543,7 @@ fn build_reverted_response(
         cx.response,
         cx.max_response_size.max(512),
         response.id(),
-        response.flags(),
+        (response.flags() & !0x000f) | (rcode & 0x000f),
     )
     .map_err(ServerError::Build)?;
     builder
@@ -1553,12 +1554,29 @@ fn build_reverted_response(
             .question(q.name, q.qtype, q.qclass)
             .map_err(ServerError::Build)?;
     }
+    let mut has_opt = false;
     for (section, records) in [
         (Section::Answer, response.answers()),
         (Section::Authority, response.authorities()),
         (Section::Additional, response.additionals()),
     ] {
         for rr in records {
+            let mut ttl = rr.ttl;
+            if rr.rtype == Type::OPT {
+                has_opt = true;
+                // RFC 6891 §6.1.3: OPT carries the high RCODE bits, not an RR TTL.
+                ttl = (ttl & 0x00ff_ffff) | (u32::from(rcode >> 4) << 24);
+            } else {
+                for (index, rule) in rules[..end].iter().enumerate().rev() {
+                    let active = recorded.map_or_else(
+                        || active_at(rules, index, original_query, &cx.metadata),
+                        |bits| bits[index] != 0,
+                    );
+                    if active && let Action::Ttl(min, max) = rule.action {
+                        ttl = ttl.max(min).min(max);
+                    }
+                }
+            }
             let mut owner_buffer = [0; 255];
             let owner = apply_history(
                 rr.name,
@@ -1642,11 +1660,26 @@ fn build_reverted_response(
                 other => other,
             };
             builder
-                .record_with(section, owner, rr.rtype, rr.class, rr.ttl, |writer| {
+                .record_with(section, owner, rr.rtype, rr.class, ttl, |writer| {
                     data.write(writer)
                 })
                 .map_err(ServerError::Build)?;
         }
+    }
+    if rcode > 15 && !has_opt {
+        let opt = original_query.opt().ok_or(ServerError::InvalidQuery)?;
+        let root = NameRef::parse(&[0], 0).expect("root name");
+        let ttl = (u32::from(rcode >> 4) << 24) | u32::from(opt.flags());
+        builder
+            .record(
+                Section::Additional,
+                root,
+                Type::OPT,
+                Class(opt.udp_payload_size()),
+                ttl,
+                &[],
+            )
+            .map_err(ServerError::Build)?;
     }
     let _ = builder.finish();
     Ok(())
@@ -1880,53 +1913,27 @@ impl Plugin for Rewrite {
             }
             return Outcome::Response;
         }
-        if outcome == Outcome::Response
-            && let Ok(response) = Message::parse(cx.response)
-        {
-            let old = response.rcode().0;
+        if outcome == Outcome::Response && response_rules {
+            let Ok(response) = Message::parse(cx.response) else {
+                return Outcome::Error(ServerError::InvalidQuery);
+            };
             let records = usize::from(response.answer_count())
                 + usize::from(response.authority_count())
                 + usize::from(response.additional_count());
-            let opt = response
-                .additionals()
-                .find(|rr| rr.rtype == Type::OPT)
-                .map(|rr| rr.ttl_offset);
-            let mut new = old;
+            let mut new = response.rcode().0;
             for _ in 0..records.max(1) {
                 new = rewrite_rcode(new);
             }
-            // RFC 6891 §6.1.3: the high RCODE bits occupy the OPT extended RCODE.
-            if new != old {
-                cx.response[3] = (cx.response[3] & 0xf0) | (new as u8 & 0x0f);
-                if let Some(offset) = opt {
-                    cx.response[offset] = (new >> 4) as u8;
-                }
+            if let Err(error) = build_reverted_response(
+                cx,
+                original_query,
+                &self.rules,
+                matches.as_deref(),
+                end,
+                new,
+            ) {
+                return Outcome::Error(error);
             }
-            let Ok(mut response) = MessageMut::parse(cx.response) else {
-                return outcome;
-            };
-            // RFC 6891 §6.1.3: OPT's TTL field contains EDNS metadata, not a TTL.
-            response.rewrite_ttls(|mut ttl| {
-                for (index, rule) in self.rules[..end].iter().enumerate().rev() {
-                    if !matches.as_deref().map_or_else(
-                        || active_at(&self.rules, index, original_query, &cx.metadata),
-                        |bits| bits[index] != 0,
-                    ) {
-                        continue;
-                    }
-                    if let Action::Ttl(min, max) = rule.action {
-                        ttl = ttl.max(min).min(max);
-                    }
-                }
-                ttl
-            });
-        }
-        if outcome == Outcome::Response
-            && response_rules
-            && let Err(error) =
-                build_reverted_response(cx, original_query, &self.rules, matches.as_deref(), end)
-        {
-            return Outcome::Error(error);
         }
         outcome
     }

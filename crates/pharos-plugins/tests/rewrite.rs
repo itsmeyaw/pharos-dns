@@ -1061,6 +1061,99 @@ impl Next for NoQuestionAnswer {
     }
 }
 
+struct TtlPointerAnswer;
+impl Next for TtlPointerAnswer {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        cx.response.extend_from_slice(b"\0\x01\x81\x80\0\x01\0\x02\0\0\0\0\0\0\x01\0\x01\0\0\x01\0\x01\0\0\0\x3c\0\x04\x7f\0\0\x01\xc0\x16\0\x01\0\x01\0\0\0\x3c\0\x04\x7f\0\0\x02");
+        Outcome::Response
+    }
+}
+
+struct RcodePointerAnswer;
+impl Next for RcodePointerAnswer {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        cx.response.extend_from_slice(b"\0\x01\x80\x02\0\x01\0\x01\0\0\0\0\0\0\x01\0\x01\xc0\x03\0\x01\0\x01\0\0\0\x3c\0\x04\x7f\0\0\x01");
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn rcode_rewrite_preserves_names_compressed_against_old_header() {
+    let config = ".:53 {\n rewrite rcode . SERVFAIL NOERROR\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\0\0\x01\0\x01";
+    let root: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, RcodePointerAnswer)
+            .await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    assert_eq!(message.rcode(), Rcode::NOERROR);
+    assert_eq!(
+        message.answers().next().unwrap().name.to_string(),
+        r"\000\001."
+    );
+}
+
+#[tokio::test]
+async fn ttl_rewrite_preserves_names_compressed_against_old_ttl() {
+    let config = ".:53 {\n rewrite ttl . 16777216\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\0\0\x01\0\x01";
+    let root: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, TtlPointerAnswer)
+            .await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    for rr in message.answers() {
+        assert_eq!(rr.name.to_string(), ".");
+        assert_eq!(rr.ttl, 16777216);
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/reverter_test.go.
 #[tokio::test]
 async fn coredns_reverter_restores_a_missing_question() {
