@@ -218,6 +218,7 @@ impl Plugin for Cache {
                                 .and_then(Result::ok)
                         };
                         if let Some(Some(mut response)) = result {
+                            // RFC 6840 §5.8: only signal AD when the query requested AD or DO.
                             if !query.ad() && !query.opt().is_some_and(|opt| opt.dnssec_ok()) {
                                 response[3] &= !0x20;
                             }
@@ -553,6 +554,7 @@ impl Cache {
         let incomplete = response_type == ResponseType::Positive
             && response.answer_count() > 0
             && !answers_question(&response);
+        // RFC 2308 §2.2: NODATA can include CNAMEs and an SOA in the authority section.
         if incomplete && has_soa {
             response_type = ResponseType::NoData;
         }
@@ -579,6 +581,7 @@ impl Cache {
             }
             found = true;
             ttl = ttl.min(record.ttl);
+            // RFC 2308 §5: the negative cache TTL is bounded by the SOA MINIMUM field.
             if denial && let Ok(Rdata::Soa { minimum, .. }) = record.data() {
                 ttl = ttl.min(minimum);
             }
@@ -636,6 +639,7 @@ impl Cache {
                 metrics.entries(true, self.denial.len());
             }
         }
+        // RFC 6840 §5.8: only signal AD when the query requested AD or DO.
         if !query.ad() && !query.opt().is_some_and(|opt| opt.dnssec_ok()) {
             cx.response[3] &= !0x20;
         }
@@ -675,6 +679,7 @@ fn answers_question(message: &Message<'_>) -> bool {
             .answers()
             .any(|rr| rr.name == question.name && matches_class(rr.class));
     }
+    // RFC 1034 §3.6.2: follow CNAME chains and detect loops.
     let mut name = question.name.to_name();
     let mut visited = Vec::new();
     loop {

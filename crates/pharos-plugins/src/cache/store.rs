@@ -162,6 +162,7 @@ impl Store {
         }
         let now = Instant::now();
         let elapsed = now.duration_since(item.stored).as_secs();
+        // RFC 8767 §5: limit serving expired data to the configured maximum stale interval.
         let stale = elapsed >= u64::from(item.ttl);
         if stale
             && (config.stale.is_zero()
@@ -182,6 +183,7 @@ impl Store {
         } else if stale {
             0
         } else {
+            // RFC 2308 §6: decrement the TTL of cached negative answers by their cache age.
             item.ttl - elapsed as u32
         };
         output.clear();
@@ -189,6 +191,7 @@ impl Store {
         output[..2].copy_from_slice(&query.id().to_be_bytes());
         let original = u16::from_be_bytes([output[2], output[3]]);
         let mut flags = 0x8000 | (original & 0x04af) | (query.flags() & 0x0110);
+        // RFC 6840 §5.8: only signal AD when the query requested AD or DO.
         if !query.ad() && !query.opt().is_some_and(|opt| opt.dnssec_ok()) {
             flags &= !0x20;
         }

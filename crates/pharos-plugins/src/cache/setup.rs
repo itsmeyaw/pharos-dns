@@ -179,6 +179,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, server_keys: &[&str]) -> Result<Con
                 }
                 if let Some(value) = args.get(ttl_index + 1) {
                     config.stale_recheck = nonnegative_duration(cursor, value)?;
+                    // RFC 8767 §6: the stale failure recheck interval should not exceed 5 minutes.
                     if config.stale_recheck > Duration::from_secs(300) {
                         return Err(cursor.error("serve_stale recheck exceeds 5 minutes"));
                     }
@@ -202,6 +203,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, server_keys: &[&str]) -> Result<Con
                     return Err(cursor.arg_err());
                 }
                 config.fail_ttl = nonnegative_duration(cursor, &args[0])?;
+                // RFC 9520 §3.2: resolution failures must not be cached for over 5 minutes.
                 if config.fail_ttl > Duration::from_secs(300) {
                     return Err(cursor.error("servfail TTL exceeds 5 minutes"));
                 }
