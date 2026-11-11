@@ -548,7 +548,7 @@ fn scenario(
 
 pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), String> {
     let status = Command::new("cargo")
-        .args(["build", "-p", "pharos"])
+        .args(["build", "-p", "pharos-dns"])
         .current_dir(root)
         .status()
         .map_err(|e| e.to_string())?;
