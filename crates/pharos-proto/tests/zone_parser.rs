@@ -20,15 +20,13 @@ fn parses_origin_ttl_and_inherited_owner() {
 }
 
 #[test]
-fn any_class_is_not_mistaken_for_record_type() {
+fn any_class_matches_miekg_rejection() {
     let parser = ZoneParser::new(
         Cursor::new("a 60 ANY A 192.0.2.1\n"),
         ".".parse().unwrap(),
         "any",
     );
-    let records = parser.collect::<Result<Vec<_>, _>>().unwrap();
-    assert_eq!(records[0].class, Class::ANY);
-    assert_eq!(records[0].rtype, Type::A);
+    assert!(parser.collect::<Result<Vec<_>, _>>().is_err());
 }
 
 #[test]

@@ -294,6 +294,9 @@ impl<R: BufRead> ZoneParser<R> {
         let rtype = loop {
             let field = tokens.get(i).ok_or_else(|| err("missing record type"))?;
             i += 1;
+            if field.eq_ignore_ascii_case("ANY") {
+                return Err(err("invalid record header"));
+            }
             if !saw_class && let Some(value) = parse_class(field) {
                 class = value;
                 saw_class = true;
