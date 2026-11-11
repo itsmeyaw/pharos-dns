@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "DNSSEC signing for the Pharos DNS server"
 
 [lints]
 workspace = true
@@ -11,4 +12,4 @@ workspace = true
 [dependencies]
 aws-lc-rs = "1.19"
 base64 = "0.22"
-pharos-proto = { path = "../pharos-proto" }
+pharos-proto = { version = "0.1.0", path = "../pharos-proto" }

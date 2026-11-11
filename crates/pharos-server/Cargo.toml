@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Listeners, Plugin Chain contract and metrics for the Pharos DNS server"
 
 [dependencies]
 arc-swap = "1"
@@ -12,7 +13,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
-pharos-proto = { path = "../pharos-proto" }
+pharos-proto = { version = "0.1.0", path = "../pharos-proto" }
 socket2 = { version = "0.6", features = ["all"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 
