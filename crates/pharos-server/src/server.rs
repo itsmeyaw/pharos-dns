@@ -130,6 +130,7 @@ impl<C: Chain> Handler for Server<C> {
         self.shed.clone()
     }
     fn shed_query(&self, wire: &[u8], peer: SocketAddr) -> bool {
+        // shortcut: admit writes its discarded error Response here, so a malformed, non-IN, or BADVERS Query allocates while the stack is full; pass a reused buffer if overload floods of such Queries matter.
         let mut response = Vec::new();
         let Admission::Query(query) = admit(wire, self.allow_non_in, &mut response) else {
             return false;
