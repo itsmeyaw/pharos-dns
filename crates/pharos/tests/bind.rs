@@ -39,9 +39,7 @@ fn answers(address: SocketAddr) -> bool {
 
 #[test]
 fn unbound_listener_serves_both_address_families() {
-    if TcpListener::bind("[::1]:0").is_err() {
-        return;
-    }
+    let ipv6 = TcpListener::bind("[::1]:0").is_ok();
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -71,9 +69,11 @@ fn unbound_listener_serves_both_address_families() {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(answers(format!("127.0.0.1:{port}").parse().unwrap()));
-    assert!(answers(format!("[::1]:{port}").parse().unwrap()));
     assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
-    assert!(TcpStream::connect(("::1", port)).is_ok());
+    if ipv6 {
+        assert!(answers(format!("[::1]:{port}").parse().unwrap()));
+        assert!(TcpStream::connect(("::1", port)).is_ok());
+    }
     drop(process);
     fs::remove_dir_all(dir).unwrap();
 }

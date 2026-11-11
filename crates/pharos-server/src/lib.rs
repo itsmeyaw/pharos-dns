@@ -387,6 +387,14 @@ pub struct Listener {
 
 impl Listener {
     pub async fn bind<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
+        Self::bind_with_ipv6(address, handler, bind_ipv6_dual).await
+    }
+
+    async fn bind_with_ipv6<H: Handler>(
+        address: SocketAddr,
+        handler: H,
+        bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
+    ) -> io::Result<Self> {
         let wildcard = address.is_ipv6() && address.ip().is_unspecified();
         let mut ipv4_only = false;
         let workers = quota::worker_count();
@@ -394,7 +402,7 @@ impl Listener {
         let mut attempts = if address.port() == 0 { 16 } else { 1 };
         let (tcp, address, sockets) = loop {
             let tcp = if wildcard && !ipv4_only {
-                match optional_ipv6(bind_ipv6_dual(address)) {
+                match optional_ipv6(bind_ipv6(address)) {
                     Ok(Some(tcp)) => tcp,
                     Ok(None) => {
                         ipv4_only = true;
@@ -506,7 +514,7 @@ fn ipv6_unavailable(error: &io::Error) -> bool {
 
 #[cfg(test)]
 mod wildcard_tests {
-    use super::{canonical_peer, optional_ipv6};
+    use super::{Action, Handler, Listener, Protocol, canonical_peer, optional_ipv6};
     use std::{
         io,
         net::{Ipv6Addr, SocketAddr, SocketAddrV6},
@@ -541,6 +549,46 @@ mod wildcard_tests {
         assert!(
             optional_ipv6::<()>(Err(io::Error::new(io::ErrorKind::AddrInUse, "occupied"))).is_err()
         );
+    }
+
+    struct Echo;
+    impl Handler for Echo {
+        async fn handle(
+            &self,
+            query: &[u8],
+            _: SocketAddr,
+            _: Protocol,
+            response: &mut Vec<u8>,
+        ) -> Action {
+            response.extend_from_slice(query);
+            Action::Respond
+        }
+    }
+
+    #[tokio::test]
+    async fn wildcard_falls_back_to_ipv4_when_ipv6_is_unavailable() {
+        fn unavailable(_: SocketAddr) -> io::Result<tokio::net::TcpListener> {
+            Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT))
+        }
+        let listener = Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, unavailable)
+            .await
+            .unwrap();
+        assert!(listener.local_addr().is_ipv4());
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket
+            .send_to(b"query", ("127.0.0.1", listener.local_addr().port()))
+            .await
+            .unwrap();
+        let mut response = [0; 16];
+        let (len, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.recv_from(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&response[..len], b"query");
+        listener.shutdown().await.unwrap();
     }
 }
 
