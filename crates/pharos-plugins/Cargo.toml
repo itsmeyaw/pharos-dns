@@ -4,17 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "CoreDNS-compatible Plugins for the Pharos DNS server"
 
 [dependencies]
 getrandom = "0.2"
 tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
-pharos-corefile = { path = "../pharos-corefile" }
-pharos-proto = { path = "../pharos-proto" }
-pharos-server = { path = "../pharos-server" }
-pharos-kubernetes = { path = "../pharos-kubernetes", optional = true }
+pharos-corefile = { version = "0.1.0", path = "../pharos-corefile" }
+pharos-proto = { version = "0.1.0", path = "../pharos-proto" }
+pharos-server = { version = "0.1.0", path = "../pharos-server" }
+pharos-kubernetes = { version = "0.1.0", path = "../pharos-kubernetes", optional = true }
 regex = { version = "1", optional = true }
 arc-swap = "1"
-nix = { version = "0.31", features = ["net", "socket"] }
+nix = { version = "0.31", features = ["net", "socket", "hostname"] }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -22,7 +23,7 @@ stats_alloc = "0.1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [features]
-default = ["plugin-root", "plugin-cancel", "plugin-timeouts", "plugin-debug", "plugin-shed", "plugin-bind", "plugin-cache", "plugin-errors", "plugin-forward", "plugin-health", "plugin-hosts", "plugin-kubernetes", "plugin-loadbalance", "plugin-log", "plugin-loop", "plugin-metadata", "plugin-multisocket", "plugin-prometheus", "plugin-ready", "plugin-reload", "plugin-whoami"]
+default = ["plugin-root", "plugin-cancel", "plugin-timeouts", "plugin-debug", "plugin-shed", "plugin-any", "plugin-bind", "plugin-bufsize", "plugin-cache", "plugin-chaos", "plugin-errors", "plugin-forward", "plugin-header", "plugin-health", "plugin-hosts", "plugin-kubernetes", "plugin-loadbalance", "plugin-local", "plugin-log", "plugin-loop", "plugin-metadata", "plugin-minimal", "plugin-multisocket", "plugin-nsid", "plugin-prometheus", "plugin-ready", "plugin-reload", "plugin-whoami"]
 plugin-root = []
 plugin-metadata = []
 plugin-geoip = []

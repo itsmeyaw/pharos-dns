@@ -14,7 +14,7 @@ fn compatibility_document_has_parseable_sections() {
     ];
     let mut in_section = false;
     let mut in_bullet = false;
-    for line in include_str!("../../../docs/compatibility.md").lines() {
+    for line in include_str!("../compatibility.md").lines() {
         if let Some(heading) = line.strip_prefix("## ") {
             assert!(
                 directives.contains(&heading) || general.contains(&heading),

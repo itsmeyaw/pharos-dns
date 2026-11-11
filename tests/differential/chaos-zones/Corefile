@@ -1,0 +1,3 @@
+version.bind:{port} version.server:{port} authors.bind:{port} hostname.bind:{port} id.server:{port} {
+    chaos CoreDNS-001 info@coredns.io
+}

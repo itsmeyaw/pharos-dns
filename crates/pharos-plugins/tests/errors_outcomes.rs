@@ -86,7 +86,7 @@ async fn errors_probe() {
     let Ok(case) = std::env::var("PHAROS_ERRORS_TEST") else {
         return;
     };
-    pharos_server::logging::set_debug(case == "debug");
+    pharos_server::logging::set_debug_enabled(case == "debug");
     let rule = match case.as_str() {
         "consolidate" => "errors {\n consolidate 2s \"^no next\" warning\n}",
         "show_first" | "show_many" => "errors {\n consolidate 2s \"^no next\" info show_first\n}",

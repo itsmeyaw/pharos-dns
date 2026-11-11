@@ -20,7 +20,7 @@ Each scenario is a directory containing:
   The API and DNS Listeners use the same non-ephemeral port reservation helper.
 - `queries`: one Query per line, `name type class udp|tcp [flags...]`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
-  `+bufsize=N`, `+norec`, `+ednsversion=N`, and `+opcode=NAME` or a number.
+  `+bufsize=N`, `+nsid`, `+norec`, `+ednsversion=N`, and `+opcode=NAME` or a number.
 - `expect` (optional): one setting per line. `ttl N` permits a TTL difference
   of N seconds for ordinary records; default is zero. `mask
   additional.srv.port` ignores only the SRV port in Additional (whoami reports
@@ -54,6 +54,15 @@ They do not compare randomized order or weight distributions.
 The `whoami-log` scenario compares Responses, not log output. The current whoami
 Responses cannot exceed the 512-octet UDP minimum for these short Queries, so
 truncation is not covered.
+The `bufsize` README scenarios use a local `whoami` Upstream instead of the
+example's external resolver, and `hosts` instead of the unimplemented `file`
+backend. They compare Responses for both UDP and TCP, with and without EDNS.
+The two `chaos` README scenarios configure the same explicit identity on both
+servers; default identity differences are covered by Rust tests instead.
+The `local` README and prefix-off scenarios use `whoami` as Next to compare
+both intercepted Queries and those passed through.
+The three `header` README scenarios use `whoami` as the Backend and compare
+Responses over UDP and TCP; Rust tests also inspect forwarded Queries.
 The metadata scenarios compare DNS Responses with inherited and explicit Domains.
 The README mentions `rewrite` without a concrete Corefile; that Plugin is not
 implemented yet, so the scenarios use Kubernetes and whoami instead. Metadata

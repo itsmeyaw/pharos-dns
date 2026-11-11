@@ -62,7 +62,7 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
         Ok(_) => {}
     }
     let status = Command::new("cargo")
-        .args(["build", "--release", "-p", "pharos"])
+        .args(["build", "--release", "-p", "pharos-dns"])
         .current_dir(root)
         .status()
         .map_err(|e| format!("building Pharos: {e}"))?;

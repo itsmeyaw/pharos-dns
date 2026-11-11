@@ -1,0 +1,2 @@
+whoami.example.org. A IN udp +nsid
+whoami.example.org. AAAA IN tcp +nsid

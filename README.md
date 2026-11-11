@@ -11,7 +11,7 @@ Build for the host with Docker Buildx, Cargo and Python 3 (or use
 `--platform linux/amd64,linux/arm64` and push or export the multi-platform image):
 
 ```sh
-version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "pharos"))')
+version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "pharos-dns"))')
 docker buildx build --load -t pharos:local \
   --build-arg VERSION="$version" --build-arg REVISION="$(git rev-parse HEAD)" .
 ```

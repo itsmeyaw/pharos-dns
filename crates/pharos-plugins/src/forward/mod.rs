@@ -251,18 +251,17 @@ impl Plugin for Forward {
             let mut buffer = self.buffers.get();
             let (order, wire, query_buffer) = buffer.parts();
             let original_query = cx.query.as_wire();
-            let query_wire =
-                if cx.query.flags() != u16::from_be_bytes([original_query[2], original_query[3]]) {
-                    if !cx.query.can_set_ad_in_wire() {
-                        return Outcome::Unanswered(Rcode::FORMERR);
-                    }
-                    query_buffer.clear();
-                    query_buffer.extend_from_slice(original_query);
-                    query_buffer[2..4].copy_from_slice(&cx.query.flags().to_be_bytes());
-                    query_buffer.as_slice()
-                } else {
-                    original_query
-                };
+            let query_wire = if cx.query.wire_changed() {
+                if cx.query.flags() != u16::from_be_bytes([original_query[2], original_query[3]])
+                    && !cx.query.can_change_flags_in_wire()
+                {
+                    return Outcome::Unanswered(Rcode::FORMERR);
+                }
+                cx.query.copy_wire(query_buffer);
+                query_buffer.as_slice()
+            } else {
+                original_query
+            };
             order.clear();
             order.extend(0..count);
             match stanza.policy {

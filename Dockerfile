@@ -35,7 +35,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && rustup target add "$target" \
-    && cargo zigbuild --locked --release -p pharos --target "$target" \
+    && cargo zigbuild --locked --release -p pharos-dns --target "$target" \
     && cp "target/$target/release/pharos" /pharos
 
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS capabilities

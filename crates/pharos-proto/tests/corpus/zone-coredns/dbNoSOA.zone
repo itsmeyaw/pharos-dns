@@ -1,0 +1,7 @@
+
+$TTL         1M
+$ORIGIN      example.org.
+
+www          IN  A      192.168.0.14
+mail         IN  A      192.168.0.15
+imap         IN  CNAME  mail

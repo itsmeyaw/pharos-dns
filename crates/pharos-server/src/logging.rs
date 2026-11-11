@@ -1,7 +1,7 @@
 //! Process-wide stdout logging, configured by the binary at startup.
 
 use std::{
-    fmt::Write as _,
+    fmt::{self, Write as _},
     io::{self, Write as _},
     sync::atomic::{AtomicBool, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -24,12 +24,13 @@ pub fn init(format: LogFormat) {
     JSON.store(format == LogFormat::Json, Ordering::Relaxed);
 }
 
-/// Enable process-wide debug entries.
-pub fn set_debug(enabled: bool) {
+/// Enable or disable process-wide debug logging.
+pub fn set_debug_enabled(enabled: bool) {
     DEBUG.store(enabled, Ordering::Relaxed);
 }
 
-/// Whether debug entries are enabled.
+/// Return whether debug entries should be emitted.
+#[must_use]
 pub fn debug_enabled() -> bool {
     DEBUG.load(Ordering::Relaxed)
 }
@@ -48,6 +49,59 @@ pub fn log(level: &str, plugin: &str, message: &str) {
     let _ = io::stdout().lock().write_all(line.as_bytes());
 }
 
+/// Write a bounded debug entry without allocating on the Query path.
+pub fn log_debug(plugin: &str, message: fmt::Arguments<'_>) {
+    let mut text = StackText::<2048>::new();
+    if text.write_fmt(message).is_err() {
+        return;
+    }
+    let mut line = StackText::<16384>::new();
+    let format = if JSON.load(Ordering::Relaxed) {
+        LogFormat::Json
+    } else {
+        LogFormat::Text
+    };
+    write_line(
+        &mut line,
+        format,
+        SystemTime::now(),
+        "DEBUG",
+        plugin,
+        text.as_str(),
+    );
+    let _ = io::stdout().lock().write_all(line.as_str().as_bytes());
+}
+
+struct StackText<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> StackText<N> {
+    fn new() -> Self {
+        Self {
+            bytes: [0; N],
+            len: 0,
+        }
+    }
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).expect("formatted UTF-8")
+    }
+}
+
+impl<const N: usize> fmt::Write for StackText<N> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let end = self
+            .len
+            .checked_add(value.len())
+            .filter(|end| *end <= N)
+            .ok_or(fmt::Error)?;
+        self.bytes[self.len..end].copy_from_slice(value.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
 /// Format one entry with a supplied timestamp.
 pub fn format_line(
     format: LogFormat,
@@ -57,9 +111,21 @@ pub fn format_line(
     message: &str,
 ) -> String {
     let mut line = String::with_capacity(128 + 6 * (level.len() + plugin.len() + message.len()));
+    write_line(&mut line, format, time, level, plugin, message);
+    line
+}
+
+fn write_line(
+    line: &mut impl fmt::Write,
+    format: LogFormat,
+    time: SystemTime,
+    level: &str,
+    plugin: &str,
+    message: &str,
+) {
     match format {
         LogFormat::Text => {
-            write_timestamp(&mut line, time);
+            write_timestamp(line, time);
             let _ = write!(line, " {level} ");
             if !plugin.is_empty() {
                 let _ = write!(line, "{plugin}: ");
@@ -67,40 +133,50 @@ pub fn format_line(
             let _ = writeln!(line, "{message}");
         }
         LogFormat::Json => {
-            line.push_str("{\"timestamp\":\"");
-            write_timestamp(&mut line, time);
-            line.push('"');
-            line.push_str(",\"level\":");
-            json_string(&mut line, level);
-            line.push_str(",\"plugin\":");
-            json_string(&mut line, plugin);
-            line.push_str(",\"message\":");
-            json_string(&mut line, message);
-            line.push_str("}\n");
+            let _ = line.write_str("{\"timestamp\":\"");
+            write_timestamp(line, time);
+            let _ = line.write_str("\",\"level\":");
+            json_string(line, level);
+            let _ = line.write_str(",\"plugin\":");
+            json_string(line, plugin);
+            let _ = line.write_str(",\"message\":");
+            json_string(line, message);
+            let _ = line.write_str("}\n");
         }
     }
-    line
 }
 
-fn json_string(out: &mut String, value: &str) {
-    out.push('"');
+fn json_string(out: &mut impl fmt::Write, value: &str) {
+    let _ = out.write_char('"');
     for c in value.chars() {
         match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
+            '"' => {
+                let _ = out.write_str("\\\"");
+            }
+            '\\' => {
+                let _ = out.write_str("\\\\");
+            }
+            '\n' => {
+                let _ = out.write_str("\\n");
+            }
+            '\r' => {
+                let _ = out.write_str("\\r");
+            }
+            '\t' => {
+                let _ = out.write_str("\\t");
+            }
             c if c <= '\u{1f}' => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
-            c => out.push(c),
+            c => {
+                let _ = out.write_char(c);
+            }
         }
     }
-    out.push('"');
+    let _ = out.write_char('"');
 }
 
-fn write_timestamp(out: &mut String, time: SystemTime) {
+fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
     let seconds = match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs() as i64,
         Err(error) => {

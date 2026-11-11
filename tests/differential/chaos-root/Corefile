@@ -1,0 +1,3 @@
+.:{port} {
+    chaos CoreDNS-001 info@coredns.io
+}

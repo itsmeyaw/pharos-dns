@@ -1644,7 +1644,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "pharos"
+name = "pharos-corefile"
+version = "0.1.0"
+dependencies = [
+ "glob",
+]
+
+[[package]]
+name = "pharos-dns"
 version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
@@ -1653,13 +1660,6 @@ dependencies = [
  "pharos-plugins",
  "pharos-server",
  "tokio",
-]
-
-[[package]]
-name = "pharos-corefile"
-version = "0.1.0"
-dependencies = [
- "glob",
 ]
 
 [[package]]

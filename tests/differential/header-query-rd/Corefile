@@ -1,0 +1,6 @@
+.:{port} {
+    header {
+        query set rd
+    }
+    whoami
+}

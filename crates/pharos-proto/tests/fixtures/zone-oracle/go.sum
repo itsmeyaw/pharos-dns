@@ -1,0 +1,8 @@
+github.com/miekg/dns v1.1.74-0.20261103100211-b2d6c9f4480a h1:j0Qm3rvV7i9UKtU7BTiUU6ApuZBW6XnS+n8GDAunmvk=
+github.com/miekg/dns v1.1.74-0.20261103100211-b2d6c9f4480a/go.mod h1:H0jGeLdTxu4CWpVN7/3qeC7SuGYk7jtrLQBXRbuhoPc=
+golang.org/x/net v0.59.0 h1:5zfYln+w5XCxwrnMMJPufRgNoXEaGxl0wo5GqPXyues=
+golang.org/x/net v0.59.0/go.mod h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg=
+golang.org/x/sync v0.23.0 h1:KameEIfc1IkluZyXWLn39Wd4tURc6GbCiISGiZm2bQk=
+golang.org/x/sync v0.23.0/go.mod h1:sUUOizhqBxiL6pEWpqNLUiaJn1ShEbZ6BBqskPbjZm0=
+golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
+golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=

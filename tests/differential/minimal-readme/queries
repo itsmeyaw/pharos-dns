@@ -1,0 +1,4 @@
+example.org. A IN udp
+example.org. AAAA IN tcp
+example.org. TXT IN udp +norec
+example.org. A IN udp +dnssec +bufsize=1232

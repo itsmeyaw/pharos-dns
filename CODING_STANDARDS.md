@@ -33,3 +33,5 @@
       Note: Same limit as DIP: a trait needs two real implementations or a test-faked OS boundary.
   - Principle of Least Surprise: Code should behave predictably and conform to standard conventions to avoid astonishing the developer.
       Example: Ensure a method named `getUser()` only retrieves data and does not silently mutate database records.
+
+- Query path: no heap allocation per Query. Exception: a TCP Response buffer may grow once, on first use of its per-connection slot, up to the 65,535-octet Message limit; UDP buffers never grow.

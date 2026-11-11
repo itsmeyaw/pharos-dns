@@ -1,0 +1,4 @@
+www.example.org. A IN udp +bufsize=4096
+www.example.org. A IN tcp +bufsize=4096
+www.example.org. A IN udp +bufsize=512
+www.example.org. A IN udp
