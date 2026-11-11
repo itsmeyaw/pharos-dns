@@ -1343,6 +1343,56 @@ async fn coredns_response_rules_restore_the_original_question_type() {
 async fn coredns_non_regex_name_rewrite_modes() {
     for (rule, incoming, expected) in [
         (
+            "rewrite name prefix foo bar",
+            "foo.example.com.",
+            "bar.example.com.",
+        ),
+        (
+            "rewrite name prefix foo. bar.",
+            "foo.example.com.",
+            "bar.example.com.",
+        ),
+        (
+            "rewrite name suffix com org",
+            "foo.example.com.",
+            "foo.example.org.",
+        ),
+        (
+            "rewrite name suffix .com .org",
+            "foo.example.com.",
+            "foo.example.org.",
+        ),
+        (
+            "rewrite name suffix .ingress.coredns.rocks nginx.coredns.rocks",
+            "coredns.ingress.coredns.rocks.",
+            "corednsnginx.coredns.rocks.",
+        ),
+        (
+            "rewrite name prefix foo bar",
+            "coredns.foo.",
+            "coredns.foo.",
+        ),
+        (
+            "rewrite name prefix foo bar.",
+            "coredns.foo.",
+            "coredns.foo.",
+        ),
+        (
+            "rewrite name suffix com org",
+            "com.coredns.",
+            "com.coredns.",
+        ),
+        (
+            "rewrite name suffix com org.",
+            "com.coredns.",
+            "com.coredns.",
+        ),
+        (
+            "rewrite name substring service svc",
+            "com.coredns.",
+            "com.coredns.",
+        ),
+        (
             "rewrite name prefix ftp web",
             "ftp.example.",
             "web.example.",
