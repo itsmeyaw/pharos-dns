@@ -2522,6 +2522,80 @@ async fn coredns_regex_name_metadata_and_missing_labels() {
     }
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_metadata_test.go TestRegexNameMetadataValues.
+#[tokio::test]
+async fn coredns_metadata_replacement_rows() {
+    for (replacement, value, expected) in [
+        (
+            "{1}.{test/Team}.EXAMPLE.",
+            Some("Team-A"),
+            "web.team-a.example.",
+        ),
+        ("{0}{test/Team}.", Some("suffix"), "web.example.suffix."),
+        (
+            "{1}.{test/Team}.",
+            Some("{1}.{test/Other}"),
+            "web.{1}.{test/other}.",
+        ),
+        ("{1}.{test/Team}.", None, "web.example."),
+        ("{1}.{test/Team}.", Some(""), "web.example."),
+        (
+            "{1}.{test/Team}.{test/Missing}.",
+            Some("present"),
+            "web.example.",
+        ),
+    ] {
+        let config = format!(
+            r".:53 {{
+ rewrite name regex ^([^.]+)\.example\.$ {replacement} metadata
+}}"
+        );
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = "web.example.".parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None; 2];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        if let Some(value) = value {
+            cx.metadata.insert("test/Team", value);
+        }
+        cx.metadata.insert("test/Other", "must-not-expand");
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, InspectName(expected))
+                .await,
+            Outcome::Drop,
+            "{replacement}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn coredns_invalid_metadata_name_restores_original_question() {
     let config = r".:53 {
