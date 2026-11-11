@@ -11,6 +11,7 @@
 - The nsid Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/nsid`.
 - The bufsize Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/bufsize`.
 - The any Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/any`.
+- The chaos Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/chaos`.
 - Upstream proxy exchange and tests follow CoreDNS v1.15.0's `plugin/pkg/proxy`.
 - The forward Plugin and tests follow CoreDNS v1.15.0's `plugin/forward`.
 - The cache Plugin and tests follow CoreDNS v1.15.0's `plugin/cache`, `plugin/pkg/cache` and `plugin/pkg/dnsutil`.

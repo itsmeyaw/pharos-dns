@@ -1,0 +1,9 @@
+version.bind. TXT CH udp
+VeRsIoN.SeRvEr. TXT CH tcp
+authors.bind. TXT CH udp
+hostname.bind. TXT CH udp
+id.server. TXT CH tcp
+version.bind. TXT CH udp +dnssec
+version.bind. SRV CH udp
+version.bind. TXT IN udp
+unknown.bind. TXT CH udp

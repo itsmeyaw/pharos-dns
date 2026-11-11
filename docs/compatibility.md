@@ -37,6 +37,14 @@
 - A hit that launches a background refresh allocates for the task and its Query and Response buffers; ordinary warmed hits do not allocate.
 - Cache metric series are initialized at setup, including zero-valued series; CoreDNS initializes individual labelled series on first use.
 
+## chaos
+
+- The default version is `Pharos-<version>` and the default authors are Pharos authors rather than CoreDNS's identity (ADR-0003).
+- The hostname is captured at setup, not on each Query; changing the system hostname requires Reload.
+- Author records use a different per-second shuffle generator than CoreDNS, so their order and the subset in a truncated Response can differ; simultaneous `authors.bind` Queries share a lock.
+- An overlong version with explicit authors produces a Plugin error and SERVFAIL rather than CoreDNS's failed write; UDP callers must supply a sufficiently large Response buffer, as with `whoami`.
+- When building a Response with many authors, Pharos truncates to the Query's limit before Listener processing; CoreDNS builds the full Response first. Plugins earlier in the chain can therefore observe a truncated Response.
+
 ## errors
 
 - The `errors` Plugin uses Rust's `regex` syntax rather than Go's RE2 syntax. For example, `\w`, `\d`, `\s` and word boundaries are Unicode-aware in Rust but ASCII-only in Go; some expressions are accepted by only one engine.
@@ -199,7 +207,7 @@
 
 ## General
 
-- Only `any`, `bind`, `bufsize`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI
