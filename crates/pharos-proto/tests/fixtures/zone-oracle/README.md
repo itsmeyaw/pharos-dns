@@ -13,11 +13,12 @@ checkout, dependency resolution failure, packing failure, or mismatch does not.
 The oracle reads zone text from standard input, with an optional origin argument
 (default `.`). It emits `accept` and uncompressed record fields, `reject`, or
 `pack_error` plus the underlying error. `pack_error` means Go accepted the zone
-but could not serialize one of its records; it is not a parser rejection and the
-Rust differential test reports it separately as a failure because no wire record
-is available for comparison. A separate oversized-TXT regression checks this
-case and confirms Rust rejects it. Three missing-prior-owner mutations are still
-compared and explicitly asserted: Go accepts and emits a zero-byte owner, while
+but could not serialize one of its records; it is not a parser rejection. The
+Rust differential test reports it separately and asserts that Rust rejects it,
+because no wire record is available for comparison. Separate regressions cover
+oversized TXT, invalid base64 and duplicate SVCB keys. Three missing-prior-owner
+mutations are still compared and explicitly asserted: Go accepts and emits a
+zero-byte owner, while
 Rust rejects it because an absolute DNS owner must include a root label. The test
 uses `--batch`: each request
 is a big-endian u32 origin length and origin bytes followed by a big-endian u32
