@@ -79,6 +79,8 @@ IPv4 and IPv6 sockets rather than CoreDNS's dual-stack socket, doubling UDP
 worker sockets and their receive buffers when IPv6 is available. Reload binds new
 Listeners before removing old ones, so switching between a wildcard and a
 specific address on the same port can fail rather than replacing the socket.
+An unbound Listener and an explicit `bind ::` on the same port share one
+Listener; CoreDNS groups them separately.
 
 The `loop` Plugin probes only the first Domain in a Server Block at startup
 and after Reload, as CoreDNS does.
