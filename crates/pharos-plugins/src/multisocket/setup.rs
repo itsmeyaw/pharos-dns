@@ -1,5 +1,7 @@
-pub(crate) fn setup(cursor: &mut pharos_corefile::Cursor<'_>, block: &mut pharos_corefile::BlockContext<crate::Chain>) -> Result<(), pharos_corefile::Error> {
-
+pub(crate) fn setup(
+    cursor: &mut pharos_corefile::Cursor<'_>,
+    block: &mut pharos_corefile::BlockContext<crate::Chain>,
+) -> Result<(), pharos_corefile::Error> {
     cursor.next();
     let args = cursor.remaining_args();
     if args.len() > 1 || cursor.next() {

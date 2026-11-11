@@ -576,48 +576,6 @@ impl pharos_server::Plugin for Unimplemented {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     #[cfg(feature = "plugin-root")]
@@ -658,32 +616,8 @@ fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std
     clean
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
 #[allow(dead_code)]
 fn setup_unimplemented(cursor: &mut Cursor<'_>, _: &mut BlockContext<Chain>) -> Result<(), Error> {
     cursor.next();
     Err(cursor.error(format!("{}: plugin is not implemented", cursor.val())))
 }
-
-
-
-
-
-
-
-
-
-
-
-

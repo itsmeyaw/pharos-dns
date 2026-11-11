@@ -558,7 +558,10 @@ fn valid_value(value: &str) -> bool {
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))))
 }
 
-pub(crate) fn setup(cursor: &mut pharos_corefile::Cursor<'_>, block: &mut pharos_corefile::BlockContext<crate::Chain>) -> Result<(), pharos_corefile::Error> {
+pub(crate) fn setup(
+    cursor: &mut pharos_corefile::Cursor<'_>,
+    block: &mut pharos_corefile::BlockContext<crate::Chain>,
+) -> Result<(), pharos_corefile::Error> {
     use crate::kubernetes;
 
     let domains = block
