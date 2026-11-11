@@ -1,0 +1,45 @@
+.:{port} {
+    forward . 127.0.0.1:{port2} {
+        except example.org
+    }
+    whoami
+}
+example.local.:{port} {
+    forward lab.example.local 127.0.0.1:{port2}
+    forward example.local 127.0.0.1:{port2}
+    forward . 127.0.0.1:{port2}
+}
+random.test.:{port} {
+    forward . 127.0.0.1:{port2} {
+        policy random
+        max_fails 3
+        health_check 500ms no_rec domain health.test
+        max_concurrent 64
+        failover SERVFAIL REFUSED
+    }
+}
+round.test.:{port} {
+    forward . 127.0.0.1:{port2} {
+        policy round_robin
+    }
+}
+sequential.test.:{port} {
+    forward . 127.0.0.1:{port2} {
+        policy sequential
+    }
+}
+next.test.:{port} {
+    forward . 127.0.0.1:{port2} {
+        next NOERROR
+    }
+    forward . 127.0.0.1:{port2}
+}
+nodata.test.:{port} {
+    forward . 127.0.0.1:{port2} {
+        next_on_nodata
+    }
+    forward . 127.0.0.1:{port2}
+}
+.:{port2} {
+    whoami
+}

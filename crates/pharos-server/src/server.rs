@@ -2,7 +2,7 @@ use std::{future::Future, net::SocketAddr, sync::Arc, time::Instant};
 
 use crate::{
     Action, Admission, Context, Error, Handler, ListenerKey, Metadata, Outcome, Protocol, Router,
-    admit, contain_panic, finish_outcome,
+    admit, finish_outcome,
     metrics::{BlockMetrics, Registry},
     response_limit,
 };
@@ -12,7 +12,20 @@ use pharos_proto::Rcode;
 pub trait Chain: Send + Sync + 'static {
     fn serve(&self, context: &mut Context<'_>) -> impl Future<Output = Outcome> + Send;
     fn is_empty(&self) -> bool;
+    fn parallel_query(
+        &self,
+        _query: &pharos_proto::Message<'_>,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        None
+    }
     fn visit_enabled(&self, _visit: &mut dyn FnMut(&'static str)) {}
+    fn metrics_enabled(&self) -> bool {
+        true
+    }
+    /// Whether contained Plugin panics should include a stacktrace.
+    fn stacktrace(&self) -> bool {
+        false
+    }
 }
 
 impl<C: Chain> Chain for Arc<C> {
@@ -22,8 +35,20 @@ impl<C: Chain> Chain for Arc<C> {
     fn is_empty(&self) -> bool {
         self.as_ref().is_empty()
     }
+    fn parallel_query(
+        &self,
+        query: &pharos_proto::Message<'_>,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.as_ref().parallel_query(query)
+    }
     fn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {
         self.as_ref().visit_enabled(visit);
+    }
+    fn metrics_enabled(&self) -> bool {
+        self.as_ref().metrics_enabled()
+    }
+    fn stacktrace(&self) -> bool {
+        self.as_ref().stacktrace()
     }
 }
 
@@ -33,9 +58,10 @@ pub struct Server<C> {
     pub key: ListenerKey,
     pub allow_non_in: bool,
     pub debug: bool,
+    pub udp_workers: usize,
     pub logger: fn(Error),
     metrics: Registry,
-    dropped: BlockMetrics,
+    dropped: Option<BlockMetrics>,
 }
 
 impl<C: Chain> Server<C> {
@@ -60,12 +86,15 @@ impl<C: Chain> Server<C> {
         };
         let server = format!("{scheme}://{address}");
         router.prepare_metrics(&key, &metrics, &server);
-        let dropped = metrics.block(&server, "dropped", "");
+        let dropped = router
+            .metrics_enabled(&key)
+            .then(|| metrics.block(&server, "dropped", ""));
         Self {
             router,
             key,
             allow_non_in: false,
             debug: false,
+            udp_workers: crate::quota::worker_count(),
             logger: log_error,
             metrics,
             dropped,
@@ -86,12 +115,109 @@ fn log_plugin_error(plugin: &str, error: Error) {
 }
 
 impl<C: Chain> Handler for Server<C> {
+    fn udp_workers(&self) -> usize {
+        self.udp_workers
+    }
+    fn parallel_query(
+        &self,
+        wire: &[u8],
+        peer: SocketAddr,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        let Ok(query) = pharos_proto::Message::parse(wire) else {
+            return None;
+        };
+        // shortcut: only loop probes require parallel dispatch; extend for other self-queries.
+        if query
+            .questions()
+            .next()
+            .is_none_or(|question| question.qtype != pharos_proto::Type::HINFO)
+        {
+            return None;
+        }
+        self.router
+            .route(&self.key, query, peer, Protocol::Udp)
+            .and_then(|block| block.chain())
+            .and_then(|chain| chain.parallel_query(&query))
+    }
     async fn handle(
         &self,
         wire: &[u8],
         peer: SocketAddr,
         protocol: Protocol,
         response: &mut Vec<u8>,
+    ) -> Action {
+        self.handle_with_depth(wire, peer, protocol, response, 0, self)
+            .await
+    }
+
+    async fn handle_shared(
+        self: &Arc<Self>,
+        wire: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        self.handle_with_depth(wire, peer, protocol, response, 0, self)
+            .await
+    }
+}
+
+impl<C: Chain> crate::SelfLookupServer for Server<C> {
+    fn lookup<'a>(
+        &'a self,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        // shortcut: static re-entry boxes a future, remove if recursive dispatch no longer needs it.
+        Box::pin(self.handle_with_depth(wire, peer, protocol, response, depth, self))
+    }
+}
+
+impl<C: Chain> crate::SelfLookupServer for Arc<Server<C>> {
+    fn lookup<'a>(
+        &'a self,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        Box::pin(self.handle_with_depth(wire, peer, protocol, response, depth, self))
+    }
+
+    fn owned(&self) -> Option<Arc<dyn crate::OwnedSelfLookupServer>> {
+        Some(Arc::clone(self) as Arc<dyn crate::OwnedSelfLookupServer>)
+    }
+}
+
+impl<C: Chain> crate::OwnedSelfLookupServer for Server<C> {
+    fn lookup<'a>(
+        self: Arc<Self>,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        Box::pin(async move {
+            self.handle_with_depth(wire, peer, protocol, response, depth, &self)
+                .await
+        })
+    }
+}
+
+impl<C: Chain> Server<C> {
+    async fn handle_with_depth(
+        &self,
+        wire: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+        depth: u8,
+        lookup_server: &dyn crate::SelfLookupServer,
     ) -> Action {
         let start = Instant::now();
         let query = match admit(wire, self.allow_non_in, response) {
@@ -100,8 +226,10 @@ impl<C: Chain> Handler for Server<C> {
                 if let Ok(query) = pharos_proto::Message::parse(wire) {
                     let rcode = pharos_proto::Message::parse(response)
                         .map_or(0, |message| message.rcode().0);
-                    if rcode != Rcode::BADVERS.0 {
-                        self.dropped.record(
+                    if rcode != Rcode::BADVERS.0
+                        && let Some(dropped) = &self.dropped
+                    {
+                        dropped.record(
                             query.questions().next().map_or(0, |q| q.qtype.0),
                             protocol == Protocol::Tcp,
                             peer_is_ipv6(peer),
@@ -121,11 +249,18 @@ impl<C: Chain> Handler for Server<C> {
         let chain_start = Instant::now();
         let mut producer = None;
         let mut error_plugin = None;
+        let mut error_logged = false;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
                 let mut slots = [None; 18];
                 slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
                 slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
+                slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
+                let mut metadata = Metadata::new(&mut slots);
+                metadata.self_lookup = Some(crate::SelfLookupState {
+                    server: lookup_server,
+                    depth,
+                });
                 let mut context = Context {
                     query,
                     client: peer,
@@ -133,11 +268,16 @@ impl<C: Chain> Handler for Server<C> {
                     transport: self.key.transport,
                     protocol,
                     domain: block.domain(),
-                    metadata: Metadata::new(&mut slots),
+                    metadata,
                     response,
                     max_response_size: response_limit(query, protocol),
                 };
-                let outcome = contain_panic(chain.serve(&mut context), self.debug).await;
+                let outcome = crate::panic::contain_panic_with_stacktrace(
+                    chain.serve(&mut context),
+                    self.debug,
+                    chain.stacktrace(),
+                )
+                .await;
                 producer = context
                     .metadata
                     .get(crate::metrics::WRITER_METADATA)
@@ -146,6 +286,8 @@ impl<C: Chain> Handler for Server<C> {
                     .metadata
                     .get(crate::logging::PLUGIN_METADATA)
                     .and_then(|name| block.plugin_name(name));
+                error_logged =
+                    context.metadata.get(crate::logging::ERROR_LOGGED_METADATA) == Some("true");
                 outcome
             } else {
                 Outcome::Unanswered(Rcode::REFUSED)
@@ -167,10 +309,17 @@ impl<C: Chain> Handler for Server<C> {
             Outcome::Drop | Outcome::Stream(_) => 0,
         };
         let duration = chain_start.elapsed().as_secs_f64();
+        let default_logger = std::ptr::fn_addr_eq(self.logger, log_error as fn(Error));
+        let mut first_error = true;
         let action = finish_outcome(query, protocol, outcome, response, |error| {
-            if let Some(plugin) =
-                error_plugin.filter(|_| std::ptr::fn_addr_eq(self.logger, log_error as fn(Error)))
-            {
+            let suppress = first_error
+                && (error_logged || default_logger)
+                && matches!(outcome, Outcome::Error(e) if e != Error::PluginPanic);
+            first_error = false;
+            if suppress {
+                return;
+            }
+            if let Some(plugin) = error_plugin.filter(|_| default_logger) {
                 log_plugin_error(plugin, error);
             } else {
                 (self.logger)(error);
@@ -206,20 +355,22 @@ impl<C: Chain> Handler for Server<C> {
             );
         } else {
             let metrics = if outcome == Outcome::Error(Error::PluginPanic) {
-                &self.dropped
+                self.dropped.as_ref()
             } else {
-                block.map_or(&self.dropped, |block| block.metrics())
+                block.map_or(self.dropped.as_ref(), |block| block.metrics())
             };
-            metrics.record(
-                qtype,
-                protocol == Protocol::Tcp,
-                peer_is_ipv6(peer),
-                dnssec,
-                wire.len(),
-                response_len,
-                code,
-                duration,
-            );
+            if let Some(metrics) = metrics {
+                metrics.record(
+                    qtype,
+                    protocol == Protocol::Tcp,
+                    peer_is_ipv6(peer),
+                    dnssec,
+                    wire.len(),
+                    response_len,
+                    code,
+                    duration,
+                );
+            }
         }
         action
     }

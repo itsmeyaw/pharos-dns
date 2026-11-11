@@ -1,0 +1,8 @@
+.:{port} {
+    ready localhost:{metrics_port}
+    whoami
+}
+example.org:{port} {
+    ready localhost:{metrics_port}
+    whoami
+}

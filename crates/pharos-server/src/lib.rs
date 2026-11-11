@@ -4,10 +4,19 @@
 //! buffer after awaiting Next. The Listener handles unanswered codes and errors.
 
 use std::{
-    collections::HashMap, fmt, future::Future, io, net::SocketAddr, sync::Arc, time::Duration,
+    any::Any,
+    collections::{HashMap, HashSet},
+    fmt,
+    future::Future,
+    io,
+    net::{Ipv4Addr, SocketAddr},
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
 };
 
-use pharos_proto::{BuildError, Message, Name, Rcode};
+use arc_swap::ArcSwap;
+use pharos_proto::{BuildError, Message, Name, Rcode, Type};
 use tokio::{
     net::{TcpListener, UdpSocket},
     sync::watch,
@@ -15,6 +24,7 @@ use tokio::{
 };
 
 mod admission;
+pub mod http;
 mod lifecycle;
 pub mod logging;
 pub mod metrics;
@@ -49,6 +59,16 @@ pub trait Plugin {
         cx: &mut Context<'_>,
         next: N,
     ) -> impl Future<Output = Outcome> + Send;
+
+    /// Return a readiness check when this Plugin participates in readiness.
+    fn readiness(&self) -> Option<&dyn Readiness> {
+        None
+    }
+}
+
+/// A Plugin's readiness, evaluated outside the Query hot path.
+pub trait Readiness: Send + Sync {
+    fn ready(&self) -> bool;
 }
 
 /// Transport named by a Server Block Key.
@@ -92,6 +112,9 @@ pub enum Error {
     NotImplemented,
     NoNextPlugin,
     PluginPanic,
+    SelfLookupDepth,
+    SelfLookupUnavailable,
+    SelfLookupDropped,
 }
 
 impl fmt::Display for Error {
@@ -103,6 +126,9 @@ impl fmt::Display for Error {
             Self::NotImplemented => f.write_str("plugin is not implemented"),
             Self::NoNextPlugin => f.write_str("no next plugin found"),
             Self::PluginPanic => f.write_str("plugin panicked"),
+            Self::SelfLookupDepth => f.write_str("Self Lookup depth exceeded"),
+            Self::SelfLookupUnavailable => f.write_str("no Server available for Self Lookup"),
+            Self::SelfLookupDropped => f.write_str("Self Lookup produced no Response"),
         }
     }
 }
@@ -112,11 +138,34 @@ impl std::error::Error for Error {}
 /// Caller-provided, fixed-capacity Metadata slots.
 pub struct Metadata<'a> {
     slots: &'a mut [Option<(&'a str, &'a str)>],
+    inline_name: Option<&'static str>,
+    inline_value: [u8; 64],
+    inline_len: usize,
+    self_lookup: Option<SelfLookupState<'a>>,
 }
 
 impl<'a> Metadata<'a> {
     pub fn new(slots: &'a mut [Option<(&'a str, &'a str)>]) -> Self {
-        Self { slots }
+        Self {
+            slots,
+            inline_name: None,
+            inline_value: [0; 64],
+            inline_len: 0,
+            self_lookup: None,
+        }
+    }
+
+    /// Construct fresh Metadata while retaining detached Self Lookup routing.
+    pub fn with_self_lookup(
+        slots: &'a mut [Option<(&'a str, &'a str)>],
+        handle: Option<&'a SelfLookupHandle>,
+    ) -> Self {
+        let mut metadata = Self::new(slots);
+        metadata.self_lookup = handle.map(|handle| SelfLookupState {
+            server: handle,
+            depth: handle.depth,
+        });
+        metadata
     }
 
     /// Insert or replace a named value; returns false when no slot is free.
@@ -127,17 +176,40 @@ impl<'a> Metadata<'a> {
             .find(|slot| slot.is_some_and(|(existing, _)| existing == name))
         {
             *slot = Some((name, value));
+            if self.inline_name == Some(name) {
+                self.inline_name = None;
+            }
             return true;
         }
         if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
             *slot = Some((name, value));
+            if self.inline_name == Some(name) {
+                self.inline_name = None;
+            }
             return true;
         }
         false
     }
 
+    /// Copy a short value whose lifetime is shorter than the Query's.
+    pub fn insert_inline(&mut self, name: &'static str, value: &str) -> bool {
+        if value.len() > self.inline_value.len()
+            || self.inline_name.is_some_and(|existing| existing != name)
+        {
+            return false;
+        }
+        // shortcut: one copied value suffices for forward; add slots for other producers.
+        self.inline_name = Some(name);
+        self.inline_len = value.len();
+        self.inline_value[..value.len()].copy_from_slice(value.as_bytes());
+        true
+    }
+
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
+        if self.inline_name == Some(name) {
+            return std::str::from_utf8(&self.inline_value[..self.inline_len]).ok();
+        }
         self.slots
             .iter()
             .flatten()
@@ -159,10 +231,116 @@ pub struct Context<'a> {
     pub max_response_size: usize,
 }
 
+/// The Listener state and depth associated with a Query.
+struct SelfLookupState<'a> {
+    server: &'a dyn SelfLookupServer,
+    depth: u8,
+}
+
+// Type erasure keeps Context nongeneric without allocating on ordinary Queries.
+trait SelfLookupServer: Sync {
+    fn lookup<'a>(
+        &'a self,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
+
+    fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
+        None
+    }
+}
+
+trait OwnedSelfLookupServer: Send + Sync {
+    fn lookup<'a>(
+        self: Arc<Self>,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
+}
+
+/// Owned Listener state for a detached Query, including its Self Lookup depth.
+pub struct SelfLookupHandle {
+    server: Arc<dyn OwnedSelfLookupServer>,
+    depth: u8,
+}
+
+impl SelfLookupServer for SelfLookupHandle {
+    fn lookup<'a>(
+        &'a self,
+        wire: &'a [u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        depth: u8,
+        response: &'a mut Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
+        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, response)
+    }
+
+    fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
+        Some(Arc::clone(&self.server))
+    }
+}
+
+impl Context<'_> {
+    /// Retain this Query's Listener state for a detached task, if available.
+    pub fn self_lookup_handle(&self) -> Option<SelfLookupHandle> {
+        let state = self.metadata.self_lookup.as_ref()?;
+        Some(SelfLookupHandle {
+            server: state.server.owned()?,
+            depth: state.depth,
+        })
+    }
+
+    /// Route a new Query through this Query's Listener and capture its Response.
+    pub async fn self_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+        let state = self
+            .metadata
+            .self_lookup
+            .as_ref()
+            .ok_or(Error::SelfLookupUnavailable)?;
+        if state.depth >= 10 {
+            return Err(Error::SelfLookupDepth);
+        }
+        let query = self
+            .query
+            .with_question(name, qtype)
+            .map_err(Error::Build)?;
+        let mut response = Vec::with_capacity(usize::from(u16::MAX));
+        match state
+            .server
+            .lookup(
+                &query,
+                self.client,
+                self.protocol,
+                state.depth + 1,
+                &mut response,
+            )
+            .await
+        {
+            Action::Respond => Ok(response),
+            Action::Drop => Err(Error::SelfLookupDropped),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ListenerKey {
     pub transport: Transport,
     pub address: SocketAddr,
+}
+
+fn canonical_peer(mut peer: SocketAddr) -> SocketAddr {
+    let ip = peer.ip().to_canonical();
+    if ip != peer.ip() {
+        peer.set_ip(ip);
+    }
+    peer
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,6 +354,14 @@ pub enum Action {
 /// Handlers must not block the runtime; TCP Queries on a connection may run
 /// concurrently.
 pub trait Handler: Send + Sync + 'static {
+    /// Number of UDP worker sockets for this Listener.
+    fn udp_workers(&self) -> usize {
+        quota::worker_count()
+    }
+    /// Whether this HINFO Query must run concurrently with UDP reception.
+    fn parallel_query(&self, _query: &[u8], _peer: SocketAddr) -> Option<watch::Receiver<bool>> {
+        None
+    }
     fn handle(
         &self,
         query: &[u8],
@@ -183,6 +369,17 @@ pub trait Handler: Send + Sync + 'static {
         protocol: Protocol,
         response: &mut Vec<u8>,
     ) -> impl Future<Output = Action> + Send;
+
+    /// Handle a Query while retaining access to the Listener's owned state.
+    fn handle_shared(
+        self: &Arc<Self>,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+    ) -> impl Future<Output = Action> + Send {
+        self.handle(query, peer, protocol, response)
+    }
 }
 
 /// A DNS Listener serving UDP and TCP on the same address.
@@ -190,32 +387,82 @@ pub struct Listener {
     address: SocketAddr,
     stop: watch::Sender<bool>,
     tasks: Vec<JoinHandle<io::Result<()>>>,
+    udp_stop: watch::Sender<bool>,
+    udp_tasks: Vec<JoinHandle<io::Result<()>>>,
 }
 
 impl Listener {
     pub async fn bind<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
-        let tcp = TcpListener::bind(address).await?;
-        let address = tcp.local_addr()?;
-        let mut sockets = Vec::new();
-        let first = udp::bind(address)?;
-        sockets.push(first);
-        for _ in 1..quota::worker_count() {
-            sockets.push(udp::bind(address)?);
-        }
+        let workers = handler.udp_workers();
+        Self::bind_with_ipv6(address, handler, workers, bind_ipv6_dual, udp::bind).await
+    }
+
+    async fn bind_with_ipv6<H: Handler>(
+        address: SocketAddr,
+        handler: H,
+        workers: usize,
+        bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
+        bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
+    ) -> io::Result<Self> {
+        let wildcard = address.is_ipv6() && address.ip().is_unspecified();
+        let mut ipv4_only = false;
+        // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
+        let mut attempts = if address.port() == 0 { 16 } else { 1 };
+        let (tcp, address, sockets) = loop {
+            let tcp = if wildcard && !ipv4_only {
+                match optional_ipv6(bind_ipv6(address)) {
+                    Ok(Some(tcp)) => tcp,
+                    Ok(None) => {
+                        ipv4_only = true;
+                        continue;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts > 1 => {
+                        attempts -= 1;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else if ipv4_only {
+                TcpListener::bind((Ipv4Addr::UNSPECIFIED, address.port())).await?
+            } else {
+                TcpListener::bind(address).await?
+            };
+            let bound = tcp.local_addr()?;
+            let sockets = (0..workers)
+                .map(|_| bind_udp(bound))
+                .collect::<io::Result<Vec<_>>>();
+            match sockets {
+                Ok(sockets) => break (tcp, bound, sockets),
+                Err(error) if wildcard && bound.is_ipv6() && ipv6_unavailable(&error) => {
+                    ipv4_only = true;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse && attempts > 1 => {
+                    attempts -= 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let (stop, receiver) = watch::channel(false);
+        let (udp_stop, udp_receiver) = watch::channel(false);
         let handler = Arc::new(handler);
-        let mut tasks = sockets
+        let udp_tasks = sockets
             .into_iter()
             .map(|socket| {
                 let socket = UdpSocket::from_std(socket)?;
-                Ok(udp::spawn(socket, Arc::clone(&handler), receiver.clone()))
+                Ok(udp::spawn(
+                    socket,
+                    Arc::clone(&handler),
+                    udp_receiver.clone(),
+                ))
             })
             .collect::<io::Result<Vec<_>>>()?;
-        tasks.push(tcp::spawn(tcp, handler, receiver));
+        let tasks = vec![tcp::spawn(tcp, handler, receiver)];
         Ok(Self {
             address,
             stop,
             tasks,
+            udp_stop,
+            udp_tasks,
         })
     }
 
@@ -226,6 +473,8 @@ impl Listener {
     /// Stop accepting Queries and drain for at most five seconds.
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.stop.send_replace(true);
+        self.udp_stop.send_replace(true);
+        self.tasks.append(&mut self.udp_tasks);
         let mut result = Ok(());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while let Some(mut task) = self.tasks.pop() {
@@ -253,27 +502,493 @@ impl Listener {
     }
 }
 
+fn bind_ipv6_dual(address: SocketAddr) -> io::Result<TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_only_v6(false)?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    socket.listen(1024)?;
+    TcpListener::from_std(socket.into())
+}
+
+fn optional_ipv6<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if ipv6_unavailable(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn ipv6_unavailable(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AddrNotAvailable
+        || error.raw_os_error() == Some(libc::EAFNOSUPPORT)
+}
+
+#[cfg(test)]
+mod wildcard_tests {
+    use super::{
+        Action, Handler, Listener, Protocol, bind_ipv6_dual, canonical_peer, optional_ipv6, udp,
+    };
+    use std::{
+        io,
+        net::{Ipv6Addr, SocketAddr, SocketAddrV6},
+    };
+
+    #[test]
+    fn canonical_peer_preserves_native_ipv6_scope() {
+        let scoped = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1".parse::<Ipv6Addr>().unwrap(),
+            53,
+            7,
+            3,
+        ));
+        assert_eq!(canonical_peer(scoped), scoped);
+        assert_eq!(
+            canonical_peer("[::ffff:127.0.0.1]:53".parse().unwrap()),
+            "127.0.0.1:53".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn unavailable_ipv6_falls_back_but_other_errors_remain_errors() {
+        assert_eq!(
+            optional_ipv6::<()>(Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT))).unwrap(),
+            None
+        );
+        assert_eq!(
+            optional_ipv6::<()>(Err(io::Error::from(io::ErrorKind::AddrNotAvailable))).unwrap(),
+            None
+        );
+        assert_eq!(optional_ipv6(Ok(7)).unwrap(), Some(7));
+        assert!(
+            optional_ipv6::<()>(Err(io::Error::new(io::ErrorKind::AddrInUse, "occupied"))).is_err()
+        );
+    }
+
+    struct Echo;
+    impl Handler for Echo {
+        async fn handle(
+            &self,
+            query: &[u8],
+            _: SocketAddr,
+            _: Protocol,
+            response: &mut Vec<u8>,
+        ) -> Action {
+            response.extend_from_slice(query);
+            Action::Respond
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_binds_the_requested_number_of_udp_sockets() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static BINDS: AtomicUsize = AtomicUsize::new(0);
+        fn counting_bind(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
+            BINDS.fetch_add(1, Ordering::SeqCst);
+            udp::bind(address)
+        }
+        let listener = Listener::bind_with_ipv6(
+            "127.0.0.1:0".parse().unwrap(),
+            Echo,
+            3,
+            bind_ipv6_dual,
+            counting_bind,
+        )
+        .await
+        .unwrap();
+        assert_eq!(BINDS.load(Ordering::SeqCst), 3);
+        listener.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reload_replaces_only_changed_udp_workers_and_keeps_tcp() {
+        use std::collections::HashMap;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        struct Counted(usize, u8);
+        impl Handler for Counted {
+            fn udp_workers(&self) -> usize {
+                self.0
+            }
+            async fn handle(
+                &self,
+                _: &[u8],
+                _: SocketAddr,
+                _: Protocol,
+                response: &mut Vec<u8>,
+            ) -> Action {
+                response.push(self.1);
+                Action::Respond
+            }
+        }
+        let key = super::ListenerKey {
+            transport: super::Transport::Dns,
+            address: "127.0.0.1:0".parse().unwrap(),
+        };
+        let mut registry = super::ListenerRegistry::default();
+        registry
+            .apply(HashMap::from([(key, Counted(2, 1))]))
+            .await
+            .unwrap();
+        let listener = registry.get(&key).unwrap();
+        let address = listener.local_addr();
+        let ids: Vec<_> = listener
+            .udp_tasks
+            .iter()
+            .map(tokio::task::JoinHandle::id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        let mut tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+        registry
+            .apply(HashMap::from([(key, Counted(2, 2))]))
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .get(&key)
+                .unwrap()
+                .udp_tasks
+                .iter()
+                .map(tokio::task::JoinHandle::id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+        registry
+            .apply(HashMap::from([(key, Counted(3, 3))]))
+            .await
+            .unwrap();
+        let listener = registry.get(&key).unwrap();
+        assert_eq!(listener.local_addr(), address);
+        let new_ids: Vec<_> = listener
+            .udp_tasks
+            .iter()
+            .map(tokio::task::JoinHandle::id)
+            .collect();
+        assert_eq!(new_ids.len(), 3);
+        assert!(new_ids.iter().all(|id| !ids.contains(id)));
+        tcp.write_all(&[0, 1, 42]).await.unwrap();
+        let mut response = [0; 3];
+        tcp.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, [0, 1, 3]);
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        udp.send_to(b"q", address).await.unwrap();
+        let mut byte = [0];
+        tokio::time::timeout(std::time::Duration::from_secs(2), udp.recv(&mut byte))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(byte, [3]);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while registry
+                .get(&key)
+                .unwrap()
+                .tasks
+                .iter()
+                .skip(1)
+                .any(|task| !task.is_finished())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        registry
+            .apply(HashMap::from([(key, Counted(1, 4))]))
+            .await
+            .unwrap();
+        let listener = registry.get(&key).unwrap();
+        assert_eq!(listener.udp_tasks.len(), 1);
+        assert_eq!(
+            listener.tasks.len(),
+            4,
+            "completed workers should be reaped"
+        );
+        drop(tcp);
+        registry.shutdown().await.unwrap();
+    }
+
+    async fn assert_ipv4_fallback(listener: Listener) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        assert!(listener.local_addr().is_ipv4());
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket
+            .send_to(b"query", ("127.0.0.1", listener.local_addr().port()))
+            .await
+            .unwrap();
+        let mut response = [0; 16];
+        let (len, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.recv_from(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&response[..len], b"query");
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", listener.local_addr().port()))
+            .await
+            .unwrap();
+        tcp.write_u16(5).await.unwrap();
+        tcp.write_all(b"query").await.unwrap();
+        let len = tokio::time::timeout(std::time::Duration::from_secs(2), tcp.read_u16())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len, 5);
+        let mut response = [0; 5];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tcp.read_exact(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&response, b"query");
+        drop(tcp);
+        listener.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wildcard_falls_back_to_ipv4_when_ipv6_tcp_is_unavailable() {
+        fn unavailable(_: SocketAddr) -> io::Result<tokio::net::TcpListener> {
+            Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT))
+        }
+        let listener =
+            Listener::bind_with_ipv6("[::]:0".parse().unwrap(), Echo, 1, unavailable, udp::bind)
+                .await
+                .unwrap();
+        assert_ipv4_fallback(listener).await;
+    }
+
+    #[tokio::test]
+    async fn wildcard_falls_back_to_ipv4_when_ipv6_udp_is_unavailable() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static TRIED_IPV6_UDP: AtomicBool = AtomicBool::new(false);
+        if std::net::TcpListener::bind("[::1]:0").is_err() {
+            return;
+        }
+        fn unavailable(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
+            if address.is_ipv6() {
+                TRIED_IPV6_UDP.store(true, Ordering::Relaxed);
+                Err(io::Error::from(io::ErrorKind::AddrNotAvailable))
+            } else {
+                udp::bind(address)
+            }
+        }
+        let listener = Listener::bind_with_ipv6(
+            "[::]:0".parse().unwrap(),
+            Echo,
+            1,
+            bind_ipv6_dual,
+            unavailable,
+        )
+        .await
+        .unwrap();
+        assert!(TRIED_IPV6_UDP.load(Ordering::Relaxed));
+        assert_ipv4_fallback(listener).await;
+    }
+}
+
 impl Drop for Listener {
     fn drop(&mut self) {
         self.stop.send_replace(true);
+        self.udp_stop.send_replace(true);
     }
 }
 
 #[derive(Default)]
 pub struct ListenerRegistry {
     listeners: HashMap<ListenerKey, Listener>,
+    handlers: HashMap<ListenerKey, Box<dyn Any + Send + Sync>>,
 }
 
 impl ListenerRegistry {
     pub fn insert(&mut self, key: ListenerKey, listener: Listener) -> Option<Listener> {
+        self.handlers.remove(&key);
         self.listeners.insert(key, listener)
     }
 
     pub fn remove(&mut self, key: &ListenerKey) -> Option<Listener> {
+        self.handlers.remove(key);
         self.listeners.remove(key)
     }
 
     pub fn get(&self, key: &ListenerKey) -> Option<&Listener> {
         self.listeners.get(key)
+    }
+
+    /// Stop and drain every Listener.
+    pub async fn shutdown(mut self) -> io::Result<()> {
+        let mut result = Ok(());
+        for (_, listener) in self.listeners.drain() {
+            if let Err(error) = listener.shutdown().await
+                && result.is_ok()
+            {
+                result = Err(error);
+            }
+        }
+        result
+    }
+
+    /// Bind new Listeners before changing handlers; return replaced states for draining.
+    pub async fn apply<H: Handler>(
+        &mut self,
+        mut servers: HashMap<ListenerKey, H>,
+    ) -> io::Result<Vec<Arc<H>>> {
+        let desired: HashSet<_> = servers.keys().copied().collect();
+        if desired.iter().any(|key| key.transport != Transport::Dns) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsupported Listener transport",
+            ));
+        }
+        for key in servers
+            .keys()
+            .filter(|key| self.listeners.contains_key(key))
+        {
+            if self
+                .handlers
+                .get(key)
+                .and_then(|handler| handler.downcast_ref::<Arc<ArcSwap<H>>>())
+                .is_none()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Listener handler type mismatch",
+                ));
+            }
+        }
+        let mut added: Vec<(ListenerKey, Listener, Arc<ArcSwap<H>>)> = Vec::new();
+        let new_keys: Vec<_> = servers
+            .keys()
+            .filter(|key| !self.listeners.contains_key(key))
+            .copied()
+            .collect();
+        for key in new_keys {
+            let handler = Arc::new(ArcSwap::from_pointee(
+                servers.remove(&key).expect("new Listener"),
+            ));
+            let listener = match Listener::bind(key.address, Swappable(Arc::clone(&handler))).await
+            {
+                Ok(listener) => listener,
+                Err(error) => {
+                    for (_, listener, _) in added {
+                        let _: io::Result<()> = listener.shutdown().await;
+                    }
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("{}: {error}", key.address),
+                    ));
+                }
+            };
+            added.push((key, listener, handler));
+        }
+        let mut replacements = Vec::new();
+        for (key, server) in &servers {
+            let listener = &self.listeners[key];
+            let count = server.udp_workers();
+            if count == listener.udp_tasks.len() {
+                continue;
+            }
+            let sockets = (0..count)
+                .map(|_| udp::bind(listener.address).and_then(UdpSocket::from_std))
+                .collect::<io::Result<Vec<_>>>();
+            match sockets {
+                Ok(sockets) => replacements.push((*key, sockets)),
+                Err(error) => {
+                    for (_, listener, _) in added {
+                        let _: io::Result<()> = listener.shutdown().await;
+                    }
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("{}: {error}", key.address),
+                    ));
+                }
+            }
+        }
+        let mut retired = Vec::new();
+        for (key, server) in servers {
+            retired.push(
+                self.handlers[&key]
+                    .downcast_ref::<Arc<ArcSwap<H>>>()
+                    .expect("validated handler")
+                    .swap(Arc::new(server)),
+            );
+        }
+        for (key, sockets) in replacements {
+            let handler = self.handlers[&key]
+                .downcast_ref::<Arc<ArcSwap<H>>>()
+                .expect("validated handler");
+            let handler = Arc::new(Swappable(Arc::clone(handler)));
+            let listener = self.listeners.get_mut(&key).expect("existing Listener");
+            for task in listener.tasks.split_off(1) {
+                if task.is_finished() {
+                    if let Err(error) = task.await.map_err(io::Error::other).and_then(|v| v) {
+                        logging::log("ERROR", "", &format!("UDP worker shutdown: {error}"));
+                    }
+                } else {
+                    listener.tasks.push(task);
+                }
+            }
+            let (stop, receiver) = watch::channel(false);
+            let tasks = sockets
+                .into_iter()
+                .map(|socket| udp::spawn(socket, Arc::clone(&handler), receiver.clone()))
+                .collect();
+            listener.udp_stop.send_replace(true);
+            listener.tasks.append(&mut listener.udp_tasks);
+            listener.udp_stop = stop;
+            listener.udp_tasks = tasks;
+        }
+        let removed: Vec<_> = self
+            .listeners
+            .keys()
+            .filter(|key| !desired.contains(key))
+            .copied()
+            .collect();
+        for (key, listener, handler) in added {
+            self.listeners.insert(key, listener);
+            self.handlers.insert(key, Box::new(handler));
+        }
+        for key in removed {
+            if let Some(handler) = self
+                .handlers
+                .get(&key)
+                .and_then(|handler| handler.downcast_ref::<Arc<ArcSwap<H>>>())
+            {
+                retired.push(handler.load_full());
+            }
+            if let Some(listener) = self.remove(&key)
+                && let Err(error) = listener.shutdown().await
+            {
+                logging::log("ERROR", "", &format!("Listener shutdown: {error}"));
+            }
+        }
+        Ok(retired)
+    }
+}
+
+struct Swappable<H>(Arc<ArcSwap<H>>);
+
+impl<H: Handler> Handler for Swappable<H> {
+    fn udp_workers(&self) -> usize {
+        self.0.load().udp_workers()
+    }
+    fn parallel_query(&self, query: &[u8], peer: SocketAddr) -> Option<watch::Receiver<bool>> {
+        self.0.load().parallel_query(query, peer)
+    }
+    async fn handle(
+        &self,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        let handler = self.0.load();
+        H::handle_shared(&handler, query, peer, protocol, response).await
     }
 }

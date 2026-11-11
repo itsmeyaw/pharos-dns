@@ -1,0 +1,21 @@
+# CoreDNS Helm chart 1.50.4, default values rendered with helm template:
+# https://github.com/coredns/helm/blob/076604cafdf0ddcb023d3968b3d691813f96c0e6/charts/coredns/values.yaml
+# https://github.com/coredns/helm/blob/076604cafdf0ddcb023d3968b3d691813f96c0e6/charts/coredns/templates/configmap.yaml
+.:53 {
+    errors
+    health {
+        lameduck 10s
+    }
+    ready
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+        pods insecure
+        fallthrough in-addr.arpa ip6.arpa
+        ttl 30
+    }
+    prometheus 0.0.0.0:9153
+    forward . /etc/resolv.conf
+    cache 30
+    loop
+    reload
+    loadbalance
+}

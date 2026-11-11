@@ -1,0 +1,4 @@
+web.default.svc.cluster.local. A IN udp
+10-2-0-5.default.pod.cluster.local. A IN udp
+10-2-0-99.default.pod.cluster.local. A IN tcp
+10-2-0-5.other.pod.cluster.local. A IN udp

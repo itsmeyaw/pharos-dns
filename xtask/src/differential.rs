@@ -1,14 +1,16 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     fs,
+    hash::{Hash, Hasher},
     io::{Read, Write},
     net::{TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, Instant},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    time::{Duration, Instant, SystemTime},
 };
 
-use pharos_proto::Message;
+use pharos_proto::{Message, Rdata};
 
 use crate::{
     compare,
@@ -19,6 +21,7 @@ use crate::{
 struct Expect {
     ttl: u32,
     mask_srv_port: bool,
+    mask_soa_serial: bool,
     deviations: Vec<(String, u16, u16)>,
 }
 
@@ -36,6 +39,7 @@ fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
         match key {
             "ttl" => expect.ttl = value.parse().map_err(|_| format!("invalid TTL: {value}"))?,
             "mask" if value == "additional.srv.port" => expect.mask_srv_port = true,
+            "mask" if value == "soa.serial" => expect.mask_soa_serial = true,
             "deviation" => {
                 let parts: Vec<_> = value.split('|').map(str::trim).collect();
                 let heading = parts[0];
@@ -133,13 +137,48 @@ impl Drop for Server {
     }
 }
 
-// shortcut: another process can take the port before a server binds; the scenario then fails at startup, add a retry if it gets flaky.
+// shortcut: another process can bind the port before startup; pass bound sockets to servers when supported.
 pub(crate) fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    // Check both Transports; sockets are released before the Listener starts.
-    UdpSocket::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
-    Ok(port)
+    reserve_port()?.port()
+}
+
+struct ReservedPort {
+    tcp: TcpListener,
+    _udp: UdpSocket,
+}
+
+impl ReservedPort {
+    fn port(&self) -> Result<u16, String> {
+        self.tcp
+            .local_addr()
+            .map(|addr| addr.port())
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn reserve_port() -> Result<ReservedPort, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let ipv6_tcp = TcpListener::bind("[::]:0").is_ok();
+    let ipv6_udp = UdpSocket::bind("[::]:0").is_ok();
+    for _ in 0..1000 {
+        let mut hash = DefaultHasher::new();
+        std::process::id().hash(&mut hash);
+        NEXT.fetch_add(1, Ordering::Relaxed).hash(&mut hash);
+        SystemTime::now().hash(&mut hash);
+        // Stay below the default ephemeral ranges on macOS and Linux.
+        let port = 10_000 + (hash.finish() % 22_768) as u16;
+        if (ipv6_tcp && TcpListener::bind(("::", port)).is_err())
+            || (ipv6_udp && UdpSocket::bind(("::", port)).is_err())
+        {
+            continue;
+        }
+        if let Ok(tcp) = TcpListener::bind(("0.0.0.0", port))
+            && let Ok(udp) = UdpSocket::bind(("0.0.0.0", port))
+        {
+            return Ok(ReservedPort { tcp, _udp: udp });
+        }
+    }
+    Err("could not find a free server port after 1000 attempts".into())
 }
 
 fn copy_fixtures(source: &Path, target: &Path) -> Result<(), String> {
@@ -170,13 +209,29 @@ fn start(
     binary: &Path,
     cwd: &Path,
     port: u16,
+    port2: u16,
+    metrics_port: u16,
     corefile: Option<&str>,
     pharos: bool,
 ) -> Result<Server, String> {
     let conf = if let Some(corefile) = corefile {
         let conf = cwd.join("Corefile");
-        fs::write(&conf, corefile.replace("{port}", &port.to_string()))
-            .map_err(|e| e.to_string())?;
+        fs::write(
+            &conf,
+            corefile
+                .replace("{port}", &port.to_string())
+                .replace("{port2}", &port2.to_string())
+                .replace("{metrics_port}", &metrics_port.to_string())
+                .replace(
+                    "{loopback}",
+                    if cfg!(target_os = "macos") {
+                        "lo0"
+                    } else {
+                        "lo"
+                    },
+                ),
+        )
+        .map_err(|e| e.to_string())?;
         Some(conf)
     } else {
         None
@@ -276,6 +331,92 @@ pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(
     }
 }
 
+fn kubernetes_ready(wire: &[u8]) -> bool {
+    Message::parse(wire).is_ok_and(|message| {
+        message.answers().any(
+            |record| matches!(record.data(), Ok(Rdata::A(ip)) if ip.octets() == [10, 96, 0, 10]),
+        )
+    })
+}
+
+fn kubernetes_http_ready(response: &[u8]) -> bool {
+    response.starts_with(b"HTTP/1.1 200 ")
+}
+
+fn readiness_probe(port: u16) -> bool {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
+        return false;
+    };
+    if stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .is_err()
+        || stream
+            .write_all(b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .is_err()
+    {
+        return false;
+    }
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).is_ok() && kubernetes_http_ready(&response)
+}
+
+fn wait_for_kubernetes(
+    server: &mut Server,
+    log_path: &Path,
+    port: u16,
+    ready_port: u16,
+) -> Result<(), String> {
+    let wire = query::parse("web.default.svc.cluster.local. A IN udp")?.wire()?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if readiness_probe(ready_port)
+            && exchange(port, Transport::Udp, &wire).is_ok_and(|reply| kubernetes_ready(&reply))
+        {
+            return Ok(());
+        }
+        if server.0.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
+            return Err(format!(
+                "Kubernetes fixture not ready on {port}:\n{}",
+                fs::read_to_string(log_path).unwrap_or_default()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn start_kubernetes_api(root: &Path, temp: &Path) -> Result<Server, String> {
+    let config = temp.join("kubeconfig");
+    let log = fs::File::create(temp.join("kubernetes-api.log")).map_err(|e| e.to_string())?;
+    let port = reserve_port()?;
+    let number = port.port()?;
+    drop(port);
+    let mut server = Server(
+        Command::new(root.join("target/debug/examples/differential"))
+            .arg(&config)
+            .arg(number.to_string())
+            .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .map_err(|e| format!("starting fake Kubernetes API: {e}"))?,
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !config.is_file() {
+        if server.0.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
+            return Err(format!(
+                "fake Kubernetes API did not start:\n{}",
+                fs::read_to_string(temp.join("kubernetes-api.log")).unwrap_or_default()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(server)
+}
+
+fn kubernetes_corefile(corefile: &str, config: &Path) -> String {
+    corefile.replace("{kubeconfig}", &config.to_string_lossy())
+}
+
 fn scenario(
     path: &Path,
     pharos: &Path,
@@ -289,23 +430,82 @@ fn scenario(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Expect::default(),
         Err(e) => return Err(e.to_string()),
     };
-    let corefile = match fs::read_to_string(path.join("Corefile")) {
+    let mut corefile = match fs::read_to_string(path.join("Corefile")) {
         Ok(input) => Some(input),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.to_string()),
     };
     let temp = TempDir::new()?;
+    let uses_kubernetes = corefile
+        .as_deref()
+        .is_some_and(|s| s.contains("{kubeconfig}"));
+    let _api = if uses_kubernetes {
+        let server = start_kubernetes_api(crate::root(), &temp.0)?;
+        let config = fs::canonicalize(temp.0.join("kubeconfig")).map_err(|e| e.to_string())?;
+        corefile = corefile.map(|s| kubernetes_corefile(&s, &config));
+        Some(server)
+    } else {
+        None
+    };
     let (pcwd, ccwd) = (temp.0.join("pharos"), temp.0.join("coredns"));
     copy_fixtures(path, &pcwd)?;
     copy_fixtures(path, &ccwd)?;
-    let (pp, cp) = (free_port()?, free_port()?);
-    if pp == cp {
-        return Err("port collision; retry differential run".into());
+    let (pp, cp) = (reserve_port()?, reserve_port()?);
+    let has_port2 = corefile.as_deref().is_some_and(|s| s.contains("{port2}"));
+    let has_metrics = corefile
+        .as_deref()
+        .is_some_and(|s| s.contains("{metrics_port}"));
+    if uses_kubernetes && !has_metrics {
+        return Err("Kubernetes scenarios require a {metrics_port} readiness listener".into());
     }
-    let mut p = start(pharos, &pcwd, pp, corefile.as_deref(), true)?;
-    let mut c = start(coredns, &ccwd, cp, corefile.as_deref(), false)?;
-    ready(&mut p, &pcwd.with_extension("server.log"), pp)?;
-    ready(&mut c, &ccwd.with_extension("server.log"), cp)?;
+    let (pp2, cp2) = (
+        has_port2.then(reserve_port).transpose()?,
+        has_port2.then(reserve_port).transpose()?,
+    );
+    let (pm, cm) = (
+        has_metrics.then(reserve_port).transpose()?,
+        has_metrics.then(reserve_port).transpose()?,
+    );
+    let (pp_num, cp_num) = (pp.port()?, cp.port()?);
+    let optional_port =
+        |port: &Option<ReservedPort>| port.as_ref().map_or(Ok(0), ReservedPort::port);
+    let (pp2_num, cp2_num) = (optional_port(&pp2)?, optional_port(&cp2)?);
+    let (pm_num, cm_num) = (optional_port(&pm)?, optional_port(&cm)?);
+    // shortcut: another process can bind the port before startup; pass bound sockets to servers when supported.
+    drop((pp, pp2, pm));
+    let mut p = start(
+        pharos,
+        &pcwd,
+        pp_num,
+        pp2_num,
+        pm_num,
+        corefile.as_deref(),
+        true,
+    )?;
+    ready(&mut p, &pcwd.with_extension("server.log"), pp_num)?;
+    if uses_kubernetes {
+        wait_for_kubernetes(&mut p, &pcwd.with_extension("server.log"), pp_num, pm_num)?;
+    }
+    if has_port2 {
+        ready(&mut p, &pcwd.with_extension("server.log"), pp2_num)?;
+    }
+    drop((cp, cp2, cm));
+    let mut c = start(
+        coredns,
+        &ccwd,
+        cp_num,
+        cp2_num,
+        cm_num,
+        corefile.as_deref(),
+        false,
+    )?;
+    ready(&mut c, &ccwd.with_extension("server.log"), cp_num)?;
+    if uses_kubernetes {
+        wait_for_kubernetes(&mut c, &ccwd.with_extension("server.log"), cp_num, cm_num)?;
+    }
+    if has_port2 {
+        ready(&mut c, &ccwd.with_extension("server.log"), cp2_num)?;
+    }
     let mut count = 0;
     for line in input
         .lines()
@@ -315,9 +515,9 @@ fn scenario(
         let query = query::parse(line).map_err(|e| format!("{line}: {e}"))?;
         let wire = query.wire()?;
         let mut pwire =
-            exchange(pp, query.transport, &wire).map_err(|e| format!("Pharos {line}: {e}"))?;
+            exchange(pp_num, query.transport, &wire).map_err(|e| format!("Pharos {line}: {e}"))?;
         let cwire =
-            exchange(cp, query.transport, &wire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            exchange(cp_num, query.transport, &wire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
         if pwire.len() < 4 || cwire.len() < 4 {
             return Err(format!("{line}: truncated Response header"));
         }
@@ -327,8 +527,12 @@ fn scenario(
         apply_deviation(&expect, line, &mut pwire, &cwire)?;
         let pm = Message::parse(&pwire).map_err(|e| format!("Pharos {line}: {e}"))?;
         let cm = Message::parse(&cwire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
-        compare::compare(&pm, &cm, expect.ttl, expect.mask_srv_port)
-            .map_err(|e| format!("{line}:\n{e}"))?;
+        let result = if expect.mask_soa_serial {
+            compare::compare_with_soa_serial(&pm, &cm, expect.ttl, expect.mask_srv_port, true)
+        } else {
+            compare::compare(&pm, &cm, expect.ttl, expect.mask_srv_port)
+        };
+        result.map_err(|e| format!("{line}:\n{e}"))?;
         count += 1;
     }
     if count == 0 {
@@ -346,6 +550,20 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
     if !status.success() {
         return Err(format!("building Pharos failed: {status}"));
     }
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "pharos-kubernetes",
+            "--example",
+            "differential",
+        ])
+        .current_dir(root)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("building Kubernetes fixture failed: {status}"));
+    }
     let pharos = root.join("target/debug/pharos");
     let docs = fs::read_to_string(root.join("docs/compatibility.md")).map_err(|e| e.to_string())?;
     let mut paths = fs::read_dir(root.join("tests/differential"))
@@ -362,7 +580,18 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
     let mut failures = Vec::new();
     for path in paths {
         let name = path.file_name().unwrap().to_string_lossy();
-        match scenario(&path, &pharos, coredns, &docs, self_test) {
+        // Ports are released before servers start, so another process can take one; retry once with fresh ports.
+        let result = match scenario(&path, &pharos, coredns, &docs, self_test) {
+            Err(error)
+                if error
+                    .to_ascii_lowercase()
+                    .contains("address already in use") =>
+            {
+                scenario(&path, &pharos, coredns, &docs, self_test)
+            }
+            result => result,
+        };
+        match result {
             Ok(count) => println!("{name:<24} {count:>7}  PASS"),
             Err(error) => {
                 println!("{name:<24} {:>7}  FAIL", "-");
@@ -382,7 +611,167 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
 
 #[cfg(test)]
 mod tests {
-    use super::{TempDir, apply_deviation, copy_fixtures, parse_expect};
+    use super::{
+        TempDir, apply_deviation, copy_fixtures, kubernetes_corefile, kubernetes_ready,
+        parse_expect, reserve_port, start,
+    };
+
+    #[test]
+    fn kubernetes_http_readiness_requires_ok() {
+        assert!(super::kubernetes_http_ready(b"HTTP/1.1 200 OK\r\n\r\nOK"));
+        assert!(!super::kubernetes_http_ready(
+            b"HTTP/1.1 503 Service Unavailable\r\n\r\nkubernetes"
+        ));
+        assert!(!super::kubernetes_http_ready(b"not an HTTP response"));
+    }
+
+    #[test]
+    fn readiness_probe_queries_the_ready_endpoint() {
+        use std::io::{Read, Write};
+        let listener = super::reserve_port().unwrap().tcp;
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 256];
+            let n = socket.read(&mut request).unwrap();
+            assert!(request[..n].starts_with(b"GET /ready HTTP/1.1\r\n"));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .unwrap();
+        });
+        assert!(super::readiness_probe(port));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn kubernetes_scenarios_expose_readiness() {
+        let root = crate::root().join("tests/differential");
+        let scenarios: Vec<_> = std::fs::read_dir(root)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("kubernetes-")
+            })
+            .collect();
+        assert!(!scenarios.is_empty());
+        for scenario in scenarios {
+            let corefile = std::fs::read_to_string(scenario.path().join("Corefile")).unwrap();
+            assert!(
+                corefile.contains("ready 127.0.0.1:{metrics_port}"),
+                "{}",
+                scenario.path().display()
+            );
+        }
+    }
+
+    #[test]
+    fn both_processes_receive_the_same_absolute_kubeconfig() {
+        let temp = TempDir::new().unwrap();
+        let config = std::fs::canonicalize(&temp.0).unwrap().join("kubeconfig");
+        assert!(config.is_absolute());
+        let corefile = kubernetes_corefile(
+            ".:{port} {\n kubernetes cluster.local {\n kubeconfig {kubeconfig}\n }\n}\n",
+            &config,
+        );
+        for (name, pharos) in [("pharos", true), ("coredns", false)] {
+            let cwd = temp.0.join(name);
+            std::fs::create_dir(&cwd).unwrap();
+            let _server = start(
+                std::path::Path::new("/usr/bin/true"),
+                &cwd,
+                1001,
+                0,
+                0,
+                Some(&corefile),
+                pharos,
+            )
+            .unwrap();
+            let written = std::fs::read_to_string(cwd.join("Corefile")).unwrap();
+            assert!(written.contains(&format!("kubeconfig {}", config.display())));
+            assert!(!written.contains("{kubeconfig}"));
+        }
+    }
+
+    #[test]
+    fn soa_serial_mask_must_be_explicit() {
+        assert!(!parse_expect("", "").unwrap().mask_soa_serial);
+        assert!(parse_expect("mask soa.serial", "").unwrap().mask_soa_serial);
+        assert!(parse_expect("mask soa", "").is_err());
+    }
+
+    #[test]
+    fn kubernetes_readiness_requires_fixture_service_answer() {
+        let mut response = [
+            0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1, 0xc0, 12, 0, 1, 0, 1,
+            0, 0, 0, 5, 0, 4, 10, 96, 0, 10,
+        ];
+        assert!(kubernetes_ready(&response));
+        response[33] = 11;
+        assert!(!kubernetes_ready(&response));
+        assert!(!kubernetes_ready(&response[..3]));
+    }
+
+    #[test]
+    fn substitutes_dns_upstream_and_metrics_ports_for_each_server() {
+        let temp = TempDir::new().unwrap();
+        let config = ".:{port} {\n    forward . 127.0.0.1:{port2}\n    prometheus localhost:{metrics_port}\n}\n# {loopback}\n";
+        let loopback = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
+        let pharos = temp.0.join("pharos");
+        let coredns = temp.0.join("coredns");
+        std::fs::create_dir(&pharos).unwrap();
+        std::fs::create_dir(&coredns).unwrap();
+        let _p = start(
+            std::path::Path::new("/usr/bin/true"),
+            &pharos,
+            1001,
+            1003,
+            1002,
+            Some(config),
+            true,
+        )
+        .unwrap();
+        let _c = start(
+            std::path::Path::new("/usr/bin/true"),
+            &coredns,
+            2001,
+            2003,
+            2002,
+            Some(config),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pharos.join("Corefile")).unwrap(),
+            format!(
+                ".:1001 {{\n    forward . 127.0.0.1:1003\n    prometheus localhost:1002\n}}\n# {loopback}\n"
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(coredns.join("Corefile")).unwrap(),
+            format!(
+                ".:2001 {{\n    forward . 127.0.0.1:2003\n    prometheus localhost:2002\n}}\n# {loopback}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn reserved_ports_are_distinct_and_block_both_transports() {
+        let first = reserve_port().unwrap();
+        let second = reserve_port().unwrap();
+        let port = first.port().unwrap();
+        assert_ne!(port, second.port().unwrap());
+        assert!((10_000..=32_767).contains(&port));
+        assert!((10_000..=32_767).contains(&second.port().unwrap()));
+        assert!(std::net::TcpListener::bind(("0.0.0.0", port)).is_err());
+        assert!(std::net::UdpSocket::bind(("0.0.0.0", port)).is_err());
+    }
 
     #[test]
     fn rejects_deviation_without_documented_heading() {

@@ -3,6 +3,66 @@
 use pharos_server::metrics::Registry;
 
 #[test]
+fn migration_table_matches_all_registry_metric_families() {
+    use std::collections::BTreeSet;
+    let registry = Registry::new("v", "rev", "rustc");
+    let block = registry.block("dns://:53", ".", "");
+    block.plugin_enabled("whoami");
+    block
+        .plugin("whoami")
+        .record(1, false, false, true, 30, 60, 0, 0.001);
+    for transport in ["https", "https3", "quic"] {
+        registry
+            .transport_status(transport, "server", "200")
+            .increment();
+    }
+    registry.cache("dns://:53", ".", "");
+    registry.hosts("hosts").update(2, 123.0);
+    let proxy = registry.proxy("forward", "192.0.2.1:53");
+    proxy.request_duration("NOERROR").observe(0.001);
+    proxy.connection_cache("udp").hit();
+    proxy.connection_cache("udp").miss();
+    proxy.healthcheck_failure();
+    registry.forward();
+    registry.enable_health_metrics();
+    registry.observe_health(0.001, true);
+    registry.reload_failed();
+    registry.reload_version("abc".into());
+    let kubernetes = registry.kubernetes();
+    let request = kubernetes.request("GET", "api:6443");
+    request.observe(0.02, "200");
+    request.rate_limiter(0.003);
+    kubernetes.programming_duration("cluster_ip", 0.002);
+    let mut text = String::new();
+    registry.encode(&mut text);
+    let actual: BTreeSet<_> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("# TYPE "))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    let documented: BTreeSet<_> = include_str!("../../../MIGRATION.md")
+        .lines()
+        .filter_map(|line| line.strip_prefix("| `pharos_"))
+        .filter_map(|line| line.split_once('`').map(|(name, _)| name))
+        .map(|name| format!("pharos_{name}"))
+        .collect();
+    assert_eq!(actual, documented.iter().map(String::as_str).collect());
+}
+
+#[test]
+fn reload_counter_and_current_hash_are_preserved() {
+    let registry = Registry::default();
+    registry.reload_version("old".into());
+    registry.reload_failed();
+    registry.reload_version("new".into());
+    let mut text = String::new();
+    registry.encode(&mut text);
+    assert!(text.contains("pharos_reload_failed_total 1\n"));
+    assert!(text.contains("pharos_reload_version_info{hash=\"sha512\",value=\"new\"} 1\n"));
+    assert!(!text.contains("value=\"old\""));
+}
+
+#[test]
 fn fixed_registry_matches_go_client_golden() {
     let registry = Registry::new("1\"\\\n", "rev", "rustc");
     registry

@@ -4,6 +4,7 @@ mod bench;
 mod compare;
 mod coredns;
 mod differential;
+mod e2e;
 mod query;
 
 use std::{
@@ -32,6 +33,8 @@ fn main() -> ExitCode {
         },
         [command] if command == "diff" => diff(false),
         [command, flag] if command == "diff" && flag == "--self-test" => diff(true),
+        [command] if command == "e2e" => e2e(false),
+        [command, flag] if command == "e2e" && flag == "--keep" => e2e(true),
         [command] if command == "fuzz" => fuzz(false),
         [command, flag] if command == "fuzz" && flag == "--short" => fuzz(true),
         [command, rest @ ..] if command == "bench" => match bench::run(root(), rest) {
@@ -43,8 +46,18 @@ fn main() -> ExitCode {
         },
         _ => {
             eprintln!(
-                "usage: cargo xtask check | coredns | diff [--self-test] | fuzz [--short] | bench [--corefile <path>] [--save-baseline <name> | --baseline <name>]"
+                "usage: cargo xtask check | coredns | diff [--self-test] | e2e [--keep] | fuzz [--short] | bench [--corefile <path>] [--save-baseline <name> | --baseline <name>]"
             );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn e2e(keep: bool) -> ExitCode {
+    match e2e::run(root(), keep) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("e2e FAIL: {error}");
             ExitCode::FAILURE
         }
     }

@@ -1,0 +1,6 @@
+.:{port} {
+    hosts example.hosts example.org example.net {
+        fallthrough
+    }
+    whoami
+}

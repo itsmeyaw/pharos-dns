@@ -77,6 +77,7 @@ pub(crate) fn spawn<H: Handler>(
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<io::Result<()>> {
     tokio::spawn(async move {
+        let socket = Arc::new(socket);
         let mut buffers = std::array::from_fn(|_| vec![0; MAX_MESSAGE]);
         let mut peers = [None; BATCH];
         let mut response = Vec::with_capacity(MAX_MESSAGE);
@@ -98,15 +99,29 @@ pub(crate) fn spawn<H: Handler>(
             };
             for index in 0..count {
                 if let Some((length, peer)) = peers[index] {
-                    response.clear();
-                    if handler
-                        .handle(
+                    let client = crate::canonical_peer(peer);
+                    if let Some(cancelled) =
+                        handler.parallel_query(&buffers[index][..length], client)
+                    {
+                        crate::udp::spawn_parallel(
+                            Arc::clone(&socket),
+                            Arc::clone(&handler),
                             &buffers[index][..length],
                             peer,
-                            Protocol::Udp,
-                            &mut response,
-                        )
-                        .await
+                            shutdown.clone(),
+                            cancelled,
+                        );
+                        continue;
+                    }
+                    response.clear();
+                    if H::handle_shared(
+                        &handler,
+                        &buffers[index][..length],
+                        client,
+                        Protocol::Udp,
+                        &mut response,
+                    )
+                    .await
                         == Action::Respond
                         && let Err(error) = socket
                             .async_io(Interest::WRITABLE, || send(&socket, &response, peer))

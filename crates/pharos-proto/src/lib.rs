@@ -2,7 +2,7 @@
 
 mod name;
 
-pub use name::{Name, NameError, NameRef, Origin};
+pub use name::{Name, NameError, NameRef, NameWirePart, NameWireParts, Origin};
 
 mod message;
 pub use message::{Message, MessageError, MessageMut, Question, Questions, Record, Records};
@@ -21,3 +21,6 @@ pub use edns::{Opt, ResponseOpt, normalized_udp_size};
 
 mod rdata;
 pub use rdata::{Rdata, RdataError, SvcParams};
+
+mod response;
+pub use response::{ResponseClass, ResponseType, classify_response, typify_response};

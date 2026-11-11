@@ -25,8 +25,74 @@ fn query(name: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
+#[cfg(feature = "plugin-prometheus")]
+async fn wildcard_whoami_preserves_native_client_addresses() {
+    let blocks = parse("Corefile", ".:0 {\n prometheus\n whoami\n}").unwrap();
+    let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (key, server) = servers.into_iter().next().unwrap();
+    let mut metrics = String::new();
+    server.metrics().encode(&mut metrics);
+    assert!(metrics.contains("server=\"dns://:0\""), "{metrics}");
+    let listener = Listener::bind(key.address, server).await.unwrap();
+    let port = listener.local_addr().port();
+    let ipv6 = std::net::TcpListener::bind("[::1]:0").is_ok();
+    for (source, destination, record_type, expected) in [
+        (
+            "127.0.0.1:0",
+            format!("127.0.0.1:{port}"),
+            pharos_proto::Type::A,
+            vec![127, 0, 0, 1],
+        ),
+        (
+            "[::1]:0",
+            format!("[::1]:{port}"),
+            pharos_proto::Type::AAAA,
+            std::net::Ipv6Addr::LOCALHOST.octets().to_vec(),
+        ),
+    ] {
+        if source.starts_with('[') && !ipv6 {
+            continue;
+        }
+        let udp = UdpSocket::bind(source).await.unwrap();
+        udp.send_to(&query("a."), &destination).await.unwrap();
+        let mut wire = [0; 512];
+        let (len, _) = timeout(Duration::from_secs(2), udp.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        let message = Message::parse(&wire[..len]).unwrap();
+        let address = message.additionals().next().unwrap();
+        assert_eq!(
+            (address.rtype, address.rdata),
+            (record_type, expected.as_slice())
+        );
+
+        let mut tcp = TcpStream::connect(&destination).await.unwrap();
+        let query = query("a.");
+        tcp.write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        tcp.write_all(&query).await.unwrap();
+        let len = timeout(Duration::from_secs(2), tcp.read_u16())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut wire = vec![0; usize::from(len)];
+        tcp.read_exact(&mut wire).await.unwrap();
+        let message = Message::parse(&wire).unwrap();
+        let address = message.additionals().next().unwrap();
+        assert_eq!(
+            (address.rtype, address.rdata),
+            (record_type, expected.as_slice())
+        );
+    }
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[cfg(feature = "plugin-prometheus")]
 async fn listeners_share_metrics_and_attribute_whoami_responses() {
-    let blocks = parse("Corefile", ".:1053 dns://.:1054 {\n whoami\n}").unwrap();
+    let blocks = parse("Corefile", ".:1053 dns://.:1054 {\n prometheus\n whoami\n}").unwrap();
     let configs = configure::<Chain>(&blocks, directives()).unwrap();
     let (servers, _) = servers(configs).unwrap();
     for server in servers.values() {
@@ -48,9 +114,14 @@ async fn listeners_share_metrics_and_attribute_whoami_responses() {
 }
 
 #[tokio::test]
-async fn plugin_error_log_names_plugin() {
-    if std::env::var_os("PHAROS_TEST_PLUGIN_ERROR").is_some() {
-        let blocks = parse("Corefile", ".:1053 {\n whoami\n}").unwrap();
+async fn plugin_errors_are_logged_only_when_enabled() {
+    if let Ok(mode) = std::env::var("PHAROS_TEST_PLUGIN_ERROR") {
+        let config = if mode == "enabled" {
+            ".:1053 {\n errors\n whoami\n}"
+        } else {
+            ".:1053 {\n whoami\n}"
+        };
+        let blocks = parse("Corefile", config).unwrap();
         let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
         servers
             .values()
@@ -65,18 +136,35 @@ async fn plugin_error_log_names_plugin() {
             .await;
         return;
     }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "plugin_error_log_names_plugin", "--nocapture"])
-        .env("PHAROS_TEST_PLUGIN_ERROR", "1")
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains(" ERROR whoami: Plugin error: Response buffer too small\n"),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    for mode in ["disabled", "enabled"] {
+        if mode == "enabled" && !cfg!(feature = "plugin-errors") {
+            continue;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "plugin_errors_are_logged_only_when_enabled",
+                "--nocapture",
+            ])
+            .env("PHAROS_TEST_PLUGIN_ERROR", mode)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<_> = stdout
+            .lines()
+            .filter(|line| line.contains(" ERROR "))
+            .collect();
+        if mode == "enabled" {
+            assert_eq!(lines.len(), 1, "{stdout}");
+            assert!(
+                lines[0].contains(" ERROR errors: 2 a. A: Response buffer too small"),
+                "{stdout}"
+            );
+        } else {
+            assert!(lines.is_empty(), "{stdout}");
+        }
+    }
 }
 
 #[tokio::test]

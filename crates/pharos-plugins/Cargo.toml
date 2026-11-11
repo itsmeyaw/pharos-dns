@@ -6,9 +6,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+getrandom = "0.2"
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
 pharos-corefile = { path = "../pharos-corefile" }
 pharos-proto = { path = "../pharos-proto" }
 pharos-server = { path = "../pharos-server" }
+pharos-kubernetes = { path = "../pharos-kubernetes", optional = true }
+regex = { version = "1", optional = true }
+arc-swap = "1"
+nix = { version = "0.31", features = ["net", "socket"] }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -16,7 +22,7 @@ stats_alloc = "0.1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [features]
-default = ["plugin-log", "plugin-whoami"]
+default = ["plugin-bind", "plugin-cache", "plugin-errors", "plugin-forward", "plugin-health", "plugin-hosts", "plugin-kubernetes", "plugin-loadbalance", "plugin-log", "plugin-loop", "plugin-multisocket", "plugin-prometheus", "plugin-ready", "plugin-reload", "plugin-whoami"]
 plugin-root = []
 plugin-metadata = []
 plugin-geoip = []
@@ -39,7 +45,7 @@ plugin-health = []
 plugin-pprof = []
 plugin-shed = []
 plugin-prometheus = []
-plugin-errors = []
+plugin-errors = ["dep:regex"]
 plugin-log = []
 plugin-dnstap = []
 plugin-local = []
@@ -65,7 +71,7 @@ plugin-route53 = []
 plugin-azure = []
 plugin-clouddns = []
 plugin-k8s-external = []
-plugin-kubernetes = []
+plugin-kubernetes = ["dep:pharos-kubernetes"]
 plugin-file = []
 plugin-auto = []
 plugin-secondary = []
@@ -92,3 +98,8 @@ required-features = ["plugin-log"]
 name = "chain"
 harness = false
 required-features = ["plugin-whoami"]
+
+[[bench]]
+name = "cache"
+harness = false
+required-features = ["plugin-cache", "plugin-whoami"]

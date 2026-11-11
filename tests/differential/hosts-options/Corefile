@@ -1,0 +1,10 @@
+.:{port} {
+    hosts empty.hosts example.com {
+        192.0.2.30 *.example.com
+        192.0.2.31 www.example.com
+        no_reverse
+        fallthrough example.com
+        fallthrough_unsupported
+    }
+    whoami
+}

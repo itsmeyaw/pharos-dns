@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, plugins_listing};
 

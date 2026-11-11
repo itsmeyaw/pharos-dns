@@ -1,0 +1,9 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    hosts fixture.hosts {
+        fallthrough
+    }
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+    }
+}

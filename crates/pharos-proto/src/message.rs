@@ -1,6 +1,9 @@
 use std::fmt;
 
-use crate::{Class, EdnsOptions, NameError, NameRef, Opcode, Opt, Rcode, Type};
+use crate::{
+    BuildError, Class, EdnsOptions, MessageBuilder, Name, NameError, NameRef, Opcode, Opt, Rcode,
+    Section, Type,
+};
 
 const HEADER_LEN: usize = 12;
 
@@ -50,6 +53,7 @@ pub struct Message<'a> {
     wire: &'a [u8],
     starts: [usize; 4],
     counts: [u16; 4],
+    flags: u16,
 }
 
 /// A Question in a Message.
@@ -77,6 +81,11 @@ impl<'a> Record<'a> {
     /// Parses the record's RDATA without allocating.
     pub fn data(&self) -> Result<crate::Rdata<'a>, crate::RdataError> {
         crate::Rdata::parse_in_message(self.rtype, self.wire, self.rdata_offset, self.rdata.len())
+    }
+
+    /// Returns up to two compressible name fields; other RDATA is opaque.
+    pub fn compressible_names(&self) -> Result<[Option<NameRef<'a>>; 2], crate::RdataError> {
+        crate::rdata::compressible_names(self.rtype, self.wire, self.rdata_offset, self.rdata.len())
     }
 
     /// Formats a valid TSIG as a complete miekg/dns pseudo-section.
@@ -137,6 +146,51 @@ fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageErro
 }
 
 impl<'a> Message<'a> {
+    /// Copy this Message with its first Question replaced by an IN Question.
+    pub fn with_question(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, BuildError> {
+        let mut wire = Vec::with_capacity(self.wire.len() + name.as_wire().len());
+        let mut builder =
+            MessageBuilder::new(&mut wire, usize::from(u16::MAX), self.id(), self.flags())?;
+        let mut questions = self.questions();
+        questions.next().ok_or(BuildError::InvalidRdata)?;
+        let name = NameRef::parse(name.as_wire(), 0).expect("validated name");
+        if !builder.question(name, qtype, Class::IN)? {
+            return Err(BuildError::SizeLimit);
+        }
+        for question in questions {
+            if !builder.question(question.name, question.qtype, question.qclass)? {
+                return Err(BuildError::SizeLimit);
+            }
+        }
+        for (section, records) in [
+            (Section::Answer, self.answers()),
+            (Section::Authority, self.authorities()),
+            (Section::Additional, self.additionals()),
+        ] {
+            for record in records {
+                let data = record.data().map_err(|_| BuildError::InvalidRdata)?;
+                if !builder.record_with(
+                    section,
+                    record.name,
+                    record.rtype,
+                    record.class,
+                    record.ttl,
+                    |writer| data.write(writer),
+                )? {
+                    return Err(BuildError::SizeLimit);
+                }
+            }
+        }
+        let _ = builder.finish();
+        Ok(wire)
+    }
+
+    /// Return the original Message bytes without copying.
+    #[must_use]
+    pub const fn as_wire(&self) -> &'a [u8] {
+        self.wire
+    }
+
     /// Validates all section boundaries and names before exposing the view.
     /// Bytes after the declared sections are ignored, as in CoreDNS.
     pub fn parse(wire: &'a [u8]) -> Result<Self, MessageError> {
@@ -177,6 +231,7 @@ impl<'a> Message<'a> {
             wire,
             starts,
             counts,
+            flags: u16::from_be_bytes([wire[2], wire[3]]),
         })
     }
     #[must_use]
@@ -185,7 +240,43 @@ impl<'a> Message<'a> {
     }
     #[must_use]
     pub fn flags(&self) -> u16 {
-        u16::from_be_bytes([self.wire[2], self.wire[3]])
+        self.flags
+    }
+    /// Returns a view with AD set. `as_wire` still returns the original bytes;
+    /// a sender must apply `flags()` when transmitting the modified view.
+    #[must_use]
+    pub fn with_ad(mut self) -> Self {
+        self.flags |= 0x20;
+        self
+    }
+    /// Whether setting AD in the wire header preserves encoded names.
+    /// Non-OPT RDATA with possible compression pointers is conservatively rejected.
+    #[must_use]
+    pub fn can_set_ad_in_wire(&self) -> bool {
+        if self.wire[3] & 0x20 != 0 {
+            return true;
+        }
+        let mut offset = self.starts[0];
+        for question in self.questions() {
+            if name_references_header(self.wire, offset) {
+                return false;
+            }
+            offset += question.name.wire_len() + 4;
+        }
+        for record in self
+            .answers()
+            .chain(self.authorities())
+            .chain(self.additionals())
+        {
+            let name_offset = record.ttl_offset - 4 - record.name.wire_len();
+            if name_references_header(self.wire, name_offset)
+                || (record.rtype != Type::OPT
+                    && record.rdata.windows(2).any(|pair| pair[0] & 0xc0 == 0xc0))
+            {
+                return false;
+            }
+        }
+        true
     }
     #[must_use]
     pub fn qr(&self) -> bool {
@@ -280,6 +371,23 @@ impl<'a> Message<'a> {
             remaining: self.counts[section],
         }
     }
+}
+
+fn name_references_header(wire: &[u8], mut offset: usize) -> bool {
+    for _ in 0..=255 {
+        match wire[offset] {
+            0 => return false,
+            length @ 1..=63 => offset += 1 + usize::from(length),
+            pointer => {
+                let target = (usize::from(pointer & 0x3f) << 8) | usize::from(wire[offset + 1]);
+                if target < HEADER_LEN {
+                    return true;
+                }
+                offset = target;
+            }
+        }
+    }
+    true
 }
 
 /// Questions of a validated Message.

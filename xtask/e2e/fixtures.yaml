@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pharos-e2e
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: pharos-e2e
+spec:
+  selector:
+    app: dns-fixture
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: headless
+  namespace: pharos-e2e
+spec:
+  clusterIP: None
+  selector:
+    app: dns-fixture
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: external
+  namespace: pharos-e2e
+spec:
+  type: ExternalName
+  externalName: kubernetes.default.svc.cluster.local
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dns-fixture
+  namespace: pharos-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dns-fixture
+  template:
+    metadata:
+      labels:
+        app: dns-fixture
+    spec:
+      hostname: endpoint
+      subdomain: headless
+      containers:
+        - name: dnsutils
+          image: registry.k8s.io/e2e-test-images/jessie-dnsutils:1.7
+          command: ["sleep", "86400"]

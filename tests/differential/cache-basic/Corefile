@@ -1,0 +1,7 @@
+.:{port} {
+    cache 10
+    forward . 127.0.0.1:{port2}
+}
+.:{port2} {
+    whoami
+}

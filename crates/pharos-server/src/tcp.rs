@@ -37,7 +37,7 @@ pub(crate) fn spawn<H: Handler>(
                     match accepted {
                         Ok((stream, peer)) => {
                             connections.spawn(serve(
-                                stream, peer, Arc::clone(&handler),
+                                stream, crate::canonical_peer(peer), Arc::clone(&handler),
                                 connections_stop.clone(),
                             ));
                         }
@@ -130,9 +130,7 @@ async fn serve<H: Handler>(
         let mut response = responses.pop().unwrap_or_default();
         response.clear();
         queries.spawn(async move {
-            if handler
-                .handle(&query, peer, Protocol::Tcp, &mut response)
-                .await
+            if H::handle_shared(&handler, &query, peer, Protocol::Tcp, &mut response).await
                 == Action::Respond
                 && let Ok(length) = u16::try_from(response.len())
             {

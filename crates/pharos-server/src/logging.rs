@@ -15,6 +15,8 @@ pub enum LogFormat {
 
 static JSON: AtomicBool = AtomicBool::new(false);
 pub const PLUGIN_METADATA: &str = "logging/plugin";
+/// Marks an Error already logged by the errors Plugin.
+pub const ERROR_LOGGED_METADATA: &str = "logging/errors-logged";
 
 /// Select the format used by subsequent log entries.
 pub fn init(format: LogFormat) {

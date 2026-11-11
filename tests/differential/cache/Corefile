@@ -1,0 +1,12 @@
+.:{port} {
+    cache 30 example.org {
+        success 1024 30 5
+        denial 1024 15 5
+        disable denial sub.example.org
+        keepttl
+    }
+    forward . 127.0.0.1:{port2}
+}
+.:{port2} {
+    whoami
+}

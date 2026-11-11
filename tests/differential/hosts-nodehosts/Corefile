@@ -1,0 +1,8 @@
+.:{port} {
+    hosts NodeHosts {
+        ttl 60
+        reload 15s
+        fallthrough
+    }
+    whoami
+}

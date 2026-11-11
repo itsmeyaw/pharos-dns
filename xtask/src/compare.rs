@@ -6,6 +6,16 @@ pub(crate) fn compare(
     tolerance: u32,
     mask_srv_port: bool,
 ) -> Result<(), String> {
+    compare_with_soa_serial(pharos, coredns, tolerance, mask_srv_port, false)
+}
+
+pub(crate) fn compare_with_soa_serial(
+    pharos: &Message<'_>,
+    coredns: &Message<'_>,
+    tolerance: u32,
+    mask_srv_port: bool,
+    mask_soa_serial: bool,
+) -> Result<(), String> {
     let questions = |message: &Message<'_>| {
         message
             .questions()
@@ -61,6 +71,7 @@ pub(crate) fn compare(
                     coredns,
                     tolerance,
                     additional && mask_srv_port,
+                    mask_soa_serial,
                 )
             }) {
                 unmatched.remove(index);
@@ -165,6 +176,7 @@ fn record_equal(
     right: &Message<'_>,
     tolerance: u32,
     mask: bool,
+    mask_soa_serial: bool,
 ) -> bool {
     if a.name.to_string() != b.name.to_string()
         || a.rtype != b.rtype
@@ -187,13 +199,62 @@ fn record_equal(
             *port = 0;
         }
     }
+    if mask_soa_serial
+        && let (Rdata::Soa { serial: a, .. }, Rdata::Soa { serial: b, .. }) =
+            (&mut a_data, &mut b_data)
+    {
+        *a = 0;
+        *b = 0;
+    }
     a_data == b_data && a_data.to_string() == b_data.to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::compare;
+    use super::{compare, compare_with_soa_serial};
     use pharos_proto::Message;
+
+    #[test]
+    fn soa_serial_mask_is_opt_in_and_preserves_every_other_field() {
+        let left = [
+            0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 6, 0, 1, 0, 0, 0, 60, 0, 26, 1, b'a', 0,
+            1, b'b', 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
+        ];
+        let mut right = left;
+        right[32] = 9; // serial
+        let l = Message::parse(&left).unwrap();
+        assert!(
+            compare_with_soa_serial(&l, &Message::parse(&right).unwrap(), 0, false, false).is_err()
+        );
+        assert!(
+            compare_with_soa_serial(&l, &Message::parse(&right).unwrap(), 0, false, true).is_ok()
+        );
+        for offset in [16, 20, 24, 27, 36, 40, 44, 48] {
+            let mut changed = right;
+            changed[offset] ^= 1;
+            assert!(
+                compare_with_soa_serial(&l, &Message::parse(&changed).unwrap(), 0, false, true)
+                    .is_err(),
+                "offset {offset}"
+            );
+        }
+        let a = [
+            0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1, 0xc0, 12, 0, 1, 0, 1,
+            0, 0, 0, 60, 0, 4, 192, 0, 2, 1,
+        ];
+        let mut other_a = a;
+        *other_a.last_mut().unwrap() = 2;
+        assert!(
+            compare_with_soa_serial(
+                &Message::parse(&a).unwrap(),
+                &Message::parse(&other_a).unwrap(),
+                0,
+                false,
+                true,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn reports_wrong_answer_in_dig_style() {

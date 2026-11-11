@@ -1,0 +1,3 @@
+.:{port} {
+    prometheus localhost:{metrics_port}
+}

@@ -1,0 +1,7 @@
+one.example.org. A IN udp
+one.example.org. AAAA IN udp
+two.example.net. A IN udp
+three.example.com. A IN udp
+missing.example.org. A IN udp
+11.2.0.192.in-addr.arpa. PTR IN udp
+12.2.0.192.in-addr.arpa. PTR IN udp

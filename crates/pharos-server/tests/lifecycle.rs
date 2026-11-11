@@ -9,7 +9,8 @@ async fn hooks_run_in_registration_order_for_each_phase() {
     let mut hooks = Lifecycle::default();
     for (phase, value) in [
         (Phase::Startup, 1),
-        (Phase::Reload, 3),
+        (Phase::Restart, 3),
+        (Phase::RestartFailed, 6),
         (Phase::Startup, 2),
         (Phase::Shutdown, 4),
     ] {
@@ -28,7 +29,8 @@ async fn hooks_run_in_registration_order_for_each_phase() {
         Ok(())
     });
     hooks.run(Phase::Startup).await.unwrap();
-    hooks.run(Phase::Reload).await.unwrap();
+    hooks.run(Phase::Restart).await.unwrap();
     hooks.run(Phase::Shutdown).await.unwrap();
-    assert_eq!(*events.lock().unwrap(), [1, 2, 3, 4, 5]);
+    hooks.run(Phase::RestartFailed).await.unwrap();
+    assert_eq!(*events.lock().unwrap(), [1, 2, 3, 4, 5, 6]);
 }

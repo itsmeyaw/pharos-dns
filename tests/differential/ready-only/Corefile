@@ -1,0 +1,3 @@
+.:{port} {
+    ready localhost:{metrics_port}
+}
