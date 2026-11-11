@@ -126,7 +126,12 @@ fn zone_names(apex: &Name, names: &[ZoneName]) -> Result<BTreeMap<Name, Vec<Type
 ///
 /// Include the Apex's SOA and NS types and exclude glue and other non-authoritative data.
 pub fn nsec_chain(apex: &Name, names: &[ZoneName]) -> Result<Vec<Nsec>, DenialError> {
-    let owners = zone_names(apex, names)?.into_iter().collect::<Vec<_>>();
+    let owners = zone_names(apex, names)?;
+    // RFC 4035 §2.3: the Zone Apex participates in the NSEC chain.
+    if !owners.contains_key(apex) {
+        return Err(DenialError::MissingApex);
+    }
+    let owners = owners.into_iter().collect::<Vec<_>>();
     let mut records = Vec::with_capacity(owners.len());
     // RFC 4034 §4.1.1: the last NSEC points back to the first canonical owner.
     for (i, (owner, types)) in owners.iter().enumerate() {

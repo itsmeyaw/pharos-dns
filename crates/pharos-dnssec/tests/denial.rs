@@ -65,7 +65,14 @@ fn nsec_chain_uses_canonical_order_merges_names_and_wraps() {
         nsec_chain(&name("example."), &[entry("other.", &[Type::A])]),
         Err(DenialError::OutOfZone)
     );
-    assert!(nsec_chain(&name("example."), &[]).unwrap().is_empty());
+    assert_eq!(
+        nsec_chain(&name("example."), &[]),
+        Err(DenialError::MissingApex)
+    );
+    assert_eq!(
+        nsec_chain(&name("example."), &[entry("a.example.", &[Type::A])]),
+        Err(DenialError::MissingApex)
+    );
 }
 
 #[test]
