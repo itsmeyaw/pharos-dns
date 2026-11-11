@@ -50,6 +50,16 @@ fn scoped_ipv6_listener_resolves_interface_index() {
     assert!(matches!(address, std::net::SocketAddr::V6(address) if address.scope_id() != 0));
 }
 
+#[test]
+fn ipv4_mapped_ipv6_address_uses_ipv4_listener() {
+    let blocks = configure_input(".:1053 {\n bind ::ffff:127.0.0.1\n}").unwrap();
+    let (servers, _) = servers(blocks).unwrap();
+    assert_eq!(
+        servers.keys().next().unwrap().address,
+        "127.0.0.1:1053".parse().unwrap()
+    );
+}
+
 #[cfg(all(feature = "plugin-prometheus", feature = "plugin-whoami"))]
 #[test]
 fn metrics_use_specific_listener_address() {

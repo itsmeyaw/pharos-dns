@@ -195,6 +195,10 @@ pub fn servers_with_registry(
                     let ip: IpAddr = address.parse().map_err(|_| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
                     })?;
+                    let ip = match ip {
+                        IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
+                        ip => ip,
+                    };
                     SocketAddr::new(ip, port)
                 };
                 routes.push((
