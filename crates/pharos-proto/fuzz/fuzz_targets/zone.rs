@@ -127,7 +127,7 @@ fn generate_line_error(zone: &[u8], error: &str) -> bool {
         && (error.contains("unterminated record") || error.contains("invalid $GENERATE"))
 }
 
-fn repair_dangling_name_escape(zone: &[u8]) -> Option<Vec<u8>> {
+fn dangling_escape_offset(zone: &[u8]) -> Option<usize> {
     let origin: Name = ORIGIN.parse().unwrap();
     let error = ZoneParser::new(Cursor::new(zone), origin, "fuzz.zone")
         .collect::<Result<Vec<_>, _>>()
@@ -146,6 +146,11 @@ fn repair_dangling_name_escape(zone: &[u8]) -> Option<Vec<u8>> {
     {
         return None;
     }
+    Some(offset)
+}
+
+fn repair_dangling_name_escape(zone: &[u8]) -> Option<Vec<u8>> {
+    let offset = dangling_escape_offset(zone)?;
     // RFC 1035 §5.1: a relative name's origin is appended to make an absolute name.
     let mut repaired = zone.to_vec();
     repaired.splice(offset..offset, b".example.".iter().copied());
@@ -179,7 +184,7 @@ fn repair_miekg_type_prefix(zone: &[u8]) -> Option<Vec<u8>> {
             repaired.push(b);
             comment = true;
             i += 1;
-        } else if !quoted && matches!(b, b' ' | b'\t' | b'\n') {
+        } else if quoted || matches!(b, b' ' | b'\t' | b'\n') {
             repaired.push(b);
             i += 1;
         } else {
@@ -206,27 +211,8 @@ fn repair_miekg_type_prefix(zone: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn has_dangling_escape(zone: &[u8]) -> bool {
-    let origin: Name = ORIGIN.parse().unwrap();
-    let Some(error) = ZoneParser::new(Cursor::new(zone), origin, "fuzz.zone")
-        .collect::<Result<Vec<_>, _>>()
-        .err()
-    else {
-        return false;
-    };
-    if error.message != "incomplete escape" {
-        return false;
-    }
-    let line_start = zone
-        .split_inclusive(|&b| b == b'\n')
-        .take(error.line - 1)
-        .map(<[u8]>::len)
-        .sum::<usize>();
-    let offset = line_start + error.column;
-    if zone.get(offset - 1) != Some(&b'\\') || !matches!(zone.get(offset), None | Some(b'\n')) {
-        return false;
-    }
     // RFC 1035 §5.1: a backslash escape requires the following character.
-    true
+    dangling_escape_offset(zone).is_some()
 }
 
 fn pharos(zone: &[u8]) -> String {
