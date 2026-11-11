@@ -254,6 +254,7 @@
 
 - CNAME Self Lookup allocates per Query; issue #86 tracks allocation-free Self Lookup.
 - EDNS rewrites use preallocated scratch storage and serialize Queries at the same Self Lookup depth; independent depths use separate buffers.
+- If the original Query had no OPT record, Pharos omits OPT from the Response as required by RFC 6891 §7. CoreDNS can return an OPT created by `rewrite edns0` to that client.
 - Regex rules use Rust regex syntax rather than Go RE2; character classes such as `\d` and `\w` are Unicode-aware by default, unlike Go. Regex captures allocate per Query.
 - TTL rewrites leave OPT's extended RCODE, version and flags untouched as required by RFC 6891 §6.1.3; CoreDNS applies its TTL rule to OPT records as well.
 

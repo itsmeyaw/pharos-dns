@@ -121,6 +121,39 @@ fn coredns_edns_variable_setup_cases() {
     }
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/rewrite_test.go TestNewRule.
+#[test]
+fn coredns_edns_nsid_and_subnet_setup_cases() {
+    for (args, valid) in [
+        ("nsid set", true),
+        ("nsid set revert", true),
+        ("nsid append", true),
+        ("nsid append revert", true),
+        ("nsid replace", true),
+        ("nsid replace revert", true),
+        ("nsid unset", true),
+        ("nsid unset revert", false),
+        ("nsid set junk", false),
+        ("subnet set 24 56", true),
+        ("subnet set 24 56 revert", true),
+        ("subnet append 24 56", true),
+        ("subnet replace 24 56", true),
+        ("subnet unset", true),
+        ("subnet unset revert", false),
+        ("subnet set -1 56", false),
+        ("subnet set 24 -56", false),
+        ("subnet set 33 56", false),
+        ("subnet set 24 129", false),
+        ("subnet append 24 56 72", false),
+        ("subnet unset 24 56", false),
+    ] {
+        let text = format!(".:53 {{\n rewrite edns0 {args}\n}}");
+        let result =
+            parse("Corefile", &text).and_then(|blocks| configure::<Chain>(&blocks, directives()));
+        assert_eq!(result.is_ok(), valid, "{args}: {result:?}");
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/name_test.go TestNewNameRule.
 #[test]
 fn coredns_name_setup_cases() {

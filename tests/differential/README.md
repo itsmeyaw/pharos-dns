@@ -79,6 +79,9 @@ The `rewrite-name-auto` scenario uses an inline hosts Backend for the README's
 suffix and automatic answer rewrite example. `rewrite-regex` and `rewrite-ttl`
 also use hosts; `rewrite-type` and `rewrite-edns-local` use whoami and mask its
 client port.
+The `rewrite edns0` example without an EDNS Query is not compared: CoreDNS
+returns OPT while Pharos omits it under RFC 6891 §7, and the harness cannot mask
+additional records. A Rust integration test covers this deviation.
 The Prometheus scenarios compare DNS Responses, not the metrics endpoint.
 The bind scenario compares Responses on 127.0.0.1 with an excluded IPv6 address;
 the harness cannot send Queries to another bind address or scrape metrics.

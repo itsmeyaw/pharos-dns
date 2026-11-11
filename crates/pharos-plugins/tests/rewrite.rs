@@ -147,6 +147,61 @@ impl pharos_server::Chain for RcodeChain {
     }
 }
 
+struct RewriteAnswerChain(pharos_plugins::rewrite::Rewrite);
+impl pharos_server::Chain for RewriteAnswerChain {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, Answer).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn edns_rewrite_does_not_add_opt_for_non_edns_client() {
+    let config = ".:53 {\n rewrite edns0 local set 0xffee abcd\n}";
+    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(RewriteAnswerChain(chain.rewrite.take().unwrap())),
+        vec![],
+    );
+    let server = pharos_server::Server::new(router, key);
+    let name: Name = "example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        pharos_server::Handler::handle(
+            &server,
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        )
+        .await,
+        pharos_server::Action::Respond
+    );
+    // RFC 6891 §7: a non-EDNS Query must not receive an OPT record.
+    assert!(Message::parse(&response).unwrap().opt().is_none());
+}
+
 #[tokio::test]
 async fn coredns_rcode_rewrite_returns_a_response_for_unanswered_success() {
     let config = ".:53 {\n rewrite rcode example. SERVFAIL NOERROR\n}";
@@ -569,6 +624,57 @@ async fn coredns_edns_revert_restores_previous_rewrite_value() {
             .unwrap()
             .serve(&mut cx, EchoOptions)
             .await,
+        Outcome::Response
+    );
+    let response = Message::parse(cx.response).unwrap();
+    assert_eq!(
+        response.opt().unwrap().options().as_bytes(),
+        b"\xff\xee\0\x04abcd"
+    );
+}
+
+#[tokio::test]
+async fn coredns_edns_revert_applies_when_next_omits_opt() {
+    let config = ".:53 {\n rewrite continue edns0 local set 0xffee abcd\n rewrite edns0 local replace 0xffee bcde revert\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    b.record(
+        Section::Additional,
+        NameRef::parse(root.as_wire(), 0).unwrap(),
+        Type::OPT,
+        Class(4096),
+        0,
+        &[],
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain.rewrite.as_ref().unwrap().serve(&mut cx, Answer).await,
         Outcome::Response
     );
     let response = Message::parse(cx.response).unwrap();
