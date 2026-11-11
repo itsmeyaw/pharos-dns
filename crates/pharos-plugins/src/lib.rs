@@ -29,10 +29,10 @@ pub mod cache;
 pub mod cancel;
 #[cfg(feature = "plugin-chaos")]
 pub mod chaos;
-#[cfg(feature = "plugin-dns64")]
-pub mod dns64;
 #[cfg(feature = "plugin-debug")]
 pub mod debug;
+#[cfg(feature = "plugin-dns64")]
+pub mod dns64;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 #[cfg(feature = "plugin-header")]
