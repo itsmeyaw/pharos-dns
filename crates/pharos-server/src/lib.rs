@@ -468,12 +468,22 @@ impl Context<'_, '_> {
 
     /// Route a new Query through this Query's Listener and capture its Response.
     pub async fn self_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
-        self.self_lookup_inner(name, qtype, false).await
+        self.self_lookup_inner(self.query, name, qtype, false).await
+    }
+
+    /// Route a Self Lookup using a temporary Query's fields and options.
+    pub async fn self_lookup_with_query(
+        &self,
+        query: Message<'_>,
+        name: &Name,
+        qtype: Type,
+    ) -> Result<Vec<u8>, Error> {
+        self.self_lookup_inner(query, name, qtype, false).await
     }
 
     /// Re-enter for SIIT synthesis, preventing recursive SIIT interception.
     pub async fn siit_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
-        self.self_lookup_inner(name, qtype, true).await
+        self.self_lookup_inner(self.query, name, qtype, true).await
     }
 
     /// Whether this Query descends from a SIIT synthesis lookup.
@@ -486,6 +496,7 @@ impl Context<'_, '_> {
 
     async fn self_lookup_inner(
         &self,
+        source: Message<'_>,
         name: &Name,
         qtype: Type,
         siit: bool,
@@ -498,10 +509,7 @@ impl Context<'_, '_> {
         if state.depth >= 10 {
             return Err(Error::SelfLookupDepth);
         }
-        let query = self
-            .query
-            .with_question(name, qtype)
-            .map_err(Error::Build)?;
+        let query = source.with_question(name, qtype).map_err(Error::Build)?;
         if let Some(server) = state.server.owned()
             && tokio::runtime::Handle::try_current().is_ok()
         {

@@ -42,6 +42,99 @@ impl pharos_server::Chain for MultiAliasChain {
     }
 }
 
+struct EdnsAliasChain(pharos_plugins::rewrite::Rewrite);
+impl pharos_server::Chain for EdnsAliasChain {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        if cx.query.questions().next().unwrap().name.to_string() == "new.example." {
+            assert!(
+                cx.query
+                    .opt()
+                    .is_some_and(|opt| opt.options().iter().any(|option| matches!(
+                        option,
+                        pharos_proto::EdnsOption::Unknown {
+                            code: 0xffee,
+                            data: b"abcd"
+                        }
+                    )))
+            );
+        }
+        self.0.serve(cx, EdnsAliasBackend).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct EdnsAliasBackend;
+impl Next for EdnsAliasBackend {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        assert!(
+            cx.query
+                .opt()
+                .unwrap()
+                .options()
+                .iter()
+                .any(|option| matches!(
+                    option,
+                    pharos_proto::EdnsOption::Unknown {
+                        code: 0xffee,
+                        data: b"abcd"
+                    }
+                ))
+        );
+        AliasBackend("new.example.").run(cx).await
+    }
+}
+
+#[tokio::test]
+async fn cname_self_lookup_preserves_rewritten_edns_options() {
+    let config = ".:53 {\n rewrite continue edns0 local set 0xffee abcd\n rewrite cname old.example. new.example.\n}";
+    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(EdnsAliasChain(chain.rewrite.take().unwrap())),
+        vec![],
+    );
+    let server = pharos_server::Server::new(router, key);
+    let name: Name = "alias.example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        pharos_server::Handler::handle(
+            &server,
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        )
+        .await,
+        pharos_server::Action::Respond
+    );
+    let response = Message::parse(&response).unwrap();
+    let pharos_proto::Rdata::Cname(target) = response.answers().next().unwrap().data().unwrap()
+    else {
+        panic!("expected CNAME")
+    };
+    assert_eq!(target.to_string(), "new.example.");
+    assert_eq!(response.answers().count(), 2);
+}
+
 struct AuthorityAliasChain(pharos_plugins::rewrite::Rewrite);
 impl pharos_server::Chain for AuthorityAliasChain {
     async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {

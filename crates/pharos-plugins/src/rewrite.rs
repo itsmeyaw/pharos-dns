@@ -1883,28 +1883,29 @@ impl Plugin for Rewrite {
                     .await,
             )
         };
-        let (mut state, output, mut matches, mut snapshots) = if let Some(scratch) = &mut scratch {
-            let EdnsScratch {
-                wire,
-                matched,
-                tags,
-                snapshots,
-            } = &mut **scratch;
-            matched.fill(0);
-            for snapshot in snapshots.iter_mut() {
-                snapshot.present = false;
-                snapshot.len = 0;
-            }
-            let (options, output) = wire.split_at_mut(65535);
-            (
-                Some(EdnsState::new(options, tags, &cx.query)),
-                Some(output),
-                Some(matched.as_mut_slice()),
-                Some(snapshots.as_mut_slice()),
-            )
-        } else {
-            (None, None, None, None)
-        };
+        let (mut state, mut output, mut matches, mut snapshots) =
+            if let Some(scratch) = &mut scratch {
+                let EdnsScratch {
+                    wire,
+                    matched,
+                    tags,
+                    snapshots,
+                } = &mut **scratch;
+                matched.fill(0);
+                for snapshot in snapshots.iter_mut() {
+                    snapshot.present = false;
+                    snapshot.len = 0;
+                }
+                let (options, output) = wire.split_at_mut(65535);
+                (
+                    Some(EdnsState::new(options, tags, &cx.query)),
+                    Some(output),
+                    Some(matched.as_mut_slice()),
+                    Some(snapshots.as_mut_slice()),
+                )
+            } else {
+                (None, None, None, None)
+            };
         for (index, rule) in self.rules.iter().enumerate() {
             let before = cx.query;
             if let Action::Edns(_, EdnsValue::Variable(label), _, _) = &rule.action
@@ -1980,7 +1981,7 @@ impl Plugin for Rewrite {
         let rewritten_query = cx.query;
         let outcome = if rewrite_edns {
             let state = state.as_ref().expect("EDNS state allocated");
-            let wire = output.expect("EDNS output allocated");
+            let wire = output.as_deref_mut().expect("EDNS output allocated");
             let len = match edns_query(cx.query, &state.bytes[..state.len], wire) {
                 Ok(len) => len,
                 Err(error) => return Outcome::Error(error),
@@ -2059,8 +2060,24 @@ impl Plugin for Rewrite {
                     let Some(question) = rewritten_query.questions().next() else {
                         return outcome;
                     };
+                    let lookup_query = if rewrite_edns {
+                        let state = state.as_ref().expect("EDNS state allocated");
+                        let wire = output.as_deref_mut().expect("EDNS output allocated");
+                        let len = match edns_query(cx.query, &state.bytes[..state.len], wire) {
+                            Ok(len) => len,
+                            Err(error) => return Outcome::Error(error),
+                        };
+                        match Message::parse(&wire[..len]) {
+                            Ok(query) => query,
+                            Err(_) => return Outcome::Error(ServerError::InvalidQuery),
+                        }
+                    } else {
+                        cx.query
+                    };
                     // shortcut: CNAME Self Lookup allocates; remove when issue #86 makes it allocation-free.
-                    if let Ok(wire) = cx.self_lookup(&target, question.qtype).await
+                    if let Ok(wire) = cx
+                        .self_lookup_with_query(lookup_query, &target, question.qtype)
+                        .await
                         && let Ok(lookup) = Message::parse(&wire)
                         && let Err(error) = build_cname_response(cx, lookup, &from, &target)
                     {
