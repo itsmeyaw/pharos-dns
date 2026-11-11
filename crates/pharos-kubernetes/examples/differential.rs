@@ -31,6 +31,14 @@ fn resources(name: &str) -> Option<(&'static str, &'static str, Vec<Value>)> {
                 json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"hidden","namespace":"other","resourceVersion":"1","uid":"hidden","labels":{"app":"web","tier":"hidden"}},"spec":{"type":"ClusterIP","clusterIP":"10.96.0.12","clusterIPs":["10.96.0.12"]}}),
             ],
         ),
+        "serviceimports" => (
+            "multicluster.x-k8s.io/v1alpha1",
+            "ServiceImport",
+            vec![
+                json!({"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"web","namespace":"default","resourceVersion":"1","uid":"mc-web"},"spec":{"type":"ClusterSetIP","ips":["10.96.1.10","fd00::110"],"ports":[{"name":"http","protocol":"TCP","port":80}]}}),
+                json!({"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"headless","namespace":"default","resourceVersion":"1","uid":"mc-headless"},"spec":{"type":"Headless","ports":[{"name":"http","protocol":"TCP","port":8080}]}}),
+            ],
+        ),
         "pods" => (
             "v1",
             "Pod",
@@ -58,6 +66,8 @@ fn resources(name: &str) -> Option<(&'static str, &'static str, Vec<Value>)> {
                     {"addresses":["10.2.0.9"],"conditions":{"ready":true}}
                 ]}),
                 json!({"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"web-1","namespace":"default","resourceVersion":"1","uid":"web-1","labels":{"kubernetes.io/service-name":"web","app":"web"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":80}],"endpoints":[{"addresses":["10.2.0.10"],"conditions":{"ready":true}}]}),
+                json!({"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"mc-web","namespace":"default","resourceVersion":"1","uid":"mc-web","labels":{"multicluster.kubernetes.io/service-name":"web","multicluster.kubernetes.io/source-cluster":"east"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":80}],"endpoints":[{"addresses":["10.3.0.10"],"hostname":"web-0","conditions":{"ready":true}}]}),
+                json!({"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"mc-headless","namespace":"default","resourceVersion":"1","uid":"mc-headless","labels":{"multicluster.kubernetes.io/service-name":"headless","multicluster.kubernetes.io/source-cluster":"east"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.3.0.11"],"hostname":"db-0","conditions":{"ready":true}}]}),
             ],
         ),
         _ => return None,
@@ -234,10 +244,15 @@ fn query_params(query: &str) -> Result<HashMap<String, String>, ()> {
 }
 
 fn resource_path(path: &str) -> Option<(&str, Option<&str>)> {
-    let (prefix, resource) = if let Some(path) = path.strip_prefix("/api/v1/") {
-        (false, path)
+    let (group, resource) = if let Some(path) = path.strip_prefix("/api/v1/") {
+        (0, path)
+    } else if let Some(path) = path.strip_prefix("/apis/discovery.k8s.io/v1/") {
+        (1, path)
     } else {
-        (true, path.strip_prefix("/apis/discovery.k8s.io/v1/")?)
+        (
+            2,
+            path.strip_prefix("/apis/multicluster.x-k8s.io/v1alpha1/")?,
+        )
     };
     let parts: Vec<_> = resource.split('/').collect();
     let (name, namespace) = match parts.as_slice() {
@@ -245,8 +260,9 @@ fn resource_path(path: &str) -> Option<(&str, Option<&str>)> {
         ["namespaces", namespace, name] if *name != "namespaces" => (*name, Some(*namespace)),
         _ => return None,
     };
-    if (prefix && name == "endpointslices")
-        || (!prefix && matches!(name, "services" | "pods" | "namespaces"))
+    if (group == 1 && name == "endpointslices")
+        || (group == 2 && name == "serviceimports")
+        || (group == 0 && matches!(name, "services" | "pods" | "namespaces"))
     {
         Some((name, namespace))
     } else {
@@ -256,21 +272,27 @@ fn resource_path(path: &str) -> Option<(&str, Option<&str>)> {
 
 fn discovery(path: &str) -> Option<Value> {
     let group = json!({"name":"discovery.k8s.io","versions":[{"groupVersion":"discovery.k8s.io/v1","version":"v1"}],"preferredVersion":{"groupVersion":"discovery.k8s.io/v1","version":"v1"}});
+    let mcs = json!({"name":"multicluster.x-k8s.io","versions":[{"groupVersion":"multicluster.x-k8s.io/v1alpha1","version":"v1alpha1"}],"preferredVersion":{"groupVersion":"multicluster.x-k8s.io/v1alpha1","version":"v1alpha1"}});
     Some(match path {
         "/version" => json!({"major":"1","minor":"37","gitVersion":"v1.37.0"}),
         "/api" => json!({"kind":"APIVersions","apiVersion":"v1","versions":["v1"]}),
-        "/apis" => json!({"kind":"APIGroupList","apiVersion":"v1","groups":[group]}),
+        "/apis" => json!({"kind":"APIGroupList","apiVersion":"v1","groups":[group,mcs]}),
+        "/apis/multicluster.x-k8s.io" => {
+            json!({"kind":"APIGroup","apiVersion":"v1","name":mcs["name"],"versions":mcs["versions"],"preferredVersion":mcs["preferredVersion"]})
+        }
         "/apis/discovery.k8s.io" => {
             json!({"kind":"APIGroup","apiVersion":"v1","name":group["name"],"versions":group["versions"],"preferredVersion":group["preferredVersion"]})
         }
-        "/api/v1" | "/apis/discovery.k8s.io/v1" => {
+        "/api/v1" | "/apis/discovery.k8s.io/v1" | "/apis/multicluster.x-k8s.io/v1alpha1" => {
             let names: &[&str] = if path == "/api/v1" {
                 &["services", "pods", "namespaces"]
-            } else {
+            } else if path == "/apis/discovery.k8s.io/v1" {
                 &["endpointslices"]
+            } else {
+                &["serviceimports"]
             };
             let entries: Vec<_> = names.iter().map(|name| json!({"name":name,"namespaced":*name != "namespaces","kind":resources(name).unwrap().1,"verbs":["get","list","watch"]})).collect();
-            json!({"kind":"APIResourceList","apiVersion":"v1","groupVersion":if path == "/api/v1" {"v1"} else {"discovery.k8s.io/v1"},"resources":entries})
+            json!({"kind":"APIResourceList","apiVersion":"v1","groupVersion":if path == "/api/v1" {"v1"} else if path == "/apis/discovery.k8s.io/v1" {"discovery.k8s.io/v1"} else {"multicluster.x-k8s.io/v1alpha1"},"resources":entries})
         }
         _ => return None,
     })
@@ -396,6 +418,24 @@ mod tests {
             .iter()
             .map(|item| item["metadata"]["name"].as_str().unwrap())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn multicluster_discovery_and_fixtures_are_available() {
+        let imports = list("/apis/multicluster.x-k8s.io/v1alpha1/serviceimports", None).await;
+        assert_eq!(names(&imports), ["web", "headless"]);
+        let slices = list(
+            "/apis/discovery.k8s.io/v1/endpointslices",
+            Some("labelSelector=multicluster.kubernetes.io%2Fservice-name"),
+        )
+        .await;
+        assert_eq!(names(&slices), ["mc-web", "mc-headless"]);
+        for path in [
+            "/apis/multicluster.x-k8s.io",
+            "/apis/multicluster.x-k8s.io/v1alpha1",
+        ] {
+            assert_eq!(api_response(path, None).status(), 200);
+        }
     }
 
     #[tokio::test]
