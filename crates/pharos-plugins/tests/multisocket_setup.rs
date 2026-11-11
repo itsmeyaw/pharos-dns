@@ -51,10 +51,26 @@ fn first_server_block_sets_each_listeners_count() {
 
 #[test]
 fn first_block_without_multisocket_keeps_the_default_count() {
+    struct DefaultWorkers;
+    impl pharos_server::Handler for DefaultWorkers {
+        async fn handle(
+            &self,
+            _: &[u8],
+            _: std::net::SocketAddr,
+            _: pharos_server::Protocol,
+            _: &mut Vec<u8>,
+        ) -> pharos_server::Action {
+            pharos_server::Action::Drop
+        }
+    }
     let default = parse("Corefile", "first.example:1053 {\n whoami\n}").unwrap();
     let (default, _) =
         pharos_plugins::servers(configure::<Chain>(&default, directives()).unwrap()).unwrap();
     let expected = default.values().next().unwrap().udp_workers;
+    assert_eq!(
+        expected,
+        pharos_server::Handler::udp_workers(&DefaultWorkers)
+    );
     let shared = parse(
         "Corefile",
         "first.example:1053 {\n whoami\n}\nsecond.example:1053 {\n multisocket 1024\n whoami\n}",
@@ -63,4 +79,8 @@ fn first_block_without_multisocket_keeps_the_default_count() {
     let (shared, _) =
         pharos_plugins::servers(configure::<Chain>(&shared, directives()).unwrap()).unwrap();
     assert_eq!(shared.values().next().unwrap().udp_workers, expected);
+    let explicit = parse("Corefile", "first.example:1053 {\n multisocket\n whoami\n}").unwrap();
+    let (explicit, _) =
+        pharos_plugins::servers(configure::<Chain>(&explicit, directives()).unwrap()).unwrap();
+    assert_eq!(explicit.values().next().unwrap().udp_workers, expected);
 }

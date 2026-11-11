@@ -682,6 +682,31 @@ mod wildcard_tests {
             .unwrap()
             .unwrap();
         assert_eq!(byte, [3]);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while registry
+                .get(&key)
+                .unwrap()
+                .tasks
+                .iter()
+                .skip(1)
+                .any(|task| !task.is_finished())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        registry
+            .apply(HashMap::from([(key, Counted(1, 4))]))
+            .await
+            .unwrap();
+        let listener = registry.get(&key).unwrap();
+        assert_eq!(listener.udp_tasks.len(), 1);
+        assert_eq!(
+            listener.tasks.len(),
+            4,
+            "completed workers should be reaped"
+        );
         drop(tcp);
         registry.shutdown().await.unwrap();
     }
@@ -900,6 +925,15 @@ impl ListenerRegistry {
                 .expect("validated handler");
             let handler = Arc::new(Swappable(Arc::clone(handler)));
             let listener = self.listeners.get_mut(&key).expect("existing Listener");
+            for task in listener.tasks.split_off(1) {
+                if task.is_finished() {
+                    if let Err(error) = task.await.map_err(io::Error::other).and_then(|v| v) {
+                        logging::log("ERROR", "", &format!("UDP worker shutdown: {error}"));
+                    }
+                } else {
+                    listener.tasks.push(task);
+                }
+            }
             let (stop, receiver) = watch::channel(false);
             let tasks = sockets
                 .into_iter()
