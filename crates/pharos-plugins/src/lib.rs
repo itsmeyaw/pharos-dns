@@ -21,8 +21,12 @@ pub mod bind;
 pub mod bufsize;
 #[cfg(feature = "plugin-cache")]
 pub mod cache;
+#[cfg(feature = "plugin-cancel")]
+pub mod cancel;
 #[cfg(feature = "plugin-chaos")]
 pub mod chaos;
+#[cfg(feature = "plugin-debug")]
+pub mod debug;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 #[cfg(feature = "plugin-header")]
@@ -33,7 +37,9 @@ pub mod header;
     feature = "plugin-reload",
     feature = "plugin-hosts",
     feature = "plugin-loadbalance",
-    feature = "plugin-kubernetes"
+    feature = "plugin-kubernetes",
+    feature = "plugin-cancel",
+    feature = "plugin-timeouts"
 ))]
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
@@ -70,6 +76,12 @@ pub mod prometheus;
 pub mod ready;
 #[cfg(feature = "plugin-reload")]
 pub mod reload;
+#[cfg(feature = "plugin-root")]
+pub mod root;
+#[cfg(feature = "plugin-shed")]
+pub mod shed;
+#[cfg(feature = "plugin-timeouts")]
+pub mod timeouts;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -120,9 +132,22 @@ pub fn servers_with_registry(
     blocks: Vec<BlockContext<Chain>>,
     metrics: pharos_server::metrics::Registry,
 ) -> io::Result<(Servers, Lifecycle)> {
-    type ListenerGroup = (Router<Arc<Chain>>, Option<usize>, bool);
+    type ListenerGroup = (
+        Router<Arc<Chain>>,
+        Option<usize>,
+        pharos_server::TcpOptions,
+        bool,
+    );
     let mut groups: HashMap<ListenerKey, ListenerGroup> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
+    #[cfg(feature = "plugin-debug")]
+    let debug = blocks.iter().any(|block| block.config.debug.is_some());
+    #[cfg(not(feature = "plugin-debug"))]
+    let debug = false;
+    lifecycle.register_sync(pharos_server::Phase::Started, move || {
+        pharos_server::logging::set_debug_enabled(debug);
+        Ok(())
+    });
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
     #[cfg(feature = "plugin-local")]
@@ -284,10 +309,30 @@ pub fn servers_with_registry(
             chain.collect_readiness(&ready_state);
         }
         for (listener, domain) in routes {
-            let group = groups
-                .entry(listener)
-                .or_insert_with(|| (Router::default(), workers, false));
-            group.2 |= allow_non_in;
+            let group = groups.entry(listener).or_insert_with(|| {
+                (
+                    Router::default(),
+                    workers,
+                    pharos_server::TcpOptions::default(),
+                    false,
+                )
+            });
+            #[cfg(feature = "plugin-timeouts")]
+            if let Some(options) = &chain.timeouts {
+                if let Some(value) = options.read {
+                    group.2.read = value;
+                }
+                if let Some(value) = options.write {
+                    group.2.write = value;
+                }
+                if let Some(value) = options.idle {
+                    group.2.idle = value;
+                }
+                if let Some(value) = options.max_tcp_queries {
+                    group.2.max_queries = usize::try_from(value).ok();
+                }
+            }
+            group.3 |= allow_non_in;
             group.0.add(
                 listener,
                 domain,
@@ -298,8 +343,10 @@ pub fn servers_with_registry(
     }
     let servers = groups
         .into_iter()
-        .map(|(key, (router, workers, allow_non_in))| {
+        .map(|(key, (router, workers, tcp_options, allow_non_in))| {
             let mut server = Server::with_registry(router, key, metrics.clone());
+            server.tcp_options = tcp_options;
+            server.debug = debug;
             server.allow_non_in = allow_non_in;
             if let Some(workers) = workers {
                 server.udp_workers = workers;
@@ -638,7 +685,7 @@ fn setup_hosts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resu
         .iter()
         .map(|key| key.domain.as_str())
         .collect::<Vec<_>>();
-    let hosts = hosts::Hosts::parse(cursor, &domains)?;
+    let hosts = hosts::Hosts::parse_with_root(cursor, &domains, root_path(&block.config))?;
     hosts.register_hooks(&mut block.config.lifecycle);
     block.config.hosts = Some(hosts);
     Ok(())
@@ -649,9 +696,91 @@ fn setup_loadbalance(
     cursor: &mut Cursor<'_>,
     block: &mut BlockContext<Chain>,
 ) -> Result<(), Error> {
-    let plugin = loadbalance::LoadBalance::parse(cursor)?;
+    let plugin = loadbalance::LoadBalance::parse(cursor, root_path(&block.config))?;
     plugin.register_hooks(&mut block.config.lifecycle);
     block.config.loadbalance = Some(plugin);
+    Ok(())
+}
+
+#[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
+fn root_path(chain: &Chain) -> Option<&std::path::Path> {
+    #[cfg(feature = "plugin-root")]
+    {
+        chain.root.as_deref()
+    }
+    #[cfg(not(feature = "plugin-root"))]
+    {
+        let _ = chain;
+        None
+    }
+}
+
+#[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
+fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let Some(root) = root.filter(|_| path.is_relative()) else {
+        return path;
+    };
+    let joined = root.join(path);
+    let mut clean = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(clean.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                clean.pop();
+            }
+            Component::ParentDir if !clean.has_root() => clean.push(component),
+            Component::ParentDir => {}
+            _ => clean.push(component),
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        clean.push(".");
+    }
+    clean
+}
+
+#[cfg(feature = "plugin-root")]
+fn setup_root(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.root = Some(root::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-cancel")]
+fn setup_cancel(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.cancel = Some(cancel::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-timeouts")]
+fn setup_timeouts(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.timeouts = Some(timeouts::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-debug")]
+fn setup_debug(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    while cursor.next() {
+        if cursor.next_arg() {
+            return Err(cursor.arg_err());
+        }
+    }
+    block.config.debug = Some(());
+    Ok(())
+}
+
+#[cfg(feature = "plugin-shed")]
+fn setup_shed(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    cursor.next();
+    if !cursor.remaining_args().is_empty() || cursor.next_block() {
+        return Err(cursor.arg_err());
+    }
+    if block.keys().iter().any(|key| key.transport != "dns") {
+        return Err(cursor.error("shed requires plain DNS"));
+    }
+    block.config.shed = Some(shed::Shed);
     Ok(())
 }
 

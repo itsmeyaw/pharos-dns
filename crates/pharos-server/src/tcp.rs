@@ -8,14 +8,11 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{Action, Handler, Protocol};
+use crate::{Action, Handler, Protocol, TcpOptions};
 
 // CoreDNS has no default connection limit; cap ours to bound resource use.
 const MAX_CONNECTIONS: usize = 1024;
 const MAX_IN_FLIGHT_PER_CONNECTION: usize = 16;
-const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(3);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn spawn<H: Handler>(
     listener: TcpListener,
@@ -38,7 +35,7 @@ pub(crate) fn spawn<H: Handler>(
                         Ok((stream, peer)) => {
                             connections.spawn(serve(
                                 stream, crate::canonical_peer(peer), Arc::clone(&handler),
-                                connections_stop.clone(),
+                                connections_stop.clone(), handler.tcp_options(),
                             ));
                         }
                         Err(error) => {
@@ -62,17 +59,10 @@ pub(crate) fn spawn<H: Handler>(
 async fn read_frame(reader: &mut OwnedReadHalf) -> io::Result<Vec<u8>> {
     // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
     let mut length = [0; 2];
-    timeout(IDLE_TIMEOUT, reader.read_exact(&mut length[..1]))
-        .await
-        .map_err(|_| io::ErrorKind::TimedOut)??;
-    timeout(READ_TIMEOUT, async {
-        reader.read_exact(&mut length[1..]).await?;
-        let mut query = vec![0; usize::from(u16::from_be_bytes(length))];
-        reader.read_exact(&mut query).await?;
-        Ok(query)
-    })
-    .await
-    .map_err(|_| io::ErrorKind::TimedOut)?
+    reader.read_exact(&mut length).await?;
+    let mut query = vec![0; usize::from(u16::from_be_bytes(length))];
+    reader.read_exact(&mut query).await?;
+    Ok(query)
 }
 
 async fn serve<H: Handler>(
@@ -80,12 +70,14 @@ async fn serve<H: Handler>(
     peer: SocketAddr,
     handler: Arc<H>,
     mut shutdown: watch::Receiver<bool>,
+    options: TcpOptions,
 ) {
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(Some(writer)));
     let (failed, mut write_failed) = watch::channel(false);
     let mut queries: JoinSet<Vec<u8>> = JoinSet::new();
     let mut responses = Vec::with_capacity(MAX_IN_FLIGHT_PER_CONNECTION);
+    let mut count = 0usize;
 
     'read: loop {
         while let Some(result) = queries.try_join_next() {
@@ -94,6 +86,10 @@ async fn serve<H: Handler>(
             }
         }
         if *shutdown.borrow() || *write_failed.borrow() {
+            break;
+        }
+        // RFC 7766 §6.2.3: a server may close a connection at any time and clients must cope.
+        if options.max_queries.is_some_and(|max| count >= max) {
             break;
         }
         while queries.len() >= MAX_IN_FLIGHT_PER_CONNECTION {
@@ -108,15 +104,45 @@ async fn serve<H: Handler>(
                 },
             }
         }
-        let query = tokio::select! {
-            biased;
-            _ = shutdown.changed() => break,
-            _ = write_failed.changed() => break,
-            query = read_frame(&mut reader) => match query {
-                Ok(query) => query,
-                Err(_) => break,
-            },
+        // RFC 7766 §6.2.3: servers close idle connections after a timeout; idle starts once no Query is in flight.
+        let query = {
+            let frame = read_frame(&mut reader);
+            tokio::pin!(frame);
+            loop {
+                let result = if queries.is_empty() {
+                    let duration = if count == 0 {
+                        options.read
+                    } else {
+                        options.idle
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => break 'read,
+                        _ = write_failed.changed() => break 'read,
+                        result = timeout(duration, &mut frame) => match result {
+                            Ok(result) => result,
+                            Err(_) => break 'read,
+                        },
+                    }
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => break 'read,
+                        _ = write_failed.changed() => break 'read,
+                        result = &mut frame => result,
+                        result = queries.join_next() => {
+                            if let Some(Ok(response)) = result { responses.push(response); }
+                            continue;
+                        },
+                    }
+                };
+                match result {
+                    Ok(query) => break query,
+                    Err(_) => break 'read,
+                }
+            }
         };
+        count += 1;
 
         while let Some(result) = queries.try_join_next() {
             if let Ok(response) = result {
@@ -139,7 +165,7 @@ async fn serve<H: Handler>(
                 // RFC 7766 §5: TCP responses use the same connection as the query.
                 let mut writer = writer.lock().await;
                 if let Some(stream) = writer.as_mut() {
-                    let result = timeout(WRITE_TIMEOUT, async {
+                    let result = timeout(options.write, async {
                         stream.write_all(&length.to_be_bytes()).await?;
                         stream.write_all(&response).await
                     })

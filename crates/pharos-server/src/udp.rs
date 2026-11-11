@@ -5,7 +5,6 @@ use std::{
 
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::sync::Arc;
-#[cfg(not(target_os = "linux"))]
 use tokio::task::JoinHandle;
 use tokio::{net::UdpSocket, sync::watch};
 
@@ -19,21 +18,38 @@ pub(crate) fn spawn_parallel<H: Handler>(
     peer: SocketAddr,
     mut shutdown: watch::Receiver<bool>,
     mut cancelled: watch::Receiver<bool>,
+    stack: Option<Arc<crate::shed::ShedStack>>,
 ) {
     let query = query.to_vec();
     tokio::spawn(async move {
         if *cancelled.borrow() {
             return;
         }
-        let mut response = Vec::with_capacity(65535);
+        let mut response = if let Some(stack) = &stack {
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                _ = cancelled.changed() => return,
+                data = stack.checkout_wait() => data,
+            }
+        } else {
+            Vec::with_capacity(65535)
+        };
         tokio::select! {
             _ = shutdown.changed() => {},
             _ = cancelled.changed() => {},
             action = handler.handle(&query, crate::canonical_peer(peer), Protocol::Udp, &mut response) => {
-                if action == Action::Respond && let Err(error) = socket.send_to(&response, peer).await {
-                    crate::logging::log("ERROR", "server", &format!("UDP Response to {peer} failed: {error}"));
+                if action == Action::Respond {
+                    if let Some(stack) = &stack {
+                        stack.push(response, peer);
+                        return;
+                    } else if let Err(error) = socket.send_to(&response, peer).await {
+                        crate::logging::log("ERROR", "server", &format!("UDP Response to {peer} failed: {error}"));
+                    }
                 }
             }
+        }
+        if let Some(stack) = stack {
+            stack.release(response);
         }
     });
 }
@@ -55,8 +71,113 @@ pub(crate) fn bind(address: SocketAddr) -> io::Result<StdUdpSocket> {
     Ok(socket.into())
 }
 
-#[cfg(not(target_os = "linux"))]
 pub(crate) fn spawn<H: Handler>(
+    socket: UdpSocket,
+    handler: Arc<H>,
+    shutdown: watch::Receiver<bool>,
+) -> JoinHandle<io::Result<()>> {
+    if let Some(metrics) = handler.shed_metrics() {
+        return spawn_shed(socket, handler, shutdown, metrics);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::udp_linux::spawn(socket, handler, shutdown)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        spawn_plain(socket, handler, shutdown)
+    }
+}
+
+fn spawn_shed<H: Handler>(
+    socket: UdpSocket,
+    handler: Arc<H>,
+    mut shutdown: watch::Receiver<bool>,
+    metrics: crate::metrics::ShedMetrics,
+) -> JoinHandle<io::Result<()>> {
+    tokio::spawn(async move {
+        let socket = Arc::new(socket);
+        let stack = crate::shed::ShedStack::for_socket(metrics);
+        let mut writer = AbortOnDrop(tokio::spawn(Arc::clone(&stack).writer(Arc::clone(&socket))));
+        let mut query = vec![0; 65535];
+        loop {
+            let received = tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                received = socket.recv_from(&mut query) => received,
+            };
+            let (length, peer) = match received {
+                Ok(message) => message,
+                Err(error) => {
+                    crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
+                    tokio::select! { _ = shutdown.changed() => break, _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {} }
+                    continue;
+                }
+            };
+            let client = crate::canonical_peer(peer);
+            if should_shed(&stack, &*handler, &query[..length], client) {
+                continue;
+            }
+            if let Some(cancelled) = handler.parallel_query(&query[..length], client) {
+                spawn_parallel(
+                    Arc::clone(&socket),
+                    Arc::clone(&handler),
+                    &query[..length],
+                    peer,
+                    shutdown.clone(),
+                    cancelled,
+                    Some(Arc::clone(&stack)),
+                );
+                continue;
+            }
+            let mut response = tokio::select! {
+                _ = shutdown.changed() => break,
+                data = stack.checkout_wait() => data,
+            };
+            if H::handle_shared(
+                &handler,
+                &query[..length],
+                client,
+                Protocol::Udp,
+                &mut response,
+            )
+            .await
+                == Action::Respond
+            {
+                stack.push(response, peer);
+            } else {
+                stack.release(response);
+            }
+        }
+        stack.close();
+        (&mut writer.0).await.map_err(io::Error::other)?;
+        Ok(())
+    })
+}
+
+struct AbortOnDrop(JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn should_shed<H: Handler>(
+    stack: &crate::shed::ShedStack,
+    handler: &H,
+    query: &[u8],
+    peer: SocketAddr,
+) -> bool {
+    if stack.full() && handler.shed_query(query, peer) {
+        stack.query_drop();
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_plain<H: Handler>(
     socket: UdpSocket,
     handler: Arc<H>,
     mut shutdown: watch::Receiver<bool>,
@@ -83,7 +204,7 @@ pub(crate) fn spawn<H: Handler>(
                     };
                     let client = crate::canonical_peer(peer);
                     if let Some(cancelled) = handler.parallel_query(&query[..length], client) {
-                        spawn_parallel(Arc::clone(&socket), Arc::clone(&handler), &query[..length], peer, shutdown.clone(), cancelled);
+                        spawn_parallel(Arc::clone(&socket), Arc::clone(&handler), &query[..length], peer, shutdown.clone(), cancelled, None);
                         continue;
                     }
                     response.clear();
@@ -97,9 +218,6 @@ pub(crate) fn spawn<H: Handler>(
     })
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) use crate::udp_linux::spawn;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +226,33 @@ mod tests {
     struct Blocking {
         started: Arc<AtomicBool>,
         dropped: Arc<AtomicBool>,
+    }
+
+    struct Shedding(bool);
+    impl Handler for Shedding {
+        fn shed_query(&self, _: &[u8], _: SocketAddr) -> bool {
+            self.0
+        }
+        async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+            Action::Drop
+        }
+    }
+
+    #[test]
+    fn full_stack_only_drops_queries_from_shed_blocks() {
+        let registry = crate::metrics::Registry::default();
+        let stack = crate::shed::ShedStack::new(1, registry.shed("dns://:53"));
+        let peer = "127.0.0.1:53".parse().unwrap();
+        assert!(!should_shed(&stack, &Shedding(true), &[], peer));
+        stack.push(stack.checkout().unwrap(), peer);
+        assert!(!should_shed(&stack, &Shedding(false), &[], peer));
+        assert!(should_shed(&stack, &Shedding(true), &[], peer));
+        let mut text = String::new();
+        registry.encode(&mut text);
+        assert!(
+            text.contains("reason=\"query\",server=\"dns://:53\"} 1"),
+            "{text}"
+        );
     }
     struct Guard(Arc<AtomicBool>);
     impl Drop for Guard {
@@ -140,6 +285,7 @@ mod tests {
             "127.0.0.1:1234".parse().unwrap(),
             receiver,
             cancelled,
+            None,
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while !started.load(Ordering::SeqCst) {

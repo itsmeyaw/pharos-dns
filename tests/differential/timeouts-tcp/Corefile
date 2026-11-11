@@ -1,0 +1,10 @@
+.:{port} {
+    timeouts {
+        read 15s
+        write 30s
+    }
+    forward . 127.0.0.1:{port2}
+}
+.:{port2} {
+    whoami
+}

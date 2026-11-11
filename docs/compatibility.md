@@ -37,6 +37,10 @@
 - A hit that launches a background refresh allocates for the task and its Query and Response buffers; ordinary warmed hits do not allocate.
 - Cache metric series are initialized at setup, including zero-valued series; CoreDNS initializes individual labelled series on first use.
 
+## cancel
+
+- On expiry Pharos drops the Next future and the Response. CoreDNS only signals context cancellation, so Plugins that ignore the context may continue and write a Response.
+
 ## chaos
 
 - The default version is `Pharos-<version>` and the default authors are Pharos authors rather than CoreDNS's identity (ADR-0003).
@@ -44,6 +48,12 @@
 - Author records use a different per-second shuffle generator than CoreDNS, so their order and the subset in a truncated Response can differ; simultaneous `authors.bind` Queries share a lock.
 - An overlong version with explicit authors produces a Plugin error and SERVFAIL rather than CoreDNS's failed write; UDP callers must supply a sufficiently large Response buffer, as with `whoami`.
 - When building a Response with many authors, Pharos truncates to the Query's limit before Listener processing; CoreDNS builds the full Response first. Plugins earlier in the chain can therefore observe a truncated Response.
+
+## debug
+
+- Pharos disables panic containment on all Listeners when any Server Block enables `debug`; CoreDNS disables it for the Listener that includes that block, while debug logging is process-wide.
+- An uncontained Rust panic terminates its Tokio task rather than necessarily terminating the process as an unhandled Go goroutine panic does. The `errors` Plugin does not add panic recovery, matching CoreDNS v1.15.0 despite its debug README.
+- Debug logging is enabled after Listeners start and is reset when a Reload without `debug` succeeds; CoreDNS enables it when constructing its Listener and does not clear its global flag on Reload.
 
 ## dnssec
 
@@ -57,7 +67,6 @@
 
 - The `errors` Plugin uses Rust's `regex` syntax rather than Go's RE2 syntax. For example, `\w`, `\d`, `\s` and word boundaries are Unicode-aware in Rust but ASCII-only in Go; some expressions are accepted by only one engine.
 - Rust's regex compiler also imposes its own compiled-size limit.
-- Pharos emits `debug` consolidation messages without CoreDNS's separate debug switch.
 - The Plugin contract represents an error as SERVFAIL without an independent RCODE, so error logs always report `2`.
 - Rust panic traces and Pharos's text/JSON logging format differ from CoreDNS's Go stack and log format.
 - Pharos selects `stacktrace` per routed Server Block; CoreDNS's last Server Block setting applies to the whole Listener.
@@ -99,7 +108,6 @@
 
 ## hosts
 
-- Relative hosts file paths resolve against the working directory; `root` is not implemented yet, so CoreDNS's join with a configured `root` is not applied.
 - Pharos discards names that are not valid DNS names or UTF-8; CoreDNS retains arbitrary fields in its hosts maps.
 - Pharos lowercases ASCII name bytes, while CoreDNS applies Go's Unicode lowercasing.
 - Configured Domains that cannot be represented as DNS names are ignored for matching; CoreDNS keeps its normalized strings.
@@ -140,7 +148,6 @@
 
 - Pharos permutes encoded records and relocates compression pointers without re-encoding names. It leaves a Response unchanged if relocation would create a forward or overlapping pointer, exceed the 14-bit pointer range, or if name encodings cannot be safely relocated. Signed TSIG Responses are not reordered. CoreDNS re-encodes its records and does not have these restrictions.
 - Other RDATA is opaque, so pointers in types outside the compression-receiving list are not relocated even if a sender encodes them contrary to the RFCs.
-- Relative weight file paths use the working directory until `root` is implemented.
 - Weight files must be UTF-8; CoreDNS accepts arbitrary bytes.
 - Pharos compares file contents directly instead of CoreDNS's MD5 checksum and keeps the last valid weights when parsing fails.
 - Weight file Domains that cannot be parsed as DNS names cannot match Responses.
@@ -239,6 +246,23 @@
 - The shared signer has the same key and canonical-RDATA restrictions listed under `dnssec`.
 - NSEC3 chain construction supports complete chains only, not opt-out.
 
+## root
+
+- The README's TLS Listener example remains unavailable because TLS is deferred to M3; the `file` Plugin is not implemented yet.
+
+## shed
+
+- Rust does not have Go's per-socket fdMutex limit. Pharos uses a single UDP writer with a 1,024-response newest-first stack and tracks query and response drops.
+- Each socket reserves 1,026 full-size UDP Response buffers at startup (about 64 MiB of address space), rather than allocating each queued Response as CoreDNS does.
+- Each Pharos UDP worker processes ordinary Queries serially, so overload can also cause uncounted kernel receive drops before the shed Plugin. Enabling shed uses the portable UDP path instead of Linux's batched receive path.
+- Toggling `shed` on Reload replaces UDP workers; while old sockets drain, a datagram can be delivered to a retiring worker and lost.
+- The README differential scenario substitutes a local Upstream for 8.8.8.8 and uses one socket for determinism.
+
+## timeouts
+
+- TCP timeouts and `maxtcpqueries` apply per Listener; encrypted Listener transports and their README scenarios are deferred to M3.
+- Pharos can read pipelined Queries while earlier Queries are executing, but starts the idle deadline only after all in-flight Queries finish; CoreDNS reads the next Query after handling the previous one. Existing connections keep their timeout settings across Reload, while newly accepted connections use the new settings.
+
 ## whoami
 
 - Whoami reports an error if adding the protocol label would make its SRV owner name exceed the DNS name length limit. CoreDNS ignores the resulting write error.
@@ -246,7 +270,7 @@
 
 ## General
 
-- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - A first Zone record with an omitted owner is rejected: miekg/dns accepts it with an empty owner, which cannot be encoded as a valid DNS name without inventing one.
 - Zone records whose parsed data cannot be encoded on the wire are rejected. miekg/dns can accept such records during parsing, including invalid base64, duplicate SVCB keys and RDATA over 65,535 octets, but then fails to pack them.

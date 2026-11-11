@@ -37,6 +37,9 @@ pub fn debug_enabled() -> bool {
 
 /// Write one entry to stdout.
 pub fn log(level: &str, plugin: &str, message: &str) {
+    if level == "DEBUG" && !debug_enabled() {
+        return;
+    }
     let format = if JSON.load(Ordering::Relaxed) {
         LogFormat::Json
     } else {

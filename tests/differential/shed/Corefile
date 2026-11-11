@@ -1,0 +1,8 @@
+.:{port} {
+    multisocket 1
+    shed
+    forward . 127.0.0.1:{port2}
+}
+.:{port2} {
+    whoami
+}

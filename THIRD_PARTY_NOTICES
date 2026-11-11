@@ -22,6 +22,11 @@
 - The cache Plugin and tests follow CoreDNS v1.15.0's `plugin/cache`, `plugin/pkg/cache` and `plugin/pkg/dnsutil`.
 - The hosts Plugin and tests follow CoreDNS v1.15.0's `plugin/hosts` and `plugin/pkg/fall`.
 - The loadbalance Plugin and tests follow CoreDNS v1.15.0's `plugin/loadbalance`.
+- The root Plugin and tests follow CoreDNS v1.15.0's `plugin/root`.
+- The cancel Plugin and tests follow CoreDNS v1.15.0's `plugin/cancel`.
+- The timeouts Plugin and tests follow CoreDNS v1.15.0's `plugin/timeouts` and `core/dnsserver/server.go`.
+- Debug setup and hexdump tests follow CoreDNS v1.15.0's `plugin/debug`.
+- Shed setup, response stack, metrics and tests follow CoreDNS v1.15.0's `plugin/shed`.
 - The loop Plugin and tests follow CoreDNS v1.15.0's `plugin/loop`.
 - The Kubernetes client, controller, object conversions, metrics and tests follow CoreDNS v1.15.0's `plugin/kubernetes`.
 - The Kubernetes Plugin, name parsing, record synthesis and ported handler, namespace, NS, reverse, informer, controller and metrics tests follow CoreDNS v1.15.0's `plugin/kubernetes`, `plugin/backend_lookup.go` and `plugin/pkg/dnsutil`.

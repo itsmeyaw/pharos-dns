@@ -2,6 +2,19 @@
 
 use std::{env, fmt::Write, fs, path::PathBuf};
 
+fn config_only(name: &str) -> bool {
+    matches!(
+        name,
+        "root" | "timeouts" | "debug" | "bind" | "multisocket" | "ready" | "health" | "reload"
+    )
+}
+
+fn next_plugin(enabled: &[&str], start: usize) -> usize {
+    (start..enabled.len())
+        .find(|&index| !config_only(enabled[index]))
+        .unwrap_or(enabled.len())
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=plugin.cfg");
     let source = fs::read_to_string("plugin.cfg").expect("plugin.cfg");
@@ -22,6 +35,11 @@ fn main() {
     );
     for name in &enabled {
         let ty = match *name {
+            "root" => "std::path::PathBuf",
+            "cancel" => "cancel::Cancel",
+            "timeouts" => "timeouts::Timeouts",
+            "debug" => "()",
+            "shed" => "shed::Shed",
             "any" => "any::Any",
             "chaos" => "chaos::Chaos",
             "cache" => "cache::Cache",
@@ -53,6 +71,11 @@ fn main() {
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
+            "root" => "setup_root",
+            "cancel" => "setup_cancel",
+            "timeouts" => "setup_timeouts",
+            "debug" => "setup_debug",
+            "shed" => "setup_shed",
             "any" => "setup_any",
             "chaos" => "setup_chaos",
             "cache" => "setup_cache",
@@ -81,6 +104,7 @@ fn main() {
         let once = matches!(
             *name,
             "cache"
+                | "shed"
                 | "metadata"
                 | "prometheus"
                 | "ready"
@@ -113,10 +137,7 @@ fn main() {
             "fn collect_readiness(self: &std::sync::Arc<Self>, state: &ready::State) {\nlet _ = state;\n",
         );
         for name in &enabled {
-            if matches!(
-                *name,
-                "bind" | "multisocket" | "ready" | "health" | "reload"
-            ) {
+            if config_only(name) {
                 continue;
             }
             writeln!(code, "if self.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some() {{ let chain = std::sync::Arc::clone(self); state.append({name:?}, move || chain.r#{name}.as_ref().and_then(pharos_server::Plugin::readiness).is_some_and(pharos_server::Readiness::ready)); }}").unwrap();
@@ -132,29 +153,22 @@ fn main() {
     if enabled.contains(&"metadata") && enabled.contains(&"kubernetes") {
         code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) && let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); } ");
     }
-    code.push_str("self.serve_0(cx) }\n");
+    writeln!(code, "self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
     if let Some(index) = enabled.iter().position(|name| *name == "cache") {
-        writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ #[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] if let Some(plugin) = &self.self_lookup_test {{ return plugin.serve(cx).await; }} self.serve_{}(cx).await }}", index + 1).unwrap();
+        writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ #[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] if let Some(plugin) = &self.self_lookup_test {{ return plugin.serve(cx).await; }} self.serve_{}(cx).await }}", next_plugin(&enabled, index + 1)).unwrap();
     }
     for (i, name) in enabled.iter().enumerate() {
-        let next = i + 1;
-        if matches!(
-            *name,
-            "bind" | "multisocket" | "ready" | "health" | "reload"
-        ) {
-            writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ self.serve_{next}(cx).await }}").unwrap();
+        if config_only(name) {
             continue;
         }
+        let next = next_plugin(&enabled, i + 1);
         writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => {{ let outcome = pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await; if outcome == pharos_server::Outcome::Response && cx.metadata.get(pharos_server::metrics::WRITER_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::metrics::WRITER_METADATA, {name:?}); }} else if matches!(outcome, pharos_server::Outcome::Error(_)) && cx.metadata.get(pharos_server::logging::PLUGIN_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::logging::PLUGIN_METADATA, {name:?}); }} outcome }}, None => self.serve_{next}(cx).await, }} }}").unwrap();
     }
     writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
     code.push_str("}\n");
     code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
-        if !matches!(
-            *name,
-            "bind" | "multisocket" | "ready" | "health" | "reload"
-        ) {
+        if !config_only(name) {
             write!(code, " && self.r#{name}.is_none()").unwrap();
         }
     }
@@ -162,10 +176,7 @@ fn main() {
         " }\nfn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {\nlet _ = &visit;\n",
     );
     for name in &enabled {
-        if !matches!(
-            *name,
-            "bind" | "multisocket" | "ready" | "health" | "reload"
-        ) {
+        if !config_only(name) {
             writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
         }
     }
@@ -181,15 +192,15 @@ fn main() {
     if enabled.contains(&"errors") {
         code.push_str("fn stacktrace(&self) -> bool { self.errors.as_ref().is_some_and(|plugin| plugin.stacktrace) }\n");
     }
+    if enabled.contains(&"shed") {
+        code.push_str("fn shed_enabled(&self) -> bool { self.shed.is_some() }\n");
+    }
     code.push_str("}\n");
     for (i, name) in enabled.iter().enumerate() {
-        if matches!(
-            *name,
-            "bind" | "multisocket" | "ready" | "health" | "reload"
-        ) {
+        if config_only(name) {
             continue;
         }
-        let next = i + 1;
+        let next = next_plugin(&enabled, i + 1);
         let test_hook = if *name == "cache" {
             "#[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] if let Some(plugin) = &self.0.self_lookup_test { return plugin.serve(cx).await; }"
         } else {

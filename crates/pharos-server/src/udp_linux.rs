@@ -111,6 +111,7 @@ pub(crate) fn spawn<H: Handler>(
                             peer,
                             shutdown.clone(),
                             cancelled,
+                            None,
                         );
                         continue;
                     }

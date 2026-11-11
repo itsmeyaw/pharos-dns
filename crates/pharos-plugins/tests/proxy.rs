@@ -138,7 +138,7 @@ async fn rejects_a_response_with_the_wrong_question() {
         proxy
             .exchange(QUERY, &mut response, Transport::Udp, Options::default())
             .await,
-        Err(Error::Mismatch)
+        Err(Error::Mismatch(_))
     ));
     task.await.unwrap();
 }

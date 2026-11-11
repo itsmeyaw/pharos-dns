@@ -1,0 +1,8 @@
+.:{port} {
+    root data
+    hosts entries {
+        reload 0
+        fallthrough
+    }
+    whoami
+}
