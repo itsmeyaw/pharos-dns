@@ -42,6 +42,7 @@ fn receive(
                     .map(|v| SocketAddr::from(*v))
                     .or_else(|| address.as_sockaddr_in6().map(|v| SocketAddr::from(*v)))
             });
+            // POSIX.1-2024 recvmsg: MSG_TRUNC indicates discarded message data.
             peers[count] = if message.flags.contains(MsgFlags::MSG_TRUNC) {
                 None
             } else {
