@@ -34,6 +34,8 @@ const ENDPOINTS: &str = r#"[
 ]"#;
 const PODS: &str = r#"[{"metadata":{"name":"foo","namespace":"podns","labels":{"app.kubernetes.io/name":"foo","bar":"baz"}},"status":{"podIPs":[{"ip":"10.240.0.1"}]}}]"#;
 const NAMESPACES: &str = r#"[{"metadata":{"name":"testns"}},{"metadata":{"name":"podns"}},{"metadata":{"name":"svcns"}},{"metadata":{"name":"kube-system"}},{"metadata":{"name":"unexposedns"}}]"#;
+const IMPORTS: &str = r#"[{"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"svc1","namespace":"testns"},"spec":{"type":"ClusterSetIP","ips":["10.0.0.1"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},{"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"hdls1","namespace":"testns"},"spec":{"type":"Headless"}}]"#;
+const MC_ENDPOINTS: &str = r#"[{"metadata":{"name":"mc1","namespace":"testns","labels":{"multicluster.kubernetes.io/service-name":"hdls1","multicluster.kubernetes.io/source-cluster":"cluster1"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":80}],"endpoints":[{"addresses":["172.0.0.2"]}]}]"#;
 
 async fn api(
     hold_endpoints: bool,
@@ -62,7 +64,9 @@ async fn api(
                     }
                     return;
                 }
-                let (kind, items) = if request.contains("/api/v1/services") {
+                let (kind, items) = if request.contains("/serviceimports") {
+                    ("ServiceImportList", IMPORTS)
+                } else if request.contains("/api/v1/services") {
                     ("ServiceList", SERVICES)
                 } else if request.contains("/endpointslices") {
                     while !*receiver.borrow_and_update() {
@@ -70,7 +74,14 @@ async fn api(
                             return;
                         }
                     }
-                    ("EndpointSliceList", ENDPOINTS)
+                    (
+                        "EndpointSliceList",
+                        if request.contains("multicluster.kubernetes.io") {
+                            MC_ENDPOINTS
+                        } else {
+                            ENDPOINTS
+                        },
+                    )
                 } else if request.contains("/api/v1/pods") {
                     ("PodList", PODS)
                 } else {
@@ -253,7 +264,7 @@ async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
         let Rdata::Soa { serial, .. } = msg.answers().next().unwrap().data().unwrap() else {
             panic!("missing SOA")
         };
-        assert!(serial > 1_000_000_000);
+        assert!(serial == 0 || serial > 1_000_000_000);
         Some(serial)
     } else {
         None
@@ -326,6 +337,64 @@ async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
     lifecycle.run(Phase::Shutdown).await.unwrap();
     api_task.abort();
     assert!(errors.is_empty(), "{}", errors.join("\n"));
+}
+
+#[tokio::test]
+async fn multicluster_answers_service_and_cluster_qualified_endpoint() {
+    let zone = "cluster.local.";
+    run_group(
+        "multicluster cluster.local",
+        vec![
+            positive(
+                "import",
+                "svc1.testns.svc.cluster.local.",
+                Type::A,
+                &["10.0.0.1"],
+            ),
+            positive(
+                "headless",
+                "hdls1.testns.svc.cluster.local.",
+                Type::A,
+                &["172.0.0.2"],
+            ),
+            positive(
+                "endpoint",
+                "172-0-0-2.cluster1.hdls1.testns.svc.cluster.local.",
+                Type::A,
+                &["172.0.0.2"],
+            ),
+            srv(
+                "headless srv",
+                "_http._tcp.hdls1.testns.svc.cluster.local.",
+                "172-0-0-2.cluster1.hdls1.testns.svc.cluster.local.",
+                100,
+                "172.0.0.2",
+            ),
+            srv(
+                "import srv",
+                "_http._tcp.svc1.testns.svc.cluster.local.",
+                "svc1.testns.svc.cluster.local.",
+                100,
+                "10.0.0.1",
+            ),
+            negative(
+                "missing cluster",
+                "172-0-0-2.hdls1.testns.svc.cluster.local.",
+                Type::A,
+                Rcode::NXDOMAIN,
+                zone,
+            ),
+            negative(
+                "no ipv6",
+                "svc1.testns.svc.cluster.local.",
+                Type::AAAA,
+                Rcode::NOERROR,
+                zone,
+            ),
+        ],
+        true,
+    )
+    .await;
 }
 
 // One-based row IDs map to CoreDNS v1.15.0 tables:

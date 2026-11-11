@@ -40,6 +40,7 @@ struct Cache {
 pub struct Kubernetes {
     config: Arc<setup::Config>,
     zones: Vec<Name>,
+    multicluster_zones: Vec<Name>,
     fallthrough: Vec<Name>,
     local_ips: Vec<IpAddr>,
     state: Arc<State>,
@@ -73,9 +74,15 @@ impl Kubernetes {
             .iter()
             .map(|z| z.parse::<Name>().map_err(|e| e.to_string()))
             .collect::<Result<_, _>>()?;
+        let multicluster_zones = config
+            .multicluster_zones
+            .iter()
+            .map(|z| z.parse::<Name>().map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
         Ok(Self {
             config: Arc::new(config),
             zones,
+            multicluster_zones,
             fallthrough,
             local_ips: local::snapshot(listen_addresses),
             state: Arc::default(),
@@ -319,7 +326,7 @@ fn visit(
     index: &Index,
     req: &name::Request<'_>,
     config: &setup::Config,
-    mut f: impl FnMut(&str, &Port, Option<&[u8]>),
+    mut f: impl FnMut(&str, &Port, Option<(&[u8], Option<&[u8]>)>),
 ) -> bool {
     let Ok(namespace) = std::str::from_utf8(req.namespace) else {
         return false;
@@ -329,6 +336,57 @@ fn visit(
     };
     if index.namespace(namespace).is_none() {
         return false;
+    }
+    if req.multicluster {
+        let Some(svc) = index.service_import(namespace, service) else {
+            return false;
+        };
+        if config.ignore_empty_service
+            && !svc.headless()
+            && !index
+                .multicluster_endpoints(namespace, service)
+                .any(|ep| !ep.endpoints.addresses.is_empty())
+        {
+            return false;
+        }
+        if svc.headless() || !req.endpoint.is_empty() {
+            let mut found = false;
+            for ep in index.multicluster_endpoints(namespace, service) {
+                if !req.endpoint.is_empty()
+                    && !req.cluster.eq_ignore_ascii_case(ep.cluster_id.as_bytes())
+                {
+                    continue;
+                }
+                for addr in &ep.endpoints.addresses {
+                    let mut buf = [0; 64];
+                    let label = endpoint_label(addr, config.endpoint_pod_names, &mut buf);
+                    if !req.endpoint.is_empty() && !req.endpoint.eq_ignore_ascii_case(label) {
+                        continue;
+                    }
+                    for port in &ep.endpoints.ports {
+                        if matching(req, port) {
+                            found = true;
+                            f(
+                                &addr.ip,
+                                port,
+                                Some((label, Some(ep.cluster_id.as_bytes()))),
+                            );
+                        }
+                    }
+                }
+            }
+            return found;
+        }
+        let mut found = false;
+        for port in &svc.ports {
+            if matching(req, port) {
+                found = true;
+                for ip in &svc.cluster_ips {
+                    f(ip, port, None);
+                }
+            }
+        }
+        return found;
     }
     let Some(svc) = index.service(namespace, service) else {
         return false;
@@ -384,7 +442,7 @@ fn visit(
                 for port in &ep.ports {
                     if matching(req, port) {
                         found = true;
-                        f(&addr.ip, port, Some(label));
+                        f(&addr.ip, port, Some((label, None)));
                     }
                 }
             }
@@ -514,7 +572,8 @@ impl pharos_server::Plugin for Kubernetes {
             zone_len += label.len();
         }
         let zone_ref = NameRef::parse(&zone_wire[..zone_len + 1], 0).unwrap();
-        let req = name::parse(&labels[..count], self.config.zonal);
+        let multicluster = self.multicluster_zones.contains(zone);
+        let req = name::parse_multicluster(&labels[..count], self.config.zonal, multicluster);
         let (store, synced) = {
             let guard = self.state.cache.read().unwrap();
             (
@@ -550,6 +609,7 @@ impl pharos_server::Plugin for Kubernetes {
                 store.with_read(|i| {
                     let ok = visit(i, req, &self.config, |_, _, _| {});
                     if ok
+                        && !multicluster
                         && let (Ok(ns), Ok(svc)) = (
                             std::str::from_utf8(req.namespace),
                             std::str::from_utf8(req.service),
@@ -678,7 +738,13 @@ impl pharos_server::Plugin for Kubernetes {
                     Section::Answer,
                     zone_ref,
                     self.config.ttl,
-                    store.with_read(Index::serial),
+                    store.with_read(|i| {
+                        if multicluster {
+                            i.multicluster_serial()
+                        } else {
+                            i.serial()
+                        }
+                    }),
                 )?;
                 answers += 1;
             }
@@ -920,16 +986,22 @@ impl pharos_server::Plugin for Kubernetes {
                             }
                         } else if q.qtype == Type::SRV && port.port >= 0 {
                             let mut wire = [0; 255];
-                            let mut parts = [&[][..]; 4];
-                            let start = if let Some(endpoint) = endpoint {
+                            let mut parts = [&[][..]; 5];
+                            let start = if let Some((endpoint, cluster)) = endpoint {
                                 parts[0] = endpoint;
-                                0
+                                if let Some(cluster) = cluster {
+                                    parts[1] = cluster;
+                                    0
+                                } else {
+                                    parts[1] = endpoint;
+                                    1
+                                }
                             } else {
-                                1
+                                2
                             };
-                            parts[1] = req.service;
-                            parts[2] = req.namespace;
-                            parts[3] = b"svc";
+                            parts[2] = req.service;
+                            parts[3] = req.namespace;
+                            parts[4] = b"svc";
                             let Some(target) = child(&parts[start..], zone_ref, &mut wire) else {
                                 return;
                             };
@@ -976,16 +1048,22 @@ impl pharos_server::Plugin for Kubernetes {
                                 return;
                             };
                             let mut wire = [0; 255];
-                            let mut parts = [&[][..]; 4];
-                            let start = if let Some(endpoint) = endpoint {
+                            let mut parts = [&[][..]; 5];
+                            let start = if let Some((endpoint, cluster)) = endpoint {
                                 parts[0] = endpoint;
-                                0
+                                if let Some(cluster) = cluster {
+                                    parts[1] = cluster;
+                                    0
+                                } else {
+                                    parts[1] = endpoint;
+                                    1
+                                }
                             } else {
-                                1
+                                2
                             };
-                            parts[1] = req.service;
-                            parts[2] = req.namespace;
-                            parts[3] = b"svc";
+                            parts[2] = req.service;
+                            parts[3] = req.namespace;
+                            parts[4] = b"svc";
                             let Some(target) = child(&parts[start..], zone_ref, &mut wire) else {
                                 return;
                             };
@@ -1032,7 +1110,13 @@ impl pharos_server::Plugin for Kubernetes {
                     Section::Authority,
                     zone_ref,
                     self.config.ttl,
-                    store.with_read(Index::serial),
+                    store.with_read(|i| {
+                        if multicluster {
+                            i.multicluster_serial()
+                        } else {
+                            i.serial()
+                        }
+                    }),
                 )?;
             }
             let _ = b.finish();

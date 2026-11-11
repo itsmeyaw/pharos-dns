@@ -6,14 +6,28 @@ pub(super) struct Request<'a> {
     pub namespace: &'a [u8],
     pub service: &'a [u8],
     pub endpoint: &'a [u8],
+    pub cluster: &'a [u8],
+    pub multicluster: bool,
     pub port: &'a [u8],
     pub protocol: &'a [u8],
     pub zone: &'a [&'a [u8]],
     pub prefer: bool,
 }
 
+#[cfg(test)]
 pub(super) fn parse<'a>(labels: &'a [&'a [u8]], zonal: bool) -> Option<Request<'a>> {
-    let mut request = Request::default();
+    parse_multicluster(labels, zonal, false)
+}
+
+pub(super) fn parse_multicluster<'a>(
+    labels: &'a [&'a [u8]],
+    zonal: bool,
+    multicluster: bool,
+) -> Option<Request<'a>> {
+    let mut request = Request {
+        multicluster,
+        ..Request::default()
+    };
     let Some((&kind, remaining)) = labels.split_last() else {
         return Some(request);
     };
@@ -33,11 +47,16 @@ pub(super) fn parse<'a>(labels: &'a [&'a [u8]], zonal: bool) -> Option<Request<'
         [] => {}
         [endpoint] => request.endpoint = endpoint,
         [port, protocol] => {
-            request.port = port.strip_prefix(b"_").unwrap_or(port);
-            request.protocol = protocol.strip_prefix(b"_").unwrap_or(protocol);
+            if multicluster && !port.starts_with(b"_") && !protocol.starts_with(b"_") {
+                request.endpoint = port;
+                request.cluster = protocol;
+            } else {
+                request.port = port.strip_prefix(b"_").unwrap_or(port);
+                request.protocol = protocol.strip_prefix(b"_").unwrap_or(protocol);
+            }
         }
         _ => {
-            if !zonal || !kind.eq_ignore_ascii_case(b"svc") {
+            if !zonal || multicluster || !kind.eq_ignore_ascii_case(b"svc") {
                 return None;
             }
             let (&anchor, rest) = remaining.split_last()?;
@@ -58,7 +77,27 @@ pub(super) fn parse<'a>(labels: &'a [&'a [u8]], zonal: bool) -> Option<Request<'
 
 #[cfg(test)]
 mod tests {
-    use super::{Request, parse};
+    use super::{Request, parse, parse_multicluster};
+
+    #[test]
+    fn parses_multicluster_endpoint_and_rejects_zonal_name() {
+        let request =
+            parse_multicluster(&[b"host", b"east", b"web", b"prod", b"svc"], true, true).unwrap();
+        assert_eq!(request.endpoint, b"host");
+        assert_eq!(request.cluster, b"east");
+        let request =
+            parse_multicluster(&[b"_http", b"_tcp", b"web", b"prod", b"svc"], true, true).unwrap();
+        assert_eq!(request.port, b"http");
+        assert_eq!(request.protocol, b"tcp");
+        assert!(
+            parse_multicluster(
+                &[b"east", b"pin", b"_zone", b"web", b"prod", b"svc"],
+                true,
+                true
+            )
+            .is_none()
+        );
+    }
 
     fn coredns_string(request: &Request<'_>) -> String {
         [
