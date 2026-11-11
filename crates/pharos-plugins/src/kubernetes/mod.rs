@@ -773,7 +773,13 @@ impl pharos_server::Plugin for Kubernetes {
                 }
                 store.with_read(|i| {
                     visit_ns(i, ns_ips, zone_ref, &self.config, |ns, ip| {
-                        if err.is_some() {
+                        // RFC 2181 §5: duplicate RRs in an RRset are suppressed.
+                        if err.is_some()
+                            || !scratch.extra.insert((
+                                scratch::Name::new(ns),
+                                scratch::Address::new(scratch::IpText::new(ip).as_str()),
+                            ))
+                        {
                             return;
                         }
                         let result = match ip {
@@ -807,6 +813,13 @@ impl pharos_server::Plugin for Kubernetes {
                 let mut err = None;
                 store.with_read(|i| {
                     visit_ns(i, ns_ips, zone_ref, &self.config, |_, ip| {
+                        // RFC 2181 §5: duplicate RRs in an RRset are suppressed.
+                        if !scratch
+                            .addresses
+                            .insert(scratch::Address::new(scratch::IpText::new(ip).as_str()))
+                        {
+                            return;
+                        }
                         let result = match ip {
                             IpAddr::V4(ip) if q.qtype == Type::A => b.record(
                                 Section::Answer,

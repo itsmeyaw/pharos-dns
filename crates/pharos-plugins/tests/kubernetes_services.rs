@@ -45,7 +45,7 @@ impl pharos_server::Chain for TruncatedRoute {
 
 #[tokio::test]
 async fn services_are_answered_from_watched_kubernetes_objects() {
-    let local_ips: Vec<std::net::IpAddr> = nix::ifaddrs::getifaddrs()
+    let mut local_ips: Vec<std::net::IpAddr> = nix::ifaddrs::getifaddrs()
         .unwrap()
         .filter_map(|entry| {
             let address = entry.address?;
@@ -60,6 +60,9 @@ async fn services_are_answered_from_watched_kubernetes_objects() {
         })
         .filter(|ip| !ip.is_loopback())
         .collect();
+    // RFC 2181 §5: an address on several interfaces yields one glue record.
+    let mut seen = std::collections::HashSet::new();
+    local_ips.retain(|ip| seen.insert(*ip));
     let v4_count = local_ips
         .iter()
         .filter(|ip| ip.is_ipv4())

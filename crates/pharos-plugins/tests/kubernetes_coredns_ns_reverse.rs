@@ -21,10 +21,16 @@ const SERVICES: &str = r#"[
 
 // The ns_test.go endpoint's synthetic local IP is replaced with a real interface.
 async fn api(local: IpAddr) -> (String, tokio::task::JoinHandle<()>) {
+    api_with(local, &["slice1"]).await
+}
+
+async fn api_with(local: IpAddr, dns_slices: &[&str]) -> (String, tokio::task::JoinHandle<()>) {
     let family = if local.is_ipv4() { "IPv4" } else { "IPv6" };
     let mut slices = Vec::new();
     for service in ["dns-service", "hdls-dns-service", "dns6-service"] {
-        slices.push(format!(r#"{{"metadata":{{"name":"{service}-slice1","namespace":"kube-system","labels":{{"kubernetes.io/service-name":"{service}"}}}},"addressType":"{family}","endpoints":[{{"addresses":["{local}"]}}]}}"#));
+        for slice in dns_slices {
+            slices.push(format!(r#"{{"metadata":{{"name":"{service}-{slice}","namespace":"kube-system","labels":{{"kubernetes.io/service-name":"{service}"}}}},"addressType":"{family}","endpoints":[{{"addresses":["{local}"]}}]}}"#));
+        }
     }
     slices.extend([
         r#"{"metadata":{"name":"svc1-slice1","namespace":"testns","labels":{"kubernetes.io/service-name":"svc1"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":80}],"endpoints":[{"addresses":["10.0.0.100"],"hostname":"ep1a"},{"addresses":["10.0.0.99"],"hostname":"double-ep"},{"addresses":["192.168.1.100"],"hostname":"shadowed"}]}"#.to_string(),
@@ -264,6 +270,35 @@ async fn coredns_ns_addrs_and_namespace_filters() {
         );
         chain.lifecycle.run(Phase::Shutdown).await.unwrap();
     }
+    task.abort();
+}
+
+// A local address in two slices of one Service (dual-stack, or a mirrored
+// slice) must not duplicate glue; CoreDNS's plugin.NS appends it per slice.
+#[tokio::test]
+async fn apex_ns_glue_is_not_duplicated() {
+    let local = local_ip();
+    let (endpoint, task) = api_with(local, &["slice1", "slice2"]).await;
+    let zone = "inter.webs.test.";
+    let chain = chain(&endpoint, zone, "").await;
+    let (outcome, wire) = query(&chain, zone, Type::NS).await;
+    assert_eq!(outcome, Outcome::Response);
+    let mut additional: Vec<_> = Message::parse(&wire)
+        .unwrap()
+        .additionals()
+        .map(record)
+        .collect();
+    let total = additional.len();
+    additional.sort();
+    additional.dedup();
+    assert_eq!(additional.len(), total, "{additional:?}");
+    assert_eq!(total, 3);
+    let (_, wire) = query(&chain, &format!("ns.dns.{zone}"), Type::A).await;
+    assert_eq!(
+        Message::parse(&wire).unwrap().answer_count(),
+        1 + u16::from(local.is_ipv4())
+    );
+    chain.lifecycle.run(Phase::Shutdown).await.unwrap();
     task.abort();
 }
 
