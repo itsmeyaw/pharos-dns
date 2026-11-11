@@ -106,7 +106,7 @@ fn main() {
             "loadbalance" => "loadbalance::setup::setup",
             "local" => "local::setup::setup",
             "nsid" => "nsid::setup::setup",
-            "reload" => "setup_reload",
+            "reload" => "reload::setup::setup",
             "errors" => "errors::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",

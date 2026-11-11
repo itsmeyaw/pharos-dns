@@ -612,11 +612,7 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
 
 
 
-#[cfg(feature = "plugin-reload")]
-fn setup_reload(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.reload = Some(reload::parse(cursor)?);
-    Ok(())
-}
+
 
 
 

@@ -1,5 +1,7 @@
 //! Reload Directive configuration.
 
+pub(crate) mod setup;
+
 use std::time::Duration;
 
 use pharos_corefile::{Cursor, Error};
