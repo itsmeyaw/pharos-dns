@@ -34,6 +34,63 @@ impl Next for Unanswered {
     }
 }
 
+struct InspectQuestion(Type, Class);
+impl Next for InspectQuestion {
+    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        assert_eq!((q.qtype, q.qclass), (self.0, self.1));
+        let mut copy = Vec::with_capacity(512);
+        cx.query.copy_wire(&mut copy);
+        let copied = Message::parse(&copy).unwrap().questions().next().unwrap();
+        assert_eq!((copied.qtype, copied.qclass), (self.0, self.1));
+        Outcome::Drop
+    }
+}
+
+#[tokio::test]
+async fn coredns_type_and_class_rewrite_question() {
+    for (rules, expected_type, expected_class) in [
+        ("rewrite type A AAAA", Type::AAAA, Class::IN),
+        ("rewrite type AAAA HINFO", Type::A, Class::IN),
+        ("rewrite class IN CH", Type::A, Class::CH),
+        (
+            "rewrite continue type A AAAA\n rewrite class IN CH",
+            Type::AAAA,
+            Class::CH,
+        ),
+    ] {
+        let config = format!(".:53 {{\n {rules}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+        let root: Name = ".".parse().unwrap();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, InspectQuestion(expected_type, expected_class))
+                .await,
+            Outcome::Drop
+        );
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/rcode_test.go.
 #[tokio::test]
 async fn coredns_rcode_rewrites_unanswered_response() {

@@ -352,10 +352,12 @@ impl Cache {
         let stored = hit.refresh.expect("refresh requested");
         let generation = hit.generation;
         let stale = hit.stale;
-        let safe_query = cx.query.can_set_ad_in_wire();
         let mut wire = Vec::with_capacity(cx.query.as_wire().len());
-        cx.query.copy_wire(&mut wire);
-        wire[3] |= 0x20;
+        let safe_query =
+            cx.query.can_set_ad_in_wire() && cx.query.copy_wire_checked(&mut wire).is_ok();
+        if safe_query {
+            wire[3] |= 0x20;
+        }
         let domain = cx.domain.clone();
         let synthetic = !stale || !self.config.verify;
         let client = if synthetic {

@@ -257,7 +257,9 @@ impl Plugin for Forward {
                 {
                     return Outcome::Unanswered(Rcode::FORMERR);
                 }
-                cx.query.copy_wire(query_buffer);
+                if cx.query.copy_wire_checked(query_buffer).is_err() {
+                    return Outcome::Unanswered(Rcode::FORMERR);
+                }
                 query_buffer.as_slice()
             } else {
                 original_query

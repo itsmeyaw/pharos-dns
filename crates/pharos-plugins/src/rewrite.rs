@@ -3,7 +3,7 @@
 use std::fmt::Write;
 
 use pharos_corefile::{Cursor, Error};
-use pharos_proto::{Message, MessageMut, Rcode, Type};
+use pharos_proto::{Class, Message, MessageMut, Rcode, Type};
 use pharos_server::{Context, Next, Outcome, Plugin};
 
 #[derive(Debug)]
@@ -17,10 +17,13 @@ struct Rule {
 enum Action {
     Ttl(u32, u32),
     Rcode(u16, u16),
+    Type(Type, Type),
+    Class(Class, Class),
 }
 
 #[derive(Debug)]
 enum Matcher {
+    Any,
     Exact(String),
     Prefix(String),
     Suffix(String),
@@ -31,6 +34,7 @@ enum Matcher {
 impl Matcher {
     fn matches(&self, name: &str) -> bool {
         match self {
+            Self::Any => true,
             Self::Exact(value) => name == value,
             Self::Prefix(value) => name.starts_with(value),
             Self::Suffix(value) => name.ends_with(value),
@@ -74,6 +78,46 @@ impl Rewrite {
             let Some((kind, args)) = args.split_first() else {
                 return Err(cursor.arg_err());
             };
+            if kind.eq_ignore_ascii_case("type") || kind.eq_ignore_ascii_case("class") {
+                let [from, to] = args else {
+                    return Err(cursor.arg_err());
+                };
+                let action = if kind.eq_ignore_ascii_case("type") {
+                    let parse = |value: &str| {
+                        (0..=261)
+                            .chain([32768, 32769, 65535])
+                            .map(Type)
+                            .find(|typ| {
+                                !typ.to_string().starts_with("TYPE")
+                                    && typ.to_string().eq_ignore_ascii_case(value)
+                            })
+                    };
+                    Action::Type(
+                        parse(from).ok_or_else(|| cursor.error("invalid type"))?,
+                        parse(to).ok_or_else(|| cursor.error("invalid type"))?,
+                    )
+                } else {
+                    let parse = |value: &str| match value.to_ascii_uppercase().as_str() {
+                        "IN" => Some(Class::IN),
+                        "CS" => Some(Class::CS),
+                        "CH" => Some(Class::CH),
+                        "HS" => Some(Class::HS),
+                        "NONE" => Some(Class::NONE),
+                        "ANY" => Some(Class::ANY),
+                        _ => None,
+                    };
+                    Action::Class(
+                        parse(from).ok_or_else(|| cursor.error("invalid class"))?,
+                        parse(to).ok_or_else(|| cursor.error("invalid class"))?,
+                    )
+                };
+                rules.push(Rule {
+                    matcher: Matcher::Any,
+                    action,
+                    stop,
+                });
+                continue;
+            }
             let (mode, name, action) = if kind.eq_ignore_ascii_case("ttl") {
                 let (mode, name, ttl) = match args {
                     [name, ttl] => ("exact", name, ttl),
@@ -206,11 +250,37 @@ impl Plugin for Rewrite {
         }
         name.bytes[..name.len].make_ascii_lowercase();
         let name = std::str::from_utf8(&name.bytes[..name.len]).expect("DNS presentation is UTF-8");
-        let end = self
-            .rules
-            .iter()
-            .position(|rule| rule.stop && rule.matcher.matches(name))
-            .map_or(self.rules.len(), |i| i + 1);
+        let mut end = self.rules.len();
+        for (index, rule) in self.rules.iter().enumerate() {
+            let matched = match rule.action {
+                Action::Type(from, to)
+                    if from.0 != 0
+                        && to.0 != 0
+                        && cx.query.questions().next().is_some_and(|q| q.qtype == from) =>
+                {
+                    cx.query = cx.query.with_question_type(to);
+                    true
+                }
+                Action::Class(from, to)
+                    if from.0 != 0
+                        && to.0 != 0
+                        && cx
+                            .query
+                            .questions()
+                            .next()
+                            .is_some_and(|q| q.qclass == from) =>
+                {
+                    cx.query = cx.query.with_question_class(to);
+                    true
+                }
+                Action::Type(..) | Action::Class(..) => false,
+                _ => rule.matcher.matches(name),
+            };
+            if matched && rule.stop {
+                end = index + 1;
+                break;
+            }
+        }
         let outcome = next.run(cx).await;
         let rewrite_rcode = |mut code: u16| {
             for rule in self.rules[..end]
