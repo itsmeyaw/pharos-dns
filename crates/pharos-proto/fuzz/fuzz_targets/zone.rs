@@ -135,7 +135,10 @@ fn dangling_escape_offset(zone: &[u8]) -> Option<usize> {
     let error = ZoneParser::new(Cursor::new(zone), origin, "fuzz.zone")
         .collect::<Result<Vec<_>, _>>()
         .err()?;
-    if !matches!(error.message.as_str(), "incomplete escape" | "trailing escape") {
+    if !matches!(
+        error.message.as_str(),
+        "incomplete escape" | "trailing escape"
+    ) {
         return None;
     }
     let line_start = zone
@@ -147,7 +150,11 @@ fn dangling_escape_offset(zone: &[u8]) -> Option<usize> {
     // backslashes; "trailing escape" is reported at the item start, not at the backslash.
     let line = zone[line_start..].split(|&b| b == b'\n').next()?;
     let trimmed = line.iter().rposition(|&b| b != b'\r').map_or(0, |i| i + 1);
-    let run = line[..trimmed].iter().rev().take_while(|&&b| b == b'\\').count();
+    let run = line[..trimmed]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\\')
+        .count();
     if run % 2 == 0 {
         return None;
     }
