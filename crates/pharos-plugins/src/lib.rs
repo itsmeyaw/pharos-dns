@@ -693,16 +693,7 @@ fn setup_multisocket(
 
 
 
-#[cfg(feature = "plugin-loadbalance")]
-fn setup_loadbalance(
-    cursor: &mut Cursor<'_>,
-    block: &mut BlockContext<Chain>,
-) -> Result<(), Error> {
-    let plugin = loadbalance::LoadBalance::parse(cursor, root_path(&block.config))?;
-    plugin.register_hooks(&mut block.config.lifecycle);
-    block.config.loadbalance = Some(plugin);
-    Ok(())
-}
+
 
 #[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {

@@ -103,7 +103,7 @@ fn main() {
             "forward" => "forward::setup::setup",
             "health" => "health::setup::setup",
             "hosts" => "hosts::setup::setup",
-            "loadbalance" => "setup_loadbalance",
+            "loadbalance" => "loadbalance::setup::setup",
             "local" => "setup_local",
             "nsid" => "setup_nsid",
             "reload" => "setup_reload",

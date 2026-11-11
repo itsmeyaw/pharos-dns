@@ -1,5 +1,7 @@
 //! Loadbalance Directive configuration.
 
+pub(crate) mod setup;
+
 mod weighted;
 
 use std::{
