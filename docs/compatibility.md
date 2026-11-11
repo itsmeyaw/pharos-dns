@@ -3,7 +3,7 @@
 ## any
 
 - Like CoreDNS, `any` synthesizes its HINFO before consulting a Backend, even for a CNAME or signed Zone; it cannot include an RRSIG when DO is set (RFC 8482 §4.2).
-- The UDP caller must supply a Response buffer with enough capacity; otherwise Pharos returns an error instead of allocating on the UDP Query path. TCP buffers can grow, as with `whoami`.
+- The UDP caller must supply a Response buffer with enough capacity; otherwise Pharos returns an error instead of allocating on the UDP Query path.
 
 ## bind
 
@@ -26,7 +26,7 @@
 - On a miss, Queries whose encoded names point into the header, or whose non-OPT RDATA might contain a compression pointer, also bypass the cache rather than changing AD.
 - Opaque EDNS option data is not treated as name compression.
 - On a hit, Pharos rewrites the Question's case in the stored wire Message; record names compressed against it therefore acquire the current Query's case, whereas CoreDNS rebuilds records from the cached Response.
-- If a UDP caller's Response buffer is too small for a cached Message, Pharos falls through to Next instead of growing it on the hit; TCP buffers are grown as needed.
+- If a UDP caller's Response buffer is too small for a cached Message, Pharos falls through to Next instead of growing it on the hit.
 - TSIG-signed Queries and Responses bypass caching so that ID, flags and TTL rewrites cannot invalidate their signatures.
 - Wildcard source Metadata is not saved with cache entries.
 - Background refreshes use a fresh Metadata map and retain Listener state for Self Lookup.
@@ -154,7 +154,7 @@
 ## local
 
 - The localhost interception debug log can be enabled through the process logging API; the `debug` Directive is not implemented yet. Unlike CoreDNS, logged Query names retain their original case.
-- UDP callers must supply a sufficiently large Response buffer; TCP buffers can grow.
+- UDP callers must supply a sufficiently large Response buffer.
 - DNS names are matched as wire labels with ASCII case folding, rather than CoreDNS's lowercased presentation strings.
 
 ## log
