@@ -1,5 +1,7 @@
 //! DNS64 address synthesis.
 
+pub(crate) mod setup;
+
 use std::{
     net::{Ipv6Addr, SocketAddr},
     sync::{

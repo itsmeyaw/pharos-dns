@@ -812,11 +812,7 @@ fn setup_unimplemented(cursor: &mut Cursor<'_>, _: &mut BlockContext<Chain>) -> 
 
 
 
-#[cfg(feature = "plugin-dns64")]
-fn setup_dns64(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    block.config.dns64 = Some(dns64::Dns64::parse(cursor)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-siit")]
 fn setup_siit(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

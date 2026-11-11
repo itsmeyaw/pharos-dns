@@ -77,7 +77,7 @@ fn main() {
     for name in &enabled {
         let setup = match *name {
             "acl" => "acl::setup::setup",
-            "dns64" => "setup_dns64",
+            "dns64" => "dns64::setup::setup",
             "siit" => "setup_siit",
             "rewrite" => "setup_rewrite",
             "autopath" => "autopath::setup::setup",
