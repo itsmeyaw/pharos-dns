@@ -930,14 +930,21 @@ fn apply_rule(
     }
 }
 
-fn active_at(
+fn active_at<'q>(
     rules: &[Rule],
     index: usize,
-    mut query: Message<'_>,
+    mut query: Message<'q>,
     metadata: &Metadata<'_>,
+    history: &[(usize, Message<'q>, Message<'q>)],
 ) -> bool {
     for (position, rule) in rules.iter().enumerate().take(index + 1) {
-        let matched = apply_rule(rule, &mut query, metadata).unwrap_or(false);
+        let matched =
+            if let Some((_, _, after)) = history.iter().find(|(index, _, _)| *index == position) {
+                query = *after;
+                true
+            } else {
+                apply_rule(rule, &mut query, metadata).unwrap_or(false)
+            };
         if position == index {
             return matched;
         }
@@ -954,10 +961,17 @@ fn states_at<'a>(
     mut query: Message<'a>,
     metadata: &Metadata<'_>,
     recorded: Option<&[u8]>,
+    history: &[(usize, Message<'a>, Message<'a>)],
 ) -> Option<(Message<'a>, Message<'a>)> {
     for (position, rule) in rules.iter().enumerate().take(index + 1) {
-        let before = query;
-        let matched = if recorded.is_some_and(|bits| bits[position] == 0) {
+        let mut before = query;
+        let matched = if let Some((_, saved_before, saved_after)) =
+            history.iter().find(|(index, _, _)| *index == position)
+        {
+            before = *saved_before;
+            query = *saved_after;
+            true
+        } else if recorded.is_some_and(|bits| bits[position] == 0) {
             false
         } else if matches!(rule.action, Action::Edns(..)) {
             recorded.is_none_or(|bits| bits[position] != 0)
@@ -989,16 +1003,16 @@ fn copy_name(source: NameRef<'_>, output: &mut [u8; 255]) -> Option<usize> {
     Some(len + 1)
 }
 
-fn apply_history<'a>(
+fn apply_history<'a, 'q>(
     source: NameRef<'a>,
-    original: Message<'_>,
+    original: Message<'q>,
     metadata: &Metadata<'_>,
-    rules: (&[Rule], Option<&[u8]>),
+    rules: (&[Rule], Option<&[u8]>, &[(usize, Message<'q>, Message<'q>)]),
     end: usize,
     value: bool,
     output: &'a mut [u8; 255],
 ) -> NameRef<'a> {
-    let (rules, recorded) = rules;
+    let (rules, recorded, history) = rules;
     let mut current = [0; 255];
     let Some(mut len) = copy_name(source, &mut current) else {
         return source;
@@ -1010,7 +1024,8 @@ fn apply_history<'a>(
         if !auto && answers.is_empty() {
             continue;
         }
-        let Some((before, after)) = states_at(rules, index, original, metadata, recorded) else {
+        let Some((before, after)) = states_at(rules, index, original, metadata, recorded, history)
+        else {
             continue;
         };
         let (Some(before), Some(after)) = (before.questions().next(), after.questions().next())
@@ -1540,11 +1555,12 @@ fn revert_edns_response(
 }
 
 #[inline(never)]
-fn build_reverted_response(
+fn build_reverted_response<'q>(
     cx: &mut Context<'_, '_>,
-    original_query: Message<'_>,
+    original_query: Message<'q>,
     rules: &[Rule],
     recorded: Option<&[u8]>,
+    history: &[(usize, Message<'q>, Message<'q>)],
     end: usize,
     rcode: u16,
 ) -> Result<(), ServerError> {
@@ -1589,7 +1605,7 @@ fn build_reverted_response(
             } else {
                 for (index, rule) in rules[..end].iter().enumerate().rev() {
                     let active = recorded.map_or_else(
-                        || active_at(rules, index, original_query, &cx.metadata),
+                        || active_at(rules, index, original_query, &cx.metadata, history),
                         |bits| bits[index] != 0,
                     );
                     if active && let Action::Ttl(min, max) = rule.action {
@@ -1602,7 +1618,7 @@ fn build_reverted_response(
                 rr.name,
                 original_query,
                 &cx.metadata,
-                (rules, recorded),
+                (rules, recorded, history),
                 end,
                 false,
                 &mut owner_buffer,
@@ -1615,7 +1631,7 @@ fn build_reverted_response(
                         $value,
                         original_query,
                         &cx.metadata,
-                        (rules, recorded),
+                        (rules, recorded, history),
                         end,
                         true,
                         &mut value_buffer,
@@ -1714,6 +1730,7 @@ impl Plugin for Rewrite {
         let mut end = self.rules.len();
         let mut response_rules = false;
         let mut rewrite_edns = false;
+        let mut name_history = Vec::new();
         // shortcut: EDNS Queries serialize per Self Lookup depth until slot-based buffers are available.
         let mut scratch = if self.edns_buffers.is_empty() {
             None
@@ -1737,6 +1754,7 @@ impl Plugin for Rewrite {
             (None, None, None)
         };
         for (index, rule) in self.rules.iter().enumerate() {
+            let before = cx.query;
             let applied = match &rule.action {
                 Action::Edns(..) => match apply_edns(
                     rule,
@@ -1764,6 +1782,10 @@ impl Plugin for Rewrite {
                 matches[index] = u8::from(matched);
             }
             if matched {
+                if matches!(rule.action, Action::Name(_, _, Some(_), _)) {
+                    // shortcut: matched metadata regex rules retain snapshots alongside regex captures.
+                    name_history.push((index, before, cx.query));
+                }
                 match &rule.action {
                     Action::Name(_, auto, _, answers) => {
                         response_rules |= *auto || !answers.is_empty();
@@ -1828,7 +1850,15 @@ impl Plugin for Rewrite {
                     continue;
                 }
                 if !matches.as_deref().map_or_else(
-                    || active_at(&self.rules, index, original_query, &cx.metadata),
+                    || {
+                        active_at(
+                            &self.rules,
+                            index,
+                            original_query,
+                            &cx.metadata,
+                            &name_history,
+                        )
+                    },
                     |bits| bits[index] != 0,
                 ) {
                     continue;
@@ -1859,7 +1889,15 @@ impl Plugin for Rewrite {
         let rewrite_rcode = |mut code: u16| {
             for (index, rule) in self.rules[..end].iter().enumerate().rev() {
                 if !matches.as_deref().map_or_else(
-                    || active_at(&self.rules, index, original_query, &cx.metadata),
+                    || {
+                        active_at(
+                            &self.rules,
+                            index,
+                            original_query,
+                            &cx.metadata,
+                            &name_history,
+                        )
+                    },
                     |bits| bits[index] != 0,
                 ) {
                     continue;
@@ -1961,6 +1999,7 @@ impl Plugin for Rewrite {
                 original_query,
                 &self.rules,
                 matches.as_deref(),
+                &name_history,
                 end,
                 new,
             ) {

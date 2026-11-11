@@ -570,6 +570,69 @@ impl Next for InspectMaybeOptions {
     }
 }
 
+struct MutateMetadataAnswer;
+impl Next for MutateMetadataAnswer {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        cx.metadata.insert("test/value", "new");
+        Answer.run(cx).await
+    }
+}
+
+#[tokio::test]
+async fn metadata_name_reversion_uses_value_from_the_query_phase() {
+    let config = r".:53 {
+ rewrite name regex ^([^.]+)\.example\.$ {1}.{test/value}. metadata answer auto
+}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "web.example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [None];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    cx.metadata.insert("test/value", "old");
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, MutateMetadataAnswer)
+            .await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(cx.response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .name
+            .to_string(),
+        "web.example."
+    );
+}
+
 struct EchoOptions;
 impl Next for EchoOptions {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
