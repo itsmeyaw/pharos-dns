@@ -59,11 +59,12 @@ pub(crate) fn parse(document: &str) -> Vec<(&str, Vec<String>)> {
         } else if let Some((_, bullets)) = sections.last_mut() {
             if let Some(text) = line.strip_prefix("- ") {
                 bullets.push(text.to_owned());
-            } else if line.starts_with("  ") && !line.trim().is_empty() {
-                if let Some(bullet) = bullets.last_mut() {
-                    bullet.push(' ');
-                    bullet.push_str(line.trim());
-                }
+            } else if line.starts_with("  ")
+                && !line.trim().is_empty()
+                && let Some(bullet) = bullets.last_mut()
+            {
+                bullet.push(' ');
+                bullet.push_str(line.trim());
             }
         }
     }
