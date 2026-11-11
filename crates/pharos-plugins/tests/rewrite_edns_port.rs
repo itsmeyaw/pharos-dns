@@ -41,6 +41,162 @@ impl Next for Echo {
     }
 }
 
+struct NoOpt;
+impl Next for NoOpt {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        builder
+            .record(
+                Section::Answer,
+                q.name,
+                Type::A,
+                Class::IN,
+                60,
+                &[127, 0, 0, 1],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/reverter_test.go TestEDNS0ResponseReverterNoOPT.
+#[tokio::test]
+async fn coredns_reverter_preserves_no_opt_backend_response() {
+    for (rule, original) in [
+        ("local set 0xffee 0xabcdef revert", None),
+        (
+            "local replace 0xffee 0x222222 revert",
+            Some(&b"\xff\xee\0\x03\x11\x11\x11"[..]),
+        ),
+    ] {
+        let config = format!(".:53 {{\n rewrite edns0 {rule}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = "example.org.".parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        if let Some(data) = original {
+            builder
+                .record(
+                    Section::Additional,
+                    NameRef::parse(root.as_wire(), 0).unwrap(),
+                    Type::OPT,
+                    Class(4096),
+                    0,
+                    data,
+                )
+                .unwrap();
+        }
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "10.240.0.1:40212".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain.rewrite.as_ref().unwrap().serve(&mut cx, NoOpt).await,
+            Outcome::Response
+        );
+        let response = Message::parse(cx.response).unwrap();
+        assert_eq!(response.answers().count(), 1);
+        assert!(response.opt().is_none(), "{rule}");
+    }
+}
+
+struct NoOptChain(pharos_plugins::rewrite::Rewrite);
+impl pharos_server::Chain for NoOptChain {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, NoOpt).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/edns0_test.go TestEdns0LocalSetRevertNoLeak and TestEdns0LocalSetRevertRestoresPreexisting.
+#[tokio::test]
+async fn coredns_revert_survives_listener_scrubbing() {
+    for original in [&b""[..], &b"\xff\xee\0\x03\x11\x11\x11"[..]] {
+        let config = ".:53 {\n rewrite edns0 local set 0xffee 0xabcdef revert\n}";
+        let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let key = pharos_server::ListenerKey {
+            transport: Transport::Dns,
+            address: "127.0.0.1:53".parse().unwrap(),
+        };
+        let mut router = pharos_server::Router::default();
+        router.add(
+            key,
+            ".".parse().unwrap(),
+            Some(NoOptChain(chain.rewrite.take().unwrap())),
+            vec![],
+        );
+        let server = pharos_server::Server::new(router, key);
+        let name: Name = "example.org.".parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut options = original.to_vec();
+        options.extend_from_slice(b"\0\x0a\0\x08\xab\xcd\xef\x01\x23\x45\x67\x89");
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Additional,
+                NameRef::parse(root.as_wire(), 0).unwrap(),
+                Type::OPT,
+                Class(4096),
+                0,
+                &options,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            pharos_server::Handler::handle(
+                &server,
+                &wire,
+                "10.240.0.1:40212".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+            pharos_server::Action::Respond
+        );
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.answers().count(), 1);
+        assert_eq!(response.opt().unwrap().options().as_bytes(), original);
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/rewrite_test.go TestEdns0MultiRule.
 #[tokio::test]
 async fn coredns_edns_multiple_rules_rows() {

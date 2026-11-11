@@ -1543,6 +1543,22 @@ fn build_cname_response(
     Ok(())
 }
 
+fn registered_options_match(mut original: &[u8], mut rewritten: &[u8]) -> bool {
+    while !original.is_empty() {
+        let code = u16::from_be_bytes([original[0], original[1]]);
+        let len = 4 + usize::from(u16::from_be_bytes([original[2], original[3]]));
+        let (option, remaining) = original.split_at(len);
+        original = remaining;
+        if pharos_proto::edns_option_registered(code) {
+            if !rewritten.starts_with(option) {
+                return false;
+            }
+            rewritten = &rewritten[len..];
+        }
+    }
+    rewritten.is_empty()
+}
+
 #[inline(never)]
 fn revert_edns_response<'q>(
     cx: &mut Context<'_, '_>,
@@ -1636,6 +1652,14 @@ fn revert_edns_response<'q>(
                 options.remove_first(*code);
             }
         }
+    }
+    // RFC 6891 §6.1.2: the listener can add the original OPT when no options changed.
+    if response_opt.is_none()
+        && original.opt().is_some_and(|opt| {
+            registered_options_match(opt.options().as_bytes(), &options.bytes[..options.len])
+        })
+    {
+        return Ok(());
     }
     let mut builder = MessageBuilder::new(
         cx.response,
