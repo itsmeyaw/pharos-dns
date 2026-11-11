@@ -243,6 +243,7 @@ impl Next for AliasBackend {
 async fn coredns_cname_rewrite_follows_target_through_self_lookup() {
     for (rule, expected) in [
         ("rewrite cname old.example. new.example.", "new.example."),
+        ("rewrite cname OLD.EXAMPLE NEW.EXAMPLE", "new.example."),
         (
             "rewrite continue cname old.example. new.example.\n rewrite cname missing.example. unused.example.",
             "new.example.",
