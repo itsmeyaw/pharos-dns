@@ -9,6 +9,62 @@ fn borrowed(value: &Name) -> NameRef<'_> {
 }
 
 #[test]
+fn fixed_storage_builds_questions_and_compressed_rdata() {
+    use pharos_proto::{FixedBuffer, Rdata};
+    let n = name("www.example.com.");
+    let mut storage = [0; 512];
+    let mut fixed = FixedBuffer::new(&mut storage);
+    let mut b = MessageBuilder::new(&mut fixed, 512, 1, 0x8180).unwrap();
+    b.question(borrowed(&n), Type::A, Class::IN).unwrap();
+    b.record_with(
+        Section::Answer,
+        borrowed(&n),
+        Type::CNAME,
+        Class::IN,
+        30,
+        |w| Rdata::Cname(borrowed(&n)).write(w),
+    )
+    .unwrap();
+    let wire = b.finish();
+    let parsed = Message::parse(wire).unwrap();
+    assert_eq!(parsed.questions().next().unwrap().name, borrowed(&n));
+    let Rdata::Cname(target) = parsed.answers().next().unwrap().data().unwrap() else {
+        panic!("expected CNAME")
+    };
+    assert_eq!(target, borrowed(&n));
+}
+
+#[test]
+fn fixed_storage_respects_capacity_and_truncation() {
+    use pharos_proto::FixedBuffer;
+    let mut small = [0; 511];
+    let mut small = FixedBuffer::new(&mut small);
+    assert!(matches!(
+        MessageBuilder::new(&mut small, 512, 1, 0),
+        Err(BuildError::InvalidMaxSize)
+    ));
+    let n = name("example.");
+    let mut storage = [0; 512];
+    let mut fixed = FixedBuffer::new(&mut storage);
+    let mut b = MessageBuilder::new(&mut fixed, 512, 1, 0x8180).unwrap();
+    b.question(borrowed(&n), Type::A, Class::IN).unwrap();
+    assert!(
+        !b.record(
+            Section::Answer,
+            borrowed(&n),
+            Type::TXT,
+            Class::IN,
+            30,
+            &[0; 500]
+        )
+        .unwrap()
+    );
+    let parsed = Message::parse(b.finish()).unwrap();
+    assert!(parsed.tc());
+    assert_eq!(parsed.answer_count(), 0);
+}
+
+#[test]
 fn builds_ordered_sections_and_reuses_buffer() {
     let mut wire = Vec::with_capacity(512);
     wire.extend_from_slice(b"old contents");

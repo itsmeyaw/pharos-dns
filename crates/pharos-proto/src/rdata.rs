@@ -3,7 +3,7 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
 };
 
-use crate::{BuildError, NameRef, RdataWriter, Type};
+use crate::{BuildError, MessageBuffer, NameRef, RdataWriter, Type};
 
 // shortcut: reject unsupported name-bearing types until their names can be relocated.
 fn unsupported_name_type(rtype: Type) -> bool {
@@ -328,8 +328,8 @@ fn display_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     Ok(())
 }
 
-fn write_character_string(
-    writer: &mut RdataWriter<'_, '_>,
+fn write_character_string<B: MessageBuffer>(
+    writer: &mut RdataWriter<'_, '_, B>,
     bytes: &[u8],
 ) -> Result<(), BuildError> {
     let len = u8::try_from(bytes.len()).map_err(|_| BuildError::InvalidRdata)?;
@@ -1002,7 +1002,10 @@ impl<'a> Rdata<'a> {
     }
 
     /// Writes this data with a Message builder's RDATA hook.
-    pub fn write(&self, writer: &mut RdataWriter<'_, '_>) -> Result<(), BuildError> {
+    pub fn write<B: MessageBuffer>(
+        &self,
+        writer: &mut RdataWriter<'_, '_, B>,
+    ) -> Result<(), BuildError> {
         match self {
             Self::A(addr) => writer.write_bytes(&addr.octets()),
             Self::Aaaa(addr) => writer.write_bytes(&addr.octets()),

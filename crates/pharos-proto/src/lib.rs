@@ -11,7 +11,7 @@ mod codes;
 pub use codes::{Class, Opcode, Rcode, Type};
 
 mod builder;
-pub use builder::{BuildError, MessageBuilder, RdataWriter, Section};
+pub use builder::{BuildError, FixedBuffer, MessageBuffer, MessageBuilder, RdataWriter, Section};
 
 mod edns_options;
 pub use edns_options::{ClientSubnet, EdnsOption, EdnsOptionError, EdnsOptionIter, EdnsOptions};
