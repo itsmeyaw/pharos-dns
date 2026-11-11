@@ -5,7 +5,7 @@ use pharos_server::{
     startup_domains,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write,
     fs,
     future::Future,
@@ -80,7 +80,24 @@ fn prepare(
     ),
     String,
 > {
-    let mut blocks = parse_blocks(options, file, input)?;
+    let blocks = parse_blocks(options, file, input)?;
+    prepare_blocks(options, blocks, metrics)
+}
+
+fn prepare_blocks(
+    options: &Options,
+    mut blocks: Vec<pharos_corefile::ServerBlock>,
+    metrics: &pharos_server::metrics::Registry,
+) -> Result<
+    (
+        pharos_plugins::Servers,
+        Lifecycle,
+        Domains,
+        ReloadConfig,
+        String,
+    ),
+    String,
+> {
     let hash = corefile_hash(&blocks);
     for block in &mut blocks {
         block.set_default_dns_port(options.port.unwrap_or(53));
@@ -107,6 +124,43 @@ fn prepare(
     let (servers, lifecycle) = pharos_plugins::servers_with_registry(blocks, metrics.clone())
         .map_err(|e| e.to_string())?;
     Ok((servers, lifecycle, domains, reload_config, hash))
+}
+
+pub fn check(options: &Options) -> Result<(), String> {
+    init_logging("text");
+    let (file, input) = configuration(options)?;
+    let blocks = parse_blocks(options, &file, &input)?;
+    let keys: Vec<_> = blocks
+        .iter()
+        .flat_map(|block| block.keys().iter().map(String::as_str))
+        .collect();
+    let directives: BTreeSet<_> = blocks
+        .iter()
+        .flat_map(|block| block.directives.keys().map(String::as_str))
+        .collect();
+    let metrics = pharos_server::metrics::Registry::default();
+    prepare_blocks(options, blocks.clone(), &metrics)?;
+    println!(
+        "Corefile: {file}; Server Blocks: {}; Directives: {}",
+        keys.join(", "),
+        directives.iter().copied().collect::<Vec<_>>().join(", ")
+    );
+    let sections = crate::compatibility::parse(include_str!("../../../docs/compatibility.md"));
+    for (heading, bullets) in sections
+        .iter()
+        .filter(|(heading, _)| directives.contains(heading))
+        .chain(
+            sections
+                .iter()
+                .filter(|(heading, _)| heading.chars().next().is_some_and(char::is_uppercase)),
+        )
+    {
+        println!("\n## {heading}");
+        for bullet in bullets {
+            println!("- {bullet}");
+        }
+    }
+    Ok(())
 }
 
 fn digest_hex(digest: aws_lc_rs::digest::Digest) -> String {

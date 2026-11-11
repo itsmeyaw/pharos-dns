@@ -16,7 +16,6 @@
 //! See `docs/compatibility.md` for remaining differences.
 
 mod app;
-#[cfg(test)]
 mod compatibility;
 
 use std::process::ExitCode;
@@ -31,11 +30,16 @@ struct Options {
     version: bool,
     quiet: bool,
     log_format: Option<String>,
+    check: bool,
 }
 
 fn options() -> Result<Options, (u8, String)> {
     let mut options = Options::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
+    if args.peek().is_some_and(|arg| arg == "check") {
+        args.next();
+        options.check = true;
+    }
     while let Some(arg) = args.next() {
         let (flag, value) = arg
             .split_once('=')
@@ -53,6 +57,9 @@ fn options() -> Result<Options, (u8, String)> {
         };
         if let Some(replacement) = replacement {
             return Err((2, format!("use {replacement} instead of {flag}")));
+        }
+        if options.check && !matches!(flag, "--help" | "-h" | "--conf" | "-c") {
+            return Err((2, format!("unknown argument: {arg}")));
         }
         match flag {
             "--help" | "-h" if value.is_none() => {
@@ -105,21 +112,33 @@ async fn main() -> ExitCode {
         }
     };
     if options.help {
-        eprint!(concat!(
-            "Usage: pharos [OPTIONS]\n",
-            "  -h, --help                    Print help\n",
-            "  -c, --conf <path|stdin>       Corefile path or stdin\n",
-            "  -p, --port <port>             Default DNS port (default: 53)\n",
-            "      --pidfile <path>          Write process ID to path\n",
-            "      --plugins                 List enabled Plugins\n",
-            "  -V, --version                 Print version\n",
-            "  -q, --quiet                   Suppress startup output\n",
-            "      --log-format <text|json>  Select log format\n",
-        ));
+        if options.check {
+            eprint!(
+                "Usage: pharos check [--conf <path|stdin>]\n  -h, --help               Print help\n  -c, --conf <path|stdin>  Corefile path or stdin\n"
+            );
+        } else {
+            eprint!(concat!(
+                "Usage: pharos [OPTIONS]\n",
+                "  check                         Validate configuration without serving\n",
+                "  -h, --help                    Print help\n",
+                "  -c, --conf <path|stdin>       Corefile path or stdin\n",
+                "  -p, --port <port>             Default DNS port (default: 53)\n",
+                "      --pidfile <path>          Write process ID to path\n",
+                "      --plugins                 List enabled Plugins\n",
+                "  -V, --version                 Print version\n",
+                "  -q, --quiet                   Suppress startup output\n",
+                "      --log-format <text|json>  Select log format\n",
+            ));
+        }
     } else if options.version {
         version();
     } else if options.plugins {
         print!("{}", pharos_plugins::plugins_listing());
+    } else if options.check {
+        if let Err(error) = app::check(&options) {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
     } else {
         match app::run(options).await {
             Ok(code) => return ExitCode::from(code),

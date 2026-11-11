@@ -51,7 +51,7 @@ fn parses_wrapped_bullets_by_heading() {
         ]
     );
 }
-fn parse(document: &str) -> Vec<(&str, Vec<String>)> {
+pub(crate) fn parse(document: &str) -> Vec<(&str, Vec<String>)> {
     let mut sections: Vec<(&str, Vec<String>)> = Vec::new();
     for line in document.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
