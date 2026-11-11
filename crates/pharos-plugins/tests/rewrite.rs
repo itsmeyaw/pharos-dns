@@ -1290,6 +1290,21 @@ async fn coredns_edns_local_append_replace_and_unset() {
             &b"\xff\xee\0\x01a\xff\xee\0\x01b"[..],
         ),
         (
+            "rewrite edns0 local append 0xffee {qname}",
+            &initial[..],
+            &initial[..],
+        ),
+        (
+            "rewrite edns0 nsid append",
+            &b"\0\x03\0\x03old"[..],
+            &b"\0\x03\0\x03old\0\x03\0\0"[..],
+        ),
+        (
+            "rewrite edns0 subnet append 24 56",
+            &b"\0\x08\0\x04\0\x01\0\0"[..],
+            &b"\0\x08\0\x04\0\x01\0\0"[..],
+        ),
+        (
             "rewrite edns0 local replace 0xffee b",
             &initial[..],
             &b"\xff\xee\0\x01b"[..],
