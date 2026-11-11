@@ -311,6 +311,22 @@ fn coredns_rcode_setup_cases() {
 }
 
 #[test]
+fn coredns_numeric_rule_syntax() {
+    for (rule, valid) in [
+        ("edns0 local set 0xff_ee data", true),
+        ("edns0 local set +65518 data", false),
+        ("edns0 local set 0x_ff__ee data", false),
+        ("ttl example. +15", false),
+        ("rcode example. +2 0", false),
+    ] {
+        let text = format!(".:53 {{\n rewrite {rule}\n}}");
+        let result =
+            parse("Corefile", &text).and_then(|blocks| configure::<Chain>(&blocks, directives()));
+        assert_eq!(result.is_ok(), valid, "{rule}");
+    }
+}
+
+#[test]
 fn coredns_rewrite_rejects_oversized_patterns() {
     let too_long = "a".repeat(10_001);
     for rule in [

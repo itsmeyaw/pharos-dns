@@ -582,31 +582,49 @@ fn name_parts(mut replacement: &str, groups: usize) -> Option<Vec<NamePart>> {
 }
 
 fn parse_edns_number(value: &str) -> Option<u16> {
-    let value = value.strip_prefix('+').unwrap_or(value);
-    if let Some(hex) = value
+    let (digits, base, prefix) = if let Some(hex) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
     {
-        u16::from_str_radix(hex, 16).ok()
+        (hex, 16, true)
     } else if let Some(binary) = value
         .strip_prefix("0b")
         .or_else(|| value.strip_prefix("0B"))
     {
-        u16::from_str_radix(binary, 2).ok()
+        (binary, 2, true)
     } else if let Some(octal) = value
         .strip_prefix("0o")
         .or_else(|| value.strip_prefix("0O"))
     {
-        u16::from_str_radix(octal, 8).ok()
+        (octal, 8, true)
     } else if value.len() > 1 && value.starts_with('0') {
-        u16::from_str_radix(&value[1..], 8).ok()
+        (&value[1..], 8, true)
     } else {
-        value.parse().ok()
+        (value, 10, false)
+    };
+    let mut number = 0u16;
+    let mut last_digit = prefix;
+    let mut any_digit = false;
+    for byte in digits.bytes() {
+        if byte == b'_' {
+            if !last_digit {
+                return None;
+            }
+            last_digit = false;
+            continue;
+        }
+        let digit = char::from(byte).to_digit(base)?;
+        number = number.checked_mul(base as u16)?.checked_add(digit as u16)?;
+        last_digit = true;
+        any_digit = true;
     }
+    (last_digit && any_digit).then_some(number)
 }
 
 fn rcode(value: &str) -> Option<u16> {
-    if let Ok(value) = value.parse::<u16>() {
+    if value.bytes().all(|byte| byte.is_ascii_digit())
+        && let Ok(value) = value.parse::<u16>()
+    {
         return (value <= 23).then_some(value);
     }
     const CODES: [(&str, u16); 20] = [
@@ -638,19 +656,26 @@ fn rcode(value: &str) -> Option<u16> {
 }
 
 fn ttl_range(value: &str) -> Option<(u32, u32)> {
+    let number = |value: &str| {
+        value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| value.parse::<u32>().ok())
+            .flatten()
+    };
     if let Some((min, max)) = value.split_once('-') {
         if min.is_empty() && max.is_empty() {
             return None;
         }
-        let min = if min.is_empty() { 0 } else { min.parse().ok()? };
+        let min = if min.is_empty() { 0 } else { number(min)? };
         let max = if max.is_empty() {
             i32::MAX as u32
         } else {
-            max.parse().ok()?
+            number(max)?
         };
         (min <= max).then_some((min, max))
     } else {
-        let value = value.parse().ok()?;
+        let value = number(value)?;
         Some((value, value))
     }
 }
