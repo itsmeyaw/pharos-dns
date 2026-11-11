@@ -70,6 +70,9 @@ fn coredns_new_rule_setup_rows() {
         ("stop class ch in", true),
         ("continue class ch in", true),
         ("unknown-action edns0 nsid set", false),
+        ("unknown-action edns0 local set 0xffee abcedef", false),
+        ("unknown-action edns0 local set 0xffee {qname}", false),
+        ("unknown-action edns0 subnet set 24 64", false),
     ] {
         let text = format!(".:53 {{\n rewrite {args}\n}}");
         let result =
