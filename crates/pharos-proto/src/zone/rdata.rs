@@ -3,6 +3,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use crate::{Name, Type};
 
 /// Encodes presentation-format RDATA into uncompressed DNS wire format.
+/// `fields` are whitespace-separated tokens with surrounding quotes removed and
+/// backslash escapes preserved, as produced by the Zone lexer.
 pub fn parse_rdata(rtype: Type, fields: &[&str], origin: &Name) -> Result<Vec<u8>, String> {
     // RFC 3597 §5: generic RDATA can represent any RR type, including known types.
     if fields.first() == Some(&r"\#") {
@@ -39,7 +41,8 @@ pub fn parse_rdata(rtype: Type, fields: &[&str], origin: &Name) -> Result<Vec<u8
             );
         }
         // RFC 1035 §3.3: domain names in RDATA are encoded as uncompressed names.
-        Type::NS | Type::CNAME | Type::PTR => {
+        // RFC 6672 §2.3: DNAME RDATA is also a domain name.
+        Type::NS | Type::CNAME | Type::PTR | Type::DNAME => {
             count(fields, 1)?;
             name(&mut out, fields[0], origin)?;
         }
@@ -62,7 +65,8 @@ pub fn parse_rdata(rtype: Type, fields: &[&str], origin: &Name) -> Result<Vec<u8
                 );
             }
         }
-        Type::TXT => {
+        // RFC 7208 §3.1: SPF records use the same character-string format as TXT.
+        Type::TXT | Type::SPF => {
             if fields.is_empty() {
                 return Err("TXT requires a character-string".into());
             }
@@ -131,9 +135,9 @@ pub fn parse_rdata(rtype: Type, fields: &[&str], origin: &Name) -> Result<Vec<u8
             out.push(number(fields[2])?);
             out.extend(base64(&fields[3..].concat())?);
         }
-        // RFC 6698 §2 and RFC 4255 §3: TLSA/SSHFP association data is hexadecimal.
-        Type::TLSA | Type::SSHFP => {
-            let prefix = if rtype == Type::TLSA { 3 } else { 2 };
+        // RFC 6698 §2, RFC 8162 §2 and RFC 4255 §3: association data is hexadecimal.
+        Type::TLSA | Type::SMIMEA | Type::SSHFP => {
+            let prefix = if rtype == Type::SSHFP { 2 } else { 3 };
             if fields.len() <= prefix {
                 return Err("missing association data".into());
             }

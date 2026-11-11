@@ -169,6 +169,15 @@ fn tsig_and_validation() {
 #[test]
 fn related_record_families_and_dnssec_dates() {
     assert_eq!(
+        parse(Type::DNAME, &["target"]).unwrap(),
+        b"\x06target\x07example\0"
+    );
+    assert_eq!(parse(Type::SPF, &["v=spf1"]).unwrap(), b"\x06v=spf1");
+    assert_eq!(
+        parse(Type::SMIMEA, &["3", "1", "1", "AB"]).unwrap(),
+        [3, 1, 1, 0xab]
+    );
+    assert_eq!(
         parse(Type::CDS, &["1", "8", "2", "AABB"]).unwrap(),
         [0, 1, 8, 2, 0xaa, 0xbb]
     );
