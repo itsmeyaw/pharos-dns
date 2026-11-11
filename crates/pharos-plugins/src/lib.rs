@@ -853,16 +853,7 @@ fn setup_unimplemented(cursor: &mut Cursor<'_>, _: &mut BlockContext<Chain>) -> 
     Err(cursor.error(format!("{}: plugin is not implemented", cursor.val())))
 }
 
-#[cfg(feature = "plugin-acl")]
-fn setup_acl(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
-    let domains = block
-        .keys()
-        .iter()
-        .map(|key| key.domain.as_str())
-        .collect::<Vec<_>>();
-    block.config.acl = Some(acl::Acl::parse(cursor, &domains)?);
-    Ok(())
-}
+
 
 #[cfg(feature = "plugin-dns64")]
 fn setup_dns64(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {

@@ -76,7 +76,7 @@ fn main() {
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
-            "acl" => "setup_acl",
+            "acl" => "acl::setup::setup",
             "dns64" => "setup_dns64",
             "siit" => "setup_siit",
             "rewrite" => "setup_rewrite",

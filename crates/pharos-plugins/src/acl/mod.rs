@@ -1,5 +1,7 @@
 //! Source-address access control.
 
+pub(crate) mod setup;
+
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Section, Type};
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
