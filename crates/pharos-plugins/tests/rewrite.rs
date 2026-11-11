@@ -628,6 +628,128 @@ struct TtlFixture {
     count: usize,
     kind: Type,
 }
+
+struct ReverterFixture {
+    owner: &'static str,
+    kind: Type,
+    count: usize,
+}
+impl Next for ReverterFixture {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        assert_eq!(q.name.to_string(), "dns.core.rocks.");
+        let owner: Name = self.owner.parse().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        for index in 0..self.count {
+            if self.kind == Type::SRV {
+                let target: Name = "srv1.dns.core.rocks.".parse().unwrap();
+                builder
+                    .record_with(
+                        Section::Answer,
+                        NameRef::parse(owner.as_wire(), 0).unwrap(),
+                        Type::SRV,
+                        Class::IN,
+                        5,
+                        |w| {
+                            w.write_bytes(&[0, 0, 0, 100, 0, 100])?;
+                            w.write_name(NameRef::parse(target.as_wire(), 0).unwrap())
+                        },
+                    )
+                    .unwrap();
+            } else {
+                let data: &[u8] = if self.kind == Type::HINFO {
+                    b"\x08INTEL-64\x08RHEL 7.4"
+                } else if index == 0 {
+                    &[10, 0, 0, 1]
+                } else {
+                    &[10, 0, 0, 2]
+                };
+                builder
+                    .record(
+                        Section::Answer,
+                        NameRef::parse(owner.as_wire(), 0).unwrap(),
+                        self.kind,
+                        Class::IN,
+                        5,
+                        data,
+                    )
+                    .unwrap();
+            }
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/reverter_test.go TestResponseReverter.
+#[tokio::test]
+async fn coredns_response_reverter_rows() {
+    for mode in ["stop", "continue"] {
+        for (kind, owner, count) in [
+            (Type::A, "dns.core.rocks.", 1),
+            (Type::SRV, "dns.core.rocks.", 1),
+            (Type::A, "core.dns.rocks.", 1),
+            (Type::SRV, "core.dns.rocks.", 1),
+            (Type::HINFO, "core.dns.rocks.", 1),
+            (Type::A, "dns.core.rocks.", 2),
+        ] {
+            let config = format!(
+                r".:53 {{
+ rewrite {mode} name regex (core)\.(dns)\.(rocks) {{2}}.{{1}}.{{3}} answer name (dns)\.(core)\.(rocks) {{2}}.{{1}}.{{3}}
+}}"
+            );
+            let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+                .unwrap()
+                .remove(0)
+                .config;
+            let name: Name = "core.dns.rocks.".parse().unwrap();
+            let root: Name = ".".parse().unwrap();
+            let mut wire = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+            builder
+                .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
+                .unwrap();
+            let _ = builder.finish();
+            let mut response = Vec::with_capacity(512);
+            let mut slots = [];
+            let mut cx = Context {
+                query: Message::parse(&wire).unwrap(),
+                client: "127.0.0.1:1234".parse().unwrap(),
+                local: "127.0.0.1:53".parse().unwrap(),
+                transport: Transport::Dns,
+                protocol: Protocol::Udp,
+                domain: &root,
+                metadata: Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size: 512,
+            };
+            assert_eq!(
+                chain
+                    .rewrite
+                    .as_ref()
+                    .unwrap()
+                    .serve(&mut cx, ReverterFixture { owner, kind, count })
+                    .await,
+                Outcome::Response
+            );
+            let response = Message::parse(cx.response).unwrap();
+            let q = response.questions().next().unwrap();
+            assert_eq!(
+                (q.name.to_string().as_str(), q.qtype),
+                ("core.dns.rocks.", kind)
+            );
+            assert_eq!(response.answers().count(), count);
+            for rr in response.answers() {
+                assert_eq!(rr.name.to_string(), "core.dns.rocks.");
+                assert_eq!(rr.rtype, kind);
+                if let pharos_proto::Rdata::Srv { target, .. } = rr.data().unwrap() {
+                    assert_eq!(target.to_string(), "srv1.dns.core.rocks.");
+                }
+            }
+        }
+    }
+}
 impl Next for TtlFixture {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
