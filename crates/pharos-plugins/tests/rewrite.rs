@@ -768,7 +768,18 @@ impl Next for ReverterFixture {
                     .unwrap();
             }
         }
-        let _ = builder.finish();
+        let raw = Message::parse(builder.finish()).unwrap();
+        assert_eq!(
+            raw.questions().next().unwrap().name.to_string(),
+            "dns.core.rocks."
+        );
+        assert_eq!(raw.answers().count(), self.count);
+        for record in raw.answers() {
+            assert_eq!(
+                (record.name.to_string().as_str(), record.rtype),
+                (self.owner, self.kind)
+            );
+        }
         Outcome::Response
     }
 }
@@ -3962,7 +3973,13 @@ impl Next for ValueAnswer<'_> {
             &[192, 0, 2, 1],
         )
         .unwrap();
-        let _ = b.finish();
+        let raw = Message::parse(b.finish()).unwrap();
+        assert_eq!(
+            raw.questions().next().unwrap().name.to_string(),
+            "my.cluster.local."
+        );
+        assert_eq!(raw.answers().next().unwrap().data().unwrap(), self.data);
+        assert_eq!(raw.additionals().next().unwrap().name, self.extra_owner);
         Outcome::Response
     }
 }
