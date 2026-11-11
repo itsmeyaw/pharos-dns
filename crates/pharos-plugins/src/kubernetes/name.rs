@@ -43,6 +43,8 @@ pub(super) fn parse_multicluster<'a>(
         return Some(request);
     };
     request.service = service;
+    // Kubernetes DNS spec 1.1.0 §2.3.2: SRV names contain port and protocol labels.
+    // KEP-1645 MCS DNS spec §2.4.1: headless endpoint names include hostname and cluster ID.
     match remaining {
         [] => {}
         [endpoint] => request.endpoint = endpoint,

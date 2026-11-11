@@ -15,6 +15,7 @@ pub(super) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
         return None;
     }
     let (kind, body) = body.split_last()?;
+    // RFC 1035 §3.5: IPv4 reverse names use four reversed decimal octets without leading zeros.
     if kind.eq_ignore_ascii_case(b"in-addr") {
         if body.len() != 4 {
             return None;
@@ -34,6 +35,7 @@ pub(super) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
     if !kind.eq_ignore_ascii_case(b"ip6") || !(32..=35).contains(&body.len()) {
         return None;
     }
+    // RFC 3596 §2.5: IPv6 reverse names use hexadecimal nibbles in reverse order.
     let mut octets = [0; 16];
     for (i, label) in body.iter().rev().take(32).enumerate() {
         if label.len() != 1 {
