@@ -105,6 +105,58 @@ async fn coredns_resolv_search_order_and_explicit_domain() {
     assert_eq!(target.to_string(), "b.baz.com.");
 }
 
+#[tokio::test]
+async fn coredns_normalizes_resolv_search_suffixes() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/autopath-uppercase.conf"
+    );
+    let config = format!(".:53 {{\n autopath {path}\n}}");
+    let mut chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(Scripted(chain.autopath.take().unwrap())),
+        vec![],
+    );
+    let server = Server::new(router, key);
+    let name: Name = "b.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+        Action::Respond
+    );
+    let msg = Message::parse(&response).unwrap();
+    let Rdata::Cname(target) = msg.answers().next().unwrap().data().unwrap() else {
+        panic!("expected CNAME")
+    };
+    assert_eq!(target.to_string(), "b.com.");
+}
+
 struct Alias;
 impl Next for Alias {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {

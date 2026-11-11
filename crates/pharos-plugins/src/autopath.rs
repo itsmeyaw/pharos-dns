@@ -32,24 +32,8 @@ impl AutoPath {
         } else {
             let file =
                 std::fs::read_to_string(source).map_err(|err| cursor.error(err.to_string()))?;
-            for line in file.lines() {
-                let fields = line.split_whitespace().collect::<Vec<_>>();
-                match fields.first().copied() {
-                    Some("domain") => {
-                        search = fields.get(1).into_iter().map(|s| (*s).to_owned()).collect()
-                    }
-                    Some("search") => {
-                        search = fields[1..].iter().map(|s| (*s).to_owned()).collect()
-                    }
-                    _ => {}
-                }
-            }
-            for suffix in &mut search {
-                if !suffix.ends_with('.') {
-                    suffix.push('.');
-                }
-            }
-            search.push(String::new());
+            search = parse_resolv(&file);
+            search.push(None);
             None
         };
         let domains = origins_from_args_or_server_block(
@@ -58,7 +42,7 @@ impl AutoPath {
         );
         Ok(Self {
             domains: domains.iter().filter_map(|d| d.parse().ok()).collect(),
-            search: search.iter().map(|s| s.parse().ok()).collect(),
+            search,
             provider,
             metrics: Vec::new(),
             #[cfg(feature = "plugin-kubernetes")]
@@ -71,23 +55,7 @@ impl AutoPath {
         if self.provider.as_deref() == Some("kubernetes") {
             self.kubernetes = kubernetes.cloned();
             if let Ok(file) = std::fs::read_to_string("/etc/resolv.conf") {
-                let mut search = Vec::new();
-                for line in file.lines() {
-                    let fields = line.split_whitespace().collect::<Vec<_>>();
-                    match fields.first().copied() {
-                        Some("domain") => {
-                            search = fields.get(1).into_iter().map(|s| (*s).to_owned()).collect()
-                        }
-                        Some("search") => {
-                            search = fields[1..].iter().map(|s| (*s).to_owned()).collect()
-                        }
-                        _ => {}
-                    }
-                }
-                self.search = search
-                    .iter()
-                    .map(|s| format!("{}.", s.trim_end_matches('.')).parse().ok())
-                    .collect();
+                self.search = parse_resolv(&file);
             }
             self.search.push(None);
         }
@@ -114,6 +82,28 @@ impl AutoPath {
             counter.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+fn parse_resolv(file: &str) -> Vec<Option<Name>> {
+    let mut search = Vec::new();
+    for line in file.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        match fields.first().copied() {
+            Some("domain") => search = fields.get(1).into_iter().copied().collect(),
+            Some("search") => search = fields[1..].to_vec(),
+            _ => {}
+        }
+    }
+    search
+        .into_iter()
+        .map(|suffix| {
+            let mut suffix = suffix.to_lowercase();
+            if !suffix.ends_with('.') {
+                suffix.push('.');
+            }
+            suffix.parse().ok()
+        })
+        .collect()
 }
 
 impl Plugin for AutoPath {
