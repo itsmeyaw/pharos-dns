@@ -17,6 +17,7 @@ Each scenario is a directory containing:
   waits for each process's `ready` endpoint and for an answer to
   `web.default.svc.cluster.local. A` with the fixture's ClusterIP before
   comparing Queries. Scenarios use `{metrics_port}` for the readiness endpoint.
+  The API and DNS Listeners use the same non-ephemeral port reservation helper.
 - `queries`: one Query per line, `name type class udp|tcp [flags...]`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
   `+bufsize=N`, `+norec`, `+ednsversion=N`, and `+opcode=NAME` or a number.

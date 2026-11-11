@@ -224,6 +224,14 @@ fn multicluster_validates_before_not_implemented() {
     let invalid =
         config("kubernetes cluster.local {\n multicluster clusterset.local\n}").unwrap_err();
     assert!(invalid.message.contains("not authoritative"), "{invalid}");
+    let invalid_extra = config(
+        "kubernetes cluster.local clusterset.local {\n multicluster clusterset.local test.local\n}",
+    )
+    .unwrap_err();
+    assert!(
+        invalid_extra.message.contains("not authoritative"),
+        "{invalid_extra}"
+    );
     let unsupported =
         config("kubernetes cluster.local clusterset.local {\n multicluster clusterset.local\n}")
             .unwrap_err();
