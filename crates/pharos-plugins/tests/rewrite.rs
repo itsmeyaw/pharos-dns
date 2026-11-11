@@ -16,6 +16,198 @@ impl pharos_server::Chain for AliasChain {
         false
     }
 }
+
+struct LoopChain {
+    rewrite: pharos_plugins::rewrite::Rewrite,
+    visits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct TruncatedAliasChain(pharos_plugins::rewrite::Rewrite);
+impl pharos_server::Chain for TruncatedAliasChain {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, TruncatedAliasBackend).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct TruncatedAliasBackend;
+impl Next for TruncatedAliasBackend {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let target = cx.query.questions().next().unwrap().name.to_string() == "new.example.";
+        let result = AliasBackend("new.example.").run(cx).await;
+        if target {
+            cx.response[2] |= 0x02;
+        }
+        result
+    }
+}
+
+#[tokio::test]
+async fn coredns_cname_rewrite_propagates_lookup_truncation() {
+    let config = ".:53 {\n rewrite cname old.example. new.example.\n}";
+    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(TruncatedAliasChain(chain.rewrite.take().unwrap())),
+        vec![],
+    );
+    let server = std::sync::Arc::new(pharos_server::Server::new(router, key));
+    let name: Name = "alias.example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        pharos_server::Handler::handle_shared(
+            &server,
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        )
+        .await,
+        pharos_server::Action::Respond
+    );
+    assert!(Message::parse(&response).unwrap().tc());
+}
+impl pharos_server::Chain for LoopChain {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.rewrite.serve(cx, LoopBackend(&self.visits)).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct LoopBackend<'a>(&'a std::sync::atomic::AtomicUsize);
+impl Next for LoopBackend<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let q = cx.query.questions().next().unwrap();
+        let target: Name = "loop.example.".parse().unwrap();
+        let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        b.question(q.name, q.qtype, q.qclass).unwrap();
+        b.record_with(Section::Answer, q.name, Type::CNAME, Class::IN, 30, |w| {
+            w.write_name(NameRef::parse(target.as_wire(), 0).unwrap())
+        })
+        .unwrap();
+        let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/cname_target_test.go.
+#[tokio::test]
+async fn coredns_cname_loop_stops_after_nine_lookups() {
+    let config = ".:53 {\n rewrite cname loop.example. target.example.\n}";
+    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let visits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(LoopChain {
+            rewrite: chain.rewrite.take().unwrap(),
+            visits: std::sync::Arc::clone(&visits),
+        }),
+        vec![],
+    );
+    let server = std::sync::Arc::new(pharos_server::Server::new(router, key));
+    let name: Name = "victim.example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        pharos_server::Handler::handle_shared(
+            &server,
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        )
+        .await,
+        pharos_server::Action::Respond
+    );
+    assert_eq!(visits.load(std::sync::atomic::Ordering::Relaxed), 10);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+}
+
+#[tokio::test]
+async fn coredns_cname_lookup_failure_keeps_original_answer() {
+    let config = ".:53 {\n rewrite cname old.example. new.example.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "alias.example.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, AliasBackend("new.example."))
+            .await,
+        Outcome::Response
+    );
+    let response = Message::parse(cx.response).unwrap();
+    let pharos_proto::Rdata::Cname(target) = response.answers().next().unwrap().data().unwrap()
+    else {
+        panic!("expected CNAME")
+    };
+    assert_eq!(target.to_string(), "old.example.");
+}
 struct AliasBackend(&'static str);
 impl Next for AliasBackend {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
