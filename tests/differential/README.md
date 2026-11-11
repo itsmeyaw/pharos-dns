@@ -20,7 +20,7 @@ Each scenario is a directory containing:
   The API and DNS Listeners use the same non-ephemeral port reservation helper.
 - `queries`: one Query per line, `name type class udp|tcp [flags...]`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
-  `+bufsize=N`, `+norec`, `+ednsversion=N`, and `+opcode=NAME` or a number.
+  `+bufsize=N`, `+nsid`, `+norec`, `+ednsversion=N`, and `+opcode=NAME` or a number.
 - `expect` (optional): one setting per line. `ttl N` permits a TTL difference
   of N seconds for ordinary records; default is zero. `mask
   additional.srv.port` ignores only the SRV port in Additional (whoami reports

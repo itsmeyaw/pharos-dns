@@ -34,6 +34,8 @@ pub mod hosts;
 pub mod kubernetes;
 #[cfg(feature = "plugin-loadbalance")]
 pub mod loadbalance;
+#[cfg(feature = "plugin-nsid")]
+pub mod nsid;
 pub mod proxy;
 
 #[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]
@@ -447,6 +449,12 @@ fn setup_whoami(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Res
         return Err(cursor.arg_err());
     }
     block.config.whoami = Some(whoami::Whoami);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-nsid")]
+fn setup_nsid(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.nsid = Some(nsid::Nsid::parse(cursor)?);
     Ok(())
 }
 

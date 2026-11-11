@@ -1,4 +1,9 @@
-#![cfg(all(feature = "plugin-nsid", feature = "plugin-whoami", feature = "plugin-cache"))]
+#![forbid(unsafe_code)]
+#![cfg(all(
+    feature = "plugin-nsid",
+    feature = "plugin-whoami",
+    feature = "plugin-cache"
+))]
 #![recursion_limit = "512"]
 
 use pharos_corefile::{configure, parse};
@@ -15,15 +20,40 @@ fn configured(directives_text: &str) -> Result<Chain, String> {
 
 #[test]
 fn coredns_setup_accepts_data_and_rejects_duplicate() {
-    for text in ["nsid", "nsid ps0", "nsid worker1", "nsid \"tf 2\"", "nsid Use The Force"] {
+    for text in [
+        "nsid",
+        "nsid ps0",
+        "nsid worker1",
+        "nsid \"tf 2\"",
+        "nsid Use The Force",
+    ] {
         assert!(configured(text).is_ok(), "{text}");
     }
     assert!(configured("nsid\nnsid").is_err());
+    assert!(configured("nsid {\n foo\n}").is_err());
+    assert!(configured("nsid {\n}").is_err());
 }
 
-async fn query(directives_text: &str, options: Option<&[u8]>) -> Vec<u8> {
-    let chain = configured(directives_text).unwrap();
-    let mut wire = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, u8::from(options.is_some()), 0, 0, 1, 0, 1];
+async fn query(chain: &Chain, options: Option<&[u8]>) -> Vec<u8> {
+    let mut wire = vec![
+        0,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        u8::from(options.is_some()),
+        0,
+        0,
+        1,
+        0,
+        1,
+    ];
     if let Some(options) = options {
         wire.extend_from_slice(&[0, 0, 41, 0x10, 0, 0, 0, 0, 0]);
         wire.extend_from_slice(&(options.len() as u16).to_be_bytes());
@@ -50,19 +80,64 @@ async fn query(directives_text: &str, options: Option<&[u8]>) -> Vec<u8> {
 #[tokio::test]
 async fn coredns_nsid_and_cache_return_requested_identifier() {
     for config in ["nsid NSID\nwhoami", "cache\nnsid NSID\nwhoami"] {
-        let response = query(config, Some(&[0, 3, 0, 0])).await;
-        let message = Message::parse(&response).unwrap();
-        let opt = message.opt().unwrap();
-        assert_eq!(opt.udp_payload_size(), 4096);
-        assert_eq!(opt.options().iter().collect::<Vec<_>>(), [EdnsOption::Nsid(b"NSID")]);
+        let chain = configured(config).unwrap();
+        for _ in 0..2 {
+            let response = query(&chain, Some(&[0, 3, 0, 0])).await;
+            let message = Message::parse(&response).unwrap();
+            let opt = message.opt().unwrap();
+            assert_eq!(opt.udp_payload_size(), 4096);
+            assert_eq!(
+                opt.options().iter().collect::<Vec<_>>(),
+                [EdnsOption::Nsid(b"NSID")]
+            );
+        }
     }
 }
 
 #[tokio::test]
 async fn no_nsid_is_added_without_an_nsid_query() {
+    let chain = configured("nsid NSID\nwhoami").unwrap();
     for options in [None, Some(&[][..]), Some(&[0, 12, 0, 0][..])] {
-        let response = query("nsid NSID\nwhoami", options).await;
+        let response = query(&chain, options).await;
         let message = Message::parse(&response).unwrap();
-        assert!(!message.opt().is_some_and(|opt| opt.options().iter().any(|o| matches!(o, EdnsOption::Nsid(_)))));
+        assert!(!message.opt().is_some_and(|opt| {
+            opt.options()
+                .iter()
+                .any(|o| matches!(o, EdnsOption::Nsid(_)))
+        }));
+    }
+}
+
+#[tokio::test]
+async fn default_identifier_is_the_hostname() {
+    let chain = configured("nsid\nwhoami").unwrap();
+    let response = query(&chain, Some(&[0, 3, 0, 0])).await;
+    let message = Message::parse(&response).unwrap();
+    let expected = nix::unistd::gethostname()
+        .map(|s| s.into_encoded_bytes())
+        .unwrap_or_else(|_| b"localhost".to_vec());
+    assert_eq!(
+        message.opt().unwrap().options().iter().collect::<Vec<_>>(),
+        [EdnsOption::Nsid(&expected)]
+    );
+}
+
+#[tokio::test]
+async fn coredns_setup_values_are_returned_verbatim() {
+    for (directive, expected) in [
+        ("nsid ps0", "ps0"),
+        ("nsid worker1", "worker1"),
+        ("nsid \"tf 2\"", "tf 2"),
+        ("nsid Use The Force", "Use The Force"),
+        ("nsid \"\"", ""),
+    ] {
+        let chain = configured(&format!("{directive}\nwhoami")).unwrap();
+        let response = query(&chain, Some(&[0, 3, 0, 0])).await;
+        let message = Message::parse(&response).unwrap();
+        assert_eq!(
+            message.opt().unwrap().options().iter().next(),
+            Some(EdnsOption::Nsid(expected.as_bytes())),
+            "{directive}"
+        );
     }
 }

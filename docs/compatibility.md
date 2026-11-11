@@ -145,6 +145,11 @@
 - Pharos always uses one TCP listening socket per Listener; CoreDNS opens one per configured server. These differences affect performance, not Responses.
 - Changing the UDP count on Reload briefly stages new reuseport sockets before replacing the old ones; Queries arriving during staging or rollback can be lost.
 
+## nsid
+
+- Adding NSID requires sufficient preallocated Response buffer capacity and a Message of at most 65,535 octets; otherwise the Plugin returns an error, answered as SERVFAIL. CoreDNS allocates when encoding and may instead fail to write an oversized Response.
+- If the Response OPT precedes other Additional records, Pharos drops those records and sets TC before modifying NSID to avoid invalidating compression pointers; CoreDNS re-encodes them. This is the same restriction as Listener scrubbing.
+
 ## prometheus
 
 - The `prometheus` Directive accepts `runtime_metrics`, but has no effect: Go runtime metrics do not exist in Pharos.
@@ -183,7 +188,7 @@
 
 ## General
 
-- Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI

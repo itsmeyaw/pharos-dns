@@ -35,6 +35,7 @@ fn main() {
             "hosts" => "hosts::Hosts",
             "kubernetes" => "kubernetes::Kubernetes",
             "loadbalance" => "loadbalance::LoadBalance",
+            "nsid" => "nsid::Nsid",
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",
             _ => "Unimplemented",
@@ -57,6 +58,7 @@ fn main() {
             "health" => "setup_health",
             "hosts" => "setup_hosts",
             "loadbalance" => "setup_loadbalance",
+            "nsid" => "setup_nsid",
             "reload" => "setup_reload",
             "errors" => "setup_errors",
             "kubernetes" => "setup_kubernetes",
@@ -71,6 +73,7 @@ fn main() {
                 | "reload"
                 | "hosts"
                 | "loop"
+                | "nsid"
                 | "kubernetes"
         );
         writeln!(

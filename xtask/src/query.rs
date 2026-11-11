@@ -19,6 +19,7 @@ pub(crate) struct Query {
     opcode: u8,
     edns: bool,
     dnssec: bool,
+    nsid: bool,
     bufsize: u16,
     edns_version: u8,
 }
@@ -90,6 +91,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         opcode: 0,
         edns: false,
         dnssec: false,
+        nsid: false,
         bufsize: 1232,
         edns_version: 0,
     };
@@ -98,6 +100,10 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         match lower.as_str() {
             "+dnssec" => {
                 query.dnssec = true;
+                query.edns = true;
+            }
+            "+nsid" => {
+                query.nsid = true;
                 query.edns = true;
             }
             "+norec" => query.recursion = false,
@@ -143,7 +149,9 @@ impl Query {
             return Err("query exceeds DNS message size".into());
         }
         if self.edns {
-            let options = EdnsOptions::parse(&[]).map_err(|err| err.to_string())?;
+            // RFC 5001 §2.2: a Query requests NSID with an empty option payload.
+            let options = EdnsOptions::parse(if self.nsid { &[0, 3, 0, 0] } else { &[] })
+                .map_err(|err| err.to_string())?;
             let opt = Opt::new(
                 self.bufsize,
                 0,
@@ -230,13 +238,23 @@ mod tests {
 
     #[test]
     fn individual_edns_flags_create_opt() {
-        for flag in ["+dnssec", "+bufsize=512", "+ednsversion=0"] {
+        for flag in ["+dnssec", "+nsid", "+bufsize=512", "+ednsversion=0"] {
             let wire = parse(&format!("example. A IN udp {flag}"))
                 .unwrap()
                 .wire()
                 .unwrap();
             assert!(Message::parse(&wire).unwrap().opt().is_some(), "{flag}");
         }
+    }
+
+    #[test]
+    fn nsid_flag_adds_empty_nsid_option() {
+        let wire = parse("example. A IN udp +nsid").unwrap().wire().unwrap();
+        let message = Message::parse(&wire).unwrap();
+        assert_eq!(
+            message.opt().unwrap().options().iter().collect::<Vec<_>>(),
+            [pharos_proto::EdnsOption::Nsid(&[])]
+        );
     }
 
     #[test]
