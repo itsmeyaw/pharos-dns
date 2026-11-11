@@ -142,7 +142,7 @@ async fn plugin_errors_are_logged_only_when_enabled() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "server::server::plugin_errors_are_logged_only_when_enabled",
+                "server::cases::plugin_errors_are_logged_only_when_enabled",
                 "--nocapture",
             ])
             .env("PHAROS_TEST_PLUGIN_ERROR", mode)

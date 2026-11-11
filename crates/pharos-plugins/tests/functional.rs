@@ -3,26 +3,26 @@
 
 #[path = "functional"]
 mod acl {
-    #[path = "acl.rs"]
-    mod acl;
     #[path = "acl_metrics.rs"]
     mod acl_metrics;
     #[path = "acl_setup.rs"]
     mod acl_setup;
+    #[path = "acl.rs"]
+    mod cases;
 }
 
 #[path = "functional"]
 mod any {
     #[path = "any.rs"]
-    mod any;
+    mod cases;
 }
 
 #[path = "functional"]
 mod autopath {
-    #[path = "autopath.rs"]
-    mod autopath;
     #[path = "autopath_setup.rs"]
     mod autopath_setup;
+    #[path = "autopath.rs"]
+    mod cases;
 }
 
 #[path = "functional"]
@@ -36,19 +36,19 @@ mod bind {
 #[path = "functional"]
 mod bufsize {
     #[path = "bufsize.rs"]
-    mod bufsize;
+    mod cases;
 }
 
 #[path = "functional"]
 mod cache {
-    #[path = "cache.rs"]
-    mod cache;
     #[path = "cache_metrics.rs"]
     mod cache_metrics;
     #[path = "cache_setup.rs"]
     mod cache_setup;
     #[path = "cache_stale.rs"]
     mod cache_stale;
+    #[path = "cache.rs"]
+    mod cases;
 }
 
 #[path = "functional"]
@@ -62,7 +62,7 @@ mod cancel {
 #[path = "functional"]
 mod chaos {
     #[path = "chaos.rs"]
-    mod chaos;
+    mod cases;
 }
 
 #[path = "functional"]
@@ -74,7 +74,7 @@ mod debug {
 #[path = "functional"]
 mod dns64 {
     #[path = "dns64.rs"]
-    mod dns64;
+    mod cases;
     #[path = "dns64_setup.rs"]
     mod dns64_setup;
 }
@@ -90,7 +90,7 @@ mod errors {
 #[path = "functional"]
 mod forward {
     #[path = "forward.rs"]
-    mod forward;
+    mod cases;
     #[path = "forward_debug.rs"]
     mod forward_debug;
     #[path = "forward_ported.rs"]
@@ -100,13 +100,13 @@ mod forward {
 #[path = "functional"]
 mod header {
     #[path = "header.rs"]
-    mod header;
+    mod cases;
 }
 
 #[path = "functional"]
 mod health {
     #[path = "health.rs"]
-    mod health;
+    mod cases;
     #[path = "health_setup.rs"]
     mod health_setup;
 }
@@ -114,7 +114,7 @@ mod health {
 #[path = "functional"]
 mod hosts {
     #[path = "hosts.rs"]
-    mod hosts;
+    mod cases;
     #[path = "hosts_ported.rs"]
     mod hosts_ported;
     #[path = "hosts_reload.rs"]
@@ -142,7 +142,7 @@ mod kubernetes {
 #[path = "functional"]
 mod loadbalance {
     #[path = "loadbalance.rs"]
-    mod loadbalance;
+    mod cases;
     #[path = "loadbalance_prefer.rs"]
     mod loadbalance_prefer;
     #[path = "loadbalance_relocation.rs"]
@@ -156,7 +156,7 @@ mod loadbalance {
 #[path = "functional"]
 mod local {
     #[path = "local.rs"]
-    mod local;
+    mod cases;
     #[path = "local_debug.rs"]
     mod local_debug;
 }
@@ -186,7 +186,7 @@ mod metadata {
 #[path = "functional"]
 mod minimal {
     #[path = "minimal.rs"]
-    mod minimal;
+    mod cases;
 }
 
 #[path = "functional"]
@@ -198,13 +198,13 @@ mod multisocket {
 #[path = "functional"]
 mod nsid {
     #[path = "nsid.rs"]
-    mod nsid;
+    mod cases;
 }
 
 #[path = "functional"]
 mod prometheus {
     #[path = "prometheus.rs"]
-    mod prometheus;
+    mod cases;
     #[path = "prometheus_setup.rs"]
     mod prometheus_setup;
 }
@@ -212,7 +212,7 @@ mod prometheus {
 #[path = "functional"]
 mod proxy {
     #[path = "proxy.rs"]
-    mod proxy;
+    mod cases;
     #[path = "proxy_throughput.rs"]
     mod proxy_throughput;
 }
@@ -220,7 +220,7 @@ mod proxy {
 #[path = "functional"]
 mod ready {
     #[path = "ready.rs"]
-    mod ready;
+    mod cases;
     #[path = "ready_setup.rs"]
     mod ready_setup;
 }
@@ -228,7 +228,7 @@ mod ready {
 #[path = "functional"]
 mod registry {
     #[path = "registry.rs"]
-    mod registry;
+    mod cases;
 }
 
 #[path = "functional"]
@@ -240,7 +240,7 @@ mod reload {
 #[path = "functional"]
 mod rewrite {
     #[path = "rewrite.rs"]
-    mod rewrite;
+    mod cases;
     #[path = "rewrite_cname_port.rs"]
     mod rewrite_cname_port;
     #[path = "rewrite_edns_port.rs"]
@@ -258,7 +258,7 @@ mod root {
 #[path = "functional"]
 mod server {
     #[path = "server.rs"]
-    mod server;
+    mod cases;
 }
 
 #[path = "functional"]
@@ -272,7 +272,7 @@ mod shed {
 #[path = "functional"]
 mod siit {
     #[path = "siit.rs"]
-    mod siit;
+    mod cases;
     #[path = "siit_setup.rs"]
     mod siit_setup;
 }
@@ -288,5 +288,5 @@ mod timeouts {
 #[path = "functional"]
 mod whoami {
     #[path = "whoami.rs"]
-    mod whoami;
+    mod cases;
 }
