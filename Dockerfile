@@ -18,6 +18,8 @@ WORKDIR /src
 COPY . .
 ARG TARGETARCH
 ARG VERSION=0.1.0
+ARG REVISION=unknown
+ENV PHAROS_REVISION=$REVISION
 # Zig's linker rejects Rust's A53 erratum flag; rust-lld applies the fix.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \

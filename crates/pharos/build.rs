@@ -11,16 +11,23 @@ fn main() {
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
         .unwrap_or_else(|| "rustc unknown".into());
-    let revision = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
+    // Container builds have no .git; they pass the revision in.
+    let revision = std::env::var("PHAROS_REVISION")
         .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .filter(|revision| !revision.is_empty())
+        .or_else(|| {
+            Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        })
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=PHAROS_RUSTC={version}");
     println!("cargo:rustc-env=PHAROS_REVISION={revision}");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=PHAROS_REVISION");
     for name in ["HEAD", "packed-refs"] {
         watch_git_path(name);
     }
