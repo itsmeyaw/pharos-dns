@@ -262,55 +262,70 @@ impl Controller {
         let synced = Arc::new(AtomicBool::new(false));
         self.synced.push(synced.clone());
         self.tasks.push(tokio::spawn(async move {
-            let stream = watcher::watcher(api, config).default_backoff();
-            pin_mut!(stream);
-            let mut initial = Vec::new();
-            let mut list_latencies = Vec::new();
-            while let Some(event) = stream.next().await {
-                match event {
-                    Ok(Event::Init) => {
-                        initial.clear();
-                        list_latencies.clear();
-                    }
-                    Ok(Event::InitApply(object)) => {
-                        if metrics.is_some()
-                            && let Some(latency) = observe(&object)
-                        {
-                            list_latencies.push(latency);
+            // shortcut: kube-runtime 5 retries a watch rejected with HTTP 410 using the same
+            // expired resourceVersion; rebuild the watcher to relist until upstream fixes it.
+            'relist: loop {
+                let stream = watcher::watcher(api.clone(), config.clone()).default_backoff();
+                pin_mut!(stream);
+                let mut initial = Vec::new();
+                let mut list_latencies = Vec::new();
+                while let Some(event) = stream.next().await {
+                    match event {
+                        Ok(Event::Init) => {
+                            initial.clear();
+                            list_latencies.clear();
                         }
-                        initial.push(convert(object));
-                    }
-                    Ok(Event::InitDone) => {
-                        replace(
-                            &store,
-                            std::mem::take(&mut initial),
-                            std::mem::take(&mut list_latencies),
-                            metrics.as_ref(),
-                        );
-                        synced.store(true, Ordering::Release);
-                    }
-                    Ok(Event::Apply(object)) => {
-                        let latency = metrics.is_some().then(|| observe(&object)).flatten();
-                        apply(&store, convert(object));
-                        record_latency(&store, metrics.as_ref(), latency);
-                    }
-                    Ok(Event::Delete(object)) => {
-                        let latency = metrics.is_some().then(|| observe(&object)).flatten();
-                        delete(
-                            &store,
-                            object.namespace().as_deref().unwrap_or(""),
-                            &object.name_any(),
-                        );
-                        record_latency(&store, metrics.as_ref(), latency);
-                    }
-                    Err(error) => {
-                        pharos_server::logging::log(
-                            "WARN",
-                            "kubernetes",
-                            &format!("Kubernetes watch error: {error}"),
-                        );
+                        Ok(Event::InitApply(object)) => {
+                            if metrics.is_some()
+                                && let Some(latency) = observe(&object)
+                            {
+                                list_latencies.push(latency);
+                            }
+                            initial.push(convert(object));
+                        }
+                        Ok(Event::InitDone) => {
+                            replace(
+                                &store,
+                                std::mem::take(&mut initial),
+                                std::mem::take(&mut list_latencies),
+                                metrics.as_ref(),
+                            );
+                            synced.store(true, Ordering::Release);
+                        }
+                        Ok(Event::Apply(object)) => {
+                            let latency = metrics.is_some().then(|| observe(&object)).flatten();
+                            apply(&store, convert(object));
+                            record_latency(&store, metrics.as_ref(), latency);
+                        }
+                        Ok(Event::Delete(object)) => {
+                            let latency = metrics.is_some().then(|| observe(&object)).flatten();
+                            delete(
+                                &store,
+                                object.namespace().as_deref().unwrap_or(""),
+                                &object.name_any(),
+                            );
+                            record_latency(&store, metrics.as_ref(), latency);
+                        }
+                        Err(error) => {
+                            pharos_server::logging::log(
+                                "WARN",
+                                "kubernetes",
+                                &format!("Kubernetes watch error: {error}"),
+                            );
+                            // Kubernetes API concepts, "Efficient detection of changes":
+                            // 410 Gone means the resourceVersion expired; relist.
+                            if let watcher::Error::WatchStartFailed(kube::Error::Api(status)) =
+                                &error
+                                && status.code == 410
+                            {
+                                // client-go reflector: backoff starts at 800 ms.
+                                tokio::time::sleep(Duration::from_millis(800)).await;
+                                continue 'relist;
+                            }
+                        }
                     }
                 }
+                break;
             }
         }));
     }
