@@ -49,6 +49,47 @@ impl pharos_server::Next for PendingChild {
     }
 }
 
+struct MutateChild;
+impl pharos_server::Next for MutateChild {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        cx.query = cx.query.with_flags(0x0100);
+        if cx.query.question_count() != 0 {
+            let name: Name = "changed.example.".parse().unwrap();
+            cx.query = cx
+                .query
+                .with_question_name(pharos_proto::NameRef::parse(name.as_wire(), 0).unwrap())
+                .with_question_type(pharos_proto::Type::AAAA)
+                .with_question_class(pharos_proto::Class::CH);
+        }
+        Outcome::Drop
+    }
+}
+
+#[tokio::test]
+async fn nested_query_propagates_downstream_header_changes() {
+    let wire = b"\0\x01\0\0\0\x01\0\0\0\0\0\0\0\0\x01\0\x01";
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(cx.run_with_query(wire, MutateChild).await, Outcome::Drop);
+    assert_eq!(cx.query.flags(), 0x0100);
+    let q = cx.query.questions().next().unwrap();
+    assert_eq!(q.name.to_string(), "changed.example.");
+    assert_eq!(q.qtype, pharos_proto::Type::AAAA);
+    assert_eq!(q.qclass, pharos_proto::Class::CH);
+}
+
 #[test]
 fn cancelled_nested_query_restores_metadata() {
     use std::{

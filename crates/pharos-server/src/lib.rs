@@ -324,9 +324,10 @@ pub struct Context<'q, 'a> {
     pub max_response_size: usize,
 }
 
-struct NestedContext<'q, 'a> {
-    parent_metadata: &'q mut Metadata<'a>,
-    child: Context<'q, 'a>,
+struct NestedContext<'s, 'q, 'a> {
+    parent_query: &'s mut Message<'q>,
+    parent_metadata: &'s mut Metadata<'a>,
+    child: Context<'s, 'a>,
 }
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
@@ -336,8 +337,27 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-impl Drop for NestedContext<'_, '_> {
+impl Drop for NestedContext<'_, '_, '_> {
     fn drop(&mut self) {
+        let mut query = self.parent_query.with_flags(self.child.query.flags());
+        if let (Some(parent), Some(child)) = (
+            self.parent_query.questions().next(),
+            self.child.query.questions().next(),
+        ) {
+            if !parent.name.labels().eq(child.name.labels()) {
+                query = query.with_question_name(child.name);
+            }
+            if parent.qtype != child.qtype {
+                query = query.with_question_type(child.qtype);
+            }
+            if parent.qclass != child.qclass {
+                query = query.with_question_class(child.qclass);
+            }
+        }
+        if let Some(opt) = self.child.query.opt() {
+            query = query.with_udp_payload_limit(opt.udp_payload_size());
+        }
+        *self.parent_query = query;
         std::mem::swap(self.parent_metadata, &mut self.child.metadata);
     }
 }
@@ -420,6 +440,7 @@ impl Context<'_, '_> {
         };
         let metadata = std::mem::replace(&mut self.metadata, Metadata::new(&mut []));
         let mut nested = NestedContext {
+            parent_query: &mut self.query,
             parent_metadata: &mut self.metadata,
             child: Context {
                 query,
