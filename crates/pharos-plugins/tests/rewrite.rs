@@ -2420,21 +2420,21 @@ async fn coredns_edns_revert_applies_when_next_omits_opt() {
 #[tokio::test]
 async fn coredns_edns_local_variables_and_metadata() {
     for (variable, value, expected) in [
-        ("qname", None, Some(&b"\xff\xee\0\x08example."[..])),
+        ("qname", None, Some(&b"\xff\xee\0\x0cexample.com."[..])),
         ("qtype", None, Some(&b"\xff\xee\0\x02\0\x01"[..])),
         (
             "client_ip",
             None,
-            Some(&b"\xff\xee\0\x04\xc0\0\x02\x81"[..]),
+            Some(&b"\xff\xee\0\x04\x0a\xf0\0\x01"[..]),
         ),
-        ("client_port", None, Some(&b"\xff\xee\0\x02\x04\xd2"[..])),
+        ("client_port", None, Some(&b"\xff\xee\0\x02\x9d\x14"[..])),
         ("server_ip", None, Some(&b"\xff\xee\0\x04\x7f\0\0\x01"[..])),
         ("server_port", None, Some(&b"\xff\xee\0\x02\0\x35"[..])),
         ("protocol", None, Some(&b"\xff\xee\0\x03udp"[..])),
         (
             "test/label",
-            Some("Team-A"),
-            Some(&b"\xff\xee\0\x06Team-A"[..]),
+            Some("my-value"),
+            Some(&b"\xff\xee\0\x08my-value"[..]),
         ),
         ("test/label", None, None),
         ("test/empty", Some(""), None),
@@ -2445,7 +2445,7 @@ async fn coredns_edns_local_variables_and_metadata() {
             .unwrap()
             .remove(0)
             .config;
-        let name: Name = "example.".parse().unwrap();
+        let name: Name = "example.com.".parse().unwrap();
         let root: Name = ".".parse().unwrap();
         let mut wire = Vec::with_capacity(512);
         let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
@@ -2460,7 +2460,7 @@ async fn coredns_edns_local_variables_and_metadata() {
         let mut slots = [None];
         let mut cx = Context {
             query: Message::parse(&wire).unwrap(),
-            client: "192.0.2.129:1234".parse().unwrap(),
+            client: "10.240.0.1:40212".parse().unwrap(),
             local: "127.0.0.1:53".parse().unwrap(),
             transport: Transport::Dns,
             protocol: Protocol::Udp,
