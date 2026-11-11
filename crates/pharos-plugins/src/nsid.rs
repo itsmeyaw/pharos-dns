@@ -150,6 +150,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strips_unsolicited_nsid_and_preserves_other_options() {
+        let query = [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 41, 16, 0, 0, 0, 0, 0, 0, 0];
+        let mut response = Vec::with_capacity(512);
+        response.extend_from_slice(&[0, 1, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 41, 16, 0, 0, 0, 0, 0, 0, 10, 0, 3, 0, 1, 1, 0, 12, 0, 1, 9]);
+        let domain: Name = ".".parse().unwrap();
+        let mut slots = [];
+        let mut cx = Context { query: Message::parse(&query).unwrap(), client: "127.0.0.1:53".parse().unwrap(), local: "127.0.0.1:53".parse().unwrap(), transport: Transport::Dns, protocol: Protocol::Udp, domain: &domain, metadata: Metadata::new(&mut slots), response: &mut response, max_response_size: 512 };
+        let plugin = Nsid { data: b"NSID".to_vec() };
+        assert_eq!(plugin.serve(&mut cx, Return(Outcome::Response)).await, Outcome::Response);
+        let message = Message::parse(&response).unwrap();
+        assert_eq!(message.opt().unwrap().options().iter().collect::<Vec<_>>(), [EdnsOption::Padding(&[9])]);
+    }
+
+    #[tokio::test]
     async fn preserves_nonresponse_outcomes() {
         let query = [
             0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 41, 16, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 0,
