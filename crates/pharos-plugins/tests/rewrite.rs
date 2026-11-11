@@ -3769,6 +3769,54 @@ async fn coredns_invalid_metadata_name_restores_original_question() {
     );
 }
 
+// Derived from CoreDNS v1.15.0 plugin/rewrite/name_test.go TestRewriteIllegalName.
+#[tokio::test]
+async fn coredns_illegal_exact_name_is_not_forwarded() {
+    let config = ".:53 {\n rewrite name example.org. example..org.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.org.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert!(matches!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, InspectName("must-not-run"))
+            .await,
+        Outcome::Error(_)
+    ));
+    assert_eq!(
+        cx.query.questions().next().unwrap().name.to_string(),
+        "example.org."
+    );
+}
+
 struct AliasedAnswer;
 impl Next for AliasedAnswer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
