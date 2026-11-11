@@ -61,6 +61,7 @@ struct RegistryInner {
     caches: Mutex<BTreeMap<Key, Arc<Cache>>>,
     acl: Mutex<BTreeMap<Key, Arc<[AtomicU64; 4]>>>,
     dns64: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
+    siit: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
     hosts: Mutex<BTreeMap<String, Arc<HostsGauge>>>,
     hosts_timestamp: Arc<AtomicU64>,
     forward: Arc<ForwardCounters>,
@@ -336,6 +337,7 @@ impl Registry {
             caches: Mutex::new(BTreeMap::new()),
             acl: Mutex::new(BTreeMap::new()),
             dns64: Mutex::new(BTreeMap::new()),
+            siit: Mutex::new(BTreeMap::new()),
             hosts: Mutex::new(BTreeMap::new()),
             hosts_timestamp: Arc::new(AtomicU64::new(0)),
             forward: Arc::new(ForwardCounters::default()),
@@ -400,6 +402,18 @@ impl Registry {
         Arc::clone(
             self.0
                 .dns64
+                .lock()
+                .unwrap()
+                .entry(server.into())
+                .or_default(),
+        )
+    }
+
+    /// Resolve the SIIT counter for a Listener during setup.
+    pub fn siit(&self, server: &str) -> Arc<AtomicU64> {
+        Arc::clone(
+            self.0
+                .siit
                 .lock()
                 .unwrap()
                 .entry(server.into())
@@ -654,6 +668,30 @@ impl Registry {
             }
         }
         drop(dns64);
+        let siit = self.0.siit.lock().unwrap();
+        if siit
+            .values()
+            .any(|counter| counter.load(Ordering::Relaxed) != 0)
+        {
+            header(
+                out,
+                "siit_requests_translated_total",
+                "Counter of DNS requests translated by siit.",
+                "counter",
+            );
+            for (server, counter) in siit.iter() {
+                let count = counter.load(Ordering::Relaxed);
+                if count != 0 {
+                    sample(
+                        out,
+                        "siit_requests_translated_total",
+                        &[("server", server)],
+                        count,
+                    );
+                }
+            }
+        }
+        drop(siit);
         let hosts = self.0.hosts.lock().unwrap();
         if !hosts.is_empty() {
             if hosts

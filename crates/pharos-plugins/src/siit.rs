@@ -1,6 +1,12 @@
 //! SIIT address synthesis.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::{
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{
@@ -13,6 +19,7 @@ pub struct Siit {
     prefix: [u8; 16],
     prefix_len: u8,
     eam: Vec<(Ipv6Addr, Ipv4Addr)>,
+    metrics: Vec<(SocketAddr, Arc<AtomicU64>)>,
 }
 
 impl Siit {
@@ -21,6 +28,7 @@ impl Siit {
             prefix: "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets(),
             prefix_len: 96,
             eam: Vec::new(),
+            metrics: Vec::new(),
         };
         while cursor.next() {
             if !cursor.remaining_args().is_empty() {
@@ -71,6 +79,22 @@ impl Siit {
             }
         }
         Ok(result)
+    }
+
+    pub(crate) fn set_metrics(
+        &mut self,
+        registry: &pharos_server::metrics::Registry,
+        listeners: &[pharos_server::ListenerKey],
+    ) {
+        for listener in listeners {
+            let address = listener.address;
+            let server = if address.ip().is_unspecified() {
+                format!("dns://:{}", address.port())
+            } else {
+                format!("dns://{address}")
+            };
+            self.metrics.push((address, registry.siit(&server)));
+        }
     }
 
     fn translate(&self, bytes: &[u8]) -> Option<[u8; 4]> {
@@ -209,7 +233,17 @@ impl Plugin for Siit {
             Ok(())
         })();
         match result {
-            Ok(()) => Outcome::Response,
+            Ok(()) => {
+                if success
+                    && let Some((_, counter)) = self
+                        .metrics
+                        .iter()
+                        .find(|(address, _)| *address == cx.local)
+                {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+                Outcome::Response
+            }
             Err(error) => Outcome::Error(error),
         }
     }

@@ -201,3 +201,45 @@ async fn siit_rfc6052_vectors() {
         );
     }
 }
+
+#[cfg(feature = "plugin-hosts")]
+#[tokio::test]
+async fn siit_metrics_count_translations_only() {
+    let config = ".:53 {\n siit\n hosts /nonexistent {\n  64:ff9b::192.0.2.1 mapped.example\n  2001:db8::1 unmapped.example\n  ttl 60\n }\n}";
+    let (mut listeners, _) = pharos_plugins::servers(
+        configure::<Chain>(&parse("Corefile", config).unwrap(), directives()).unwrap(),
+    )
+    .unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    for host in ["mapped.example.", "unmapped.example."] {
+        let name: Name = host.parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &wire,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+    }
+    let mut metrics = String::new();
+    server.metrics().encode(&mut metrics);
+    assert!(
+        metrics.contains("pharos_siit_requests_translated_total{server=\"dns://:53\"} 1"),
+        "{metrics}"
+    );
+}
