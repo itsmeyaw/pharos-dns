@@ -1,0 +1,7 @@
+.:{port} {
+    rewrite name suffix .coredns.rocks .service.consul answer auto
+    hosts empty.hosts {
+        192.0.2.10 ftp.service.consul
+        reload 0
+    }
+}
