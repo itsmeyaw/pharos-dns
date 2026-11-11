@@ -3,7 +3,7 @@
 pub mod format;
 pub(crate) mod setup;
 
-use crate::log_format::{COMMON_LOG_FORMAT, Format};
+use self::format::{COMMON_LOG_FORMAT, Format};
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{Message, Name, NameRef, Opcode, Rcode, Type};
 use pharos_server::{Context, Next, Outcome, Plugin};

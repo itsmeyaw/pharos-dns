@@ -14,7 +14,8 @@ fn compatibility_document_has_parseable_sections() {
     ];
     let mut in_section = false;
     let mut in_bullet = false;
-    for line in include_str!("../compatibility.md").lines() {
+    let index = include_str!("../compatibility.md");
+    for line in index.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
             assert!(
                 directives.contains(&heading) || general.contains(&heading),
@@ -34,6 +35,9 @@ fn compatibility_document_has_parseable_sections() {
         }
     }
     for (name, document) in pharos_plugins::COMPATIBILITY {
+        assert!(index.contains(&format!(
+            "## {name}\n\n- [{name} Plugin notes](../crates/pharos-plugins/src/{name}/README.md)"
+        )), "missing index entry for {name}");
         let sections = parse(document);
         assert_eq!(sections.first().map(|(heading, _)| heading), Some(name));
         let mut in_bullet = false;
