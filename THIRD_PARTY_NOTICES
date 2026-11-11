@@ -14,6 +14,7 @@
 - The chaos Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/chaos`.
 - The header Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/header`.
 - The minimal Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/minimal`.
+- The local Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/local`.
 - Upstream proxy exchange and tests follow CoreDNS v1.15.0's `plugin/pkg/proxy`.
 - The forward Plugin and tests follow CoreDNS v1.15.0's `plugin/forward`.
 - The cache Plugin and tests follow CoreDNS v1.15.0's `plugin/cache`, `plugin/pkg/cache` and `plugin/pkg/dnsutil`.
