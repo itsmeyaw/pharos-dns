@@ -2408,6 +2408,57 @@ impl Next for NoQuestionAnswer {
     }
 }
 
+struct EmptyResponse;
+impl Next for EmptyResponse {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/reverter_test.go TestResponseReverterWriteMsgNilResponse.
+#[tokio::test]
+async fn coredns_reverter_rejects_missing_response_without_panicking() {
+    let config = ".:53 {\n rewrite ttl example.org. 30\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.org.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert!(matches!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, EmptyResponse)
+            .await,
+        Outcome::Error(_)
+    ));
+}
+
 struct TtlPointerAnswer;
 impl Next for TtlPointerAnswer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
