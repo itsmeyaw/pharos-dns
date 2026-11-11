@@ -191,6 +191,7 @@ impl<'a> Metadata<'a> {
             server: handle,
             depth: handle.depth,
             siit: handle.siit,
+            autopath: handle.autopath,
         });
         metadata
     }
@@ -367,6 +368,7 @@ struct SelfLookupState<'a> {
     server: &'a dyn SelfLookupServer,
     depth: u8,
     siit: bool,
+    autopath: bool,
 }
 
 // Type erasure keeps Context nongeneric without allocating on ordinary Queries.
@@ -378,6 +380,7 @@ trait SelfLookupServer: Sync {
         protocol: Protocol,
         depth: u8,
         siit: bool,
+        autopath: bool,
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
 
@@ -394,6 +397,7 @@ trait OwnedSelfLookupServer: Send + Sync {
         protocol: Protocol,
         depth: u8,
         siit: bool,
+        autopath: bool,
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>>;
 }
@@ -403,6 +407,7 @@ pub struct SelfLookupHandle {
     server: Arc<dyn OwnedSelfLookupServer>,
     depth: u8,
     siit: bool,
+    autopath: bool,
 }
 
 impl SelfLookupServer for SelfLookupHandle {
@@ -413,9 +418,10 @@ impl SelfLookupServer for SelfLookupHandle {
         protocol: Protocol,
         depth: u8,
         siit: bool,
+        autopath: bool,
         response: &'a mut Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Action> + Send + 'a>> {
-        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, siit, response)
+        Arc::clone(&self.server).lookup(wire, peer, protocol, depth, siit, autopath, response)
     }
 
     fn owned(&self) -> Option<Arc<dyn OwnedSelfLookupServer>> {
@@ -463,12 +469,14 @@ impl Context<'_, '_> {
             server: state.server.owned()?,
             depth: state.depth,
             siit: state.siit,
+            autopath: state.autopath,
         })
     }
 
     /// Route a new Query through this Query's Listener and capture its Response.
     pub async fn self_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
-        self.self_lookup_inner(self.query, name, qtype, false).await
+        self.self_lookup_inner(self.query, name, qtype, false, false)
+            .await
     }
 
     /// Route a Self Lookup using a temporary Query's fields and options.
@@ -478,12 +486,28 @@ impl Context<'_, '_> {
         name: &Name,
         qtype: Type,
     ) -> Result<Vec<u8>, Error> {
-        self.self_lookup_inner(query, name, qtype, false).await
+        self.self_lookup_inner(query, name, qtype, false, false)
+            .await
     }
 
     /// Re-enter for SIIT synthesis, preventing recursive SIIT interception.
     pub async fn siit_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
-        self.self_lookup_inner(self.query, name, qtype, true).await
+        self.self_lookup_inner(self.query, name, qtype, true, false)
+            .await
+    }
+
+    /// Re-enter for search-path completion without recursively restarting it.
+    pub async fn autopath_lookup(&self, name: &Name, qtype: Type) -> Result<Vec<u8>, Error> {
+        self.self_lookup_inner(self.query, name, qtype, false, true)
+            .await
+    }
+
+    /// Whether this Query descends from a search-path lookup.
+    pub fn autopath_lookup_active(&self) -> bool {
+        self.metadata
+            .self_lookup
+            .as_ref()
+            .is_some_and(|state| state.autopath)
     }
 
     /// Whether this Query descends from a SIIT synthesis lookup.
@@ -500,6 +524,7 @@ impl Context<'_, '_> {
         name: &Name,
         qtype: Type,
         siit: bool,
+        autopath: bool,
     ) -> Result<Vec<u8>, Error> {
         let state = self
             .metadata
@@ -517,11 +542,12 @@ impl Context<'_, '_> {
             let protocol = self.protocol;
             let depth = state.depth + 1;
             let siit = siit || state.siit;
+            let autopath = autopath || state.autopath;
             // shortcut: Self Lookup spawns an allocated task to bound recursive stack use; remove with #86.
             let mut task = AbortOnDrop(tokio::spawn(async move {
                 let mut response = Vec::with_capacity(usize::from(u16::MAX));
                 let action = server
-                    .lookup(&query, peer, protocol, depth, siit, &mut response)
+                    .lookup(&query, peer, protocol, depth, siit, autopath, &mut response)
                     .await;
                 (action, response)
             }));
@@ -540,6 +566,7 @@ impl Context<'_, '_> {
                 self.protocol,
                 state.depth + 1,
                 siit || state.siit,
+                autopath || state.autopath,
                 &mut response,
             )
             .await

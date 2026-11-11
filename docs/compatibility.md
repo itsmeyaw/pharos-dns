@@ -11,6 +11,12 @@
 - Like CoreDNS, `any` synthesizes its HINFO before consulting a Backend, even for a CNAME or signed Zone; it cannot include an RRSIG when DO is set (RFC 8482 §4.2).
 - The UDP caller must supply a Response buffer with enough capacity; otherwise Pharos returns an error instead of allocating on the UDP Query path.
 
+## autopath
+
+- Search-path Self Lookups allocate; issue #86 tracks allocation-free Self Lookup.
+- Search-path Self Lookups re-enter the Listener rather than CoreDNS's Next,
+  so earlier Plugins, routing, Response limits and error handling also apply.
+
 ## bind
 
 - Interface enumeration uses `getifaddrs`; scoped IPv6 Listener labels use the numeric interface index rather than CoreDNS's interface name.
