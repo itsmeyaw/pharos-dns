@@ -81,9 +81,20 @@ response body. Kube's internal retries are counted once per request rather
 than once per attempt as in client-go.
 Client-side rate-limit waits are capped at 100 years for extremely small QPS.
 
-Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `loadbalance`, `log`, `loop`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
+Only `bind`, `cache`, `errors`, `forward`, `health`, `hosts`, `loadbalance`, `log`, `loop`, `multisocket`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are
 disabled by default; explicitly enabling their Cargo features makes setup fail with a
 not-implemented error rather than accepting their configuration.
+
+## Multisocket
+
+Without `multisocket`, Pharos uses the CPU-quota-aware worker count for UDP;
+CoreDNS uses one socket. With `multisocket` and no argument, Pharos uses that
+same worker count rather than Go's GOMAXPROCS, and does not honor the
+`GOMAXPROCS` environment variable. Pharos always uses one TCP listening socket
+per Listener; CoreDNS opens one per configured server. These differences affect
+performance, not Responses. Changing the UDP count on Reload briefly stages
+new reuseport sockets before replacing the old ones; Queries arriving during
+staging or rollback can be lost.
 
 ## Bind
 
@@ -195,7 +206,7 @@ selection, as in CoreDNS, and can change which address appears first.
 
 Like CoreDNS, HTTP Listeners close and reopen on Reload; probes and scrapes can
 briefly fail, and re-opening an old Listener can fail if another process takes
-its port. DNS Listeners with unchanged keys keep their sockets. New Listeners
+its port. DNS Listeners with unchanged keys and UDP counts keep their sockets. New Listeners
 are bound before existing handlers are swapped; separate Listeners are swapped
 individually rather than in one process-wide atomic operation.
 
