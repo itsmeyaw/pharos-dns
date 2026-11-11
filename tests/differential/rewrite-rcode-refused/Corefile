@@ -1,0 +1,7 @@
+.:{port} {
+    rewrite continue rcode regex (.*)\.coredns\.rocks REFUSED NOERROR
+    acl {
+        block net 127.0.0.1/32
+    }
+    whoami
+}
