@@ -140,7 +140,8 @@ impl TsigKey {
         }
     }
 
-    /// Appends a full-length TSIG to a Message, optionally chaining a Query MAC.
+    /// Appends a full-length TSIG to a Message, chaining the Query MAC for a Response.
+    /// Set a Response's header ID to the original Query ID before signing.
     pub fn sign(
         &self,
         wire: &mut Vec<u8>,
@@ -152,6 +153,7 @@ impl TsigKey {
     }
 
     /// Appends a TSIG with an RFC-permitted MAC length.
+    /// For a Response, set its header ID to the original Query ID and pass its verified MAC.
     pub fn sign_truncated(
         &self,
         wire: &mut Vec<u8>,
@@ -160,6 +162,14 @@ impl TsigKey {
         prior_mac: Option<&[u8]>,
         mac_len: usize,
     ) -> Result<(), TsigError> {
+        // RFC 8945 §4.3.1: a Response MAC must include the validated Query MAC.
+        if wire.get(2).is_some_and(|flags| flags & 0x80 != 0)
+            && prior_mac.is_none_or(|mac| {
+                mac.len() < 10.max(self.algorithm.len() / 2) || mac.len() > self.algorithm.len()
+            })
+        {
+            return Err(TsigError::Format);
+        }
         // RFC 8945 §5.2.2.1: truncated MACs have a mandatory minimum size.
         if mac_len > self.algorithm.len() || mac_len < 10.max(self.algorithm.len() / 2) {
             return Err(TsigError::Format);
@@ -230,6 +240,9 @@ impl TsigKey {
         minimum_mac: usize,
     ) -> Result<Option<TsigError>, TsigError> {
         let query_tsig = parse(query)?;
+        if query[2] & 0x80 != 0 {
+            return Err(TsigError::Format);
+        }
         let failure = match self.verify(query, now, None, minimum_mac) {
             Err(
                 error @ (TsigError::BadKey
@@ -327,7 +340,7 @@ impl TsigKey {
         Ok(Some(failure))
     }
 
-    /// Verifies a signed Message, optionally chaining the Query MAC.
+    /// Verifies a signed Message, requiring the Query MAC for a Response.
     /// `minimum_mac` is the local truncation policy in octets (0 uses RFC minimum).
     pub fn verify<'a>(
         &self,
@@ -337,6 +350,14 @@ impl TsigKey {
         minimum_mac: usize,
     ) -> Result<TsigRecord<'a>, TsigError> {
         let tsig = parse(wire)?;
+        // RFC 8945 §4.3.1: a Response MAC must include the validated Query MAC.
+        if wire[2] & 0x80 != 0
+            && prior_mac.is_none_or(|mac| {
+                mac.len() < 10.max(self.algorithm.len() / 2) || mac.len() > self.algorithm.len()
+            })
+        {
+            return Err(TsigError::Format);
+        }
         // RFC 8945 §4.2: the Error field in a Query must be zero.
         if wire[2] & 0x80 == 0 && tsig.error != 0 {
             return Err(TsigError::Format);
@@ -445,6 +466,7 @@ impl<'a> TsigStream<'a> {
     }
 
     /// Sign one Response Message, appending TSIG to the caller's buffer.
+    /// Set its header ID to the original Query ID before signing.
     pub fn sign(&mut self, wire: &mut Vec<u8>, time: u64, fudge: u16) -> Result<(), TsigError> {
         if self.failed {
             return Err(TsigError::Format);

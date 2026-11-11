@@ -56,6 +56,24 @@ fn signs_miekg_fixture_byte_for_byte() {
 }
 
 #[test]
+fn response_requires_query_mac() {
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let mut response = hex("000180000000000000000000");
+    assert_eq!(
+        key.sign(&mut response, 1000, 300, None),
+        Err(TsigError::Format)
+    );
+    let query_mac = [42; 32];
+    key.sign(&mut response, 1000, 300, Some(&query_mac))
+        .unwrap();
+    assert_eq!(
+        key.verify(&response, 1000, None, 0).unwrap_err(),
+        TsigError::Format
+    );
+    assert!(key.verify(&response, 1000, Some(&query_mac), 0).is_ok());
+}
+
+#[test]
 fn stream_chains_every_response_and_requires_signed_endpoints() {
     let key = TsigKey::new(
         "testkey.".parse().unwrap(),
