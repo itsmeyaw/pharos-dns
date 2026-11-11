@@ -77,7 +77,7 @@ pub mod forward;
 #[cfg(feature = "plugin-log")]
 pub mod log;
 #[cfg(feature = "plugin-log")]
-pub mod log_format;
+pub use log::format as log_format;
 #[cfg(feature = "plugin-loop")]
 pub mod r#loop;
 #[cfg(feature = "plugin-metadata")]

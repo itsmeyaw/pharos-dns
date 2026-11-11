@@ -1,5 +1,6 @@
 //! Corefile access logging rules.
 
+pub mod format;
 pub(crate) mod setup;
 
 use crate::log_format::{COMMON_LOG_FORMAT, Format};
