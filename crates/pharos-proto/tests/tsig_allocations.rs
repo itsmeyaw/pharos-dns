@@ -10,9 +10,9 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 #[test]
 fn reused_stream_output_needs_no_rust_allocations() {
     let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
-    let request_mac = [42; 32];
-    let mut signer = TsigStream::new(&key, &request_mac);
-    let mut verifier = TsigStream::new(&key, &request_mac);
+    let query_mac = [42; 32];
+    let mut signer = TsigStream::new(&key, &query_mac);
+    let mut verifier = TsigStream::new(&key, &query_mac);
     let mut wire = Vec::with_capacity(512);
     let region = Region::new(GLOBAL);
     for _ in 0..3 {

@@ -127,7 +127,7 @@ insights.
 - DNS code presentation names in `crates/pharos-proto/src/codes.rs` follow miekg/dns v1.1.73.
 - Response classification's signature validity check follows miekg/dns v1.1.73's `RRSIG.ValidityPeriod`.
 - DNS wire fixtures in `crates/pharos-proto/tests/corpus` are from miekg/dns tests; see the corpus README for the revision and original tests.
-- TSIG tests and generated interoperability fixtures in `crates/pharos-proto/tests/tsig.rs` and `tests/corpus/tsig-miekg.txt` follow miekg/dns v1.1.73's `tsig_test.go` and `tsig.go`.
+- TSIG error handling in `crates/pharos-proto/src/tsig.rs`, tests and generated interoperability fixtures in `tests/tsig.rs` and `tests/corpus/tsig-miekg.txt` follow miekg/dns v1.1.73's `tsig_test.go` and `tsig.go`.
 - EDNS option formatting and tests in `crates/pharos-proto` follow miekg/dns v1.1.73's `edns.go` and `edns_test.go`.
 - RDATA presentation in `crates/pharos-proto/src/rdata.rs` follows miekg/dns v1.1.73; fixtures in `crates/pharos-proto/tests/rdata_*.rs` adapt its `parse_test.go`, `dns_test.go`, `msg_helpers_test.go`, `svcb_test.go` and `tsig_test.go`.
 - Response truncation in `crates/pharos-server` follows miekg/dns v1.1.73's `msg_truncate.go`, without recompression.

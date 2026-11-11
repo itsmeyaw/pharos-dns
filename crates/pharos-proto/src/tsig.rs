@@ -109,6 +109,7 @@ pub struct TsigKey {
 impl TsigKey {
     #[must_use]
     pub fn new(name: Name, algorithm: TsigAlgorithm, secret: &[u8]) -> Self {
+        // RFC 8945 §6: TSIG algorithm names select the corresponding HMAC.
         let key = match algorithm {
             TsigAlgorithm::Md5 => KeyMaterial::Md5(
                 Hmac::<Md5>::new_from_slice(secret).expect("HMAC accepts any key length"),
@@ -159,6 +160,7 @@ impl TsigKey {
         prior_mac: Option<&[u8]>,
         mac_len: usize,
     ) -> Result<(), TsigError> {
+        // RFC 8945 §5.2.2.1: truncated MACs have a mandatory minimum size.
         if mac_len > self.algorithm.len() || mac_len < 10.max(self.algorithm.len() / 2) {
             return Err(TsigError::Format);
         }
@@ -181,6 +183,7 @@ impl TsigKey {
 
     fn validate_sign(&self, wire: &[u8], time: u64) -> Result<(), TsigError> {
         let msg = Message::parse(wire).map_err(|_| TsigError::Format)?;
+        // RFC 8945 §4.2 and RFC 1035 §4.1.1: time and section counts have fixed widths.
         if message_end(&msg) != wire.len()
             || time >= (1 << 48)
             || msg.additional_count() == u16::MAX
@@ -204,6 +207,7 @@ impl TsigKey {
     }
 
     fn append(&self, wire: &mut Vec<u8>, time: u64, fudge: u16, mac: &[u8]) {
+        // RFC 8945 §4.2: append the TSIG fields in wire order.
         let id = [wire[0], wire[1]];
         let count = u16::from_be_bytes([wire[10], wire[11]]) + 1;
         wire.extend_from_slice(self.name.as_wire());
@@ -229,7 +233,7 @@ impl TsigKey {
         now: u64,
         minimum_mac: usize,
     ) -> Result<Option<TsigError>, TsigError> {
-        let request = parse(query)?;
+        let query_tsig = parse(query)?;
         let failure = match self.verify(query, now, None, minimum_mac) {
             Err(
                 error @ (TsigError::BadKey
@@ -241,6 +245,7 @@ impl TsigKey {
             Err(error) => return Err(error),
         };
         self.validate_sign(response, now)?;
+        // RFC 8945 §4.2: the server time is an unsigned 48-bit integer.
         if now >= 1 << 48 {
             return Err(TsigError::Format);
         }
@@ -254,7 +259,7 @@ impl TsigKey {
         // RFC 8945 §5.3.2: only an authenticated Query MAC may be chained in an error Response.
         let authenticated = matches!(failure, TsigError::BadTime | TsigError::BadTrunc);
         let time = if failure == TsigError::BadTime {
-            request.time_signed
+            query_tsig.time_signed
         } else if authenticated {
             now
         } else {
@@ -266,13 +271,13 @@ impl TsigKey {
         } else {
             &[]
         };
-        let owner_len: usize = request
+        let owner_len: usize = query_tsig
             .owner
             .labels()
             .map(|label| label.len() + 1)
             .sum::<usize>()
             + 1;
-        let algorithm_len: usize = request
+        let algorithm_len: usize = query_tsig
             .algorithm
             .labels()
             .map(|label| label.len() + 1)
@@ -292,33 +297,33 @@ impl TsigKey {
         let mut mac = [0; 64];
         if authenticated {
             let mut digest = self.digest();
-            digest.update(&(request.mac.len() as u16).to_be_bytes());
-            digest.update(request.mac);
-            digest.update(&request.original_id.to_be_bytes());
+            digest.update(&(query_tsig.mac.len() as u16).to_be_bytes());
+            digest.update(query_tsig.mac);
+            digest.update(&query_tsig.original_id.to_be_bytes());
             digest.update(&response[2..]);
             variables(
                 &mut digest,
-                request.owner,
-                request.algorithm,
+                query_tsig.owner,
+                query_tsig.algorithm,
                 time,
-                request.fudge,
+                query_tsig.fudge,
                 code,
                 other,
             );
             (mac, _) = digest.finish();
         }
         let count = u16::from_be_bytes([response[10], response[11]]) + 1;
-        write_name(response, request.owner);
+        write_name(response, query_tsig.owner);
         response.extend_from_slice(&[0, 250, 0, 255, 0, 0, 0, 0]);
         response.extend_from_slice(
             &((algorithm_len + 16 + mac_len + other.len()) as u16).to_be_bytes(),
         );
-        write_name(response, request.algorithm);
+        write_name(response, query_tsig.algorithm);
         response.extend_from_slice(&time.to_be_bytes()[2..]);
-        response.extend_from_slice(&request.fudge.to_be_bytes());
+        response.extend_from_slice(&query_tsig.fudge.to_be_bytes());
         response.extend_from_slice(&(mac_len as u16).to_be_bytes());
         response.extend_from_slice(&mac[..mac_len]);
-        response.extend_from_slice(&request.original_id.to_be_bytes());
+        response.extend_from_slice(&query_tsig.original_id.to_be_bytes());
         response.extend_from_slice(&code.to_be_bytes());
         response.extend_from_slice(&(other.len() as u16).to_be_bytes());
         response.extend_from_slice(other);
@@ -391,30 +396,56 @@ impl TsigKey {
 /// The first Message and the final Message must be signed.
 pub struct TsigStream<'a> {
     key: &'a TsigKey,
-    request_mac: &'a [u8],
+    query_mac: &'a [u8],
     digest: Option<Digest>,
     unsigned: usize,
+    last_time: Option<u64>,
     failed: bool,
 }
 
 impl<'a> TsigStream<'a> {
     #[must_use]
-    pub fn new(key: &'a TsigKey, request_mac: &'a [u8]) -> Self {
+    pub fn new(key: &'a TsigKey, query_mac: &'a [u8]) -> Self {
         Self {
             key,
-            request_mac,
+            query_mac,
             digest: None,
             unsigned: 0,
+            last_time: None,
             failed: false,
         }
     }
 
-    fn chain(&mut self, mac: &[u8]) {
+    fn chain(&mut self, mac: &[u8], time: u64) {
+        // RFC 8945 §5.3.1: each running MAC starts with the previous MAC and its length.
         let mut digest = self.key.digest();
         digest.update(&(mac.len() as u16).to_be_bytes());
         digest.update(mac);
         self.digest = Some(digest);
         self.unsigned = 0;
+        self.last_time = Some(time);
+    }
+
+    /// Add an unsigned intermediate Response from a legacy stream.
+    /// RFC 8945 requires senders to sign all Responses; use this only for legacy interoperability.
+    pub fn add_unsigned(&mut self, wire: &[u8]) -> Result<(), TsigError> {
+        let message = Message::parse(wire).map_err(|_| TsigError::Format)?;
+        if self.failed
+            || self.digest.is_none()
+            || self.unsigned >= 99
+            || message_end(&message) != wire.len()
+            || message
+                .answers()
+                .chain(message.authorities())
+                .chain(message.additionals())
+                .any(|rr| rr.rtype == Type::TSIG)
+        {
+            return Err(TsigError::Format);
+        }
+        // RFC 8945 §5.3.1: hash up to 99 unsigned intermediary Messages in order.
+        self.digest.as_mut().expect("checked above").update(wire);
+        self.unsigned += 1;
+        Ok(())
     }
 
     /// Sign one Response Message, appending TSIG to the caller's buffer.
@@ -423,10 +454,13 @@ impl<'a> TsigStream<'a> {
             return Err(TsigError::Format);
         }
         if self.digest.is_none() {
-            self.key.sign(wire, time, fudge, Some(self.request_mac))?;
+            self.key.sign(wire, time, fudge, Some(self.query_mac))?;
             let tsig = parse(wire)?;
-            self.chain(tsig.mac);
+            self.chain(tsig.mac, time);
             return Ok(());
+        }
+        if self.last_time.is_some_and(|last| time < last) {
+            return Err(TsigError::BadTime);
         }
         self.key.validate_sign(wire, time)?;
         let mut digest = self.digest.take().expect("checked above");
@@ -436,7 +470,7 @@ impl<'a> TsigStream<'a> {
         digest.update(&fudge.to_be_bytes());
         let (mac, len) = digest.finish();
         self.key.append(wire, time, fudge, &mac[..len]);
-        self.chain(&mac[..len]);
+        self.chain(&mac[..len], time);
         Ok(())
     }
 
@@ -473,19 +507,14 @@ impl<'a> TsigStream<'a> {
             .chain(message.additionals())
             .any(|rr| rr.rtype == Type::TSIG);
         if !has_tsig {
-            let digest = self.digest.as_mut().ok_or(TsigError::Format)?;
-            self.unsigned += 1;
-            if self.unsigned > 99 {
-                return Err(TsigError::Format);
-            }
-            digest.update(wire);
+            self.add_unsigned(wire)?;
             return Ok(None);
         }
         if self.digest.is_none() {
             let tsig = self
                 .key
-                .verify(wire, now, Some(self.request_mac), minimum_mac)?;
-            self.chain(tsig.mac);
+                .verify(wire, now, Some(self.query_mac), minimum_mac)?;
+            self.chain(tsig.mac, tsig.time_signed);
             return Ok(Some(tsig));
         }
         let tsig = parse(wire)?;
@@ -500,6 +529,7 @@ impl<'a> TsigStream<'a> {
             return Err(TsigError::BadKey);
         }
         let len = tsig.mac.len();
+        // RFC 8945 §5.2.2.1: enforce the permitted MAC length in every stream Message.
         if len > self.key.algorithm.len() || len < 10.max(self.key.algorithm.len() / 2) {
             return Err(TsigError::Format);
         }
@@ -515,13 +545,16 @@ impl<'a> TsigStream<'a> {
         if constant_time::verify_slices_are_equal(&tag[..len], tsig.mac).is_err() {
             return Err(TsigError::BadSig);
         }
-        if now.abs_diff(tsig.time_signed) > u64::from(tsig.fudge) {
+        // RFC 8945 §5.3.1: successive signed stream timestamps do not decrease.
+        if now.abs_diff(tsig.time_signed) > u64::from(tsig.fudge)
+            || self.last_time.is_some_and(|last| tsig.time_signed < last)
+        {
             return Err(TsigError::BadTime);
         }
         if len < minimum_mac {
             return Err(TsigError::BadTrunc);
         }
-        self.chain(tsig.mac);
+        self.chain(tsig.mac, tsig.time_signed);
         Ok(Some(tsig))
     }
 
@@ -620,6 +653,7 @@ fn parse(wire: &[u8]) -> Result<TsigRecord<'_>, TsigError> {
 }
 
 fn message_end(message: &Message<'_>) -> usize {
+    // RFC 1035 §4.1: sections occupy the complete encoded Message in order.
     if let Some(record) = message
         .answers()
         .chain(message.authorities())

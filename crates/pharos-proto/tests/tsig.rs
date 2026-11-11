@@ -62,14 +62,14 @@ fn stream_chains_every_response_and_requires_signed_endpoints() {
         TsigAlgorithm::Sha256,
         b"test secret",
     );
-    let request_mac = [42; 32];
-    let mut signer = TsigStream::new(&key, &request_mac);
+    let query_mac = [42; 32];
+    let mut signer = TsigStream::new(&key, &query_mac);
     let mut first = hex("000180000000000000000000");
     let mut second = hex("000180000000000000000000");
     signer.sign(&mut first, 1000, 300).unwrap();
     signer.sign(&mut second, 1001, 300).unwrap();
 
-    let mut verifier = TsigStream::new(&key, &request_mac);
+    let mut verifier = TsigStream::new(&key, &query_mac);
     assert!(verifier.verify(&first, 1000, 0).unwrap().is_some());
     assert!(verifier.verify(&second, 1001, 0).unwrap().is_some());
     verifier.finish().unwrap();
@@ -78,7 +78,7 @@ fn stream_chains_every_response_and_requires_signed_endpoints() {
         wrong.verify(&first, 1000, 0).unwrap_err(),
         TsigError::BadSig
     );
-    let mut incomplete = TsigStream::new(&key, &request_mac);
+    let mut incomplete = TsigStream::new(&key, &query_mac);
     incomplete.verify(&first, 1000, 0).unwrap();
     assert!(
         incomplete
@@ -94,7 +94,7 @@ fn badtime_is_signed_but_bad_signature_response_is_unsigned() {
     let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
     let mut query = hex("000100000000000000000000");
     key.sign(&mut query, 1000, 30, None).unwrap();
-    let request_mac = TsigRecord::parse(&query).unwrap().mac.to_vec();
+    let query_mac = TsigRecord::parse(&query).unwrap().mac.to_vec();
     let mut response = hex("000180000000000000000000");
     assert_eq!(
         key.sign_error_response(&mut response, &query, 1000, 0)
@@ -126,7 +126,7 @@ fn badtime_is_signed_but_bad_signature_response_is_unsigned() {
         Some(TsigError::BadTime)
     );
     assert_eq!(Message::parse(&response).unwrap().rcode().0, 9);
-    let tsig = key.verify(&response, 1000, Some(&request_mac), 0).unwrap();
+    let tsig = key.verify(&response, 1000, Some(&query_mac), 0).unwrap();
     assert_eq!(tsig.error, 18);
     assert_eq!(tsig.time_signed, 1000);
     assert_eq!(tsig.other, &1100u64.to_be_bytes()[2..]);
@@ -160,13 +160,13 @@ fn miekg_interoperability_for_all_algorithms_and_streams() {
         let response = hex(lines.next().unwrap().split_whitespace().nth(1).unwrap());
         let next = hex(lines.next().unwrap().split_whitespace().nth(1).unwrap());
         let key = TsigKey::new("testkey.".parse().unwrap(), algorithm, &secret);
-        let request_mac = key.verify(&query, 1594855491, None, 0).unwrap().mac;
+        let query_mac = key.verify(&query, 1594855491, None, 0).unwrap().mac;
         let mut generated_query = hex("c60028000001000000000000076578616d706c6503636f6d0000060001");
         key.sign(&mut generated_query, 1594855491, 300, None)
             .unwrap();
         assert_eq!(generated_query, query);
-        let mut signer = TsigStream::new(&key, request_mac);
-        let mut verifier = TsigStream::new(&key, request_mac);
+        let mut signer = TsigStream::new(&key, query_mac);
+        let mut verifier = TsigStream::new(&key, query_mac);
         for expected in [&response, &next] {
             assert!(verifier.verify(expected, 1594855491, 0).unwrap().is_some());
             let mut generated = hex("c60080000000000000000000");
@@ -242,9 +242,16 @@ fn unsigned_intermediate_is_covered_and_limited() {
     let last = hex(
         "c6008000000000000000000107746573746b65790000fa00ff00000000003d0b686d61632d7368613235360000005f0f9043012c002008286d64268c92a303a9cca5ce2016eac2d09b4e49b092427c88df2474c9e33ac60000000000",
     );
-    let request_mac = TsigRecord::parse(&query).unwrap().mac;
+    let query_mac = TsigRecord::parse(&query).unwrap().mac;
     let unsigned = hex("c60080000000000000000000");
-    let mut verifier = TsigStream::new(&key, request_mac);
+    let mut signer = TsigStream::new(&key, query_mac);
+    let mut generated_first = unsigned.clone();
+    signer.sign(&mut generated_first, 1594855491, 300).unwrap();
+    signer.add_unsigned(&unsigned).unwrap();
+    let mut generated_last = unsigned.clone();
+    signer.sign(&mut generated_last, 1594855491, 300).unwrap();
+    assert_eq!(generated_last, last);
+    let mut verifier = TsigStream::new(&key, query_mac);
     verifier.verify(&first, 1594855491, 0).unwrap();
     assert!(verifier.verify(&unsigned, 1594855491, 0).unwrap().is_none());
     verifier.verify(&last, 1594855491, 0).unwrap();
@@ -252,7 +259,7 @@ fn unsigned_intermediate_is_covered_and_limited() {
     let mut forged_error = last.clone();
     let error_offset = forged_error.len() - 4;
     forged_error[error_offset + 1] = 18;
-    let mut verifier = TsigStream::new(&key, request_mac);
+    let mut verifier = TsigStream::new(&key, query_mac);
     verifier.verify(&first, 1594855491, 0).unwrap();
     verifier.verify(&unsigned, 1594855491, 0).unwrap();
     assert_eq!(
@@ -261,14 +268,14 @@ fn unsigned_intermediate_is_covered_and_limited() {
     );
     let mut altered = unsigned.clone();
     altered[3] ^= 1;
-    let mut verifier = TsigStream::new(&key, request_mac);
+    let mut verifier = TsigStream::new(&key, query_mac);
     verifier.verify(&first, 1594855491, 0).unwrap();
     verifier.verify(&altered, 1594855491, 0).unwrap();
     assert_eq!(
         verifier.verify(&last, 1594855491, 0).unwrap_err(),
         TsigError::BadSig
     );
-    let mut verifier = TsigStream::new(&key, request_mac);
+    let mut verifier = TsigStream::new(&key, query_mac);
     verifier.verify(&first, 1594855491, 0).unwrap();
     for _ in 0..99 {
         verifier.verify(&unsigned, 1594855491, 0).unwrap();
@@ -276,6 +283,33 @@ fn unsigned_intermediate_is_covered_and_limited() {
     assert_eq!(
         verifier.verify(&unsigned, 1594855491, 0).unwrap_err(),
         TsigError::Format
+    );
+}
+
+#[test]
+fn stream_time_does_not_move_backwards() {
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let query_mac = [42; 32];
+    let mut signer = TsigStream::new(&key, &query_mac);
+    let mut first = hex("000180000000000000000000");
+    signer.sign(&mut first, 1000, 300).unwrap();
+    let mut next = hex("000180000000000000000000");
+    assert_eq!(signer.sign(&mut next, 999, 300), Err(TsigError::BadTime));
+
+    let secret = hex("3684c2254f8332a156cb068fcb14a28eb0c403f782de72b4c62dc030466e3d59");
+    let key = TsigKey::new("testkey.".parse().unwrap(), TsigAlgorithm::Sha256, &secret);
+    let lines: Vec<_> = include_str!("corpus/tsig-miekg.txt").lines().collect();
+    let query = hex(lines[9].split_whitespace().nth(1).unwrap());
+    let first = hex(lines[10].split_whitespace().nth(1).unwrap());
+    // miekg/dns generated with timers-only and a one-second earlier timestamp.
+    let earlier = hex(
+        "c6008000000000000000000107746573746b65790000fa00ff00000000003d0b686d61632d7368613235360000005f0f9042012c00206aeb47f475280d4c87016d147056e0d9f51efcb01c7927fbc847130b6b7898bcc60000000000",
+    );
+    let mut verifier = TsigStream::new(&key, TsigRecord::parse(&query).unwrap().mac);
+    verifier.verify(&first, 1594855491, 0).unwrap();
+    assert_eq!(
+        verifier.verify(&earlier, 1594855491, 0).unwrap_err(),
+        TsigError::BadTime
     );
 }
 

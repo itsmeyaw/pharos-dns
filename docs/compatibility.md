@@ -224,6 +224,7 @@
 - HMAC-MD5 is available for legacy TSIG interoperability, although miekg/dns v1.1.73's default provider no longer implements it. RFC 8945 prohibits its use; prefer HMAC-SHA256 or stronger.
 - Stream verification includes unsigned intermediate Messages in the running MAC and requires signed first and last Messages, following RFC 8945; miekg/dns does not accumulate unsigned intermediates.
 - Subsequent stream TSIGs with an Error or Other Data are rejected because those fields are not authenticated by the stream MAC; miekg/dns does not reject them.
+- Stream signatures reject decreasing Time Signed values; miekg/dns does not track previous times. The stream API also permits callers to feed unsigned intermediate Messages for legacy interoperability, although RFC 8945 requires senders to sign every Response.
 - Pharos rejects compression pointers that do not point backwards, while miekg/dns follows them until its hop limit.
 - Pharos also rejects targets whose encoding overlaps the pointer; miekg/dns accepts them.
 - Pharos permits up to 255 pointer hops; miekg/dns permits 126.
