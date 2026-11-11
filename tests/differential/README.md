@@ -59,6 +59,8 @@ example's external resolver, and `hosts` instead of the unimplemented `file`
 backend. They compare Responses for both UDP and TCP, with and without EDNS.
 The two `chaos` README scenarios configure the same explicit identity on both
 servers; default identity differences are covered by Rust tests instead.
+The `local` README and prefix-off scenarios use `whoami` as Next to compare
+both intercepted Queries and those passed through.
 The three `header` README scenarios use `whoami` as the Backend and compare
 Responses over UDP and TCP; Rust tests also inspect forwarded Queries.
 The `loop` scenario compares Responses for a non-looping configuration. The

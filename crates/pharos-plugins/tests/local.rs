@@ -226,3 +226,59 @@ async fn coredns_localhost_prefix_and_next() {
         assert_eq!(query(&on, name, Type::A).await.0, Outcome::Drop);
     }
 }
+
+#[tokio::test]
+async fn counter_is_shared_by_server_blocks_and_excludes_apex_and_reverse() {
+    use pharos_plugins::servers_with_registry;
+    use pharos_server::{Action, Handler, metrics::Registry};
+
+    let source = ".:53 {\n local\n}\nexample.net:53 {\n local\n}";
+    let blocks = parse("Corefile", source).unwrap();
+    let registry = Registry::new("test", "test", "test");
+    let (servers, _) = servers_with_registry(
+        configure::<Chain>(&blocks, directives()).unwrap(),
+        registry.clone(),
+    )
+    .unwrap();
+    let server = servers.values().next().unwrap();
+    let mut text = String::new();
+    registry.encode(&mut text);
+    assert!(text.contains("pharos_local_localhost_requests_total 0\n"));
+    for name in [
+        "localhost.",
+        "1.0.0.127.in-addr.arpa.",
+        "a.localhost.",
+        "localhost.example.net.",
+    ] {
+        let name: Name = name.parse().unwrap();
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &wire,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+    }
+    text.clear();
+    registry.encode(&mut text);
+    assert!(text.contains("# TYPE pharos_local_localhost_requests_total counter\n"));
+    assert!(
+        text.contains("pharos_local_localhost_requests_total 2\n"),
+        "{text}"
+    );
+}
