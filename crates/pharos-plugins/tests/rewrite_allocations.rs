@@ -16,6 +16,18 @@ use std::{
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 struct Answer;
+struct WaitForever;
+impl Next for WaitForever {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+        std::future::pending().await
+    }
+}
+struct DropNext;
+impl Next for DropNext {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+        Outcome::Drop
+    }
+}
 impl Next for Answer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let query = cx.query;
@@ -123,4 +135,56 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         assert_eq!(outcome, Poll::Ready(Outcome::Response), "{rule}");
         assert_eq!((stats.allocations, stats.reallocations), (0, 0), "{rule}");
     }
+
+    let config = ".:53 {\n rewrite edns0 local set 0xffee abcd\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let plugin = chain.rewrite.as_ref().unwrap();
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let root: Name = ".".parse().unwrap();
+    let mut first_response = Vec::with_capacity(512);
+    let mut second_response = Vec::with_capacity(512);
+    let mut first_slots = [];
+    let mut second_slots = [];
+    let mut first = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut first_slots),
+        response: &mut first_response,
+        max_response_size: 512,
+    };
+    let mut second = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut second_slots),
+        response: &mut second_response,
+        max_response_size: 512,
+    };
+    let mut first_future = Box::pin(plugin.serve(&mut first, WaitForever));
+    let mut second_future = Box::pin(plugin.serve(&mut second, DropNext));
+    let region = Region::new(GLOBAL);
+    let mut task = TaskContext::from_waker(Waker::noop());
+    assert_eq!(first_future.as_mut().poll(&mut task), Poll::Pending);
+    assert_eq!(second_future.as_mut().poll(&mut task), Poll::Pending);
+    drop(first_future);
+    assert_eq!(
+        second_future.as_mut().poll(&mut task),
+        Poll::Ready(Outcome::Drop)
+    );
+    let stats = region.change();
+    assert_eq!(
+        (stats.allocations, stats.reallocations),
+        (0, 0),
+        "contended EDNS scratch"
+    );
 }
