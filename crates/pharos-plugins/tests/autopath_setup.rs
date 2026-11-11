@@ -1,0 +1,32 @@
+#![forbid(unsafe_code)]
+#![cfg(feature = "plugin-autopath")]
+#![recursion_limit = "512"]
+
+use pharos_corefile::{configure, parse};
+use pharos_plugins::{Chain, directives};
+
+// Derived from CoreDNS v1.15.0 plugin/autopath/setup_test.go.
+#[test]
+fn coredns_autopath_setup_cases() {
+    let file = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/autopath-resolv.conf"
+    );
+    for (directive, valid) in [
+        ("autopath @kubernetes".to_owned(), true),
+        ("autopath example.org @kubernetes".to_owned(), true),
+        ("autopath 10.0.0.0/8 @kubernetes".to_owned(), true),
+        (format!("autopath {file}"), true),
+        ("autopath kubernetes".to_owned(), false),
+        ("autopath".to_owned(), false),
+        ("autopath \"\"".to_owned(), false),
+    ] {
+        let text = format!(".:53 {{\n {directive}\n}}");
+        let blocks = parse("Corefile", &text).unwrap();
+        assert_eq!(
+            configure::<Chain>(&blocks, directives()).is_ok(),
+            valid,
+            "{directive}"
+        );
+    }
+}

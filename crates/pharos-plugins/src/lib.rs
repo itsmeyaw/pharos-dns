@@ -17,6 +17,8 @@ use std::{
 pub mod acl;
 #[cfg(feature = "plugin-any")]
 pub mod any;
+#[cfg(feature = "plugin-autopath")]
+pub mod autopath;
 #[cfg(feature = "plugin-bind")]
 pub mod bind;
 #[cfg(feature = "plugin-bufsize")]
@@ -721,6 +723,17 @@ fn setup_siit(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Resul
 #[cfg(feature = "plugin-rewrite")]
 fn setup_rewrite(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.rewrite = Some(rewrite::Rewrite::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-autopath")]
+fn setup_autopath(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    let domains = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.as_str())
+        .collect::<Vec<_>>();
+    block.config.autopath = Some(autopath::AutoPath::parse(cursor, &domains)?);
     Ok(())
 }
 
