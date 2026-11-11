@@ -614,6 +614,71 @@ impl Next for AliasedAnswer {
     }
 }
 
+struct DnameAnswer;
+impl Next for DnameAnswer {
+    async fn run(self, cx: &mut Context<'_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let target: Name = "other.internal.example.".parse().unwrap();
+        let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        b.question(q.name, q.qtype, q.qclass).unwrap();
+        b.record_with(Section::Answer, q.name, Type::DNAME, Class::IN, 60, |w| {
+            w.write_uncompressed_name(NameRef::parse(target.as_wire(), 0).unwrap())
+        })
+        .unwrap();
+        let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/rewrite/reverter_test.go.
+#[tokio::test]
+async fn coredns_auto_rewrites_dname_values() {
+    let config = ".:53 {\n rewrite name example.com. internal.example.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.com.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(name.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, DnameAnswer)
+            .await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    let rr = message.answers().next().unwrap();
+    assert_eq!(
+        NameRef::parse(rr.rdata, 0).unwrap().to_string(),
+        "other.example.com."
+    );
+}
+
 struct SuffixAnswer;
 impl Next for SuffixAnswer {
     async fn run(self, cx: &mut Context<'_>) -> Outcome {

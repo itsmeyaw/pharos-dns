@@ -1178,6 +1178,7 @@ impl Plugin for Rewrite {
                     }
                     let data = match data {
                         Rdata::Cname(value) => Rdata::Cname(map!(value)),
+                        Rdata::Dname(value) => Rdata::Dname(map!(value)),
                         Rdata::Ns(value) => Rdata::Ns(map!(value)),
                         Rdata::Ptr(value) => Rdata::Ptr(map!(value)),
                         Rdata::Mx {
