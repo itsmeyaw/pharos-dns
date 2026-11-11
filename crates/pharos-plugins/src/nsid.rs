@@ -37,17 +37,27 @@ impl Plugin for Nsid {
                 .any(|option| matches!(option, EdnsOption::Nsid(_)))
         });
         let outcome = next.run(cx).await;
-        if requested && outcome == Outcome::Response {
-            if let Err(error) = add_nsid(cx, &self.data) {
-                return Outcome::Error(error);
-            }
+        if outcome == Outcome::Response
+            && let Err(error) = update_nsid(cx, requested.then_some(self.data.as_slice()))
+        {
+            return Outcome::Error(error);
         }
         outcome
     }
 }
 
-fn add_nsid(cx: &mut Context<'_>, data: &[u8]) -> Result<(), Error> {
+fn update_nsid(cx: &mut Context<'_>, data: Option<&[u8]>) -> Result<(), Error> {
     let message = Message::parse(cx.response).map_err(|_| Error::InvalidQuery)?;
+    // RFC 5001 §2.2: an NSID from Next must not reach a client that did not request it.
+    if data.is_none()
+        && !message.opt().is_some_and(|opt| {
+            opt.options()
+                .iter()
+                .any(|option| matches!(option, EdnsOption::Nsid(_)))
+        })
+    {
+        return Ok(());
+    }
     let record = message
         .additionals()
         .enumerate()
@@ -62,7 +72,9 @@ fn add_nsid(cx: &mut Context<'_>, data: &[u8]) -> Result<(), Error> {
             let size = usize::from(u16::from_be_bytes([remaining[2], remaining[3]])) + 4;
             let option = &remaining[..size];
             if code == 3 {
-                append_option(&mut options, &mut len, data)?;
+                if let Some(data) = data {
+                    append_option(&mut options, &mut len, data)?;
+                }
                 found = true;
             } else {
                 let end = len
@@ -75,7 +87,7 @@ fn add_nsid(cx: &mut Context<'_>, data: &[u8]) -> Result<(), Error> {
             remaining = &remaining[size..];
         }
     }
-    if !found {
+    if !found && let Some(data) = data {
         append_option(&mut options, &mut len, data)?;
     }
     let len_wire = u16::try_from(len).map_err(|_| Error::ResponseBufferTooSmall)?;
@@ -127,7 +139,7 @@ fn append_option(options: &mut [u8], len: &mut usize, data: &[u8]) -> Result<(),
         .filter(|end| *end <= options.len())
         .ok_or(Error::ResponseBufferTooSmall)?;
     let size = u16::try_from(data.len()).map_err(|_| Error::ResponseBufferTooSmall)?;
-    // RFC 5001 §2.1: NSID is EDNS option code 3 with an opaque byte payload.
+    // RFC 5001 §2.3: NSID is EDNS option code 3 with an opaque byte payload.
     options[*len..*len + 2].copy_from_slice(&3_u16.to_be_bytes());
     options[*len + 2..*len + 4].copy_from_slice(&size.to_be_bytes());
     options[*len + 4..end].copy_from_slice(data);
@@ -151,16 +163,39 @@ mod tests {
 
     #[tokio::test]
     async fn strips_unsolicited_nsid_and_preserves_other_options() {
-        let query = [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 41, 16, 0, 0, 0, 0, 0, 0, 0];
+        let query = [
+            0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 41, 16, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let mut response = Vec::with_capacity(512);
-        response.extend_from_slice(&[0, 1, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 41, 16, 0, 0, 0, 0, 0, 0, 10, 0, 3, 0, 1, 1, 0, 12, 0, 1, 9]);
+        response.extend_from_slice(&[
+            0, 1, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 41, 16, 0, 0, 0, 0, 0, 0, 10, 0, 3, 0, 1,
+            1, 0, 12, 0, 1, 9,
+        ]);
         let domain: Name = ".".parse().unwrap();
         let mut slots = [];
-        let mut cx = Context { query: Message::parse(&query).unwrap(), client: "127.0.0.1:53".parse().unwrap(), local: "127.0.0.1:53".parse().unwrap(), transport: Transport::Dns, protocol: Protocol::Udp, domain: &domain, metadata: Metadata::new(&mut slots), response: &mut response, max_response_size: 512 };
-        let plugin = Nsid { data: b"NSID".to_vec() };
-        assert_eq!(plugin.serve(&mut cx, Return(Outcome::Response)).await, Outcome::Response);
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:53".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        let plugin = Nsid {
+            data: b"NSID".to_vec(),
+        };
+        assert_eq!(
+            plugin.serve(&mut cx, Return(Outcome::Response)).await,
+            Outcome::Response
+        );
         let message = Message::parse(&response).unwrap();
-        assert_eq!(message.opt().unwrap().options().iter().collect::<Vec<_>>(), [EdnsOption::Padding(&[9])]);
+        assert_eq!(
+            message.opt().unwrap().options().iter().collect::<Vec<_>>(),
+            [EdnsOption::Padding(&[9])]
+        );
     }
 
     #[tokio::test]
@@ -219,7 +254,7 @@ mod tests {
             response: &mut response,
             max_response_size: 512,
         };
-        add_nsid(&mut cx, b"NSID").unwrap();
+        update_nsid(&mut cx, Some(b"NSID")).unwrap();
         let message = Message::parse(&response).unwrap();
         assert_eq!(
             message.opt().unwrap().options().iter().collect::<Vec<_>>(),
@@ -253,7 +288,7 @@ mod tests {
             max_response_size: 512,
         };
         assert_eq!(
-            add_nsid(&mut cx, &vec![b'x'; 65535]),
+            update_nsid(&mut cx, Some(&vec![b'x'; 65535])),
             Err(Error::ResponseBufferTooSmall)
         );
         assert_eq!(response, original);
@@ -282,7 +317,7 @@ mod tests {
             response: &mut response,
             max_response_size: 512,
         };
-        add_nsid(&mut cx, b"NSID").unwrap();
+        update_nsid(&mut cx, Some(b"NSID")).unwrap();
         let message = Message::parse(&response).unwrap();
         assert!(message.tc());
         assert_eq!(message.additional_count(), 1);

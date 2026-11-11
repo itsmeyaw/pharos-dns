@@ -95,6 +95,17 @@ async fn coredns_nsid_and_cache_return_requested_identifier() {
 }
 
 #[tokio::test]
+async fn query_nsid_payload_is_ignored() {
+    let chain = configured("nsid NSID\nwhoami").unwrap();
+    let response = query(&chain, Some(&[0, 3, 0, 3, 1, 2, 3])).await;
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(
+        message.opt().unwrap().options().iter().next(),
+        Some(EdnsOption::Nsid(b"NSID"))
+    );
+}
+
+#[tokio::test]
 async fn no_nsid_is_added_without_an_nsid_query() {
     let chain = configured("nsid NSID\nwhoami").unwrap();
     for options in [None, Some(&[][..]), Some(&[0, 12, 0, 0][..])] {
