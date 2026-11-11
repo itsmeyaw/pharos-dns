@@ -56,6 +56,10 @@
 - AAAA synthesis uses a Self Lookup that allocates per Query; issue #86 tracks
   allocation-free Self Lookup. Queries that do not require synthesis do not
   allocate in this Plugin.
+- The A Self Lookup passes through the Listener's normal size and EDNS
+  handling, unlike CoreDNS's in-process capture, so its result may be truncated
+  before synthesis. An unsupported name-bearing or malformed record in that
+  result produces SERVFAIL rather than being copied into the Response.
 
 ## dnssec
 
