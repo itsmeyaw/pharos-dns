@@ -219,7 +219,7 @@
 ## timeouts
 
 - TCP timeouts and `maxtcpqueries` apply per Listener; encrypted Listener transports and their README scenarios are deferred to M3.
-- Pharos starts the next idle read while earlier pipelined Queries are still executing; CoreDNS reads the next Query after handling the previous one. Existing connections keep their timeout settings across Reload, while newly accepted connections use the new settings.
+- Pharos can read pipelined Queries while earlier Queries are executing, but starts the idle deadline only after all in-flight Queries finish; CoreDNS reads the next Query after handling the previous one. Existing connections keep their timeout settings across Reload, while newly accepted connections use the new settings.
 
 ## whoami
 

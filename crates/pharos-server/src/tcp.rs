@@ -56,17 +56,13 @@ pub(crate) fn spawn<H: Handler>(
     })
 }
 
-async fn read_frame(reader: &mut OwnedReadHalf, duration: Duration) -> io::Result<Vec<u8>> {
+async fn read_frame(reader: &mut OwnedReadHalf) -> io::Result<Vec<u8>> {
     // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
     let mut length = [0; 2];
-    timeout(duration, async {
-        reader.read_exact(&mut length).await?;
-        let mut query = vec![0; usize::from(u16::from_be_bytes(length))];
-        reader.read_exact(&mut query).await?;
-        Ok(query)
-    })
-    .await
-    .map_err(|_| io::ErrorKind::TimedOut)?
+    reader.read_exact(&mut length).await?;
+    let mut query = vec![0; usize::from(u16::from_be_bytes(length))];
+    reader.read_exact(&mut query).await?;
+    Ok(query)
 }
 
 async fn serve<H: Handler>(
@@ -107,14 +103,42 @@ async fn serve<H: Handler>(
                 },
             }
         }
-        let query = tokio::select! {
-            biased;
-            _ = shutdown.changed() => break,
-            _ = write_failed.changed() => break,
-            query = read_frame(&mut reader, if count == 0 { options.read } else { options.idle }) => match query {
-                Ok(query) => query,
-                Err(_) => break,
-            },
+        let query = {
+            let frame = read_frame(&mut reader);
+            tokio::pin!(frame);
+            loop {
+                let result = if queries.is_empty() {
+                    let duration = if count == 0 {
+                        options.read
+                    } else {
+                        options.idle
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => break 'read,
+                        _ = write_failed.changed() => break 'read,
+                        result = timeout(duration, &mut frame) => match result {
+                            Ok(result) => result,
+                            Err(_) => break 'read,
+                        },
+                    }
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => break 'read,
+                        _ = write_failed.changed() => break 'read,
+                        result = &mut frame => result,
+                        result = queries.join_next() => {
+                            if let Some(Ok(response)) = result { responses.push(response); }
+                            continue;
+                        },
+                    }
+                };
+                match result {
+                    Ok(query) => break query,
+                    Err(_) => break 'read,
+                }
+            }
         };
         count += 1;
 

@@ -52,3 +52,13 @@ fn shared_listener_combines_last_explicit_values() {
     assert_eq!(options.idle, std::time::Duration::from_secs(9));
     assert_eq!(options.max_queries, None);
 }
+
+#[test]
+fn repeated_timeouts_preserve_earlier_options() {
+    let text = ".:53 {\n timeouts {\n read 7s\n }\n timeouts {\n idle 9s\n }\n}";
+    let blocks = configure::<Chain>(&parse("Corefile", text).unwrap(), directives()).unwrap();
+    let (servers, _) = pharos_plugins::servers(blocks).unwrap();
+    let options = servers.values().next().unwrap().tcp_options;
+    assert_eq!(options.read, std::time::Duration::from_secs(7));
+    assert_eq!(options.idle, std::time::Duration::from_secs(9));
+}
