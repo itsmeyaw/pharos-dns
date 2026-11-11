@@ -44,6 +44,26 @@ impl Next for QuestionOnly {
         Outcome::Response
     }
 }
+struct OtherCname<'a>(&'a Name);
+impl Next for OtherCname<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        builder
+            .record_with(
+                Section::Answer,
+                q.name,
+                Type::CNAME,
+                Class::IN,
+                30,
+                |writer| writer.write_name(NameRef::parse(self.0.as_wire(), 0).unwrap()),
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
 impl Next for Answer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let query = cx.query;
@@ -281,5 +301,41 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         stats.allocations + stats.reallocations,
         1,
         "TCP buffer grows once"
+    );
+    let config = ".:53 {\n rewrite cname old.example. new.example.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let target: Name = "other.example.".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    let region = Region::new(GLOBAL);
+    let future = chain
+        .rewrite
+        .as_ref()
+        .unwrap()
+        .serve(&mut cx, OtherCname(&target));
+    let mut future = std::pin::pin!(future);
+    assert_eq!(
+        future.as_mut().poll(&mut task),
+        Poll::Ready(Outcome::Response)
+    );
+    let stats = region.change();
+    assert_eq!(
+        (stats.allocations, stats.reallocations),
+        (0, 0),
+        "non-matching CNAME target"
     );
 }
