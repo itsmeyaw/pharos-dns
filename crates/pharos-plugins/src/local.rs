@@ -83,8 +83,22 @@ impl Plugin for Local {
         if !special && zone_start.is_none() {
             return next.run(cx).await;
         }
-        if special && let Some(counter) = &self.counter {
-            counter.fetch_add(1, Ordering::Relaxed);
+        if special {
+            if pharos_server::logging::debug_enabled() {
+                pharos_server::logging::log(
+                    "DEBUG",
+                    "local",
+                    &format!(
+                        "Intercepting localhost query for {:?} {}, from {}",
+                        question.name.to_string().to_ascii_lowercase(),
+                        question.qtype,
+                        cx.client.ip()
+                    ),
+                );
+            }
+            if let Some(counter) = &self.counter {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
         }
         let apex = zone_start == Some(0);
         let localhost_apex = apex && eq(0, b"localhost");

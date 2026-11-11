@@ -14,6 +14,7 @@ pub enum LogFormat {
 }
 
 static JSON: AtomicBool = AtomicBool::new(false);
+static DEBUG: AtomicBool = AtomicBool::new(false);
 pub const PLUGIN_METADATA: &str = "logging/plugin";
 /// Marks an Error already logged by the errors Plugin.
 pub const ERROR_LOGGED_METADATA: &str = "logging/errors-logged";
@@ -21,6 +22,17 @@ pub const ERROR_LOGGED_METADATA: &str = "logging/errors-logged";
 /// Select the format used by subsequent log entries.
 pub fn init(format: LogFormat) {
     JSON.store(format == LogFormat::Json, Ordering::Relaxed);
+}
+
+/// Enable or disable process-wide debug logging.
+pub fn set_debug_enabled(enabled: bool) {
+    DEBUG.store(enabled, Ordering::Relaxed);
+}
+
+/// Return whether debug entries should be emitted.
+#[must_use]
+pub fn debug_enabled() -> bool {
+    DEBUG.load(Ordering::Relaxed)
 }
 
 /// Write one entry to stdout.
