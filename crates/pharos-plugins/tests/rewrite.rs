@@ -3635,6 +3635,8 @@ async fn coredns_answer_value_rewrites_name_bearing_record_types() {
         },
     ] {
         for rules in [
+            r"rewrite name regex (.*)\.domain\.uk {1}.cluster.local answer name (.*)\.cluster\.local {1}.domain.uk answer value (.*)\.cluster\.local {1}.domain.uk",
+            r"rewrite continue name regex (.*)\.domain\.uk {1}.cluster.local answer name (.*)\.cluster\.local {1}.domain.uk answer value (.*)\.cluster\.local {1}.domain.uk",
             r"rewrite name suffix .domain.uk .cluster.local answer auto answer value (.*)\.cluster\.local {1}.domain.uk",
             "rewrite continue name suffix .domain.uk .domain.us answer auto\n rewrite name suffix .domain.us .cluster.local answer auto",
         ] {
