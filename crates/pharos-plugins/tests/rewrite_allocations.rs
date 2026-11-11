@@ -34,6 +34,16 @@ impl Next for FailNext {
         Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL)
     }
 }
+struct QuestionOnly;
+impl Next for QuestionOnly {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8000).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
 impl Next for Answer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let query = cx.query;
@@ -206,5 +216,66 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         (stats.allocations, stats.reallocations),
         (0, 0),
         "EDNS unanswered response"
+    );
+    let long = "long-long-long-long-long-long-long-long.example.";
+    let config = format!(".:53 {{\n rewrite name {long} x.\n}}");
+    let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = long.parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(32);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    {
+        let region = Region::new(GLOBAL);
+        let future = chain.rewrite.as_ref().unwrap().serve(&mut cx, QuestionOnly);
+        let mut future = std::pin::pin!(future);
+        let outcome = future.as_mut().poll(&mut task);
+        let stats = region.change();
+        assert_eq!(
+            outcome,
+            Poll::Ready(Outcome::Error(pharos_server::Error::ResponseBufferTooSmall))
+        );
+        assert_eq!(
+            (stats.allocations, stats.reallocations),
+            (0, 0),
+            "undersized UDP buffer"
+        );
+    }
+    cx.protocol = Protocol::Tcp;
+    cx.query = Message::parse(&wire).unwrap();
+    let region = Region::new(GLOBAL);
+    let future = chain.rewrite.as_ref().unwrap().serve(&mut cx, QuestionOnly);
+    let mut future = std::pin::pin!(future);
+    assert_eq!(
+        future.as_mut().poll(&mut task),
+        Poll::Ready(Outcome::Response)
+    );
+    let stats = region.change();
+    assert_eq!(
+        stats.allocations + stats.reallocations,
+        1,
+        "TCP buffer grows once"
     );
 }

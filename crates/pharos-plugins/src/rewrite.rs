@@ -1778,6 +1778,18 @@ impl Plugin for Rewrite {
         } else {
             next.run(cx).await
         };
+        if (response_rules || rewrite_edns)
+            && matches!(outcome, Outcome::Response | Outcome::Unanswered(_))
+        {
+            let max = cx.max_response_size.max(512);
+            if cx.response.capacity() < max {
+                if cx.protocol == pharos_server::Protocol::Tcp {
+                    cx.response.reserve(max.saturating_sub(cx.response.len()));
+                } else {
+                    return Outcome::Error(ServerError::ResponseBufferTooSmall);
+                }
+            }
+        }
         if outcome == Outcome::Response
             && rewrite_edns
             && let Some(matched) = matches.as_deref()
