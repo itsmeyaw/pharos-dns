@@ -1,5 +1,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-use pharos_dnssec::digest::{DigestType, ds_digest, key_tag, signature_valid_at};
+use pharos_dnssec::digest::{
+    DigestType, cdnskey_rdata, cds_rdata, ds_digest, key_tag, signature_valid_at,
+};
 use pharos_proto::Name;
 
 #[test]
@@ -20,6 +22,11 @@ fn rfc_4509_dnskey_and_ds_vector() {
     rdata.extend(key);
     assert_eq!(key_tag(&rdata), Some(60485));
     let owner: Name = "DSKEY.Example.COM.".parse().unwrap();
+    assert_eq!(cdnskey_rdata(&rdata).unwrap(), rdata);
+    let cds = cds_rdata(&owner, &rdata, DigestType::Sha256).unwrap();
+    assert_eq!(&cds[..4], &[0xec, 0x45, 5, 2]);
+    assert_eq!(&cds[4..], ds_digest(&owner, &rdata, DigestType::Sha256));
+    assert_eq!(cds_rdata(&owner, &[0, 0, 3], DigestType::Sha1), None);
     assert_eq!(
         ds_digest(&owner, &rdata, DigestType::Sha256),
         [

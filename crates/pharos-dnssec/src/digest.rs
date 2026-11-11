@@ -49,6 +49,30 @@ pub fn ds_digest(owner: &Name, rdata: &[u8], algorithm: DigestType) -> Vec<u8> {
     context.finish().as_ref().to_vec()
 }
 
+/// Produces CDS RDATA for a DNSKEY.
+#[must_use]
+pub fn cds_rdata(owner: &Name, dnskey: &[u8], algorithm: DigestType) -> Option<Vec<u8>> {
+    // RFC 7344 §4.1: CDS has the same RDATA format and digest as DS.
+    let tag = key_tag(dnskey)?;
+    let digest_type = match algorithm {
+        DigestType::Sha1 => 1,
+        DigestType::Sha256 => 2,
+        DigestType::Sha384 => 4,
+    };
+    let mut result = tag.to_be_bytes().to_vec();
+    result.extend_from_slice(&[dnskey[3], digest_type]);
+    result.extend_from_slice(&ds_digest(owner, dnskey, algorithm));
+    Some(result)
+}
+
+/// Produces CDNSKEY RDATA for a DNSKEY.
+#[must_use]
+pub fn cdnskey_rdata(dnskey: &[u8]) -> Option<Vec<u8>> {
+    // RFC 7344 §4.1: CDNSKEY uses the same RDATA format as DNSKEY.
+    key_tag(dnskey)?;
+    Some(dnskey.to_vec())
+}
+
 /// Tests a signature's inclusive serial-arithmetic validity window.
 #[must_use]
 pub fn signature_valid_at(inception: u32, expiration: u32, now: u32) -> bool {
