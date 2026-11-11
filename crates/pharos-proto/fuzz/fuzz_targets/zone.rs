@@ -92,6 +92,34 @@ fn without_comments(zone: &[u8]) -> Vec<u8> {
     result
 }
 
+fn decode_alphanumeric_escapes(zone: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(zone.len());
+    let mut i = 0;
+    // RFC 1035 §5.1: `\DDD` is the octet with that decimal value; `\X` pairs stay untouched.
+    while i < zone.len() {
+        if zone[i] != b'\\' {
+            result.push(zone[i]);
+            i += 1;
+        } else if let Some(digits) = zone
+            .get(i + 1..i + 4)
+            .filter(|digits| digits.iter().all(u8::is_ascii_digit))
+        {
+            let value = digits
+                .iter()
+                .fold(0_u16, |sum, digit| sum * 10 + u16::from(digit - b'0'));
+            match u8::try_from(value).ok().filter(u8::is_ascii_alphanumeric) {
+                Some(byte) => result.push(byte),
+                None => result.extend_from_slice(&zone[i..i + 4]),
+            }
+            i += 4;
+        } else {
+            result.extend_from_slice(&zone[i..(i + 2).min(zone.len())]);
+            i += 2;
+        }
+    }
+    result
+}
+
 fn space_numeric_apl_at_line_end(zone: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(zone.len());
     // RFC 3597 §5 and RFC 3123 §4: numeric TYPE42 also permits an empty APL.
@@ -366,6 +394,20 @@ fuzz_target!(|zone: &[u8]| {
         }
         if uncommented_expected == actual {
             return;
+        }
+    }
+    // Documented deviation: miekg/dns rejects any backslash in a numeric field, where Pharos
+    // decodes valid escapes. Only skip when the decoded spelling gets the same result.
+    if actual.starts_with("accept\n") && expected == "reject\n" && zone.contains(&b'\\') {
+        let decoded = decode_alphanumeric_escapes(zone);
+        if decoded != zone {
+            let mut decoded_expected = oracle.parse(&decoded);
+            if decoded_expected != actual && !decoded.ends_with(b"\n") {
+                decoded_expected = oracle.parse(&[&decoded[..], b"\n"].concat());
+            }
+            if decoded_expected == actual {
+                return;
+            }
         }
     }
     // Documented deviation: numeric APL types need a blank before a line end in miekg/dns.
