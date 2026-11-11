@@ -42,6 +42,8 @@ pub mod hosts;
 pub mod kubernetes;
 #[cfg(feature = "plugin-loadbalance")]
 pub mod loadbalance;
+#[cfg(feature = "plugin-local")]
+pub mod local;
 #[cfg(feature = "plugin-minimal")]
 pub mod minimal;
 #[cfg(feature = "plugin-nsid")]
@@ -121,6 +123,8 @@ pub fn servers_with_registry(
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-forward")]
     let _ = metrics.forward();
+    #[cfg(feature = "plugin-local")]
+    let _ = metrics.local();
     #[cfg(feature = "plugin-health")]
     metrics.enable_health_metrics();
     #[cfg(feature = "plugin-prometheus")]
@@ -141,11 +145,19 @@ pub fn servers_with_registry(
         });
     }
     for block in blocks {
-        #[cfg(any(feature = "plugin-forward", feature = "plugin-cache"))]
+        #[cfg(any(
+            feature = "plugin-forward",
+            feature = "plugin-cache",
+            feature = "plugin-local"
+        ))]
         let mut block = block;
         #[cfg(feature = "plugin-forward")]
         if let Some(forward) = &mut block.config.forward {
             forward.set_metrics(&metrics);
+        }
+        #[cfg(feature = "plugin-local")]
+        if let Some(local) = &mut block.config.local {
+            local.set_metrics(&metrics);
         }
         #[cfg(feature = "plugin-hosts")]
         if let Some(hosts) = &block.config.hosts {
@@ -471,6 +483,12 @@ fn setup_any(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result
 #[cfg(feature = "plugin-chaos")]
 fn setup_chaos(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     block.config.chaos = Some(chaos::Chaos::parse(cursor)?);
+    Ok(())
+}
+
+#[cfg(feature = "plugin-local")]
+fn setup_local(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
+    block.config.local = Some(local::Local::parse(cursor)?);
     Ok(())
 }
 

@@ -8,8 +8,7 @@ use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
 use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 
 fn configured(text: &str) -> Result<Chain, String> {
-    let blocks = parse("Corefile", &format!(".:53 {{\n{text}\n}}"))
-        .map_err(|e| e.to_string())?;
+    let blocks = parse("Corefile", &format!(".:53 {{\n{text}\n}}")).map_err(|e| e.to_string())?;
     Ok(configure::<Chain>(&blocks, directives())
         .map_err(|e| e.to_string())?
         .remove(0)
@@ -27,7 +26,9 @@ async fn query(chain: &Chain, name: &str, qtype: Type) -> (Outcome, Vec<u8>) {
     let name: Name = name.parse().unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 123, 0x0110).unwrap();
-    builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, Class::IN).unwrap();
+    builder
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, Class::IN)
+        .unwrap();
     let _ = builder.finish();
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::with_capacity(512);
@@ -49,10 +50,22 @@ async fn query(chain: &Chain, name: &str, qtype: Type) -> (Outcome, Vec<u8>) {
 
 #[test]
 fn coredns_setup_cases() {
-    for text in ["local", "local {\n}", "local {\n localhost_prefix on\n}", "local {\n localhost_prefix off\n}", "local {\n localhost_prefix off\n localhost_prefix on\n}"] {
+    for text in [
+        "local",
+        "local {\n}",
+        "local {\n localhost_prefix on\n}",
+        "local {\n localhost_prefix off\n}",
+        "local {\n localhost_prefix off\n localhost_prefix on\n}",
+    ] {
         assert!(configured(text).is_ok(), "{text}");
     }
-    for text in ["local example.org", "local {\n foo\n}", "local {\n localhost_prefix maybe\n}", "local {\n localhost_prefix\n}", "local {\n localhost_prefix on off\n}"] {
+    for text in [
+        "local example.org",
+        "local {\n foo\n}",
+        "local {\n localhost_prefix maybe\n}",
+        "local {\n localhost_prefix\n}",
+        "local {\n localhost_prefix on off\n}",
+    ] {
         assert!(configured(text).is_err(), "{text}");
     }
 }
@@ -61,30 +74,132 @@ fn coredns_setup_cases() {
 async fn coredns_local_cases() {
     let chain = configured("local").unwrap();
     for (name, qtype, rcode, answer, authority) in [
-        ("localhost.", Type::A, Rcode::NOERROR, Some(("localhost.", Type::A)), None),
-        ("localHOst.", Type::A, Rcode::NOERROR, Some(("localHOst.", Type::A)), None),
-        ("localhost.", Type::AAAA, Rcode::NOERROR, Some(("localhost.", Type::AAAA)), None),
-        ("localhost.", Type::NS, Rcode::NOERROR, Some(("localhost.", Type::NS)), None),
-        ("localhost.", Type::SOA, Rcode::NOERROR, Some(("localhost.", Type::SOA)), None),
-        ("127.in-addr.arpa.", Type::A, Rcode::NOERROR, None, Some("127.in-addr.arpa.")),
-        ("localhost.", Type::MX, Rcode::NOERROR, None, Some("localhost.")),
-        ("a.localhost.", Type::A, Rcode::NOERROR, Some(("a.localhost.", Type::A)), None),
-        ("a.localhost.", Type::AAAA, Rcode::NOERROR, Some(("a.localhost.", Type::AAAA)), None),
-        ("a.localhost.", Type::MX, Rcode::NOERROR, None, Some("a.localhost.")),
-        ("1.0.0.127.in-addr.arpa.", Type::PTR, Rcode::NOERROR, Some(("1.0.0.127.in-addr.arpa.", Type::PTR)), None),
-        ("1.0.0.127.in-addr.arpa.", Type::MX, Rcode::NOERROR, None, Some("127.in-addr.arpa.")),
-        ("2.0.0.127.in-addr.arpa.", Type::PTR, Rcode::NXDOMAIN, None, Some("127.in-addr.arpa.")),
-        ("x.0.in-addr.arpa.", Type::A, Rcode::NXDOMAIN, None, Some("0.in-addr.arpa.")),
-        ("x.255.in-addr.arpa.", Type::AAAA, Rcode::NXDOMAIN, None, Some("255.in-addr.arpa.")),
+        (
+            "localhost.",
+            Type::A,
+            Rcode::NOERROR,
+            Some(("localhost.", Type::A)),
+            None,
+        ),
+        (
+            "localHOst.",
+            Type::A,
+            Rcode::NOERROR,
+            Some(("localHOst.", Type::A)),
+            None,
+        ),
+        (
+            "localhost.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            Some(("localhost.", Type::AAAA)),
+            None,
+        ),
+        (
+            "localhost.",
+            Type::NS,
+            Rcode::NOERROR,
+            Some(("localhost.", Type::NS)),
+            None,
+        ),
+        (
+            "localhost.",
+            Type::SOA,
+            Rcode::NOERROR,
+            Some(("localhost.", Type::SOA)),
+            None,
+        ),
+        (
+            "127.in-addr.arpa.",
+            Type::A,
+            Rcode::NOERROR,
+            None,
+            Some("127.in-addr.arpa."),
+        ),
+        (
+            "localhost.",
+            Type::MX,
+            Rcode::NOERROR,
+            None,
+            Some("localhost."),
+        ),
+        (
+            "a.localhost.",
+            Type::A,
+            Rcode::NOERROR,
+            Some(("a.localhost.", Type::A)),
+            None,
+        ),
+        (
+            "a.localhost.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            Some(("a.localhost.", Type::AAAA)),
+            None,
+        ),
+        (
+            "a.localhost.",
+            Type::MX,
+            Rcode::NOERROR,
+            None,
+            Some("a.localhost."),
+        ),
+        (
+            "1.0.0.127.in-addr.arpa.",
+            Type::PTR,
+            Rcode::NOERROR,
+            Some(("1.0.0.127.in-addr.arpa.", Type::PTR)),
+            None,
+        ),
+        (
+            "1.0.0.127.in-addr.arpa.",
+            Type::MX,
+            Rcode::NOERROR,
+            None,
+            Some("127.in-addr.arpa."),
+        ),
+        (
+            "2.0.0.127.in-addr.arpa.",
+            Type::PTR,
+            Rcode::NXDOMAIN,
+            None,
+            Some("127.in-addr.arpa."),
+        ),
+        (
+            "x.0.in-addr.arpa.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            None,
+            Some("0.in-addr.arpa."),
+        ),
+        (
+            "x.255.in-addr.arpa.",
+            Type::AAAA,
+            Rcode::NXDOMAIN,
+            None,
+            Some("255.in-addr.arpa."),
+        ),
     ] {
         let (outcome, wire) = query(&chain, name, qtype).await;
         assert_eq!(outcome, Outcome::Response, "{name}");
         let msg = Message::parse(&wire).unwrap();
-        assert_eq!((msg.id(), msg.flags() & 0xfff0, msg.rcode()), (123, 0x8110, rcode), "{name}");
+        assert_eq!(
+            (msg.id(), msg.flags() & 0xfff0, msg.rcode()),
+            (123, 0x8110, rcode),
+            "{name}"
+        );
         let rr = msg.answers().next();
-        assert_eq!(rr.map(|r| (r.name.to_string(), r.rtype)), answer.map(|(n, t)| (n.to_owned(), t)), "{name}");
+        assert_eq!(
+            rr.map(|r| (r.name.to_string(), r.rtype)),
+            answer.map(|(n, t)| (n.to_owned(), t)),
+            "{name}"
+        );
         let rr = msg.authorities().next();
-        assert_eq!(rr.map(|r| (r.name.to_string(), r.rtype)), authority.map(|n| (n.to_owned(), Type::SOA)), "{name}");
+        assert_eq!(
+            rr.map(|r| (r.name.to_string(), r.rtype)),
+            authority.map(|n| (n.to_owned(), Type::SOA)),
+            "{name}"
+        );
         for rr in msg.answers().chain(msg.authorities()) {
             assert_eq!((rr.class, rr.ttl), (Class::IN, 604800));
         }
@@ -102,7 +217,12 @@ async fn coredns_localhost_prefix_and_next() {
     for name in ["a.localhost.", "a.LOCALHOST."] {
         assert_eq!(query(&off, name, Type::AAAA).await.0, Outcome::Response);
     }
-    for name in ["example.net.", "notlocalhost.", "notlocalhost.example.net.", "1.ip6.arpa."] {
+    for name in [
+        "example.net.",
+        "notlocalhost.",
+        "notlocalhost.example.net.",
+        "1.ip6.arpa.",
+    ] {
         assert_eq!(query(&on, name, Type::A).await.0, Outcome::Drop);
     }
 }

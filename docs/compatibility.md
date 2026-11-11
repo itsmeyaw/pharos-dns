@@ -143,6 +143,12 @@
 - Successful reloads are not logged.
 - When both policies are configured, subnet preference runs after weighted selection, as in CoreDNS, and can change which address appears first.
 
+## local
+
+- The `debug` Directive is not implemented, so the localhost interception debug log cannot yet be enabled.
+- UDP callers must supply a sufficiently large Response buffer; TCP buffers can grow.
+- DNS names are matched as wire labels with ASCII case folding, rather than CoreDNS's lowercased presentation strings.
+
 ## log
 
 - The `log` Plugin's body uses CoreDNS's common format by default, preceded by Pharos's timestamp and `INFO log:` rather than CoreDNS's `[INFO]` prefix.
@@ -219,7 +225,7 @@
 
 ## General
 
-- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `any`, `bind`, `bufsize`, `cache`, `chaos`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 
 ## CLI
