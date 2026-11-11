@@ -33,6 +33,7 @@ fn run_isolated(name: &str) -> bool {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
     true
 }
 

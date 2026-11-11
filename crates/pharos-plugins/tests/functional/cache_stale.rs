@@ -156,18 +156,32 @@ async fn popular_entry_prefetches_before_expiry() {
     assert_eq!(request(&server, 1003).await.0, 0);
 }
 
-#[tokio::test]
-async fn expired_entry_does_not_transfer_popularity_to_a_new_miss() {
-    let server = setup("prefetch 2 10m 90%");
-    request(&server, 1001).await;
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    assert_eq!(request(&server, 1002).await.0, 1001);
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    assert_eq!(request(&server, 1003).await.0, 1003);
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    assert_eq!(request(&server, 1004).await.0, 1003);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(request(&server, 1005).await.0, 1003);
+#[test]
+fn expired_entry_does_not_transfer_popularity_to_a_new_miss() {
+    // ADR-0007: the combined test binary needs more stack for this chain future.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let server = setup("prefetch 2 10m 90%");
+                    request(&server, 1001).await;
+                    tokio::time::sleep(Duration::from_millis(1100)).await;
+                    assert_eq!(request(&server, 1002).await.0, 1001);
+                    tokio::time::sleep(Duration::from_millis(1100)).await;
+                    assert_eq!(request(&server, 1003).await.0, 1003);
+                    tokio::time::sleep(Duration::from_millis(1100)).await;
+                    assert_eq!(request(&server, 1004).await.0, 1003);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    assert_eq!(request(&server, 1005).await.0, 1003);
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[cfg(feature = "plugin-forward")]
