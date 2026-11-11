@@ -21,7 +21,14 @@ enum Action {
     Rcode(u16, u16),
     Type(Type, Type),
     Class(Class, Class),
-    Name(String, bool, Option<Vec<NamePart>>),
+    Name(String, bool, Option<Vec<NamePart>>, Vec<AnswerRule>),
+}
+
+#[derive(Debug)]
+struct AnswerRule {
+    value: bool,
+    pattern: regex::Regex,
+    replacement: String,
 }
 
 #[derive(Debug)]
@@ -102,11 +109,8 @@ impl Rewrite {
                 if metadata && !mode.eq_ignore_ascii_case("regex") {
                     return Err(cursor.error("metadata requires regex"));
                 }
-                let auto = match extra {
-                    [] => false,
-                    [answer, auto] if answer == "answer" && auto == "auto" => true,
-                    _ => return Err(cursor.arg_err()),
-                };
+                let (auto, answers) =
+                    answer_rules(extra).ok_or_else(|| cursor.error("invalid answer rules"))?;
                 let normal = |value: &str| {
                     let mut value = value.to_ascii_lowercase();
                     if !value.ends_with('.') {
@@ -156,6 +160,7 @@ impl Rewrite {
                         normal(to),
                         auto || mode.eq_ignore_ascii_case("exact"),
                         parts,
+                        answers,
                     ),
                     stop,
                 });
@@ -251,6 +256,58 @@ impl Rewrite {
         }
         Ok(Self { rules })
     }
+}
+
+fn answer_rules(args: &[String]) -> Option<(bool, Vec<AnswerRule>)> {
+    if args.is_empty() {
+        return Some((false, Vec::new()));
+    }
+    if args[0] != "answer" {
+        return None;
+    }
+    let mut index = 0;
+    let mut auto = false;
+    let mut rules = Vec::new();
+    while index < args.len() {
+        if args[index] == "answer" {
+            index += 1;
+        }
+        let kind = args.get(index)?;
+        index += 1;
+        if kind == "auto" {
+            auto = true;
+            continue;
+        }
+        if kind != "name" && kind != "value" {
+            return None;
+        }
+        let from = args.get(index)?;
+        let to = args.get(index + 1)?;
+        index += 2;
+        if from.len() > 10_000 {
+            return None;
+        }
+        let pattern = regex::Regex::new(from).ok()?;
+        let used = (0..=100)
+            .filter(|number| to.contains(&format!("{{{number}}}")))
+            .count();
+        if used > pattern.captures_len() - 1 {
+            return None;
+        }
+        let mut replacement = to.to_ascii_lowercase();
+        if !replacement.ends_with('.') {
+            replacement.push('.');
+        }
+        rules.push(AnswerRule {
+            value: kind == "value",
+            pattern,
+            replacement,
+        });
+    }
+    if auto && rules.iter().any(|rule| !rule.value) {
+        return None;
+    }
+    Some((auto, rules))
 }
 
 fn name_parts(mut replacement: &str, groups: usize) -> Option<Vec<NamePart>> {
@@ -422,6 +479,63 @@ fn remap_response<'a>(
     }
 }
 
+fn apply_answer<'a>(
+    source: NameRef<'a>,
+    from: NameRef<'_>,
+    to: NameRef<'_>,
+    suffix: Option<(&str, &str)>,
+    auto: bool,
+    answers: &[AnswerRule],
+    value: bool,
+    buffer: &'a mut [u8; 255],
+) -> NameRef<'a> {
+    if !answers.iter().any(|rule| rule.value == value) {
+        return if auto {
+            remap_response(source, from, to, suffix, buffer)
+        } else {
+            source
+        };
+    }
+    // shortcut: explicit answer regex captures allocate, outside the non-regex path.
+    let mut text = source.to_string();
+    for rule in answers.iter().rev().filter(|rule| rule.value == value) {
+        let Some(captures) = rule.pattern.captures(&text) else {
+            continue;
+        };
+        let mut replacement = rule.replacement.clone();
+        for (index, capture) in captures.iter().enumerate() {
+            replacement = replacement.replace(
+                &format!("{{{index}}}"),
+                capture.map_or("", |value| value.as_str()),
+            );
+        }
+        text = replacement;
+    }
+    let mut intermediate = [0; 255];
+    let Ok(wire) = Name::parse_absolute_into(&text, &mut intermediate) else {
+        return source;
+    };
+    let current = NameRef::parse(wire, 0).expect("validated name");
+    let mut mapped_buffer = [0; 255];
+    let mapped = if auto {
+        remap_response(current, from, to, suffix, &mut mapped_buffer)
+    } else {
+        current
+    };
+    let mut len = 0;
+    for label in mapped.labels() {
+        if len + label.len() + 1 >= buffer.len() {
+            return source;
+        }
+        buffer[len] = label.len() as u8;
+        len += 1;
+        buffer[len..len + label.len()].copy_from_slice(label);
+        len += label.len();
+    }
+    buffer[len] = 0;
+    NameRef::parse(&buffer[..=len], 0).expect("validated name")
+}
+
 impl Plugin for Rewrite {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_>, next: N) -> Outcome {
         let original_query = cx.query;
@@ -440,6 +554,8 @@ impl Plugin for Rewrite {
         let mut end = self.rules.len();
         let mut name_rewritten = false;
         let mut suffix = None;
+        let mut answer_auto = false;
+        let mut selected_answers = &[][..];
         'rules: for (index, rule) in self.rules.iter().enumerate() {
             let matched = match rule.action {
                 Action::Type(from, to)
@@ -463,7 +579,9 @@ impl Plugin for Rewrite {
                     true
                 }
                 Action::Type(..) | Action::Class(..) => false,
-                Action::Name(ref target, auto, ref parts) if rule.matcher.matches(name) => {
+                Action::Name(ref target, auto, ref parts, ref answers)
+                    if rule.matcher.matches(name) =>
+                {
                     let mut text = NameText {
                         bytes: [0; 1024],
                         len: 0,
@@ -549,7 +667,9 @@ impl Plugin for Rewrite {
                     cx.query = cx
                         .query
                         .with_question_name(NameRef::parse(wire, 0).expect("validated name"));
-                    name_rewritten |= auto;
+                    name_rewritten |= auto || !answers.is_empty();
+                    answer_auto = auto;
+                    selected_answers = answers;
                     if auto && let Matcher::Suffix(from) = &rule.matcher {
                         suffix = Some((target.as_str(), from.as_str()));
                     }
@@ -657,11 +777,14 @@ impl Plugin for Rewrite {
             ] {
                 for rr in records {
                     let mut owner_buffer = [0; 255];
-                    let owner = remap_response(
+                    let owner = apply_answer(
                         rr.name,
                         rewritten.name,
                         original.name,
                         suffix,
+                        answer_auto,
+                        selected_answers,
+                        false,
                         &mut owner_buffer,
                     );
                     let Ok(data) = rr.data() else {
@@ -670,11 +793,14 @@ impl Plugin for Rewrite {
                     let mut value_buffer = [0; 255];
                     macro_rules! map {
                         ($value:expr) => {
-                            remap_response(
+                            apply_answer(
                                 $value,
                                 rewritten.name,
                                 original.name,
                                 suffix,
+                                answer_auto,
+                                selected_answers,
+                                true,
                                 &mut value_buffer,
                             )
                         };
