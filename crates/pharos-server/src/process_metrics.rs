@@ -182,6 +182,18 @@ mod tests {
             Some("cpu 0 0 0\nbtime 1000\n"),
             Some(5),
         );
+        let actual: std::collections::BTreeSet<_> = out
+            .lines()
+            .filter_map(|line| line.strip_prefix("# TYPE "))
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        let documented: std::collections::BTreeSet<_> = include_str!("../../../MIGRATION.md")
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `process_"))
+            .filter_map(|line| line.split_once('`').map(|(name, _)| name))
+            .map(|name| format!("process_{name}"))
+            .collect();
+        assert_eq!(actual, documented.iter().map(String::as_str).collect());
         assert_eq!(
             out,
             concat!(
