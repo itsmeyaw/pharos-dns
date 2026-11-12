@@ -798,12 +798,15 @@ impl Zone {
             }
         }
         let synthesized = dname.is_none() && !std::ptr::eq(source.as_ptr(), name.as_ptr());
-        if synthesized && cx.metadata.enabled() && zone.exact(source) {
+        if synthesized
+            && cx.metadata.enabled()
+            && let Some(node) = zone.node(source).filter(|node| node.tree)
+        {
             let mut text = NameText {
                 bytes: [0; 1024],
                 len: 0,
             };
-            if let Ok(owner) = NameRef::parse(source, 0)
+            if let Ok(owner) = NameRef::parse(node.name.as_wire(), 0)
                 && write!(text, "{owner}").is_ok()
                 && let Ok(text) = std::str::from_utf8(&text.bytes[..text.len])
             {
