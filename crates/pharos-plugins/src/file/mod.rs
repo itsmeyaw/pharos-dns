@@ -404,6 +404,9 @@ impl Plugin for File {
         if matches!(question.qtype, Type::AXFR | Type::IXFR) {
             return Outcome::Unanswered(Rcode::REFUSED);
         }
+        if cx.query.opcode() == pharos_proto::Opcode::NOTIFY {
+            return Outcome::Drop;
+        }
         // RFC 1034 §4.3.2: return the first Zone Cut between the apex and QNAME.
         let cut = zone.cut(name, question.qtype);
         // RFC 6672 §3.2: DNAME applies to strict descendants of its owner.
