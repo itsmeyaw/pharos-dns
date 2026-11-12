@@ -23,6 +23,7 @@ provides the type to pass to `compile_with_variables` for subsequent variables.
 
 ## Errors and differences
 
+- Like expr-lang v1.17.8 `parser/lexer/utils.go:196-220`, surrogate `\u` escapes decode to U+FFFD.
 - Unknown names, wrong argument types or counts, malformed literals, invalid
   regexes and unsupported constructs fail at setup. Unsupported constructs
   include maps, indexing, list-valued results or variables, nonliteral `in`

@@ -758,6 +758,41 @@ fn quoted_and_raw_string_literals_decode_expr_escapes() {
 }
 
 #[test]
+fn expression_surrogate_escapes_decode_as_replacement_characters() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 128];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [r"'\uD800'", r"'\uDBFF'", r"'\uDC00'", r"'\uDFFF'"] {
+        let expression = Expression::compile(source).unwrap();
+        assert_eq!(
+            expression
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::String("\u{fffd}"),
+            "{source}"
+        );
+    }
+    for (source, expected) in [(r"'\uD7FF'", "\u{d7ff}"), (r"'\uE000'", "\u{e000}")] {
+        let expression = Expression::compile(source).unwrap();
+        assert_eq!(
+            expression
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::String(expected),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn query_functions_normalize_mapped_addresses_and_keep_ipv6_scope() {
     let message = Message::parse(WIRE).unwrap();
     let query = Query::new(

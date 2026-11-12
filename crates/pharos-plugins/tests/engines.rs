@@ -317,6 +317,25 @@ fn go_escaping_builtins_return_pipeline_strings() {
 }
 
 #[test]
+fn template_rejects_surrogate_escapes_like_go_unquote() {
+    for source in [
+        r#"{{ "\uD800" }}"#,
+        r#"{{ "\uDBFF" }}"#,
+        r#"{{ "\uDC00" }}"#,
+        r#"{{ "\uDFFF" }}"#,
+    ] {
+        assert!(Template::compile(source).is_err(), "{source}");
+    }
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile(r#"{{ "\uD7FF\uE000" }}"#).unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "\u{d7ff}\u{e000}");
+}
+
+#[test]
 fn js_escapes_non_printable_unicode_like_go() {
     let mut slots = [];
     let metadata = Metadata::new(&mut slots);
