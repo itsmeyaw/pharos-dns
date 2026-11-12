@@ -287,7 +287,10 @@ impl Parser<'_, '_> {
                 let Node::String(pattern) = right else {
                     return Err("matches requires a literal pattern".into());
                 };
-                left = Node::Matches(Box::new(left), crate::regex_match::Regex::new(&pattern)?);
+                left = Node::Matches(
+                    Box::new(left),
+                    Box::new(crate::regex_match::Regex::new(&pattern)?),
+                );
                 continue;
             }
             let kind = match op {
