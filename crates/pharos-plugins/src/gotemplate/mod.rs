@@ -232,9 +232,9 @@ fn write_field(
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
 enum Marker {
     Else,
+    ElseIf(String),
     End,
 }
 
@@ -278,6 +278,9 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             "end" => return Ok((parts, Some(Marker::End))),
             _ => {}
         }
+        if let Some(condition) = action.strip_prefix("else if ") {
+            return Ok((parts, Some(Marker::ElseIf(condition.trim().to_owned()))));
+        }
         let range = action.starts_with("range ");
         let part = if let Some(condition) = action
             .strip_prefix("if ")
@@ -289,18 +292,7 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             } else {
                 None
             };
-            let (yes, marker) = parse_parts(source, depth + 1)?;
-            let no = if marker == Some(Marker::Else) {
-                let (no, marker) = parse_parts(source, depth + 1)?;
-                if marker != Some(Marker::End) {
-                    return Err("if is missing end".into());
-                }
-                no
-            } else if marker == Some(Marker::End) {
-                Vec::new()
-            } else {
-                return Err("if is missing end".into());
-            };
+            let (yes, no) = parse_branches(source, depth + 1)?;
             if let Some(field) = field {
                 Part::Range(field, yes, no)
             } else {
@@ -317,6 +309,27 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
     parts.push(Part::Text((*source).to_owned()));
     *source = "";
     Ok((parts, None))
+}
+
+fn parse_branches(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Vec<Part>), String> {
+    let (yes, marker) = parse_parts(source, depth)?;
+    let no = match marker {
+        Some(Marker::End) => Vec::new(),
+        Some(Marker::Else) => {
+            let (no, marker) = parse_parts(source, depth)?;
+            if !matches!(marker, Some(Marker::End)) {
+                return Err("control action is missing end".into());
+            }
+            no
+        }
+        Some(Marker::ElseIf(condition)) => {
+            let condition = Condition::parse(&condition)?;
+            let (inner_yes, inner_no) = parse_branches(source, depth + 1)?;
+            vec![Part::If(condition, inner_yes, inner_no)]
+        }
+        None => return Err("control action is missing end".into()),
+    };
+    Ok((yes, no))
 }
 
 fn is_space(byte: u8) -> bool {

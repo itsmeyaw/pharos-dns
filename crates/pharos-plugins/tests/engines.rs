@@ -260,3 +260,18 @@ fn range_visits_group_and_variable_maps_in_go_key_order() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "[first][last]|12");
 }
+
+#[test]
+fn else_if_selects_first_truthy_branch() {
+    use pharos_plugins::expression::Value;
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.variables = &[("a", Value::Bool(false)), ("b", Value::Bool(true))];
+    let template =
+        Template::compile("{{ if .Var.a }}first{{ else if .Var.b }}second{{ else }}third{{ end }}")
+            .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "second");
+}
