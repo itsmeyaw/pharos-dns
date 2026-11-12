@@ -72,6 +72,34 @@ async fn udp_axfr_is_refused_and_ixfr_returns_only_current_soa() {
 }
 
 #[tokio::test]
+async fn axfr_client_reads_stream_and_checks_closing_soa() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(Transfer), vec![]);
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+        .await
+        .unwrap();
+    let mut types = Vec::new();
+    pharos_server::transfer::axfr(
+        listener.local_addr(),
+        &"a.".parse().unwrap(),
+        1,
+        Duration::from_secs(3),
+        |message| {
+            types.extend(message.answers().map(|record| record.rtype));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(types, [Type::SOA, Type::A, Type::SOA]);
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn plugin_stream_reaches_tcp_listener_as_multiple_messages() {
     let key = ListenerKey {
         transport: Transport::Dns,
