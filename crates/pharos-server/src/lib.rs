@@ -92,6 +92,7 @@ pub enum Protocol {
 }
 
 /// Lazily produces complete wire-format Messages into a reusable buffer.
+/// Producers must not block the runtime; clones share the same cursor.
 #[derive(Clone)]
 pub struct Stream(Arc<std::sync::Mutex<StreamProducer>>);
 
@@ -104,7 +105,9 @@ impl Stream {
     }
 
     pub fn next(&mut self, response: &mut Vec<u8>) -> Result<bool, Error> {
-        (self.0.lock().map_err(|_| Error::PluginPanic)?)(response)
+        let mut producer = self.0.lock().map_err(|_| Error::PluginPanic)?;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| producer(response)))
+            .unwrap_or(Err(Error::PluginPanic))
     }
 }
 

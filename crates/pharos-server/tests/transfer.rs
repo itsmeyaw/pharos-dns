@@ -14,6 +14,16 @@ struct Transfer;
 
 struct BadClosingSoa;
 
+struct PanickingTransfer;
+impl Chain for PanickingTransfer {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
+        Outcome::Stream(Stream::new(|_| panic!("broken producer")))
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
 impl Chain for BadClosingSoa {
     async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         let Outcome::Stream(mut source) = Chain::serve(&Transfer, cx).await else {
@@ -121,6 +131,32 @@ async fn udp_axfr_is_refused_and_ixfr_returns_only_current_soa() {
             assert_eq!(message.answers().next().unwrap().rtype, Type::SOA);
         }
     }
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn udp_ixfr_turns_producer_panic_into_servfail() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(PanickingTransfer), vec![]);
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+        .await
+        .unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let query = [0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 251, 0, 1];
+    socket.send_to(&query, listener.local_addr()).await.unwrap();
+    let mut wire = [0; 512];
+    let (len, _) = timeout(Duration::from_secs(3), socket.recv_from(&mut wire))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        Message::parse(&wire[..len]).unwrap().rcode(),
+        Rcode::SERVFAIL
+    );
     listener.shutdown().await.unwrap();
 }
 

@@ -173,12 +173,10 @@ async fn serve<H: Handler>(
                 }
                 if let Some(transfer) = transfer.as_mut() {
                     response.clear();
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        transfer.next(&mut response)
-                    })) {
-                        Ok(Ok(true)) => {}
-                        Ok(Ok(false)) => break,
-                        failure => {
+                    match transfer.next(&mut response) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(failure) => {
                             crate::logging::log(
                                 "ERROR",
                                 "server",
