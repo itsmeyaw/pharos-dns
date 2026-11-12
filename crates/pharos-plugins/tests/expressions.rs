@@ -233,6 +233,34 @@ fn incidr_handles_ipv4_ipv6_and_reports_invalid_arguments() {
 }
 
 #[test]
+fn incidr_accepts_zero_padded_decimal_prefixes_like_go() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.1.2.3:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut bytes = [0; 512];
+    let mut scratch = Scratch::new(&mut bytes);
+    for source in [
+        "incidr('10.1.2.3', '10.0.0.0/08')",
+        "incidr('2001:db8::1', '2001:db8::/0032')",
+        "incidr('192.0.2.1', '0.0.0.0/000')",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch),
+            Ok(Value::Bool(true)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn template_capture_groups_variables_and_int_conversion() {
     let message = Message::parse(WIRE).unwrap();
     let mut query = Query::new(

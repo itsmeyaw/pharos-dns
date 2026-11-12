@@ -728,10 +728,7 @@ fn incidr(ip: &str, cidr: &str) -> Result<bool, &'static str> {
         .map_err(|_| "first argument is not an IP address")?;
     let (network, prefix) = cidr.split_once('/').ok_or("invalid CIDR")?;
     let network: IpAddr = network.parse().map_err(|_| "invalid CIDR address")?;
-    if prefix.is_empty()
-        || !prefix.bytes().all(|b| b.is_ascii_digit())
-        || (prefix.len() > 1 && prefix.starts_with('0'))
-    {
+    if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {
         return Err("invalid CIDR prefix");
     }
     let prefix: u8 = prefix.parse().map_err(|_| "invalid CIDR prefix")?;
