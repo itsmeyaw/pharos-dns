@@ -733,3 +733,41 @@ fn nil_literal_and_mixed_list_membership_are_supported() {
         ValueType::Nil
     );
 }
+
+#[test]
+fn coredns_chained_integer_variables_evaluate_in_order() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    let a = Expression::compile("1").unwrap();
+    let a_value = a.evaluate(&query, &metadata, &mut scratch).unwrap();
+    let vars = [("a", a_value)];
+    let mut query_b = Query::new(&message, query.client, query.local, query.protocol);
+    query_b.variables = &vars;
+    let b = Expression::compile_with_variables("a + 1", &[("a", a.value_type())]).unwrap();
+    let mut other_buffer = [0; 2048];
+    let mut other_scratch = Scratch::new(&mut other_buffer);
+    let b_value = b.evaluate(&query_b, &metadata, &mut other_scratch).unwrap();
+    let vars = [("a", a_value), ("b", b_value)];
+    let mut last = Query::new(&message, query.client, query.local, query.protocol);
+    last.variables = &vars;
+    let c = Expression::compile_with_variables(
+        "b * 10",
+        &[("a", a.value_type()), ("b", b.value_type())],
+    )
+    .unwrap();
+    let mut third_buffer = [0; 2048];
+    let mut third_scratch = Scratch::new(&mut third_buffer);
+    assert_eq!(
+        c.evaluate(&last, &metadata, &mut third_scratch).unwrap(),
+        Value::Int(20)
+    );
+}
