@@ -1,0 +1,9 @@
+example.org. SOA IN udp
+example.org. SOA IN udp +opcode=NOTIFY
+example.org. NS IN udp
+www.example.org. A IN udp
+www.example.org. AAAA IN udp
+www.example.org. MX IN udp
+missing.example.org. A IN udp
+www.other.org. A IN udp
+www.ignored.org. A IN udp

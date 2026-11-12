@@ -57,6 +57,11 @@ The `secondary` README scenarios replace the documented remote Primaries with
 local `file` and `transfer` fixtures. `wait-zone` waits for the asynchronous
 transfer, including the catalog member transfer, before comparing Responses.
 
+The `auto` README scenarios use fixture-relative directories instead of
+`/etc/coredns/zones/org`. `auto-transfer-readme` omits the remote NOTIFY
+destination; `auto-regexp-readme` includes an unmatched file to exercise the
+documented filename pattern.
+
 The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS
 Responses, and the harness cannot mask that difference.
