@@ -963,7 +963,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_notify_waits_for_first_sync_even_for_empty_zone() {
+    async fn empty_zone_is_notified_after_initial_sync() {
+        use crate::transfer::{Destination, Transfer, TransferZone};
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let transfer = Transfer {
+            zones: vec![TransferZone {
+                domains: vec![".".parse().unwrap()],
+                destinations: vec![Destination::Address {
+                    host: "127.0.0.1".into(),
+                    port: socket.local_addr().unwrap().port().to_string(),
+                }],
+                source: None,
+            }],
+        };
+        let (send, receive) =
+            tokio::sync::watch::channel(pharos_kubernetes::store::Changes::default());
+        let task = tokio::spawn(watch_changes(
+            receive,
+            transfer,
+            vec!["cluster.local.".parse().unwrap()],
+            vec![],
+            Arc::new(Ready),
+        ));
+        let mut wire = [0; 512];
+        let (len, from) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.recv_from(&mut wire),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            Message::parse(&wire[..len])
+                .unwrap()
+                .questions()
+                .next()
+                .unwrap()
+                .name
+                .to_string(),
+            "cluster.local."
+        );
+        wire[2] |= 0x80;
+        socket.send_to(&wire[..len], from).await.unwrap();
+        drop(send);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initial_notify_waits_for_first_sync() {
         use crate::transfer::{Destination, Transfer, TransferZone};
         use std::sync::atomic::{AtomicBool, Ordering};
         struct Sync(AtomicBool);
