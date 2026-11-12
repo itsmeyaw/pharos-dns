@@ -1,29 +1,35 @@
 {
-  "version": 1,
+  "version": 2,
   "skills": {
+    "caveman": {
+      "source": "JuliusBrussee/caveman",
+      "sourceType": "github",
+      "skillPath": "skills/caveman/SKILL.md",
+      "computedHash": "b51af74aacdadbc3c2d6bb79f05db58dc521854b87f7ffabd48faf286a81ed31"
+    },
     "caveman-commit": {
       "source": "juliusbrussee/caveman",
       "sourceType": "github",
       "skillPath": "skills/caveman-commit/SKILL.md",
-      "computedHash": "b416cf134b0f33ddadeca7977aebdbb2d3db79a166d0fce2e1aabeec98132766"
+      "computedHash": "2c1472fb59eedd3cfba0b6512dc470a00287343ade421db55c21a6fb52afbe86"
     },
     "rust-async-patterns": {
       "source": "wshobson/agents",
       "sourceType": "github",
       "skillPath": "plugins/systems-programming/skills/rust-async-patterns/SKILL.md",
-      "computedHash": "20d32ef58158c94eb4dfc4aaf19bec7ae2a025ae5d42da7b49ccfbaeda389273"
+      "computedHash": "286b73077a434af5844dd480e5b98026bea5b31fcfafce3c04405a7392331601"
     },
     "rust-best-practices": {
       "source": "apollographql/skills",
       "sourceType": "github",
       "skillPath": "skills/rust-best-practices/SKILL.md",
-      "computedHash": "a3db351ec552ed9d36b59e547d6c1d94077867eb5bcb98b3f802dfebb0a8a248"
+      "computedHash": "7e12e68aa50152eb7ba9ea1f88ca5380c846ea0175f8ab6788bb79b7faf12ca0"
     },
     "rust-testing": {
       "source": "affaan-m/ecc",
       "sourceType": "github",
       "skillPath": "skills/rust-testing/SKILL.md",
-      "computedHash": "bd66d6441ff6d3a6acb89c902cd6a01bf58410aec3ecbc43d45409b3a3788ac8"
+      "computedHash": "4a16853504a8d9ee1af3abb29e4db9b506ddc46f5ef6bafff45193a1a1a1e520"
     }
   }
 }
