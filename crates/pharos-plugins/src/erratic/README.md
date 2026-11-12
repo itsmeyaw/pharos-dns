@@ -5,7 +5,6 @@
 ## erratic
 
 - AXFR over UDP is REFUSED by the Listener (RFC 5936 §4.2); CoreDNS sends the transfer over UDP.
-- A UDP Response requires a preallocated buffer large enough for its limit; otherwise Pharos returns an error instead of allocating per Query.
 
 ## Differential scenarios
 
