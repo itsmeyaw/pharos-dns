@@ -132,6 +132,12 @@ impl Zone {
             };
             if let Some((offset, lowercase)) = offset {
                 let end = normalize_rdata_name(&mut record.rdata, offset, lowercase)?;
+                // RFC 1035 §§3.3.1, 3.3.11 and RFC 6672 §2.1: these RDATA fields contain only one name.
+                if matches!(record.rtype, Type::NS | Type::CNAME | Type::DNAME)
+                    && end != record.rdata.len()
+                {
+                    return Err("trailing name-only RDATA".into());
+                }
                 if record.rtype == Type::SOA {
                     let end = normalize_rdata_name(&mut record.rdata, end, true)?;
                     if record.rdata.len() != end + 20 {

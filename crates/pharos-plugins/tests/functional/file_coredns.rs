@@ -163,14 +163,29 @@ fn reusable_zone_rejects_trailing_name_only_rdata() {
         "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n".as_bytes(),
         apex.clone(),
         "test",
-    ).next().unwrap().unwrap();
+    )
+    .next()
+    .unwrap()
+    .unwrap();
     for kind in [Type::NS, Type::CNAME, Type::DNAME] {
-        let record = ZoneRecord { owner: "test.example.org.".parse().unwrap(), ttl: 60, class: Class::IN, rtype: kind, rdata: vec![0] };
-        assert!(Zone::from_records(apex.clone(), vec![soa.clone(), record.clone()]).is_ok(), "{kind:?}");
+        let record = ZoneRecord {
+            owner: "test.example.org.".parse().unwrap(),
+            ttl: 60,
+            class: Class::IN,
+            rtype: kind,
+            rdata: vec![0],
+        };
+        assert!(
+            Zone::from_records(apex.clone(), vec![soa.clone(), record.clone()]).is_ok(),
+            "{kind:?}"
+        );
         for trailing in [vec![0, 0], vec![1, b'x', 0, 0xff]] {
             let mut invalid = record.clone();
             invalid.rdata = trailing;
-            assert!(Zone::from_records(apex.clone(), vec![soa.clone(), invalid]).is_err(), "{kind:?}");
+            assert!(
+                Zone::from_records(apex.clone(), vec![soa.clone(), invalid]).is_err(),
+                "{kind:?}"
+            );
         }
     }
     let structured = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\na 60 IN MX 10 mail.example.org.\nb 60 IN SRV 1 2 3 host.example.org.\nc 60 IN SVCB 1 svc.example.org. alpn=h2\n";
