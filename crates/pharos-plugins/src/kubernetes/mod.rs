@@ -273,6 +273,7 @@ fn child<'a>(prefix: &[&[u8]], zone: NameRef<'_>, wire: &'a mut [u8; 255]) -> Op
     NameRef::parse(&wire[..n + 1], 0).ok()
 }
 
+// RFC 1035 §3.3.13 and RFC 2308 §5: SOA RDATA order and negative-cache TTL.
 fn soa(
     builder: &mut MessageBuilder<'_>,
     section: Section,
@@ -812,6 +813,7 @@ impl pharos_server::Plugin for Kubernetes {
         }
         let mut scratch = self.state.scratch.lease();
         let result = (|| -> Result<(), BuildError> {
+            // RFC 1035 §4.1.1: set Response and authoritative flags while retaining Query flags.
             let mut b = MessageBuilder::new(
                 cx.response,
                 max,
@@ -1062,6 +1064,7 @@ impl pharos_server::Plugin for Kubernetes {
                 if let Some(wire) = &chased
                     && let Ok(message) = Message::parse(wire)
                 {
+                    // RFC 1034 §4.3.2: include records found while following a CNAME.
                     for rr in message.answers() {
                         if let Ok(data) = rr.data() {
                             b.record_with(
@@ -1149,6 +1152,7 @@ impl pharos_server::Plugin for Kubernetes {
                             {
                                 return;
                             }
+                            // RFC 2782 §3: SRV RDATA contains priority, weight, port and target.
                             let weight = (100 / total.max(1)).max(1) as u16;
                             b.record_with(
                                 Section::Answer,
