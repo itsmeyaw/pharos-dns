@@ -391,6 +391,50 @@ fn range_accepts_pipelines_and_integer_counts() {
 }
 
 #[test]
+fn integer_range_rejects_oversized_captures_before_rendering() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let template =
+        Template::compile("{{ range parseInt .Group.count 10 64 }}x{{ else }}empty{{ end }}")
+            .unwrap();
+    let mut output = String::new();
+    let mut scratch = [0; 128];
+    for count in ["65536", "9999999999"] {
+        let groups = [("count", count)];
+        let mut data = Data::new("example.", &metadata);
+        data.groups = &groups;
+        output.clear();
+        assert!(
+            template
+                .render_with_scratch(&data, &mut output, &mut scratch)
+                .is_err(),
+            "{count}"
+        );
+        assert!(output.is_empty(), "{count}");
+    }
+    let mut data = Data::new("example.", &metadata);
+    data.variables = &[("count", pharos_plugins::expression::Value::Int(-1))];
+    let negative = Template::compile("{{ range .Var.count }}x{{ else }}empty{{ end }}").unwrap();
+    negative
+        .render_with_scratch(&data, &mut output, &mut scratch)
+        .unwrap();
+    assert_eq!(output, "empty");
+}
+
+#[test]
+fn integer_range_accepts_65535_iterations() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.groups = &[("count", "65535")];
+    let template = Template::compile("{{ range parseInt .Group.count 10 64 }}x{{ end }}").unwrap();
+    let mut output = String::with_capacity(65535);
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output.len(), 65535);
+    assert!(output.bytes().all(|byte| byte == b'x'));
+}
+
+#[test]
 fn printf_supports_go_numeric_string_and_type_formats() {
     let mut slots = [];
     let metadata = Metadata::new(&mut slots);

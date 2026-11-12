@@ -343,6 +343,10 @@ fn render_parts(
                         scratch,
                     )?,
                     pipeline::RangeValue::Integer(count) => {
+                        // Bound Query-driven loops; Go text/template has no cap.
+                        if count > 65_535 {
+                            return Err(fmt::Error);
+                        }
                         if names.len() > 1 {
                             return Err(fmt::Error);
                         }
