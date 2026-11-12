@@ -21,6 +21,7 @@ enum Function {
     Not,
     ParseInt,
     Index,
+    Slice,
 }
 enum Command {
     Atom(Atom),
@@ -57,6 +58,7 @@ impl Pipeline {
                 "not" => Some(Function::Not),
                 "parseInt" => Some(Function::ParseInt),
                 "index" => Some(Function::Index),
+                "slice" => Some(Function::Slice),
                 _ => None,
             };
             let command = if let Some(function) = function {
@@ -105,6 +107,7 @@ impl Pipeline {
                         Function::Len | Function::Not => count == 1,
                         Function::ParseInt => count == 3,
                         Function::Index => count >= 2,
+                        Function::Slice => (2..=4).contains(&count),
                     };
                     if !valid {
                         return Err(fmt::Error);
@@ -171,6 +174,23 @@ impl Pipeline {
                                 indexed = indexed.index(get(index)?)?;
                             }
                             indexed
+                        }
+                        Function::Slice => {
+                            let input = get(0)?;
+                            let len = input.length()?;
+                            let low =
+                                usize::try_from(get(1)?.integer()?).map_err(|_| fmt::Error)?;
+                            let high = if count >= 3 {
+                                usize::try_from(get(2)?.integer()?).map_err(|_| fmt::Error)?
+                            } else {
+                                len
+                            };
+                            let max = if count == 4 {
+                                usize::try_from(get(3)?.integer()?).map_err(|_| fmt::Error)?
+                            } else {
+                                len
+                            };
+                            input.slice(low, high, max, count == 4)?
                         }
                     }
                 }
@@ -297,6 +317,29 @@ impl<'a> ResultValue<'a> {
                     .as_bytes()
                     .get(usize::try_from(key.integer()?).map_err(|_| fmt::Error)?)
                     .ok_or(fmt::Error)?,
+            ))),
+            _ => Err(fmt::Error),
+        }
+    }
+    fn slice(
+        self,
+        low: usize,
+        high: usize,
+        max: usize,
+        three_index: bool,
+    ) -> Result<Self, fmt::Error> {
+        if low > high || high > max {
+            return Err(fmt::Error);
+        }
+        match self {
+            Self::Matches(values) => {
+                if max > values.len() {
+                    return Err(fmt::Error);
+                }
+                Ok(Self::Matches(values.get(low..high).ok_or(fmt::Error)?))
+            }
+            Self::Scalar(Some(Value::String(value))) if !three_index => Ok(Self::Scalar(Some(
+                Value::String(value.get(low..high).ok_or(fmt::Error)?),
             ))),
             _ => Err(fmt::Error),
         }

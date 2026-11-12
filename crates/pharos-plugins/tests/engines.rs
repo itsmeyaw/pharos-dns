@@ -275,3 +275,18 @@ fn else_if_selects_first_truthy_branch() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "second");
 }
+
+#[test]
+fn slice_builtin_slices_strings_and_capture_lists() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["whole", "first", "second"];
+    let template = Template::compile(
+        "{{ slice .Name 0 7 }}|{{ slice .Match 1 3 | len }}|{{ index (slice .Match 1) 0 }}",
+    )
+    .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "example|2|first");
+}
