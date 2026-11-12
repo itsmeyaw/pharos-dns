@@ -311,6 +311,9 @@ fn covered<'a>(records: impl Iterator<Item = pharos_proto::Record<'a>>) -> Vec<T
 async fn signed_response_preserves_out_of_zone_rrset_ttls() {
     let dnssec = plugin("miek.nl", KEY);
     let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let other: Name = "outside.example.".parse().unwrap();
+    let other = NameRef::parse(other.as_wire(), 0).unwrap();
+    // Repeat to check that a cache hit preserves the TTLs.
     for _ in 0..2 {
         let (outcome, wire) =
             serve(&dnssec, &q, Reply::OutOfZoneTtl, Protocol::Udp, 4096, 4096).await;
@@ -334,9 +337,7 @@ async fn signed_response_preserves_out_of_zone_rrset_ttls() {
             assert_eq!(
                 records
                     .iter()
-                    .filter(
-                        |rr| rr.rtype == Type::RRSIG && rr.name.to_string() == "outside.example."
-                    )
+                    .filter(|rr| rr.rtype == Type::RRSIG && rr.name == other)
                     .map(|rr| rr.ttl.to_be_bytes())
                     .collect::<Vec<_>>(),
                 [300u32.to_be_bytes(), 30u32.to_be_bytes()]
