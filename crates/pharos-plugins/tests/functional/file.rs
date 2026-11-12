@@ -101,22 +101,41 @@ async fn serves_aliases_wildcards_and_referrals() {
 
 #[tokio::test]
 async fn reload_replaces_only_changed_serial() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/file-reload-test.zone");
-    let original = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone")).unwrap();
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-reload-test.zone");
+    let original = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    ))
+    .unwrap();
     std::fs::write(&path, &original).unwrap();
-    let corefile = format!("example.org:53 {{\n file {} {{\n reload 10ms\n }}\n}}", path.display());
+    let corefile = format!(
+        "example.org:53 {{\n file {} {{\n reload 10ms\n }}\n}}",
+        path.display()
+    );
     let blocks = parse("Corefile", &corefile).unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let chain = &configured[0].config;
     chain.lifecycle.run(Phase::Startup).await.unwrap();
-    std::fs::write(&path, original.replace(" 1 7200", " 2 7200").replace("192.0.2.1", "192.0.2.9")).unwrap();
+    std::fs::write(
+        &path,
+        original
+            .replace(" 1 7200", " 2 7200")
+            .replace("192.0.2.1", "192.0.2.9"),
+    )
+    .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         let name: Name = "www.example.org.".parse().unwrap();
         let mut wire = Vec::with_capacity(512);
         let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
-        builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
         let _ = builder.finish();
         let mut response = Vec::with_capacity(512);
         let mut slots = [None; 8];
@@ -133,7 +152,9 @@ async fn reload_replaces_only_changed_serial() {
         };
         assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
         let response = Message::parse(&response).unwrap();
-        if response.answers().next().unwrap().rdata == [192, 0, 2, 9] { break; }
+        if response.answers().next().unwrap().rdata == [192, 0, 2, 9] {
+            break;
+        }
         assert!(std::time::Instant::now() < deadline, "Zone did not reload");
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }

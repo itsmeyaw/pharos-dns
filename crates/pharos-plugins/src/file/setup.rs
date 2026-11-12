@@ -8,6 +8,7 @@ pub(crate) fn setup(
         .map(|key| key.domain.as_str())
         .collect::<Vec<_>>();
     let file = super::File::parse(cursor, &domains, crate::root_path(&block.config))?;
+    file.register_hooks(&mut block.config.lifecycle);
     block.config.file = Some(file);
     Ok(())
 }

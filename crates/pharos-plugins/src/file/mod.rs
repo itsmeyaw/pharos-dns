@@ -8,7 +8,12 @@ use pharos_proto::{
     zone::{ZoneParser, ZoneRecord},
 };
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
-use std::{io::BufReader, path::Path, sync::Arc};
+use std::{
+    io::BufReader,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime},
+};
 
 /// Immutable authoritative Zone data, reusable by Zone-serving Plugins.
 #[derive(Debug)]
@@ -60,12 +65,71 @@ impl Zone {
             .iter()
             .any(|rr| contains_wire(rr.owner.as_wire(), name))
     }
+
+    fn serial(&self) -> Option<u32> {
+        let soa = self.records.iter().find(|rr| rr.rtype == Type::SOA)?;
+        let offset = soa.rdata.len().checked_sub(20)?;
+        Some(u32::from_be_bytes(
+            soa.rdata.get(offset..offset + 4)?.try_into().ok()?,
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct Loaded {
+    apex: Name,
+    path: PathBuf,
+    current: arc_swap::ArcSwapOption<Zone>,
+    interval: Duration,
+    by_mtime: bool,
+    modified: Mutex<Option<SystemTime>>,
+}
+
+impl Loaded {
+    fn reload(&self) -> bool {
+        let modified = if self.by_mtime {
+            let Ok(modified) =
+                std::fs::metadata(&self.path).and_then(|metadata| metadata.modified())
+            else {
+                return false;
+            };
+            if self
+                .modified
+                .lock()
+                .unwrap()
+                .is_some_and(|old| modified <= old)
+            {
+                return false;
+            }
+            Some(modified)
+        } else {
+            None
+        };
+        let Ok(next) = Zone::load(self.apex.clone(), &self.path) else {
+            return false;
+        };
+        if !self.by_mtime
+            && self
+                .current
+                .load()
+                .as_ref()
+                .is_some_and(|old| old.serial() == next.serial())
+        {
+            return false;
+        }
+        self.current.store(Some(Arc::new(next)));
+        if self.by_mtime {
+            *self.modified.lock().unwrap() = modified;
+        }
+        true
+    }
 }
 
 #[derive(Debug)]
 pub struct File {
-    zones: Vec<Arc<Zone>>,
+    zones: Vec<Arc<Loaded>>,
     fallthrough: Vec<Name>,
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl File {
@@ -76,17 +140,14 @@ impl File {
     ) -> Result<Self, Error> {
         let mut zones = Vec::new();
         let mut fallthrough = Vec::new();
+        let mut reload = Duration::from_secs(60);
+        let mut by_mtime = false;
         while cursor.next() {
             let args = cursor.remaining_args();
             let path = args.first().ok_or_else(|| cursor.arg_err())?;
             let path = crate::resolve_path(path.into(), root);
             let names = args[1..].iter().map(String::as_str).collect::<Vec<_>>();
-            for domain in origins_from_args_or_server_block(&names, server_domains) {
-                let apex = domain.parse().map_err(|_| cursor.error("invalid Zone"))?;
-                zones.push(Arc::new(
-                    Zone::load(apex, &path).map_err(|error| cursor.error(error))?,
-                ));
-            }
+            let origins = origins_from_args_or_server_block(&names, server_domains);
             while cursor.next_block() {
                 let option = cursor.val().to_owned();
                 let args = cursor.remaining_args();
@@ -103,15 +164,83 @@ impl File {
                             }
                         }
                     }
-                    "reload"
-                        if !args.is_empty()
-                            && crate::health::parse_duration(&args[0]).is_some() => {}
-                    "reload_by_mtime" | "upstream" => {}
+                    "reload" if !args.is_empty() => {
+                        reload = crate::health::parse_duration(&args[0])
+                            .ok_or_else(|| cursor.arg_err())?
+                    }
+                    "reload_by_mtime" => by_mtime = true,
+                    "upstream" => {}
                     _ => return Err(cursor.arg_err()),
                 }
             }
+            for origin in origins {
+                let apex: Name = origin.parse().map_err(|_| cursor.error("invalid Zone"))?;
+                let opened = std::fs::File::open(&path);
+                let modified = opened
+                    .as_ref()
+                    .ok()
+                    .and_then(|file| file.metadata().ok())
+                    .and_then(|metadata| metadata.modified().ok());
+                let current = match opened {
+                    Ok(_) => Some(Arc::new(
+                        Zone::load(apex.clone(), &path).map_err(|error| cursor.error(error))?,
+                    )),
+                    Err(error) if reload.is_zero() => return Err(cursor.error(error.to_string())),
+                    Err(_) => None,
+                };
+                zones.push(Arc::new(Loaded {
+                    apex,
+                    path: path.clone(),
+                    current: arc_swap::ArcSwapOption::from(current),
+                    interval: reload,
+                    by_mtime,
+                    modified: Mutex::new(modified),
+                }));
+            }
         }
-        Ok(Self { zones, fallthrough })
+        Ok(Self {
+            zones,
+            fallthrough,
+            tasks: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    fn register_hooks(&self, lifecycle: &mut pharos_server::Lifecycle) {
+        let zones = self.zones.clone();
+        let tasks = Arc::clone(&self.tasks);
+        lifecycle.register(pharos_server::Phase::Startup, move || {
+            let zones = zones.clone();
+            let tasks = Arc::clone(&tasks);
+            async move {
+                let mut tasks = tasks.lock().unwrap();
+                for zone in zones {
+                    if zone.interval.is_zero() {
+                        continue;
+                    }
+                    tasks.push(tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(zone.interval).await;
+                            let zone = Arc::clone(&zone);
+                            let _ = tokio::task::spawn_blocking(move || zone.reload()).await;
+                        }
+                    }));
+                }
+                Ok(())
+            }
+        });
+        let tasks = Arc::clone(&self.tasks);
+        let stop = move || {
+            let tasks = std::mem::take(&mut *tasks.lock().unwrap());
+            async move {
+                for task in tasks {
+                    task.abort();
+                    let _ = task.await;
+                }
+                Ok(())
+            }
+        };
+        lifecycle.register(pharos_server::Phase::Restart, stop.clone());
+        lifecycle.register(pharos_server::Phase::Shutdown, stop);
     }
 }
 
@@ -148,13 +277,17 @@ impl Plugin for File {
         }
         len += 1;
         let name = &wire[..len];
-        let Some(zone) = self
+        let Some(loaded) = self
             .zones
             .iter()
             .filter(|zone| contains(name, &zone.apex))
             .max_by_key(|zone| zone.apex.label_count())
         else {
             return next.run(cx).await;
+        };
+        let snapshot = loaded.current.load();
+        let Some(zone) = snapshot.as_ref() else {
+            return Outcome::Unanswered(Rcode::SERVFAIL);
         };
         if matches!(question.qtype, Type::AXFR | Type::IXFR) {
             return Outcome::Unanswered(Rcode::REFUSED);
