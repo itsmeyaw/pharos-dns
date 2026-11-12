@@ -344,9 +344,43 @@ struct Loaded {
 
 impl Loaded {
     fn reload(&self) -> bool {
+        self.reload_with_open(|path| std::fs::File::open(path))
+    }
+
+    fn reload_with_open(&self, open: impl FnOnce(&Path) -> std::io::Result<std::fs::File>) -> bool {
         // A cancelled blocking reload can outlive Restart; serialize generation swaps.
         let _gate = self.reload_gate.lock().unwrap();
-        let file = match std::fs::File::open(&self.path) {
+        // CoreDNS samples the path mtime before opening the Zone on reload.
+        let modified = if self.by_mtime {
+            let modified =
+                match std::fs::metadata(&self.path).and_then(|metadata| metadata.modified()) {
+                    Ok(modified) => modified,
+                    Err(error) => {
+                        pharos_server::logging::log(
+                            "ERROR",
+                            "file",
+                            &format!(
+                                "Failed to stat Zone {} in {}: {error}",
+                                self.apex,
+                                self.path.display()
+                            ),
+                        );
+                        return false;
+                    }
+                };
+            if self
+                .modified
+                .lock()
+                .unwrap()
+                .is_some_and(|old| modified <= old)
+            {
+                return false;
+            }
+            Some(modified)
+        } else {
+            None
+        };
+        let file = match open(&self.path) {
             Ok(file) => file,
             Err(error) => {
                 pharos_server::logging::log(
@@ -360,34 +394,6 @@ impl Loaded {
                 );
                 return false;
             }
-        };
-        let modified = if self.by_mtime {
-            let modified = match file.metadata().and_then(|metadata| metadata.modified()) {
-                Ok(modified) => modified,
-                Err(error) => {
-                    pharos_server::logging::log(
-                        "ERROR",
-                        "file",
-                        &format!(
-                            "Failed to stat Zone {} in {}: {error}",
-                            self.apex,
-                            self.path.display()
-                        ),
-                    );
-                    return false;
-                }
-            };
-            if self
-                .modified
-                .lock()
-                .unwrap()
-                .is_some_and(|old| modified <= old)
-            {
-                return false;
-            }
-            Some(modified)
-        } else {
-            None
         };
         let serial = if self.by_mtime {
             Some(0)
