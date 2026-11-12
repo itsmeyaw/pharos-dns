@@ -1601,6 +1601,7 @@ fn build_cname_response_stack(
     from: &NameText,
     target: &Name,
 ) -> Result<(), ServerError> {
+    // shortcut: 64 KiB stack zeroed per Query without an edns0 rule; reuse scratch if profiling shows it matters.
     let mut scratch = [0u8; 65535];
     build_cname_response(cx, lookup, from, target, &mut scratch)
 }
@@ -1863,6 +1864,7 @@ fn build_reverted_response_stack<'q>(
     history: &NameHistory<'q>,
     end_and_rcode: (usize, u16),
 ) -> Result<(), ServerError> {
+    // shortcut: 64 KiB stack zeroed per Query without an edns0 rule; reuse scratch if profiling shows it matters.
     let mut scratch = [0u8; 65535];
     build_reverted_response(
         cx,
