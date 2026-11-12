@@ -142,6 +142,7 @@ impl Zone {
             keep
         });
         let mut nodes: BTreeMap<Name, ZoneNode> = BTreeMap::new();
+        // RFC 1034 §3.1: ancestors may exist as empty nonterminals.
         for (index, record) in records.iter().enumerate() {
             let apex_record = record.owner == apex
                 && (matches!(record.rtype, Type::SOA | Type::NS)
@@ -304,6 +305,7 @@ fn normalize_rdata_name(
     mut offset: usize,
     lowercase: bool,
 ) -> Result<usize, String> {
+    // RFC 1035 §3.1: wire labels are length-prefixed and at most 63 octets.
     let start = offset;
     loop {
         let len = usize::from(*data.get(offset).ok_or("invalid domain name RDATA")?);
