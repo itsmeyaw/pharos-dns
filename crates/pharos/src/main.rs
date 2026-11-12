@@ -102,8 +102,23 @@ fn options() -> Result<Options, (u8, String)> {
     Ok(options)
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // Plugin Chain poll depth can exceed Tokio's 2 MiB default; see #90.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            pharos_server::logging::log("ERROR", "", &error.to_string());
+            return ExitCode::from(1);
+        }
+    };
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> ExitCode {
     let options = match options() {
         Ok(options) => options,
         Err((code, error)) => {
