@@ -146,6 +146,71 @@ async fn signed_axfr_client_authenticates_stream() {
     listener.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn signed_axfr_client_rejects_unsigned_last_and_tampering() {
+    for tamper in [false, true] {
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = socket.accept().await.unwrap();
+            let len = connection.read_u16().await.unwrap();
+            let mut query = vec![0; usize::from(len)];
+            connection.read_exact(&mut query).await.unwrap();
+            let key = pharos_proto::TsigKey::new(
+                "key.".parse().unwrap(),
+                pharos_proto::TsigAlgorithm::Sha256,
+                b"secret",
+            );
+            let mac = pharos_proto::TsigRecord::parse(&query).unwrap().mac;
+            let mut signer = pharos_proto::TsigStream::new(&key, mac);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            for index in 0..2 {
+                let mut response = vec![0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+                response.extend_from_slice(&[
+                    1, b'a', 0, 0, 6, 0, 1, 0, 0, 0, 60, 0, 22, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0,
+                    0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
+                ]);
+                if index == 0 || tamper {
+                    signer.sign(&mut response, now, 300).unwrap();
+                }
+                if index == 1 && tamper {
+                    response[3] ^= 1;
+                }
+                connection
+                    .write_all(&(response.len() as u16).to_be_bytes())
+                    .await
+                    .unwrap();
+                connection.write_all(&response).await.unwrap();
+            }
+        });
+        let key = pharos_proto::TsigKey::new(
+            "key.".parse().unwrap(),
+            pharos_proto::TsigAlgorithm::Sha256,
+            b"secret",
+        );
+        let mut count = 0;
+        let error = pharos_server::transfer::axfr_signed(
+            address,
+            &"a.".parse().unwrap(),
+            1,
+            Duration::from_secs(3),
+            &key,
+            |_| {
+                count += 1;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(count, 1);
+        server.await.unwrap();
+    }
+}
+
 struct BadClosingSoa;
 
 struct PanickingTransfer;
