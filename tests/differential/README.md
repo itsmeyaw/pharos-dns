@@ -50,8 +50,7 @@ The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS
 Responses, and the harness cannot mask that difference.
 
-The `tsig` transfer README example is skipped until the `file` Plugin is
-available. Signed scenarios authenticate each Response before comparing its
+The `tsig` transfer README example uses a small file Zone. Signed scenarios authenticate each Response before comparing its
 other fields; TSIG timestamps and MAC bytes are not compared between servers.
 The `tsig-forward` README example replaces its unreachable external Upstream
 with a local deterministic fixture.

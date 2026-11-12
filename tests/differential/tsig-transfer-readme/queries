@@ -1,0 +1,2 @@
+example.zone. AXFR IN tcp
+example.zone. AXFR IN tcp +tsig=example.zone.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=
