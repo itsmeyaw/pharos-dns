@@ -47,19 +47,22 @@ impl Dnssec {
             .iter()
             .find(|(address, _)| *address == cx.local)
             .map(|(_, metrics)| metrics);
-        let mut cache = self.cache.lock().map_err(|_| Error::InvalidQuery)?;
-        if let Some(entry) = cache.get(cx.response.get(2..).ok_or(Error::InvalidQuery)?)
-            && entry.valid(now, cx.max_response_size)
         {
-            if let Some(metrics) = metrics {
-                metrics.hit(entry.sets);
+            let cache = self.cache.lock().map_err(|_| Error::InvalidQuery)?;
+            if let Some(entry) = cache.get(cx.response.get(2..).ok_or(Error::InvalidQuery)?)
+                && entry.valid(now, cx.max_response_size)
+            {
+                if let Some(metrics) = metrics {
+                    metrics.hit(entry.sets);
+                }
+                let id = [cx.response[0], cx.response[1]];
+                cx.response.clear();
+                cx.response.extend_from_slice(&entry.wire);
+                cx.response[..2].copy_from_slice(&id);
+                return Ok(());
             }
-            let id = [cx.response[0], cx.response[1]];
-            cx.response.clear();
-            cx.response.extend_from_slice(&entry.wire);
-            cx.response[..2].copy_from_slice(&id);
-            return Ok(());
         }
+        // shortcut: concurrent misses can sign twice; add bounded single-flight when RRset caching is implemented.
         // shortcut: cache misses allocate for canonical RRsets and signing; remove when signing accepts caller buffers.
         let original = cx.response.clone();
         let message = Message::parse(&original).map_err(|_| Error::InvalidQuery)?;
@@ -195,7 +198,9 @@ impl Dnssec {
             metrics.miss(signed_sets);
         }
         if self.capacity > 0 {
+            let mut cache = self.cache.lock().map_err(|_| Error::InvalidQuery)?;
             if cache.len() >= self.capacity
+                && !cache.contains_key(&original[2..])
                 && let Some(key) = cache.keys().next().cloned()
             {
                 cache.remove(&key);
