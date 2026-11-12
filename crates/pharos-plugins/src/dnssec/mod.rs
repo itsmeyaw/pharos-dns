@@ -23,14 +23,12 @@ pub struct Dnssec {
 
 impl Plugin for Dnssec {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        let Some(question) = cx.query.questions().next() else {
-            return next.run(cx).await;
-        };
-        let Some(zone) = self.zone_for(question.name) else {
-            return next.run(cx).await;
-        };
-        let do_bit = cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
-        let intercepted = question.qtype == Type::DNSKEY && question.name == *zone;
+        let matching = cx.query.questions().next().and_then(|question| {
+            self.zone_for(question.name)
+                .map(|zone| question.qtype == Type::DNSKEY && question.name == *zone)
+        });
+        let do_bit = matching.is_some() && cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
+        let intercepted = matching.unwrap_or(false);
         let outcome = if intercepted {
             match self.dnskey(cx) {
                 Ok(()) => Outcome::Response,
