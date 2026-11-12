@@ -25,6 +25,7 @@ pub(super) enum Snapshot {
     NamespaceOnly,
 }
 
+// CoreDNS retains lookup results across Self Lookups, even if the Kubernetes data changes.
 pub(super) fn capture(index: &Index, req: &Request<'_>, headless: bool) -> Snapshot {
     let Ok(namespace) = std::str::from_utf8(req.namespace) else {
         return Snapshot::MissingNamespace;
