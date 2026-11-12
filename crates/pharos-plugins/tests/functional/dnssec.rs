@@ -238,6 +238,83 @@ impl Next for Negative {
     }
 }
 
+// CoreDNS v1.15.0 plugin/dnssec/dnssec.go: NSEC queries move only the final two records.
+#[tokio::test]
+async fn negative_nsec_returns_last_two_records_for_any_key_count() {
+    let base = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+    );
+    let domain: Name = "miek.nl.".parse().unwrap();
+    let name: Name = "missing.miek.nl.".parse().unwrap();
+    let mut wire = Vec::with_capacity(1232);
+    let mut builder = MessageBuilder::new(&mut wire, 1232, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::NSEC,
+            Class::IN,
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(1232),
+            0x8000,
+            &[],
+        )
+        .unwrap();
+    let _ = builder.finish();
+    for keys in [
+        String::new(),
+        format!("key file {base}"),
+        format!("key file {base} {base}"),
+    ] {
+        let text = format!("miek.nl {{\n dnssec {{\n {keys}\n }}\n}}");
+        let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        let mut response = Vec::with_capacity(1232);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 1232,
+        };
+        assert_eq!(
+            chain[0]
+                .config
+                .dnssec
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, Negative(true))
+                .await,
+            Outcome::Response
+        );
+        let reply = Message::parse(cx.response).unwrap();
+        assert_eq!(reply.authority_count(), 0);
+        let types: Vec<_> = reply.answers().map(|rr| rr.rtype).collect();
+        assert_eq!(
+            types,
+            if keys.is_empty() {
+                vec![Type::SOA, Type::NSEC]
+            } else {
+                vec![Type::RRSIG, Type::NSEC]
+            },
+            "{keys}"
+        );
+        if !keys.is_empty() {
+            verify_signatures(&reply.answers().collect::<Vec<_>>());
+        }
+    }
+}
+
 struct Referral(bool);
 impl Next for Referral {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {

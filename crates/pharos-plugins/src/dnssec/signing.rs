@@ -135,6 +135,21 @@ impl Dnssec {
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(Error::Build)?;
         }
+        // CoreDNS plugin/dnssec: without keys, the final pair is SOA and NSEC.
+        if special_nsec && self.keys.is_empty() {
+            let rr = message.authorities().next().ok_or(Error::InvalidQuery)?;
+            let data = rr.data().map_err(|_| Error::InvalidQuery)?;
+            builder
+                .record_with(
+                    Section::Answer,
+                    rr.name,
+                    rr.rtype,
+                    rr.class,
+                    rr.ttl,
+                    |writer| data.write(writer),
+                )
+                .map_err(Error::Build)?;
+        }
         let mut signed_sets = 0;
         let mut attempted_sets = 0;
         for (section, records) in [
@@ -182,8 +197,15 @@ impl Dnssec {
                 } else {
                     rr.ttl
                 };
-                signed_sets +=
-                    usize::from(self.sign_set(&mut builder, section, &group, zone, now, ttl)?);
+                signed_sets += usize::from(self.sign_set(
+                    &mut builder,
+                    section,
+                    &group,
+                    zone,
+                    now,
+                    ttl,
+                    false,
+                )?);
                 attempted_sets += 1;
             }
             if let Some(lie) = &lie
@@ -195,8 +217,15 @@ impl Dnssec {
                     }
             {
                 let rr = lie.answers().next().ok_or(Error::InvalidQuery)?;
-                signed_sets +=
-                    usize::from(self.sign_set(&mut builder, section, &[rr], zone, now, rr.ttl)?);
+                signed_sets += usize::from(self.sign_set(
+                    &mut builder,
+                    section,
+                    &[rr],
+                    zone,
+                    now,
+                    rr.ttl,
+                    special_nsec,
+                )?);
                 attempted_sets += 1;
                 let data = rr.data().map_err(|_| Error::InvalidQuery)?;
                 builder
@@ -243,6 +272,7 @@ impl Dnssec {
         zone: &pharos_proto::Name,
         now: u64,
         ttl: u32,
+        last_only: bool,
     ) -> Result<bool, Error> {
         let first = records.first().ok_or(Error::InvalidQuery)?;
         let signer = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
@@ -258,17 +288,23 @@ impl Dnssec {
                 })
             })
             .collect::<Result<_, Error>>()?;
-        let mut signed = false;
-        for (key, public) in self.keys.iter().zip(&self.public) {
-            if has_ksk
+        let keys = self.keys.iter().zip(&self.public).filter(|(key, _)| {
+            !(has_ksk
                 && has_zsk
                 && (key.public.flags & 257
                     != if first.rtype == Type::DNSKEY {
                         257
                     } else {
                         256
-                    })
-            {
+                    }))
+        });
+        // CoreDNS plugin/dnssec: special NSEC replies retain only the last signature.
+        let last_key = last_only
+            .then(|| keys.clone().last().map(|(key, _)| key))
+            .flatten();
+        let mut signed = false;
+        for (key, public) in keys {
+            if last_only && !last_key.is_some_and(|last| std::ptr::eq(last, key)) {
                 continue;
             }
             let labels = first.name.labels().count()
