@@ -1,0 +1,13 @@
+.:{port} {
+    secondary catalog.example {
+        transfer from 127.0.0.1:{port2}
+        catalog example.org internal.example
+    }
+}
+.:{port2} {
+    file db.catalog catalog.example
+    file db.example.org example.org
+    transfer {
+        to *
+    }
+}

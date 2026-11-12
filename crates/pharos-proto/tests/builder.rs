@@ -9,6 +9,35 @@ fn borrowed(value: &Name) -> NameRef<'_> {
 }
 
 #[test]
+fn rdata_can_disable_compression_for_zone_storage() {
+    let n = name("example.com.");
+    let mut bytes = Vec::with_capacity(512);
+    let mut b = MessageBuilder::new(&mut bytes, 512, 1, 0).unwrap();
+    b.record_with(
+        Section::Answer,
+        borrowed(&n),
+        Type::CNAME,
+        Class::IN,
+        30,
+        |writer| {
+            writer.disable_compression();
+            pharos_proto::Rdata::Cname(borrowed(&n)).write(writer)
+        },
+    )
+    .unwrap();
+    let _ = b.finish();
+    assert_eq!(
+        Message::parse(&bytes)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        n.as_wire()
+    );
+}
+
+#[test]
 fn fixed_storage_builds_questions_and_compressed_rdata() {
     use pharos_proto::{FixedBuffer, Rdata};
     let n = name("www.example.com.");

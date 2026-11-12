@@ -13,6 +13,7 @@
 - The acl Plugin setup and tests follow CoreDNS v1.15.0's `plugin/acl`.
 - The transfer Plugin setup and tests follow CoreDNS v1.15.0's `plugin/transfer`.
 - The file Plugin and tests follow CoreDNS v1.15.0's `plugin/file`.
+- The secondary Plugin and tests follow CoreDNS v1.15.0's `plugin/secondary`, `plugin/file/secondary.go`, and `plugin/pkg/catalog`.
 - The dns64 Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/dns64`.
 - The siit Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/siit`.
 - The rewrite Plugin and tests follow CoreDNS v1.15.0's `plugin/rewrite`.
@@ -216,6 +217,7 @@ insights.
 - License: BSD-3-Clause
 - Copyright (c) 2009, The Go Authors. Extensions copyright (c) 2011, Miek Gieben.
 - The autopath resolver-file search parser follows miekg/dns v1.1.73's `clientconfig.go`.
+- The CoreDNS-compatible AXFR client follows miekg/dns v1.1.73's `xfr.go`.
 - DNS code presentation names in `crates/pharos-proto/src/codes.rs` follow miekg/dns v1.1.73.
 - The DNSSEC interoperability verifier in `crates/pharos-dnssec/tests/interop` uses miekg/dns v1.1.73.
 - Response classification's signature validity check follows miekg/dns v1.1.73's `RRSIG.ValidityPeriod`.

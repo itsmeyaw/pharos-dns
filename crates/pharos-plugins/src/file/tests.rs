@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn shared_zone_snapshot_retains_previous_generation() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let path = Path::new("tests/fixtures/file/example.zone");
+    let original = Arc::new(crate::zone::Zone::load(apex.clone(), path).unwrap());
+    let holder = crate::zone::ZoneHolder::from(Some(Arc::clone(&original)));
+    let snapshot = holder.load_full().unwrap();
+    holder.store(None);
+    assert_eq!(snapshot.apex(), &apex);
+    assert!(holder.load_full().is_none());
+}
+
+#[cfg(feature = "plugin-transfer")]
+#[test]
+fn shared_zone_exposes_transfer_stream() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let zone =
+        Arc::new(Zone::load(apex.clone(), Path::new("tests/fixtures/file/example.zone")).unwrap());
+    let request = crate::transfer::TransferRequest {
+        zone: NameRef::parse(apex.as_wire(), 0).unwrap(),
+        qtype: Type::AXFR,
+        qclass: Class::IN,
+        serial: 0,
+        id: 1,
+        flags: 0,
+        protocol: Protocol::Tcp,
+    };
+    assert!(zone.transfer(request).is_ok());
+}
+
+#[test]
 fn records_construct_a_reusable_zone_with_indexed_names_and_types() {
     let apex: Name = "example.org.".parse().unwrap();
     let parser = ZoneParser::new(

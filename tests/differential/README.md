@@ -38,6 +38,8 @@ Each scenario is a directory containing:
   all other fields and record counts are compared.
 - Any other files or subdirectories are copied into separate temporary working
   directories for both processes, preserving relative paths.
+- `wait-zone` (optional): a Query whose positive answer indicates that an
+  asynchronously transferred secondary Zone is ready for comparisons.
 
 IDs and RR order within each section are ignored; all other fields are compared.
 Unsigned TCP AXFR comparisons collect the complete stream through its closing
@@ -50,6 +52,10 @@ the tests do not send traffic outside the local fixture.
 The intentionally invalid root-Server-Block example cannot produce DNS
 Responses because its SOA owner does not match the configured root Zone; the
 `coredns_readme_root_without_zone_is_invalid` test checks startup rejection.
+
+The `secondary` README scenarios replace the documented remote Primaries with
+local `file` and `transfer` fixtures. `wait-zone` waits for the asynchronous
+transfer, including the catalog member transfer, before comparing Responses.
 
 The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS

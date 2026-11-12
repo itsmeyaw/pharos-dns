@@ -448,6 +448,25 @@ fn kubernetes_ready(wire: &[u8]) -> bool {
     })
 }
 
+fn transferred_zone_ready(wire: &[u8]) -> bool {
+    Message::parse(wire)
+        .is_ok_and(|message| message.rcode() == Rcode::NOERROR && message.answer_count() > 0)
+}
+
+fn wait_for_secondary(port: u16, line: &str) -> Result<(), String> {
+    let query = query::parse(line)?;
+    let wire = query.wire()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if exchange(port, query.transport, &wire).is_ok_and(|reply| transferred_zone_ready(&reply))
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(format!("secondary Zone not ready on {port}: {line}"))
+}
+
 fn kubernetes_http_ready(response: &[u8]) -> bool {
     response.starts_with(b"HTTP/1.1 200 ")
 }
@@ -627,6 +646,10 @@ fn scenario(
     }
     if has_port2 {
         ready(&mut c, &ccwd.with_extension("server.log"), cp2_num)?;
+    }
+    if let Ok(line) = fs::read_to_string(path.join("wait-zone")) {
+        wait_for_secondary(pp_num, line.trim())?;
+        wait_for_secondary(cp_num, line.trim())?;
     }
     let mut count = 0;
     for line in input

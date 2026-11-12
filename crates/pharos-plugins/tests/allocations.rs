@@ -51,6 +51,10 @@ fn run_isolated(name: &str) -> bool {
 #[path = "allocations/file_allocations.rs"]
 mod file_allocations;
 
+#[cfg(feature = "plugin-secondary")]
+#[path = "allocations/secondary_allocations.rs"]
+mod secondary_allocations;
+
 #[path = "allocations"]
 mod template {
     #[path = "template_allocations.rs"]

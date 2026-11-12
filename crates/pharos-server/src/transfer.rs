@@ -100,7 +100,18 @@ pub async fn axfr(
     deadline: Duration,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(address, zone, id, deadline, None, on_message).await
+    axfr_inner(address, zone, id, deadline, None, false, on_message).await
+}
+
+/// Receive an AXFR using CoreDNS's miekg/dns stream acceptance rules.
+pub async fn axfr_coredns(
+    address: SocketAddr,
+    zone: &Name,
+    id: u16,
+    deadline: Duration,
+    on_message: impl FnMut(Message<'_>) -> io::Result<()>,
+) -> io::Result<()> {
+    axfr_inner(address, zone, id, deadline, None, true, on_message).await
 }
 
 /// Receive an authenticated AXFR incrementally. Discard partial data on error;
@@ -113,7 +124,7 @@ pub async fn axfr_signed(
     key: &TsigKey,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(address, zone, id, deadline, Some(key), on_message).await
+    axfr_inner(address, zone, id, deadline, Some(key), false, on_message).await
 }
 
 async fn axfr_inner(
@@ -122,6 +133,7 @@ async fn axfr_inner(
     id: u16,
     deadline: Duration,
     key: Option<&TsigKey>,
+    coredns: bool,
     mut on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
     // shortcut: buffers are allocated once per Zone Transfer; reuse across transfers when needed.
@@ -180,6 +192,34 @@ async fn axfr_inner(
                 .map_err(|_| invalid("invalid AXFR TSIG"))?;
         }
         let message = Message::parse(&wire).map_err(|_| invalid("invalid AXFR Message"))?;
+        if coredns {
+            // RFC 5936 §2.2: a Zone Transfer begins and ends with SOA.
+            if message.id() != id {
+                return Err(invalid("invalid AXFR Response ID"));
+            }
+            let first = opening.is_none();
+            if first {
+                if message.rcode() != Rcode::NOERROR
+                    || message
+                        .answers()
+                        .next()
+                        .is_none_or(|record| record.rtype != Type::SOA)
+                {
+                    return Err(invalid("AXFR must begin with SOA"));
+                }
+                opening = Some(Vec::new());
+            }
+            let done = (!first || message.answer_count() > 1)
+                && message
+                    .answers()
+                    .last()
+                    .is_some_and(|record| record.rtype == Type::SOA);
+            on_message(message)?;
+            if done {
+                return Ok(());
+            }
+            continue;
+        }
         // RFC 5936 §2.2: every Response belongs to the Query and carries its ID.
         if message.id() != id || message.flags() & 0x8000 == 0 || message.rcode() != Rcode::NOERROR
         {

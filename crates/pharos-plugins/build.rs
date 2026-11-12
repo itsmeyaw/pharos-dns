@@ -26,7 +26,7 @@ fn next_plugin(enabled: &[&str], start: usize) -> usize {
 
 fn transferer(name: &str) -> bool {
     // Add each implemented Transferer here; enabled retains Plugin Order.
-    matches!(name, "k8s_external" | "kubernetes" | "file")
+    matches!(name, "k8s_external" | "kubernetes" | "file" | "secondary")
 }
 
 fn registered_handler(name: &str) -> bool {
@@ -93,6 +93,7 @@ fn main() {
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",
             "file" => "file::File",
+            "secondary" => "secondary::Secondary",
             "erratic" => "erratic::Erratic",
             _ => "Unimplemented",
         };
@@ -144,6 +145,7 @@ fn main() {
             "reload" => "reload::setup::setup",
             "errors" => "errors::setup::setup",
             "file" => "file::setup::setup",
+            "secondary" => "secondary::setup::setup",
             "erratic" => "erratic::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",
@@ -230,7 +232,7 @@ fn main() {
         let next = next_plugin(&enabled, i + 1);
         let call = if *name == "transfer" {
             format!("plugin.serve_with(cx, Next{i}(self), Some(&ChainTransferers(self))).await")
-        } else if *name == "file" {
+        } else if *name == "file" || *name == "secondary" {
             let tail = enabled
                 .iter()
                 .skip(i + 1)
