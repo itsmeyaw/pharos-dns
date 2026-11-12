@@ -40,26 +40,15 @@ impl pharos_server::Chain for TruncatedRoute {
     }
 }
 
-#[test]
-fn services_are_answered_from_watched_kubernetes_objects() {
+#[tokio::test]
+async fn services_are_answered_from_watched_kubernetes_objects() {
     if crate::run_isolated(
         "kubernetes::kubernetes_services::services_are_answered_from_watched_kubernetes_objects",
     ) {
         return;
     }
-    // This fixture holds many distinct Plugin Chain futures in one test future.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(services_scenario())
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    // Spawn the whole multi-Query fixture once, before measuring allocations.
+    tokio::spawn(services_scenario()).await.unwrap();
 }
 
 async fn services_scenario() {
