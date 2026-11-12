@@ -6,6 +6,35 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn external_serial_tracks_service_updates_without_changing_internal_serial() {
+        let store = Store::default();
+        let mut item = service("10.0.0.1");
+        item.version = "1".into();
+        store.apply_service(item.clone());
+        store.0.write().unwrap().serial = 1;
+        assert_eq!(store.with_read(|index| index.external_serial()), 0);
+        item.version = "2".into();
+        item.external_ips = vec!["192.0.2.2".into()];
+        store.apply_service(item);
+        store.with_read(|index| {
+            assert_ne!(index.external_serial(), 0);
+            assert_eq!(index.serial(), 1);
+        });
+    }
+
+    #[test]
+    fn external_serial_tracks_service_updates_after_relist() {
+        let store = Store::default();
+        let mut item = service("10.0.0.1");
+        item.version = "1".into();
+        store.replace_services(vec![item.clone()]);
+        item.version = "2".into();
+        item.external_ips = vec!["192.0.2.2".into()];
+        store.replace_services(vec![item]);
+        assert_ne!(store.with_read(|index| index.external_serial()), 0);
+    }
+
+    #[test]
     fn change_signals_do_not_depend_on_serial_advancing() {
         let store = Store::default();
         let mut changes = store.subscribe_changes();
@@ -550,6 +579,7 @@ pub struct Changes {
 #[derive(Default)]
 pub struct Index {
     serial: u32,
+    external_serial: u32,
     multicluster_serial: u32,
     changes: tokio::sync::watch::Sender<Changes>,
     allowed_namespaces: HashSet<Arc<str>>,
@@ -616,6 +646,10 @@ impl Index {
         self.multicluster_serial
     }
 
+    pub fn external_serial(&self) -> u32 {
+        self.external_serial
+    }
+
     fn signal_multicluster(&self) {
         self.changes.send_modify(|changes| {
             changes.multicluster = changes.multicluster.wrapping_add(1);
@@ -631,6 +665,13 @@ impl Index {
     fn mark_multicluster_modified(&mut self) {
         self.signal_multicluster();
         self.multicluster_serial = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+    }
+
+    fn mark_external_modified(&mut self) {
+        self.external_serial = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as u32;
@@ -1046,6 +1087,12 @@ impl Store {
     }
     pub(crate) fn apply_service(&self, object: Service) {
         let mut index = self.0.write().unwrap();
+        if index
+            .service_unfiltered(&object.namespace, &object.name)
+            .is_some_and(|old| service_external_changed(old, &object))
+        {
+            index.mark_external_modified();
+        }
         if service_changed(
             index.service_unfiltered(&object.namespace, &object.name),
             &object,
@@ -1070,6 +1117,13 @@ impl Store {
     }
     pub(crate) fn replace_services(&self, objects: Vec<Service>) {
         let mut index = self.0.write().unwrap();
+        if objects.iter().any(|object| {
+            index
+                .service_unfiltered(&object.namespace, &object.name)
+                .is_some_and(|old| service_external_changed(old, object))
+        }) {
+            index.mark_external_modified();
+        }
         if index.services.values().map(HashMap::len).sum::<usize>() != objects.len()
             || objects.iter().any(|object| {
                 service_changed(
@@ -1224,6 +1278,10 @@ fn service_changed(old: Option<&Service>, new: &Service) -> bool {
         old.version != new.version
             && (old.external_name != new.external_name || old.ports != new.ports)
     })
+}
+
+fn service_external_changed(old: &Service, new: &Service) -> bool {
+    old.version != new.version && (old.external_ips != new.external_ips || old.ports != new.ports)
 }
 
 fn service_import_changed(old: &ServiceImport, new: &ServiceImport) -> bool {
