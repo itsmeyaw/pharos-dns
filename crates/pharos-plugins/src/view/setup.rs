@@ -1,11 +1,9 @@
 use pharos_corefile::{BlockContext, Cursor, Error};
 
+use super::View;
 use crate::{Chain, expression::Expression};
 
-pub(crate) fn setup(
-    cursor: &mut Cursor<'_>,
-    _block: &mut BlockContext<Chain>,
-) -> Result<(), Error> {
+pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) -> Result<(), Error> {
     cursor.next();
     let args = cursor.remaining_args();
     if args.len() != 1 {
@@ -19,5 +17,10 @@ pub(crate) fn setup(
         let source = cursor.remaining_args().join(" ");
         expressions.push(Expression::compile(&source).map_err(|err| cursor.error(err))?);
     }
-    Err(cursor.error("view routing is not implemented"))
+    block.view = true;
+    block.config.view = Some(View {
+        name: args[0].as_str().into(),
+        expressions,
+    });
+    Ok(())
 }

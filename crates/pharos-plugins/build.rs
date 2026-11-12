@@ -5,7 +5,15 @@ use std::{env, fmt::Write, fs, path::PathBuf};
 fn config_only(name: &str) -> bool {
     matches!(
         name,
-        "root" | "timeouts" | "debug" | "bind" | "multisocket" | "ready" | "health" | "reload"
+        "root"
+            | "timeouts"
+            | "debug"
+            | "bind"
+            | "multisocket"
+            | "ready"
+            | "health"
+            | "reload"
+            | "view"
     )
 }
 
@@ -187,7 +195,7 @@ fn main() {
     code.push_str("}\n");
     code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
-        if !config_only(name) {
+        if !config_only(name) || *name == "view" {
             write!(code, " && self.r#{name}.is_none()").unwrap();
         }
     }
@@ -195,11 +203,31 @@ fn main() {
         " }\nfn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {\nlet _ = &visit;\n",
     );
     for name in &enabled {
-        if !config_only(name) {
+        if !config_only(name) || *name == "view" {
             writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
         }
     }
     code.push_str("}\n");
+    if enabled.contains(&"view") {
+        code.push_str("fn has_view(&self) -> bool { self.view.is_some() }\nfn view_name(&self) -> &str { self.view.as_ref().map_or(\"\", |view| view.name.as_ref()) }\nfn matches_view(&self, cx: &pharos_server::Context<'_>) -> bool { self.view.as_ref().is_none_or(|view| view.matches(cx)) }\n");
+    }
+    if enabled.contains(&"metadata") {
+        code.push_str("fn has_metadata_collector(&self) -> bool { self.metadata.is_some() }\nfn collect_metadata(&self, cx: &mut pharos_server::Context<'_>) { let _ = &cx; ");
+        if enabled.contains(&"view") || enabled.contains(&"kubernetes") {
+            code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { ");
+            if enabled.contains(&"view") {
+                code.push_str("if let Some(view) = &self.view { cx.metadata.set_view_name(std::sync::Arc::clone(&view.name)); } ");
+            }
+            if enabled.contains(&"kubernetes") {
+                code.push_str(
+                    "if let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); } ",
+                );
+            }
+            code.push_str("} ");
+        }
+        code.push_str("}\n");
+    }
+    writeln!(code, "fn serve_with_collected_metadata(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send {{ self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
     if enabled.contains(&"loop") {
         code.push_str("fn parallel_query(&self, query: &pharos_proto::Message<'_>) -> Option<tokio::sync::watch::Receiver<bool>> { self.r#loop.as_ref().and_then(|plugin| plugin.parallel_query(query)) }\n");
     }

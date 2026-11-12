@@ -43,7 +43,7 @@ fn coredns_filter_accepts_only_all_true_results() {
                     .map(|s| Expression::compile(s).unwrap())
                     .collect(),
             };
-            assert_eq!(view.name, "test");
+            assert_eq!(view.name.as_ref(), "test");
             assert_eq!(view.matches(cx), expected, "{rules:?}");
         }
     });
@@ -107,4 +107,37 @@ fn coredns_view_delegates_to_next() {
             .poll(&mut TaskContext::from_waker(Waker::noop())),
         Poll::Ready(Outcome::Unanswered(pharos_proto::Rcode::REFUSED))
     );
+}
+
+#[test]
+fn readme_cidr_filters_ipv4_and_ipv6_clients() {
+    let wire =
+        b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
+    let domain: Name = ".".parse().unwrap();
+    for (address, cidr, expected) in [
+        ("127.0.0.1:1234", "127.0.0.0/24", true),
+        ("192.168.1.2:1234", "192.168.0.0/16", true),
+        ("[2001:db8::1]:1234", "2001:db8::/32", true),
+        ("203.0.113.1:1234", "127.0.0.0/24", false),
+    ] {
+        let expression = Expression::compile(&format!("incidr(client_ip(), '{cidr}')")).unwrap();
+        let view = View {
+            name: "cidr".into(),
+            expressions: vec![expression],
+        };
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let cx = Context {
+            query: Message::parse(wire).unwrap(),
+            client: address.parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(view.matches(&cx), expected, "{address} in {cidr}");
+    }
 }

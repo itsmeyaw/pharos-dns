@@ -3,17 +3,6 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 
-#[test]
-fn unfinished_view_fails_closed_at_setup() {
-    let blocks = parse("Corefile", ".:53 {\n view example {\n  expr true\n }\n}").unwrap();
-    let error = configure::<Chain>(&blocks, directives()).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("view routing is not implemented")
-    );
-}
-
 // Derived from CoreDNS v1.15.0 plugin/view/setup_test.go.
 #[test]
 fn coredns_view_setup_cases() {

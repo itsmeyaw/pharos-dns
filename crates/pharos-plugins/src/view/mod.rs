@@ -4,14 +4,14 @@ pub(crate) mod setup;
 
 use crate::expression::{Expression, Query, Scratch, Value};
 use pharos_server::{Context, Next, Outcome, Plugin};
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::Arc};
 
 thread_local! {
     static SCRATCH: RefCell<[u8; 65_535]> = const { RefCell::new([0; 65_535]) };
 }
 
 pub struct View {
-    pub name: String,
+    pub name: Arc<str>,
     pub expressions: Vec<Expression>,
 }
 
