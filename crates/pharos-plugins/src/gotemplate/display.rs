@@ -65,3 +65,14 @@ pub(super) fn questions(output: &mut impl Write, values: QuestionSlice<'_>) -> f
     }
     output.write_char(']')
 }
+
+pub(super) fn question_pointer(
+    output: &mut impl Write,
+    question: pharos_proto::Question<'_>,
+) -> fmt::Result {
+    write!(
+        output,
+        ";{}\t{}\t {}",
+        question.name, question.qclass, question.qtype
+    )
+}

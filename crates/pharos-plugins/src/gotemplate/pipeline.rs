@@ -76,6 +76,7 @@ enum ResultValue<'a> {
     Variables(&'a [(&'a str, Value<'a>)]),
     Questions(QuestionSlice<'a>),
     Question(pharos_proto::Question<'a>),
+    QuestionPointer(pharos_proto::Question<'a>),
     Stored(usize, usize),
 }
 
@@ -398,6 +399,9 @@ impl Pipeline {
                 "{{{} {} {}}}",
                 question.name, question.qtype.0, question.qclass.0
             ),
+            ResultValue::QuestionPointer(question) => {
+                super::display::question_pointer(output, question)
+            }
             ResultValue::Matches(values) => super::display::matches(output, values),
             ResultValue::Groups(values) => super::display::map(
                 output,
@@ -557,6 +561,12 @@ impl Atom {
                 write!(scratch, "{}", super::question_name(data)?)?;
                 Ok(ResultValue::Stored(start, scratch.len))
             }
+            Self::Field(Field::Question) if matches!(dot.base(), Dot::Root) => {
+                Ok(ResultValue::QuestionPointer(super::question(data)?))
+            }
+            Self::Field(Field::Root(field)) if matches!(field.as_ref(), Field::Question) => {
+                Ok(ResultValue::QuestionPointer(super::question(data)?))
+            }
             Self::Field(Field::Root(field)) if matches!(field.as_ref(), Field::QuestionName) => {
                 let start = scratch.len;
                 write!(scratch, "{}", super::question_name(data)?)?;
@@ -713,7 +723,8 @@ fn format_values(
             };
             argument += 1;
             let compatible = match verb {
-                's' | 'q' => value.is_string(),
+                's' => value.is_string() || matches!(value, ResultValue::QuestionPointer(_)),
+                'q' => value.is_string(),
                 'd' | 'x' | 'X' | 'o' | 'b' | 'c' => matches!(
                     value,
                     ResultValue::Scalar(Some(Value::Int(_))) | ResultValue::Uint(_)
@@ -748,6 +759,14 @@ fn format_values(
                             scratch.write_char(' ')?;
                         }
                     }
+                }
+                's' if matches!(value, ResultValue::QuestionPointer(_)) => {
+                    if precision.is_some() {
+                        return Err(fmt::Error);
+                    }
+                    let start = scratch.len;
+                    scratch.append(value)?;
+                    pad_segment(scratch, start, width, left, zero)?;
                 }
                 'd' | 'x' | 'X' | 'o' | 'b' => {
                     let (negative, number) = match value {
@@ -989,6 +1008,7 @@ impl Scratch<'_> {
                 "{{{} {} {}}}",
                 value.name, value.qtype.0, value.qclass.0
             ),
+            ResultValue::QuestionPointer(value) => super::display::question_pointer(self, value),
             ResultValue::Matches(values) => super::display::matches(self, values),
             ResultValue::Groups(values) => super::display::map(
                 self,
@@ -1031,6 +1051,7 @@ impl<'a> ResultValue<'a> {
             Self::Variables(value) => !value.is_empty(),
             Self::Questions(value) => value.start < value.end,
             Self::Question(_) => true,
+            Self::QuestionPointer(_) => true,
             Self::Stored(start, end) => {
                 let _ = scratch;
                 start != end
@@ -1225,6 +1246,7 @@ impl<'a> ResultValue<'a> {
             Self::Variables(_) => "map[string]interface {}",
             Self::Questions(_) => "[]dns.Question",
             Self::Question(_) => "dns.Question",
+            Self::QuestionPointer(_) => "*dns.Question",
         }
     }
 }

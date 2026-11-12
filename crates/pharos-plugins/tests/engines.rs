@@ -742,6 +742,21 @@ fn control_actions_accept_go_whitespace_and_comments() {
 }
 
 #[test]
+fn question_pointer_renders_like_miekg_and_supports_printf() {
+    let wire =
+        b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.org.", &metadata);
+    data.message = Some(&message);
+    let template = Template::compile("{{ .Question }}|{{ .Question | printf \"%s\" }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, ";Example.Org.\tIN\t A|;Example.Org.\tIN\t A");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

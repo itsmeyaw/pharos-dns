@@ -55,6 +55,7 @@ enum Field {
     CurrentQtype,
     CurrentQclass,
     Unknown,
+    Question,
     QuestionName,
     QueryScalar(QueryField),
     Name,
@@ -537,6 +538,9 @@ fn write_field(
             output,
             pipeline::QuestionSlice::new(data.message.ok_or(fmt::Error)?),
         ),
+        Field::Question if matches!(dot.base(), Dot::Root) => {
+            display::question_pointer(output, question(data)?)
+        }
         Field::QuestionName if matches!(dot.base(), Dot::Root) => {
             write!(output, "{}", question_name(data)?)
         }
@@ -891,6 +895,7 @@ fn parse_field(action: &str) -> Result<Field, String> {
         ".Group" => Ok(Field::Groups),
         ".Var" => Ok(Field::Variables),
         ".Message.Question" => Ok(Field::Questions),
+        ".Question" => Ok(Field::Question),
         ".Qtype" => Ok(Field::CurrentQtype),
         ".Qclass" => Ok(Field::CurrentQclass),
         ".Question.Name" => Ok(Field::QuestionName),
@@ -992,6 +997,10 @@ impl Field {
             Self::Questions if matches!(dot.base(), Dot::Root) => {
                 Ok(data.message.ok_or(fmt::Error)?.questions().next().is_some())
             }
+            Self::Question if matches!(dot.base(), Dot::Root) => {
+                question(data)?;
+                Ok(true)
+            }
             Self::Name if matches!(dot.base(), Dot::Question { .. }) => Ok(true),
             Self::CurrentQtype | Self::CurrentQclass
                 if matches!(dot.base(), Dot::Question { .. }) =>
@@ -1050,6 +1059,7 @@ impl Field {
             | Self::Groups
             | Self::Variables
             | Self::Questions
+            | Self::Question
             | Self::CurrentQtype
             | Self::CurrentQclass
             | Self::LocalQuestion(_, _)
@@ -1098,13 +1108,15 @@ fn truth_value(value: Value<'_>) -> bool {
 }
 
 fn question_name<'a>(data: &'a Data<'_, '_>) -> Result<NameRef<'a>, fmt::Error> {
-    Ok(data
-        .message
+    Ok(question(data)?.name)
+}
+
+fn question<'a>(data: &'a Data<'_, '_>) -> Result<Question<'a>, fmt::Error> {
+    data.message
         .ok_or(fmt::Error)?
         .questions()
         .next()
-        .ok_or(fmt::Error)?
-        .name)
+        .ok_or(fmt::Error)
 }
 
 impl QueryField {
