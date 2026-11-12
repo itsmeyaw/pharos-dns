@@ -112,28 +112,55 @@ fn fuzz_args(target: &str, short: bool) -> Vec<&str> {
 }
 
 #[cfg(unix)]
-fn configure_fuzz_command(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
+fn fuzz_descendants(pid: u32, result: &mut Vec<u32>) -> std::io::Result<()> {
+    let output = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(std::io::Error::other(format!(
+            "pgrep failed: {}",
+            output.status
+        )));
+    }
+    for value in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+        let child = value.parse::<u32>().map_err(std::io::Error::other)?;
+        fuzz_descendants(child, result)?;
+        result.push(child);
+    }
+    Ok(())
 }
 
-#[cfg(not(unix))]
-fn configure_fuzz_command(_: &mut Command) {}
-
-fn stop_fuzz_group(child: &mut std::process::Child) {
+fn stop_fuzz_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
-        // POSIX process groups let cancellation include cargo-fuzz and libFuzzer descendants.
-        let result = Command::new("/bin/kill")
-            .args(["-KILL", "--", &format!("-{}", child.id())])
-            .stderr(std::process::Stdio::null())
-            .status();
-        if !matches!(result, Ok(status) if status.success()) {
-            let _ = child.kill();
+        // POSIX process hierarchy: stop descendants before their cargo parent.
+        let mut descendants = Vec::new();
+        if let Err(error) = fuzz_descendants(child.id(), &mut descendants) {
+            eprintln!("could not enumerate fuzz descendants: {error}");
+        }
+        for signal in ["-TERM", "-KILL"] {
+            if signal == "-KILL" && !descendants.is_empty() {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            for pid in &descendants {
+                let _ = Command::new("/bin/kill")
+                    .args([signal, &pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
         }
     }
-    #[cfg(not(unix))]
     let _ = child.kill();
+}
+
+fn fuzz_command(target: &str, short: bool, oracle: &Path, root: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .args(fuzz_args(target, short))
+        .env("PHAROS_ZONE_ORACLE", oracle)
+        .current_dir(root.join("crates/pharos-proto"));
+    command
 }
 
 fn fuzz(short: bool) -> ExitCode {
@@ -168,18 +195,13 @@ fn fuzz(short: bool) -> ExitCode {
 
     let mut children = Vec::new();
     for target in FUZZ_TARGETS {
-        let mut command = Command::new("cargo");
-        command
-            .args(fuzz_args(target, short))
-            .env("PHAROS_ZONE_ORACLE", &oracle)
-            .current_dir(root.join("crates/pharos-proto"));
-        configure_fuzz_command(&mut command);
+        let mut command = fuzz_command(target, short, &oracle, root);
         match command.spawn() {
             Ok(child) => children.push((*target, child)),
             Err(error) => {
                 eprintln!("could not start {target}: {error}");
                 for (_, mut child) in children {
-                    stop_fuzz_group(&mut child);
+                    stop_fuzz_tree(&mut child);
                     let _ = child.wait();
                 }
                 return ExitCode::FAILURE;
@@ -196,7 +218,7 @@ fn fuzz(short: bool) -> ExitCode {
                 result => {
                     eprintln!("fuzz target {} failed: {result:?}", children[index].0);
                     for (_, mut child) in children {
-                        stop_fuzz_group(&mut child);
+                        stop_fuzz_tree(&mut child);
                         let _ = child.wait();
                     }
                     return ExitCode::FAILURE;
@@ -518,16 +540,21 @@ mod tests {
         };
         let mut command = Command::new("sh");
         command
-            .args(["-c", "sleep 30 & echo $!; wait"])
+            .args([
+                "-c",
+                "/bin/sh -c 'trap \"\" TERM; /bin/sleep 30 & echo $!; wait' & wait",
+            ])
             .stdout(Stdio::piped());
-        super::configure_fuzz_command(&mut command);
         let mut child = command.spawn().unwrap();
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut line)
             .unwrap();
         let grandchild: u32 = line.trim().parse().unwrap();
-        super::stop_fuzz_group(&mut child);
+        let mut descendants = Vec::new();
+        super::fuzz_descendants(child.id(), &mut descendants).unwrap();
+        assert!(descendants.len() >= 2 && descendants.contains(&grandchild));
+        super::stop_fuzz_tree(&mut child);
         let _ = child.wait();
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
@@ -548,6 +575,77 @@ mod tests {
             }
             std::thread::yield_now();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuzz_child_keeps_terminal_group_and_receives_interrupt() {
+        use std::{
+            io::{BufRead, BufReader},
+            os::unix::fs::PermissionsExt,
+            process::{Child, Command, Stdio},
+            sync::mpsc,
+            time::Duration,
+        };
+        struct Guard(Child);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                if self.0.try_wait().ok().flatten().is_none() {
+                    super::stop_fuzz_tree(&mut self.0);
+                }
+                let _ = self.0.wait();
+            }
+        }
+        let fixture = TempFixture::new();
+        fs::create_dir_all(fixture.path().join("crates/pharos-proto")).unwrap();
+        let cargo = fixture.path().join("cargo");
+        fs::write(&cargo, "#!/bin/sh\ntrap ':' TERM\n/bin/sh -c 'trap \"echo SIGNAL; exit 0\" INT; echo READY:$$; while :; do /bin/sleep 1; done'\n").unwrap();
+        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = super::fuzz_command("message", true, fixture.path(), fixture.path());
+        command.env("PATH", fixture.path()).stdout(Stdio::piped());
+        let mut child = Guard(command.spawn().unwrap());
+        let stdout = child.0.stdout.take().unwrap();
+        let (send, receive) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if send.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let line = receive.recv_timeout(Duration::from_secs(3)).unwrap();
+        let fuzzer: u32 = line.strip_prefix("READY:").unwrap().parse().unwrap();
+        let group = |pid: u32| {
+            let output = Command::new("ps")
+                .args(["-o", "pgid=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        assert_eq!(
+            group(child.0.id()),
+            group(std::process::id()),
+            "cargo left the terminal process group"
+        );
+        assert_eq!(
+            group(fuzzer),
+            group(std::process::id()),
+            "fuzzer left the terminal process group"
+        );
+        assert!(
+            Command::new("kill")
+                .args(["-INT", &fuzzer.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            receive.recv_timeout(Duration::from_secs(3)).unwrap(),
+            "SIGNAL"
+        );
+        assert!(child.0.wait().unwrap().success());
+        reader.join().unwrap();
     }
 
     #[test]
