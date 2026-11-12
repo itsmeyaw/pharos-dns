@@ -559,3 +559,62 @@ template ANY ANY invalid. {
             extra_text: b"Blocked due to RFC2606",
         }));
 }
+
+// Derived from CoreDNS TestVar: GroupMissing, QueryFunctions, BoolInTemplateCondition and NoVars.
+#[tokio::test]
+async fn coredns_variable_values_in_templates() {
+    let cases = [
+        (
+            r#"template IN TXT example. {
+ match ^(?P<a>[a-z]+)[.]example[.]$
+ var missing group('nosuchgroup') + group(9)
+ answer "{{ .Name }} 60 IN TXT \"empty={{ eq .Var.missing \"\" }}\""
+}"#,
+            Type::TXT,
+            b"\x0aempty=true".as_slice(),
+        ),
+        (
+            r#"template IN A example. {
+ var local incidr(client_ip(), '10.0.0.0/8')
+ answer "{{ .Name }} 60 IN A {{ if .Var.local }}10.0.0.1{{ else }}192.0.2.1{{ end }}"
+}"#,
+            Type::A,
+            &[10, 0, 0, 1],
+        ),
+        (
+            r#"template IN TXT example. {
+ answer "{{ .Name }} 60 IN TXT \"{{ len .Var }}\""
+}"#,
+            Type::TXT,
+            b"\x010".as_slice(),
+        ),
+    ];
+    for (directive, qtype, expected) in cases {
+        let (outcome, wire) = query(&chain(directive), "a.example.", qtype, Class::IN, &[]).await;
+        assert_eq!(outcome, Outcome::Response, "{directive}");
+        assert_eq!(
+            Message::parse(&wire)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .rdata,
+            expected
+        );
+    }
+
+    let chain = chain(
+        r#"template IN A example. {
+ var n name()
+ var t type()
+ var ip client_ip()
+ answer "{{ .Var.n }} 60 IN A {{ .Var.ip }}"
+ additional "{{ .Var.n }} 60 IN TXT \"{{ .Var.t }}\""
+}"#,
+    );
+    let (outcome, wire) = query(&chain, "a.example.", Type::A, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.answers().next().unwrap().rdata, &[10, 240, 0, 1]);
+    assert_eq!(response.additionals().next().unwrap().rdata, b"\x01A");
+}
