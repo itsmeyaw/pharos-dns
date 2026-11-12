@@ -70,11 +70,8 @@ pub async fn notify_from(
             let len = socket.recv(&mut wire).await?;
             let response =
                 Message::parse(&wire[..len]).map_err(|_| invalid("invalid NOTIFY Response"))?;
-            // RFC 1996 §3.3, §3.6: a NOTIFY Response has QR set and the request's ID.
-            if response.id() != id
-                || response.flags() & 0x8000 == 0
-                || response.opcode() != pharos_proto::Opcode::NOTIFY
-            {
+            // RFC 1996 §3.6: a NOTIFY Response carries the request's ID.
+            if response.id() != id {
                 return Err(invalid("NOTIFY was not accepted"));
             }
             if response.rcode() != Rcode::NOERROR {

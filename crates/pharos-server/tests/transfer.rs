@@ -558,6 +558,52 @@ async fn notify_sender_retries_refused_responses() {
 }
 
 #[tokio::test]
+async fn notify_accepts_noerror_without_qr_or_notify_opcode() {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let responder = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+        wire[2] &= !0xf8;
+        socket.send_to(&wire[..len], peer).await.unwrap();
+    });
+    pharos_server::transfer::notify(
+        address,
+        &"a.".parse().unwrap(),
+        42,
+        Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn notify_retries_response_with_wrong_id() {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let responder = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        for attempt in 0..2 {
+            let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+            if attempt == 0 {
+                wire[1] ^= 1;
+            }
+            socket.send_to(&wire[..len], peer).await.unwrap();
+        }
+    });
+    pharos_server::transfer::notify(
+        address,
+        &"a.".parse().unwrap(),
+        42,
+        Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    responder.await.unwrap();
+}
+
+#[tokio::test]
 async fn notify_sender_uses_configured_source_address() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
