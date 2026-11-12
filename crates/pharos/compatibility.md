@@ -193,6 +193,7 @@
 
 ## Server
 
+- View-aware routing and metrics perform per-Query dispatch checks even when no View is configured; no View filters run in that case.
 - The Rust `Server` API stores its Router in an `Arc`; callers adding blocks after construction must obtain unique access with `Arc::get_mut`.
 - The Rust Plugin API's `Context` has separate Query and Metadata lifetimes to support allocation-free internal Query rewrites.
 - Without `multisocket`, Pharos uses the CPU-quota-aware worker count for UDP; CoreDNS uses one socket.
