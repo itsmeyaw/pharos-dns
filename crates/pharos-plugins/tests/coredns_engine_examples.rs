@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use pharos_plugins::expression::{Expression, Query, Scratch, Value};
+use pharos_plugins::gotemplate::{Data, Template};
 use pharos_proto::Message;
 use pharos_server::{Metadata, Protocol};
 
@@ -80,4 +81,97 @@ fn view_readme_expressions_match_ipv4_ipv6_type_and_name() {
             Value::Bool(expected)
         );
     }
+}
+
+#[test]
+fn template_readme_record_examples_render_expected_records() {
+    // CoreDNS v1.15.0 plugin/template/README.md, Examples.
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("ip-10-11-12-13.example.", &metadata);
+    data.zone = "example.";
+    data.class = "IN";
+    data.matches = &["example.com.dc1.example.com.", "dc1.example.com."];
+    data.groups = &[("a", "10"), ("b", "11"), ("c", "12"), ("d", "13")];
+    data.variables = &[("ip", Value::String("192.168.1.2"))];
+    for (source, expected) in [
+        (
+            "invalid. 60 {{ .Class }} SOA ns.invalid. hostmaster.invalid. (1 60 60 60 60)",
+            "invalid. 60 IN SOA ns.invalid. hostmaster.invalid. (1 60 60 60 60)",
+        ),
+        (
+            "{{ .Zone }} 60 IN SOA ns.example.com hostmaster.example.com (1 60 60 60 60)",
+            "example. 60 IN SOA ns.example.com hostmaster.example.com (1 60 60 60 60)",
+        ),
+        (
+            "{{ index .Match 1 }} 60 IN SOA ns.{{ index .Match 1 }} hostmaster.{{ index .Match 1 }} (1 60 60 60 60)",
+            "dc1.example.com. 60 IN SOA ns.dc1.example.com. hostmaster.dc1.example.com. (1 60 60 60 60)",
+        ),
+        (
+            "{{ .Name }} 60 IN A {{ .Group.a }}.{{ .Group.b }}.{{ .Group.c }}.{{ .Group.d }}",
+            "ip-10-11-12-13.example. 60 IN A 10.11.12.13",
+        ),
+        (
+            "{{ .Name }} 60 IN PTR ip-{{ .Group.a }}-{{ .Group.b }}-{{ .Group.c }}-{{ .Group.d }}.example.",
+            "ip-10-11-12-13.example. 60 IN PTR ip-10-11-12-13.example.",
+        ),
+        (
+            "{{ .Name }} 60 IN A {{ .Var.ip }}",
+            "ip-10-11-12-13.example. 60 IN A 192.168.1.2",
+        ),
+        (
+            "{{ .Name }} 60 IN A {{ .Group.a}}.{{ .Group.b }}.{{ .Group.c }}.{{ .Group.d }}",
+            "ip-10-11-12-13.example. 60 IN A 10.11.12.13",
+        ),
+        (
+            "{{ .Name }} 60 IN A 10.{{ .Group.b }}.{{ .Group.c }}.{{ .Group.d }}",
+            "ip-10-11-12-13.example. 60 IN A 10.11.12.13",
+        ),
+        (
+            "{{ .Name }} 60 IN MX 10 {{ .Name }}",
+            "ip-10-11-12-13.example. 60 IN MX 10 ip-10-11-12-13.example.",
+        ),
+        (
+            "example. 60 IN NS ns0.example.",
+            "example. 60 IN NS ns0.example.",
+        ),
+        (
+            "example. 60 IN NS ns1.example.",
+            "example. 60 IN NS ns1.example.",
+        ),
+        (
+            "ns0.example. 60 IN A 203.0.113.8",
+            "ns0.example. 60 IN A 203.0.113.8",
+        ),
+        (
+            "ns1.example. 60 IN A 198.51.100.8",
+            "ns1.example. 60 IN A 198.51.100.8",
+        ),
+        (
+            "foogle.com 60 IN CNAME google.com",
+            "foogle.com 60 IN CNAME google.com",
+        ),
+    ] {
+        let mut output = String::new();
+        Template::compile(source)
+            .unwrap()
+            .render(&data, &mut output)
+            .unwrap();
+        assert_eq!(output, expected, "{source}");
+    }
+}
+
+#[test]
+fn template_readme_hexadecimal_address_example() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("ip0a7b7b7b.example.", &metadata);
+    data.groups = &[("b", "7b"), ("c", "7b"), ("d", "7b")];
+    let source = "{{ .Name }} 60 IN A 10.{{ parseInt .Group.b 16 8 }}.{{ parseInt .Group.c 16 8 }}.{{ parseInt .Group.d 16 8 }}";
+    let mut output = String::new();
+    Template::compile(source)
+        .unwrap()
+        .render(&data, &mut output)
+        .unwrap();
+    assert_eq!(output, "ip0a7b7b7b.example. 60 IN A 10.123.123.123");
 }
