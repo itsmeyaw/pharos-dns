@@ -293,6 +293,12 @@ fn soa_serial(soa: &ZoneRecord) -> Option<u32> {
     ))
 }
 
+fn rdata_target(record: &ZoneRecord, offset: usize) -> Option<&[u8]> {
+    let bytes = record.rdata.get(offset..)?;
+    let len = NameRef::parse(bytes, 0).ok()?.wire_len();
+    bytes.get(..len)
+}
+
 fn normalize_rdata_name(
     data: &mut [u8],
     mut offset: usize,
@@ -1097,7 +1103,7 @@ impl Zone {
                 };
                 if let Some(offset) = offset {
                     for (index, rr) in zone.records_at(target, question.qtype).enumerate() {
-                        let Some(address) = rr.rdata.get(offset..) else {
+                        let Some(address) = rdata_target(rr, offset) else {
                             continue;
                         };
                         if !contains(address, &zone.apex)
@@ -1105,9 +1111,7 @@ impl Zone {
                                 .records_at(target, question.qtype)
                                 .take(index)
                                 .any(|earlier| {
-                                    earlier
-                                        .rdata
-                                        .get(offset..)
+                                    rdata_target(earlier, offset)
                                         .is_some_and(|name| name.eq_ignore_ascii_case(address))
                                 })
                         {
