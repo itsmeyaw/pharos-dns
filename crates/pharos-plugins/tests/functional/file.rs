@@ -161,3 +161,30 @@ async fn reload_replaces_only_changed_serial() {
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
     std::fs::remove_file(path).unwrap();
 }
+
+#[cfg(feature = "plugin-transfer")]
+#[test]
+fn axfr_and_current_ixfr_have_soa_framing() {
+    use pharos_plugins::transfer::{TransferRequest, Transferer};
+    let zonefile = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone");
+    let corefile = format!("example.org:53 {{\n file {zonefile}\n}}");
+    let blocks = parse("Corefile", &corefile).unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let plugin = configured[0].config.file.as_ref().unwrap();
+    let apex: Name = "example.org.".parse().unwrap();
+    for (kind, serial, expected) in [(Type::AXFR, 0, 2), (Type::IXFR, 1, 1)] {
+        let mut stream = plugin.transfer(TransferRequest {
+            zone: NameRef::parse(apex.as_wire(), 0).unwrap(), serial, id: 1, flags: 0,
+            protocol: Protocol::Tcp, qtype: kind, qclass: Class::IN,
+        }).unwrap().unwrap();
+        let mut wire = Vec::with_capacity(65535);
+        let mut types = Vec::new();
+        while stream.next(&mut wire).unwrap() {
+            let message = Message::parse(&wire).unwrap();
+            types.extend(message.answers().map(|record| record.rtype));
+        }
+        assert_eq!(types.first(), Some(&Type::SOA));
+        assert_eq!(types.last(), Some(&Type::SOA));
+        assert_eq!(types.iter().filter(|kind| **kind == Type::SOA).count(), expected);
+    }
+}
