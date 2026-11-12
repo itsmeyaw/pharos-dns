@@ -6,11 +6,15 @@ use pharos_proto::Message;
 use pharos_server::{Action, Handler, Protocol};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region};
 
-#[tokio::test(flavor = "current_thread")]
-async fn filtered_routing_does_not_allocate() {
+#[test]
+fn filtered_routing_does_not_allocate() {
     if crate::run_isolated("view::cases::filtered_routing_does_not_allocate") {
         return;
     }
+    crate::on_allocation_stack(filtered_routing);
+}
+
+async fn filtered_routing() {
     let text = ".:53 {\n view first {\n  expr name() == 'example.com.' && type() == 'A'\n }\n hosts {\n  192.0.2.1 example.com other.com\n }\n}\n.:53 {\n hosts {\n  192.0.2.2 example.com other.com\n }\n}";
     let blocks = parse("Corefile", text).unwrap();
     let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
