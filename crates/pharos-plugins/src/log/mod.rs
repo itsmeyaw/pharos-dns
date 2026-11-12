@@ -118,6 +118,9 @@ impl Plugin for Log {
 }
 
 fn classify(cx: &Context<'_, '_>, outcome: &Outcome) -> (&'static str, &'static str, u8) {
+    if matches!(outcome, Outcome::Stream(_)) {
+        return ("META", "error", 8);
+    }
     let message = (*outcome == Outcome::Response)
         .then(|| Message::parse(cx.response).ok())
         .flatten();

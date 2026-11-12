@@ -148,6 +148,12 @@ async fn matching_rule_classifies_next_outcome_without_changing_it() {
     for (outcome, wire, kind, class) in [
         (Outcome::Drop, &b""[..], "OTHERERROR", "error"),
         (
+            Outcome::Stream(pharos_server::Stream::new(|_| Ok(false))),
+            &b""[..],
+            "META",
+            "error",
+        ),
+        (
             Outcome::Unanswered(Rcode::SERVFAIL),
             &b""[..],
             "SERVERERROR",

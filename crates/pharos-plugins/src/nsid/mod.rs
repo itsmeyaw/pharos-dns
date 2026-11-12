@@ -229,10 +229,9 @@ mod tests {
                 response: &mut response,
                 max_response_size: 512,
             };
-            let expected = std::mem::discriminant(&outcome);
             assert_eq!(
-                std::mem::discriminant(&plugin.serve(&mut cx, Return(outcome)).await),
-                expected
+                plugin.serve(&mut cx, Return(outcome.clone())).await,
+                outcome
             );
             assert!(response.is_empty());
         }
