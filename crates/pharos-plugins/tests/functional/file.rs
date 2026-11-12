@@ -745,3 +745,23 @@ async fn signed_referral_includes_ds_and_in_bailiwick_signed_glue() {
             .all(|rr| rr.name.to_string() == "ns.child.example.org.")
     );
 }
+
+#[cfg(feature = "plugin-transfer")]
+#[tokio::test]
+async fn duplicate_zone_entries_notify_each_configured_name() {
+    use pharos_plugins::servers;
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone");
+    let config = format!(".:0 {{\n file {path} example.org\n file {path} example.org\n transfer example.org {{\n to {address}\n }}\n}}");
+    let (_, lifecycle) = servers(configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap()).unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    for _ in 0..2 {
+        let mut wire = [0; 512];
+        let (len, peer) = tokio::time::timeout(std::time::Duration::from_secs(2), socket.recv_from(&mut wire)).await.unwrap().unwrap();
+        assert_eq!(Message::parse(&wire[..len]).unwrap().opcode(), pharos_proto::Opcode::NOTIFY);
+        wire[2] |= 0x80;
+        socket.send_to(&wire[..len], peer).await.unwrap();
+    }
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+}
