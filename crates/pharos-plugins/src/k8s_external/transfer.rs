@@ -387,9 +387,15 @@ where
         let endpoint = endpoint_owner(label, base, &mut target_wire);
         let ip = normalized_ip(&address.ip);
         let previous_ip = seen.insert(Seen::Address(&address.ip), 0).is_some();
+        if ip.is_none() || !previous_ip {
+            snapshot.address(base, &address.ip)?;
+        }
+        let Some(endpoint) = endpoint else {
+            continue;
+        };
         let mut host_wire = [0; 255];
         let target = if ip.is_some() {
-            endpoint
+            Some(endpoint)
         } else {
             hostname(&address.ip, 0, &mut host_wire).ok()
         };
@@ -408,12 +414,6 @@ where
                 0,
             )
             .is_some();
-        let Some(endpoint) = endpoint else {
-            continue;
-        };
-        if ip.is_none() || !previous_ip {
-            snapshot.address(base, &address.ip)?;
-        }
         if port.port != -1 {
             let mut host_wire = [0; 255];
             let target = if ip.is_some() {
@@ -1088,6 +1088,52 @@ mod tests {
         assert!(endpoint.iter().all(|v| v.0 == 100));
         assert_eq!(named.len(), 2);
         assert!(named.iter().all(|v| v.0 == 50));
+    }
+
+    #[test]
+    fn headless_base_address_survives_invalid_endpoint_hostname() {
+        use pharos_kubernetes::object::{EndpointAddress, Port};
+        let plugin = plugin();
+        let zone: Name = "example.com.".parse().unwrap();
+        let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let addresses: Vec<_> = ["a".repeat(64), "node".to_owned()]
+            .into_iter()
+            .map(|hostname| EndpointAddress {
+                ip: "192.0.2.1".into(),
+                hostname,
+                node_name: String::new(),
+                target_ref_name: String::new(),
+            })
+            .collect();
+        let port = Port {
+            name: "http".into(),
+            protocol: "TCP".into(),
+            port: 80,
+        };
+        for count in [1, 2] {
+            let mut snapshot = fixture_snapshot(&plugin, &zone);
+            headless(
+                &mut snapshot,
+                || addresses[..count].iter().map(|address| (address, &port)),
+                NameRef::parse(base.as_wire(), 0).unwrap(),
+                false,
+                &mut HashMap::with_capacity(8),
+            )
+            .unwrap();
+            let mut stream = stream_snapshot(snapshot.bytes.unwrap());
+            let mut wire = Vec::new();
+            let mut found = 0;
+            while stream.next(&mut wire).unwrap() {
+                for rr in Message::parse(&wire).unwrap().answers() {
+                    if rr.name.to_string() == "web.hidden.example.com."
+                        && matches!(rr.data().unwrap(), Rdata::A(_))
+                    {
+                        found += 1;
+                    }
+                }
+            }
+            assert_eq!(found, 1, "{count} endpoints");
+        }
     }
 
     #[test]
