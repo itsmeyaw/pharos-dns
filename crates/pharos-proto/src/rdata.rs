@@ -153,6 +153,7 @@ pub(crate) fn compressible_names(
 ) -> Result<[Option<NameRef<'_>>; 2], RdataError> {
     let end = offset.checked_add(len).ok_or(RdataError)?;
     let bytes = wire.get(offset..end).ok_or(RdataError)?;
+    // RFC 1035 §4.1.4 and RFC 3597 §4: RDATA name layouts; SRV follows miekg/dns.
     let (prefix, count, trailing) = match rtype {
         Type::NS
         | Type::CNAME

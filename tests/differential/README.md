@@ -3,7 +3,7 @@
 Run `cargo xtask coredns` once with Go installed, then `cargo xtask diff`.
 `cargo xtask check` runs the scenarios when that binary is cached. The cache
 is `target/coredns/v1.15.0/coredns`. `cargo xtask diff --self-test` deliberately
-changes a Response and must fail with a diagnostic.
+changes a Response and succeeds only when it detects that injected mismatch.
 
 Each scenario is a directory containing:
 
@@ -20,7 +20,8 @@ Each scenario is a directory containing:
   The API and DNS Listeners use the same non-ephemeral port reservation helper.
 - `queries`: one Query per line, `name type class udp|tcp [flags...]`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
-  `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, and `+opcode=NAME` or a number.
+  `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, `+opcode=NAME` or a number,
+  and `+tsig=NAME:BASE64[:badkey|badsig|badtime]` (HMAC-SHA256).
 - `expect` (optional): one setting per line. `ttl N` permits a TTL difference
   of N seconds for ordinary records; default is zero. `mask
   additional.srv.port` ignores only the SRV port in Additional (whoami reports
@@ -31,10 +32,19 @@ Each scenario is a directory containing:
   that exact pair of flag values on that Query; other fields remain checked.
   `mask soa.serial` ignores only the SOA serial, for scenarios that explicitly
   opt in; Kubernetes SOA serials can depend on each process's startup time.
+  `mask rrsig` ignores only the RRSIG Original TTL, signature contents and
+  inception/expiration timestamps; signature validity duration, signature length,
+  all other fields and record counts are compared.
 - Any other files or subdirectories are copied into separate temporary working
   directories for both processes, preserving relative paths.
 
 IDs and RR order within each section are ignored; all other fields are compared.
+
+The `tsig` transfer README example is skipped until the `transfer` Plugin is
+available. Signed scenarios authenticate each Response before comparing its
+other fields; TSIG timestamps and MAC bytes are not compared between servers.
+The `tsig-forward` README example replaces its unreachable external Upstream
+with a local deterministic fixture.
 
 The `kubernetes-*` scenarios exercise the small, read-only API fixture in
 `crates/pharos-kubernetes/examples/differential.rs`, sharing the HTTP server
@@ -48,3 +58,14 @@ comparisons with `cargo xtask coredns` followed by `cargo xtask diff` after the
 Kubernetes Plugin is available. The zonal scenario also requires zonal Plugin
 and store support.
 
+The `dnssec-whoami` and `dnssec-kubernetes` scenarios cover the file-key README
+examples with unsigned and DO-bit Queries, including apex DNSKEY, ordinary
+responses and Kubernetes Negative Responses.
+Their public test keys reuse the Ed25519 fixture in `crates/pharos-dnssec/tests`;
+they must never be used for real zones. The opt-in RRSIG mask accommodates
+independently generated signatures and signing times. It also permits Pharos's
+RRset Original TTL to differ from CoreDNS's hardcoded 3600 (RFC 4034 §3.1.4).
+It does not verify signatures.
+The AWS Secrets Manager README example is skipped because it requires live AWS
+credentials and a provisioned secret; the default build also disables the AWS
+feature.

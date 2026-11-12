@@ -1,5 +1,5 @@
 use std::{
-    error::Error,
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -7,6 +7,52 @@ use kube::{
     Config,
     config::{KubeConfigOptions, Kubeconfig},
 };
+
+/// Errors while resolving Kubernetes configuration or constructing a client.
+#[derive(Debug)]
+pub enum ClientConfigError {
+    InvalidQps,
+    InvalidInflight,
+    EmptyHost,
+    InvalidEndpoint(http::uri::InvalidUri),
+    InvalidPort(std::num::ParseIntError),
+    Environment(std::env::VarError),
+    Io(std::io::Error),
+    Kubeconfig(kube::config::KubeconfigError),
+    Client(kube::Error),
+}
+
+impl fmt::Display for ClientConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidQps => formatter.write_str("API QPS must be finite and nonnegative"),
+            Self::InvalidInflight => {
+                formatter.write_str("API maximum inflight exceeds semaphore limit")
+            }
+            Self::EmptyHost => formatter.write_str("KUBERNETES_SERVICE_HOST is empty"),
+            Self::InvalidEndpoint(error) => error.fmt(formatter),
+            Self::InvalidPort(error) => error.fmt(formatter),
+            Self::Environment(error) => error.fmt(formatter),
+            Self::Io(error) => error.fmt(formatter),
+            Self::Kubeconfig(error) => error.fmt(formatter),
+            Self::Client(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ClientConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidQps | Self::InvalidInflight | Self::EmptyHost => None,
+            Self::InvalidEndpoint(error) => Some(error),
+            Self::InvalidPort(error) => Some(error),
+            Self::Environment(error) => Some(error),
+            Self::Io(error) => Some(error),
+            Self::Kubeconfig(error) => Some(error),
+            Self::Client(error) => Some(error),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct TlsConfig {
@@ -30,12 +76,12 @@ impl ClientConfig {
     pub async fn client(
         &self,
         registry: &pharos_server::metrics::Registry,
-    ) -> Result<kube::Client, Box<dyn Error + Send + Sync>> {
+    ) -> Result<kube::Client, ClientConfigError> {
         if !self.api_qps.is_finite() || self.api_qps < 0.0 {
-            return Err("API QPS must be finite and nonnegative".into());
+            return Err(ClientConfigError::InvalidQps);
         }
         if self.api_max_inflight > tokio::sync::Semaphore::MAX_PERMITS {
-            return Err("API maximum inflight exceeds semaphore limit".into());
+            return Err(ClientConfigError::InvalidInflight);
         }
         let config = self.resolve().await?;
         let host = config
@@ -50,25 +96,31 @@ impl ClientConfig {
             self.api_burst,
             self.api_max_inflight,
         );
-        Ok(kube::client::ClientBuilder::try_from(config)?
+        Ok(kube::client::ClientBuilder::try_from(config)
+            .map_err(ClientConfigError::Client)?
             .with_layer(&layer)
             .build())
     }
 
-    pub async fn resolve(&self) -> Result<Config, Box<dyn Error + Send + Sync>> {
+    pub async fn resolve(&self) -> Result<Config, ClientConfigError> {
         if let Some((path, context)) = &self.kubeconfig {
-            let file = Kubeconfig::read_from(path)?;
-            return Ok(Config::from_custom_kubeconfig(
+            let file = Kubeconfig::read_from(path).map_err(ClientConfigError::Kubeconfig)?;
+            return Config::from_custom_kubeconfig(
                 file,
                 &KubeConfigOptions {
                     context: context.clone(),
                     ..Default::default()
                 },
             )
-            .await?);
+            .await
+            .map_err(ClientConfigError::Kubeconfig);
         }
         if let Some(endpoint) = &self.endpoint {
-            let mut config = Config::new(endpoint.parse()?);
+            let mut config = Config::new(
+                endpoint
+                    .parse()
+                    .map_err(ClientConfigError::InvalidEndpoint)?,
+            );
             if let Some(tls) = &self.tls {
                 config.root_cert_file = Some(tls.ca.clone());
                 config.auth_info.client_certificate = Some(tls.cert.to_string_lossy().into_owned());
@@ -76,8 +128,10 @@ impl ClientConfig {
             }
             return Ok(config);
         }
-        let host = std::env::var("KUBERNETES_SERVICE_HOST")?;
-        let port = std::env::var("KUBERNETES_SERVICE_PORT")?;
+        let host =
+            std::env::var("KUBERNETES_SERVICE_HOST").map_err(ClientConfigError::Environment)?;
+        let port =
+            std::env::var("KUBERNETES_SERVICE_PORT").map_err(ClientConfigError::Environment)?;
         Self::in_cluster(
             &host,
             &port,
@@ -85,22 +139,22 @@ impl ClientConfig {
         )
     }
 
-    fn in_cluster(
-        host: &str,
-        port: &str,
-        directory: &Path,
-    ) -> Result<Config, Box<dyn Error + Send + Sync>> {
+    fn in_cluster(host: &str, port: &str, directory: &Path) -> Result<Config, ClientConfigError> {
         if host.is_empty() {
-            return Err("KUBERNETES_SERVICE_HOST is empty".into());
+            return Err(ClientConfigError::EmptyHost);
         }
-        let port: u16 = port.parse()?;
+        let port: u16 = port.parse().map_err(ClientConfigError::InvalidPort)?;
         let host = match host.parse::<std::net::IpAddr>() {
             Ok(std::net::IpAddr::V6(ip)) => format!("[{ip}]"),
             _ => host.to_owned(),
         };
         let token = directory.join("token");
-        std::fs::read(&token)?;
-        let mut config = Config::new(format!("https://{host}:{port}").parse()?);
+        std::fs::read(&token).map_err(ClientConfigError::Io)?;
+        let mut config = Config::new(
+            format!("https://{host}:{port}")
+                .parse()
+                .map_err(ClientConfigError::InvalidEndpoint)?,
+        );
         config.auth_info.token_file = Some(token.to_string_lossy().into_owned());
         let ca = directory.join("ca.crt");
         if ca.exists() {
@@ -112,7 +166,7 @@ impl ClientConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::ClientConfig;
+    use super::{ClientConfig, ClientConfigError};
 
     #[test]
     fn in_cluster_uses_token_and_ca_files() {
@@ -126,6 +180,17 @@ mod tests {
             config.auth_info.token_file.unwrap(),
             dir.path().join("token").to_str().unwrap()
         );
-        assert!(ClientConfig::in_cluster("", "443", dir.path()).is_err());
+        assert!(matches!(
+            ClientConfig::in_cluster("", "443", dir.path()),
+            Err(ClientConfigError::EmptyHost)
+        ));
+        let port_error = ClientConfig::in_cluster("127.0.0.1", "bad", dir.path()).unwrap_err();
+        assert!(matches!(port_error, ClientConfigError::InvalidPort(_)));
+        assert_eq!(port_error.to_string(), "invalid digit found in string");
+        let missing = dir.path().join("missing");
+        assert!(matches!(
+            ClientConfig::in_cluster("127.0.0.1", "443", &missing),
+            Err(ClientConfigError::Io(_))
+        ));
     }
 }

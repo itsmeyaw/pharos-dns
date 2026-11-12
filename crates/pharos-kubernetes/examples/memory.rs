@@ -195,10 +195,7 @@ async fn client(url: &str) -> Result<(), Box<dyn std::error::Error>> {
         endpoint: Some(url.into()),
         ..Default::default()
     };
-    let client = config
-        .client(&registry)
-        .await
-        .map_err(|error| -> Box<dyn std::error::Error> { error })?;
+    let client = config.client(&registry).await?;
     let before_rss = rss_kib()?;
     let before_heap = live_heap_bytes(GLOBAL.stats());
     let mut controller =

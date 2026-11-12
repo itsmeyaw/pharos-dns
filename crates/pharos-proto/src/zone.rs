@@ -1,7 +1,7 @@
 //! Streaming presentation-format Zone records.
 
 mod rdata;
-pub use rdata::parse_rdata;
+pub use rdata::{RdataParseError, parse_rdata};
 
 use std::{
     fmt::{self, Write},
@@ -566,6 +566,7 @@ impl<R: BufRead> ZoneParser<R> {
     }
 }
 
+// RFC 1035 §5.1: quoted text represents character-strings in master files.
 fn text_parts(token: &Token) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
@@ -894,6 +895,7 @@ fn parse_ttl(value: &str) -> Option<u32> {
     u32::try_from(result.wrapping_add(number)).ok()
 }
 
+// RFC 1035 §3.2.4 and RFC 3597 §5: classes use mnemonics or CLASS followed by a number.
 fn parse_class(value: &str) -> Option<Class> {
     let upper = value.to_ascii_uppercase();
     Some(match upper.as_str() {
@@ -907,6 +909,7 @@ fn parse_class(value: &str) -> Option<Class> {
     })
 }
 
+// RFC 3597 §5: unknown types use TYPE followed by a decimal number.
 fn parse_type(value: &str) -> Option<Type> {
     let upper = value.to_ascii_uppercase();
     if let Some(number) = upper.strip_prefix("TYPE") {

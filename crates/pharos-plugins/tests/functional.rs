@@ -22,6 +22,12 @@ mod any {
 }
 
 #[path = "functional"]
+mod tsig {
+    #[path = "tsig.rs"]
+    mod cases;
+}
+
+#[path = "functional"]
 mod autopath {
     #[path = "autopath_setup.rs"]
     mod autopath_setup;
@@ -81,6 +87,20 @@ mod dns64 {
     mod cases;
     #[path = "dns64_setup.rs"]
     mod dns64_setup;
+}
+
+#[path = "functional"]
+mod dnssec {
+    #[path = "dnssec.rs"]
+    mod cases;
+    #[path = "dnssec_extra.rs"]
+    mod extra;
+    #[path = "dnssec_metrics.rs"]
+    mod metrics;
+    #[path = "dnssec_more.rs"]
+    mod more;
+    #[path = "dnssec_setup.rs"]
+    mod setup;
 }
 
 #[path = "functional"]

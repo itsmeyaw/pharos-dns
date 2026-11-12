@@ -571,7 +571,7 @@ pub(crate) fn setup(
         .collect::<Vec<_>>();
     let config = kubernetes::setup::parse(cursor, &domains)?;
     let plugin = kubernetes::Kubernetes::with_listen_addresses(config, &block.listen_addresses)
-        .map_err(|error| cursor.error(error))?;
+        .map_err(|error| cursor.error(error.to_string()))?;
     plugin.register_hooks(&mut block.config.lifecycle);
     block.config.kubernetes = Some(plugin);
     Ok(())

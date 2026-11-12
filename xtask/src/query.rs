@@ -1,11 +1,21 @@
 use std::fmt;
 
-use pharos_proto::{Class, EdnsOptions, MessageBuilder, Name, NameRef, Opt, Type};
+use pharos_proto::{
+    Class, EdnsOptions, MessageBuilder, Name, NameRef, Opt, TsigAlgorithm, TsigKey, Type,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Transport {
     Udp,
     Tcp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TsigCase {
+    Valid,
+    BadKey,
+    BadSig,
+    BadTime,
 }
 
 #[derive(Debug)]
@@ -23,6 +33,7 @@ pub(crate) struct Query {
     options: Vec<(u16, Vec<u8>)>,
     bufsize: u16,
     edns_version: u8,
+    tsig: Option<(Name, Vec<u8>, TsigCase)>,
 }
 
 impl fmt::Display for Query {
@@ -96,6 +107,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         options: Vec::new(),
         bufsize: 1232,
         edns_version: 0,
+        tsig: None,
     };
     for flag in parts {
         let lower = flag.to_ascii_lowercase();
@@ -109,6 +121,25 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
                 query.edns = true;
             }
             "+norec" => query.recursion = false,
+            _ if lower.starts_with("+tsig=") => {
+                let mut values = flag[6..].split(':');
+                let (Some(name), Some(secret)) = (values.next(), values.next()) else {
+                    return Err(format!("invalid flag: {flag}"));
+                };
+                let mode = match values.next() {
+                    None | Some("valid") => TsigCase::Valid,
+                    Some("badkey") => TsigCase::BadKey,
+                    Some("badsig") => TsigCase::BadSig,
+                    Some("badtime") => TsigCase::BadTime,
+                    _ => return Err(format!("invalid flag: {flag}")),
+                };
+                if values.next().is_some() || query.tsig.is_some() {
+                    return Err(format!("invalid flag: {flag}"));
+                }
+                let name = Name::parse(name, &root).map_err(|e| e.to_string())?;
+                let secret = pharos_proto::decode_secret(secret).map_err(|e| e.to_string())?;
+                query.tsig = Some((name, secret, mode));
+            }
             _ if lower.starts_with("+bufsize=") => {
                 query.bufsize =
                     decimal(&lower[9..]).ok_or_else(|| format!("invalid flag: {flag}"))?;
@@ -161,6 +192,67 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
 }
 
 impl Query {
+    pub(crate) fn check_response_tsig(
+        &self,
+        query: &[u8],
+        response: &[u8],
+    ) -> Result<bool, String> {
+        let Some((name, secret, mode)) = &self.tsig else {
+            return Ok(false);
+        };
+        let request = pharos_proto::TsigRecord::parse(query).map_err(|e| e.to_string())?;
+        let record = pharos_proto::TsigRecord::parse(response).map_err(|e| e.to_string())?;
+        let expected = match mode {
+            TsigCase::BadKey => 17,
+            TsigCase::BadSig => 16,
+            TsigCase::BadTime => 18,
+            TsigCase::Valid => 0,
+        };
+        if record.error != expected
+            || record.owner != request.owner
+            || record.algorithm != request.algorithm
+            || record.original_id != request.original_id
+            || record.fudge != request.fudge
+        {
+            return Err(format!(
+                "unexpected TSIG response fields: error {} expected {expected}",
+                record.error
+            ));
+        }
+        if expected == 16 || expected == 17 {
+            if !record.mac.is_empty() || !record.other.is_empty() {
+                return Err("authentication error has nonempty MAC or other data".into());
+            }
+        } else {
+            if (expected == 18 && record.other.len() != 6)
+                || (expected == 0 && !record.other.is_empty())
+            {
+                return Err("unexpected TSIG other data".into());
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs();
+            let checked_time = if expected == 18 {
+                if record.time_signed != request.time_signed {
+                    return Err("BADTIME did not echo Query time".into());
+                }
+                let mut server_time = [0; 8];
+                server_time[2..].copy_from_slice(record.other);
+                if now.abs_diff(u64::from_be_bytes(server_time)) > 300 {
+                    return Err("BADTIME server time is outside fudge".into());
+                }
+                request.time_signed
+            } else {
+                now
+            };
+            let key = TsigKey::new(name.clone(), TsigAlgorithm::Sha256, secret);
+            // RFC 8945 §4.3.1: verify the Response against the Query MAC.
+            key.verify(response, checked_time, Some(request.mac), 0)
+                .map_err(|e| format!("invalid response signature: {e}"))?;
+        }
+        Ok(true)
+    }
     pub(crate) fn wire(&self) -> Result<Vec<u8>, String> {
         let mut wire = Vec::new();
         let flags = (u16::from(self.opcode) << 11) | if self.recursion { 0x0100 } else { 0 };
@@ -204,6 +296,33 @@ impl Query {
         } else {
             let _ = builder.finish();
         }
+        if let Some((name, secret, mode)) = &self.tsig {
+            let key = TsigKey::new(name.clone(), TsigAlgorithm::Sha256, secret);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs();
+            // RFC 8945 §4.3: sign the complete Query before transmitting it.
+            key.sign(
+                &mut wire,
+                if *mode == TsigCase::BadTime {
+                    now.saturating_sub(600)
+                } else {
+                    now
+                },
+                300,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            if *mode == TsigCase::BadSig {
+                let mac_len = pharos_proto::TsigRecord::parse(&wire)
+                    .map_err(|e| e.to_string())?
+                    .mac
+                    .len();
+                let first_mac_byte = wire.len() - 6 - mac_len;
+                wire[first_mac_byte] ^= 1;
+            }
+        }
         Ok(wire)
     }
 }
@@ -212,6 +331,64 @@ impl Query {
 mod tests {
     use super::{Transport, parse};
     use pharos_proto::{Class, Message, Opcode, Type};
+
+    #[test]
+    fn builds_signed_queries_and_failure_variants() {
+        let key = pharos_proto::TsigKey::new(
+            "key.".parse().unwrap(),
+            pharos_proto::TsigAlgorithm::Sha256,
+            b"secret",
+        );
+        for (flag, expected) in [
+            ("+tsig=key.:c2VjcmV0", Ok(())),
+            (
+                "+tsig=key.:c2VjcmV0:badtime",
+                Err(pharos_proto::TsigError::BadTime),
+            ),
+            (
+                "+tsig=key.:c2VjcmV0:badsig",
+                Err(pharos_proto::TsigError::BadSig),
+            ),
+        ] {
+            let wire = parse(&format!("example. A IN udp {flag}"))
+                .unwrap()
+                .wire()
+                .unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            assert!(Message::parse(&wire).unwrap().rd(), "{flag}");
+            assert_eq!(
+                key.verify(&wire, now, None, 0).map(|_| ()),
+                expected,
+                "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_authentication_rejects_tampering() {
+        let query = parse("example. A IN udp +tsig=key.:c2VjcmV0").unwrap();
+        let wire = query.wire().unwrap();
+        let request_mac = pharos_proto::TsigRecord::parse(&wire).unwrap().mac;
+        let key = pharos_proto::TsigKey::new(
+            "key.".parse().unwrap(),
+            pharos_proto::TsigAlgorithm::Sha256,
+            b"secret",
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut response = Vec::new();
+        response.extend_from_slice(&[0, 0, 0x81, 0x80, 0, 0, 0, 0, 0, 0, 0, 0]);
+        key.sign(&mut response, now, 300, Some(request_mac))
+            .unwrap();
+        assert!(query.check_response_tsig(&wire, &response).is_ok());
+        response[3] ^= 1;
+        assert!(query.check_response_tsig(&wire, &response).is_err());
+    }
 
     #[test]
     fn builds_queries_with_custom_edns_options() {
@@ -347,6 +524,9 @@ mod tests {
             "example. A IN udp +opcode=NOPE",
             "example. A IN udp +dnssec=1",
             "example. A IN udp +norec extra",
+            "example. A IN udp +tsig=key.",
+            "example. A IN udp +tsig=key.:c2VjcmV0:unknown",
+            "example. A IN udp +tsig=key.:c2VjcmV0:valid:extra",
         ] {
             assert!(parse(line).is_err(), "accepted {line:?}");
         }

@@ -1,0 +1,9 @@
+example.org. A IN udp
+www.example.org. AAAA IN tcp
+www.example.org. DNSKEY IN udp
+example.org. A IN udp +dnssec +bufsize=1232
+example.org. AAAA IN tcp +dnssec
+example.org. DNSKEY IN udp +dnssec +bufsize=1232
+example.org. DNSKEY IN tcp +dnssec
+example.org. DNSKEY IN udp
+example.org. DNSKEY IN tcp

@@ -6,5 +6,5 @@ mod metrics;
 pub mod object;
 pub mod store;
 
-pub use client_config::{ClientConfig, TlsConfig};
+pub use client_config::{ClientConfig, ClientConfigError, TlsConfig};
 pub use controller::{Controller, DEFAULT_STARTUP_TIMEOUT, WatchConfig};

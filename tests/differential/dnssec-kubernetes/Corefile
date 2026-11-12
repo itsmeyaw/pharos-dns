@@ -1,0 +1,9 @@
+cluster.local:{port} {
+    ready 127.0.0.1:{metrics_port}
+    kubernetes {
+        kubeconfig {kubeconfig}
+    }
+    dnssec {
+        key file Kcluster.local.+015+21336
+    }
+}

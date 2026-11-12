@@ -102,14 +102,14 @@ impl Format {
         &self,
         output: &mut String,
         cx: &Context<'_, '_>,
-        outcome: Outcome,
+        outcome: impl std::borrow::Borrow<Outcome>,
         elapsed: Duration,
     ) {
         let response = self
             .parts
             .iter()
             .any(|part| matches!(part, Part::Rcode | Part::Rsize | Part::Rflags))
-            .then(|| response(cx, outcome));
+            .then(|| response(cx, outcome.borrow()));
         for part in &self.parts {
             match part {
                 Part::Literal(value) => output.push_str(value),
@@ -216,16 +216,16 @@ struct Response {
     size: usize,
 }
 
-fn response(cx: &Context<'_, '_>, outcome: Outcome) -> Response {
+fn response(cx: &Context<'_, '_>, outcome: &Outcome) -> Response {
     let deferred = match outcome {
         Outcome::Error(_) => Some(Rcode::SERVFAIL),
         Outcome::Unanswered(code)
             if matches!(
-                code,
+                *code,
                 Rcode::SERVFAIL | Rcode::REFUSED | Rcode::FORMERR | Rcode::NOTIMP
             ) =>
         {
-            Some(code)
+            Some(*code)
         }
         _ => None,
     };
@@ -249,7 +249,7 @@ fn response(cx: &Context<'_, '_>, outcome: Outcome) -> Response {
             size,
         };
     }
-    if outcome == Outcome::Response {
+    if *outcome == Outcome::Response {
         return match Message::parse(cx.response) {
             Ok(message) => Response {
                 code: Some(message.rcode()),

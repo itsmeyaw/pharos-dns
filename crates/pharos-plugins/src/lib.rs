@@ -33,6 +33,8 @@ pub mod chaos;
 pub mod debug;
 #[cfg(feature = "plugin-dns64")]
 pub mod dns64;
+#[cfg(feature = "plugin-dnssec")]
+pub mod dnssec;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 pub mod expression;
@@ -99,6 +101,8 @@ pub mod root;
 pub mod shed;
 #[cfg(feature = "plugin-timeouts")]
 pub mod timeouts;
+#[cfg(feature = "plugin-tsig")]
+pub mod tsig;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -140,6 +144,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("root", include_str!("root/README.md")),
     ("shed", include_str!("shed/README.md")),
     ("timeouts", include_str!("timeouts/README.md")),
+    ("tsig", include_str!("tsig/README.md")),
     ("whoami", include_str!("whoami/README.md")),
 ];
 
@@ -227,6 +232,8 @@ pub fn servers_with_registry(
             Ok(())
         });
     }
+    #[cfg(feature = "plugin-tsig")]
+    let mut tsig_keyrings = tsig::KeyRings::default();
     for block in blocks {
         #[cfg(any(
             feature = "plugin-forward",
@@ -234,8 +241,10 @@ pub fn servers_with_registry(
             feature = "plugin-local",
             feature = "plugin-acl",
             feature = "plugin-dns64",
+            feature = "plugin-dnssec",
             feature = "plugin-siit",
-            feature = "plugin-autopath"
+            feature = "plugin-autopath",
+            feature = "plugin-tsig"
         ))]
         let mut block = block;
         #[cfg(feature = "plugin-forward")]
@@ -336,6 +345,10 @@ pub fn servers_with_registry(
         {
             plugin.register(&mut lifecycle, listener.address);
         }
+        #[cfg(feature = "plugin-tsig")]
+        if let Some(tsig) = &mut block.config.tsig {
+            tsig.register(routes.iter().map(|(key, _)| *key), &mut tsig_keyrings);
+        }
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &mut block.config.cache {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
@@ -350,6 +363,11 @@ pub fn servers_with_registry(
         if let Some(dns64) = &mut block.config.dns64 {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             dns64.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-dnssec")]
+        if let Some(dnssec) = &mut block.config.dnssec {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            dnssec.set_metrics(&metrics, &listeners);
         }
         #[cfg(feature = "plugin-siit")]
         if let Some(siit) = &mut block.config.siit {
@@ -442,6 +460,8 @@ pub fn servers_with_registry(
             );
         }
     }
+    #[cfg(feature = "plugin-tsig")]
+    tsig_keyrings.finish();
     let servers = groups
         .into_iter()
         .map(|(key, (router, workers, tcp_options, allow_non_in))| {
@@ -620,7 +640,11 @@ impl pharos_server::Plugin for Unimplemented {
     }
 }
 
-#[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
+#[cfg(any(
+    feature = "plugin-hosts",
+    feature = "plugin-loadbalance",
+    feature = "plugin-dnssec"
+))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     #[cfg(feature = "plugin-root")]
     {
@@ -633,7 +657,11 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     }
 }
 
-#[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
+#[cfg(any(
+    feature = "plugin-hosts",
+    feature = "plugin-loadbalance",
+    feature = "plugin-dnssec"
+))]
 fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std::path::PathBuf {
     use std::path::{Component, PathBuf};
     let Some(root) = root.filter(|_| path.is_relative()) else {

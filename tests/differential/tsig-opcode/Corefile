@@ -1,0 +1,6 @@
+dynamic.zone:{port} {
+    tsig {
+        secret dynamic.zone.key. NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=
+        require_opcode UPDATE NOTIFY
+    }
+}

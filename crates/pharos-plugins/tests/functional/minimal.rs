@@ -225,7 +225,13 @@ async fn message_less_and_error_outcomes_are_preserved() {
                 .minimal
                 .as_ref()
                 .unwrap()
-                .serve(&mut cx, Reply { wire: &[], outcome })
+                .serve(
+                    &mut cx,
+                    Reply {
+                        wire: &[],
+                        outcome: outcome.clone()
+                    }
+                )
                 .await,
             outcome
         );

@@ -1,0 +1,5 @@
+auth.zone. A IN udp +tsig=auth.zone.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=
+auth.zone. A IN tcp +tsig=auth.zone.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=
+auth.zone. A IN udp +tsig=unknown.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=:badkey
+auth.zone. A IN udp +tsig=auth.zone.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=:badsig
+auth.zone. A IN udp +tsig=auth.zone.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=:badtime

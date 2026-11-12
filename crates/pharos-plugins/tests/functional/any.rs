@@ -130,7 +130,7 @@ async fn coredns_non_any_queries_pass_next_outcomes_unchanged() {
                     .any
                     .as_ref()
                     .unwrap()
-                    .serve(&mut cx, NextOutcome(outcome))
+                    .serve(&mut cx, NextOutcome(outcome.clone()))
                     .await,
                 outcome,
                 "{qtype:?}"

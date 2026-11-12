@@ -34,7 +34,7 @@ mod process_metrics;
 mod quota;
 pub use admission::{Admission, admit};
 pub use lifecycle::{Lifecycle, Phase};
-pub use outcome::{finish_outcome, response_limit};
+pub use outcome::{TsigSigning, finish_outcome, finish_outcome_signed, response_limit};
 pub use panic::{contain_panic, panics_total};
 mod router;
 mod server;
@@ -44,6 +44,7 @@ pub use router::{Router, ServerBlock, ViewFilter};
 pub use server::{Chain, Server};
 pub use startup::startup_domains;
 mod tcp;
+pub mod transfer;
 mod udp;
 #[cfg(target_os = "linux")]
 mod udp_linux;
@@ -90,12 +91,55 @@ pub enum Protocol {
     Tcp,
 }
 
-/// A placeholder for a future Zone Transfer stream.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Stream;
+/// Lazily produces complete wire-format Messages into a reusable buffer.
+/// Producers must not block the runtime; clones share the same cursor.
+/// Signed transfers must leave space for TSIG within the TCP Message limit.
+#[derive(Clone)]
+pub struct Stream {
+    producer: Arc<std::sync::Mutex<StreamProducer>>,
+    signing: Option<StreamSigning>,
+}
+
+#[derive(Clone)]
+struct StreamSigning {
+    key: Arc<pharos_proto::TsigKey>,
+    fudge: u16,
+}
+
+type StreamProducer = dyn FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send;
+
+impl Stream {
+    pub fn new(produce: impl FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send + 'static) -> Self {
+        // shortcut: one allocation per Zone Transfer; remove when a concrete stream type exists.
+        Self {
+            producer: Arc::new(std::sync::Mutex::new(produce)),
+            signing: None,
+        }
+    }
+
+    pub fn next(&mut self, response: &mut Vec<u8>) -> Result<bool, Error> {
+        let mut producer = self.producer.lock().map_err(|_| Error::PluginPanic)?;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| producer(response)))
+            .unwrap_or(Err(Error::PluginPanic))
+    }
+}
+
+impl fmt::Debug for Stream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Stream(..)")
+    }
+}
+
+impl PartialEq for Stream {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.producer, &other.producer)
+    }
+}
+
+impl Eq for Stream {}
 
 /// Explicit result of running a Plugin Chain.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
     Response,
     Stream(Stream),
@@ -146,6 +190,9 @@ pub struct Metadata<'a> {
     copied: [Option<(&'static str, usize, usize)>; 12],
     copied_data: [u8; 1024],
     copied_len: usize,
+    validated_tsig: [u8; 255],
+    validated_tsig_len: usize,
+    tsig_signing: Option<TsigSigning>,
     source: Option<Arc<dyn MetadataSource>>,
     enabled: bool,
     self_lookup: Option<SelfLookupState<'a>>,
@@ -161,6 +208,9 @@ impl<'a> Metadata<'a> {
             copied: [None; 12],
             copied_data: [0; 1024],
             copied_len: 0,
+            validated_tsig: [0; 255],
+            validated_tsig_len: 0,
+            tsig_signing: None,
             source: None,
             enabled: true,
             self_lookup: None,
@@ -175,6 +225,32 @@ impl<'a> Metadata<'a> {
     /// Enable public Plugin Metadata for the current Server Block.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+    }
+
+    /// Set the authenticated TSIG key name for downstream Plugins.
+    pub fn set_validated_tsig(&mut self, name: &Name) {
+        let wire = name.as_wire();
+        self.validated_tsig[..wire.len()].copy_from_slice(wire);
+        self.validated_tsig_len = wire.len();
+    }
+
+    /// Defer authentication until the Listener has finalized the Response.
+    pub fn set_tsig_signing(&mut self, signing: TsigSigning) {
+        self.tsig_signing = Some(signing);
+    }
+
+    /// Take the pending Response authentication request.
+    pub fn take_tsig_signing(&mut self) -> Option<TsigSigning> {
+        self.tsig_signing.take()
+    }
+
+    /// Return the authenticated TSIG key name, if the Query was verified.
+    #[must_use]
+    pub fn validated_tsig(&self) -> Option<pharos_proto::NameRef<'_>> {
+        (self.validated_tsig_len != 0).then(|| {
+            pharos_proto::NameRef::parse(&self.validated_tsig[..self.validated_tsig_len], 0)
+                .expect("validated TSIG name")
+        })
     }
 
     #[must_use]
@@ -448,6 +524,15 @@ impl Context<'_, '_> {
         let Ok(query) = Message::parse(wire) else {
             return Outcome::Error(Error::InvalidQuery);
         };
+        self.run_with_message(query, next).await
+    }
+
+    /// Run Next with a modified Query view while preserving Metadata and Response state.
+    pub async fn run_with_message<N: Next + Send>(
+        &mut self,
+        query: Message<'_>,
+        next: N,
+    ) -> Outcome {
         let metadata = std::mem::replace(&mut self.metadata, Metadata::new(&mut []));
         let mut nested = NestedContext {
             parent_query: &mut self.query,
@@ -564,7 +649,7 @@ impl Context<'_, '_> {
             }));
             return match (&mut task.0).await {
                 Ok((Action::Respond, response)) => Ok(response),
-                Ok((Action::Drop, _)) => Err(Error::SelfLookupDropped),
+                Ok((Action::Drop | Action::Stream(_), _)) => Err(Error::SelfLookupDropped),
                 Err(_) => Err(Error::PluginPanic),
             };
         }
@@ -582,7 +667,7 @@ impl Context<'_, '_> {
             .await
         {
             Action::Respond => Ok(response),
-            Action::Drop => Err(Error::SelfLookupDropped),
+            Action::Drop | Action::Stream(_) => Err(Error::SelfLookupDropped),
         }
     }
 }
@@ -601,10 +686,11 @@ fn canonical_peer(mut peer: SocketAddr) -> SocketAddr {
     peer
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum Action {
     Respond,
     Drop,
+    Stream(Stream),
 }
 
 /// TCP connection limits selected by the Listener configuration.
@@ -762,11 +848,16 @@ impl Listener {
     }
 
     /// Stop accepting Queries and drain for at most five seconds.
-    pub async fn shutdown(mut self) -> io::Result<()> {
+    pub async fn shutdown(self) -> io::Result<()> {
+        self.shutdown_with_status().await.map(|_| ())
+    }
+
+    async fn shutdown_with_status(mut self) -> io::Result<bool> {
         self.stop.send_replace(true);
         self.udp_stop.send_replace(true);
         self.tasks.append(&mut self.udp_tasks);
         let mut result = Ok(());
+        let mut timed_out = false;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while let Some(mut task) = self.tasks.pop() {
             match tokio::time::timeout_at(deadline, &mut task).await {
@@ -777,6 +868,7 @@ impl Listener {
                     }
                 }
                 Err(_) => {
+                    timed_out = true;
                     task.abort();
                     for task in &self.tasks {
                         task.abort();
@@ -789,7 +881,7 @@ impl Listener {
                 }
             }
         }
-        result
+        result.map(|()| timed_out)
     }
 }
 
@@ -1097,6 +1189,13 @@ pub struct ListenerRegistry {
     handlers: HashMap<ListenerKey, Box<dyn Any + Send + Sync>>,
 }
 
+/// A replaced Handler and any removed Listener still being stopped.
+pub struct RetiredHandler<H> {
+    pub key: ListenerKey,
+    pub handler: Arc<H>,
+    pub shutdown: Option<JoinHandle<io::Result<bool>>>,
+}
+
 impl ListenerRegistry {
     pub fn insert(&mut self, key: ListenerKey, listener: Listener) -> Option<Listener> {
         self.handlers.remove(&key);
@@ -1128,8 +1227,23 @@ impl ListenerRegistry {
     /// Bind new Listeners before changing handlers; return replaced states for draining.
     pub async fn apply<H: Handler>(
         &mut self,
-        mut servers: HashMap<ListenerKey, H>,
+        servers: HashMap<ListenerKey, H>,
     ) -> io::Result<Vec<Arc<H>>> {
+        let mut handlers = Vec::new();
+        for retired in self.apply_with_keys(servers).await? {
+            if let Some(shutdown) = retired.shutdown {
+                let _ = shutdown.await;
+            }
+            handlers.push(retired.handler);
+        }
+        Ok(handlers)
+    }
+
+    /// Bind new Listeners and retain each retired handler's Listener address.
+    pub async fn apply_with_keys<H: Handler>(
+        &mut self,
+        mut servers: HashMap<ListenerKey, H>,
+    ) -> io::Result<Vec<RetiredHandler<H>>> {
         let desired: HashSet<_> = servers.keys().copied().collect();
         if desired.iter().any(|key| key.transport != Transport::Dns) {
             return Err(io::Error::new(
@@ -1204,12 +1318,17 @@ impl ListenerRegistry {
         }
         let mut retired = Vec::new();
         for (key, server) in servers {
-            retired.push(
-                self.handlers[&key]
+            retired.push(RetiredHandler {
+                key: ListenerKey {
+                    address: self.listeners[&key].local_addr(),
+                    ..key
+                },
+                handler: self.handlers[&key]
                     .downcast_ref::<Arc<ArcSwap<H>>>()
                     .expect("validated handler")
                     .swap(Arc::new(server)),
-            );
+                shutdown: None,
+            });
         }
         for (key, sockets) in replacements {
             let handler = self.handlers[&key]
@@ -1248,17 +1367,43 @@ impl ListenerRegistry {
             self.handlers.insert(key, Box::new(handler));
         }
         for key in removed {
+            let mut retired_index = None;
             if let Some(handler) = self
                 .handlers
                 .get(&key)
                 .and_then(|handler| handler.downcast_ref::<Arc<ArcSwap<H>>>())
             {
-                retired.push(handler.load_full());
+                retired_index = Some(retired.len());
+                retired.push(RetiredHandler {
+                    key: ListenerKey {
+                        address: self.listeners[&key].local_addr(),
+                        ..key
+                    },
+                    handler: handler.load_full(),
+                    shutdown: None,
+                });
             }
-            if let Some(listener) = self.remove(&key)
-                && let Err(error) = listener.shutdown().await
-            {
-                logging::log("ERROR", "", &format!("Listener shutdown: {error}"));
+            if let Some(listener) = self.remove(&key) {
+                let address = listener.local_addr();
+                let task = tokio::spawn(async move {
+                    let result = listener.shutdown_with_status().await;
+                    if matches!(result, Ok(true)) {
+                        logging::log(
+                            "ERROR",
+                            "",
+                            &format!("Stopping {address}: context deadline exceeded"),
+                        );
+                    }
+                    if let Err(error) = &result {
+                        logging::log("ERROR", "", &format!("Listener shutdown: {error}"));
+                    }
+                    result
+                });
+                if let Some(index) = retired_index {
+                    retired[index].shutdown = Some(task);
+                } else {
+                    let _ = task.await;
+                }
             }
         }
         Ok(retired)

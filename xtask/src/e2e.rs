@@ -181,6 +181,16 @@ fn matches_required(answer: &str, required: &str) -> bool {
         })
 }
 
+fn baseline_matches(case: &Case, expected: &str, actual: &str) -> bool {
+    if case.name == "forwarded public A" {
+        case.required
+            .iter()
+            .all(|required| matches_required(actual, required))
+    } else {
+        actual == expected
+    }
+}
+
 fn wait_response(cluster: &Cluster, case: &Case, timeout: Duration) -> Result<String, String> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -563,7 +573,7 @@ pub(crate) fn run(root: &Path, keep: bool) -> Result<(), String> {
     let rollout = Instant::now();
     for (case, expected) in checks.iter().zip(&baseline) {
         let actual = wait_response(&cluster, case, Duration::from_secs(90))?;
-        if &actual != expected {
+        if !baseline_matches(case, expected, &actual) {
             return Err(format!(
                 "{} differs from CoreDNS:\nCoreDNS:\n{expected}\nPharos:\n{actual}",
                 case.name
@@ -601,7 +611,7 @@ pub(crate) fn run(root: &Path, keep: bool) -> Result<(), String> {
     reload(&cluster, &pods)?;
     for (case, expected) in checks.iter().zip(&baseline) {
         let actual = wait_response(&cluster, case, Duration::from_secs(90))?;
-        if &actual != expected {
+        if !baseline_matches(case, expected, &actual) {
             return Err(format!(
                 "{} differs after Reload:\nCoreDNS:\n{expected}\nPharos:\n{actual}",
                 case.name
@@ -695,6 +705,31 @@ mod tests {
     use super::{
         deployment_patch, json_string, matches_required, normalize, pharos_pods, reload_corefile,
     };
+
+    #[test]
+    fn public_forwarding_allows_rotating_addresses_but_checks_response_shape() {
+        let cases = super::cases("10.96.0.10", "10.96.0.1", "10.244.0.5").unwrap();
+        let public = cases
+            .iter()
+            .find(|case| case.name == "forwarded public A")
+            .unwrap();
+        let baseline = "noerror\nanswer example.com. in a 192.0.2.1";
+        assert!(super::baseline_matches(
+            public,
+            baseline,
+            "noerror\nanswer example.com. in a 192.0.2.2"
+        ));
+        assert!(!super::baseline_matches(public, baseline, "nxdomain"));
+        let fixed = cases
+            .iter()
+            .find(|case| case.name != "forwarded public A")
+            .unwrap();
+        assert!(!super::baseline_matches(
+            fixed,
+            baseline,
+            "noerror\nanswer example.com. in a 192.0.2.2"
+        ));
+    }
 
     #[test]
     fn normalizes_ttl_and_record_order_but_keeps_status_and_sections() {

@@ -120,21 +120,21 @@ async fn in_flight_query_finishes_with_old_handler() {
         .apply(HashMap::from([(key, handler(1, true))]))
         .await
         .unwrap();
-    let mut client = tokio::net::TcpStream::connect(listeners.get(&key).unwrap().local_addr())
-        .await
-        .unwrap();
+    let address = listeners.get(&key).unwrap().local_addr();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     client.write_all(&[0, 1, 42]).await.unwrap();
     entered.notified().await;
     let retired = listeners
-        .apply(HashMap::from([(key, handler(2, false))]))
+        .apply_with_keys(HashMap::from([(key, handler(2, false))]))
         .await
         .unwrap();
-    assert!(std::sync::Arc::strong_count(&retired[0]) > 1);
+    assert_eq!(retired[0].key.address, address);
+    assert!(std::sync::Arc::strong_count(&retired[0].handler) > 1);
     resume.notify_one();
     let mut frame = [0; 3];
     client.read_exact(&mut frame).await.unwrap();
     assert_eq!(frame, [0, 1, 1]);
-    assert_eq!(std::sync::Arc::strong_count(&retired[0]), 1);
+    assert_eq!(std::sync::Arc::strong_count(&retired[0].handler), 1);
     client.write_all(&[0, 1, 42]).await.unwrap();
     client.read_exact(&mut frame).await.unwrap();
     assert_eq!(frame, [0, 1, 2]);
@@ -143,4 +143,49 @@ async fn in_flight_query_finishes_with_old_handler() {
         .apply::<WaitingAnswer>(HashMap::new())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn removed_listener_retires_without_blocking_on_inflight_query() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:0".parse().unwrap(),
+    };
+    let entered = std::sync::Arc::new(Notify::new());
+    let resume = std::sync::Arc::new(Notify::new());
+    let mut listeners = ListenerRegistry::default();
+    listeners
+        .apply(HashMap::from([(
+            key,
+            WaitingAnswer {
+                value: 1,
+                entered: entered.clone(),
+                resume: resume.clone(),
+                wait: true,
+            },
+        )]))
+        .await
+        .unwrap();
+    let address = listeners.get(&key).unwrap().local_addr();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client.write_all(&[0, 1, 42]).await.unwrap();
+    entered.notified().await;
+    let retired = tokio::time::timeout(
+        Duration::from_millis(500),
+        listeners.apply_with_keys::<WaitingAnswer>(HashMap::new()),
+    )
+    .await
+    .expect("removal blocked on an in-flight Query")
+    .unwrap();
+    assert_eq!(retired[0].key.address, address);
+    resume.notify_one();
+    let mut response = [0; 3];
+    client.read_exact(&mut response).await.unwrap();
+    assert_eq!(response, [0, 1, 1]);
+    drop(client);
+    for entry in retired {
+        if let Some(task) = entry.shutdown {
+            task.await.unwrap().unwrap();
+        }
+    }
 }

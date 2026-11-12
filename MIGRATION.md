@@ -18,6 +18,11 @@ in-place migration manifest: do not apply it over an existing kubeadm DNS
 installation. For that case, patch the existing CoreDNS Deployment instead,
 retaining its ConfigMap, RBAC, probes, security context and Service.
 
+For `dnssec` keys stored in AWS Secrets Manager, build with
+`cargo build --release -p pharos-dns --features pharos-plugins/dnssec-aws`.
+The feature is off by default; without it, `key aws_secretsmanager` is a
+configuration error. The SDK uses its default AWS credential chain.
+
 Before rollout, run:
 
 ```sh
@@ -29,6 +34,9 @@ then uses its built-in default. `check` parses imports and runs Plugin setup,
 but does not bind Listeners or run Startup hooks; it cannot validate connectivity
 or credentials that are checked at Startup. It returns 0 on success, 1 for a
 configuration error, and 2 for an invalid flag.
+
+For `key aws_secretsmanager`, Plugin setup retrieves the secret, so `check`
+requires AWS connectivity and credentials.
 
 With the `kubernetes` option `multicluster`, the ServiceImport CRD
 (`serviceimports.multicluster.x-k8s.io`) must be installed and readable by the
@@ -71,6 +79,9 @@ The following table lists metric families, not individual histogram samples.
 | `pharos_dns_requests_total` | `coredns_dns_requests_total` |
 | `pharos_dns_response_size_bytes` | `coredns_dns_response_size_bytes` |
 | `pharos_dns_responses_total` | `coredns_dns_responses_total` |
+| `pharos_dnssec_cache_entries` | `coredns_dnssec_cache_entries` |
+| `pharos_dnssec_cache_hits_total` | `coredns_dnssec_cache_hits_total` |
+| `pharos_dnssec_cache_misses_total` | `coredns_dnssec_cache_misses_total` |
 | `pharos_forward_healthcheck_broken_total` | `coredns_forward_healthcheck_broken_total` |
 | `pharos_forward_max_concurrent_rejects_total` | `coredns_forward_max_concurrent_rejects_total` |
 | `pharos_health_request_duration_seconds` | `coredns_health_request_duration_seconds` |

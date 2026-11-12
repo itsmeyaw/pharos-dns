@@ -40,6 +40,25 @@ fn setup(options: &str) -> impl Handler {
     servers.drain().next().unwrap().1
 }
 
+#[cfg(feature = "plugin-forward")]
+fn with_cache_stack<F: std::future::Future<Output = ()>>(
+    test: impl FnOnce() -> F + Send + 'static,
+) {
+    // The cache/forward test future overflowed a 2 MiB test thread stack; see #90.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(test());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn immediate_serves_stale_then_refreshes() {
     let server = setup("serve_stale 10s immediate 7s");
@@ -133,16 +152,23 @@ async fn verify_timeout_serves_stale_and_keeps_refresh_running() {
         .await
         .unwrap()
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    assert_eq!(
-        server
-            .handle(QUERY, peer, Protocol::Udp, &mut response)
-            .await,
-        Action::Respond
-    );
-    assert!(
-        matches!(Message::parse(&response).unwrap().answers().next().unwrap().data().unwrap(), Rdata::A(ip) if ip.octets() == [192, 0, 2, 2])
-    );
+    // RFC 8767 §4: wait until the background refresh replaces the stale answer.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            assert_eq!(
+                server
+                    .handle(QUERY, peer, Protocol::Udp, &mut response)
+                    .await,
+                Action::Respond
+            );
+            if matches!(Message::parse(&response).unwrap().answers().next().unwrap().data().unwrap(), Rdata::A(ip) if ip.octets() == [192, 0, 2, 2]) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     upstream.await.unwrap();
 }
 
@@ -152,8 +178,14 @@ async fn popular_entry_prefetches_before_expiry() {
     request(&server, 1001).await;
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(request(&server, 1002).await.0, 1001);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(request(&server, 1003).await.0, 0);
+    // RFC 1035 §7.4: wait for the prefetched answer to enter the cache.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while request(&server, 1003).await.0 != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[test]
@@ -175,7 +207,11 @@ fn expired_entry_does_not_transfer_popularity_to_a_new_miss() {
                     assert_eq!(request(&server, 1003).await.0, 1003);
                     tokio::time::sleep(Duration::from_millis(1100)).await;
                     assert_eq!(request(&server, 1004).await.0, 1003);
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    // Extra cache hits would themselves trigger prefetch, so only poll the deadline.
+                    let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+                    while tokio::time::Instant::now() < deadline {
+                        tokio::task::yield_now().await;
+                    }
                     assert_eq!(request(&server, 1005).await.0, 1003);
                 });
         })
@@ -185,24 +221,28 @@ fn expired_entry_does_not_transfer_popularity_to_a_new_miss() {
 }
 
 #[cfg(feature = "plugin-forward")]
-#[tokio::test]
-async fn prefetched_servfail_does_not_shadow_a_valid_positive() {
-    let response = prefetched_result("", 0x8082).await;
-    assert_eq!(
-        Message::parse(&response).unwrap().rcode(),
-        pharos_proto::Rcode::NOERROR
-    );
+#[test]
+fn prefetched_servfail_does_not_shadow_a_valid_positive() {
+    with_cache_stack(|| async {
+        let response = prefetched_result("", 0x8082).await;
+        assert_eq!(
+            Message::parse(&response).unwrap().rcode(),
+            pharos_proto::Rcode::NOERROR
+        );
+    });
 }
 
 #[cfg(feature = "plugin-forward")]
-#[tokio::test]
-async fn prefer_positive_retains_last_good_answer_after_nonanswer_prefetch() {
-    let response = prefetched_result(
-        "serve_stale 10s\n serve_stale_policy prefer_positive",
-        0x8080,
-    )
-    .await;
-    assert_eq!(Message::parse(&response).unwrap().answer_count(), 1);
+#[test]
+fn prefer_positive_retains_last_good_answer_after_nonanswer_prefetch() {
+    with_cache_stack(|| async {
+        let response = prefetched_result(
+            "serve_stale 10s\n serve_stale_policy prefer_positive",
+            0x8080,
+        )
+        .await;
+        assert_eq!(Message::parse(&response).unwrap().answer_count(), 1);
+    });
 }
 
 #[cfg(feature = "plugin-forward")]
@@ -317,13 +357,17 @@ async fn prefetched_result(options: &str, second_flags: u16) -> Vec<u8> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let (sent, done) = tokio::sync::oneshot::channel();
+    let (retried, mut retry_started) = tokio::sync::oneshot::channel();
     let upstream = tokio::spawn(async move {
         let (mut connection, _) = listener.accept().await.unwrap();
-        for index in 0..2 {
+        for index in 0..3 {
             let len = connection.read_u16().await.unwrap();
             let mut wire = vec![0; usize::from(len)];
             connection.read_exact(&mut wire).await.unwrap();
+            if index == 2 {
+                let _ = retried.send(());
+                return;
+            }
             let query = Message::parse(&wire).unwrap();
             let q = query.questions().next().unwrap();
             let mut response = Vec::with_capacity(512);
@@ -351,7 +395,6 @@ async fn prefetched_result(options: &str, second_flags: u16) -> Vec<u8> {
             connection.write_u16(response.len() as u16).await.unwrap();
             connection.write_all(&response).await.unwrap();
         }
-        let _ = sent.send(());
     });
     let text = format!(
         ".:0 {{\n cache {{\n success 1024 2 0\n prefetch 1 1m 90%\n {options}\n }}\n forward . {address} {{\n force_tcp\n }}\n}}"
@@ -374,11 +417,23 @@ async fn prefetched_result(options: &str, second_flags: u16) -> Vec<u8> {
             .await,
         Action::Respond
     );
-    tokio::time::timeout(Duration::from_secs(2), done)
-        .await
-        .unwrap()
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    // RFC 1035 §7.4: a second prefetch can start only after the first was processed.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            assert_eq!(
+                server
+                    .handle(QUERY, peer, Protocol::Udp, &mut response)
+                    .await,
+                Action::Respond
+            );
+            if retry_started.try_recv().is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
         server
             .handle(QUERY, peer, Protocol::Udp, &mut response)

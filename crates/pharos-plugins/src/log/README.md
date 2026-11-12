@@ -11,7 +11,7 @@
 - For a returned Response, `{rsize}` is the size before truncation, as in CoreDNS.
 - `{rflags}` also describes the Message before truncation; CoreDNS scrubs its recorded Message in place, so its `{rflags}` shows `tc` when the Listener truncates.
 - A Drop is logged with `-` RCODE and flags and zero size; a Plugin error is logged as a synthesized SERVFAIL.
-- Zone Transfer streams are not yet served and are logged as a Message-less outcome.
+- Zone Transfer streams are classified as `META` errors and logged with `-` RCODE and flags and zero size; CoreDNS logs the last transferred Message's RCODE and flags and the total transferred size.
 - The formatter cannot expand compressed names in unsupported RDATA when calculating Message size.
 
 ## Sources

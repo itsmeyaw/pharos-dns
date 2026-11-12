@@ -11,7 +11,8 @@ use pharos_proto::{Message, MessageError, NameError, Rcode, Type};
 use pharos_server::metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry};
 use std::{
     collections::VecDeque,
-    fmt, io,
+    fmt,
+    io::{self, IoSlice},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Mutex, OnceLock,
@@ -20,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpSocket, TcpStream, UdpSocket},
     time::timeout,
 };
@@ -63,7 +64,27 @@ async fn connect_tcp(address: SocketAddr, source: Option<IpAddr>) -> io::Result<
     if let Some(source) = source {
         socket.bind(SocketAddr::new(source, 0))?;
     }
-    socket.connect(address).await
+    let stream = socket.connect(address).await?;
+    stream.set_nodelay(true)?;
+    Ok(stream)
+}
+
+async fn write_tcp_frame(stream: &mut (impl AsyncWrite + Unpin), wire: &[u8]) -> io::Result<()> {
+    // RFC 1035 §4.2.2: prefix each TCP Message with its two-octet length.
+    let length = (wire.len() as u16).to_be_bytes();
+    let mut written = 0;
+    while written < length.len() + wire.len() {
+        let buffers = [
+            IoSlice::new(&length[written.min(length.len())..]),
+            IoSlice::new(&wire[written.saturating_sub(length.len())..]),
+        ];
+        let n = stream.write_vectored(&buffers).await?;
+        if n == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        written += n;
+    }
+    Ok(())
 }
 
 fn is_overflow(error: &MessageError) -> bool {
@@ -157,10 +178,7 @@ impl Socket {
                 Ok(())
             }
             // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
-            Self::Tcp(s) => {
-                s.write_all(&(wire.len() as u16).to_be_bytes()).await?;
-                s.write_all(wire).await
-            }
+            Self::Tcp(s) => write_tcp_frame(s, wire).await,
         }
     }
     async fn receive(&mut self, wire: &mut [u8]) -> io::Result<usize> {
@@ -599,6 +617,93 @@ impl Drop for Proxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tcp_upstream_connect_disables_nagle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = connect_tcp(listener.local_addr().unwrap(), None)
+            .await
+            .unwrap();
+        assert!(stream.nodelay().unwrap());
+    }
+
+    #[tokio::test]
+    async fn tcp_frame_vectored_write_handles_partial_and_zero_writes() {
+        use std::{
+            pin::Pin,
+            task::{Context, Poll},
+        };
+        struct Writer {
+            bytes: Vec<u8>,
+            limit: usize,
+            calls: usize,
+            first_segments: usize,
+        }
+        impl AsyncWrite for Writer {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                panic!("expected vectored write")
+            }
+            fn poll_write_vectored(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buffers: &[IoSlice<'_>],
+            ) -> Poll<io::Result<usize>> {
+                if self.calls == 0 {
+                    self.first_segments = buffers.iter().filter(|b| !b.is_empty()).count();
+                }
+                self.calls += 1;
+                let mut left = self.limit;
+                let mut written = 0;
+                for buffer in buffers {
+                    let count = left.min(buffer.len());
+                    self.bytes.extend_from_slice(&buffer[..count]);
+                    written += count;
+                    left -= count;
+                }
+                Poll::Ready(Ok(written))
+            }
+            fn is_write_vectored(&self) -> bool {
+                true
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+        for limit in [1, 3, 100] {
+            let mut writer = Writer {
+                bytes: Vec::new(),
+                limit,
+                calls: 0,
+                first_segments: 0,
+            };
+            write_tcp_frame(&mut writer, b"hello").await.unwrap();
+            assert_eq!(writer.bytes, b"\0\x05hello");
+            assert_eq!(writer.first_segments, 2);
+            if limit == 100 {
+                assert_eq!(writer.calls, 1);
+            }
+        }
+        let mut writer = Writer {
+            bytes: Vec::new(),
+            limit: 0,
+            calls: 0,
+            first_segments: 0,
+        };
+        assert_eq!(
+            write_tcp_frame(&mut writer, b"hello")
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WriteZero
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]

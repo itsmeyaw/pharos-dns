@@ -525,10 +525,15 @@ async fn idle_cap_applies_per_transport() {
 
 #[tokio::test]
 async fn max_age_expires_connections_even_when_recently_used() {
-    use std::time::Duration;
+    use pharos_server::metrics::Registry;
+    use std::time::{Duration, Instant};
     let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut proxy = Proxy::new(server.local_addr().unwrap());
-    proxy.set_max_age(Duration::from_millis(300));
+    let max_age = Duration::from_millis(300);
+    proxy.set_max_age(max_age);
+    proxy.set_expire(max_age);
+    let registry = Registry::new("v", "r", "rust");
+    proxy.set_metrics(&registry, "forward");
     let upstream = tokio::spawn(async move {
         let mut peers = Vec::new();
         let mut wire = [0; 512];
@@ -545,19 +550,36 @@ async fn max_age_expires_connections_even_when_recently_used() {
         .exchange(QUERY, &mut response, Transport::Udp, Options::default())
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    let started = Instant::now();
+    while started.elapsed() < max_age / 2 {
+        tokio::task::yield_now().await;
+    }
+    let recently_used = Instant::now();
     proxy
         .exchange(QUERY, &mut response, Transport::Udp, Options::default())
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(320)).await;
+    while started.elapsed() <= max_age {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        recently_used.elapsed() < max_age,
+        "connection was idle too long"
+    );
     proxy
         .exchange(QUERY, &mut response, Transport::Udp, Options::default())
         .await
         .unwrap();
     let peers = upstream.await.unwrap();
     assert_eq!(peers[0], peers[1]);
-    assert_ne!(peers[1], peers[2]);
+    let mut metrics = String::new();
+    registry.encode(&mut metrics);
+    assert!(metrics.lines().any(
+        |line| line.starts_with("pharos_proxy_conn_cache_hits_total{") && line.ends_with(" 1")
+    ));
+    assert!(metrics.lines().any(
+        |line| line.starts_with("pharos_proxy_conn_cache_misses_total{") && line.ends_with(" 2")
+    ));
 }
 
 #[tokio::test]
@@ -608,10 +630,14 @@ async fn unlimited_idle_cache_rotates_connections_fifo() {
 
 #[tokio::test]
 async fn fifo_rotated_connections_expire_by_creation_age() {
-    use std::time::Duration;
+    use pharos_server::metrics::Registry;
+    use std::time::{Duration, Instant};
     let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut proxy = Proxy::new(server.local_addr().unwrap());
-    proxy.set_max_age(Duration::from_millis(300));
+    let max_age = Duration::from_millis(300);
+    proxy.set_max_age(max_age);
+    let registry = Registry::new("v", "r", "rust");
+    proxy.set_metrics(&registry, "forward");
     let upstream = tokio::spawn(async move {
         let mut wire = [0; 512];
         let mut peers = Vec::new();
@@ -637,7 +663,10 @@ async fn fifo_rotated_connections_expire_by_creation_age() {
             .await
             .unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(320)).await;
+    let started = Instant::now();
+    while started.elapsed() <= max_age {
+        tokio::task::yield_now().await;
+    }
     let (one, two) = tokio::join!(
         proxy.exchange(QUERY, &mut a, Transport::Udp, Options::default()),
         proxy.exchange(QUERY, &mut b, Transport::Udp, Options::default())
@@ -650,8 +679,14 @@ async fn fifo_rotated_connections_expire_by_creation_age() {
     initial.sort();
     rotated.sort();
     assert_eq!(initial, rotated);
-    assert!(!peers[..2].contains(&peers[4]));
-    assert!(!peers[..2].contains(&peers[5]));
+    let mut metrics = String::new();
+    registry.encode(&mut metrics);
+    assert!(metrics.lines().any(
+        |line| line.starts_with("pharos_proxy_conn_cache_hits_total{") && line.ends_with(" 2")
+    ));
+    assert!(metrics.lines().any(
+        |line| line.starts_with("pharos_proxy_conn_cache_misses_total{") && line.ends_with(" 4")
+    ));
 }
 
 #[tokio::test]
@@ -704,10 +739,58 @@ async fn source_address_is_used_by_udp_and_tcp() {
 async fn health_check_uses_configured_source_address() {
     use pharos_plugins::proxy::{Health, HealthConfig};
     use std::{
-        net::{IpAddr, Ipv6Addr},
+        net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
     };
-    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    let target = nix::ifaddrs::getifaddrs()
+        .unwrap()
+        .filter_map(|interface| {
+            interface
+                .address?
+                .as_sockaddr_in()
+                .map(|address| address.ip())
+        })
+        .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        .unwrap_or(Ipv4Addr::LOCALHOST);
+    let tcp = TcpListener::bind(SocketAddr::new(target.into(), 0))
+        .await
+        .unwrap();
+    let server = UdpSocket::bind(tcp.local_addr().unwrap()).await.unwrap();
+    let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    for force_tcp in [false, true] {
+        let mut config = HealthConfig::new(server.local_addr().unwrap(), 1);
+        config.source_address = Some(source);
+        config.force_tcp = force_tcp;
+        let health = Health::with_config(config);
+        health.start();
+        let mut wire = [0; 512];
+        if force_tcp {
+            let (mut stream, peer) = tokio::time::timeout(Duration::from_secs(3), tcp.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(peer.ip(), source);
+            let len = usize::from(stream.read_u16().await.unwrap());
+            stream.read_exact(&mut wire[..len]).await.unwrap();
+            wire[2] |= 0x80;
+            stream.write_u16(len as u16).await.unwrap();
+            stream.write_all(&wire[..len]).await.unwrap();
+        } else {
+            let (len, peer) =
+                tokio::time::timeout(Duration::from_secs(3), server.recv_from(&mut wire))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(peer.ip(), source);
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+        health.stop();
+    }
     for force_tcp in [false, true] {
         let mut config = HealthConfig::new(server.local_addr().unwrap(), 1);
         config.source_address = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
@@ -769,28 +852,41 @@ async fn stop_closes_idle_connections_and_rejects_queries() {
 #[test]
 fn activity_on_another_worker_sweeps_expired_sockets() {
     use std::{
-        net::UdpSocket as StdUdp,
+        io::{Read, Write},
+        net::{TcpListener as StdTcp, UdpSocket as StdUdp},
         sync::{Arc, mpsc},
-        time::Duration,
+        time::{Duration, Instant},
     };
     let server = StdUdp::bind("127.0.0.1:0").unwrap();
+    let tcp = StdTcp::bind(server.local_addr().unwrap()).unwrap();
     server
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     let mut proxy = Proxy::new(server.local_addr().unwrap());
-    proxy.set_expire(Duration::from_millis(40));
+    let expire = Duration::from_millis(40);
+    proxy.set_expire(expire);
     let proxy = Arc::new(proxy);
     let (peers_tx, peers_rx) = mpsc::channel();
     let upstream = std::thread::spawn(move || {
         let mut wire = [0; 512];
-        for _ in 0..2 {
-            let (len, peer) = server.recv_from(&mut wire).unwrap();
-            peers_tx.send(peer).unwrap();
-            wire[2] |= 0x80;
-            server.send_to(&wire[..len], peer).unwrap();
-        }
+        let (len, peer) = server.recv_from(&mut wire).unwrap();
+        peers_tx.send(peer).unwrap();
+        wire[2] |= 0x80;
+        server.send_to(&wire[..len], peer).unwrap();
+        let (mut stream, _) = tcp.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        // RFC 1035 §4.2.2: TCP DNS messages use a two-octet length prefix.
+        let mut length = [0; 2];
+        stream.read_exact(&mut length).unwrap();
+        let len = usize::from(u16::from_be_bytes(length));
+        stream.read_exact(&mut wire[..len]).unwrap();
+        wire[2] |= 0x80;
+        stream.write_all(&length).unwrap();
+        stream.write_all(&wire[..len]).unwrap();
     });
-    let exchange = |proxy: Arc<Proxy>| {
+    let exchange = |proxy: Arc<Proxy>, transport| {
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -798,19 +894,20 @@ fn activity_on_another_worker_sweeps_expired_sockets() {
                 .unwrap();
             runtime.block_on(async {
                 proxy
-                    .exchange(QUERY, &mut [0; 512], Transport::Udp, Options::default())
+                    .exchange(QUERY, &mut [0; 512], transport, Options::default())
                     .await
                     .unwrap();
             });
         })
     };
-    exchange(Arc::clone(&proxy)).join().unwrap();
+    exchange(Arc::clone(&proxy), Transport::Udp).join().unwrap();
     let first = peers_rx.recv().unwrap();
     assert!(StdUdp::bind(first).is_err());
-    std::thread::sleep(Duration::from_millis(70));
-    exchange(Arc::clone(&proxy)).join().unwrap();
-    let second = peers_rx.recv().unwrap();
-    assert_ne!(first, second);
+    let started = Instant::now();
+    while started.elapsed() <= expire {
+        std::thread::yield_now();
+    }
+    exchange(Arc::clone(&proxy), Transport::Tcp).join().unwrap();
     assert!(
         StdUdp::bind(first).is_ok(),
         "inactive worker's expired socket stayed open"

@@ -2,7 +2,7 @@ use std::{future::Future, net::SocketAddr, sync::Arc, time::Instant};
 
 use crate::{
     Action, Admission, Context, Error, Handler, ListenerKey, Metadata, Outcome, Protocol, Router,
-    admit, finish_outcome,
+    admit, finish_outcome_signed,
     metrics::{BlockMetrics, Registry},
     response_limit,
 };
@@ -317,6 +317,7 @@ impl<C: Chain> Server<C> {
         let mut producer = None;
         let mut error_plugin = None;
         let mut error_logged = false;
+        let mut tsig_signing = None;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
                 let mut slots = [None; 18];
@@ -360,6 +361,7 @@ impl<C: Chain> Server<C> {
                     .and_then(|name| block.plugin_name(name));
                 error_logged =
                     context.metadata.get(crate::logging::ERROR_LOGGED_METADATA) == Some("true");
+                tsig_signing = context.metadata.take_tsig_signing();
                 outcome
             } else {
                 Outcome::Unanswered(Rcode::REFUSED)
@@ -383,23 +385,22 @@ impl<C: Chain> Server<C> {
         let duration = chain_start.elapsed().as_secs_f64();
         let default_logger = std::ptr::fn_addr_eq(self.logger, log_error as fn(Error));
         let mut first_error = true;
-        let action = finish_outcome(query, protocol, outcome, response, |error| {
-            let suppress = first_error
-                && (error_logged || default_logger)
-                && matches!(outcome, Outcome::Error(e) if e != Error::PluginPanic);
-            first_error = false;
-            if suppress {
-                return;
-            }
-            if let Some(plugin) = error_plugin.filter(|_| default_logger) {
-                log_plugin_error(plugin, error);
-            } else {
-                (self.logger)(error);
-            }
-        });
-        let code = if (block.is_none() || outcome == Outcome::Error(Error::PluginPanic))
-            && action == Action::Respond
-        {
+        let plugin_panic = outcome == Outcome::Error(Error::PluginPanic);
+        let plugin_error = matches!(outcome, Outcome::Error(e) if e != Error::PluginPanic);
+        let action =
+            finish_outcome_signed(query, protocol, outcome, response, tsig_signing, |error| {
+                let suppress = first_error && (error_logged || default_logger) && plugin_error;
+                first_error = false;
+                if suppress {
+                    return;
+                }
+                if let Some(plugin) = error_plugin.filter(|_| default_logger) {
+                    log_plugin_error(plugin, error);
+                } else {
+                    (self.logger)(error);
+                }
+            });
+        let code = if (block.is_none() || plugin_panic) && action == Action::Respond {
             pharos_proto::Message::parse(response).map_or(0, |message| message.rcode().0)
         } else {
             recorded_code
@@ -407,9 +408,7 @@ impl<C: Chain> Server<C> {
         // shortcut: compressed Query lengths differ until decoded Message lengths are available.
         let qtype = query.questions().next().map_or(0, |q| q.qtype.0);
         let dnssec = query.opt().is_some_and(|opt| opt.dnssec_ok());
-        let response_len = if (block.is_none() || outcome == Outcome::Error(Error::PluginPanic))
-            && action == Action::Respond
-        {
+        let response_len = if (block.is_none() || plugin_panic) && action == Action::Respond {
             response.len()
         } else {
             recorded_size
@@ -426,7 +425,7 @@ impl<C: Chain> Server<C> {
                 duration,
             );
         } else {
-            let metrics = if outcome == Outcome::Error(Error::PluginPanic) {
+            let metrics = if plugin_panic {
                 self.dropped.as_ref()
             } else {
                 block.map_or(self.dropped.as_ref(), |block| block.metrics())

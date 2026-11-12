@@ -37,7 +37,9 @@ fn main() {
         let ty = match *name {
             "acl" => "acl::Acl",
             "dns64" => "dns64::Dns64",
+            "dnssec" => "dnssec::Dnssec",
             "siit" => "siit::Siit",
+            "tsig" => "tsig::Tsig",
             "rewrite" => "rewrite::Rewrite",
             "autopath" => "autopath::AutoPath",
             "root" => "std::path::PathBuf",
@@ -78,7 +80,9 @@ fn main() {
         let setup = match *name {
             "acl" => "acl::setup::setup",
             "dns64" => "dns64::setup::setup",
+            "dnssec" => "dnssec::setup::setup",
             "siit" => "siit::setup::setup",
+            "tsig" => "tsig::setup::setup",
             "rewrite" => "rewrite::setup::setup",
             "autopath" => "autopath::setup::setup",
             "root" => "root::setup::setup",
@@ -114,6 +118,8 @@ fn main() {
         let once = matches!(
             *name,
             "cache"
+                | "dnssec"
+                | "tsig"
                 | "shed"
                 | "metadata"
                 | "prometheus"

@@ -61,6 +61,12 @@ mod any {
 }
 
 #[path = "allocations"]
+mod tsig {
+    #[path = "tsig_allocations.rs"]
+    mod cases;
+}
+
+#[path = "allocations"]
 mod autopath {
     #[path = "autopath_allocations.rs"]
     mod autopath_allocations;
@@ -94,6 +100,12 @@ mod chaos {
 mod dns64 {
     #[path = "dns64_allocations.rs"]
     mod dns64_allocations;
+}
+
+#[path = "allocations"]
+mod dnssec {
+    #[path = "dnssec_allocations.rs"]
+    mod cases;
 }
 
 #[path = "allocations"]
