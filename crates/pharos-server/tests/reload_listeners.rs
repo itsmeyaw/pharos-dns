@@ -120,21 +120,21 @@ async fn in_flight_query_finishes_with_old_handler() {
         .apply(HashMap::from([(key, handler(1, true))]))
         .await
         .unwrap();
-    let mut client = tokio::net::TcpStream::connect(listeners.get(&key).unwrap().local_addr())
-        .await
-        .unwrap();
+    let address = listeners.get(&key).unwrap().local_addr();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     client.write_all(&[0, 1, 42]).await.unwrap();
     entered.notified().await;
     let retired = listeners
-        .apply(HashMap::from([(key, handler(2, false))]))
+        .apply_with_keys(HashMap::from([(key, handler(2, false))]))
         .await
         .unwrap();
-    assert!(std::sync::Arc::strong_count(&retired[0]) > 1);
+    assert_eq!(retired[0].0.address, address);
+    assert!(std::sync::Arc::strong_count(&retired[0].1) > 1);
     resume.notify_one();
     let mut frame = [0; 3];
     client.read_exact(&mut frame).await.unwrap();
     assert_eq!(frame, [0, 1, 1]);
-    assert_eq!(std::sync::Arc::strong_count(&retired[0]), 1);
+    assert_eq!(std::sync::Arc::strong_count(&retired[0].1), 1);
     client.write_all(&[0, 1, 42]).await.unwrap();
     client.read_exact(&mut frame).await.unwrap();
     assert_eq!(frame, [0, 1, 2]);

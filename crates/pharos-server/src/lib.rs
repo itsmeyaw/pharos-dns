@@ -1208,8 +1208,21 @@ impl ListenerRegistry {
     /// Bind new Listeners before changing handlers; return replaced states for draining.
     pub async fn apply<H: Handler>(
         &mut self,
-        mut servers: HashMap<ListenerKey, H>,
+        servers: HashMap<ListenerKey, H>,
     ) -> io::Result<Vec<Arc<H>>> {
+        Ok(self
+            .apply_with_keys(servers)
+            .await?
+            .into_iter()
+            .map(|(_, handler)| handler)
+            .collect())
+    }
+
+    /// Bind new Listeners and retain each retired handler's Listener address.
+    pub async fn apply_with_keys<H: Handler>(
+        &mut self,
+        mut servers: HashMap<ListenerKey, H>,
+    ) -> io::Result<Vec<(ListenerKey, Arc<H>)>> {
         let desired: HashSet<_> = servers.keys().copied().collect();
         if desired.iter().any(|key| key.transport != Transport::Dns) {
             return Err(io::Error::new(
@@ -1284,12 +1297,16 @@ impl ListenerRegistry {
         }
         let mut retired = Vec::new();
         for (key, server) in servers {
-            retired.push(
+            retired.push((
+                ListenerKey {
+                    address: self.listeners[&key].local_addr(),
+                    ..key
+                },
                 self.handlers[&key]
                     .downcast_ref::<Arc<ArcSwap<H>>>()
                     .expect("validated handler")
                     .swap(Arc::new(server)),
-            );
+            ));
         }
         for (key, sockets) in replacements {
             let handler = self.handlers[&key]
@@ -1333,7 +1350,13 @@ impl ListenerRegistry {
                 .get(&key)
                 .and_then(|handler| handler.downcast_ref::<Arc<ArcSwap<H>>>())
             {
-                retired.push(handler.load_full());
+                retired.push((
+                    ListenerKey {
+                        address: self.listeners[&key].local_addr(),
+                        ..key
+                    },
+                    handler.load_full(),
+                ));
             }
             if let Some(listener) = self.remove(&key)
                 && let Err(error) = listener.shutdown().await
