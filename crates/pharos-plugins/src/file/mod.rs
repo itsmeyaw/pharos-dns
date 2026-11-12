@@ -333,6 +333,7 @@ struct Loaded {
     path: PathBuf,
     current: arc_swap::ArcSwapOption<Zone>,
     interval: Duration,
+    negative_interval: bool,
     by_mtime: bool,
     modified: Mutex<Option<SystemTime>>,
 }
@@ -437,6 +438,7 @@ impl File {
         let mut zones = Vec::new();
         let mut fallthrough = Vec::new();
         let mut reload = Duration::from_secs(60);
+        let mut negative_reload = false;
         let mut by_mtime = false;
         let mut open_error = None;
         #[cfg(feature = "plugin-transfer")]
@@ -465,8 +467,12 @@ impl File {
                         }
                     }
                     "reload" if !args.is_empty() => {
-                        reload = crate::health::parse_duration(&args[0])
-                            .ok_or_else(|| cursor.arg_err())?
+                        let value = &args[0];
+                        crate::health::parse_duration(value).ok_or_else(|| cursor.arg_err())?;
+                        let magnitude = value.strip_prefix('-').unwrap_or(value);
+                        reload = crate::health::parse_duration(magnitude)
+                            .ok_or_else(|| cursor.arg_err())?;
+                        negative_reload = value.starts_with('-') && !reload.is_zero();
                     }
                     "reload_by_mtime" => by_mtime = true,
                     "upstream" => {}
@@ -510,6 +516,7 @@ impl File {
                     path: path.clone(),
                     current: arc_swap::ArcSwapOption::from(current),
                     interval: reload,
+                    negative_interval: negative_reload,
                     by_mtime,
                     modified: Mutex::new(modified),
                 }));
@@ -551,6 +558,9 @@ impl File {
             #[cfg(feature = "plugin-transfer")]
             let notify_names = notify_names.clone();
             async move {
+                if zones.iter().any(|zone| zone.negative_interval) {
+                    return Err(std::io::Error::other("negative file reload interval"));
+                }
                 let mut tasks = tasks.lock().unwrap();
                 for task in tasks.drain(..) {
                     task.abort();
