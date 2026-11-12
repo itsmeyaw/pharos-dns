@@ -715,3 +715,85 @@ async fn coredns_serve_dns_requirement_and_next_cases() {
         assert_eq!(cx.metadata.take_tsig_signing().is_some(), authenticated);
     }
 }
+
+#[tokio::test]
+async fn tsig_plugin_authenticates_and_signs_zone_transfer_stream() {
+    use pharos_server::{
+        Chain as ServerChain, Listener, ListenerKey, Next, Plugin, Router, Server, Stream,
+    };
+    struct TransferNext;
+    impl Next for TransferNext {
+        async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+            assert!(pharos_plugins::tsig::validated_key_name(cx).is_some());
+            assert!(
+                cx.query
+                    .additionals()
+                    .all(|r| r.rtype != pharos_proto::Type::TSIG)
+            );
+            let id = cx.query.id().to_be_bytes();
+            let mut count = 0;
+            Outcome::Stream(Stream::new(move |wire| {
+                if count == 2 {
+                    return Ok(false);
+                }
+                wire.extend_from_slice(&[id[0], id[1], 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+                wire.extend_from_slice(&[
+                    1, b'a', 0, 0, 6, 0, 1, 0, 0, 0, 60, 0, 22, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0,
+                    0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
+                ]);
+                count += 1;
+                Ok(true)
+            }))
+        }
+    }
+    struct TestChain(pharos_plugins::tsig::Tsig);
+    impl ServerChain for TestChain {
+        async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+            self.0.serve(cx, TransferNext).await
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+    }
+    let blocks = parse(
+        "Corefile",
+        ". {\n tsig {\n secret key. c2VjcmV0\n require AXFR\n }\n}",
+    )
+    .unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let plugin = configured.into_iter().next().unwrap().config.tsig.unwrap();
+    let listener_key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        listener_key,
+        ".".parse().unwrap(),
+        Some(TestChain(plugin)),
+        vec![],
+    );
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Server::new(router, listener_key),
+    )
+    .await
+    .unwrap();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let mut messages = 0;
+    pharos_server::transfer::axfr_signed(
+        listener.local_addr(),
+        &"a.".parse().unwrap(),
+        1,
+        std::time::Duration::from_secs(3),
+        &key,
+        |_| {
+            messages += 1;
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(messages, 2);
+    listener.shutdown().await.unwrap();
+}
