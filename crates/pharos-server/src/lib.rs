@@ -585,7 +585,7 @@ impl SelfLookupServer for SelfLookupHandle {
     }
 }
 
-impl<'q> Context<'q, '_> {
+impl<'q, 'a> Context<'q, 'a> {
     /// Return the nesting depth of this Query's Self Lookup, or zero for an external Query.
     #[must_use]
     pub fn self_lookup_depth(&self) -> u8 {
@@ -614,7 +614,8 @@ impl<'q> Context<'q, '_> {
         let Ok(query) = Message::parse(wire) else {
             return Outcome::Error(Error::InvalidQuery);
         };
-        self.run_with_message(query, next).await
+        let mut nested = self.nested_context(query);
+        next.run(&mut nested.child).await
     }
 
     /// Run Next with a modified Query view while preserving Metadata and Response state.
@@ -623,8 +624,13 @@ impl<'q> Context<'q, '_> {
         query: Message<'_>,
         next: N,
     ) -> Outcome {
+        let mut nested = self.nested_context(query);
+        next.run(&mut nested.child).await
+    }
+
+    fn nested_context<'s>(&'s mut self, query: Message<'s>) -> NestedContext<'s, 'q, 'a> {
         let metadata = std::mem::replace(&mut self.metadata, Metadata::new(&mut []));
-        let mut nested = NestedContext {
+        NestedContext {
             parent_query: &mut self.query,
             parent_metadata: &mut self.metadata,
             child: Context {
@@ -638,8 +644,7 @@ impl<'q> Context<'q, '_> {
                 response: self.response,
                 max_response_size: self.max_response_size,
             },
-        };
-        next.run(&mut nested.child).await
+        }
     }
     /// Retain this Query's Listener state for a detached task, if available.
     pub fn self_lookup_handle(&self) -> Option<SelfLookupHandle> {
