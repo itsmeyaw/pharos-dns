@@ -269,3 +269,44 @@ async fn dnssec_ok_serves_rrsigs_and_nsec_denial() {
         );
     }
 }
+
+#[tokio::test]
+async fn external_alias_preserves_target_rcode_and_truncation() {
+    use pharos_server::{Action, Handler, ListenerKey, Router, Server};
+    use std::sync::Arc;
+    enum Route { File(Box<Chain>), Target }
+    impl pharos_server::Chain for Route {
+        async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+            match self {
+                Self::File(chain) => chain.serve(cx).await,
+                Self::Target => {
+                    let question = cx.query.questions().next().unwrap();
+                    let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8202).unwrap();
+                    builder.question(question.name, question.qtype, question.qclass).unwrap();
+                    let _ = builder.finish();
+                    Outcome::Response
+                }
+            }
+        }
+        fn is_empty(&self) -> bool { false }
+    }
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone");
+    let config = format!("example.org:53 {{\n file {path}\n}}");
+    let chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap().remove(0).config;
+    let key = ListenerKey { transport: Transport::Dns, address: "127.0.0.1:53".parse().unwrap() };
+    let mut router = Router::default();
+    router.add(key, "example.org.".parse().unwrap(), Some(Route::File(Box::new(chain))), vec![]);
+    router.add(key, "outside.test.".parse().unwrap(), Some(Route::Target), vec![]);
+    let server = Arc::new(Server::new(router, key));
+    let name: Name = "external.example.org.".parse().unwrap();
+    let mut query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x0100).unwrap();
+    builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN).unwrap();
+    let _ = builder.finish();
+    let mut wire = Vec::with_capacity(65535);
+    assert_eq!(Handler::handle_shared(&server, &query, "127.0.0.1:1234".parse().unwrap(), Protocol::Udp, &mut wire).await, Action::Respond);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.rcode(), Rcode::SERVFAIL);
+    assert!(response.tc());
+    assert_eq!(response.answer_count(), 1);
+}
