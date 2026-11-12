@@ -1,7 +1,7 @@
 //! Compiled Go-template expressions used by the template Plugin.
 
 use crate::expression::Value;
-use pharos_proto::{Message, NameRef};
+use pharos_proto::{Message, NameRef, Question};
 use pharos_server::Metadata;
 use std::fmt::{self, Write};
 
@@ -49,6 +49,9 @@ enum Field {
     Matches,
     Groups,
     Variables,
+    Questions,
+    CurrentQtype,
+    CurrentQclass,
     Unknown,
     QuestionName,
     QueryScalar(QueryField),
@@ -61,6 +64,7 @@ enum Field {
     Group(String),
     Variable(String),
     Local(String),
+    LocalQuestion(String, QuestionMember),
     Match(usize),
     Metadata(String),
 }
@@ -72,6 +76,31 @@ enum QueryField {
     Flag(u16),
     QuestionType,
     QuestionClass,
+}
+
+#[derive(Clone, Copy)]
+enum QuestionMember {
+    Name,
+    Qtype,
+    Qclass,
+}
+
+impl QuestionMember {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "Name" => Some(Self::Name),
+            "Qtype" => Some(Self::Qtype),
+            "Qclass" => Some(Self::Qclass),
+            _ => None,
+        }
+    }
+    fn numeric(self, question: Question<'_>) -> Option<Value<'static>> {
+        match self {
+            Self::Name => None,
+            Self::Qtype => Some(Value::Int(i64::from(question.qtype.0))),
+            Self::Qclass => Some(Value::Int(i64::from(question.qclass.0))),
+        }
+    }
 }
 
 enum Part {
@@ -115,12 +144,18 @@ enum Dot<'a> {
         names: &'a [String],
         parent: &'a Dot<'a>,
     },
+    Question {
+        value: Question<'a>,
+        key: Value<'a>,
+        names: &'a [String],
+        parent: &'a Dot<'a>,
+    },
 }
 
 impl<'a> Dot<'a> {
     fn value(self) -> Option<Value<'a>> {
         match self {
-            Self::Root => None,
+            Self::Root | Self::Question { .. } => None,
             Self::Range { value, .. } => Some(value),
         }
     }
@@ -142,7 +177,45 @@ impl<'a> Dot<'a> {
                     parent.local(name)
                 }
             }
+            Self::Question {
+                key, names, parent, ..
+            } => {
+                if names.len() == 2 && names[0] == name {
+                    Some(key)
+                } else if names.iter().any(|candidate| candidate == name) {
+                    None
+                } else {
+                    parent.local(name)
+                }
+            }
             _ => None,
+        }
+    }
+
+    fn local_question(self, name: &str) -> Option<Question<'a>> {
+        match self {
+            Self::Question {
+                value,
+                names,
+                parent,
+                ..
+            } => {
+                if names.len() == 1 && names[0] == name || names.len() == 2 && names[1] == name {
+                    Some(value)
+                } else if names.iter().any(|candidate| candidate == name) {
+                    None
+                } else {
+                    parent.local_question(name)
+                }
+            }
+            Self::Range { names, parent, .. } => {
+                if names.iter().any(|candidate| candidate == name) {
+                    None
+                } else {
+                    parent.local_question(name)
+                }
+            }
+            Self::Root => None,
         }
     }
 }
@@ -220,6 +293,22 @@ fn render_parts(
                     dot,
                     output,
                 )?,
+                pipeline::RangeValue::Questions(message) => {
+                    let mut any = false;
+                    for (index, question) in message.questions().enumerate() {
+                        any = true;
+                        let nested = Dot::Question {
+                            value: question,
+                            key: Value::Int(index as i64),
+                            names,
+                            parent: &dot,
+                        };
+                        render_parts(body, data, nested, output)?;
+                    }
+                    if !any {
+                        render_parts(otherwise, data, dot, output)?;
+                    }
+                }
             },
             Part::Pipeline(pipeline) => pipeline.write(data, dot, output)?,
         }
@@ -296,11 +385,44 @@ fn write_field(
         Field::QuestionName if matches!(dot, Dot::Root) => {
             write!(output, "{}", question_name(data)?)
         }
+        Field::Name if matches!(dot, Dot::Question { .. }) => {
+            let Dot::Question { value, .. } = dot else {
+                unreachable!()
+            };
+            write!(output, "{}", value.name)
+        }
+        Field::CurrentQtype | Field::CurrentQclass if matches!(dot, Dot::Question { .. }) => {
+            write_value(field.scalar(data, dot)?, output)
+        }
         Field::QueryScalar(field) if matches!(dot, Dot::Root) => {
             write_value(Some(field.value(data)?), output)
         }
-        Field::Dot => write_value(dot.value().ok_or(fmt::Error).map(Some)?, output),
-        Field::Local(name) => write_value(dot.local(name), output),
+        Field::Dot => match dot {
+            Dot::Question { value, .. } => write!(
+                output,
+                "{{{} {} {}}}",
+                value.name, value.qtype.0, value.qclass.0
+            ),
+            _ => write_value(dot.value().ok_or(fmt::Error).map(Some)?, output),
+        },
+        Field::Local(name) => {
+            if let Some(question) = dot.local_question(name) {
+                write!(
+                    output,
+                    "{{{} {} {}}}",
+                    question.name, question.qtype.0, question.qclass.0
+                )
+            } else {
+                write_value(dot.local(name), output)
+            }
+        }
+        Field::LocalQuestion(name, member) => {
+            let question = dot.local_question(name).ok_or(fmt::Error)?;
+            match member {
+                QuestionMember::Name => write!(output, "{}", question.name),
+                member => write_value(member.numeric(question), output),
+            }
+        }
         Field::Variable(name) if matches!(dot, Dot::Root) => write_value(
             data.variables
                 .iter()
@@ -522,6 +644,19 @@ fn parse_field(action: &str) -> Result<Field, String> {
     if let Some(field) = action.strip_prefix("$.") {
         return Ok(Field::Root(Box::new(parse_field(&format!(".{field}"))?)));
     }
+    if let Some((name, field)) = action
+        .strip_prefix('$')
+        .and_then(|action| action.split_once('.'))
+        && !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Ok(match QuestionMember::parse(field) {
+            Some(member) => Field::LocalQuestion(name.to_owned(), member),
+            None => Field::Unknown,
+        });
+    }
     if let Some(name) = action.strip_prefix('$').filter(|name| {
         !name.is_empty()
             && name
@@ -557,6 +692,9 @@ fn parse_field(action: &str) -> Result<Field, String> {
         ".Match" => Ok(Field::Matches),
         ".Group" => Ok(Field::Groups),
         ".Var" => Ok(Field::Variables),
+        ".Message.Question" => Ok(Field::Questions),
+        ".Qtype" => Ok(Field::CurrentQtype),
+        ".Qclass" => Ok(Field::CurrentQclass),
         ".Question.Name" => Ok(Field::QuestionName),
         ".Question.Qtype" => Ok(Field::QueryScalar(QueryField::QuestionType)),
         ".Question.Qclass" => Ok(Field::QueryScalar(QueryField::QuestionClass)),
@@ -607,8 +745,24 @@ impl Field {
         match self {
             Self::Root(field) => field.scalar(data, Dot::Root),
             Self::QueryScalar(field) if matches!(dot, Dot::Root) => Ok(Some(field.value(data)?)),
+            Self::CurrentQtype if matches!(dot, Dot::Question { .. }) => {
+                let Dot::Question { value, .. } = dot else {
+                    unreachable!()
+                };
+                Ok(Some(Value::Int(i64::from(value.qtype.0))))
+            }
+            Self::CurrentQclass if matches!(dot, Dot::Question { .. }) => {
+                let Dot::Question { value, .. } = dot else {
+                    unreachable!()
+                };
+                Ok(Some(Value::Int(i64::from(value.qclass.0))))
+            }
             Self::Dot => dot.value().map(Some).ok_or(fmt::Error),
             Self::Local(name) => Ok(dot.local(name)),
+            Self::LocalQuestion(name, member) => member
+                .numeric(dot.local_question(name).ok_or(fmt::Error)?)
+                .map(Some)
+                .ok_or(fmt::Error),
             Self::Variable(name) if matches!(dot, Dot::Root) => Ok(data
                 .variables
                 .iter()
@@ -625,10 +779,23 @@ impl Field {
         match self {
             Self::Root(field) => field.truthy(data, Dot::Root),
             Self::Dot => Ok(dot.value().is_none_or(truth_value)),
-            Self::Local(name) => Ok(dot.local(name).is_some_and(truth_value)),
+            Self::Local(name) => {
+                Ok(dot.local_question(name).is_some() || dot.local(name).is_some_and(truth_value))
+            }
+            Self::LocalQuestion(name, member) => {
+                let question = dot.local_question(name).ok_or(fmt::Error)?;
+                Ok(member.numeric(question).is_none_or(truth_value))
+            }
             Self::Matches if matches!(dot, Dot::Root) => Ok(!data.matches.is_empty()),
             Self::Groups if matches!(dot, Dot::Root) => Ok(!data.groups.is_empty()),
             Self::Variables if matches!(dot, Dot::Root) => Ok(!data.variables.is_empty()),
+            Self::Questions if matches!(dot, Dot::Root) => {
+                Ok(data.message.ok_or(fmt::Error)?.questions().next().is_some())
+            }
+            Self::Name if matches!(dot, Dot::Question { .. }) => Ok(true),
+            Self::CurrentQtype | Self::CurrentQclass if matches!(dot, Dot::Question { .. }) => {
+                Ok(self.scalar(data, dot)?.is_some_and(truth_value))
+            }
             Self::QueryScalar(field) if matches!(dot, Dot::Root) => {
                 Ok(match field.value(data)? {
                     Value::Bool(value) => value,
@@ -679,6 +846,10 @@ impl Field {
             Self::Matches
             | Self::Groups
             | Self::Variables
+            | Self::Questions
+            | Self::CurrentQtype
+            | Self::CurrentQclass
+            | Self::LocalQuestion(_, _)
             | Self::Unknown
             | Self::QuestionName
             | Self::QueryScalar(_) => Err(fmt::Error),

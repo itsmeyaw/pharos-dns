@@ -91,3 +91,26 @@ fn escape_builtins_do_not_allocate_on_first_render() {
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
     assert_eq!(output, "é\\u003C\\u0026|é&lt;&amp;|%C3%A9%3C%26");
 }
+
+#[test]
+fn borrowed_question_fields_render_without_allocating() {
+    if crate::run_isolated(
+        "gotemplate::gotemplate_allocations::borrowed_question_fields_render_without_allocating",
+    ) {
+        return;
+    }
+    let wire =
+        b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
+    let message = pharos_proto::Message::parse(wire).unwrap();
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.org.", &metadata);
+    data.message = Some(&message);
+    let template = Template::compile("{{ range .Message.Question }}{{ .Name }} {{ .Qtype }}{{ end }}|{{ .Question.Name | eq \"Example.Org.\" }}").unwrap();
+    let mut output = String::with_capacity(128);
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    template.render(&data, &mut output).unwrap();
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+    assert_eq!(output, "Example.Org. 1|true");
+}

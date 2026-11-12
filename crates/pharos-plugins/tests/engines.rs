@@ -415,3 +415,33 @@ fn metadata_method_accepts_variable_and_pipeline_arguments() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "eu|eu");
 }
+
+#[test]
+fn range_over_message_questions_exposes_original_question_fields() {
+    let wire =
+        b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.org.", &metadata);
+    data.message = Some(&message);
+    let template = Template::compile("{{ range .Message.Question }}{{ .Name }}/{{ .Qtype }}/{{ .Qclass }}{{ end }}|{{ len .Message.Question }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "Example.Org./1/1|1");
+}
+
+#[test]
+fn question_range_variables_and_indexed_fields_are_borrowed() {
+    let wire =
+        b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.org.", &metadata);
+    data.message = Some(&message);
+    let template = Template::compile("{{ range $i, $q := .Message.Question }}{{$i}}={{$q.Name}}/{{$q.Qtype}}{{ end }}|{{ (index .Message.Question 0).Name }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "0=Example.Org./1|Example.Org.");
+}

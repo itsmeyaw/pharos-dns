@@ -4,6 +4,7 @@ use std::fmt::{self, Write};
 enum Atom {
     Field(Field),
     Nested(Box<Pipeline>),
+    Select(Box<Atom>, super::QuestionMember),
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -44,6 +45,7 @@ pub(super) enum RangeValue<'a> {
     Matches(&'a [&'a str]),
     Groups(&'a [(&'a str, &'a str)]),
     Variables(&'a [(&'a str, Value<'a>)]),
+    Questions(&'a pharos_proto::Message<'a>),
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +55,8 @@ enum ResultValue<'a> {
     Matches(&'a [&'a str]),
     Groups(&'a [(&'a str, &'a str)]),
     Variables(&'a [(&'a str, Value<'a>)]),
+    Questions(&'a pharos_proto::Message<'a>),
+    Question(pharos_proto::Question<'a>),
     Stored(usize, usize),
 }
 
@@ -321,9 +325,15 @@ impl Pipeline {
             ResultValue::Stored(start, end) => output.write_str(
                 std::str::from_utf8(&scratch.bytes[start..end]).map_err(|_| fmt::Error)?,
             ),
-            ResultValue::Matches(_) | ResultValue::Groups(_) | ResultValue::Variables(_) => {
-                Err(fmt::Error)
-            }
+            ResultValue::Question(question) => write!(
+                output,
+                "{{{} {} {}}}",
+                question.name, question.qtype.0, question.qclass.0
+            ),
+            ResultValue::Matches(_)
+            | ResultValue::Groups(_)
+            | ResultValue::Variables(_)
+            | ResultValue::Questions(_) => Err(fmt::Error),
         }
     }
 
@@ -355,6 +365,7 @@ impl Pipeline {
             ResultValue::Matches(values) => Ok(RangeValue::Matches(values)),
             ResultValue::Groups(values) => Ok(RangeValue::Groups(values)),
             ResultValue::Variables(values) => Ok(RangeValue::Variables(values)),
+            ResultValue::Questions(message) => Ok(RangeValue::Questions(message)),
             _ => Err(fmt::Error),
         }
     }
@@ -430,6 +441,34 @@ impl Atom {
             Self::Bool(value) => Ok(ResultValue::Scalar(Some(Value::Bool(*value)))),
             Self::Nil => Ok(ResultValue::Scalar(Some(Value::Nil))),
             Self::Nested(pipeline) => pipeline.evaluate(data, dot, scratch),
+            Self::Field(Field::Dot) if matches!(dot, Dot::Question { .. }) => {
+                let Dot::Question { value, .. } = dot else {
+                    unreachable!()
+                };
+                Ok(ResultValue::Question(value))
+            }
+            Self::Select(atom, member) => {
+                let ResultValue::Question(question) = atom.value(data, dot, scratch)? else {
+                    return Err(fmt::Error);
+                };
+                question_member(*member, question, scratch)
+            }
+            Self::Field(Field::Local(name)) if dot.local_question(name).is_some() => Ok(
+                ResultValue::Question(dot.local_question(name).ok_or(fmt::Error)?),
+            ),
+            Self::Field(Field::LocalQuestion(name, member)) => question_member(
+                *member,
+                dot.local_question(name).ok_or(fmt::Error)?,
+                scratch,
+            ),
+            Self::Field(Field::Name) if matches!(dot, Dot::Question { .. }) => {
+                let Dot::Question { value, .. } = dot else {
+                    unreachable!()
+                };
+                let start = scratch.len;
+                write!(scratch, "{}", value.name)?;
+                Ok(ResultValue::Stored(start, scratch.len))
+            }
             Self::Field(Field::QuestionName) if matches!(dot, Dot::Root) => {
                 let start = scratch.len;
                 write!(scratch, "{}", super::question_name(data)?)?;
@@ -449,21 +488,40 @@ impl Atom {
             Self::Field(Field::Variables) if matches!(dot, Dot::Root) => {
                 Ok(ResultValue::Variables(data.variables))
             }
+            Self::Field(Field::Questions) if matches!(dot, Dot::Root) => {
+                Ok(ResultValue::Questions(data.message.ok_or(fmt::Error)?))
+            }
             Self::Field(Field::Root(field))
                 if matches!(
                     field.as_ref(),
-                    Field::Matches | Field::Groups | Field::Variables
+                    Field::Matches | Field::Groups | Field::Variables | Field::Questions
                 ) =>
             {
                 match field.as_ref() {
                     Field::Matches => Ok(ResultValue::Matches(data.matches)),
                     Field::Groups => Ok(ResultValue::Groups(data.groups)),
                     Field::Variables => Ok(ResultValue::Variables(data.variables)),
+                    Field::Questions => Ok(ResultValue::Questions(data.message.ok_or(fmt::Error)?)),
                     _ => unreachable!(),
                 }
             }
             Self::Field(field) => Ok(ResultValue::Scalar(field.scalar(data, dot)?)),
         }
+    }
+}
+
+fn question_member<'a>(
+    member: super::QuestionMember,
+    question: pharos_proto::Question<'a>,
+    scratch: &mut Scratch<'_>,
+) -> Result<ResultValue<'a>, fmt::Error> {
+    match member {
+        super::QuestionMember::Name => {
+            let start = scratch.len;
+            write!(scratch, "{}", question.name)?;
+            Ok(ResultValue::Stored(start, scratch.len))
+        }
+        member => Ok(ResultValue::Scalar(member.numeric(question))),
     }
 }
 
@@ -653,6 +711,11 @@ impl Scratch<'_> {
             ResultValue::Scalar(Some(Value::Float(value))) => write!(self, "{value}"),
             ResultValue::Scalar(None | Some(Value::Nil)) => self.write_str("<nil>"),
             ResultValue::Uint(value) => write!(self, "{value}"),
+            ResultValue::Question(value) => write!(
+                self,
+                "{{{} {} {}}}",
+                value.name, value.qtype.0, value.qclass.0
+            ),
             _ => Err(fmt::Error),
         }
     }
@@ -670,6 +733,8 @@ impl<'a> ResultValue<'a> {
             Self::Matches(value) => !value.is_empty(),
             Self::Groups(value) => !value.is_empty(),
             Self::Variables(value) => !value.is_empty(),
+            Self::Questions(value) => value.questions().next().is_some(),
+            Self::Question(_) => true,
             Self::Stored(start, end) => {
                 let _ = scratch;
                 start != end
@@ -698,6 +763,7 @@ impl<'a> ResultValue<'a> {
             Self::Matches(value) => Ok(value.len()),
             Self::Groups(value) => Ok(value.len()),
             Self::Variables(value) => Ok(value.len()),
+            Self::Questions(value) => Ok(value.questions().count()),
             Self::Stored(start, end) => Ok(end - start),
             _ => Err(fmt::Error),
         }
@@ -721,6 +787,12 @@ impl<'a> ResultValue<'a> {
                     (*name == key.text(scratch).ok()?).then_some(*value)
                 })))
             }
+            Self::Questions(message) => Ok(Self::Question(
+                message
+                    .questions()
+                    .nth(usize::try_from(key.integer()?).map_err(|_| fmt::Error)?)
+                    .ok_or(fmt::Error)?,
+            )),
             Self::Scalar(Some(Value::String(value))) => Ok(Self::Uint(u64::from(
                 *value
                     .as_bytes()
@@ -833,11 +905,22 @@ impl<'a> ResultValue<'a> {
             Self::Matches(_) => "[]string",
             Self::Groups(_) => "map[string]string",
             Self::Variables(_) => "map[string]interface {}",
+            Self::Questions(_) => "[]dns.Question",
+            Self::Question(_) => "dns.Question",
         }
     }
 }
 
 fn atom(word: &str) -> Result<Atom, String> {
+    if let Some((base, suffix)) = word.rsplit_once(").")
+        && base.starts_with('(')
+    {
+        let member = super::QuestionMember::parse(suffix).ok_or("unsupported indexed field")?;
+        return Ok(Atom::Select(
+            Box::new(atom(&word[..base.len() + 1])?),
+            member,
+        ));
+    }
     if let Some(inner) = word
         .strip_prefix('(')
         .and_then(|word| word.strip_suffix(')'))
