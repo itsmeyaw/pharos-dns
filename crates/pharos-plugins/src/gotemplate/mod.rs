@@ -150,6 +150,11 @@ enum Dot<'a> {
         names: &'a [String],
         parent: &'a Dot<'a>,
     },
+    EmptyRange {
+        value: pipeline::RangeValue<'a>,
+        names: &'a [String],
+        parent: &'a Dot<'a>,
+    },
 }
 
 impl<'a> Dot<'a> {
@@ -157,6 +162,7 @@ impl<'a> Dot<'a> {
         match self {
             Self::Root | Self::Question { .. } => None,
             Self::Range { value, .. } => Some(value),
+            Self::EmptyRange { parent, .. } => parent.value(),
         }
     }
     fn local(self, name: &str) -> Option<Value<'a>> {
@@ -188,6 +194,21 @@ impl<'a> Dot<'a> {
                     parent.local(name)
                 }
             }
+            Self::EmptyRange {
+                value,
+                names,
+                parent,
+            } => {
+                if names.iter().any(|candidate| candidate == name) {
+                    match value {
+                        pipeline::RangeValue::Empty => Some(Value::Nil),
+                        pipeline::RangeValue::Integer(value) => Some(Value::Int(value)),
+                        _ => None,
+                    }
+                } else {
+                    parent.local(name)
+                }
+            }
             _ => None,
         }
     }
@@ -215,7 +236,45 @@ impl<'a> Dot<'a> {
                     parent.local_question(name)
                 }
             }
+            Self::EmptyRange { names, parent, .. } => {
+                if names.iter().any(|candidate| candidate == name) {
+                    None
+                } else {
+                    parent.local_question(name)
+                }
+            }
             Self::Root => None,
+        }
+    }
+
+    fn local_range(self, name: &str) -> Option<pipeline::RangeValue<'a>> {
+        match self {
+            Self::EmptyRange {
+                value,
+                names,
+                parent,
+            } => {
+                if names.iter().any(|candidate| candidate == name) {
+                    Some(value)
+                } else {
+                    parent.local_range(name)
+                }
+            }
+            Self::Range { names, parent, .. } | Self::Question { names, parent, .. } => {
+                if names.iter().any(|candidate| candidate == name) {
+                    None
+                } else {
+                    parent.local_range(name)
+                }
+            }
+            Self::Root => None,
+        }
+    }
+
+    fn base(self) -> Self {
+        match self {
+            Self::EmptyRange { parent, .. } => parent.base(),
+            dot => dot,
         }
     }
 }
@@ -241,13 +300,27 @@ fn render_parts(
                 output,
             )?,
             Part::Range(pipeline, names, body, otherwise) => match pipeline.range(data, dot)? {
-                pipeline::RangeValue::Empty => render_parts(otherwise, data, dot, output)?,
+                pipeline::RangeValue::Empty => render_empty(
+                    names,
+                    pipeline::RangeValue::Empty,
+                    otherwise,
+                    data,
+                    dot,
+                    output,
+                )?,
                 pipeline::RangeValue::Integer(count) => {
                     if names.len() > 1 {
                         return Err(fmt::Error);
                     }
                     if count <= 0 {
-                        render_parts(otherwise, data, dot, output)?;
+                        render_empty(
+                            names,
+                            pipeline::RangeValue::Integer(count),
+                            otherwise,
+                            data,
+                            dot,
+                            output,
+                        )?;
                     }
                     for value in 0..count {
                         let nested = Dot::Range {
@@ -261,7 +334,14 @@ fn render_parts(
                 }
                 pipeline::RangeValue::Matches(matches) => {
                     if matches.is_empty() {
-                        render_parts(otherwise, data, dot, output)?;
+                        render_empty(
+                            names,
+                            pipeline::RangeValue::Matches(matches),
+                            otherwise,
+                            data,
+                            dot,
+                            output,
+                        )?;
                     }
                     for (index, value) in matches.iter().enumerate() {
                         let nested = Dot::Range {
@@ -278,8 +358,8 @@ fn render_parts(
                         .iter()
                         .map(|(key, value)| (*key, Value::String(value))),
                     names,
-                    body,
-                    otherwise,
+                    pipeline::RangeValue::Groups(groups),
+                    (body, otherwise),
                     data,
                     dot,
                     output,
@@ -287,8 +367,8 @@ fn render_parts(
                 pipeline::RangeValue::Variables(variables) => render_map(
                     variables.iter().map(|(key, value)| (*key, *value)),
                     names,
-                    body,
-                    otherwise,
+                    pipeline::RangeValue::Variables(variables),
+                    (body, otherwise),
                     data,
                     dot,
                     output,
@@ -306,7 +386,14 @@ fn render_parts(
                         render_parts(body, data, nested, output)?;
                     }
                     if !any {
-                        render_parts(otherwise, data, dot, output)?;
+                        render_empty(
+                            names,
+                            pipeline::RangeValue::Questions(message),
+                            otherwise,
+                            data,
+                            dot,
+                            output,
+                        )?;
                     }
                 }
             },
@@ -316,15 +403,32 @@ fn render_parts(
     Ok(())
 }
 
-fn render_map<'a>(
-    entries: impl Iterator<Item = (&'a str, Value<'a>)> + Clone,
+fn render_empty(
     names: &[String],
+    value: pipeline::RangeValue<'_>,
     body: &[Part],
-    otherwise: &[Part],
     data: &Data<'_, '_>,
     dot: Dot<'_>,
     output: &mut String,
 ) -> fmt::Result {
+    let context = Dot::EmptyRange {
+        value,
+        names,
+        parent: &dot,
+    };
+    render_parts(body, data, context, output)
+}
+
+fn render_map<'a>(
+    entries: impl Iterator<Item = (&'a str, Value<'a>)> + Clone,
+    names: &[String],
+    empty_value: pipeline::RangeValue<'a>,
+    branches: (&[Part], &[Part]),
+    data: &Data<'_, '_>,
+    dot: Dot<'_>,
+    output: &mut String,
+) -> fmt::Result {
+    let (body, otherwise) = branches;
     // shortcut: map iteration scans quadratically; pre-sort keys at setup if large maps are needed.
     let mut last = None;
     let mut any = false;
@@ -344,7 +448,7 @@ fn render_map<'a>(
         last = Some(key);
     }
     if !any {
-        render_parts(otherwise, data, dot, output)?;
+        render_empty(names, empty_value, otherwise, data, dot, output)?;
     }
     Ok(())
 }
@@ -383,22 +487,24 @@ fn write_field(
 ) -> fmt::Result {
     match field {
         Field::Root(field) => write_field(field, data, Dot::Root, output),
-        Field::QuestionName if matches!(dot, Dot::Root) => {
+        Field::QuestionName if matches!(dot.base(), Dot::Root) => {
             write!(output, "{}", question_name(data)?)
         }
-        Field::Name if matches!(dot, Dot::Question { .. }) => {
-            let Dot::Question { value, .. } = dot else {
+        Field::Name if matches!(dot.base(), Dot::Question { .. }) => {
+            let Dot::Question { value, .. } = dot.base() else {
                 unreachable!()
             };
             write!(output, "{}", value.name)
         }
-        Field::CurrentQtype | Field::CurrentQclass if matches!(dot, Dot::Question { .. }) => {
+        Field::CurrentQtype | Field::CurrentQclass
+            if matches!(dot.base(), Dot::Question { .. }) =>
+        {
             write_value(field.scalar(data, dot)?, output)
         }
-        Field::QueryScalar(field) if matches!(dot, Dot::Root) => {
+        Field::QueryScalar(field) if matches!(dot.base(), Dot::Root) => {
             write_value(Some(field.value(data)?), output)
         }
-        Field::Dot => match dot {
+        Field::Dot => match dot.base() {
             Dot::Question { value, .. } => write!(
                 output,
                 "{{{} {} {}}}",
@@ -407,7 +513,18 @@ fn write_field(
             _ => write_value(dot.value().ok_or(fmt::Error).map(Some)?, output),
         },
         Field::Local(name) => {
-            if let Some(question) = dot.local_question(name) {
+            if let Some(value) = dot.local_range(name) {
+                match value {
+                    pipeline::RangeValue::Empty => output.write_str("<no value>"),
+                    pipeline::RangeValue::Integer(value) => write!(output, "{value}"),
+                    pipeline::RangeValue::Matches(_) | pipeline::RangeValue::Questions(_) => {
+                        output.write_str("[]")
+                    }
+                    pipeline::RangeValue::Groups(_) | pipeline::RangeValue::Variables(_) => {
+                        output.write_str("map[]")
+                    }
+                }
+            } else if let Some(question) = dot.local_question(name) {
                 write!(
                     output,
                     "{{{} {} {}}}",
@@ -424,7 +541,7 @@ fn write_field(
                 member => write_value(member.numeric(question), output),
             }
         }
-        Field::Variable(name) if matches!(dot, Dot::Root) => write_value(
+        Field::Variable(name) if matches!(dot.base(), Dot::Root) => write_value(
             data.variables
                 .iter()
                 .find_map(|(key, value)| (*key == name).then_some(*value)),
@@ -745,15 +862,17 @@ impl Field {
     ) -> Result<Option<Value<'a>>, fmt::Error> {
         match self {
             Self::Root(field) => field.scalar(data, Dot::Root),
-            Self::QueryScalar(field) if matches!(dot, Dot::Root) => Ok(Some(field.value(data)?)),
-            Self::CurrentQtype if matches!(dot, Dot::Question { .. }) => {
-                let Dot::Question { value, .. } = dot else {
+            Self::QueryScalar(field) if matches!(dot.base(), Dot::Root) => {
+                Ok(Some(field.value(data)?))
+            }
+            Self::CurrentQtype if matches!(dot.base(), Dot::Question { .. }) => {
+                let Dot::Question { value, .. } = dot.base() else {
                     unreachable!()
                 };
                 Ok(Some(Value::Int(i64::from(value.qtype.0))))
             }
-            Self::CurrentQclass if matches!(dot, Dot::Question { .. }) => {
-                let Dot::Question { value, .. } = dot else {
+            Self::CurrentQclass if matches!(dot.base(), Dot::Question { .. }) => {
+                let Dot::Question { value, .. } = dot.base() else {
                     unreachable!()
                 };
                 Ok(Some(Value::Int(i64::from(value.qclass.0))))
@@ -764,11 +883,11 @@ impl Field {
                 .numeric(dot.local_question(name).ok_or(fmt::Error)?)
                 .map(Some)
                 .ok_or(fmt::Error),
-            Self::Variable(name) if matches!(dot, Dot::Root) => Ok(data
+            Self::Variable(name) if matches!(dot.base(), Dot::Root) => Ok(data
                 .variables
                 .iter()
                 .find_map(|(key, value)| (*key == name).then_some(*value))),
-            Self::Group(name) if matches!(dot, Dot::Root) => Ok(data
+            Self::Group(name) if matches!(dot.base(), Dot::Root) => Ok(data
                 .groups
                 .iter()
                 .find_map(|(key, value)| (*key == name).then_some(Value::String(value)))),
@@ -787,29 +906,31 @@ impl Field {
                 let question = dot.local_question(name).ok_or(fmt::Error)?;
                 Ok(member.numeric(question).is_none_or(truth_value))
             }
-            Self::Matches if matches!(dot, Dot::Root) => Ok(!data.matches.is_empty()),
-            Self::Groups if matches!(dot, Dot::Root) => Ok(!data.groups.is_empty()),
-            Self::Variables if matches!(dot, Dot::Root) => Ok(!data.variables.is_empty()),
-            Self::Questions if matches!(dot, Dot::Root) => {
+            Self::Matches if matches!(dot.base(), Dot::Root) => Ok(!data.matches.is_empty()),
+            Self::Groups if matches!(dot.base(), Dot::Root) => Ok(!data.groups.is_empty()),
+            Self::Variables if matches!(dot.base(), Dot::Root) => Ok(!data.variables.is_empty()),
+            Self::Questions if matches!(dot.base(), Dot::Root) => {
                 Ok(data.message.ok_or(fmt::Error)?.questions().next().is_some())
             }
-            Self::Name if matches!(dot, Dot::Question { .. }) => Ok(true),
-            Self::CurrentQtype | Self::CurrentQclass if matches!(dot, Dot::Question { .. }) => {
+            Self::Name if matches!(dot.base(), Dot::Question { .. }) => Ok(true),
+            Self::CurrentQtype | Self::CurrentQclass
+                if matches!(dot.base(), Dot::Question { .. }) =>
+            {
                 Ok(self.scalar(data, dot)?.is_some_and(truth_value))
             }
-            Self::QueryScalar(field) if matches!(dot, Dot::Root) => {
+            Self::QueryScalar(field) if matches!(dot.base(), Dot::Root) => {
                 Ok(match field.value(data)? {
                     Value::Bool(value) => value,
                     Value::Int(value) => value != 0,
                     _ => return Err(fmt::Error),
                 })
             }
-            Self::QuestionName if matches!(dot, Dot::Root) => {
+            Self::QuestionName if matches!(dot.base(), Dot::Root) => {
                 question_name(data)?;
                 Ok(true)
             }
             Self::Literal(_) => Ok(!self.value(data, dot)?.is_empty()),
-            _ if !matches!(dot, Dot::Root) => Err(fmt::Error),
+            _ if !matches!(dot.base(), Dot::Root) => Err(fmt::Error),
             Self::Variable(name) => Ok(
                 match data
                     .variables
@@ -844,7 +965,7 @@ impl Field {
                 _ => Err(fmt::Error),
             },
             Self::Literal(value) => Ok(value),
-            _ if !matches!(dot, Dot::Root) => Err(fmt::Error),
+            _ if !matches!(dot.base(), Dot::Root) => Err(fmt::Error),
             Self::Matches
             | Self::Groups
             | Self::Variables

@@ -40,6 +40,7 @@ enum Command {
 
 pub(super) struct Pipeline(Vec<Command>);
 
+#[derive(Clone, Copy)]
 pub(super) enum RangeValue<'a> {
     Empty,
     Integer(i64),
@@ -242,7 +243,7 @@ impl Pipeline {
                             indexed
                         }
                         Function::Meta(root) => {
-                            if !root && !matches!(dot, Dot::Root) {
+                            if !root && !matches!(dot.base(), Dot::Root) {
                                 return Err(fmt::Error);
                             }
                             let label = argument(args, 0, value, data, dot, scratch)?;
@@ -487,8 +488,18 @@ impl Atom {
             Self::Bool(value) => Ok(ResultValue::Scalar(Some(Value::Bool(*value)))),
             Self::Nil => Ok(ResultValue::Scalar(Some(Value::Nil))),
             Self::Nested(pipeline) => pipeline.evaluate(data, dot, scratch),
-            Self::Field(Field::Dot) if matches!(dot, Dot::Question { .. }) => {
-                let Dot::Question { value, .. } = dot else {
+            Self::Field(Field::Local(name)) if dot.local_range(name).is_some() => {
+                Ok(match dot.local_range(name).ok_or(fmt::Error)? {
+                    RangeValue::Empty => ResultValue::Scalar(None),
+                    RangeValue::Integer(value) => ResultValue::Scalar(Some(Value::Int(value))),
+                    RangeValue::Matches(value) => ResultValue::Matches(value),
+                    RangeValue::Groups(value) => ResultValue::Groups(value),
+                    RangeValue::Variables(value) => ResultValue::Variables(value),
+                    RangeValue::Questions(value) => ResultValue::Questions(value),
+                })
+            }
+            Self::Field(Field::Dot) if matches!(dot.base(), Dot::Question { .. }) => {
+                let Dot::Question { value, .. } = dot.base() else {
                     unreachable!()
                 };
                 Ok(ResultValue::Question(value))
@@ -507,15 +518,15 @@ impl Atom {
                 dot.local_question(name).ok_or(fmt::Error)?,
                 scratch,
             ),
-            Self::Field(Field::Name) if matches!(dot, Dot::Question { .. }) => {
-                let Dot::Question { value, .. } = dot else {
+            Self::Field(Field::Name) if matches!(dot.base(), Dot::Question { .. }) => {
+                let Dot::Question { value, .. } = dot.base() else {
                     unreachable!()
                 };
                 let start = scratch.len;
                 write!(scratch, "{}", value.name)?;
                 Ok(ResultValue::Stored(start, scratch.len))
             }
-            Self::Field(Field::QuestionName) if matches!(dot, Dot::Root) => {
+            Self::Field(Field::QuestionName) if matches!(dot.base(), Dot::Root) => {
                 let start = scratch.len;
                 write!(scratch, "{}", super::question_name(data)?)?;
                 Ok(ResultValue::Stored(start, scratch.len))
@@ -525,16 +536,16 @@ impl Atom {
                 write!(scratch, "{}", super::question_name(data)?)?;
                 Ok(ResultValue::Stored(start, scratch.len))
             }
-            Self::Field(Field::Matches) if matches!(dot, Dot::Root) => {
+            Self::Field(Field::Matches) if matches!(dot.base(), Dot::Root) => {
                 Ok(ResultValue::Matches(data.matches))
             }
-            Self::Field(Field::Groups) if matches!(dot, Dot::Root) => {
+            Self::Field(Field::Groups) if matches!(dot.base(), Dot::Root) => {
                 Ok(ResultValue::Groups(data.groups))
             }
-            Self::Field(Field::Variables) if matches!(dot, Dot::Root) => {
+            Self::Field(Field::Variables) if matches!(dot.base(), Dot::Root) => {
                 Ok(ResultValue::Variables(data.variables))
             }
-            Self::Field(Field::Questions) if matches!(dot, Dot::Root) => {
+            Self::Field(Field::Questions) if matches!(dot.base(), Dot::Root) => {
                 Ok(ResultValue::Questions(data.message.ok_or(fmt::Error)?))
             }
             Self::Field(Field::Root(field))

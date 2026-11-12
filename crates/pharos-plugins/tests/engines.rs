@@ -515,3 +515,17 @@ fn call_invokes_bound_metadata_group_and_cidr_functions_with_arguments() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "west|true|eu");
 }
+
+#[test]
+fn empty_range_else_keeps_outer_dot_and_binds_pipeline_value() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile(
+        "{{ range $i, $v := .Match }}bad{{ else }}{{ .Name }}:{{ len $i }}:{{ len $v }}{{ end }}",
+    )
+    .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "example.:0:0");
+}
