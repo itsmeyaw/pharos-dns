@@ -24,6 +24,10 @@ fn next_plugin(enabled: &[&str], start: usize) -> usize {
         .unwrap_or(enabled.len())
 }
 
+fn registered_handler(name: &str) -> bool {
+    !config_only(name) || name == "view"
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=plugin.cfg");
     let source = fs::read_to_string("plugin.cfg").expect("plugin.cfg");
@@ -196,7 +200,7 @@ fn main() {
     code.push_str("}\n");
     code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
-        if !config_only(name) || *name == "view" {
+        if registered_handler(name) {
             write!(code, " && self.r#{name}.is_none()").unwrap();
         }
     }
@@ -204,7 +208,7 @@ fn main() {
         " }\nfn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {\nlet _ = &visit;\n",
     );
     for name in &enabled {
-        if !config_only(name) || *name == "view" {
+        if registered_handler(name) {
             writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
         }
     }
