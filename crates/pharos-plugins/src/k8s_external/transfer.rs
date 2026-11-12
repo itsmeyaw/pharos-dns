@@ -1,4 +1,8 @@
-use std::net::IpAddr;
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    net::IpAddr,
+};
 
 use super::{External, Zone};
 use crate::kubernetes::Kubernetes;
@@ -173,6 +177,7 @@ impl Snapshot<'_> {
         }
         let mut wire = [0; 255];
         let target = hostname(text, 0, &mut wire)?;
+        // CoreDNS uses context.Background(), so upstream lookup fails during transfers.
         // RFC 1035 §3.3.1: CNAME RDATA names the canonical target.
         for _ in 0..2 {
             self.record(owner, Type::CNAME, self.service_ttl, |w| {
@@ -292,25 +297,122 @@ fn entries<'a>(
         })
 }
 
+#[derive(Clone, Copy)]
+struct CaseInsensitive<'a>(&'a str);
+
+impl PartialEq for CaseInsensitive<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq_ignore_ascii_case(other.0)
+    }
+}
+
+impl Eq for CaseInsensitive<'_> {}
+
+impl Hash for CaseInsensitive<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.len().hash(state);
+        for byte in self.0.bytes() {
+            byte.to_ascii_lowercase().hash(state);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Label<'a>(&'a EndpointAddress, bool);
+
+impl PartialEq for Label<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        let mut left = [0; 64];
+        let mut right = [0; 64];
+        endpoint_label(self.0, self.1, &mut left) == endpoint_label(other.0, other.1, &mut right)
+    }
+}
+
+impl Eq for Label<'_> {}
+
+impl Hash for Label<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let mut buffer = [0; 64];
+        endpoint_label(self.0, self.1, &mut buffer).hash(state);
+    }
+}
+
+#[derive(Hash, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "transfer keys must not allocate per record"
+)]
+enum Seen<'a> {
+    Address(&'a str),
+    Bare([u8; 255], i32),
+    Named(CaseInsensitive<'a>, CaseInsensitive<'a>, i32, Label<'a>),
+    Count(CaseInsensitive<'a>, CaseInsensitive<'a>),
+}
+
+fn target_key(target: NameRef<'_>) -> [u8; 255] {
+    let mut wire = [0; 255];
+    let mut offset = 0;
+    for label in target.labels() {
+        wire[offset] = label.len() as u8;
+        offset += 1;
+        wire[offset..offset + label.len()].copy_from_slice(label);
+        offset += label.len();
+    }
+    wire
+}
+
 fn headless<'a, I>(
     snapshot: &mut Snapshot<'_>,
     entries: impl Fn() -> I,
     base: NameRef<'_>,
     pod_names: bool,
+    seen: &mut HashMap<Seen<'a>, usize>,
 ) -> Result<(), Error>
 where
     I: Iterator<Item = (&'a EndpointAddress, &'a pharos_kubernetes::object::Port)>,
 {
-    let total = entries().count();
-    for (i, (address, port)) in entries().enumerate() {
+    seen.clear();
+    let mut total = 0;
+    for (_, port) in entries() {
+        total += 1;
+        *seen
+            .entry(Seen::Count(
+                CaseInsensitive(&port.name),
+                CaseInsensitive(&port.protocol),
+            ))
+            .or_default() += 1;
+    }
+    for (address, port) in entries() {
         let mut label_buf = [0; 64];
         let label = endpoint_label(address, pod_names, &mut label_buf);
         let mut target_wire = [0; 255];
-        let Some(endpoint) = endpoint_owner(label, base, &mut target_wire) else {
+        let endpoint = endpoint_owner(label, base, &mut target_wire);
+        let ip = normalized_ip(&address.ip);
+        let previous_ip = seen.insert(Seen::Address(&address.ip), 0).is_some();
+        let mut host_wire = [0; 255];
+        let target = if ip.is_some() {
+            endpoint
+        } else {
+            hostname(&address.ip, 0, &mut host_wire).ok()
+        };
+        let duplicate_bare = target.is_some_and(|target| {
+            seen.insert(Seen::Bare(target_key(target), port.port), 0)
+                .is_some()
+        });
+        let duplicate_named = seen
+            .insert(
+                Seen::Named(
+                    CaseInsensitive(&port.name),
+                    CaseInsensitive(&port.protocol),
+                    port.port,
+                    Label(address, pod_names),
+                ),
+                0,
+            )
+            .is_some();
+        let Some(endpoint) = endpoint else {
             continue;
         };
-        let ip = normalized_ip(&address.ip);
-        let previous_ip = entries().take(i).any(|(other, _)| other.ip == address.ip);
         if ip.is_none() || !previous_ip {
             snapshot.address(base, &address.ip)?;
         }
@@ -321,24 +423,7 @@ where
             } else {
                 hostname(&address.ip, 0, &mut host_wire)?
             };
-            let duplicate = entries().take(i).any(|(other, old_port)| {
-                if old_port.port != port.port {
-                    return false;
-                }
-                let mut old_buf = [0; 64];
-                let mut old_wire = [0; 255];
-                let old_target = if normalized_ip(&other.ip).is_some() {
-                    endpoint_owner(
-                        endpoint_label(other, pod_names, &mut old_buf),
-                        base,
-                        &mut old_wire,
-                    )
-                } else {
-                    hostname(&other.ip, 0, &mut old_wire).ok()
-                };
-                old_target.is_some_and(|old| old.labels().eq(target.labels()))
-            });
-            if !duplicate {
+            if !duplicate_bare {
                 for _ in 0..2 {
                     snapshot.srv(base, target, port.port, weight(total))?;
                 }
@@ -359,18 +444,9 @@ where
         if port.name.is_empty() || port.port == -1 {
             continue;
         }
-        let matches_port = |p: &pharos_kubernetes::object::Port| {
-            p.name.eq_ignore_ascii_case(&port.name)
-                && p.protocol.eq_ignore_ascii_case(&port.protocol)
-        };
-        let duplicate = entries().take(i).any(|(other, old_port)| {
-            let mut old_buf = [0; 64];
-            matches_port(old_port)
-                && old_port.port == port.port
-                && endpoint_label(other, pod_names, &mut old_buf) == label
-        });
-        if !duplicate {
-            let count = entries().filter(|(_, p)| matches_port(p)).count();
+        if !duplicate_named {
+            let count =
+                seen[&Seen::Count(CaseInsensitive(&port.name), CaseInsensitive(&port.protocol))];
             let mut owner_wire = [0; 255];
             if let Some(owner) = named_owner(&port.name, &port.protocol, base, &mut owner_wire) {
                 snapshot.srv(owner, endpoint, port.port, weight(count))?;
@@ -380,11 +456,12 @@ where
     Ok(())
 }
 
-fn generate(
+fn generate<'a>(
     snapshot: &mut Snapshot<'_>,
     plugin: &External,
     kubernetes: &Kubernetes,
-    index: &Index,
+    index: &'a Index,
+    seen: &mut HashMap<Seen<'a>, usize>,
 ) -> Result<(), Error> {
     let current = index.external_serial();
     // RFC 1995 §2: a current IXFR is a single SOA; UDP IXFR returns the current SOA.
@@ -434,6 +511,7 @@ fn generate(
                     || entries(index, service),
                     base,
                     kubernetes.endpoint_pod_names(),
+                    seen,
                 )?;
             } else {
                 non_headless(snapshot, service, base)?;
@@ -468,7 +546,25 @@ fn encode(
         bytes: None,
         size: 0,
     };
-    generate(&mut snapshot, plugin, kubernetes, index)?;
+    let max_entries = if plugin.config.headless {
+        index
+            .services_unfiltered()
+            .filter(|service| service.external_ips.is_empty() && service.headless())
+            .map(|service| entries(index, service).count())
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    // shortcut: allocate transfer scratch once; reuse immutable snapshots for incremental streaming.
+    let mut seen = HashMap::new();
+    seen.try_reserve(
+        max_entries
+            .checked_mul(4)
+            .ok_or(Error::ResponseBufferTooSmall)?,
+    )
+    .map_err(|_| Error::ResponseBufferTooSmall)?;
+    generate(&mut snapshot, plugin, kubernetes, index, &mut seen)?;
     // shortcut: the snapshot and Stream each allocate once; use immutable snapshots for incremental streaming.
     let mut bytes = Vec::new();
     bytes
@@ -476,7 +572,7 @@ fn encode(
         .map_err(|_| Error::ResponseBufferTooSmall)?;
     snapshot.bytes = Some(bytes);
     snapshot.size = 0;
-    generate(&mut snapshot, plugin, kubernetes, index)?;
+    generate(&mut snapshot, plugin, kubernetes, index, &mut seen)?;
     snapshot.bytes.ok_or(Error::InvalidQuery)
 }
 
@@ -793,6 +889,39 @@ mod tests {
     }
 
     #[test]
+    fn axfr_hostname_emits_cname_without_target_addresses() {
+        let plugin = plugin();
+        let zone: Name = "example.com.".parse().unwrap();
+        let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let mut service = fixture_service();
+        service.external_ips = vec!["lb.example.net".into()];
+        let mut snapshot = fixture_snapshot(&plugin, &zone);
+        non_headless(
+            &mut snapshot,
+            &service,
+            NameRef::parse(base.as_wire(), 0).unwrap(),
+        )
+        .unwrap();
+        let mut stream = stream_snapshot(snapshot.bytes.unwrap());
+        let mut wire = Vec::new();
+        let mut cnames = 0;
+        while stream.next(&mut wire).unwrap() {
+            for rr in Message::parse(&wire).unwrap().answers() {
+                assert!(
+                    !(rr.name.to_string() == "lb.example.net."
+                        && matches!(rr.rtype, Type::A | Type::AAAA))
+                );
+                if let Rdata::Cname(target) = rr.data().unwrap() {
+                    assert_eq!(rr.name.to_string(), "web.hidden.example.com.");
+                    assert_eq!(target.to_string(), "lb.example.net.");
+                    cnames += 1;
+                }
+            }
+        }
+        assert_eq!(cnames, 4);
+    }
+
+    #[test]
     fn headless_transfers_weighted_and_repeated_srv_records() {
         use pharos_kubernetes::object::{EndpointAddress, Endpoints, Port};
         let plugin = plugin();
@@ -831,6 +960,7 @@ mod tests {
             },
             NameRef::parse(base.as_wire(), 0).unwrap(),
             false,
+            &mut HashMap::with_capacity(8),
         )
         .unwrap();
         let mut stream = stream_snapshot(snapshot.bytes.unwrap());
@@ -867,6 +997,144 @@ mod tests {
     }
 
     #[test]
+    fn headless_many_repeated_endpoints_and_ports_preserve_order() {
+        use pharos_kubernetes::object::{EndpointAddress, Port};
+        let plugin = plugin();
+        let zone: Name = "example.com.".parse().unwrap();
+        let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let addresses: Vec<_> = (0..48)
+            .map(|i| EndpointAddress {
+                ip: format!("192.0.2.{}", i % 24 + 1),
+                hostname: format!("node{}", i % 24),
+                node_name: String::new(),
+                target_ref_name: String::new(),
+            })
+            .collect();
+        let ports: Vec<_> = [("http", 80), ("HTTP", 80), ("http", 81), ("metrics", 90)]
+            .into_iter()
+            .map(|(name, port)| Port {
+                name: name.into(),
+                protocol: "TCP".into(),
+                port,
+            })
+            .collect();
+        let mut snapshot = fixture_snapshot(&plugin, &zone);
+        let mut seen = HashMap::with_capacity(addresses.len() * ports.len() * 4);
+        let capacity = seen.capacity();
+        headless(
+            &mut snapshot,
+            || {
+                addresses
+                    .iter()
+                    .flat_map(|a| ports.iter().map(move |p| (a, p)))
+            },
+            NameRef::parse(base.as_wire(), 0).unwrap(),
+            false,
+            &mut seen,
+        )
+        .unwrap();
+        assert_eq!(seen.capacity(), capacity);
+        let mut stream = stream_snapshot(snapshot.bytes.unwrap());
+        let mut wire = Vec::new();
+        let mut actual = Vec::new();
+        while stream.next(&mut wire).unwrap() {
+            for rr in Message::parse(&wire).unwrap().answers() {
+                let owner = rr.name.to_string();
+                let value = match rr.data().unwrap() {
+                    Rdata::A(ip) => format!("{owner} A {ip}"),
+                    Rdata::Srv {
+                        weight,
+                        port,
+                        target,
+                        ..
+                    } => {
+                        format!("{owner} SRV {weight} {port} {target}")
+                    }
+                    _ => panic!("unexpected record"),
+                };
+                actual.push(value);
+            }
+        }
+        let mut expected = Vec::new();
+        for i in 0..48 {
+            let endpoint = format!("node{}.web.hidden.example.com.", i % 24);
+            let ip = format!("192.0.2.{}", i % 24 + 1);
+            for (p, port) in ports.iter().enumerate() {
+                if i < 24 && p == 0 {
+                    expected.push(format!("{base} A {ip}"));
+                }
+                if i < 24 && p != 1 {
+                    for _ in 0..2 {
+                        expected.push(format!("{base} SRV 1 {} {endpoint}", port.port));
+                    }
+                }
+                expected.push(format!("{endpoint} A {ip}"));
+                for _ in 0..2 {
+                    expected.push(format!("{endpoint} SRV 100 {} {endpoint}", port.port));
+                }
+                if i < 24 && p != 1 {
+                    let name = port.name.to_ascii_lowercase();
+                    let weight = if p == 3 { 2 } else { 1 };
+                    expected.push(format!(
+                        "_{name}._tcp.{base} SRV {weight} {} {endpoint}",
+                        port.port
+                    ));
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn headless_dedup_uses_host_text_and_resets_between_services() {
+        use pharos_kubernetes::object::{EndpointAddress, Port};
+        let plugin = plugin();
+        let zone: Name = "example.com.".parse().unwrap();
+        let addresses: Vec<_> = ["2001:db8::1", "2001:0db8::1", "2001:db8::1"]
+            .into_iter()
+            .map(|ip| EndpointAddress {
+                ip: ip.into(),
+                hostname: "node".into(),
+                node_name: String::new(),
+                target_ref_name: String::new(),
+            })
+            .collect();
+        let port = Port {
+            name: "http".into(),
+            protocol: "TCP".into(),
+            port: 80,
+        };
+        let mut snapshot = fixture_snapshot(&plugin, &zone);
+        let mut seen = HashMap::with_capacity(12);
+        for name in ["web.hidden.example.com.", "api.hidden.example.com."] {
+            let base: Name = name.parse().unwrap();
+            headless(
+                &mut snapshot,
+                || addresses.iter().map(|address| (address, &port)),
+                NameRef::parse(base.as_wire(), 0).unwrap(),
+                false,
+                &mut seen,
+            )
+            .unwrap();
+        }
+        let mut stream = stream_snapshot(snapshot.bytes.unwrap());
+        let mut wire = Vec::new();
+        let mut addresses_per_service = [0, 0];
+        while stream.next(&mut wire).unwrap() {
+            for rr in Message::parse(&wire).unwrap().answers() {
+                if rr.rtype == Type::AAAA {
+                    match rr.name.to_string().as_str() {
+                        "web.hidden.example.com." => addresses_per_service[0] += 1,
+                        "api.hidden.example.com." => addresses_per_service[1] += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!(addresses_per_service, [2, 2]);
+    }
+
+    #[test]
     fn headless_group_deduplicates_hostname_srv_targets() {
         use pharos_kubernetes::object::{EndpointAddress, Port};
         let plugin = plugin();
@@ -892,6 +1160,7 @@ mod tests {
             || addresses.iter().map(|address| (address, &port)),
             NameRef::parse(base.as_wire(), 0).unwrap(),
             false,
+            &mut HashMap::with_capacity(8),
         )
         .unwrap();
         let mut stream = stream_snapshot(snapshot.bytes.unwrap());
@@ -932,6 +1201,7 @@ mod tests {
             || std::iter::once((&address, &port)),
             NameRef::parse(base.as_wire(), 0).unwrap(),
             true,
+            &mut HashMap::with_capacity(4),
         )
         .unwrap();
         let mut stream = stream_snapshot(snapshot.bytes.unwrap());
@@ -1047,7 +1317,7 @@ mod tests {
                     let (kind, items) = if request.contains("/services") {
                         (
                             "ServiceList",
-                            r#"[{"metadata":{"name":"web","namespace":"hidden"},"spec":{"clusterIP":"10.0.0.1","externalIPs":["192.0.2.1"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},{"metadata":{"name":"head","namespace":"hidden"},"spec":{"clusterIP":"None"}}]"#,
+                            r#"[{"metadata":{"name":"web","namespace":"hidden"},"spec":{"clusterIP":"10.0.0.1","externalIPs":["192.0.2.1","lb.example.net"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},{"metadata":{"name":"head","namespace":"hidden"},"spec":{"clusterIP":"None"}}]"#,
                         )
                     } else if request.contains("/endpointslices") {
                         (
@@ -1097,11 +1367,21 @@ mod tests {
         let mut web = false;
         let mut head = false;
         let mut srv = false;
+        let mut cname = false;
         while stream.next(&mut wire).unwrap() {
             let message = Message::parse(&wire).unwrap();
             for rr in message.answers() {
                 match (rr.name.to_string().as_str(), rr.rtype) {
                     ("web.hidden.example.com.", Type::A) => web = true,
+                    ("web.hidden.example.com.", Type::CNAME) => {
+                        assert!(
+                            matches!(rr.data().unwrap(), Rdata::Cname(target) if target.to_string() == "lb.example.net.")
+                        );
+                        cname = true;
+                    }
+                    ("lb.example.net.", Type::A | Type::AAAA) => {
+                        panic!("unexpected target address")
+                    }
                     ("node.head.hidden.example.com.", Type::A) => {
                         assert!(web);
                         head = true;
@@ -1114,7 +1394,7 @@ mod tests {
                 }
             }
         }
-        assert!(web && head && srv);
+        assert!(web && head && srv && cname);
         lifecycle.run(Phase::Shutdown).await.unwrap();
         task.abort();
     }
