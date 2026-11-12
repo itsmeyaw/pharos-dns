@@ -10,6 +10,14 @@ pub(crate) enum Transport {
     Tcp,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TsigCase {
+    Valid,
+    BadKey,
+    BadSig,
+    BadTime,
+}
+
 #[derive(Debug)]
 pub(crate) struct Query {
     original: String,
@@ -25,7 +33,7 @@ pub(crate) struct Query {
     options: Vec<(u16, Vec<u8>)>,
     bufsize: u16,
     edns_version: u8,
-    tsig: Option<(Name, Vec<u8>, String)>,
+    tsig: Option<(Name, Vec<u8>, TsigCase)>,
 }
 
 impl fmt::Display for Query {
@@ -114,17 +122,23 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
             }
             "+norec" => query.recursion = false,
             _ if lower.starts_with("+tsig=") => {
-                let values = flag[6..].split(':').collect::<Vec<_>>();
-                if !(2..=3).contains(&values.len()) || query.tsig.is_some() {
+                let mut values = flag[6..].split(':');
+                let (Some(name), Some(secret)) = (values.next(), values.next()) else {
+                    return Err(format!("invalid flag: {flag}"));
+                };
+                let mode = match values.next() {
+                    None | Some("valid") => TsigCase::Valid,
+                    Some("badkey") => TsigCase::BadKey,
+                    Some("badsig") => TsigCase::BadSig,
+                    Some("badtime") => TsigCase::BadTime,
+                    _ => return Err(format!("invalid flag: {flag}")),
+                };
+                if values.next().is_some() || query.tsig.is_some() {
                     return Err(format!("invalid flag: {flag}"));
                 }
-                let mode = values.get(2).copied().unwrap_or("valid");
-                if !matches!(mode, "valid" | "badkey" | "badsig" | "badtime") {
-                    return Err(format!("invalid flag: {flag}"));
-                }
-                let name = Name::parse(values[0], &root).map_err(|e| e.to_string())?;
-                let secret = pharos_proto::decode_secret(values[1]).map_err(|e| e.to_string())?;
-                query.tsig = Some((name, secret, mode.to_owned()));
+                let name = Name::parse(name, &root).map_err(|e| e.to_string())?;
+                let secret = pharos_proto::decode_secret(secret).map_err(|e| e.to_string())?;
+                query.tsig = Some((name, secret, mode));
             }
             _ if lower.starts_with("+bufsize=") => {
                 query.bufsize =
@@ -188,11 +202,11 @@ impl Query {
         };
         let request = pharos_proto::TsigRecord::parse(query).map_err(|e| e.to_string())?;
         let record = pharos_proto::TsigRecord::parse(response).map_err(|e| e.to_string())?;
-        let expected = match mode.as_str() {
-            "badkey" => 17,
-            "badsig" => 16,
-            "badtime" => 18,
-            _ => 0,
+        let expected = match mode {
+            TsigCase::BadKey => 17,
+            TsigCase::BadSig => 16,
+            TsigCase::BadTime => 18,
+            TsigCase::Valid => 0,
         };
         if record.error != expected
             || record.owner != request.owner
@@ -291,7 +305,7 @@ impl Query {
             // RFC 8945 §4.3: sign the complete Query before transmitting it.
             key.sign(
                 &mut wire,
-                if mode == "badtime" {
+                if *mode == TsigCase::BadTime {
                     now.saturating_sub(600)
                 } else {
                     now
@@ -300,8 +314,13 @@ impl Query {
                 None,
             )
             .map_err(|e| e.to_string())?;
-            if mode == "badsig" {
-                wire[2] ^= 1;
+            if *mode == TsigCase::BadSig {
+                let mac_len = pharos_proto::TsigRecord::parse(&wire)
+                    .map_err(|e| e.to_string())?
+                    .mac
+                    .len();
+                let first_mac_byte = wire.len() - 6 - mac_len;
+                wire[first_mac_byte] ^= 1;
             }
         }
         Ok(wire)
@@ -339,6 +358,7 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
+            assert!(Message::parse(&wire).unwrap().rd(), "{flag}");
             assert_eq!(
                 key.verify(&wire, now, None, 0).map(|_| ()),
                 expected,
@@ -504,6 +524,9 @@ mod tests {
             "example. A IN udp +opcode=NOPE",
             "example. A IN udp +dnssec=1",
             "example. A IN udp +norec extra",
+            "example. A IN udp +tsig=key.",
+            "example. A IN udp +tsig=key.:c2VjcmV0:unknown",
+            "example. A IN udp +tsig=key.:c2VjcmV0:valid:extra",
         ] {
             assert!(parse(line).is_err(), "accepted {line:?}");
         }
