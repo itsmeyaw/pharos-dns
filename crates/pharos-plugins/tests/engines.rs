@@ -180,3 +180,24 @@ fn pipelines_pass_the_previous_value_as_last_argument() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "true 255 remote");
 }
+
+#[test]
+fn go_logical_and_comparison_builtins_preserve_values() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile("{{ and true \"yes\" }}|{{ or false .Name }}|{{ not 0 }}|{{ ne 1 2 }}|{{ lt 1 2 }}|{{ le 2 2 }}|{{ gt 3 2 }}|{{ ge 2 2 }}|{{ if eq .Name \"example.\" }}ok{{ end }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "yes|example.|true|true|true|true|true|true|ok");
+}
+
+#[test]
+fn coredns_accepts_known_functions_with_wrong_arity_until_rendering() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile("{{ parseInt }}").unwrap();
+    assert!(template.render(&data, &mut String::new()).is_err());
+    assert!(Template::compile("{{ notAFunction }}").is_err());
+}

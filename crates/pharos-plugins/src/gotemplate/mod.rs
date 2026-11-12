@@ -60,11 +60,8 @@ enum Field {
 enum Part {
     Text(String),
     Field(Field),
-    ParseInt(Field, u32, u32),
     If(Condition, Vec<Part>, Vec<Part>),
     Range(Field, Vec<Part>, Vec<Part>),
-    Len(Field),
-    Eq(Vec<Field>),
     Pipeline(pipeline::Pipeline),
 }
 
@@ -108,16 +105,6 @@ fn render_parts(
         match part {
             Part::Text(text) => output.write_str(text)?,
             Part::Field(field) => write_field(field, data, dot, output)?,
-            Part::ParseInt(field, base, bits) => {
-                if (*base != 0 && !(2..=36).contains(base)) || *bits > 64 {
-                    return Err(fmt::Error);
-                }
-                let value = parse_uint(field.value(data, dot)?, *base)?;
-                if *bits != 0 && *bits < 64 && value >= (1u64 << bits) {
-                    return Err(fmt::Error);
-                }
-                write!(output, "{value}")?;
-            }
             Part::If(condition, yes, no) => render_parts(
                 if condition.truthy(data, dot)? {
                     yes
@@ -140,15 +127,6 @@ fn render_parts(
                 for value in data.matches {
                     render_parts(body, data, Dot::Value(Value::String(value)), output)?;
                 }
-            }
-            Part::Len(field) => write!(output, "{}", field.length(data, dot)?)?,
-            Part::Eq(fields) => {
-                let first = fields[0].scalar(data, dot)?;
-                let mut equal = false;
-                for field in &fields[1..] {
-                    equal |= compare(first, field.scalar(data, dot)?)?;
-                }
-                write!(output, "{equal}")?;
             }
             Part::Pipeline(pipeline) => pipeline.write(data, dot, output)?,
         }
@@ -277,38 +255,11 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             } else {
                 Part::If(Condition::parse(condition)?, yes, no)
             }
-        } else if action.contains('|') {
-            Part::Pipeline(pipeline::Pipeline::compile(action)?)
-        } else if let Some(args) = action.strip_prefix("len ") {
-            Part::Len(parse_field(args.trim())?)
-        } else if let Some(args) = action.strip_prefix("eq ") {
-            let fields = args
-                .split_whitespace()
-                .map(parse_field)
-                .collect::<Result<Vec<_>, _>>()?;
-            if fields.len() < 2 {
-                return Err("eq needs at least two arguments".into());
-            }
-            Part::Eq(fields)
-        } else if let Some(args) = action.strip_prefix("parseInt ") {
-            let mut args = args.split_whitespace();
-            let field = parse_field(args.next().ok_or("parseInt needs three arguments")?)?;
-            let base = args
-                .next()
-                .ok_or("parseInt needs a base")?
-                .parse::<u32>()
-                .map_err(|_| "invalid parseInt base")?;
-            let bits = args
-                .next()
-                .ok_or("parseInt needs a bit size")?
-                .parse::<u32>()
-                .map_err(|_| "invalid parseInt bit size")?;
-            if args.next().is_some() {
-                return Err("parseInt has too many arguments".into());
-            }
-            Part::ParseInt(field, base, bits)
         } else {
-            Part::Field(parse_field(action)?)
+            match parse_field(action) {
+                Ok(field) => Part::Field(field),
+                Err(_) => Part::Pipeline(pipeline::Pipeline::compile(action)?),
+            }
         };
         parts.push(part);
     }

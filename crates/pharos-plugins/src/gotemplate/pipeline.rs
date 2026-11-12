@@ -9,6 +9,13 @@ enum Atom {
 }
 enum Function {
     Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
     Len,
     Not,
     ParseInt,
@@ -35,6 +42,13 @@ impl Pipeline {
             let first = *words.first().ok_or("empty pipeline command")?;
             let function = match first {
                 "eq" => Some(Function::Eq),
+                "ne" => Some(Function::Ne),
+                "lt" => Some(Function::Lt),
+                "le" => Some(Function::Le),
+                "gt" => Some(Function::Gt),
+                "ge" => Some(Function::Ge),
+                "and" => Some(Function::And),
+                "or" => Some(Function::Or),
                 "len" => Some(Function::Len),
                 "not" => Some(Function::Not),
                 "parseInt" => Some(Function::ParseInt),
@@ -45,15 +59,6 @@ impl Pipeline {
                     .iter()
                     .map(|word| atom(word))
                     .collect::<Result<Vec<_>, _>>()?;
-                let count = args.len() + usize::from(index != 0);
-                let valid = match function {
-                    Function::Eq => count >= 2,
-                    Function::Len | Function::Not => count == 1,
-                    Function::ParseInt => count == 3,
-                };
-                if !valid {
-                    return Err(format!("invalid argument count for {first}"));
-                }
                 Command::Call(function, args)
             } else {
                 if index != 0 || words.len() != 1 {
@@ -84,6 +89,20 @@ impl Pipeline {
                             value.ok_or(fmt::Error)
                         }
                     };
+                    let valid = match function {
+                        Function::Eq => count >= 2,
+                        Function::And | Function::Or => count >= 1,
+                        Function::Ne
+                        | Function::Lt
+                        | Function::Le
+                        | Function::Gt
+                        | Function::Ge => count == 2,
+                        Function::Len | Function::Not => count == 1,
+                        Function::ParseInt => count == 3,
+                    };
+                    if !valid {
+                        return Err(fmt::Error);
+                    }
                     match function {
                         Function::Eq => {
                             let first = get(0)?;
@@ -92,6 +111,32 @@ impl Pipeline {
                                 same |= first.equal(get(index)?)?;
                             }
                             ResultValue::Scalar(Some(Value::Bool(same)))
+                        }
+                        Function::Ne => {
+                            ResultValue::Scalar(Some(Value::Bool(!get(0)?.equal(get(1)?)?)))
+                        }
+                        Function::Lt | Function::Le | Function::Gt | Function::Ge => {
+                            let ordering = get(0)?.order(get(1)?)?;
+                            let result = match function {
+                                Function::Lt => ordering.is_some_and(|v| v.is_lt()),
+                                Function::Le => ordering.is_some_and(|v| v.is_le()),
+                                Function::Gt => ordering.is_some_and(|v| v.is_gt()),
+                                Function::Ge => ordering.is_some_and(|v| v.is_ge()),
+                                _ => unreachable!(),
+                            };
+                            ResultValue::Scalar(Some(Value::Bool(result)))
+                        }
+                        Function::And | Function::Or => {
+                            let mut result = get(0)?;
+                            for index in 1..count {
+                                if matches!(function, Function::And) && !result.truthy()
+                                    || matches!(function, Function::Or) && result.truthy()
+                                {
+                                    break;
+                                }
+                                result = get(index)?;
+                            }
+                            result
                         }
                         Function::Len => {
                             ResultValue::Scalar(Some(Value::Int(get(0)?.length()? as i64)))
@@ -205,6 +250,31 @@ impl<'a> ResultValue<'a> {
             | (Self::Scalar(Some(Value::Int(b))), Self::Uint(a)) => {
                 Ok(u64::try_from(b).is_ok_and(|b| a == b))
             }
+            _ => Err(fmt::Error),
+        }
+    }
+    fn order(self, other: Self) -> Result<Option<std::cmp::Ordering>, fmt::Error> {
+        match (self, other) {
+            (Self::Scalar(Some(Value::Int(a))), Self::Scalar(Some(Value::Int(b)))) => {
+                Ok(Some(a.cmp(&b)))
+            }
+            (Self::Scalar(Some(Value::Float(a))), Self::Scalar(Some(Value::Float(b)))) => {
+                Ok(a.partial_cmp(&b))
+            }
+            (Self::Scalar(Some(Value::String(a))), Self::Scalar(Some(Value::String(b)))) => {
+                Ok(Some(a.cmp(b)))
+            }
+            (Self::Uint(a), Self::Uint(b)) => Ok(Some(a.cmp(&b))),
+            (Self::Uint(a), Self::Scalar(Some(Value::Int(b)))) => Ok(Some(if b < 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                a.cmp(&(b as u64))
+            })),
+            (Self::Scalar(Some(Value::Int(a))), Self::Uint(b)) => Ok(Some(if a < 0 {
+                std::cmp::Ordering::Less
+            } else {
+                (a as u64).cmp(&b)
+            })),
             _ => Err(fmt::Error),
         }
     }
