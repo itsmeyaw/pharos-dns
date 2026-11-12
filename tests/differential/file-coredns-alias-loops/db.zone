@@ -1,0 +1,17 @@
+@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 7200 3600 1209600 3600
+@ 3600 IN NS ns.example.org.
+self 60 IN CNAME self.example.org.
+loopa 60 IN CNAME loopb.example.org.
+loopb 60 IN CNAME loopa.example.org.
+n0 60 IN CNAME n1.example.org.
+n1 60 IN CNAME n2.example.org.
+n2 60 IN CNAME n3.example.org.
+n3 60 IN CNAME n4.example.org.
+n4 60 IN CNAME n5.example.org.
+n5 60 IN CNAME n6.example.org.
+n6 60 IN CNAME n7.example.org.
+n7 60 IN CNAME n8.example.org.
+n8 60 IN CNAME n9.example.org.
+n9 60 IN CNAME n10.example.org.
+n10 60 IN CNAME final.example.org.
+final 60 IN A 192.0.2.9
