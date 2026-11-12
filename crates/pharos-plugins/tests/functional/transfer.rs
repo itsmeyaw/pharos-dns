@@ -40,6 +40,13 @@ async fn transfer_acl_and_zone_selection() {
     let root: Name = ".".parse().unwrap();
     for (name, kind, client, protocol, expected) in [
         ("example.org.", Type::AXFR, "127.0.0.1:42", Protocol::Tcp, 0),
+        (
+            "example.org.",
+            Type::AXFR,
+            "[::ffff:127.0.0.1]:42",
+            Protocol::Tcp,
+            0,
+        ),
         ("example.org.", Type::AXFR, "127.0.0.2:42", Protocol::Tcp, 1),
         (
             "elsewhere.org.",

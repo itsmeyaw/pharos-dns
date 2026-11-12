@@ -188,7 +188,11 @@ impl Transfer {
             bytes: [0; 45],
             len: 0,
         };
-        if write!(client, "{}", cx.client.ip()).is_err() {
+        let ip = match cx.client.ip() {
+            IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
+            ip => ip,
+        };
+        if write!(client, "{ip}").is_err() {
             return Outcome::Unanswered(Rcode::REFUSED);
         }
         let allowed = rule
