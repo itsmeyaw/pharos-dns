@@ -729,7 +729,9 @@ fn format_values(
                     value,
                     ResultValue::Scalar(Some(Value::Int(_))) | ResultValue::Uint(_)
                 ),
-                'f' | 'g' => matches!(value, ResultValue::Scalar(Some(Value::Float(_)))),
+                'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
+                    matches!(value, ResultValue::Scalar(Some(Value::Float(_))))
+                }
                 't' => matches!(value, ResultValue::Scalar(Some(Value::Bool(_)))),
                 'T' | 'v' => true,
                 _ => false,
@@ -834,21 +836,50 @@ fn format_values(
                         }
                     }
                 }
-                'f' => match value {
+                'f' | 'F' => match value {
                     ResultValue::Scalar(Some(Value::Float(v))) => {
                         let precision = precision.unwrap_or(6);
-                        match (plus, left, zero) {
-                            (true, true, _) => write!(scratch, "{v:<+width$.precision$}")?,
-                            (false, true, _) => write!(scratch, "{v:<width$.precision$}")?,
-                            (true, false, true) => write!(scratch, "{v:+0width$.precision$}")?,
-                            (false, false, true) => write!(scratch, "{v:0width$.precision$}")?,
-                            (true, false, false) => write!(scratch, "{v:+width$.precision$}")?,
-                            (false, false, false) => write!(scratch, "{v:width$.precision$}")?,
+                        let start = scratch.len;
+                        if v.is_finite() {
+                            if plus {
+                                write!(scratch, "{v:+.precision$}")?;
+                            } else {
+                                write!(scratch, "{v:.precision$}")?;
+                            }
+                            if alternate && precision == 0 {
+                                scratch.write_char('.')?;
+                            }
+                        } else {
+                            if plus && v.is_nan() {
+                                scratch.write_char('+')?;
+                            }
+                            super::float::write_float(scratch, v)?;
                         }
+                        pad_segment(scratch, start, width, left, zero && v.is_finite())?;
                     }
                     _ => return Err(fmt::Error),
                 },
-                'g' => match value {
+                'e' | 'E' => match value {
+                    ResultValue::Scalar(Some(Value::Float(v))) => {
+                        let start = scratch.len;
+                        if plus && v.is_sign_positive() && v.is_finite() {
+                            scratch.write_char('+')?;
+                        }
+                        if plus && v.is_nan() {
+                            scratch.write_char('+')?;
+                        }
+                        super::float::write_e(
+                            scratch,
+                            v,
+                            precision.unwrap_or(6),
+                            verb == 'E',
+                            alternate,
+                        )?;
+                        pad_segment(scratch, start, width, left, zero && v.is_finite())?;
+                    }
+                    _ => return Err(fmt::Error),
+                },
+                'g' | 'G' => match value {
                     ResultValue::Scalar(Some(Value::Float(v))) => {
                         let start = scratch.len;
                         if plus && v.is_sign_positive() && v.is_finite() {
@@ -858,6 +889,13 @@ fn format_values(
                             super::float::write_g(scratch, v, precision.unwrap_or(6), alternate)?;
                         } else {
                             super::float::write_float(scratch, v)?;
+                        }
+                        if verb == 'G' {
+                            for byte in &mut scratch.bytes[start..scratch.len] {
+                                if *byte == b'e' {
+                                    *byte = b'E';
+                                }
+                            }
                         }
                         pad_segment(scratch, start, width, left, zero)?;
                     }

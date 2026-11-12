@@ -17,7 +17,7 @@ Templates are compiled at setup and rendered into a caller-provided `String`.
   `slice`, `len`, `print`, `println`, `printf`, `html`, `js`, and `urlquery`,
   plus CoreDNS's `parseInt`. `call` supports the borrowed Query, `metadata`,
   `incidr`, and `group` function values produced by the expression engine.
-- `printf` handles `%s`, `%d`, `%x`, `%X`, `%o`, `%b`, `%c`, `%f`, `%g`,
+- `printf` handles `%s`, `%d`, `%x`, `%X`, `%o`, `%b`, `%c`, `%f`, `%F`, `%e`, `%E`, `%g`, `%G`,
   `%t`, `%q`, `%T`, `%v`, and `%%`, with selected widths, flags, and precision.
 
 ## Errors and differences

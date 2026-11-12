@@ -782,6 +782,19 @@ fn printf_alternate_g_retains_decimal_point_and_zeros() {
 }
 
 #[test]
+fn printf_scientific_and_uppercase_float_verbs_match_go() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template =
+        Template::compile(r#"{{ printf "%+011.2e|%E|%F|%G|%#.0e" 1234.0 1.0 1.0 1000000.0 1.0 }}"#)
+            .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "+001.23e+03|1.000000E+00|1.000000|1E+06|1.e+00");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

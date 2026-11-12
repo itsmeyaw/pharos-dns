@@ -102,3 +102,38 @@ fn trim_fraction(value: &str) -> &str {
         value
     }
 }
+
+pub(super) fn write_e(
+    output: &mut impl Write,
+    value: f64,
+    precision: usize,
+    uppercase: bool,
+    alternate: bool,
+) -> fmt::Result {
+    if !value.is_finite() {
+        return write_float(output, value);
+    }
+    let digits = precision.min(1100);
+    let mut buffer = Buffer {
+        bytes: [0; 2048],
+        len: 0,
+    };
+    write!(buffer, "{value:.digits$e}")?;
+    let text = std::str::from_utf8(&buffer.bytes[..buffer.len]).map_err(|_| fmt::Error)?;
+    let (mantissa, exponent) = text.split_once('e').ok_or(fmt::Error)?;
+    let exponent: i32 = exponent.parse().map_err(|_| fmt::Error)?;
+    output.write_str(mantissa)?;
+    if alternate && precision == 0 {
+        output.write_char('.')?;
+    }
+    for _ in digits..precision {
+        output.write_char('0')?;
+    }
+    write!(
+        output,
+        "{}{}{abs:02}",
+        if uppercase { 'E' } else { 'e' },
+        if exponent < 0 { '-' } else { '+' },
+        abs = exponent.unsigned_abs()
+    )
+}
