@@ -199,16 +199,24 @@ async fn axfr_inner(
             let first = opening.is_none();
             if first {
                 if message.rcode() != Rcode::NOERROR
-                    || message.answers().next().is_none_or(|record| record.rtype != Type::SOA)
+                    || message
+                        .answers()
+                        .next()
+                        .is_none_or(|record| record.rtype != Type::SOA)
                 {
                     return Err(invalid("AXFR must begin with SOA"));
                 }
                 opening = Some(Vec::new());
             }
             let done = (!first || message.answer_count() > 1)
-                && message.answers().last().is_some_and(|record| record.rtype == Type::SOA);
+                && message
+                    .answers()
+                    .last()
+                    .is_some_and(|record| record.rtype == Type::SOA);
             on_message(message)?;
-            if done { return Ok(()); }
+            if done {
+                return Ok(());
+            }
             continue;
         }
         // RFC 5936 §2.2: every Response belongs to the Query and carries its ID.

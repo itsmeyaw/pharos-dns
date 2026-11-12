@@ -257,7 +257,10 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
             let length_offset = self.wire.len();
             self.write_bytes(&[0, 0])?;
             let rdata_start = self.wire.len();
-            write(&mut RdataWriter { builder: self, compress: true })?;
+            write(&mut RdataWriter {
+                builder: self,
+                compress: true,
+            })?;
             let length = u16::try_from(self.wire.len() - rdata_start)
                 .map_err(|_| BuildError::RdataTooLong)?;
             self.wire[length_offset..length_offset + 2].copy_from_slice(&length.to_be_bytes());
@@ -425,7 +428,8 @@ impl<B: MessageBuffer> RdataWriter<'_, '_, B> {
     /// [`Self::write_uncompressed_name`]. Unknown RDATA must remain opaque and
     /// should be written with [`Self::write_bytes`].
     pub fn write_name(&mut self, name: NameRef<'_>) -> Result<(), BuildError> {
-        self.builder.write_name_with_compression(name, self.compress)
+        self.builder
+            .write_name_with_compression(name, self.compress)
     }
 
     /// Writes literal labels while registering them as future compression targets.

@@ -512,11 +512,24 @@ async fn axfr_client_rejects_a_different_closing_soa() {
 
 #[tokio::test]
 async fn coredns_axfr_client_accepts_different_closing_soa() {
-    let key = ListenerKey { transport: Transport::Dns, address: "127.0.0.1:53".parse().unwrap() };
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
     let mut router = Router::default();
     router.add(key, ".".parse().unwrap(), Some(BadClosingSoa), vec![]);
-    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key)).await.unwrap();
-    pharos_server::transfer::axfr_coredns(listener.local_addr(), &"a.".parse().unwrap(), 1, Duration::from_secs(3), |_| Ok(())).await.unwrap();
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+        .await
+        .unwrap();
+    pharos_server::transfer::axfr_coredns(
+        listener.local_addr(),
+        &"a.".parse().unwrap(),
+        1,
+        Duration::from_secs(3),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
     listener.shutdown().await.unwrap();
 }
 

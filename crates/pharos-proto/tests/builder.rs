@@ -13,12 +13,28 @@ fn rdata_can_disable_compression_for_zone_storage() {
     let n = name("example.com.");
     let mut bytes = Vec::with_capacity(512);
     let mut b = MessageBuilder::new(&mut bytes, 512, 1, 0).unwrap();
-    b.record_with(Section::Answer, borrowed(&n), Type::CNAME, Class::IN, 30, |writer| {
-        writer.disable_compression();
-        pharos_proto::Rdata::Cname(borrowed(&n)).write(writer)
-    }).unwrap();
+    b.record_with(
+        Section::Answer,
+        borrowed(&n),
+        Type::CNAME,
+        Class::IN,
+        30,
+        |writer| {
+            writer.disable_compression();
+            pharos_proto::Rdata::Cname(borrowed(&n)).write(writer)
+        },
+    )
+    .unwrap();
     let _ = b.finish();
-    assert_eq!(Message::parse(&bytes).unwrap().answers().next().unwrap().rdata, n.as_wire());
+    assert_eq!(
+        Message::parse(&bytes)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        n.as_wire()
+    );
 }
 
 #[test]
