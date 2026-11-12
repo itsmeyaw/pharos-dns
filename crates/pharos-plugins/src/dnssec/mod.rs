@@ -16,6 +16,7 @@ pub struct Dnssec {
     keys: Vec<KeyPair>,
     public: Vec<Vec<u8>>,
     capacity: usize,
+    // shortcut: caches whole Responses; use RRset keys when canonicalization supports allocation-free buffers.
     cache: Mutex<HashMap<Vec<u8>, signing::CacheEntry>>,
     metrics: Vec<(std::net::SocketAddr, pharos_server::metrics::DnssecMetrics)>,
 }
