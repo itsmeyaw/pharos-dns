@@ -609,6 +609,7 @@ fn scenario(
                 expect.mask_srv_port,
                 expect.mask_soa_serial,
                 expect.dedupe_additional,
+                expect.mask_rrsig,
             );
             verify_self_test(result, injected, &expected).map_err(|e| format!("{line}: {e}"))?;
             println!("self-test detected injected header mismatch: {line}");
