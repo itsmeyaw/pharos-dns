@@ -458,3 +458,67 @@ fn setup_accepts_coredns_requirement_options() {
         );
     }
 }
+
+#[test]
+fn setup_rejects_coredns_invalid_options() {
+    for directive in [
+        "tsig {\n blah\n}",
+        "tsig {\n secret name. too many parameters\n}",
+        "tsig {\n require\n}",
+        "tsig {\n require invalid-qtype\n}",
+        "tsig {\n require_opcode\n}",
+        "tsig {\n require_opcode INVALID\n}",
+        "tsig {\n secret key. c2VjcmV0\n secret KEY c2VjcmV0\n}",
+    ] {
+        let source = format!(". {{\n {directive}\n}}");
+        let blocks = parse("Corefile", &source).unwrap();
+        assert!(
+            configure::<Chain>(&blocks, directives()).is_err(),
+            "{directive}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn badtime_response_is_signed_and_contains_server_time() {
+    use pharos_server::{Action, Handler};
+    let blocks = parse(
+        "Corefile",
+        ".:53 {\n tsig {\n secret key. c2VjcmV0\n }\n whoami\n}",
+    )
+    .unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let (servers, _) = pharos_plugins::servers(configured).unwrap();
+    let server = servers.values().next().unwrap();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut wire = Vec::with_capacity(512);
+    wire.extend_from_slice(&[0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1]);
+    key.sign(&mut wire, now - 600, 300, None).unwrap();
+    let mac = pharos_proto::TsigRecord::parse(&wire).unwrap().mac;
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.rcode(), Rcode::NOTAUTH);
+    let tsig = pharos_proto::TsigRecord::parse(&response).unwrap();
+    assert_eq!(tsig.error, 18);
+    assert_eq!(tsig.time_signed, now - 600);
+    assert_eq!(tsig.other.len(), 6);
+    assert_eq!(
+        key.verify(&response, now, Some(mac), 0).unwrap_err(),
+        pharos_proto::TsigError::BadTime
+    );
+}
