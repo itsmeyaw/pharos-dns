@@ -358,7 +358,22 @@ async fn coredns_setup_soa_owner_with_implicit_and_explicit_origin() {
                 )
                 .await;
                 assert_eq!(outcome, Outcome::Response);
-                assert_eq!(Message::parse(&wire).unwrap().rcode(), expected);
+                let response = Message::parse(&wire).unwrap();
+                assert_eq!(response.rcode(), expected);
+                if expected == Rcode::NOERROR {
+                    assert_records(response.answers(), &["foo.test. 500 IN A 1.1.1.1"]);
+                    assert_records(
+                        response.authorities(),
+                        &["test. 500 IN NS ns1.outside.com."],
+                    );
+                } else {
+                    assert_records(
+                        response.authorities(),
+                        &[
+                            "test. 500 IN SOA ns1.outside.com. root.test.test. 3 604800 86400 2419200 604800",
+                        ],
+                    );
+                }
             }
         }
     }
