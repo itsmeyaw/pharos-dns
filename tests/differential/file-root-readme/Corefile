@@ -1,0 +1,4 @@
+.:{port} {
+    root zonefiles
+    file db.example.org example.org
+}

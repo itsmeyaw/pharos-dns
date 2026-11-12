@@ -399,8 +399,12 @@ async fn registry_counts_each_api_request_once_across_restart() {
     server.abort();
 }
 
-#[tokio::test]
-async fn registry_records_endpoint_programming_once_per_list() {
+#[test]
+fn registry_records_endpoint_programming_once_per_list() {
+    crate::on_plugin_stack(registry_records_endpoint_programming);
+}
+
+async fn registry_records_endpoint_programming() {
     let (endpoint, gate, _, _, _, server) = api().await;
     let text = format!(
         ".:53 {{\n kubernetes cluster.local {{\n  endpoint {endpoint}\n  startup_timeout 2s\n }}\n}}"

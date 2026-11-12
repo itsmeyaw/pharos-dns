@@ -1,7 +1,7 @@
 use std::fmt;
 
 use pharos_proto::{
-    Class, EdnsOptions, MessageBuilder, Name, NameRef, Opt, TsigAlgorithm, TsigKey, Type,
+    Class, EdnsOptions, MessageBuilder, Name, NameRef, Opt, Section, TsigAlgorithm, TsigKey, Type,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +34,7 @@ pub(crate) struct Query {
     bufsize: u16,
     edns_version: u8,
     tsig: Option<(Name, Vec<u8>, TsigCase)>,
+    ixfr_serial: Option<u32>,
 }
 
 impl fmt::Display for Query {
@@ -108,6 +109,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         bufsize: 1232,
         edns_version: 0,
         tsig: None,
+        ixfr_serial: None,
     };
     for flag in parts {
         let lower = flag.to_ascii_lowercase();
@@ -121,6 +123,13 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
                 query.edns = true;
             }
             "+norec" => query.recursion = false,
+            _ if lower.starts_with("+ixfr=") => {
+                if query.qtype != Type::IXFR || query.ixfr_serial.is_some() {
+                    return Err(format!("invalid flag: {flag}"));
+                }
+                query.ixfr_serial =
+                    Some(decimal(&lower[6..]).ok_or_else(|| format!("invalid flag: {flag}"))?);
+            }
             _ if lower.starts_with("+tsig=") => {
                 let mut values = flag[6..].split(':');
                 let (Some(name), Some(secret)) = (values.next(), values.next()) else {
@@ -265,6 +274,17 @@ impl Query {
         {
             return Err("query exceeds DNS message size".into());
         }
+        if let Some(serial) = self.ixfr_serial {
+            // RFC 1995 §3: an IXFR Query carries the requester's SOA in Authority.
+            let mut soa = [0u8; 22];
+            soa[2..6].copy_from_slice(&serial.to_be_bytes());
+            if !builder
+                .record(Section::Authority, name, Type::SOA, self.class, 0, &soa)
+                .map_err(|err| err.to_string())?
+            {
+                return Err("query exceeds DNS message size".into());
+            }
+        }
         if self.edns {
             // RFC 5001 §2.2: a Query requests NSID with an empty option payload.
             let mut raw_options = Vec::new();
@@ -331,6 +351,22 @@ impl Query {
 mod tests {
     use super::{Transport, parse};
     use pharos_proto::{Class, Message, Opcode, Type};
+
+    #[test]
+    fn ixfr_serial_adds_a_signed_authority_soa() {
+        let query = parse("example. IXFR IN tcp +ixfr=123 +tsig=key.:c2VjcmV0").unwrap();
+        let wire = query.wire().unwrap();
+        let message = Message::parse(&wire).unwrap();
+        assert_eq!(message.authority_count(), 1);
+        assert!(matches!(
+            message.authorities().next().unwrap().data(),
+            Ok(pharos_proto::Rdata::Soa { serial: 123, .. })
+        ));
+        assert_eq!(message.additionals().last().unwrap().rtype, Type::TSIG);
+        assert!(parse("example. A IN tcp +ixfr=1").is_err());
+        assert!(parse("example. IXFR IN tcp +ixfr=x").is_err());
+        assert!(parse("example. IXFR IN tcp +ixfr=1 +ixfr=2").is_err());
+    }
 
     #[test]
     fn builds_signed_queries_and_failure_variants() {

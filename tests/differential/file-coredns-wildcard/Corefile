@@ -1,0 +1,3 @@
+dnssex.nl:{port} {
+    file db.signed
+}

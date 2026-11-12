@@ -1,0 +1,9 @@
+miek.nl. SOA IN udp +dnssec +bufsize=4096
+miek.nl. AAAA IN udp +dnssec +bufsize=4096
+miek.nl. NS IN udp +dnssec +bufsize=4096
+miek.nl. MX IN udp +dnssec +bufsize=4096
+www.miek.nl. A IN udp +dnssec +bufsize=4096
+a.miek.nl. SRV IN udp +dnssec +bufsize=4096
+b.miek.nl. A IN udp +dnssec +bufsize=4096
+b.blaat.miek.nl. A IN udp +dnssec +bufsize=4096
+b.a.miek.nl. A IN udp +dnssec +bufsize=4096

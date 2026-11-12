@@ -1,0 +1,4 @@
+.:{port} {
+    file db.shared example.org
+    forward example.net 127.0.0.1:9
+}

@@ -13,13 +13,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[tokio::test(flavor = "current_thread")]
-async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
+#[test]
+fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
     if crate::run_isolated(
         "kubernetes::kubernetes_allocations::routed_kubernetes_cluster_ip_queries_do_not_allocate",
     ) {
         return;
     }
+    crate::on_allocation_stack(routed_kubernetes_cluster_ip_queries);
+}
+
+async fn routed_kubernetes_cluster_ip_queries() {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", support::free_port()))
         .await
         .unwrap();

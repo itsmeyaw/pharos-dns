@@ -52,6 +52,10 @@
 
 - [erratic Plugin notes](../crates/pharos-plugins/src/erratic/README.md)
 
+## file
+
+- [file Plugin notes](../crates/pharos-plugins/src/file/README.md)
+
 ## forward
 
 - [forward Plugin notes](../crates/pharos-plugins/src/forward/README.md)

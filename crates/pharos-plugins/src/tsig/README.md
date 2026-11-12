@@ -4,7 +4,7 @@
 
 ## tsig
 
-- Signed Zone Transfer streams are supported by the Listener; the `transfer` and `secondary` Plugins and Zone backends are not yet implemented.
+- Signed Zone Transfer streams are supported by the Listener and `transfer` with the `file` and Kubernetes Zone backends; the `secondary` Plugin is not yet implemented.
 - The Listener rejects UPDATE before the Plugin Chain, as CoreDNS v1.15.0 does without an UPDATE handler; `require_opcode UPDATE` cannot yet authenticate UPDATE traffic.
 - A TSIG-truncated Response contains only the Question and TSIG, with NOERROR, as required by RFC 8945 §5.3; CoreDNS may retain other records.
 - A Query with a nonzero TSIG Error is rejected as malformed (RFC 8945 §4.2); CoreDNS accepts it.

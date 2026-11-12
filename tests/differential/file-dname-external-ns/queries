@@ -1,0 +1,2 @@
+leaf.mapped.example.org. NS IN udp
+leaf.mapped.example.org. CNAME IN udp

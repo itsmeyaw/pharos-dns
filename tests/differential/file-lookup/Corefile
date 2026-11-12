@@ -1,0 +1,3 @@
+example.org:{port} {
+    file db.example
+}

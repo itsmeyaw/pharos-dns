@@ -10,11 +10,15 @@ use std::alloc::System;
 
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[tokio::test(flavor = "current_thread")]
-async fn routed_hosts_hit_has_no_allocations() {
+#[test]
+fn routed_hosts_hit_has_no_allocations() {
     if crate::run_isolated("hosts::hosts_allocations::routed_hosts_hit_has_no_allocations") {
         return;
     }
+    crate::on_allocation_stack(routed_hosts_hit);
+}
+
+async fn routed_hosts_hit() {
     let path =
         std::env::temp_dir().join(format!("pharos-hosts-allocations-{}", std::process::id()));
     std::fs::write(

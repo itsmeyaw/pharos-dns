@@ -334,8 +334,12 @@ async fn coredns_dns64_interception_cases() {
 }
 
 // Derived from CoreDNS v1.15.0 plugin/dns64/dns64_test.go, TestTo6.
-#[tokio::test]
-async fn coredns_dns64_synthesizes_prefixes_through_self_lookup() {
+#[test]
+fn coredns_dns64_synthesizes_prefixes_through_self_lookup() {
+    crate::on_plugin_stack(synthesizes_prefixes_through_self_lookup);
+}
+
+async fn synthesizes_prefixes_through_self_lookup() {
     for (prefix, expected) in [
         ("64:ff9b::/96", "64:ff9b::4040:4040"),
         ("64:ff9b::/64", "64:ff9b::40:4040:4000:0"),

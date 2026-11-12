@@ -1,0 +1,17 @@
+$TTL 300
+$ORIGIN example.org.
+@	IN SOA	ns.example.org. admin.example.org. 1 3600 600 86400 300
+	IN NS	ns.example.org.
+ns	IN A	192.0.2.1
+
+alias	IN CNAME	host.child.example.org.
+chain	IN CNAME	alias.example.org.
+*.wild	IN CNAME	host.child.example.org.
+child	IN NS	ns.child.example.org.
+ns.child	IN A	192.0.2.2
+		IN AAAA	2001:db8::2
+
+mapped	IN DNAME	example.org.
+host	IN NS	ns.host.example.org.
+ns.host	IN A	192.0.2.3
+	IN AAAA	2001:db8::3

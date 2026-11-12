@@ -1,6 +1,46 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+// Debug Plugin Chain futures exceed 2 MiB; see #90.
+#[cfg(any(
+    all(feature = "plugin-autopath", feature = "plugin-whoami"),
+    feature = "plugin-forward",
+    feature = "plugin-hosts",
+    feature = "plugin-kubernetes",
+    feature = "plugin-template",
+    feature = "plugin-tsig",
+    all(
+        feature = "plugin-view",
+        feature = "plugin-acl",
+        feature = "plugin-cache",
+        feature = "plugin-whoami"
+    )
+))]
+fn on_plugin_stack<R: Send + 'static, F: std::future::Future<Output = R>>(
+    test: impl FnOnce() -> F + Send + 'static,
+) -> R {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(test())
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[cfg(feature = "plugin-file")]
+#[path = "functional/file.rs"]
+mod file;
+
+#[cfg(feature = "plugin-file")]
+#[path = "functional/file_coredns.rs"]
+mod file_coredns;
+
 #[cfg(feature = "plugin-k8s-external")]
 #[path = "functional/k8s_external_setup.rs"]
 mod k8s_external_setup;

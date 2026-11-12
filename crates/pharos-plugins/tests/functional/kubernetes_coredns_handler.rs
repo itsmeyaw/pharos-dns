@@ -100,8 +100,13 @@ async fn api(
 }
 
 #[cfg(feature = "plugin-autopath")]
-#[tokio::test]
-async fn autopath_uses_verified_client_pod_namespace() {
+#[test]
+fn autopath_uses_verified_client_pod_namespace() {
+    crate::on_plugin_stack(autopath_verified_client_pod_namespace);
+}
+
+#[cfg(feature = "plugin-autopath")]
+async fn autopath_verified_client_pod_namespace() {
     let (endpoint, _, task) = api(false).await;
     let config = format!(
         ".:53 {{\n autopath @kubernetes\n kubernetes cluster.local {{\n endpoint {endpoint}\n pods verified\n startup_timeout 3s\n }}\n}}"
@@ -319,6 +324,11 @@ fn record(record: Record<'_>, expected_serial: Option<u32>) -> String {
 }
 
 async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
+    let options = options.to_owned();
+    crate::on_plugin_stack(move || run_group_on_stack(options, cases, synced));
+}
+
+async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
     let (endpoint, gate, api_task) = api(!synced).await;
     let text = format!(
         ".:53 {{\n bind 127.0.0.1\n kubernetes cluster.local {{\n  endpoint {endpoint}\n  startup_timeout 3s\n  {options}\n }}\n}}"
@@ -1016,8 +1026,12 @@ impl pharos_server::Chain for TruncatedRoute {
 }
 
 // handler_test.go dnsTestCases row 10: the synthetic upstream returns a truncated A response.
-#[tokio::test]
-async fn handler_external_truncated_upstream() {
+#[test]
+fn handler_external_truncated_upstream() {
+    crate::on_plugin_stack(external_truncated_upstream);
+}
+
+async fn external_truncated_upstream() {
     let (endpoint, _, api_task) = api(false).await;
     let text = format!(
         ".:53 {{\n kubernetes cluster.local {{\n  endpoint {endpoint}\n  namespaces testns\n  startup_timeout 3s\n }}\n}}"

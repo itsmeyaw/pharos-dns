@@ -47,6 +47,37 @@ fn run_isolated(name: &str) -> bool {
     true
 }
 
+// Debug Plugin Chain futures exceed 2 MiB; see #90.
+#[cfg(any(
+    all(feature = "plugin-cache", feature = "plugin-whoami"),
+    feature = "plugin-kubernetes",
+    all(feature = "plugin-hosts", feature = "plugin-loadbalance"),
+    all(feature = "plugin-view", feature = "plugin-hosts"),
+    feature = "plugin-hosts",
+    feature = "plugin-file",
+    all(feature = "plugin-dnssec", feature = "plugin-whoami")
+))]
+fn on_allocation_stack<F: std::future::Future<Output = ()>>(
+    test: impl FnOnce() -> F + Send + 'static,
+) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(test());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(feature = "plugin-file")]
+#[path = "allocations/file_allocations.rs"]
+mod file_allocations;
+
 #[path = "allocations"]
 mod template {
     #[path = "template_allocations.rs"]

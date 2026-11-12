@@ -261,8 +261,13 @@ async fn siit_rfc6052_vectors() {
 }
 
 #[cfg(feature = "plugin-hosts")]
-#[tokio::test]
-async fn siit_metrics_count_translations_only() {
+#[test]
+fn siit_metrics_count_translations_only() {
+    crate::on_plugin_stack(siit_metrics_count_translations);
+}
+
+#[cfg(feature = "plugin-hosts")]
+async fn siit_metrics_count_translations() {
     let config = ".:53 {\n siit\n hosts /nonexistent {\n  64:ff9b::192.0.2.1 mapped.example\n  2001:db8::1 unmapped.example\n  ttl 60\n }\n}";
     let (mut listeners, _) = pharos_plugins::servers(
         configure::<Chain>(&parse("Corefile", config).unwrap(), directives()).unwrap(),

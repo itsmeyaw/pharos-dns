@@ -1,0 +1,2 @@
+empty.example.org. A IN udp +dnssec
+x.empty.example.org. A IN udp +dnssec

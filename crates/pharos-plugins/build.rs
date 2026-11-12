@@ -26,7 +26,7 @@ fn next_plugin(enabled: &[&str], start: usize) -> usize {
 
 fn transferer(name: &str) -> bool {
     // Add each implemented Transferer here; enabled retains Plugin Order.
-    matches!(name, "k8s_external" | "kubernetes")
+    matches!(name, "k8s_external" | "kubernetes" | "file")
 }
 
 fn registered_handler(name: &str) -> bool {
@@ -92,6 +92,7 @@ fn main() {
             "nsid" => "nsid::Nsid",
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",
+            "file" => "file::File",
             "erratic" => "erratic::Erratic",
             _ => "Unimplemented",
         };
@@ -142,6 +143,7 @@ fn main() {
             "nsid" => "nsid::setup::setup",
             "reload" => "reload::setup::setup",
             "errors" => "errors::setup::setup",
+            "file" => "file::setup::setup",
             "erratic" => "erratic::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",
@@ -228,6 +230,16 @@ fn main() {
         let next = next_plugin(&enabled, i + 1);
         let call = if *name == "transfer" {
             format!("plugin.serve_with(cx, Next{i}(self), Some(&ChainTransferers(self))).await")
+        } else if *name == "file" {
+            let tail = enabled
+                .iter()
+                .skip(i + 1)
+                .filter(|name| registered_handler(name))
+                .map(|name| format!("self.r#{name}.is_some()"))
+                .collect::<Vec<_>>()
+                .join(" || ");
+            let has_next = if tail.is_empty() { "false" } else { &tail };
+            format!("plugin.serve_with(cx, Next{i}(self), {has_next}).await")
         } else {
             format!("pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await")
         };

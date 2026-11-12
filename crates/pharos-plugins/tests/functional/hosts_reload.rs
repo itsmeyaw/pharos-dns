@@ -7,8 +7,12 @@ use pharos_proto::Message;
 use pharos_server::{Action, Handler, Phase, Protocol};
 use std::time::Duration;
 
-#[tokio::test]
-async fn updates_changed_file_and_zero_disables_reload() {
+#[test]
+fn updates_changed_file_and_zero_disables_reload() {
+    crate::on_plugin_stack(changed_file_and_zero_reload);
+}
+
+async fn changed_file_and_zero_reload() {
     for (interval, expected) in [("10ms", [192, 0, 2, 22]), ("0", [192, 0, 2, 1])] {
         let path =
             std::env::temp_dir().join(format!("pharos-hosts-{}-{interval}", std::process::id()));
@@ -102,8 +106,12 @@ async fn reports_hosts_entries_and_reload_timestamp() {
     std::fs::remove_file(path).unwrap();
 }
 
-#[tokio::test]
-async fn restart_stops_watcher_and_failed_restart_resumes_it() {
+#[test]
+fn restart_stops_watcher_and_failed_restart_resumes_it() {
+    crate::on_plugin_stack(restart_stops_watcher_and_failed_restart_resumes_it_body);
+}
+
+async fn restart_stops_watcher_and_failed_restart_resumes_it_body() {
     let path = std::env::temp_dir().join(format!("pharos-hosts-restart-{}", std::process::id()));
     std::fs::write(&path, "192.0.2.1 example.org\n").unwrap();
     let text = format!(

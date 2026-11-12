@@ -1,0 +1,10 @@
+example.zone:{port} {
+    tsig {
+        secret example.zone.key. NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=
+        require AXFR IXFR
+    }
+    transfer {
+        to *
+    }
+    file db.example
+}

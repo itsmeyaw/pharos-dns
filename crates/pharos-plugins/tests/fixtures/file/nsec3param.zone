@@ -1,0 +1,2 @@
+example.org. 1800 IN SOA ns.example.org. hostmaster.example.org. 1 7200 3600 1209600 3600
+example.org. 0 IN NSEC3PARAM 1 0 5 A3DEBC9CC4F695C7

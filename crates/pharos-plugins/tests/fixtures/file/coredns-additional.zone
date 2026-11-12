@@ -1,0 +1,46 @@
+$TTL 30M
+$ORIGIN example.org.
+@	IN SOA	ns.example.org. admin.example.org. (
+			2024010100 ; serial
+			14400      ; refresh (4 hours)
+			3600       ; retry (1 hour)
+			604800     ; expire (1 week)
+			14400      ; minimum (4 hours)
+			)
+	IN NS	ns.example.org.
+
+ns		IN A	192.0.2.1
+
+; The target shared by the records below.
+host		IN A	192.0.2.10
+		IN AAAA	2001:db8::10
+
+; A second, distinct target.
+other		IN A	192.0.2.20
+		IN AAAA	2001:db8::20
+
+; Two MX records differing only in preference, pointing at one target.
+mx		IN MX	10 host.example.org.
+		IN MX	20 host.example.org.
+
+; Two SRV records pointing at one target.
+srv		IN SRV	10 50 8080 host.example.org.
+		IN SRV	20 50 8080 host.example.org.
+
+; The same target, spelled differently. SRV targets are not normalized on insert.
+mixed		IN SRV	10 50 8080 host.example.org.
+		IN SRV	20 50 8080 HOST.EXAMPLE.ORG.
+
+; Two MX records with distinct targets.
+two		IN MX	10 host.example.org.
+		IN MX	20 other.example.org.
+
+; A CNAME resolving to an SRV: the ordinary-CNAME chase must still add glue.
+cname-srv	IN CNAME	srv.example.org.
+
+; A wildcard CNAME resolving to an SRV.
+*.wild		IN CNAME	srv.example.org.
+
+; A DNAME whose subtree holds an SRV: the DNAME chase must add glue too.
+dname		IN DNAME	dsub.example.org.
+srv.dsub	IN SRV	10 50 8080 host.example.org.

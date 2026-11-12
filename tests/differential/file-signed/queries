@@ -1,0 +1,3 @@
+www.example.org. A IN udp +dnssec
+www.example.org. AAAA IN udp +dnssec
+missing.example.org. A IN udp +dnssec

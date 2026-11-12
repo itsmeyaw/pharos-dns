@@ -1,0 +1,18 @@
+$ORIGIN example.org.
+@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 7200 3600 1209600 3600
+@ 3600 IN NS ns.example.org.
+@ 3600 IN MX 10 ns.example.org.
+_sip._tcp 60 IN SRV 0 10 5060 ns.example.org.
+old 60 IN DNAME dest.example.org.
+outside-dname 60 IN DNAME external.test.
+foo.dest 60 IN A 192.0.2.6
+ns 3600 IN A 192.0.2.53
+www 60 IN A 192.0.2.1
+alias 60 IN CNAME www
+external 60 IN CNAME outside.test.
+*.wild 60 IN A 192.0.2.2
+child 3600 IN NS ns.child
+ns.child 3600 IN A 192.0.2.54
+aliaschild 60 IN CNAME host.child
+host.child 60 IN A 192.0.2.55
+leaf.empty 60 IN A 192.0.2.3

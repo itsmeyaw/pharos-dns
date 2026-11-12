@@ -4,11 +4,15 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
 use pharos_server::{Action, Handler, Protocol};
 
-#[tokio::test(flavor = "current_thread")]
-async fn no_do_and_warmed_signature_hits_do_not_allocate() {
+#[test]
+fn no_do_and_warmed_signature_hits_do_not_allocate() {
     if crate::run_isolated("dnssec::cases::no_do_and_warmed_signature_hits_do_not_allocate") {
         return;
     }
+    crate::on_allocation_stack(no_do_and_warmed_signature_hits);
+}
+
+async fn no_do_and_warmed_signature_hits() {
     let base = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"

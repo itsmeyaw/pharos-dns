@@ -1,0 +1,7 @@
+something.e.example.org. A IN udp
+something.e.example.org. AAAA IN udp
+something.somewhere.e.example.org. A IN udp
+f.*.e.example.org. A IN udp
+missing.*.e.example.org. A IN udp
+missing.deep.e.example.org. A IN udp
+something.ordinary.example.org. A IN udp

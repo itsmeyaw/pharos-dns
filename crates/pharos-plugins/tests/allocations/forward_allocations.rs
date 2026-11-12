@@ -22,13 +22,21 @@ fn warmed_forward_queries_with_metrics_do_not_allocate() {
     ) {
         return;
     }
-    for (protocol, failover) in [
-        (Protocol::Udp, false),
-        (Protocol::Tcp, false),
-        (Protocol::Udp, true),
-    ] {
-        check_forward(protocol, failover);
-    }
+    // Debug Plugin Chain futures exceed 2 MiB; see #90.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            for (protocol, failover) in [
+                (Protocol::Udp, false),
+                (Protocol::Tcp, false),
+                (Protocol::Udp, true),
+            ] {
+                check_forward(protocol, failover);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 fn check_forward(protocol: Protocol, failover: bool) {

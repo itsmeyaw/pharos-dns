@@ -1,0 +1,4 @@
+www.child.example.org. A IN udp +dnssec
+child.example.org. DS IN udp +dnssec
+www.example.org. AAAA IN udp +dnssec
+missing.example.org. A IN udp +dnssec

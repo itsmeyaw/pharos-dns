@@ -21,6 +21,7 @@ Each scenario is a directory containing:
 - `queries`: one Query per line, `name type class udp|tcp [flags...]`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
   `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, `+opcode=NAME` or a number,
+  `+ixfr=SERIAL` for an IXFR SOA in Authority,
   and `+tsig=NAME:BASE64[:badkey|badsig|badtime]` (HMAC-SHA256).
 - `expect` (optional): one setting per line. `ttl N` permits a TTL difference
   of N seconds for ordinary records; default is zero. `mask
@@ -43,6 +44,13 @@ Unsigned TCP AXFR comparisons collect the complete stream through its closing
 SOA before comparing records, independent of Message boundaries. The combined
 records must fit into one 65,535-octet comparison Message.
 
+The `file` README scenarios omit the example's remote NOTIFY destination so
+the tests do not send traffic outside the local fixture.
+`file-root-readme` uses a fixture-relative root instead of `/etc/coredns/zones`.
+The intentionally invalid root-Server-Block example cannot produce DNS
+Responses because its SOA owner does not match the configured root Zone; the
+`coredns_readme_root_without_zone_is_invalid` test checks startup rejection.
+
 The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS
 Responses, and the harness cannot mask that difference.
@@ -56,8 +64,7 @@ queries because a timeout aborts the scenario; the default and `drop 2` plus
 elapsed time. The latter exercises CoreDNS's truncation bitmask on UDP and TCP.
 Truncated AXFR is skipped because the harness requires a closing SOA.
 
-The `tsig` transfer README example is skipped until the `file` Plugin is
-available. Signed scenarios authenticate each Response before comparing its
+The `tsig` transfer README example uses a small file Zone. Signed scenarios authenticate each Response before comparing its
 other fields; TSIG timestamps and MAC bytes are not compared between servers.
 The `tsig-forward` README example replaces its unreachable external Upstream
 with a local deterministic fixture.
