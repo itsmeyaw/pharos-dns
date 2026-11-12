@@ -24,6 +24,7 @@ impl Transferer for File {
         let only_soa = request.qtype == Type::IXFR
             && (request.protocol == Protocol::Udp
                 || request.serial != 0 && request.serial == current);
+        let authoritative = !(only_soa && request.protocol == Protocol::Tcp);
         let id = request.id;
         let flags = request.flags;
         let qtype = request.qtype;
@@ -40,8 +41,13 @@ impl Transferer for File {
                 response.reserve(65535 - response.len());
             }
             let apex = NameRef::parse(zone.apex.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
-            let mut builder = MessageBuilder::new(response, 64500, id, 0x8400 | (flags & 0x0110))
-                .map_err(Error::Build)?;
+            let mut builder = MessageBuilder::new(
+                response,
+                64500,
+                id,
+                0x8000 | if authoritative { 0x0400 } else { 0 } | (flags & 0x0110),
+            )
+            .map_err(Error::Build)?;
             builder
                 .question(apex, qtype, qclass)
                 .map_err(Error::Build)?;
