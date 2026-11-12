@@ -94,6 +94,8 @@ pub mod root;
 pub mod shed;
 #[cfg(feature = "plugin-timeouts")]
 pub mod timeouts;
+#[cfg(feature = "plugin-tsig")]
+pub mod tsig;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
