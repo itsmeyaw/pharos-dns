@@ -14,6 +14,8 @@ static SERIAL: Mutex<()> = Mutex::new(());
 #[cfg(feature = "plugin-k8s-external")]
 #[path = "allocations"]
 mod k8s_external {
+    #[path = "k8s_external_headless_allocations.rs"]
+    mod headless;
     #[path = "k8s_external_allocations.rs"]
     mod k8s_external_allocations;
 }
