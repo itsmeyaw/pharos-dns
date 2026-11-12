@@ -161,15 +161,24 @@ impl Transfer {
         next: N,
         provider: Option<&T>,
     ) -> Outcome {
-        let Some(question) = cx.query.questions().next() else {
-            return next.run(cx).await;
-        };
+        match self.process(cx, provider) {
+            Some(outcome) => outcome,
+            None => next.run(cx).await,
+        }
+    }
+
+    fn process<T: Transferer>(
+        &self,
+        cx: &Context<'_, '_>,
+        provider: Option<&T>,
+    ) -> Option<Outcome> {
+        let question = cx.query.questions().next()?;
         if !matches!(question.qtype, Type::AXFR | Type::IXFR) {
-            return next.run(cx).await;
+            return None;
         }
         // RFC 5936 §4.2: AXFR uses TCP rather than UDP.
         if question.qtype == Type::AXFR && cx.protocol == Protocol::Udp {
-            return Outcome::Unanswered(Rcode::REFUSED);
+            return Some(Outcome::Unanswered(Rcode::REFUSED));
         }
         let rule = self
             .zones
@@ -191,9 +200,7 @@ impl Transfer {
             })
             .max_by_key(|(count, _)| *count)
             .map(|(_, zone)| zone);
-        let Some(rule) = rule else {
-            return next.run(cx).await;
-        };
+        let rule = rule?;
         let mut client = IpText {
             bytes: [0; 45],
             len: 0,
@@ -203,7 +210,7 @@ impl Transfer {
             ip => ip,
         };
         if write!(client, "{ip}").is_err() {
-            return Outcome::Unanswered(Rcode::REFUSED);
+            return Some(Outcome::Unanswered(Rcode::REFUSED));
         }
         let allowed = rule
             .destinations
@@ -213,7 +220,7 @@ impl Transfer {
                 Destination::Address { host, .. } => host.as_bytes() == &client.bytes[..client.len],
             });
         if !allowed {
-            return Outcome::Unanswered(Rcode::REFUSED);
+            return Some(Outcome::Unanswered(Rcode::REFUSED));
         }
         // RFC 1995 §3: an IXFR Query carries the current SOA in Authority.
         let serial = if question.qtype == Type::IXFR {
@@ -226,14 +233,12 @@ impl Transfer {
                 });
             match (serial, authority.next()) {
                 (Some(serial), None) => serial,
-                _ => return Outcome::Unanswered(Rcode::SERVFAIL),
+                _ => return Some(Outcome::Unanswered(Rcode::SERVFAIL)),
             }
         } else {
             0
         };
-        let Some(provider) = provider else {
-            return next.run(cx).await;
-        };
+        let provider = provider?;
         match provider.transfer(TransferRequest {
             zone: question.name,
             serial,
@@ -243,9 +248,9 @@ impl Transfer {
             qtype: question.qtype,
             qclass: question.qclass,
         }) {
-            Ok(Some(stream)) => Outcome::Stream(stream),
-            Ok(None) => next.run(cx).await,
-            Err(error) => Outcome::Error(error),
+            Ok(Some(stream)) => Some(Outcome::Stream(stream)),
+            Ok(None) => None,
+            Err(error) => Some(Outcome::Error(error)),
         }
     }
 }
