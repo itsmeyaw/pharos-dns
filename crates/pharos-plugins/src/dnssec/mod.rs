@@ -92,7 +92,8 @@ impl Dnssec {
                 return Err(Error::ResponseBufferTooSmall);
             }
         }
-        // RFC 4035 §3.1.1: authoritative servers return the DNSKEY RRset at the Zone Apex.
+        // RFC 4035 §2.1: the zone apex DNSKEY RRset carries the zone's public keys.
+        // RFC 1035 §4.1.1: keep the Query's opcode and RD; RFC 4035 §3.1.6: copy CD.
         let flags = 0x8400 | (cx.query.flags() & 0x7910);
         let mut builder = MessageBuilder::new(cx.response, max_size, cx.query.id(), flags)
             .map_err(Error::Build)?;
