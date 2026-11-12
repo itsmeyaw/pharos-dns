@@ -430,3 +430,41 @@ fn negated_membership_and_string_operators_match_expr() {
         );
     }
 }
+
+#[test]
+fn query_functions_handle_ipv6_tcp_edns_and_small_scratch() {
+    let mut wire = WIRE.to_vec();
+    wire[10..12].copy_from_slice(&1u16.to_be_bytes());
+    wire.extend_from_slice(b"\x00\x00\x29\x10\x00\x00\x00\x80\x00\x00\x00");
+    let message = Message::parse(&wire).unwrap();
+    let query = Query::new(
+        &message,
+        "[2001:db8::1]:1234".parse().unwrap(),
+        "[::1]:53".parse().unwrap(),
+        Protocol::Tcp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    let expr = Expression::compile("client_ip() == '2001:db8::1' && server_ip() == '::1' && proto() == 'tcp' && do() && bufsize() == 65535").unwrap();
+    assert_eq!(
+        expr.evaluate(&query, &metadata, &mut scratch).unwrap(),
+        Value::Bool(true)
+    );
+    let mut small = [0; 2];
+    let mut small_scratch = Scratch::new(&mut small);
+    assert!(
+        Expression::compile("name()")
+            .unwrap()
+            .evaluate(&query, &metadata, &mut small_scratch)
+            .is_err()
+    );
+    assert_eq!(
+        Expression::compile("true")
+            .unwrap()
+            .evaluate(&query, &metadata, &mut small_scratch)
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
