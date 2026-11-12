@@ -108,6 +108,13 @@ async fn scenario() {
     let client = "127.0.0.1:1001".parse().unwrap();
     let mut response = Vec::with_capacity(65535);
     for (index, query) in queries.iter().enumerate() {
+        // The per-thread deduplication scratch grows on first use and is then reused.
+        assert_eq!(
+            server
+                .handle(query, client, Protocol::Udp, &mut response)
+                .await,
+            Action::Respond
+        );
         let before = GLOBAL.stats();
         let action = server
             .handle(query, client, Protocol::Udp, &mut response)
@@ -117,12 +124,12 @@ async fn scenario() {
         assert_eq!(
             after.allocations - before.allocations,
             0,
-            "first query {index}"
+            "warmed query {index}"
         );
         assert_eq!(
             after.reallocations - before.reallocations,
             0,
-            "first query {index}"
+            "warmed query {index}"
         );
 
         let message = Message::parse(&response).unwrap();

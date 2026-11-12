@@ -14,6 +14,7 @@ const SERVICES: &str = r#"[
  {"metadata":{"name":"svc6","namespace":"testns"},"spec":{"type":"ClusterIP","clusterIP":"10.0.0.3","externalIPs":["1:2::5"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"svc11","namespace":"testns"},"spec":{"type":"LoadBalancer","clusterIP":"10.0.0.3","externalIPs":["2.3.4.5"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"svc12","namespace":"testns"},"spec":{"type":"LoadBalancer","clusterIP":"10.0.0.3","externalIPs":["dummy.hostname"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
+ {"metadata":{"name":"mixed","namespace":"testns"},"spec":{"clusterIP":"10.0.0.4","externalIPs":["192.0.2.1","one.target.test","2001:db8::1","192.0.2.2","2001:0db8:0:0:0:0:0:1","two.target.test","2001:db8::2","192.0.2.1"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}},
  {"metadata":{"name":"svc-headless","namespace":"testns"},"spec":{"type":"ClusterIP","clusterIP":"None","ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"dns-service","namespace":"kube-system"},"spec":{"clusterIP":"10.0.0.111","externalIPs":["127.0.0.1"]}}
 ]"#;
@@ -452,6 +453,104 @@ async fn coredns_scenario() {
         if let Some(actual) = check(&server, case).await {
             assert_eq!(*serial.get_or_insert(actual), actual, "SOA serial changed");
         }
+    }
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    task.abort();
+}
+
+#[test]
+#[cfg(feature = "plugin-hosts")]
+fn mixed_external_addresses_preserve_coredns_answer_order() {
+    // Debug Plugin Chain futures exceed the test-thread stack; see #90.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(mixed_order_scenario());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(feature = "plugin-hosts")]
+async fn mixed_order_scenario() {
+    let (endpoint, task) = api(local_ip()).await;
+    let text = format!(
+        ".:0 {{\n k8s_external example.com\n kubernetes cluster.local {{\n  endpoint {endpoint}\n  startup_timeout 3s\n }}\n hosts /nonexistent target.test {{\n  203.0.113.1 one.target.test\n  203.0.113.2 two.target.test\n  2001:db8::11 one.target.test\n  2001:db8::22 two.target.test\n }}\n}}"
+    );
+    let (mut configured, lifecycle) =
+        servers(configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap())
+            .unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    let (_, server) = configured.drain().next().unwrap();
+    let name: Name = "mixed.testns.example.com.".parse().unwrap();
+    for (kind, expected) in [
+        (
+            Type::A,
+            vec![
+                "A 192.0.2.1",
+                "CNAME one.target.test.",
+                "A 203.0.113.1",
+                "CNAME one.target.test.",
+                "A 203.0.113.1",
+                "A 192.0.2.2",
+                "CNAME two.target.test.",
+                "A 203.0.113.2",
+                "CNAME two.target.test.",
+                "A 203.0.113.2",
+            ],
+        ),
+        (
+            Type::AAAA,
+            vec![
+                "CNAME one.target.test.",
+                "AAAA 2001:db8::11",
+                "CNAME one.target.test.",
+                "AAAA 2001:db8::11",
+                "AAAA 2001:db8::1",
+                "AAAA 2001:db8::1",
+                "CNAME two.target.test.",
+                "AAAA 2001:db8::22",
+                "CNAME two.target.test.",
+                "AAAA 2001:db8::22",
+                "AAAA 2001:db8::2",
+            ],
+        ),
+    ] {
+        let mut query = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x100).unwrap();
+        builder
+            .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &query,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+        let message = Message::parse(&response).unwrap();
+        assert_eq!(message.rcode(), Rcode::NOERROR, "{kind:?}: {message:?}");
+        let actual: Vec<_> = message
+            .answers()
+            .map(|rr| match rr.data().unwrap() {
+                Rdata::A(ip) => format!("A {ip}"),
+                Rdata::Aaaa(ip) => format!("AAAA {ip}"),
+                Rdata::Cname(name) => format!("CNAME {name}"),
+                other => panic!("unexpected answer: {other:?}"),
+            })
+            .collect();
+        assert_eq!(actual, expected, "{kind:?}");
     }
     lifecycle.run(Phase::Shutdown).await.unwrap();
     task.abort();
