@@ -196,6 +196,52 @@ mod tests {
     }
 
     #[test]
+    fn service_snapshot_retains_ordered_data_and_requires_exposed_namespace() {
+        let store = Store::new(&["prod".into()], false);
+        let mut old = service("10.0.0.1");
+        old.external_ips = vec!["192.0.2.1".into(), "old.example".into(), "192.0.2.2".into()];
+        store.apply_service(old.clone());
+        assert!(
+            store
+                .with_read(|index| index.service_snapshot("prod", "web"))
+                .is_none()
+        );
+        store.apply_namespace(Namespace {
+            name: "prod".into(),
+            version: "1".into(),
+        });
+        store.apply_namespace(Namespace {
+            name: "hidden".into(),
+            version: "1".into(),
+        });
+        let mut hidden = old.clone();
+        hidden.namespace = "hidden".into();
+        store.apply_service(hidden);
+        let snapshot = store.with_read(|index| {
+            assert!(index.service_snapshot("hidden", "web").is_none());
+            assert!(index.service_snapshot("prod", "missing").is_none());
+            let first = index.service_snapshot("prod", "web").unwrap();
+            let second = index.service_snapshot("prod", "web").unwrap();
+            assert!(std::sync::Arc::ptr_eq(&first, &second));
+            first
+        });
+        old.external_ips = vec!["new.example".into()];
+        store.apply_service(old);
+        assert_eq!(
+            snapshot.external_ips,
+            ["192.0.2.1", "old.example", "192.0.2.2"]
+        );
+        assert_eq!(
+            store.with_read(|index| index
+                .service_snapshot("prod", "web")
+                .unwrap()
+                .external_ips
+                .clone()),
+            ["new.example"]
+        );
+    }
+
+    #[test]
     fn external_reverse_index_can_read_hidden_services() {
         let store = Store::new(&["prod".into()], false);
         let mut hidden = service("10.0.0.1");
@@ -759,6 +805,14 @@ impl Index {
     pub fn service(&self, namespace: &str, name: &str) -> Option<&Service> {
         if self.namespace_allowed(namespace) {
             self.service_unfiltered(namespace, name)
+        } else {
+            None
+        }
+    }
+    /// Retain an exposed Service after releasing the index lock.
+    pub fn service_snapshot(&self, namespace: &str, name: &str) -> Option<Arc<Service>> {
+        if self.namespace_exposed(namespace) {
+            by_name(&self.services, namespace, name).cloned()
         } else {
             None
         }

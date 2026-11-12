@@ -1,5 +1,5 @@
 use pharos_kubernetes::{
-    object::{EndpointAddress, Port},
+    object::{EndpointAddress, Port, Service},
     store::Index,
 };
 use pharos_proto::Rcode;
@@ -60,11 +60,6 @@ pub(super) fn lookup(
     let Some(svc) = index.service(namespace, service) else {
         return Rcode::NXDOMAIN;
     };
-    let matches = |port: &Port| {
-        (req.port.is_empty() || req.port.eq_ignore_ascii_case(port.name.as_bytes()))
-            && (req.protocol.is_empty()
-                || req.protocol.eq_ignore_ascii_case(port.protocol.as_bytes()))
-    };
     let mut code = Rcode::NXDOMAIN;
     if headless && svc.external_ips.is_empty() && (svc.headless() || !req.endpoint.is_empty()) {
         // Kubernetes DNS spec 1.1.0 §2.4.1: headless records use ready endpoint addresses.
@@ -76,7 +71,7 @@ pub(super) fn lookup(
                     continue;
                 }
                 for port in &ep.ports {
-                    if matches(port) {
+                    if matches(req, port) {
                         code = Rcode::NOERROR;
                         callback(&addr.ip, port, Some(label));
                     }
@@ -84,16 +79,46 @@ pub(super) fn lookup(
             }
         }
     } else {
-        for ip in &svc.external_ips {
-            for port in &svc.ports {
-                if matches(port) {
-                    code = Rcode::NOERROR;
-                    callback(ip, port, None);
-                }
+        return external(svc, req, callback);
+    }
+    code
+}
+
+fn matches(req: &Request<'_>, port: &Port) -> bool {
+    (req.port.is_empty() || req.port.eq_ignore_ascii_case(port.name.as_bytes()))
+        && (req.protocol.is_empty() || req.protocol.eq_ignore_ascii_case(port.protocol.as_bytes()))
+}
+
+pub(super) fn external(
+    svc: &Service,
+    req: &Request<'_>,
+    mut callback: impl FnMut(&str, &Port, Option<&[u8]>),
+) -> Rcode {
+    let mut code = Rcode::NXDOMAIN;
+    for ip in &svc.external_ips {
+        for port in &svc.ports {
+            if matches(req, port) {
+                code = Rcode::NOERROR;
+                callback(ip, port, None);
             }
         }
     }
     code
+}
+
+pub(super) fn snapshot_or_lookup(
+    index: &Index,
+    req: &Request<'_>,
+    headless: bool,
+    endpoint_pod_names: bool,
+    snapshot: Option<&Service>,
+    callback: impl FnMut(&str, &Port, Option<&[u8]>),
+) -> Rcode {
+    if let Some(snapshot) = snapshot {
+        external(snapshot, req, callback)
+    } else {
+        lookup(index, req, headless, endpoint_pod_names, callback)
+    }
 }
 
 pub(super) fn endpoint_label<'a>(
@@ -132,6 +157,68 @@ pub(super) fn endpoint_label<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_external_service_keeps_order_and_port_filter_after_update() {
+        use pharos_kubernetes::object::{Port, Service};
+        use std::sync::Arc;
+        let mut current = Arc::new(Service {
+            version: "1".into(),
+            name: "web".into(),
+            namespace: "prod".into(),
+            cluster_ips: vec![],
+            service_type: "LoadBalancer".into(),
+            external_name: String::new(),
+            external_ips: vec!["192.0.2.1".into(), "old.example".into(), "192.0.2.2".into()],
+            ports: vec![
+                Port {
+                    name: "http".into(),
+                    protocol: "TCP".into(),
+                    port: 80,
+                },
+                Port {
+                    name: "https".into(),
+                    protocol: "TCP".into(),
+                    port: 443,
+                },
+            ],
+        });
+        let snapshot = Arc::clone(&current);
+        Arc::make_mut(&mut current).external_ips = vec!["new.example".into()];
+        let request = parse(&[b"web", b"prod"]).unwrap();
+        let mut rows = Vec::new();
+        assert_eq!(
+            external(&snapshot, &request, |host, port, _| rows
+                .push((host.to_owned(), port.port))),
+            Rcode::NOERROR
+        );
+        assert_eq!(
+            rows,
+            [
+                ("192.0.2.1".into(), 80),
+                ("192.0.2.1".into(), 443),
+                ("old.example".into(), 80),
+                ("old.example".into(), 443),
+                ("192.0.2.2".into(), 80),
+                ("192.0.2.2".into(), 443)
+            ]
+        );
+        let request = parse(&[b"_HTTP", b"_tcp", b"web", b"prod"]).unwrap();
+        rows.clear();
+        assert_eq!(
+            external(&snapshot, &request, |host, port, _| rows
+                .push((host.to_owned(), port.port))),
+            Rcode::NOERROR
+        );
+        assert_eq!(
+            rows,
+            [
+                ("192.0.2.1".into(), 80),
+                ("old.example".into(), 80),
+                ("192.0.2.2".into(), 80)
+            ]
+        );
+    }
 
     #[test]
     fn parses_namespace_service_endpoint_and_port_names() {

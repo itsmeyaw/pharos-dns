@@ -83,6 +83,7 @@ impl External {
         zone: &Zone,
         kubernetes: &crate::kubernetes::Kubernetes,
         store: &pharos_kubernetes::store::Store,
+        snapshot: Option<&pharos_kubernetes::object::Service>,
         request: Option<&lookup::Request<'_>>,
         reverse_ip: Option<&str>,
         code: pharos_proto::Rcode,
@@ -164,11 +165,12 @@ impl External {
                 store.with_read(|index| {
                     let mut ordinal = 0usize;
                     let mut chased = chased.iter().peekable();
-                    lookup::lookup(
+                    lookup::snapshot_or_lookup(
                         index,
                         request,
                         self.config.headless,
                         kubernetes.endpoint_pod_names(),
+                        snapshot,
                         |address, _, _| {
                             let current = ordinal;
                             ordinal += 1;
@@ -244,19 +246,21 @@ impl External {
                 let mut scratch = scratch::lease();
                 store.with_read(|index| {
                     let mut count = 0usize;
-                    lookup::lookup(
+                    lookup::snapshot_or_lookup(
                         index,
                         request,
                         self.config.headless,
                         kubernetes.endpoint_pod_names(),
+                        snapshot,
                         |_, _, _| count += 1,
                     );
                     let weight = (100 / count.max(1)).max(1) as u16;
-                    lookup::lookup(
+                    lookup::snapshot_or_lookup(
                         index,
                         request,
                         self.config.headless,
                         kubernetes.endpoint_pod_names(),
+                        snapshot,
                         |address, port, endpoint| {
                             if port.port < 0 || error.is_some() {
                                 return;
@@ -302,11 +306,12 @@ impl External {
                     );
                     let mut ordinal = 0usize;
                     let mut chased = chased.iter().peekable();
-                    lookup::lookup(
+                    lookup::snapshot_or_lookup(
                         index,
                         request,
                         self.config.headless,
                         kubernetes.endpoint_pod_names(),
+                        snapshot,
                         |address, port, endpoint| {
                             let current = ordinal;
                             ordinal += 1;
@@ -415,7 +420,6 @@ impl External {
 
 struct Chased {
     ordinal: usize,
-    host: String,
     name: Name,
     answers: [Option<Vec<u8>>; 2],
 }
@@ -429,7 +433,14 @@ fn chased_at<'a>(
         chased.next();
     }
     if chased.peek().is_some_and(|entry| entry.ordinal == ordinal) {
-        chased.next().filter(|entry| entry.host == address)
+        chased.next().filter(|entry| {
+            let mut wire = [0; 255];
+            let Ok(expected) = NameRef::parse(entry.name.as_wire(), 0) else {
+                return false;
+            };
+            // RFC 4343 §4.1: preserve the case of label octets when matching the captured target.
+            hostname(address, &mut wire).is_some_and(|target| target.labels().eq(expected.labels()))
+        })
     } else {
         None
     }
@@ -512,21 +523,7 @@ fn service_target<'a>(
     wire: &'a mut [u8; 255],
 ) -> Option<NameRef<'a>> {
     if address.parse::<std::net::IpAddr>().is_err() {
-        let mut text = [0u8; 1024];
-        let bytes = address.as_bytes();
-        if bytes.len() >= text.len() {
-            return None;
-        }
-        text[..bytes.len()].copy_from_slice(bytes);
-        let length = if bytes.last() == Some(&b'.') {
-            bytes.len()
-        } else {
-            text[bytes.len()] = b'.';
-            bytes.len() + 1
-        };
-        let result =
-            Name::parse_absolute_into(std::str::from_utf8(&text[..length]).ok()?, wire).ok()?;
-        return NameRef::parse(result, 0).ok();
+        return hostname(address, wire);
     }
     let mut prefix = [0u8; 255];
     let mut text = [0u8; 1024];
@@ -567,6 +564,24 @@ fn service_target<'a>(
     }
     wire[pos] = 0;
     NameRef::parse(&wire[..=pos], 0).ok()
+}
+
+fn hostname<'a>(address: &str, wire: &'a mut [u8; 255]) -> Option<NameRef<'a>> {
+    let mut text = [0u8; 1024];
+    let bytes = address.as_bytes();
+    if bytes.len() >= text.len() {
+        return None;
+    }
+    text[..bytes.len()].copy_from_slice(bytes);
+    let length = if bytes.last() == Some(&b'.') {
+        bytes.len()
+    } else {
+        text[bytes.len()] = b'.';
+        bytes.len() + 1
+    };
+    let result =
+        Name::parse_absolute_into(std::str::from_utf8(&text[..length]).ok()?, wire).ok()?;
+    NameRef::parse(result, 0).ok()
 }
 
 fn child_name<'a>(
@@ -649,6 +664,17 @@ impl External {
                 None
             };
             let request = lookup::parse(&labels[..relative]);
+            let snapshot = if reverse_ip.is_none() {
+                request.as_ref().ok().and_then(|request| {
+                    let namespace = std::str::from_utf8(request.namespace).ok()?;
+                    let service = std::str::from_utf8(request.service).ok()?;
+                    store
+                        .with_read(|index| index.service_snapshot(namespace, service))
+                        .filter(|service| !service.external_ips.is_empty())
+                })
+            } else {
+                None
+            };
             let code = if let Some(ip) = &reverse_ip {
                 if store.with_read(|index| {
                     index
@@ -665,11 +691,12 @@ impl External {
             } else {
                 match &request {
                     Ok(request) => store.with_read(|index| {
-                        lookup::lookup(
+                        lookup::snapshot_or_lookup(
                             index,
                             request,
                             self.config.headless,
                             kubernetes.endpoint_pod_names(),
+                            snapshot.as_deref(),
                             |_, _, _| {},
                         )
                     }),
@@ -690,11 +717,12 @@ impl External {
                 store.with_read(|index| {
                     let mut scratch = scratch::lease();
                     let mut ordinal = 0;
-                    lookup::lookup(
+                    lookup::snapshot_or_lookup(
                         index,
                         request,
                         self.config.headless,
                         kubernetes.endpoint_pod_names(),
+                        snapshot.as_deref(),
                         |address, port, _| {
                             let current = ordinal;
                             ordinal += 1;
@@ -715,7 +743,6 @@ impl External {
                             {
                                 chased.push(Chased {
                                     ordinal: current,
-                                    host: address.to_owned(),
                                     name,
                                     answers: [None, None],
                                 });
@@ -745,6 +772,7 @@ impl External {
                 zone,
                 kubernetes,
                 &store,
+                snapshot.as_deref(),
                 request.as_ref().ok(),
                 reverse_ip.as_ref().map(|ip| ip.as_str()),
                 code,
@@ -1042,13 +1070,11 @@ mod tests {
         let chased = [
             Chased {
                 ordinal: 2,
-                host: "lb.example.net".into(),
                 name: target.clone(),
                 answers: [Some(chased_wire.clone()), None],
             },
             Chased {
                 ordinal: 3,
-                host: "lb.example.net".into(),
                 name: target,
                 answers: [Some(chased_wire), None],
             },
@@ -1081,6 +1107,7 @@ mod tests {
                 &external.zones[0],
                 kubernetes,
                 &store,
+                None,
                 Some(&request),
                 None,
                 Rcode::NOERROR,
@@ -1126,13 +1153,11 @@ mod tests {
         let mut stale = [
             Chased {
                 ordinal: 2,
-                host: "old.example.net".into(),
                 name: "old.example.net.".parse().unwrap(),
                 answers: [Some(stale_wire), None],
             },
             Chased {
                 ordinal: 3,
-                host: chased[1].host.clone(),
                 name: chased[1].name.clone(),
                 answers: chased[1].answers.clone(),
             },
@@ -1156,6 +1181,7 @@ mod tests {
                 &external.zones[0],
                 kubernetes,
                 &store,
+                None,
                 Some(&request),
                 None,
                 Rcode::NOERROR,
@@ -1177,7 +1203,7 @@ mod tests {
             _ => true,
         }));
 
-        stale[0].host = "lb.example.net".into();
+        stale[0].name = "lb.example.net.".parse().unwrap();
         response.clear();
         let mut valid_slots = [None; 8];
         let mut cx = Context {
@@ -1197,6 +1223,7 @@ mod tests {
                 &external.zones[0],
                 kubernetes,
                 &store,
+                None,
                 Some(&request),
                 None,
                 Rcode::NOERROR,
@@ -1211,7 +1238,6 @@ mod tests {
 
         let srv_chased = [Chased {
             ordinal: 2,
-            host: chased[0].host.clone(),
             name: chased[0].name.clone(),
             answers: chased[0].answers.clone(),
         }];
@@ -1243,6 +1269,7 @@ mod tests {
                 &external.zones[0],
                 kubernetes,
                 &store,
+                None,
                 Some(&request),
                 None,
                 Rcode::NOERROR,
@@ -1288,6 +1315,66 @@ mod tests {
                 )
             ]
         );
+
+        let mut snapshot = store.with_read(|index| index.service_snapshot("prod", "web").unwrap());
+        std::sync::Arc::make_mut(&mut snapshot).external_ips = vec![
+            "198.51.100.1".into(),
+            "lb.example.net".into(),
+            "198.51.100.2".into(),
+        ];
+        query.clear();
+        let mut b = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+        b.question(
+            NameRef::parse(owner.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+        let _ = b.finish();
+        response.clear();
+        let mut snapshot_slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &zone,
+            metadata: Metadata::new(&mut snapshot_slots),
+            response: &mut response,
+            max_response_size: 4096,
+        };
+        assert!(matches!(
+            external.service_response(
+                &mut cx,
+                &external.zones[0],
+                kubernetes,
+                &store,
+                Some(&snapshot),
+                Some(&request),
+                None,
+                Rcode::NOERROR,
+                &chased
+            ),
+            Outcome::Response
+        ));
+        let message = Message::parse(&response).unwrap();
+        let addresses: Vec<_> = message
+            .answers()
+            .filter_map(|rr| match rr.data().unwrap() {
+                Rdata::A(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            addresses,
+            [
+                "198.51.100.1".parse::<std::net::Ipv4Addr>().unwrap(),
+                "203.0.113.1".parse().unwrap(),
+                "203.0.113.1".parse().unwrap(),
+                "198.51.100.2".parse().unwrap()
+            ]
+        );
         chain.lifecycle.run(Phase::Shutdown).await.unwrap();
         task.abort();
     }
@@ -1297,19 +1384,16 @@ mod tests {
         let chased = [
             Chased {
                 ordinal: 1,
-                host: "old.example".into(),
                 name: "old.example.".parse().unwrap(),
                 answers: [None, None],
             },
             Chased {
                 ordinal: 3,
-                host: "same.example".into(),
                 name: "same.example.".parse().unwrap(),
                 answers: [None, None],
             },
             Chased {
                 ordinal: 5,
-                host: "later.example".into(),
                 name: "later.example.".parse().unwrap(),
                 answers: [None, None],
             },
@@ -1318,9 +1402,52 @@ mod tests {
         assert!(chased_at(&mut cursor, 1, "new.example").is_none());
         assert!(chased_at(&mut cursor, 4, "other.example").is_none());
         assert_eq!(
-            chased_at(&mut cursor, 5, "later.example").unwrap().host,
-            "later.example"
+            chased_at(&mut cursor, 5, "later.example")
+                .unwrap()
+                .name
+                .to_string(),
+            "later.example."
         );
+    }
+
+    #[test]
+    fn chased_hosts_match_exact_wire_labels_without_copying_presentation() {
+        let chased = [Chased {
+            ordinal: 0,
+            name: r"a\.b.Example.".parse().unwrap(),
+            answers: [None, None],
+        }];
+        let matches = |address| chased_at(&mut chased.iter().peekable(), 0, address).is_some();
+        assert!(matches(r"a\.b.Example"));
+        assert!(matches(r"a\046b.Example."));
+        assert!(!matches(r"a.b.Example"));
+        assert!(!matches(r"a\.b.example"));
+        assert!(!matches(r"a\.c.Example"));
+        assert!(!matches(r"a\.b.Example.."));
+    }
+
+    #[test]
+    fn chased_hosts_handle_long_escapes_and_duplicate_ports() {
+        let label = "a".repeat(63);
+        let host = format!("{label}.Example");
+        let escaped = format!("{}.Example.", r"\097".repeat(63));
+        let name: Name = format!("{host}.").parse().unwrap();
+        let chased = [
+            Chased {
+                ordinal: 0,
+                name: name.clone(),
+                answers: [None, None],
+            },
+            Chased {
+                ordinal: 1,
+                name,
+                answers: [None, None],
+            },
+        ];
+        let mut cursor = chased.iter().peekable();
+        assert!(chased_at(&mut cursor, 0, &escaped).is_some());
+        assert!(chased_at(&mut cursor, 1, &host).is_some());
+        assert!(chased_at(&mut chased.iter().peekable(), 0, &"x".repeat(8192)).is_none());
     }
 
     #[test]
