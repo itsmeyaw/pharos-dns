@@ -52,6 +52,15 @@ fn scrub(
     wire: &mut Vec<u8>,
 ) -> Result<(), Error> {
     let message = Message::parse(wire).map_err(|_| Error::InvalidQuery)?;
+    // RFC 8945 §5.3.2: a TSIG covers the complete Message and cannot be modified afterward.
+    if wire.len() <= limit
+        && message
+            .additionals()
+            .last()
+            .is_some_and(|rr| rr.rtype == Type::TSIG)
+    {
+        return Ok(());
+    }
     if query.opt().is_none() && message.opt().is_none() && wire.len() <= limit {
         return Ok(());
     }
@@ -84,7 +93,6 @@ fn scrub(
     let opt_len = response_opt.map_or(0, |opt| opt.wire_len());
     // RFC 6891 §7: a truncated EDNS response must retain the question and OPT record.
     let budget = limit
-        .max(512)
         .checked_sub(opt_len)
         .ok_or(Error::ResponseBufferTooSmall)?;
     let mut end = 12
@@ -146,4 +154,17 @@ fn scrub(
         wire[4 + 2 * i..6 + 2 * i].copy_from_slice(&count.to_be_bytes());
     }
     Ok(())
+}
+
+/// Finalize a Response with space reserved for a TSIG appended afterward.
+pub fn prepare_signed_response(
+    query: Message<'_>,
+    protocol: Protocol,
+    reserved: usize,
+    wire: &mut Vec<u8>,
+) -> Result<(), Error> {
+    let limit = response_limit(query, protocol)
+        .checked_sub(reserved)
+        .ok_or(Error::ResponseBufferTooSmall)?;
+    scrub(query, limit, protocol, wire)
 }

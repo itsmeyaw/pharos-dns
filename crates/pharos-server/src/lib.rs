@@ -34,7 +34,7 @@ mod process_metrics;
 mod quota;
 pub use admission::{Admission, admit};
 pub use lifecycle::{Lifecycle, Phase};
-pub use outcome::{finish_outcome, response_limit};
+pub use outcome::{finish_outcome, prepare_signed_response, response_limit};
 pub use panic::{contain_panic, panics_total};
 mod router;
 mod server;

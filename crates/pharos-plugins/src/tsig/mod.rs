@@ -108,11 +108,14 @@ impl Tsig {
             return outcome;
         }
         let index = algorithm.expect("checked above");
-        let needed = cx.response.len()
-            + secret.name.as_wire().len()
-            + 26
-            + names[index].len()
-            + [20, 28, 32, 48, 64][index];
+        let size =
+            secret.name.as_wire().len() + 26 + names[index].len() + [20, 28, 32, 48, 64][index];
+        if let Err(error) =
+            pharos_server::prepare_signed_response(cx.query, cx.protocol, size, cx.response)
+        {
+            return Outcome::Error(error);
+        }
+        let needed = cx.response.len() + size;
         if needed > cx.response.capacity() {
             if cx.protocol == pharos_server::Protocol::Tcp {
                 cx.response.reserve(needed - cx.response.len());
