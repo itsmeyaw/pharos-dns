@@ -704,8 +704,13 @@ fn write_set(
     Ok(())
 }
 
-impl Plugin for File {
-    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+impl File {
+    pub(crate) async fn serve_with<N: Next + Send>(
+        &self,
+        cx: &mut Context<'_, '_>,
+        next: N,
+        has_next: bool,
+    ) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
@@ -725,13 +730,23 @@ impl Plugin for File {
             .filter(|zone| contains(name, &zone.apex))
             .max_by_key(|zone| zone.apex.label_count())
         else {
-            return next.run(cx).await;
+            return if has_next {
+                next.run(cx).await
+            } else {
+                Outcome::Unanswered(Rcode::REFUSED)
+            };
         };
         let snapshot = loaded.current.load();
         let Some(zone) = snapshot.as_ref() else {
             return Outcome::Unanswered(Rcode::SERVFAIL);
         };
         zone.lookup(cx, next, &self.fallthrough).await
+    }
+}
+
+impl Plugin for File {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        self.serve_with(cx, next, true).await
     }
 }
 
