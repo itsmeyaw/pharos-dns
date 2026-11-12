@@ -73,6 +73,96 @@ impl External {
         self.kubernetes = Some(kubernetes.clone());
     }
 
+    fn reverse_response(
+        &self,
+        index: &pharos_kubernetes::store::Index,
+        cx: &mut Context<'_, '_>,
+        zone: &Zone,
+        kubernetes: &crate::kubernetes::Kubernetes,
+        ip: &str,
+    ) -> Option<Outcome> {
+        let q = cx.query.questions().next()?;
+        let services = || {
+            index
+                .services_by_external_ip_unfiltered(ip)
+                .filter(|service| {
+                    !kubernetes.has_namespace_filter()
+                        || index.namespace_exposed(&service.namespace)
+                })
+        };
+        let code = if services().next().is_some() {
+            pharos_proto::Rcode::NOERROR
+        } else {
+            pharos_proto::Rcode::NXDOMAIN
+        };
+        if code == pharos_proto::Rcode::NXDOMAIN
+            && self.fallthrough.iter().any(|zone| contains(q.name, zone))
+        {
+            return None;
+        }
+        let (Some(ns), Some(host)) = (&zone.ns, &zone.host) else {
+            return Some(Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL));
+        };
+        let max = cx.max_response_size.max(512);
+        if cx.response.capacity() < max {
+            if cx.protocol == pharos_server::Protocol::Tcp {
+                cx.response.reserve(max - cx.response.len());
+            } else {
+                return Some(Outcome::Error(pharos_server::Error::ResponseBufferTooSmall));
+            }
+        }
+        let result = (|| {
+            // RFC 1035 §§4.1.1–4.1.2: set authoritative flags and repeat the Question.
+            let mut b = MessageBuilder::new(
+                cx.response,
+                max,
+                cx.query.id(),
+                0x8400 | (cx.query.flags() & 0x7910) | code.0,
+            )?;
+            b.question(q.name, q.qtype, q.qclass)?;
+            let mut answers = 0usize;
+            let first_zone = NameRef::parse(self.zones[0].name.as_wire(), 0).unwrap();
+            for service in services() {
+                let mut wire = [0; 255];
+                let Some(target) = child_name(
+                    &[service.name.as_bytes(), service.namespace.as_bytes()],
+                    first_zone,
+                    &mut wire,
+                ) else {
+                    continue;
+                };
+                // RFC 1035 §3.3.12: PTR RDATA identifies the target domain name.
+                if b.record_with(
+                    Section::Answer,
+                    q.name,
+                    Type::PTR,
+                    Class::IN,
+                    self.config.ttl,
+                    |w| w.write_name(target),
+                )? {
+                    answers += 1;
+                }
+            }
+            if answers == 0 {
+                write_soa(
+                    &mut b,
+                    NameRef::parse(zone.name.as_wire(), 0).unwrap(),
+                    ns,
+                    host,
+                    self.config.ttl,
+                    index.external_serial(),
+                    Section::Authority,
+                )?;
+            }
+            let _ = b.finish();
+            Ok::<_, pharos_proto::BuildError>(())
+        })();
+        Some(match result {
+            Ok(()) => Outcome::Response,
+            Err(error) => Outcome::Error(pharos_server::Error::Build(error)),
+        })
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "the borrowed lookup state stays on the Query stack"
@@ -85,7 +175,6 @@ impl External {
         store: &pharos_kubernetes::store::Store,
         snapshot: Option<&lookup::Snapshot>,
         request: Option<&lookup::Request<'_>>,
-        reverse_ip: Option<&str>,
         code: pharos_proto::Rcode,
         chased: &[Chased],
     ) -> Outcome {
@@ -116,47 +205,6 @@ impl External {
             )?;
             b.question(q.name, q.qtype, q.qclass)?;
             let mut answers = 0usize;
-            if let Some(ip) = reverse_ip {
-                let mut error = None;
-                let first_zone = NameRef::parse(self.zones[0].name.as_wire(), 0).unwrap();
-                store.with_read(|index| {
-                    for service in index
-                        .services_by_external_ip_unfiltered(ip)
-                        .filter(|service| {
-                            !kubernetes.has_namespace_filter()
-                                || index.namespace_exposed(&service.namespace)
-                        })
-                    {
-                        let mut wire = [0; 255];
-                        let Some(target) = child_name(
-                            &[service.name.as_bytes(), service.namespace.as_bytes()],
-                            first_zone,
-                            &mut wire,
-                        ) else {
-                            continue;
-                        };
-                        // RFC 1035 §3.3.12: PTR RDATA identifies the target domain name.
-                        match b.record_with(
-                            Section::Answer,
-                            q.name,
-                            Type::PTR,
-                            Class::IN,
-                            self.config.ttl,
-                            |w| w.write_name(target),
-                        ) {
-                            Ok(true) => answers += 1,
-                            Ok(false) => {}
-                            Err(err) => {
-                                error = Some(err);
-                                break;
-                            }
-                        }
-                    }
-                });
-                if let Some(error) = error {
-                    return Err(error);
-                }
-            }
             if let Some(request) = request
                 && matches!(q.qtype, Type::A | Type::AAAA)
             {
@@ -677,80 +725,67 @@ impl External {
             } else {
                 None
             };
+            if let Some(ip) = &reverse_ip {
+                return store.with_read(|index| {
+                    self.reverse_response(index, cx, zone, kubernetes, ip.as_str())
+                });
+            }
             let request = lookup::parse(&labels[..relative]);
             // shortcut: hostname targets and Self Lookups allocate per Query until #86 pools buffers and futures.
             let mut chased = Vec::new();
-            let (snapshot, code) = if let Some(ip) = &reverse_ip {
-                let code = if store.with_read(|index| {
-                    index
-                        .services_by_external_ip_unfiltered(ip.as_str())
-                        .any(|service| {
-                            !kubernetes.has_namespace_filter()
-                                || index.namespace_exposed(&service.namespace)
-                        })
-                }) {
-                    pharos_proto::Rcode::NOERROR
-                } else {
-                    pharos_proto::Rcode::NXDOMAIN
-                };
-                (None, code)
-            } else {
-                match &request {
-                    Ok(request) if matches!(q.qtype, Type::A | Type::AAAA | Type::SRV) => store
-                        .with_read(|index| {
-                            let snapshot = lookup::capture(index, request, self.config.headless);
-                            let mut scratch = scratch::lease();
-                            let mut ordinal = 0;
-                            let code = lookup::snapshot_or_lookup(
-                                index,
-                                request,
-                                self.config.headless,
-                                kubernetes.endpoint_pod_names(),
-                                Some(&snapshot),
-                                |address, port, _| {
-                                    let current = ordinal;
-                                    ordinal += 1;
-                                    if address.parse::<std::net::IpAddr>().is_ok()
-                                        || q.qtype == Type::SRV && port.port < 0
-                                    {
-                                        return;
-                                    }
-                                    let mut wire = [0; 255];
-                                    if let Some(target) =
-                                        service_target(request, None, address, zone_ref, &mut wire)
-                                        && let Ok(name) = target.to_string().parse::<Name>()
-                                        && (q.qtype != Type::SRV || {
-                                            let mut key = [0; 2048];
-                                            target_key(request, None, address, zone_ref, &mut key)
-                                                .is_some_and(|key| {
-                                                    scratch.extra.insert(key, key, 0)
-                                                })
-                                        })
-                                    {
-                                        chased.push(Chased {
-                                            ordinal: current,
-                                            name,
-                                            answers: [None, None],
-                                        });
-                                    }
-                                },
-                            );
-                            (Some(snapshot), code)
-                        }),
-                    Ok(request) => (
-                        None,
-                        store.with_read(|index| {
-                            lookup::lookup(
-                                index,
-                                request,
-                                self.config.headless,
-                                kubernetes.endpoint_pod_names(),
-                                |_, _, _| {},
-                            )
-                        }),
-                    ),
-                    Err(code) => (None, *code),
-                }
+            let (snapshot, code) = match &request {
+                Ok(request) if matches!(q.qtype, Type::A | Type::AAAA | Type::SRV) => store
+                    .with_read(|index| {
+                        let snapshot = lookup::capture(index, request, self.config.headless);
+                        let mut scratch = scratch::lease();
+                        let mut ordinal = 0;
+                        let code = lookup::snapshot_or_lookup(
+                            index,
+                            request,
+                            self.config.headless,
+                            kubernetes.endpoint_pod_names(),
+                            Some(&snapshot),
+                            |address, port, _| {
+                                let current = ordinal;
+                                ordinal += 1;
+                                if address.parse::<std::net::IpAddr>().is_ok()
+                                    || q.qtype == Type::SRV && port.port < 0
+                                {
+                                    return;
+                                }
+                                let mut wire = [0; 255];
+                                if let Some(target) =
+                                    service_target(request, None, address, zone_ref, &mut wire)
+                                    && let Ok(name) = target.to_string().parse::<Name>()
+                                    && (q.qtype != Type::SRV || {
+                                        let mut key = [0; 2048];
+                                        target_key(request, None, address, zone_ref, &mut key)
+                                            .is_some_and(|key| scratch.extra.insert(key, key, 0))
+                                    })
+                                {
+                                    chased.push(Chased {
+                                        ordinal: current,
+                                        name,
+                                        answers: [None, None],
+                                    });
+                                }
+                            },
+                        );
+                        (Some(snapshot), code)
+                    }),
+                Ok(request) => (
+                    None,
+                    store.with_read(|index| {
+                        lookup::lookup(
+                            index,
+                            request,
+                            self.config.headless,
+                            kubernetes.endpoint_pod_names(),
+                            |_, _, _| {},
+                        )
+                    }),
+                ),
+                Err(code) => (None, *code),
             };
             if code == pharos_proto::Rcode::NXDOMAIN
                 && self.fallthrough.iter().any(|zone| contains(q.name, zone))
@@ -780,7 +815,6 @@ impl External {
                 &store,
                 snapshot.as_ref(),
                 request.as_ref().ok(),
-                reverse_ip.as_ref().map(|ip| ip.as_str()),
                 code,
                 &chased,
             ));
@@ -994,6 +1028,158 @@ mod tests {
     impl Next for Sentinel {
         async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
             Outcome::Unanswered(Rcode::REFUSED)
+        }
+    }
+
+    async fn assert_reverse_snapshot(
+        kubernetes: &crate::kubernetes::Kubernetes,
+        store: &pharos_kubernetes::store::Store,
+    ) {
+        assert!(kubernetes.has_namespace_filter());
+        store.with_read(|index| {
+            assert_eq!(
+                index
+                    .services_by_external_ip_unfiltered("192.0.2.1")
+                    .count(),
+                2
+            );
+            assert_eq!(
+                index
+                    .services_by_external_ip_unfiltered("192.0.2.3")
+                    .count(),
+                1
+            );
+            assert!(!index.namespace_exposed("secret"));
+        });
+        let blocks = parse(
+            "Corefile",
+            ".:53 {\n k8s_external example.com in-addr.arpa\n}",
+        )
+        .unwrap();
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &blocks[0].directives["k8s_external"]),
+            &["."],
+        )
+        .unwrap();
+        let mut external = External::new(config).unwrap();
+        external.bind_kubernetes(kubernetes);
+        let zone: Name = "in-addr.arpa.".parse().unwrap();
+        let name: Name = "1.2.0.192.in-addr.arpa.".parse().unwrap();
+        let mut query = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::PTR,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let empty = pharos_kubernetes::store::Store::default();
+        for (index_store, fallthrough, expected) in [
+            (store, false, Some(Rcode::NOERROR)),
+            (&empty, false, Some(Rcode::NXDOMAIN)),
+            (&empty, true, None),
+            (store, true, Some(Rcode::NOERROR)),
+        ] {
+            external.fallthrough = if fallthrough {
+                vec![zone.clone()]
+            } else {
+                vec![]
+            };
+            let mut response = Vec::with_capacity(512);
+            let mut slots = [None; 8];
+            let mut cx = Context {
+                query: Message::parse(&query).unwrap(),
+                client: "127.0.0.1:1234".parse().unwrap(),
+                local: "127.0.0.1:53".parse().unwrap(),
+                transport: Transport::Dns,
+                protocol: Protocol::Udp,
+                domain: &zone,
+                metadata: Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size: 512,
+            };
+            let outcome = index_store.with_read(|index| {
+                external.reverse_response(
+                    index,
+                    &mut cx,
+                    &external.zones[1],
+                    kubernetes,
+                    "192.0.2.1",
+                )
+            });
+            if let Some(code) = expected {
+                assert!(matches!(outcome, Some(Outcome::Response)));
+                let message = Message::parse(&response).unwrap();
+                assert_eq!(message.rcode(), code);
+                if code == Rcode::NOERROR {
+                    assert_eq!(message.answer_count(), 1);
+                    let Rdata::Ptr(target) = message.answers().next().unwrap().data().unwrap()
+                    else {
+                        panic!("expected PTR")
+                    };
+                    assert_eq!(target.to_string(), "web.prod.example.com.");
+                } else {
+                    assert_eq!(message.answer_count(), 0);
+                    let Rdata::Soa { serial, .. } =
+                        message.authorities().next().unwrap().data().unwrap()
+                    else {
+                        panic!("expected SOA")
+                    };
+                    assert_eq!(
+                        serial,
+                        index_store.with_read(|index| index.external_serial())
+                    );
+                }
+            } else {
+                assert!(outcome.is_none());
+                assert!(response.is_empty());
+            }
+        }
+        for (name, fallthrough, expected) in [
+            ("1.2.0.192.in-addr.arpa.", false, Some(Rcode::NOERROR)),
+            ("3.2.0.192.in-addr.arpa.", false, Some(Rcode::NXDOMAIN)),
+            ("3.2.0.192.in-addr.arpa.", true, None),
+        ] {
+            external.fallthrough = if fallthrough {
+                vec![zone.clone()]
+            } else {
+                vec![]
+            };
+            let name: Name = name.parse().unwrap();
+            query.clear();
+            let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+            builder
+                .question(
+                    NameRef::parse(name.as_wire(), 0).unwrap(),
+                    Type::PTR,
+                    Class::IN,
+                )
+                .unwrap();
+            let _ = builder.finish();
+            let mut response = Vec::with_capacity(512);
+            let mut slots = [None; 8];
+            let mut cx = Context {
+                query: Message::parse(&query).unwrap(),
+                client: "127.0.0.1:1234".parse().unwrap(),
+                local: "127.0.0.1:53".parse().unwrap(),
+                transport: Transport::Dns,
+                protocol: Protocol::Udp,
+                domain: &zone,
+                metadata: Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size: 512,
+            };
+            let outcome = external.answer(&mut cx).await;
+            if let Some(code) = expected {
+                assert!(matches!(outcome, Some(Outcome::Response)));
+                let message = Message::parse(&response).unwrap();
+                assert_eq!(message.rcode(), code);
+                assert_eq!(message.answer_count(), u16::from(code == Rcode::NOERROR));
+            } else {
+                assert!(outcome.is_none());
+            }
         }
     }
 
@@ -1301,12 +1487,15 @@ mod tests {
                     let (kind, items) = if request.contains("/services") {
                         (
                             "ServiceList",
-                            r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"externalIPs":["192.0.2.1","lb.example.net","192.0.2.1","192.0.2.2"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}}]"#,
+                            r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"externalIPs":["192.0.2.1","lb.example.net","192.0.2.1","192.0.2.2"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}},{"metadata":{"name":"hidden","namespace":"secret"},"spec":{"externalIPs":["192.0.2.1","192.0.2.3"]}}]"#,
                         )
                     } else if request.contains("/endpointslices") {
                         ("EndpointSliceList", "[]")
                     } else {
-                        ("NamespaceList", r#"[{"metadata":{"name":"prod"}}]"#)
+                        (
+                            "NamespaceList",
+                            r#"[{"metadata":{"name":"prod"}},{"metadata":{"name":"secret"}}]"#,
+                        )
                     };
                     let body = if request.contains("watch=true") {
                         String::new()
@@ -1324,7 +1513,7 @@ mod tests {
             }
         });
         let text = format!(
-            ".:53 {{\n kubernetes cluster.local {{\n  endpoint http://{server}\n  startup_timeout 3s\n }}\n}} "
+            ".:53 {{\n kubernetes cluster.local {{\n  endpoint http://{server}\n  namespaces prod\n  startup_timeout 3s\n }}\n}} "
         );
         let chain =
             configure::<crate::Chain>(&parse("Corefile", &text).unwrap(), crate::directives())
@@ -1334,6 +1523,7 @@ mod tests {
         chain.lifecycle.run(Phase::Startup).await.unwrap();
         let kubernetes = chain.kubernetes.as_ref().unwrap();
         let store = kubernetes.store().unwrap();
+        assert_reverse_snapshot(kubernetes, &store).await;
         let blocks = parse("Corefile", ".:53 {\n k8s_external example.com\n}").unwrap();
         let config = setup::parse(
             &mut Cursor::new("Corefile", &blocks[0].directives["k8s_external"]),
@@ -1401,7 +1591,6 @@ mod tests {
                 &store,
                 None,
                 Some(&request),
-                None,
                 Rcode::NOERROR,
                 &chased
             ),
@@ -1466,7 +1655,6 @@ mod tests {
                     &store,
                     Some(&empty),
                     Some(&request),
-                    None,
                     code,
                     &[]
                 ),
@@ -1512,7 +1700,6 @@ mod tests {
                 &store,
                 None,
                 Some(&request),
-                None,
                 Rcode::NOERROR,
                 &stale,
             ),
@@ -1554,7 +1741,6 @@ mod tests {
                 &store,
                 None,
                 Some(&request),
-                None,
                 Rcode::NOERROR,
                 &stale
             ),
@@ -1600,7 +1786,6 @@ mod tests {
                 &store,
                 None,
                 Some(&request),
-                None,
                 Rcode::NOERROR,
                 &srv_chased
             ),
@@ -1681,7 +1866,6 @@ mod tests {
                 &store,
                 Some(&lookup::Snapshot::Service(snapshot)),
                 Some(&request),
-                None,
                 Rcode::NOERROR,
                 &chased
             ),
