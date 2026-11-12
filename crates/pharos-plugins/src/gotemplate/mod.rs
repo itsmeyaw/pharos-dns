@@ -100,6 +100,7 @@ impl QuestionMember {
         }
     }
     fn numeric(self, question: Question<'_>) -> Option<Value<'static>> {
+        // RFC 1035 §4.1.2: QTYPE and QCLASS are unsigned 16-bit Question fields.
         match self {
             Self::Name => None,
             Self::Qtype => Some(Value::Int(i64::from(question.qtype.0))),
@@ -1164,7 +1165,7 @@ fn question<'a>(data: &'a Data<'_, '_>) -> Result<Question<'a>, fmt::Error> {
 impl QueryField {
     fn value(&self, data: &Data<'_, '_>) -> Result<Value<'static>, fmt::Error> {
         let message = data.message.ok_or(fmt::Error)?;
-        // RFC 1035 §4.1.1–4.1.2: header flags and first Question carry these values.
+        // RFC 1035 §4.1.1–4.1.2 and RFC 4035 §3.2.3: headers and Questions carry these fields.
         Ok(match self {
             Self::Id => Value::Int(i64::from(message.id())),
             Self::Opcode => Value::Int(i64::from(message.opcode().0)),

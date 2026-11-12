@@ -627,6 +627,7 @@ fn call<'a>(
     }
     let message = query.message;
     match name {
+        // RFC 1035 §4.1.1: ID and OPCODE are fields of the Message header.
         "id" => return Ok(Temporary::Int(i64::from(message.id()))),
         "opcode" => return Ok(Temporary::Int(i64::from(message.opcode().0))),
         "size" => {
@@ -656,6 +657,7 @@ fn call<'a>(
     }
     let start = scratch.len;
     let result = match name {
+        // RFC 1035 §4.1.2: the Question holds QNAME, QTYPE, and QCLASS.
         "name" => {
             if let Some(question) = message.questions().next() {
                 write!(scratch, "{}", question.name)
@@ -685,6 +687,7 @@ fn call<'a>(
     };
     result.map_err(|_| "expression scratch buffer is too small")?;
     if name == "name" {
+        // RFC 4343 §2: DNS label comparisons ignore ASCII case.
         scratch.buffer[start..scratch.len].make_ascii_lowercase();
     }
     Ok(Temporary::Stored(start, scratch.len))
@@ -712,6 +715,7 @@ fn write_ip(output: &mut Scratch<'_>, address: SocketAddr) -> fmt::Result {
     match address {
         SocketAddr::V4(address) => write!(output, "{}", address.ip()),
         SocketAddr::V6(address) => {
+            // RFC 4291 §2.5.5.2: IPv4-mapped addresses embed an IPv4 address.
             if let Some(ip) = address.ip().to_ipv4_mapped() {
                 write!(output, "{ip}")
             } else if address.scope_id() == 0 {
@@ -738,6 +742,7 @@ fn incidr(ip: &str, cidr: &str) -> Result<bool, &'static str> {
     if prefix > max {
         return Err("invalid CIDR prefix");
     }
+    // RFC 4291 §2.5.5.2: treat IPv4-mapped addresses as their embedded IPv4 address.
     let ip = match ip {
         IpAddr::V6(value) => value.to_ipv4_mapped().map_or(ip, IpAddr::V4),
         _ => ip,
