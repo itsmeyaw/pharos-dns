@@ -640,6 +640,7 @@ impl Zone {
                 }
             }
         }
+        let mut lookup_failed = false;
         let lookup = if cut.is_none()
             && (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
             && (!zone.exact(target)
@@ -654,7 +655,10 @@ impl Zone {
             // shortcut: Self Lookup allocates; remove when #86 makes it allocation-free.
             match cx.self_lookup(&target, question.qtype).await {
                 Ok(wire) => Some(wire),
-                Err(_) => return Outcome::Unanswered(Rcode::SERVFAIL),
+                Err(_) => {
+                    lookup_failed = true;
+                    None
+                }
             }
         } else {
             None
@@ -672,7 +676,9 @@ impl Zone {
         {
             return next.run(cx).await;
         }
-        let rcode = if let Some(response) = external {
+        let rcode = if lookup_failed || lookup.is_some() && external.is_none() {
+            Rcode::SERVFAIL
+        } else if let Some(response) = external {
             match response.rcode() {
                 Rcode::SERVFAIL => Rcode::SERVFAIL,
                 Rcode::NXDOMAIN => Rcode::NXDOMAIN,

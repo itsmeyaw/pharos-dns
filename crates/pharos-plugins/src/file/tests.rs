@@ -106,19 +106,43 @@ async fn zone_lookup_is_reusable_without_file_plugin() {
 async fn unavailable_self_lookup_keeps_cname_in_servfail() {
     struct DropNext;
     impl Next for DropNext {
-        async fn run(self, _: &mut Context<'_, '_>) -> Outcome { Outcome::Drop }
+        async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+            Outcome::Drop
+        }
     }
     let apex: Name = "example.org.".parse().unwrap();
-    let records = ZoneParser::new(include_str!("../../tests/fixtures/file/example.zone").as_bytes(), apex.clone(), "test").collect::<Result<Vec<_>, _>>().unwrap();
+    let records = ZoneParser::new(
+        include_str!("../../tests/fixtures/file/example.zone").as_bytes(),
+        apex.clone(),
+        "test",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
     let zone = Zone::from_records(apex.clone(), records).unwrap();
     let name: Name = "external.example.org.".parse().unwrap();
     let mut query = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
-    builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
     let _ = builder.finish();
     let mut response = Vec::with_capacity(512);
     let mut slots = [None; 8];
-    let mut cx = Context { query: Message::parse(&query).unwrap(), client: "127.0.0.1:1234".parse().unwrap(), local: "127.0.0.1:53".parse().unwrap(), transport: pharos_server::Transport::Dns, protocol: Protocol::Udp, domain: &apex, metadata: pharos_server::Metadata::new(&mut slots), response: &mut response, max_response_size: 512 };
+    let mut cx = Context {
+        query: Message::parse(&query).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: pharos_server::Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &apex,
+        metadata: pharos_server::Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
     assert_eq!(zone.lookup(&mut cx, DropNext, &[]).await, Outcome::Response);
     let response = Message::parse(&response).unwrap();
     assert_eq!(response.rcode(), Rcode::SERVFAIL);
