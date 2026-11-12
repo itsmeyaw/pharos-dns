@@ -93,6 +93,7 @@ pub enum Protocol {
 
 /// Lazily produces complete wire-format Messages into a reusable buffer.
 /// Producers must not block the runtime; clones share the same cursor.
+/// Signed transfers must leave space for TSIG within the TCP Message limit.
 #[derive(Clone)]
 pub struct Stream {
     producer: Arc<std::sync::Mutex<StreamProducer>>,
