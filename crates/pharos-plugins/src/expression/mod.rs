@@ -256,6 +256,14 @@ fn call<'a>(
     metadata: &'a Metadata<'_>,
     scratch: &mut Scratch<'_>,
 ) -> Result<Temporary<'a>, &'static str> {
+    if name == "incidr" {
+        let ip = args[0].eval(query, metadata, scratch)?;
+        let cidr = args[1].eval(query, metadata, scratch)?;
+        return Ok(Temporary::Bool(incidr(
+            ip.text(scratch)?,
+            cidr.text(scratch)?,
+        )?));
+    }
     if name == "metadata" {
         let label = args[0].eval(query, metadata, scratch)?;
         return Ok(Temporary::Borrowed(
@@ -325,6 +333,37 @@ fn call<'a>(
         scratch.buffer[start..scratch.len].make_ascii_lowercase();
     }
     Ok(Temporary::Stored(start, scratch.len))
+}
+
+fn incidr(ip: &str, cidr: &str) -> Result<bool, &'static str> {
+    use std::net::IpAddr;
+    let ip: IpAddr = ip
+        .parse()
+        .map_err(|_| "first argument is not an IP address")?;
+    let (network, prefix) = cidr.split_once('/').ok_or("invalid CIDR")?;
+    let network: IpAddr = network.parse().map_err(|_| "invalid CIDR address")?;
+    if prefix.is_empty()
+        || !prefix.bytes().all(|b| b.is_ascii_digit())
+        || (prefix.len() > 1 && prefix.starts_with('0'))
+    {
+        return Err("invalid CIDR prefix");
+    }
+    let prefix: u8 = prefix.parse().map_err(|_| "invalid CIDR prefix")?;
+    let max = if network.is_ipv4() { 32 } else { 128 };
+    if prefix > max {
+        return Err("invalid CIDR prefix");
+    }
+    let ip = match ip {
+        IpAddr::V6(value) => value.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        _ => ip,
+    };
+    let (network, prefix) = match network {
+        IpAddr::V6(value) if prefix >= 96 => value
+            .to_ipv4_mapped()
+            .map_or((network, prefix), |v4| (IpAddr::V4(v4), prefix - 96)),
+        _ => (network, prefix),
+    };
+    Ok(crate::ipnet::contains(network, prefix, ip))
 }
 
 /// An expression parsed once at setup.

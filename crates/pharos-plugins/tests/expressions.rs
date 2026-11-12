@@ -186,3 +186,46 @@ fn coredns_name_regex_is_compiled_at_setup() {
     assert!(Expression::compile("name() matches '['").is_err());
     assert!(Expression::compile("name() matches metadata('pattern')").is_err());
 }
+
+#[test]
+fn incidr_handles_ipv4_ipv6_and_reports_invalid_arguments() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.1.2.3:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "incidr(client_ip(), '10.0.0.0/8')",
+        "incidr('2001:db8::1', '2001:db8::/32')",
+        "incidr('192.0.2.1', '0.0.0.0/0')",
+        "not incidr('192.0.2.1', '2001:db8::/32')",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+    for source in [
+        "incidr('invalid', '10.0.0.0/8')",
+        "incidr('10.0.0.1', '10.0.0.0/33')",
+    ] {
+        assert!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .is_err(),
+            "{source}"
+        );
+    }
+    assert!(Expression::compile("incidr(1, '10.0.0.0/8')").is_err());
+}

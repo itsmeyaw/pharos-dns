@@ -52,6 +52,7 @@ pub mod header;
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
 pub mod hosts;
+mod ipnet;
 #[cfg(feature = "plugin-kubernetes")]
 pub mod kubernetes;
 #[cfg(feature = "plugin-loadbalance")]

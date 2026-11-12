@@ -142,6 +142,11 @@ impl Parser<'_> {
                 self.advance()?;
                 let kind = match name.as_str() {
                     "metadata" if args.len() == 1 && args[0].kind() == Kind::String => Kind::String,
+                    "incidr"
+                        if args.len() == 2 && args.iter().all(|arg| arg.kind() == Kind::String) =>
+                    {
+                        Kind::Bool
+                    }
                     "type" | "name" | "class" | "proto" | "client_ip" | "port" | "server_ip"
                     | "server_port"
                         if args.is_empty() =>

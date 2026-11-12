@@ -209,10 +209,9 @@ impl Plugin for Acl {
                 .find(|policy| {
                     (policy.types.contains(&Type::NONE) || policy.types.contains(&question.qtype))
                         && (policy.networks.is_empty()
-                            || policy
-                                .networks
-                                .iter()
-                                .any(|&(network, prefix)| contains(network, prefix, ip)))
+                            || policy.networks.iter().any(|&(network, prefix)| {
+                                crate::ipnet::contains(network, prefix, ip)
+                            }))
                 })
                 .map(|policy| policy.action);
             match action {
@@ -280,19 +279,5 @@ impl Plugin for Acl {
             metrics.increment(0);
         }
         next.run(cx).await
-    }
-}
-
-fn contains(network: IpAddr, prefix: u8, client: IpAddr) -> bool {
-    match (network, client) {
-        (IpAddr::V4(net), IpAddr::V4(ip)) => {
-            let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
-            u32::from(net) & mask == u32::from(ip) & mask
-        }
-        (IpAddr::V6(net), IpAddr::V6(ip)) => {
-            let mask = u128::MAX.checked_shl(u32::from(128 - prefix)).unwrap_or(0);
-            u128::from(net) & mask == u128::from(ip) & mask
-        }
-        _ => false,
     }
 }
