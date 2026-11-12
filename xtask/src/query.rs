@@ -1,6 +1,8 @@
 use std::fmt;
 
-use pharos_proto::{Class, EdnsOptions, MessageBuilder, Name, NameRef, Opt, Type};
+use pharos_proto::{
+    Class, EdnsOptions, MessageBuilder, Name, NameRef, Opt, TsigAlgorithm, TsigKey, Type,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Transport {
@@ -23,6 +25,7 @@ pub(crate) struct Query {
     options: Vec<(u16, Vec<u8>)>,
     bufsize: u16,
     edns_version: u8,
+    tsig: Option<(Name, Vec<u8>, String)>,
 }
 
 impl fmt::Display for Query {
@@ -96,6 +99,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         options: Vec::new(),
         bufsize: 1232,
         edns_version: 0,
+        tsig: None,
     };
     for flag in parts {
         let lower = flag.to_ascii_lowercase();
@@ -109,6 +113,19 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
                 query.edns = true;
             }
             "+norec" => query.recursion = false,
+            _ if lower.starts_with("+tsig=") => {
+                let values = flag[6..].split(':').collect::<Vec<_>>();
+                if !(2..=3).contains(&values.len()) || query.tsig.is_some() {
+                    return Err(format!("invalid flag: {flag}"));
+                }
+                let mode = values.get(2).copied().unwrap_or("valid");
+                if !matches!(mode, "valid" | "badsig" | "badtime") {
+                    return Err(format!("invalid flag: {flag}"));
+                }
+                let name = Name::parse(values[0], &root).map_err(|e| e.to_string())?;
+                let secret = pharos_proto::decode_secret(values[1]).map_err(|e| e.to_string())?;
+                query.tsig = Some((name, secret, mode.to_owned()));
+            }
             _ if lower.starts_with("+bufsize=") => {
                 query.bufsize =
                     decimal(&lower[9..]).ok_or_else(|| format!("invalid flag: {flag}"))?;
@@ -204,6 +221,28 @@ impl Query {
         } else {
             let _ = builder.finish();
         }
+        if let Some((name, secret, mode)) = &self.tsig {
+            let key = TsigKey::new(name.clone(), TsigAlgorithm::Sha256, secret);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs();
+            // RFC 8945 §4.3: sign the complete Query before transmitting it.
+            key.sign(
+                &mut wire,
+                if mode == "badtime" {
+                    now.saturating_sub(600)
+                } else {
+                    now
+                },
+                300,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            if mode == "badsig" {
+                wire[2] ^= 1;
+            }
+        }
         Ok(wire)
     }
 }
@@ -212,6 +251,40 @@ impl Query {
 mod tests {
     use super::{Transport, parse};
     use pharos_proto::{Class, Message, Opcode, Type};
+
+    #[test]
+    fn builds_signed_queries_and_failure_variants() {
+        let key = pharos_proto::TsigKey::new(
+            "key.".parse().unwrap(),
+            pharos_proto::TsigAlgorithm::Sha256,
+            b"secret",
+        );
+        for (flag, expected) in [
+            ("+tsig=key.:c2VjcmV0", Ok(())),
+            (
+                "+tsig=key.:c2VjcmV0:badtime",
+                Err(pharos_proto::TsigError::BadTime),
+            ),
+            (
+                "+tsig=key.:c2VjcmV0:badsig",
+                Err(pharos_proto::TsigError::BadSig),
+            ),
+        ] {
+            let wire = parse(&format!("example. A IN udp {flag}"))
+                .unwrap()
+                .wire()
+                .unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            assert_eq!(
+                key.verify(&wire, now, None, 0).map(|_| ()),
+                expected,
+                "{flag}"
+            );
+        }
+    }
 
     #[test]
     fn builds_queries_with_custom_edns_options() {
