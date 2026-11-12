@@ -739,10 +739,58 @@ async fn source_address_is_used_by_udp_and_tcp() {
 async fn health_check_uses_configured_source_address() {
     use pharos_plugins::proxy::{Health, HealthConfig};
     use std::{
-        net::{IpAddr, Ipv6Addr},
+        net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
     };
-    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    let target = nix::ifaddrs::getifaddrs()
+        .unwrap()
+        .filter_map(|interface| {
+            interface
+                .address?
+                .as_sockaddr_in()
+                .map(|address| address.ip())
+        })
+        .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        .unwrap_or(Ipv4Addr::LOCALHOST);
+    let tcp = TcpListener::bind(SocketAddr::new(target.into(), 0))
+        .await
+        .unwrap();
+    let server = UdpSocket::bind(tcp.local_addr().unwrap()).await.unwrap();
+    let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    for force_tcp in [false, true] {
+        let mut config = HealthConfig::new(server.local_addr().unwrap(), 1);
+        config.source_address = Some(source);
+        config.force_tcp = force_tcp;
+        let health = Health::with_config(config);
+        health.start();
+        let mut wire = [0; 512];
+        if force_tcp {
+            let (mut stream, peer) = tokio::time::timeout(Duration::from_secs(3), tcp.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(peer.ip(), source);
+            let len = usize::from(stream.read_u16().await.unwrap());
+            stream.read_exact(&mut wire[..len]).await.unwrap();
+            wire[2] |= 0x80;
+            stream.write_u16(len as u16).await.unwrap();
+            stream.write_all(&wire[..len]).await.unwrap();
+        } else {
+            let (len, peer) =
+                tokio::time::timeout(Duration::from_secs(3), server.recv_from(&mut wire))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(peer.ip(), source);
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+        health.stop();
+    }
     for force_tcp in [false, true] {
         let mut config = HealthConfig::new(server.local_addr().unwrap(), 1);
         config.source_address = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
