@@ -293,6 +293,32 @@ async fn coredns_setup_accepts_origins_and_rejects_bad_directives() {
         let blocks = parse("Corefile", &text).unwrap();
         assert!(configure::<Chain>(&blocks, directives()).is_err(), "{text}");
     }
+    for (fixture, origin, name) in [
+        (
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/file/coredns-miek.zone"
+            ),
+            "miek.nl.",
+            "a.miek.nl.",
+        ),
+        (
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/file/dnssex-signed.zone"
+            ),
+            "dnssex.nl.",
+            "a.dnssex.nl.",
+        ),
+    ] {
+        let text = format!(".:53 {{\n file {fixture} {origin}\n}}");
+        let configured =
+            configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        let (outcome, wire) =
+            query_chain(&configured[0].config, &".".parse().unwrap(), name, Type::A).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(Message::parse(&wire).unwrap().answer_count(), 1);
+    }
     std::fs::remove_file(path).unwrap();
 }
 
@@ -549,6 +575,77 @@ async fn coredns_mtime_reload_keeps_last_valid_zone_and_recovers() {
         .await
         .unwrap();
     std::fs::remove_file(path).unwrap();
+}
+
+// Derived from CoreDNS reload_test.go TestZoneReload, TestZoneReloadSOAChange, and TestZoneReloadByMtime.
+#[tokio::test(start_paused = true)]
+async fn coredns_reload_updates_apex_records() {
+    use std::time::{Duration, Instant, SystemTime};
+    let first = "miek.nl. 1627 IN SOA linode.atoom.net. miek.miek.nl. 1460175181 14400 3600 604800 14400\nmiek.nl. 1627 IN NS ext.ns.whyscream.net.\nmiek.nl. 1627 IN NS omval.tednet.nl.\nmiek.nl. 1627 IN NS linode.atoom.net.\nmiek.nl. 1627 IN NS ns-ext.nlnetlabs.nl.\n";
+    let second = "miek.nl. 1627 IN SOA linode.atoom.net. miek.miek.nl. 1460175182 14400 3600 604800 14400\nmiek.nl. 1627 IN NS ext.ns.whyscream.net.\nmiek.nl. 1627 IN NS omval.tednet.nl.\n";
+    let apex: Name = "miek.nl.".parse().unwrap();
+    for mtime in [false, true] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../target/file-p75-apex-{mtime}-{}.zone",
+            std::process::id()
+        ));
+        let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        std::fs::write(&path, first).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+        let config = format!(
+            "miek.nl:53 {{\n file {} {{\n reload 1s\n {}\n }}\n}}",
+            path.display(),
+            if mtime { "reload_by_mtime" } else { "" }
+        );
+        let configured =
+            configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap();
+        let chain = &configured[0].config;
+        chain
+            .lifecycle
+            .run(pharos_server::Phase::Startup)
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        let (outcome, wire) = query_chain(chain, &apex, "miek.nl.", Type::NS).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(Message::parse(&wire).unwrap().answer_count(), 4);
+        let same_serial = second.replace("1460175182", "1460175181");
+        std::fs::write(&path, &same_serial).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_time + Duration::from_secs(10)))
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        if !mtime {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+            let (_, wire) = query_chain(chain, &apex, "miek.nl.", Type::NS).await;
+            assert_eq!(Message::parse(&wire).unwrap().answer_count(), 4);
+            std::fs::write(&path, second).unwrap();
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let (outcome, wire) = query_chain(chain, &apex, "miek.nl.", Type::NS).await;
+            assert_eq!(outcome, Outcome::Response);
+            if Message::parse(&wire).unwrap().answer_count() == 2 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "apex records were not reloaded");
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        chain
+            .lifecycle
+            .run(pharos_server::Phase::Shutdown)
+            .await
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 // Derived from CoreDNS setup_test.go TestFileParseReloadByMtimeMissingFileLeavesBaselineUnset
