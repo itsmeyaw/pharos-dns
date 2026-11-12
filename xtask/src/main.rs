@@ -284,7 +284,11 @@ fn run_cargo(args: &[&str]) -> Result<(), String> {
         );
     }
 
-    match Command::new("cargo").args(args).status() {
+    match Command::new("cargo")
+        .args(args)
+        .env("PHAROS_REQUIRE_INTEROP", "1")
+        .status()
+    {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!("cargo {} failed with {status}", args.join(" "))),
         Err(error) => Err(format!("could not run cargo {}: {error}", args.join(" "))),
