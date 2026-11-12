@@ -1788,3 +1788,178 @@ async fn coredns_empty_nonterminal_wildcard_cases() {
         );
     }
 }
+
+// Derived from CoreDNS svcb_test.go TestLookupSVCB and TestSVCBPrivateKeys.
+#[tokio::test]
+async fn coredns_svcb_and_https_cases() {
+    let zone = zone(
+        "example.com.",
+        include_str!("../fixtures/file/coredns-svcb.zone"),
+    )
+    .unwrap();
+    for (name, kind, record) in [
+        (
+            "_8443._foo.example.com.",
+            Type::SVCB,
+            "_8443._foo.example.com. 1800 IN SVCB 1 svc-target.example.com. alpn=h2,h3 port=8443",
+        ),
+        (
+            "www.example.com.",
+            Type::HTTPS,
+            "www.example.com. 1800 IN HTTPS 1 svc-target.example.com. alpn=h2,h3",
+        ),
+        (
+            "_alias._foo.example.com.",
+            Type::SVCB,
+            "_alias._foo.example.com. 1800 IN SVCB 0 svc-target.example.com.",
+        ),
+        (
+            "_http._tcp.example.com.",
+            Type::SVCB,
+            "_http._tcp.example.com. 1800 IN SVCB 1 svc-target.example.com. port=443",
+        ),
+    ] {
+        let (outcome, wire) = query(&zone, name, kind, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_records(response.answers(), &[record]);
+        assert_records(
+            response.authorities(),
+            &["example.com. 1800 IN NS ns.example.com."],
+        );
+        assert_records(
+            response.additionals(),
+            &[
+                "svc-target.example.com. 1800 IN A 192.0.2.10",
+                "svc-target.example.com. 1800 IN AAAA 2001:db8::10",
+            ],
+        );
+    }
+    for (name, expected) in [
+        ("svc-target.example.com.", Rcode::NOERROR),
+        ("nonexistent.example.com.", Rcode::NXDOMAIN),
+    ] {
+        let (outcome, wire) = query(&zone, name, Type::SVCB, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), expected);
+        assert_records(
+            response.authorities(),
+            &[
+                "example.com. 1800 IN SOA ns.example.com. admin.example.com. 2024010100 14400 3600 604800 14400",
+            ],
+        );
+    }
+    let (outcome, wire) = query(&zone, "_dnsaid.example.com.", Type::HTTPS, false, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    let value = response
+        .answers()
+        .next()
+        .unwrap()
+        .data()
+        .unwrap()
+        .to_string();
+    for key in ["key65400=", "key65401=", "key65406="] {
+        assert!(value.contains(key), "{value}");
+    }
+}
+
+// Derived from CoreDNS lookup_test.go TestAdditionalSectionDeduplication and TestAdditionalSectionDeduplicationMixedCase.
+#[tokio::test]
+async fn coredns_additional_processing_deduplicates_targets() {
+    let zone = zone(
+        "example.org.",
+        include_str!("../fixtures/file/coredns-additional.zone"),
+    )
+    .unwrap();
+    let host = [
+        "host.example.org. 1800 IN A 192.0.2.10",
+        "host.example.org. 1800 IN AAAA 2001:db8::10",
+    ];
+    let two = [
+        "host.example.org. 1800 IN A 192.0.2.10",
+        "host.example.org. 1800 IN AAAA 2001:db8::10",
+        "other.example.org. 1800 IN A 192.0.2.20",
+        "other.example.org. 1800 IN AAAA 2001:db8::20",
+    ];
+    let cases: &[(&str, Type, &[&str], &[&str])] = &[
+        (
+            "mx.example.org.",
+            Type::MX,
+            &[
+                "mx.example.org. 1800 IN MX 10 host.example.org.",
+                "mx.example.org. 1800 IN MX 20 host.example.org.",
+            ],
+            &host,
+        ),
+        (
+            "srv.example.org.",
+            Type::SRV,
+            &[
+                "srv.example.org. 1800 IN SRV 10 50 8080 host.example.org.",
+                "srv.example.org. 1800 IN SRV 20 50 8080 host.example.org.",
+            ],
+            &host,
+        ),
+        (
+            "mixed.example.org.",
+            Type::SRV,
+            &[
+                "mixed.example.org. 1800 IN SRV 10 50 8080 host.example.org.",
+                "mixed.example.org. 1800 IN SRV 20 50 8080 HOST.EXAMPLE.ORG.",
+            ],
+            &host,
+        ),
+        (
+            "two.example.org.",
+            Type::MX,
+            &[
+                "two.example.org. 1800 IN MX 10 host.example.org.",
+                "two.example.org. 1800 IN MX 20 other.example.org.",
+            ],
+            &two,
+        ),
+        (
+            "cname-srv.example.org.",
+            Type::SRV,
+            &[
+                "cname-srv.example.org. 1800 IN CNAME srv.example.org.",
+                "srv.example.org. 1800 IN SRV 10 50 8080 host.example.org.",
+                "srv.example.org. 1800 IN SRV 20 50 8080 host.example.org.",
+            ],
+            &host,
+        ),
+        (
+            "foo.wild.example.org.",
+            Type::SRV,
+            &[
+                "foo.wild.example.org. 1800 IN CNAME srv.example.org.",
+                "srv.example.org. 1800 IN SRV 10 50 8080 host.example.org.",
+                "srv.example.org. 1800 IN SRV 20 50 8080 host.example.org.",
+            ],
+            &host,
+        ),
+        (
+            "srv.dname.example.org.",
+            Type::SRV,
+            &[
+                "dname.example.org. 1800 IN DNAME dsub.example.org.",
+                "srv.dname.example.org. 1800 IN CNAME srv.dsub.example.org.",
+                "srv.dsub.example.org. 1800 IN SRV 10 50 8080 host.example.org.",
+            ],
+            &host,
+        ),
+    ];
+    for (name, kind, answer, additional) in cases {
+        let (outcome, wire) = query(&zone, name, *kind, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_records(response.answers(), answer);
+        assert_records(
+            response.authorities(),
+            &["example.org. 1800 IN NS ns.example.org."],
+        );
+        assert_records(response.additionals(), additional);
+    }
+}
