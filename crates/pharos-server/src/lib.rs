@@ -195,6 +195,7 @@ pub struct Metadata<'a> {
     tsig_signing: Option<TsigSigning>,
     source: Option<Arc<dyn MetadataSource>>,
     view_name: Option<Arc<str>>,
+    metric_view: &'a str,
     enabled: bool,
     self_lookup: Option<SelfLookupState<'a>>,
 }
@@ -214,6 +215,7 @@ impl<'a> Metadata<'a> {
             tsig_signing: None,
             source: None,
             view_name: None,
+            metric_view: "",
             enabled: true,
             self_lookup: None,
         }
@@ -258,6 +260,16 @@ impl<'a> Metadata<'a> {
             }
         }
         self.view_name = Some(name);
+    }
+
+    /// Return the routed View used for dynamic Plugin metrics.
+    #[must_use]
+    pub fn metric_view(&self) -> &str {
+        self.metric_view
+    }
+
+    pub(crate) fn set_metric_view(&mut self, view: &'a str) {
+        self.metric_view = view;
     }
 
     /// Enable public Plugin Metadata for the current Server Block.

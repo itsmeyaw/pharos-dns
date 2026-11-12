@@ -423,21 +423,27 @@ impl<C: Chain> Server<C> {
             }
             Admission::Drop => return Action::Drop,
         };
-        let mut slots = [None; 18];
-        slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
-        slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
-        slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
-        let mut metadata = Metadata::new(&mut slots);
-        metadata.self_lookup = Some(crate::SelfLookupState {
-            server: lookup_server,
-            depth: lookup.0,
-            siit: lookup.1,
-            autopath: lookup.2,
-        });
         let has_views = self.has_views.load(Ordering::Relaxed);
-        let (block, view) = if has_views {
+        let mut view_slots;
+        let mut view_metadata = if has_views {
+            view_slots = [None; 18];
+            view_slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
+            view_slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
+            view_slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
+            let mut metadata = Metadata::new(&mut view_slots);
+            metadata.self_lookup = Some(crate::SelfLookupState {
+                server: lookup_server,
+                depth: lookup.0,
+                siit: lookup.1,
+                autopath: lookup.2,
+            });
             metadata.set_enabled(false);
-            self.route_view(query, peer, protocol, response, &mut metadata)
+            Some(metadata)
+        } else {
+            None
+        };
+        let (block, view) = if let Some(metadata) = &mut view_metadata {
+            self.route_view(query, peer, protocol, response, metadata)
         } else {
             (self.router.route(&self.key, query, peer, protocol), "")
         };
@@ -448,6 +454,26 @@ impl<C: Chain> Server<C> {
         let mut tsig_signing = None;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
+                let mut slots;
+                let mut metadata = if let Some(metadata) = view_metadata {
+                    metadata
+                } else {
+                    slots = [None; 18];
+                    slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
+                    slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
+                    slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
+                    let mut metadata = Metadata::new(&mut slots);
+                    metadata.self_lookup = Some(crate::SelfLookupState {
+                        server: lookup_server,
+                        depth: lookup.0,
+                        siit: lookup.1,
+                        autopath: lookup.2,
+                    });
+                    metadata
+                };
+                if has_views {
+                    metadata.set_metric_view(view);
+                }
                 let mut context = Context {
                     query,
                     client: peer,

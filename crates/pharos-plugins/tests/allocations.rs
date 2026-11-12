@@ -56,6 +56,8 @@ mod whoami {
 
 #[path = "allocations"]
 mod view {
+    #[path = "view_acl_metrics_allocations.rs"]
+    mod acl_metrics;
     #[path = "view_allocations.rs"]
     mod cases;
 }

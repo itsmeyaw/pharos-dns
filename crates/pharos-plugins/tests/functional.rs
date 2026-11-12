@@ -27,6 +27,8 @@ mod view {
     mod cases;
     #[path = "view_filter.rs"]
     mod filter;
+    #[path = "view_plugin_metrics.rs"]
+    mod plugin_metrics;
     #[path = "view_routing.rs"]
     mod routing;
 }

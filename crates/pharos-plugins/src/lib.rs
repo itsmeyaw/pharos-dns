@@ -237,6 +237,18 @@ pub fn servers_with_registry(
     }
     #[cfg(feature = "plugin-tsig")]
     let mut tsig_keyrings = tsig::KeyRings::default();
+    #[cfg(feature = "plugin-acl")]
+    let view_names = {
+        let mut names = blocks
+            .iter()
+            .map(|block| pharos_server::Chain::view_name(&block.config))
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        names
+    };
     for block in blocks {
         #[cfg(any(
             feature = "plugin-forward",
@@ -353,14 +365,17 @@ pub fn servers_with_registry(
             tsig.register(routes.iter().map(|(key, _)| *key), &mut tsig_keyrings);
         }
         #[cfg(feature = "plugin-cache")]
-        if let Some(cache) = &mut block.config.cache {
+        if block.config.cache.is_some() {
+            let view_name = pharos_server::Chain::view_name(&block.config).to_owned();
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
-            cache.set_metrics(&metrics, &listeners);
+            if let Some(cache) = &mut block.config.cache {
+                cache.set_metrics(&metrics, &listeners, &view_name);
+            }
         }
         #[cfg(feature = "plugin-acl")]
         if let Some(acl) = &mut block.config.acl {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
-            acl.set_metrics(&metrics, &listeners);
+            acl.set_metrics(&metrics, &listeners, &view_names);
         }
         #[cfg(feature = "plugin-dns64")]
         if let Some(dns64) = &mut block.config.dns64 {
