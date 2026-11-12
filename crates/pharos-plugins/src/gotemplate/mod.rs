@@ -176,8 +176,8 @@ struct RenderState<'a> {
 }
 
 impl RenderState<'_> {
-    fn iterate(&mut self) -> fmt::Result {
-        // Go text/template §Actions: Pharos bounds total range iterations per render (#51).
+    fn consume_iteration(&mut self) -> fmt::Result {
+        // Go text/template §Actions has no iteration cap; #51 caps each render.
         self.remaining = self.remaining.checked_sub(1).ok_or(fmt::Error)?;
         Ok(())
     }
@@ -361,7 +361,7 @@ fn render_parts(
                         state,
                     )?,
                     pipeline::RangeValue::Integer(count) => {
-                        // Bound Query-driven loops; Go text/template has no cap.
+                        // Reject oversized integer ranges before writing any loop output (#51).
                         if count > MAX_RANGE_ITERATIONS as i64 {
                             return Err(fmt::Error);
                         }
@@ -380,7 +380,7 @@ fn render_parts(
                             )?;
                         }
                         for value in 0..count {
-                            state.iterate()?;
+                            state.consume_iteration()?;
                             let nested = Dot::Range {
                                 value: Value::Int(value),
                                 key: Value::Nil,
@@ -403,7 +403,7 @@ fn render_parts(
                             )?;
                         }
                         for (index, value) in matches.iter().enumerate() {
-                            state.iterate()?;
+                            state.consume_iteration()?;
                             let nested = Dot::Range {
                                 value: Value::String(value),
                                 key: Value::Int(index as i64),
@@ -442,7 +442,7 @@ fn render_parts(
                             .take(questions.end - questions.start)
                             .enumerate()
                         {
-                            state.iterate()?;
+                            state.consume_iteration()?;
                             any = true;
                             let nested = Dot::Question {
                                 value: question,
@@ -508,7 +508,7 @@ fn render_map<'a>(
         .filter(|(key, _)| last.is_none_or(|previous| *key > previous))
         .min_by_key(|(key, _)| *key)
     {
-        state.iterate()?;
+        state.consume_iteration()?;
         any = true;
         let nested = Dot::Range {
             value,
