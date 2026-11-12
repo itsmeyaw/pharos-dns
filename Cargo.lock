@@ -1684,6 +1684,7 @@ dependencies = [
  "jiff",
  "k8s-openapi",
  "kube",
+ "pharos-proto",
  "pharos-server",
  "serde",
  "serde_json",

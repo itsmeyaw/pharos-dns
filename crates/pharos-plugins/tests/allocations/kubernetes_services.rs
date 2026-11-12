@@ -149,6 +149,43 @@ async fn services_scenario() {
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
     let chain = &blocks[0].config;
+    let prestart_name: Name = "missing.prod.svc.cluster.local.".parse().unwrap();
+    let prestart_root: Name = ".".parse().unwrap();
+    let mut prestart_query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut prestart_query, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(prestart_name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut prestart_response = Vec::with_capacity(512);
+    let mut slots = [None; 8];
+    let mut cx = Context {
+        query: Message::parse(&prestart_query).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &prestart_root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut prestart_response,
+        max_response_size: 512,
+    };
+    assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    let before = GLOBAL.stats();
+    for _ in 0..50 {
+        assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    }
+    let after = GLOBAL.stats();
+    assert_eq!(after.allocations - before.allocations, 0);
+    assert_eq!(after.reallocations - before.reallocations, 0);
+    assert_eq!(
+        Message::parse(cx.response).unwrap().rcode(),
+        Rcode::SERVFAIL
+    );
     let readiness = chain.kubernetes.as_ref().unwrap().readiness().unwrap();
     assert!(!readiness.ready());
     let lifecycle = &chain.lifecycle;
@@ -878,6 +915,8 @@ async fn services_scenario() {
         ("web.prod.svc.cluster.local.", Type::A),
         ("web.prod.svc.cluster.local.", Type::AAAA),
         ("_http._tcp.web.prod.svc.cluster.local.", Type::SRV),
+        ("alias.prod.svc.cluster.local.", Type::CNAME),
+        ("internal.prod.svc.cluster.local.", Type::CNAME),
     ] {
         let name: Name = name.parse().unwrap();
         let mut wire = Vec::with_capacity(512);

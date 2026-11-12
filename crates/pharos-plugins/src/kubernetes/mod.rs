@@ -29,6 +29,7 @@ struct State {
     cache: RwLock<Cache>,
     metrics: Mutex<pharos_server::metrics::Registry>,
     scratch: scratch::Pool,
+    empty_store: Store,
 }
 
 #[derive(Default)]
@@ -425,12 +426,11 @@ fn visit_reverse(
     found
 }
 
-fn external_name(index: &Index, req: &name::Request<'_>) -> Option<String> {
-    let service = index.service(
-        std::str::from_utf8(req.namespace).ok()?,
-        std::str::from_utf8(req.service).ok()?,
-    )?;
-    (service.service_type == "ExternalName").then(|| service.external_name.clone())
+fn external_name(index: &Index, req: &name::Request<'_>) -> Option<Option<Arc<Name>>> {
+    let namespace = std::str::from_utf8(req.namespace).ok()?;
+    let name = std::str::from_utf8(req.service).ok()?;
+    let service = index.service(namespace, name)?;
+    (service.service_type == "ExternalName").then(|| index.external_name(namespace, name))
 }
 
 fn visit(
@@ -696,7 +696,7 @@ impl pharos_server::Plugin for Kubernetes {
                 guard.sync.as_ref().is_some_and(|sync| sync.ready()),
             )
         };
-        let store = store.unwrap_or_default();
+        let store = store.unwrap_or_else(|| self.state.empty_store.clone());
         let mut external = None;
         let mut pod = None;
         let primary =
@@ -768,20 +768,14 @@ impl pharos_server::Plugin for Kubernetes {
         } else {
             Rcode::SERVFAIL
         };
-        let target = external.as_ref().and_then(|s| {
-            let fqdn = if s.ends_with('.') {
-                s.clone()
-            } else {
-                format!("{s}.")
-            };
-            fqdn.parse::<Name>().ok()
-        });
+        let target = external.as_ref().and_then(Option::as_ref);
         let mut truncated = false;
         let chased = if matches!(q.qtype, Type::A | Type::AAAA)
-            && target.as_ref().is_some_and(|t| {
+            && target.is_some_and(|t| {
                 NameRef::parse(t.as_wire(), 0).is_ok_and(|name| name != lower_name)
             }) {
-            if let Some(target) = &target {
+            if let Some(target) = target {
+                // shortcut: Self Lookup allocates per Query until #86 pools its buffers and futures.
                 let result = cx.self_lookup(target, q.qtype).await.ok();
                 truncated = result
                     .as_deref()
@@ -1048,7 +1042,7 @@ impl pharos_server::Plugin for Kubernetes {
             }
             // Kubernetes DNS spec 1.1.0 §2.5: ExternalName services have a CNAME to the target.
             // RFC 1034 §4.3.2 step 3a: the CNAME is returned whatever the QTYPE.
-            if let Some(target) = &target
+            if let Some(target) = target
                 && (!matches!(q.qtype, Type::A | Type::AAAA) || chased.is_some())
             {
                 let target_ref = NameRef::parse(target.as_wire(), 0).unwrap();
