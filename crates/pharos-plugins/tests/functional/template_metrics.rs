@@ -9,7 +9,8 @@ async fn metric_for(option: &str) -> String {
 }
 
 async fn metric_for_query(header: &str, option: &str, qtype: u8, qclass: u8) -> String {
-    let corefile = format!(".:0 {{\n template {header} {{\n  {option}\n }}\n}}");
+    let chaos = if qclass == 1 { "" } else { " chaos\n" };
+    let corefile = format!(".:0 {{\n{chaos} template {header} {{\n  {option}\n }}\n}}");
     let blocks = parse("Corefile", &corefile).unwrap();
     let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let (_, server) = servers.drain().next().unwrap();
@@ -34,6 +35,7 @@ async fn metric_for_query(header: &str, option: &str, qtype: u8, qclass: u8) -> 
 }
 
 #[tokio::test]
+#[cfg(feature = "plugin-chaos")]
 async fn wildcard_template_metrics_use_question_class_and_type() {
     let text = metric_for_query("ANY ANY", "rcode NXDOMAIN", 16, 3).await;
     let line = text
