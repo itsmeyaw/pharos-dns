@@ -28,7 +28,7 @@ impl CacheEntry {
         // RFC 4034 §3.1.5: compare signature times using 32-bit serial arithmetic.
         let horizon = (now as u32).wrapping_add(2 * 86400);
         self.max_size == max_size
-            && self.expires > now
+            && self.expires >= now
             && horizon.wrapping_sub(self.inception) <= i32::MAX as u32
     }
 }
@@ -431,7 +431,8 @@ mod tests {
             sets: 1,
         };
         assert!(entry.valid(6 * 86400 - 1, 512));
-        assert!(!entry.valid(6 * 86400, 512));
+        assert!(entry.valid(6 * 86400, 512));
+        assert!(!entry.valid(6 * 86400 + 1, 512));
         assert!(!entry.valid(1, 1232));
     }
 
