@@ -129,6 +129,56 @@ fn query_size_expands_compressed_names_like_coredns() {
 }
 
 #[test]
+fn query_size_handles_root_pointers_and_cross_record_rdata() {
+    let mut wire = WIRE.to_vec();
+    wire[..2].copy_from_slice(&[0, 0]);
+    wire[6..8].copy_from_slice(&2u16.to_be_bytes());
+    // RFC 1035 §4.1.4: the first CNAME pointer crosses its RDLENGTH boundary.
+    wire.extend_from_slice(b"\xc0\x0c\x00\x05\x00\x01\x00\x00\x00\x00\x00\x01\xc0");
+    wire.extend_from_slice(b"\x00\x00\x01\x00\x01\x00\x00\x00\x00\x00\x04\x01\x02\x03\x04");
+    let message = Message::parse(&wire).unwrap();
+    assert!(message.answers().next().unwrap().data().is_err());
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut bytes = [0; 512];
+    let mut scratch = Scratch::new(&mut bytes);
+    assert_eq!(
+        Expression::compile("size()")
+            .unwrap()
+            .evaluate(&query, &metadata, &mut scratch)
+            .unwrap(),
+        Value::Int(68)
+    );
+
+    let mut wire = WIRE.to_vec();
+    wire[..2].copy_from_slice(&[0, 0]);
+    wire[6..8].copy_from_slice(&1u16.to_be_bytes());
+    wire.extend_from_slice(b"\xc0\x0c\x00\x06\x00\x01\x00\x00\x00\x00\x00\x18\xc0\x00\xc0\x00");
+    wire.extend_from_slice(&[0; 20]);
+    let message = Message::parse(&wire).unwrap();
+    assert!(message.answers().next().unwrap().data().is_ok());
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    assert_eq!(
+        Expression::compile("size()")
+            .unwrap()
+            .evaluate(&query, &metadata, &mut scratch)
+            .unwrap(),
+        Value::Int(74)
+    );
+}
+
+#[test]
 fn list_membership_and_string_operators_follow_expr() {
     let message = Message::parse(WIRE).unwrap();
     let query = Query::new(
