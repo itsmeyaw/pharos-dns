@@ -25,7 +25,13 @@ pub struct ServerBlock<C> {
     metrics: Option<BlockMetrics>,
     plugin_metrics: Vec<(&'static str, PluginMetrics)>,
     plugin_names: Vec<&'static str>,
-    inherited_metrics: Vec<(String, BlockMetrics, Vec<(&'static str, PluginMetrics)>)>,
+    inherited_metrics: Vec<InheritedMetrics>,
+}
+
+struct InheritedMetrics {
+    view: String,
+    block: BlockMetrics,
+    plugins: Vec<(&'static str, PluginMetrics)>,
 }
 
 impl<C> ServerBlock<C> {
@@ -48,15 +54,15 @@ impl<C> ServerBlock<C> {
     pub(crate) fn metrics(&self, view: &str) -> Option<&BlockMetrics> {
         self.inherited_metrics
             .iter()
-            .find(|(name, _, _)| name == view)
-            .map(|(_, metrics, _)| metrics)
+            .find(|metrics| metrics.view == view)
+            .map(|metrics| &metrics.block)
             .or(self.metrics.as_ref())
     }
     pub(crate) fn plugin_metrics(&self, name: &str, view: &str) -> Option<&PluginMetrics> {
         self.inherited_metrics
             .iter()
-            .find(|(candidate, _, _)| candidate == view)
-            .map_or(&self.plugin_metrics, |(_, _, plugins)| plugins)
+            .find(|metrics| metrics.view == view)
+            .map_or(&self.plugin_metrics, |metrics| &metrics.plugins)
             .iter()
             .find(|(candidate, _)| *candidate == name)
             .map(|(_, metrics)| metrics)
@@ -280,7 +286,7 @@ fn prepare_blocks<C: Chain>(blocks: &mut [ServerBlock<C>], registry: &Registry, 
                 || block
                     .inherited_metrics
                     .iter()
-                    .any(|(view, _, _)| view == name)
+                    .any(|metrics| metrics.view == name)
             {
                 continue;
             }
@@ -291,9 +297,11 @@ fn prepare_blocks<C: Chain>(blocks: &mut [ServerBlock<C>], registry: &Registry, 
                 .iter()
                 .map(|&plugin| (plugin, metrics.plugin(plugin)))
                 .collect();
-            block
-                .inherited_metrics
-                .push((name.to_owned(), metrics, plugins));
+            block.inherited_metrics.push(InheritedMetrics {
+                view: name.to_owned(),
+                block: metrics,
+                plugins,
+            });
         }
     }
 }

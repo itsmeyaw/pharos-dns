@@ -221,7 +221,7 @@ fn main() {
         if enabled.contains(&"view") || enabled.contains(&"kubernetes") {
             code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { ");
             if enabled.contains(&"view") {
-                code.push_str("if let Some(view) = &self.view { cx.metadata.set_view_name(std::sync::Arc::clone(&view.name)); } ");
+                code.push_str("if let Some(view) = &self.view { cx.metadata.set_view_name(std::sync::Arc::clone(&view.name)); }\n");
             }
             if enabled.contains(&"kubernetes") {
                 code.push_str(
