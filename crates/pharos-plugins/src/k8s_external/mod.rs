@@ -1,6 +1,7 @@
 //! External Kubernetes DNS names.
 
 mod lookup;
+mod scratch;
 pub mod setup;
 #[cfg(feature = "plugin-transfer")]
 mod transfer;
@@ -125,7 +126,6 @@ impl External {
             )?;
             b.question(q.name, q.qtype, q.qclass)?;
             let mut answers = 0usize;
-            // shortcut: duplicate suppression is quadratic in matching records; use pooled scratch for large Services.
             if let Some(ip) = reverse_ip {
                 let mut error = None;
                 let first_zone = NameRef::parse(self.zones[0].name.as_wire(), 0).unwrap();
@@ -171,8 +171,10 @@ impl External {
                 && matches!(q.qtype, Type::A | Type::AAAA)
             {
                 let mut error = None;
+                let mut scratch = scratch::lease();
                 store.with_read(|index| {
                     let mut ordinal = 0usize;
+                    let mut chased = chased.iter().peekable();
                     lookup::lookup(
                         index,
                         request,
@@ -181,21 +183,8 @@ impl External {
                         |address, _, _| {
                             let current = ordinal;
                             ordinal += 1;
-                            let mut seen = false;
-                            let mut previous = 0usize;
-                            lookup::lookup(
-                                index,
-                                request,
-                                self.config.headless,
-                                kubernetes.endpoint_pod_names(),
-                                |earlier, _, _| {
-                                    if previous < current && earlier == address {
-                                        seen = true;
-                                    }
-                                    previous += 1;
-                                },
-                            );
-                            if seen || error.is_some() {
+                            let entry = chased_at(&mut chased, current, address);
+                            if error.is_some() {
                                 return;
                             }
                             let ip = match address.parse::<std::net::IpAddr>() {
@@ -203,8 +192,26 @@ impl External {
                                     .to_ipv4_mapped()
                                     .map_or(std::net::IpAddr::V6(ip), std::net::IpAddr::V4),
                                 Ok(ip) => ip,
-                                Err(_) => return,
+                                Err(_) => {
+                                    if let Some(entry) = entry {
+                                        match write_chased(
+                                            &mut b,
+                                            q.name,
+                                            entry,
+                                            kubernetes.ttl(),
+                                            Section::Answer,
+                                        ) {
+                                            Ok(true) => answers += 1,
+                                            Ok(false) => {}
+                                            Err(err) => error = Some(err),
+                                        }
+                                    }
+                                    return;
+                                }
                             };
+                            if !scratch.addresses.insert(scratch::Address::new(address)) {
+                                return;
+                            }
                             // RFC 1035 §3.4.1 and RFC 3596 §2.2: address records use network byte order.
                             let result = match ip {
                                 std::net::IpAddr::V4(ip) if q.qtype == Type::A => b.record(
@@ -236,41 +243,12 @@ impl External {
                 if let Some(error) = error {
                     return Err(error);
                 }
-                for entry in chased {
-                    let target = NameRef::parse(entry.name.as_wire(), 0).unwrap();
-                    // RFC 1035 §3.3.1: CNAME RDATA identifies the canonical name.
-                    if b.record_with(
-                        Section::Answer,
-                        q.name,
-                        Type::CNAME,
-                        Class::IN,
-                        kubernetes.ttl(),
-                        |w| w.write_name(target),
-                    )? {
-                        answers += 1;
-                    }
-                    for wire in entry.answers.iter().flatten() {
-                        if let Ok(message) = pharos_proto::Message::parse(wire) {
-                            for record in message.answers() {
-                                if let Ok(data) = record.data() {
-                                    b.record_with(
-                                        Section::Answer,
-                                        record.name,
-                                        record.rtype,
-                                        record.class,
-                                        record.ttl,
-                                        |w| data.write(w),
-                                    )?;
-                                }
-                            }
-                        }
-                    }
-                }
             }
             if let Some(request) = request
                 && q.qtype == Type::SRV
             {
                 let mut error = None;
+                let mut scratch = scratch::lease();
                 store.with_read(|index| {
                     let mut count = 0usize;
                     lookup::lookup(
@@ -281,43 +259,13 @@ impl External {
                         |_, _, _| count += 1,
                     );
                     let weight = (100 / count.max(1)).max(1) as u16;
-                    let mut ordinal = 0usize;
                     lookup::lookup(
                         index,
                         request,
                         self.config.headless,
                         kubernetes.endpoint_pod_names(),
                         |address, port, endpoint| {
-                            let current = ordinal;
-                            ordinal += 1;
                             if port.port < 0 || error.is_some() {
-                                return;
-                            }
-                            let mut seen = false;
-                            let mut previous = 0usize;
-                            lookup::lookup(
-                                index,
-                                request,
-                                self.config.headless,
-                                kubernetes.endpoint_pod_names(),
-                                |earlier, prior_port, prior_endpoint| {
-                                    let same_target = if address.parse::<std::net::IpAddr>().is_ok()
-                                    {
-                                        earlier.parse::<std::net::IpAddr>().is_ok()
-                                            && endpoint == prior_endpoint
-                                    } else {
-                                        earlier == address
-                                    };
-                                    if previous < current
-                                        && same_target
-                                        && prior_port.port == port.port
-                                    {
-                                        seen = true;
-                                    }
-                                    previous += 1;
-                                },
-                            );
-                            if seen {
                                 return;
                             }
                             let mut target_wire = [0; 255];
@@ -330,6 +278,15 @@ impl External {
                             ) else {
                                 return;
                             };
+                            let mut key = [0; 2048];
+                            let Some(key) =
+                                target_key(request, endpoint, address, zone_ref, &mut key)
+                            else {
+                                return;
+                            };
+                            if !scratch.srv.insert(key, b"", port.port as u16) {
+                                return;
+                            }
                             // RFC 2782 §3: SRV stores priority, weight, port, and target.
                             match b.record_with(
                                 Section::Answer,
@@ -351,6 +308,7 @@ impl External {
                         },
                     );
                     let mut ordinal = 0usize;
+                    let mut chased = chased.iter().peekable();
                     lookup::lookup(
                         index,
                         request,
@@ -359,35 +317,8 @@ impl External {
                         |address, port, endpoint| {
                             let current = ordinal;
                             ordinal += 1;
+                            let entry = chased_at(&mut chased, current, address);
                             if port.port < 0 || error.is_some() {
-                                return;
-                            }
-                            let ip = match address.parse::<std::net::IpAddr>() {
-                                Ok(std::net::IpAddr::V6(ip)) => ip
-                                    .to_ipv4_mapped()
-                                    .map_or(std::net::IpAddr::V6(ip), std::net::IpAddr::V4),
-                                Ok(ip) => ip,
-                                Err(_) => return,
-                            };
-                            let mut seen = false;
-                            let mut previous = 0usize;
-                            lookup::lookup(
-                                index,
-                                request,
-                                self.config.headless,
-                                kubernetes.endpoint_pod_names(),
-                                |earlier, prior_port, prior_endpoint| {
-                                    if previous < current
-                                        && prior_port.port >= 0
-                                        && endpoint == prior_endpoint
-                                        && address == earlier
-                                    {
-                                        seen = true;
-                                    }
-                                    previous += 1;
-                                },
-                            );
-                            if seen {
                                 return;
                             }
                             let mut target_wire = [0; 255];
@@ -398,6 +329,42 @@ impl External {
                                 zone_ref,
                                 &mut target_wire,
                             ) else {
+                                return;
+                            };
+                            let mut key = [0; 2048];
+                            let Some(key) =
+                                target_key(request, endpoint, address, zone_ref, &mut key)
+                            else {
+                                return;
+                            };
+                            let ip = match address.parse::<std::net::IpAddr>() {
+                                Ok(std::net::IpAddr::V6(ip)) => Some(
+                                    ip.to_ipv4_mapped()
+                                        .map_or(std::net::IpAddr::V6(ip), std::net::IpAddr::V4),
+                                ),
+                                Ok(ip) => Some(ip),
+                                Err(_) => None,
+                            };
+                            let addr = if ip.is_some() {
+                                address.as_bytes()
+                            } else {
+                                key
+                            };
+                            if !scratch.extra.insert(key, addr, 0) {
+                                return;
+                            }
+                            let Some(ip) = ip else {
+                                if let Some(entry) = entry
+                                    && let Err(err) = write_chased(
+                                        &mut b,
+                                        q.name,
+                                        entry,
+                                        kubernetes.ttl(),
+                                        Section::Additional,
+                                    )
+                                {
+                                    error = Some(err);
+                                }
                                 return;
                             };
                             let result = match ip {
@@ -427,24 +394,6 @@ impl External {
                 if let Some(error) = error {
                     return Err(error);
                 }
-                for entry in chased {
-                    for wire in entry.answers.iter().flatten() {
-                        if let Ok(message) = pharos_proto::Message::parse(wire) {
-                            for record in message.answers() {
-                                if let Ok(data) = record.data() {
-                                    b.record_with(
-                                        Section::Additional,
-                                        record.name,
-                                        record.rtype,
-                                        record.class,
-                                        record.ttl,
-                                        |w| data.write(w),
-                                    )?;
-                                }
-                            }
-                        }
-                    }
-                }
             }
             if answers == 0 {
                 write_soa(
@@ -468,8 +417,94 @@ impl External {
 }
 
 struct Chased {
+    ordinal: usize,
+    host: String,
     name: Name,
     answers: [Option<Vec<u8>>; 2],
+}
+
+fn chased_at<'a>(
+    chased: &mut std::iter::Peekable<std::slice::Iter<'a, Chased>>,
+    ordinal: usize,
+    address: &str,
+) -> Option<&'a Chased> {
+    while chased.peek().is_some_and(|entry| entry.ordinal < ordinal) {
+        chased.next();
+    }
+    if chased.peek().is_some_and(|entry| entry.ordinal == ordinal) {
+        chased.next().filter(|entry| entry.host == address)
+    } else {
+        None
+    }
+}
+
+fn write_chased(
+    b: &mut MessageBuilder<'_>,
+    owner: NameRef<'_>,
+    entry: &Chased,
+    ttl: u32,
+    section: Section,
+) -> Result<bool, pharos_proto::BuildError> {
+    let mut written = false;
+    if section == Section::Answer {
+        let target = NameRef::parse(entry.name.as_wire(), 0).unwrap();
+        // RFC 1035 §3.3.1: CNAME RDATA identifies the canonical name.
+        written = b.record_with(section, owner, Type::CNAME, Class::IN, ttl, |w| {
+            w.write_name(target)
+        })?;
+    }
+    for wire in entry.answers.iter().flatten() {
+        if let Ok(message) = pharos_proto::Message::parse(wire) {
+            for record in message.answers() {
+                if let Ok(data) = record.data() {
+                    b.record_with(
+                        section,
+                        record.name,
+                        record.rtype,
+                        record.class,
+                        record.ttl,
+                        |w| data.write(w),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(written)
+}
+
+fn target_key<'a>(
+    request: &lookup::Request<'_>,
+    endpoint: Option<&[u8]>,
+    address: &str,
+    zone: NameRef<'_>,
+    buffer: &'a mut [u8],
+) -> Option<&'a [u8]> {
+    let mut len = 0;
+    let mut append = |bytes: &[u8]| {
+        let end = len + bytes.len();
+        buffer.get_mut(len..end)?.copy_from_slice(bytes);
+        len = end;
+        Some(())
+    };
+    if address.parse::<std::net::IpAddr>().is_err() {
+        append(address.as_bytes())?;
+        if !address.ends_with('.') {
+            append(b".")?;
+        }
+    } else {
+        if let Some(endpoint) = endpoint.filter(|endpoint| !endpoint.is_empty()) {
+            append(endpoint)?;
+            append(b".")?;
+        }
+        for label in [request.service, request.namespace]
+            .into_iter()
+            .chain(zone.labels())
+        {
+            append(label)?;
+            append(b".")?;
+        }
+    }
+    Some(&buffer[..len])
 }
 
 fn service_target<'a>(
@@ -656,12 +691,16 @@ impl External {
                 && let Ok(request) = &request
             {
                 store.with_read(|index| {
+                    let mut scratch = scratch::lease();
+                    let mut ordinal = 0;
                     lookup::lookup(
                         index,
                         request,
                         self.config.headless,
                         kubernetes.endpoint_pod_names(),
                         |address, port, _| {
+                            let current = ordinal;
+                            ordinal += 1;
                             if address.parse::<std::net::IpAddr>().is_ok()
                                 || q.qtype == Type::SRV && port.port < 0
                             {
@@ -671,10 +710,15 @@ impl External {
                             if let Some(target) =
                                 service_target(request, None, address, zone_ref, &mut wire)
                                 && let Ok(name) = target.to_string().parse::<Name>()
-                                && (q.qtype != Type::SRV
-                                    || !chased.iter().any(|entry: &Chased| entry.name == name))
+                                && (q.qtype != Type::SRV || {
+                                    let mut key = [0; 2048];
+                                    target_key(request, None, address, zone_ref, &mut key)
+                                        .is_some_and(|key| scratch.extra.insert(key, key, 0))
+                                })
                             {
                                 chased.push(Chased {
+                                    ordinal: current,
+                                    host: address.to_owned(),
                                     name,
                                     answers: [None, None],
                                 });
@@ -920,6 +964,331 @@ mod tests {
         async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
             Outcome::Unanswered(Rcode::REFUSED)
         }
+    }
+
+    #[tokio::test]
+    async fn mixed_addresses_and_chased_answers_follow_service_order() {
+        use pharos_corefile::configure;
+        use pharos_server::Phase;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = [0; 4096];
+                    let n = socket.read(&mut request).await.unwrap();
+                    let request = String::from_utf8_lossy(&request[..n]);
+                    let (kind, items) = if request.contains("/services") {
+                        (
+                            "ServiceList",
+                            r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"externalIPs":["192.0.2.1","lb.example.net","192.0.2.1","192.0.2.2"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}}]"#,
+                        )
+                    } else if request.contains("/endpointslices") {
+                        ("EndpointSliceList", "[]")
+                    } else {
+                        ("NamespaceList", r#"[{"metadata":{"name":"prod"}}]"#)
+                    };
+                    let body = if request.contains("watch=true") {
+                        String::new()
+                    } else {
+                        format!(
+                            r#"{{"apiVersion":"v1","kind":"{kind}","metadata":{{"resourceVersion":"1"}},"items":{items}}}"#
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let text = format!(
+            ".:53 {{\n kubernetes cluster.local {{\n  endpoint http://{server}\n  startup_timeout 3s\n }}\n}} "
+        );
+        let chain =
+            configure::<crate::Chain>(&parse("Corefile", &text).unwrap(), crate::directives())
+                .unwrap()
+                .remove(0)
+                .config;
+        chain.lifecycle.run(Phase::Startup).await.unwrap();
+        let kubernetes = chain.kubernetes.as_ref().unwrap();
+        let store = kubernetes.store().unwrap();
+        let blocks = parse("Corefile", ".:53 {\n k8s_external example.com\n}").unwrap();
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &blocks[0].directives["k8s_external"]),
+            &["."],
+        )
+        .unwrap();
+        let external = External::new(config).unwrap();
+        let zone: Name = "example.com.".parse().unwrap();
+        let owner: Name = "web.prod.example.com.".parse().unwrap();
+        let target: Name = "lb.example.net.".parse().unwrap();
+        let request = lookup::parse(&[b"web", b"prod"]).unwrap();
+        let mut chased_wire = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut chased_wire, 512, 1, 0x8000).unwrap();
+        let target_ref = NameRef::parse(target.as_wire(), 0).unwrap();
+        b.question(target_ref, Type::A, Class::IN).unwrap();
+        b.record(
+            Section::Answer,
+            target_ref,
+            Type::A,
+            Class::IN,
+            30,
+            &[203, 0, 113, 1],
+        )
+        .unwrap();
+        let _ = b.finish();
+        let chased = [
+            Chased {
+                ordinal: 2,
+                host: "lb.example.net".into(),
+                name: target.clone(),
+                answers: [Some(chased_wire.clone()), None],
+            },
+            Chased {
+                ordinal: 3,
+                host: "lb.example.net".into(),
+                name: target,
+                answers: [Some(chased_wire), None],
+            },
+        ];
+        let mut query = Vec::with_capacity(512);
+        let mut b = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+        b.question(
+            NameRef::parse(owner.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+        let _ = b.finish();
+        let mut response = Vec::with_capacity(4096);
+        let mut slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &zone,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 4096,
+        };
+        assert!(matches!(
+            external.service_response(
+                &mut cx,
+                &external.zones[0],
+                kubernetes,
+                &store,
+                Some(&request),
+                None,
+                Rcode::NOERROR,
+                &chased
+            ),
+            Outcome::Response
+        ));
+        let message = Message::parse(&response).unwrap();
+        let records: Vec<_> = message
+            .answers()
+            .map(|rr| (rr.rtype, rr.name.to_string()))
+            .collect();
+        assert_eq!(
+            records,
+            [
+                (Type::A, "web.prod.example.com.".into()),
+                (Type::CNAME, "web.prod.example.com.".into()),
+                (Type::A, "lb.example.net.".into()),
+                (Type::CNAME, "web.prod.example.com.".into()),
+                (Type::A, "lb.example.net.".into()),
+                (Type::A, "web.prod.example.com.".into())
+            ]
+        );
+        let addresses: Vec<_> = message
+            .answers()
+            .filter_map(|rr| match rr.data().unwrap() {
+                Rdata::A(ip) => Some(ip),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            addresses,
+            [
+                "192.0.2.1".parse::<std::net::Ipv4Addr>().unwrap(),
+                "203.0.113.1".parse().unwrap(),
+                "203.0.113.1".parse().unwrap(),
+                "192.0.2.2".parse().unwrap()
+            ]
+        );
+
+        let stale = [
+            Chased {
+                ordinal: 2,
+                host: "old.example.net".into(),
+                name: "old.example.net.".parse().unwrap(),
+                answers: chased[0].answers.clone(),
+            },
+            Chased {
+                ordinal: 3,
+                host: chased[1].host.clone(),
+                name: chased[1].name.clone(),
+                answers: chased[1].answers.clone(),
+            },
+        ];
+        response.clear();
+        let mut stale_slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &zone,
+            metadata: Metadata::new(&mut stale_slots),
+            response: &mut response,
+            max_response_size: 4096,
+        };
+        assert!(matches!(
+            external.service_response(
+                &mut cx,
+                &external.zones[0],
+                kubernetes,
+                &store,
+                Some(&request),
+                None,
+                Rcode::NOERROR,
+                &stale,
+            ),
+            Outcome::Response
+        ));
+        let message = Message::parse(&response).unwrap();
+        assert_eq!(
+            message
+                .answers()
+                .filter(|rr| rr.rtype == Type::CNAME)
+                .count(),
+            1
+        );
+        assert!(message.answers().all(|rr| match rr.data().unwrap() {
+            Rdata::Cname(target) => target.to_string() == "lb.example.net.",
+            _ => true,
+        }));
+
+        let srv_chased = [Chased {
+            ordinal: 2,
+            host: chased[0].host.clone(),
+            name: chased[0].name.clone(),
+            answers: chased[0].answers.clone(),
+        }];
+        query.clear();
+        let mut b = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+        b.question(
+            NameRef::parse(owner.as_wire(), 0).unwrap(),
+            Type::SRV,
+            Class::IN,
+        )
+        .unwrap();
+        let _ = b.finish();
+        response.clear();
+        let mut srv_slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &zone,
+            metadata: Metadata::new(&mut srv_slots),
+            response: &mut response,
+            max_response_size: 4096,
+        };
+        assert!(matches!(
+            external.service_response(
+                &mut cx,
+                &external.zones[0],
+                kubernetes,
+                &store,
+                Some(&request),
+                None,
+                Rcode::NOERROR,
+                &srv_chased
+            ),
+            Outcome::Response
+        ));
+        let message = Message::parse(&response).unwrap();
+        let srv: Vec<_> = message
+            .answers()
+            .map(|rr| match rr.data().unwrap() {
+                Rdata::Srv { target, port, .. } => (target.to_string(), port),
+                _ => panic!("expected SRV"),
+            })
+            .collect();
+        assert_eq!(
+            srv,
+            [
+                ("web.prod.example.com.".into(), 80),
+                ("web.prod.example.com.".into(), 443),
+                ("lb.example.net.".into(), 80),
+                ("lb.example.net.".into(), 443)
+            ]
+        );
+        let extra: Vec<_> = message
+            .additionals()
+            .map(|rr| (rr.name.to_string(), rr.data().unwrap()))
+            .collect();
+        assert_eq!(
+            extra,
+            [
+                (
+                    "web.prod.example.com.".into(),
+                    Rdata::A("192.0.2.1".parse().unwrap())
+                ),
+                (
+                    "lb.example.net.".into(),
+                    Rdata::A("203.0.113.1".parse().unwrap())
+                ),
+                (
+                    "web.prod.example.com.".into(),
+                    Rdata::A("192.0.2.2".parse().unwrap())
+                )
+            ]
+        );
+        chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+        task.abort();
+    }
+
+    #[test]
+    fn chased_ordinals_reject_changed_or_missing_hosts() {
+        let chased = [
+            Chased {
+                ordinal: 1,
+                host: "old.example".into(),
+                name: "old.example.".parse().unwrap(),
+                answers: [None, None],
+            },
+            Chased {
+                ordinal: 3,
+                host: "same.example".into(),
+                name: "same.example.".parse().unwrap(),
+                answers: [None, None],
+            },
+            Chased {
+                ordinal: 5,
+                host: "later.example".into(),
+                name: "later.example.".parse().unwrap(),
+                answers: [None, None],
+            },
+        ];
+        let mut cursor = chased.iter().peekable();
+        assert!(chased_at(&mut cursor, 1, "new.example").is_none());
+        assert!(chased_at(&mut cursor, 4, "other.example").is_none());
+        assert_eq!(
+            chased_at(&mut cursor, 5, "later.example").unwrap().host,
+            "later.example"
+        );
     }
 
     #[test]
