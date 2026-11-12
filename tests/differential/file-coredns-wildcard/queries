@@ -1,0 +1,6 @@
+wild.dnssex.nl. TXT IN udp +bufsize=4096
+a.wild.dnssex.nl. TXT IN udp +bufsize=4096
+wild.dnssex.nl. TXT IN udp +dnssec +bufsize=4096
+a.wild.dnssex.nl. TXT IN udp +dnssec +bufsize=4096
+wild.dnssex.nl. SRV IN udp +bufsize=4096
+wild.dnssex.nl. SRV IN udp +dnssec +bufsize=4096
