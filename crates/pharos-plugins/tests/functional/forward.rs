@@ -88,6 +88,35 @@ async fn forward_alone_allows_non_in_queries_through_listener_admission() {
 }
 
 #[tokio::test]
+#[cfg(feature = "plugin-whoami")]
+async fn forward_allows_non_in_queries_for_other_blocks_on_same_listener() {
+    let text = "example.:0 {\n forward . 127.0.0.1:53\n}\nother.:0 {\n whoami\n}";
+    let blocks = configure::<Chain>(&parse("Corefile", text).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    let query = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x03www\x05other\0\0\x01\0\x03";
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                query,
+                "127.0.0.1:1000".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let reply = Message::parse(&response).unwrap();
+    assert_eq!(reply.rcode(), pharos_proto::Rcode::NOERROR);
+    assert_eq!(reply.additional_count(), 2);
+    assert_eq!(
+        reply.questions().next().unwrap().qclass,
+        pharos_proto::Class::CH
+    );
+}
+
+#[tokio::test]
 async fn forwards_query_and_restores_client_id() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = upstream.local_addr().unwrap();
