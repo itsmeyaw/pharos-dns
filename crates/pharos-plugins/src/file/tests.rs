@@ -20,7 +20,86 @@ fn records_construct_a_reusable_zone_with_indexed_names_and_types() {
     assert!(zone.exists(ent.as_wire()));
     assert!(!zone.exact(ent.as_wire()));
     let cut: Name = "host.child.example.org.".parse().unwrap();
-    assert_eq!(zone.cut(cut.as_wire(), Type::A).unwrap().owner.to_string(), "child.example.org.");
+    assert_eq!(
+        zone.cut(cut.as_wire(), Type::A).unwrap().owner.to_string(),
+        "child.example.org."
+    );
+}
+
+#[test]
+fn predecessor_uses_nearest_tree_name_not_nearest_nsec() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NSEC a.example.org. SOA NSEC\na 60 IN A 192.0.2.1\nc 60 IN NSEC example.org. NSEC\n";
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let zone = Zone::from_records(apex, records).unwrap();
+    let name: Name = "b.example.org.".parse().unwrap();
+    assert!(zone.previous_nsec(name.as_wire()).is_none());
+    let name: Name = "z.example.org.".parse().unwrap();
+    assert_eq!(
+        zone.previous_nsec(name.as_wire())
+            .unwrap()
+            .owner
+            .to_string(),
+        "c.example.org."
+    );
+}
+
+#[tokio::test]
+async fn zone_lookup_is_reusable_without_file_plugin() {
+    struct DropNext;
+    impl Next for DropNext {
+        async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+            Outcome::Drop
+        }
+    }
+    let apex: Name = "example.org.".parse().unwrap();
+    let records = ZoneParser::new(
+        include_str!("../../tests/fixtures/file/example.zone").as_bytes(),
+        apex.clone(),
+        "test",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    let zone = Zone::from_records(apex.clone(), records).unwrap();
+    let name: Name = "www.example.org.".parse().unwrap();
+    let mut query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [None; 8];
+    let mut context = Context {
+        query: Message::parse(&query).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: pharos_server::Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &apex,
+        metadata: pharos_server::Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        zone.lookup(&mut context, DropNext, &[]).await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 1]
+    );
 }
 
 // Derived from CoreDNS plugin/file/reload_test.go.
