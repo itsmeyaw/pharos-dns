@@ -5,6 +5,22 @@ use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
 use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 
+// RFC 4034 §6.1: canonical ordering puts descendants inside the CoreDNS referral span.
+#[test]
+fn synthetic_nsec_spans_match_coredns_canonical_ordering() {
+    use pharos_dnssec::denial::{BlackLieKind, black_lie};
+
+    let apex: Name = "miek.nl.".parse().unwrap();
+    let owner: Name = "child.miek.nl.".parse().unwrap();
+    let descendant: Name = "a.child.miek.nl.".parse().unwrap();
+    let negative = black_lie(&owner, &apex, Type::A, BlackLieKind::Negative).unwrap();
+    let referral = black_lie(&owner, &apex, Type::DS, BlackLieKind::Referral).unwrap();
+    assert_eq!(negative.next, "\\000.child.miek.nl.".parse().unwrap());
+    assert_eq!(referral.next, "child\\000.miek.nl.".parse().unwrap());
+    assert!(owner < negative.next && negative.next < descendant);
+    assert!(owner < descendant && descendant < referral.next);
+}
+
 fn verify_signatures(records: &[pharos_proto::Record<'_>]) {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, ED25519, UnparsedPublicKey};
     use pharos_dnssec::canonical::{CanonicalRecord, signed_data};

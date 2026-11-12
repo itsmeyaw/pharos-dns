@@ -119,8 +119,9 @@ mod tests {
 
     #[test]
     fn cache_capacity_matches_coredns_effective_shard_capacity() {
+        let minimum = isize::MIN.to_string();
         for (input, expected) in [
-            ("-9223372036854775808", 1024),
+            (minimum.as_str(), 1024),
             ("-1", 1024),
             ("0", 1024),
             ("500", 1024),
