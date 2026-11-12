@@ -177,6 +177,31 @@ async fn axfr_client_rejects_a_different_closing_soa() {
 }
 
 #[tokio::test]
+async fn axfr_client_times_out_when_primary_does_not_reply() {
+    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut connection, _) = socket.accept().await.unwrap();
+        let length = connection.read_u16().await.unwrap();
+        let mut query = vec![0; usize::from(length)];
+        connection.read_exact(&mut query).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let error = pharos_server::transfer::axfr(
+        address,
+        &"a.".parse().unwrap(),
+        1,
+        Duration::from_millis(100),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn notify_sender_retries_refused_responses() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
