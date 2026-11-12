@@ -51,6 +51,7 @@ pub(crate) enum Destination {
 impl Transfer {
     /// Notify the configured Secondary Servers that a Zone changed.
     pub async fn notify(&self, zone: &Name) -> std::io::Result<()> {
+        // CoreDNS longestMatch keeps the first of equally long Zones; max_by_key would keep the last.
         let Some(rule) = self
             .zones
             .iter()
@@ -60,6 +61,7 @@ impl Transfer {
                         .then_some((domain.label_count(), rule))
                 })
             })
+            .rev()
             .max_by_key(|(count, _)| *count)
             .map(|(_, rule)| rule)
         else {
@@ -180,6 +182,7 @@ impl Transfer {
         if question.qtype == Type::AXFR && cx.protocol == Protocol::Udp {
             return Some(Outcome::Unanswered(Rcode::REFUSED));
         }
+        // CoreDNS longestMatch keeps the first of equally long Zones; max_by_key would keep the last.
         let rule = self
             .zones
             .iter()
@@ -198,6 +201,7 @@ impl Transfer {
                     .then_some((base_count, zone))
                 })
             })
+            .rev()
             .max_by_key(|(count, _)| *count)
             .map(|(_, zone)| zone);
         let rule = rule?;

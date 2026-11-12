@@ -304,3 +304,47 @@ async fn most_specific_zone_controls_acl() {
         Outcome::Stream(_)
     ));
 }
+
+// Derived from CoreDNS v1.15.0 plugin/transfer/transfer.go, longestMatch keeps the first Zone.
+#[tokio::test]
+async fn first_duplicate_zone_controls_acl() {
+    let config =
+        ". {\n transfer example.org {\n to 192.0.2.1\n }\n transfer example.org {\n to *\n }\n}";
+    let blocks = parse("Corefile", config).unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.org.".parse().unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AXFR,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::new();
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:42".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &name,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .transfer
+            .unwrap()
+            .serve_with(&mut cx, DropNext, Some(&Provider))
+            .await,
+        Outcome::Unanswered(Rcode::REFUSED)
+    );
+}
