@@ -5,7 +5,7 @@ pub(crate) mod setup;
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{Class, Name, NameRef, Rcode, Rdata, Type};
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
-use std::net::IpAddr;
+use std::{fmt::Write, net::IpAddr};
 
 /// Supplies an authoritative Zone's records to the transfer Plugin.
 pub trait Transferer {
@@ -184,14 +184,19 @@ impl Transfer {
         let Some(rule) = rule else {
             return next.run(cx).await;
         };
+        let mut client = IpText {
+            bytes: [0; 45],
+            len: 0,
+        };
+        if write!(client, "{}", cx.client.ip()).is_err() {
+            return Outcome::Unanswered(Rcode::REFUSED);
+        }
         let allowed = rule
             .destinations
             .iter()
             .any(|destination| match destination {
                 Destination::All => true,
-                Destination::Address { host, .. } => {
-                    host.parse::<IpAddr>().ok() == Some(cx.client.ip())
-                }
+                Destination::Address { host, .. } => host.as_bytes() == &client.bytes[..client.len],
             });
         if !allowed {
             return Outcome::Unanswered(Rcode::REFUSED);
@@ -225,6 +230,23 @@ impl Transfer {
             Ok(None) => next.run(cx).await,
             Err(error) => Outcome::Error(error),
         }
+    }
+}
+
+struct IpText {
+    bytes: [u8; 45],
+    len: usize,
+}
+
+impl std::fmt::Write for IpText {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(std::fmt::Error)?;
+        self.bytes
+            .get_mut(self.len..end)
+            .ok_or(std::fmt::Error)?
+            .copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
     }
 }
 

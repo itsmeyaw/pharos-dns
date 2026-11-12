@@ -114,3 +114,36 @@ async fn notify_uses_to_addresses_and_source() {
         .unwrap();
     responder.await.unwrap();
 }
+
+// CoreDNS compares the text of the configured host to the client's normalized IP.
+#[tokio::test]
+async fn acl_does_not_normalize_configured_ipv6_text() {
+    let blocks = parse("Corefile", ". {\n transfer {\n to 2001:0db8::1\n }\n}").unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let wire = [0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 252, 0, 1];
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::new();
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "[2001:db8::1]:42".parse().unwrap(),
+        local: "[::1]:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .transfer
+            .unwrap()
+            .serve_with(&mut cx, DropNext, Some(&Provider))
+            .await,
+        Outcome::Unanswered(Rcode::REFUSED)
+    );
+}
