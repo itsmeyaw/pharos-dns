@@ -58,9 +58,10 @@ fn parse_int_accepts_literal_and_reports_invalid_values_at_render_time() {
 }
 
 #[test]
-fn template_rejects_unsupported_quoted_string_escapes() {
-    assert!(Template::compile(r#"{{ .Meta "a\nb" }}"#).is_err());
-    assert!(Template::compile(r#"{{ parseInt "1\x32" 10 8 }}"#).is_err());
+fn template_decodes_quoted_strings_and_rejects_invalid_escapes() {
+    assert!(Template::compile(r#"{{ .Meta "a\nb" }}"#).is_ok());
+    assert!(Template::compile(r#"{{ parseInt "1\x32" 10 8 }}"#).is_ok());
+    assert!(Template::compile(r#"{{ "\q" }}"#).is_err());
 }
 
 #[test]
@@ -219,4 +220,27 @@ fn nested_pipelines_index_borrowed_captures_and_maps() {
 fn excessive_pipeline_nesting_is_rejected_at_compile_time() {
     let source = format!("{{{{ {}.Name{} }}}}", "(".repeat(300), ")".repeat(300));
     assert!(Template::compile(&source).is_err());
+}
+
+#[test]
+fn quoted_strings_can_contain_delimiters_and_go_escapes() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile(
+        r#"{{ "a}}b\n" | len }}|{{ eq "\x41 \u263a" "A ☺" }}|{{ 'A' }}|{{ `a b` }}"#,
+    )
+    .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "5|true|65|a b");
+}
+
+#[test]
+fn coredns_accepts_unknown_fields_until_execution() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile("{{ .Name }} A {{ .Grup.d }}").unwrap();
+    assert!(template.render(&data, &mut String::new()).is_err());
 }

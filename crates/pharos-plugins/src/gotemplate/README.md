@@ -5,7 +5,7 @@ The engine is under construction. It currently accepts literal text, `.Name`,
 `index .Match N`, `.Meta "label"`, trim markers, `if`/`else`/`end` with a field, `range .Match` (including `.` and `$.Field`), `eq`, `len`, and `parseInt` with a field or a simple
 quoted string and literal base and bit size. Missing Metadata renders as an
 empty string; an out-of-range match or invalid `parseInt` fails at render time.
-Pipelines and nested parentheses support `and`, `or`, `not`, `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `index`, `len`, and `parseInt`. Other actions fail compilation; in particular other pipeline functions, other range values and Go
-quoted-string escapes are not yet supported.
+Pipelines and nested parentheses support `and`, `or`, `not`, `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `index`, `len`, and `parseInt`. Go quoted-string escapes and raw strings are supported. Other actions fail compilation; in particular other pipeline functions and other range values are not yet supported.
 
 Nesting of actions and pipelines is limited to 255 levels to bound recursion.
+String literals that decode to non-UTF-8 bytes are rejected because the output buffer is a Rust `String`.

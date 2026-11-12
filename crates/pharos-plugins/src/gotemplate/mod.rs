@@ -5,6 +5,7 @@ use pharos_server::Metadata;
 use std::fmt::{self, Write};
 
 mod pipeline;
+mod quote;
 
 /// Borrowed template values for a Query.
 pub struct Data<'a, 'm> {
@@ -45,6 +46,7 @@ enum Field {
     Matches,
     Groups,
     Variables,
+    Unknown,
     Name,
     Zone,
     Class,
@@ -207,7 +209,7 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
         }
         parts.push(Part::Text(text.to_owned()));
         *source = action_source;
-        let end = source.find("}}").ok_or("unclosed template action")?;
+        let end = action_end(source).ok_or("unclosed template action")?;
         let mut raw = &source[..end];
         let trim_right = raw.ends_with('-')
             && raw
@@ -272,6 +274,31 @@ fn is_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
+fn action_end(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let byte = bytes[offset];
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' && active != b'`' {
+                escaped = true;
+            } else if byte == active {
+                quote = None;
+            }
+        } else if matches!(byte, b'"' | b'\'' | b'`') {
+            quote = Some(byte);
+        } else if byte == b'}' && bytes.get(offset + 1) == Some(&b'}') {
+            return Some(offset);
+        }
+        offset += 1;
+    }
+    None
+}
+
 fn parse_field(action: &str) -> Result<Field, String> {
     if let Some(field) = action.strip_prefix("$.") {
         return Ok(Field::Root(Box::new(parse_field(&format!(".{field}"))?)));
@@ -288,11 +315,8 @@ fn parse_field(action: &str) -> Result<Field, String> {
         ".Remote" => Ok(Field::Remote),
         ".Regex" => Ok(Field::Regex),
         _ => {
-            if let Some(literal) = action.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-                if literal.contains(['\\', '"', '\n', '\r']) {
-                    return Err("unsupported quoted-string escape".into());
-                }
-                Ok(Field::Literal(literal.to_owned()))
+            if action.starts_with('"') || action.starts_with('`') {
+                Ok(Field::Literal(quote::unquote(action)?))
             } else if let Some(name) = action
                 .strip_prefix(".Group.")
                 .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'))
@@ -308,15 +332,13 @@ fn parse_field(action: &str) -> Result<Field, String> {
                     index.trim().parse().map_err(|_| "invalid .Match index")?,
                 ))
             } else if let Some(label) = action.strip_prefix(".Meta ") {
-                let label = label
-                    .trim()
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .ok_or("unsupported .Meta argument")?;
-                if label.contains(['\\', '"', '\n', '\r']) {
-                    return Err("unsupported quoted-string escape".into());
-                }
-                Ok(Field::Metadata(label.to_owned()))
+                Ok(Field::Metadata(quote::unquote(label.trim())?))
+            } else if action.strip_prefix('.').is_some_and(|path| {
+                path.split('.').all(|name| {
+                    !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+                })
+            }) {
+                Ok(Field::Unknown)
             } else {
                 Err(format!("unsupported template action: {action}"))
             }
@@ -394,7 +416,7 @@ impl Field {
             },
             Self::Literal(value) => Ok(value),
             _ if !matches!(dot, Dot::Root) => Err(fmt::Error),
-            Self::Matches | Self::Groups | Self::Variables => Err(fmt::Error),
+            Self::Matches | Self::Groups | Self::Variables | Self::Unknown => Err(fmt::Error),
             Self::Name => Ok(data.name),
             Self::Zone => Ok(data.zone),
             Self::Class => Ok(data.class),

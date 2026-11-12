@@ -346,6 +346,15 @@ fn atom(word: &str) -> Result<Atom, String> {
     {
         return Ok(Atom::Nested(Box::new(Pipeline::compile(inner)?)));
     }
+    if word.starts_with('\'') {
+        let decoded = super::quote::unquote(word)?;
+        let mut chars = decoded.chars();
+        let value = chars.next().ok_or("empty character literal")?;
+        if chars.next().is_some() {
+            return Err("character literal has multiple characters".into());
+        }
+        return Ok(Atom::Int(i64::from(u32::from(value))));
+    }
     match word {
         "true" => Ok(Atom::Bool(true)),
         "false" => Ok(Atom::Bool(false)),
@@ -362,7 +371,7 @@ fn atom(word: &str) -> Result<Atom, String> {
 
 fn split(source: &str, separator: char) -> Result<Vec<&str>, String> {
     let mut result = Vec::new();
-    let mut quote = false;
+    let mut quote: Option<char> = None;
     let mut escape = false;
     let mut start = 0;
     let mut depth = 0usize;
@@ -371,30 +380,34 @@ fn split(source: &str, separator: char) -> Result<Vec<&str>, String> {
             escape = false;
             continue;
         }
-        if quote && ch == '\\' {
+        if quote.is_some_and(|active| active != '`') && ch == '\\' {
             escape = true;
             continue;
         }
-        if ch == '"' {
-            quote = !quote;
+        if quote == Some(ch) {
+            quote = None;
+            continue;
+        }
+        if quote.is_none() && matches!(ch, '"' | '\'' | '`') {
+            quote = Some(ch);
             continue;
         }
         // shortcut: cap nested pipelines at 255 levels; use iterative parsing to lift the stack limit.
-        if !quote && ch == '(' {
+        if quote.is_none() && ch == '(' {
             depth += 1;
             if depth >= 256 {
                 return Err("pipeline nesting exceeds 255 levels".into());
             }
         }
-        if !quote && ch == ')' {
+        if quote.is_none() && ch == ')' {
             depth = depth.checked_sub(1).ok_or("unmatched parenthesis")?;
         }
-        if !quote && depth == 0 && ch == separator {
+        if quote.is_none() && depth == 0 && ch == separator {
             result.push(source[start..index].trim());
             start = index + ch.len_utf8();
         }
     }
-    if quote {
+    if quote.is_some() {
         return Err("unterminated quoted string".into());
     }
     if depth != 0 {
@@ -406,7 +419,7 @@ fn split(source: &str, separator: char) -> Result<Vec<&str>, String> {
 
 fn split_words(source: &str) -> Result<Vec<&str>, String> {
     let mut result = Vec::new();
-    let mut quote = false;
+    let mut quote: Option<char> = None;
     let mut escape = false;
     let mut start = None;
     let mut depth = 0usize;
@@ -415,20 +428,23 @@ fn split_words(source: &str) -> Result<Vec<&str>, String> {
             escape = false;
             continue;
         }
-        if quote && ch == '\\' {
+        if quote.is_some_and(|active| active != '`') && ch == '\\' {
             escape = true;
             continue;
         }
-        if ch == '"' {
-            quote = !quote;
+        let was_quoted = quote.is_some();
+        if quote == Some(ch) {
+            quote = None;
+        } else if quote.is_none() && matches!(ch, '"' | '\'' | '`') {
+            quote = Some(ch);
         }
-        if !quote && ch == '(' {
+        if !was_quoted && quote.is_none() && ch == '(' {
             depth += 1;
         }
-        if !quote && ch == ')' {
+        if !was_quoted && quote.is_none() && ch == ')' {
             depth = depth.checked_sub(1).ok_or("unmatched parenthesis")?;
         }
-        if !quote && depth == 0 && ch.is_ascii_whitespace() {
+        if !was_quoted && quote.is_none() && depth == 0 && ch.is_ascii_whitespace() {
             if let Some(begin) = start.take() {
                 result.push(&source[begin..index]);
             }
@@ -436,7 +452,7 @@ fn split_words(source: &str) -> Result<Vec<&str>, String> {
             start = Some(index);
         }
     }
-    if quote {
+    if quote.is_some() {
         return Err("unterminated quoted string".into());
     }
     if depth != 0 {
