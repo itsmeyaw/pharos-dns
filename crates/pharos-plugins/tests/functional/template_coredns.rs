@@ -523,6 +523,9 @@ async fn coredns_runtime_errors_do_not_fall_through() {
  expr incidr('notanip', '10.0.0.0/8')
  fallthrough
 }"#,
+        r#"template IN A example. {
+ answer "{{ .Name }} 60 IN A 10.0.0.{{ parseInt \"gg\" 16 8 }}"
+}"#,
     ] {
         let (outcome, wire) = query(&chain(directive), "a.example.", Type::A, Class::IN, &[]).await;
         assert_servfail(outcome, &wire);
@@ -617,4 +620,61 @@ async fn coredns_variable_values_in_templates() {
     let response = Message::parse(&wire).unwrap();
     assert_eq!(response.answers().next().unwrap().rdata, &[10, 240, 0, 1]);
     assert_eq!(response.additionals().next().unwrap().rdata, b"\x01A");
+}
+
+// Derived from CoreDNS TestVar, TestMultiSection and TestHandler.
+#[tokio::test]
+async fn coredns_variable_scope_metadata_and_servfail() {
+    let configured = chain(
+        r#"metadata
+template IN A example. {
+ match ^a[.]example[.]$
+ var region metadata('test/region')
+ answer "{{ .Var.region }}.{{ .Name }} 60 IN A 10.0.0.1"
+ fallthrough
+}
+template IN A example. {
+ answer "{{ .Name }} 60 IN TXT \"{{ len .Var }}\""
+}"#,
+    );
+    let (outcome, wire) = query(
+        &configured,
+        "a.example.",
+        Type::A,
+        Class::IN,
+        &[("test/region", "eu")],
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .name
+            .to_string(),
+        "eu.a.example."
+    );
+    let (outcome, wire) = query(&configured, "b.example.", Type::A, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        b"\x010"
+    );
+
+    let configured = chain("template IN A example. {\n rcode SERVFAIL\n}");
+    let (outcome, wire) = query(&configured, "a.example.", Type::A, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Unanswered(Rcode::SERVFAIL));
+    assert!(wire.is_empty());
+    let configured =
+        chain("template IN TXT example. {\n match $^\n rcode SERVFAIL\n fallthrough\n}");
+    let (outcome, wire) = query(&configured, "a.example.", Type::TXT, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
+    assert!(wire.is_empty());
 }

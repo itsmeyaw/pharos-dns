@@ -97,7 +97,20 @@ async fn coredns_cname_lookup_preserves_truncation_and_answers() {
     let response = Message::parse(&response).unwrap();
     assert!(response.tc());
     let mut answers = response.answers();
-    assert_eq!(answers.next().unwrap().rtype, Type::CNAME);
-    assert_eq!(answers.next().unwrap().rdata, &[1, 2, 3, 4]);
+    let alias = answers.next().unwrap();
+    assert_eq!(
+        (alias.name.to_string().as_str(), alias.rtype, alias.ttl),
+        ("foogle.com.", Type::CNAME, 60)
+    );
+    let address = answers.next().unwrap();
+    assert_eq!(
+        (
+            address.name.to_string().as_str(),
+            address.rtype,
+            address.ttl
+        ),
+        ("google.com.", Type::A, 600)
+    );
+    assert_eq!(address.rdata, &[1, 2, 3, 4]);
     assert!(answers.next().is_none());
 }
