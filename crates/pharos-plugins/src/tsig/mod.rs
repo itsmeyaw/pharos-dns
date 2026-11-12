@@ -1,6 +1,8 @@
 pub(crate) mod setup;
 
-use pharos_proto::{Name, NameRef, Opcode, Rcode, TsigKey, TsigRecord, Type};
+use pharos_proto::{
+    MessageBuilder, Name, NameRef, Opcode, Rcode, TsigError, TsigKey, TsigRecord, Type,
+};
 use pharos_server::{Context, Error, Next, Outcome, Plugin};
 
 #[derive(Debug)]
@@ -73,10 +75,10 @@ impl Tsig {
             .iter()
             .find(|secret| record.owner == secret.name)
         else {
-            return Outcome::Unanswered(Rcode::REFUSED);
+            return tsig_error(cx, &record, 17, None, 0);
         };
         let Some(keys) = &secret.keys else {
-            return Outcome::Unanswered(Rcode::REFUSED);
+            return tsig_error(cx, &record, 16, None, 0);
         };
         let names = [
             b"\x09hmac-sha1\0".as_slice(),
@@ -89,13 +91,16 @@ impl Tsig {
             .iter()
             .position(|name| record.algorithm == NameRef::parse(name, 0).expect("valid algorithm"));
         let Some(key) = algorithm.map(|i| &keys[i]) else {
-            return Outcome::Unanswered(Rcode::REFUSED);
+            return tsig_error(cx, &record, 16, None, 0);
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        if key.verify(wire, now, None, 0).is_err() {
-            return Outcome::Unanswered(Rcode::REFUSED);
+        match key.verify(wire, now, None, 0) {
+            Ok(_) => {}
+            Err(TsigError::BadTime) => return tsig_error(cx, &record, 18, Some(key), now),
+            Err(TsigError::Format) => return Outcome::Unanswered(Rcode::FORMERR),
+            Err(_) => return tsig_error(cx, &record, 16, None, 0),
         }
         let query = cx.query.without_final_tsig().expect("verified TSIG");
         let outcome = cx.run_with_message(query, next).await;
@@ -121,4 +126,72 @@ impl Tsig {
             Err(_) => Outcome::Error(Error::InvalidQuery),
         }
     }
+}
+
+fn tsig_error(
+    cx: &mut Context<'_, '_>,
+    record: &TsigRecord<'_>,
+    code: u16,
+    key: Option<&TsigKey>,
+    now: u64,
+) -> Outcome {
+    let required = 12 + 260 + 2 * 255 + 26 + 64;
+    if cx.response.capacity() < required && cx.protocol == pharos_server::Protocol::Tcp {
+        cx.response
+            .reserve(required.saturating_sub(cx.response.len()));
+    }
+    let flags = 0x8000 | (cx.query.flags() & 0x7910) | Rcode::NOTAUTH.0;
+    let Ok(mut builder) = MessageBuilder::new(
+        cx.response,
+        cx.max_response_size.max(512),
+        cx.query.id(),
+        flags,
+    ) else {
+        return Outcome::Error(Error::ResponseBufferTooSmall);
+    };
+    if let Some(q) = cx.query.questions().next()
+        && builder.question(q.name, q.qtype, q.qclass).is_err()
+    {
+        return Outcome::Error(Error::ResponseBufferTooSmall);
+    }
+    let _ = builder.finish();
+    if let Some(key) = key {
+        return match key.sign_error_response(cx.response, cx.query.as_wire(), now, 0) {
+            Ok(Some(_)) => Outcome::Response,
+            _ => Outcome::Error(Error::InvalidQuery),
+        };
+    }
+    let owner_len = record.owner.labels().map(|l| l.len() + 1).sum::<usize>() + 1;
+    let algorithm_len = record
+        .algorithm
+        .labels()
+        .map(|l| l.len() + 1)
+        .sum::<usize>()
+        + 1;
+    if cx.response.len() + owner_len + algorithm_len + 26 > cx.response.capacity() {
+        return Outcome::Error(Error::ResponseBufferTooSmall);
+    }
+    // RFC 8945 §5.3.2: BADKEY and BADSIG carry an empty MAC.
+    for label in record.owner.labels() {
+        cx.response.push(label.len() as u8);
+        cx.response.extend_from_slice(label);
+    }
+    cx.response.push(0);
+    cx.response.extend_from_slice(&[0, 250, 0, 255, 0, 0, 0, 0]);
+    cx.response
+        .extend_from_slice(&((algorithm_len + 16) as u16).to_be_bytes());
+    for label in record.algorithm.labels() {
+        cx.response.push(label.len() as u8);
+        cx.response.extend_from_slice(label);
+    }
+    cx.response.push(0);
+    cx.response.extend_from_slice(&[0; 6]);
+    cx.response.extend_from_slice(&record.fudge.to_be_bytes());
+    cx.response.extend_from_slice(&[0; 2]);
+    cx.response
+        .extend_from_slice(&record.original_id.to_be_bytes());
+    cx.response.extend_from_slice(&code.to_be_bytes());
+    cx.response.extend_from_slice(&[0; 2]);
+    cx.response[10..12].copy_from_slice(&1u16.to_be_bytes());
+    Outcome::Response
 }

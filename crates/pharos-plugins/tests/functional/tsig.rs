@@ -6,6 +6,45 @@ use pharos_proto::{Message, Name, Rcode, TsigAlgorithm, TsigKey};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 #[tokio::test]
+async fn unknown_key_and_bad_mac_return_tsig_errors() {
+    let blocks = parse(
+        "Corefile",
+        ". {\n tsig {\n secret key. c2VjcmV0\n }\n whoami\n}",
+    )
+    .unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for (name, secret, code) in [("other.", b"secret".as_slice(), 17), ("key.", b"wrong", 16)] {
+        let key = TsigKey::new(name.parse().unwrap(), TsigAlgorithm::Sha256, secret);
+        let mut wire = Vec::with_capacity(512);
+        wire.extend_from_slice(&[0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1]);
+        key.sign(&mut wire, now, 300, None).unwrap();
+        let domain: Name = ".".parse().unwrap();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTAUTH);
+        let tsig = pharos_proto::TsigRecord::parse(&response).unwrap();
+        assert_eq!(tsig.error, code);
+        assert!(tsig.mac.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn valid_signed_query_produces_signed_response() {
     let blocks = parse(
         "Corefile",
