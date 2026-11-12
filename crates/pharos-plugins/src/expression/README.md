@@ -32,7 +32,8 @@ provides the type to pass to `compile_with_variables` for subsequent variables.
   pipelines, closures and other expr-lang built-ins.
 - `matches` compiles literal patterns at setup using Rust regex syntax and
   Unicode rules rather than Go RE2. Unlike expr-lang, dynamic patterns are
-  rejected at setup. Each worker initializes its regex cache on first use.
+  rejected at setup. Each worker initializes its regex cache on first use;
+  removed caches are reclaimed when another cache is initialized or the thread exits.
 - Expressions exceeding 1,024 tokens or 16 parse/evaluation levels fail at
   setup to bound worker stack use. expr-lang's default limit is 10,000 AST nodes.
   Compiled result types are validated at setup; malformed inputs and exhausted

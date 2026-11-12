@@ -104,18 +104,14 @@ impl ThreadRegex {
             let mut caches = caches.borrow_mut();
             if !caches.contains_key(&key) {
                 caches.retain(|_, (owner, _)| owner.strong_count() != 0);
-                caches.insert(
-                    key,
-                    (
-                        Arc::downgrade(&self.identity),
-                        warm_cache(&self.vm, &self.warmer),
-                    ),
-                );
             }
-            self.vm.is_match(
-                &mut caches.get_mut(&key).expect("cache just initialized").1,
-                text,
-            )
+            let (_, cache) = caches.entry(key).or_insert_with(|| {
+                (
+                    Arc::downgrade(&self.identity),
+                    warm_cache(&self.vm, &self.warmer),
+                )
+            });
+            self.vm.is_match(cache, text)
         })
     }
 }
