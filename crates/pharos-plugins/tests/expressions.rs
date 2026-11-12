@@ -334,3 +334,33 @@ fn replace_and_any_handle_unicode_empty_lists_and_nested_predicates() {
         );
     }
 }
+
+#[test]
+fn replace_optional_count_matches_expr_builtin() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "replace('foo,bar,baz,goo', ',', ';', 2) == 'foo;bar;baz,goo'",
+        "replace('abc', '', '-', 2) == '-a-bc'",
+        "replace('abc', 'b', 'x', 0) == 'abc'",
+        "replace('aaa', 'a', 'b', -1) == 'bbb'",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+}

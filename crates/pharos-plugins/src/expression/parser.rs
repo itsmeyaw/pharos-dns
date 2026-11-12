@@ -206,7 +206,9 @@ impl Parser<'_, '_> {
                         Kind::Int
                     }
                     "replace"
-                        if args.len() == 3 && args.iter().all(|arg| arg.kind() == Kind::String) =>
+                        if (args.len() == 3 || args.len() == 4)
+                            && args[..3].iter().all(|arg| arg.kind() == Kind::String)
+                            && (args.len() == 3 || args[3].kind() == Kind::Int) =>
                     {
                         Kind::String
                     }

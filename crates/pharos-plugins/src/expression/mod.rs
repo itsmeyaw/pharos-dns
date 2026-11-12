@@ -352,6 +352,7 @@ fn replace<'a>(
     input: Temporary<'a>,
     from: Temporary<'a>,
     to: Temporary<'a>,
+    mut count: i64,
     scratch: &mut Scratch<'_>,
 ) -> Result<Temporary<'a>, &'static str> {
     let output = scratch.len;
@@ -360,7 +361,14 @@ fn replace<'a>(
     let mut pos = 0;
     if from_len == 0 {
         loop {
+            if count == 0 {
+                scratch.append(input.slice(pos, len)?)?;
+                break;
+            }
             scratch.append(to)?;
+            if count > 0 {
+                count -= 1;
+            }
             if pos == len {
                 break;
             }
@@ -374,10 +382,15 @@ fn replace<'a>(
             pos = next;
         }
     } else {
-        while let Some(relative) = input.text(scratch)?[pos..].find(from.text(scratch)?) {
+        while count != 0
+            && let Some(relative) = input.text(scratch)?[pos..].find(from.text(scratch)?)
+        {
             let found = pos + relative;
             scratch.append(input.slice(pos, found)?)?;
             scratch.append(to)?;
+            if count > 0 {
+                count -= 1;
+            }
             pos = found + from_len;
         }
         scratch.append(input.slice(pos, len)?)?;
@@ -397,7 +410,15 @@ fn call<'a>(
         let input = args[0].eval(query, metadata, scratch, current)?;
         let from = args[1].eval(query, metadata, scratch, current)?;
         let to = args[2].eval(query, metadata, scratch, current)?;
-        return replace(input, from, to, scratch);
+        let count = if args.len() == 4 {
+            let Temporary::Int(count) = args[3].eval(query, metadata, scratch, current)? else {
+                return Err("replace count must be an integer");
+            };
+            count
+        } else {
+            -1
+        };
+        return replace(input, from, to, count, scratch);
     }
     if name == "group" {
         let value = args[0].eval(query, metadata, scratch, current)?;
