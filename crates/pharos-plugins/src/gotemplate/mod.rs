@@ -54,6 +54,7 @@ enum Part {
     Text(String),
     Field(Field),
     ParseInt(Field, u32, u32),
+    If(Field, Vec<Part>, Vec<Part>),
 }
 
 /// A template parsed at setup time.
@@ -62,70 +63,116 @@ pub struct Template(Vec<Part>);
 impl Template {
     /// Compile the supported template actions.
     pub fn compile(mut source: &str) -> Result<Self, String> {
-        let mut parts = Vec::new();
-        while let Some(start) = source.find("{{") {
-            parts.push(Part::Text(source[..start].to_owned()));
-            source = &source[start + 2..];
-            let end = source.find("}}").ok_or("unclosed template action")?;
-            let action = source[..end].trim();
-            let part = if let Some(args) = action.strip_prefix("parseInt ") {
-                let mut args = args.split_whitespace();
-                let field = parse_field(args.next().ok_or("parseInt needs three arguments")?)?;
-                let base = args
-                    .next()
-                    .ok_or("parseInt needs a base")?
-                    .parse::<u32>()
-                    .map_err(|_| "invalid parseInt base")?;
-                let bits = args
-                    .next()
-                    .ok_or("parseInt needs a bit size")?
-                    .parse::<u32>()
-                    .map_err(|_| "invalid parseInt bit size")?;
-                if args.next().is_some() {
-                    return Err("parseInt has too many arguments".into());
-                }
-                Part::ParseInt(field, base, bits)
-            } else {
-                Part::Field(parse_field(action)?)
-            };
-            parts.push(part);
-            source = &source[end + 2..];
+        let (parts, marker) = parse_parts(&mut source, 0)?;
+        if marker.is_some() {
+            return Err("unexpected template else or end".into());
         }
-        parts.push(Part::Text(source.to_owned()));
         Ok(Self(parts))
     }
 
     /// Append the rendered template to a caller-provided buffer.
     pub fn render(&self, data: &Data<'_, '_>, output: &mut String) -> fmt::Result {
-        for part in &self.0 {
-            match part {
-                Part::Text(text) => output.write_str(text)?,
-                Part::Field(Field::Variable(name)) => match data
-                    .variables
-                    .iter()
-                    .find_map(|(key, value)| (*key == name).then_some(value))
-                {
-                    Some(Value::Nil) | None => output.write_str("<no value>")?,
-                    Some(Value::Bool(value)) => write!(output, "{value}")?,
-                    Some(Value::Int(value)) => write!(output, "{value}")?,
-                    Some(Value::Float(value)) => write!(output, "{value}")?,
-                    Some(Value::String(value)) => output.write_str(value)?,
-                },
-                Part::Field(field) => output.write_str(field.value(data)?)?,
-                Part::ParseInt(field, base, bits) => {
-                    if (*base != 0 && !(2..=36).contains(base)) || *bits > 64 {
-                        return Err(fmt::Error);
-                    }
-                    let value = parse_uint(field.value(data)?, *base)?;
-                    if *bits != 0 && *bits < 64 && value >= (1u64 << bits) {
-                        return Err(fmt::Error);
-                    }
-                    write!(output, "{value}")?;
+        render_parts(&self.0, data, output)
+    }
+}
+
+fn render_parts(parts: &[Part], data: &Data<'_, '_>, output: &mut String) -> fmt::Result {
+    for part in parts {
+        match part {
+            Part::Text(text) => output.write_str(text)?,
+            Part::Field(Field::Variable(name)) => match data
+                .variables
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(value))
+            {
+                Some(Value::Nil) | None => output.write_str("<no value>")?,
+                Some(Value::Bool(value)) => write!(output, "{value}")?,
+                Some(Value::Int(value)) => write!(output, "{value}")?,
+                Some(Value::Float(value)) => write!(output, "{value}")?,
+                Some(Value::String(value)) => output.write_str(value)?,
+            },
+            Part::Field(field) => output.write_str(field.value(data)?)?,
+            Part::ParseInt(field, base, bits) => {
+                if (*base != 0 && !(2..=36).contains(base)) || *bits > 64 {
+                    return Err(fmt::Error);
                 }
+                let value = parse_uint(field.value(data)?, *base)?;
+                if *bits != 0 && *bits < 64 && value >= (1u64 << bits) {
+                    return Err(fmt::Error);
+                }
+                write!(output, "{value}")?;
+            }
+            Part::If(condition, yes, no) => {
+                render_parts(if condition.truthy(data)? { yes } else { no }, data, output)?
             }
         }
-        Ok(())
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Marker {
+    Else,
+    End,
+}
+
+fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Marker>), String> {
+    // shortcut: 256 nested actions bound recursive rendering; use an iterative renderer to lift this limit.
+    if depth >= 256 {
+        return Err("template nesting exceeds 256 levels".into());
+    }
+    let mut parts = Vec::new();
+    while let Some(start) = source.find("{{") {
+        parts.push(Part::Text(source[..start].to_owned()));
+        *source = &source[start + 2..];
+        let end = source.find("}}").ok_or("unclosed template action")?;
+        let action = source[..end].trim();
+        *source = &source[end + 2..];
+        match action {
+            "else" => return Ok((parts, Some(Marker::Else))),
+            "end" => return Ok((parts, Some(Marker::End))),
+            _ => {}
+        }
+        let part = if let Some(condition) = action.strip_prefix("if ") {
+            let condition = parse_field(condition.trim())?;
+            let (yes, marker) = parse_parts(source, depth + 1)?;
+            let no = if marker == Some(Marker::Else) {
+                let (no, marker) = parse_parts(source, depth + 1)?;
+                if marker != Some(Marker::End) {
+                    return Err("if is missing end".into());
+                }
+                no
+            } else if marker == Some(Marker::End) {
+                Vec::new()
+            } else {
+                return Err("if is missing end".into());
+            };
+            Part::If(condition, yes, no)
+        } else if let Some(args) = action.strip_prefix("parseInt ") {
+            let mut args = args.split_whitespace();
+            let field = parse_field(args.next().ok_or("parseInt needs three arguments")?)?;
+            let base = args
+                .next()
+                .ok_or("parseInt needs a base")?
+                .parse::<u32>()
+                .map_err(|_| "invalid parseInt base")?;
+            let bits = args
+                .next()
+                .ok_or("parseInt needs a bit size")?
+                .parse::<u32>()
+                .map_err(|_| "invalid parseInt bit size")?;
+            if args.next().is_some() {
+                return Err("parseInt has too many arguments".into());
+            }
+            Part::ParseInt(field, base, bits)
+        } else {
+            Part::Field(parse_field(action)?)
+        };
+        parts.push(part);
+    }
+    parts.push(Part::Text((*source).to_owned()));
+    *source = "";
+    Ok((parts, None))
 }
 
 fn parse_field(action: &str) -> Result<Field, String> {
@@ -174,6 +221,29 @@ fn parse_field(action: &str) -> Result<Field, String> {
 }
 
 impl Field {
+    fn truthy(&self, data: &Data<'_, '_>) -> Result<bool, fmt::Error> {
+        match self {
+            Self::Variable(name) => Ok(
+                match data
+                    .variables
+                    .iter()
+                    .find_map(|(key, value)| (*key == name).then_some(value))
+                {
+                    Some(Value::Bool(value)) => *value,
+                    Some(Value::Int(value)) => *value != 0,
+                    Some(Value::Float(value)) => *value != 0.0,
+                    Some(Value::String(value)) => !value.is_empty(),
+                    Some(Value::Nil) | None => false,
+                },
+            ),
+            Self::Group(name) => Ok(data
+                .groups
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(!value.is_empty()))
+                .unwrap_or(false)),
+            _ => Ok(!self.value(data)?.is_empty()),
+        }
+    }
     fn value<'a>(&'a self, data: &'a Data<'_, '_>) -> Result<&'a str, fmt::Error> {
         match self {
             Self::Literal(value) => Ok(value),

@@ -90,3 +90,26 @@ fn expression_values_are_available_as_template_variables() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "a.example. 60 IN A 10.0.0.1");
 }
+
+#[test]
+fn coredns_if_else_uses_expression_variable_truth() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let template = Template::compile(
+        "{{ .Name }} 60 IN A {{ if .Var.local }}10.0.0.1{{ else }}192.0.2.1{{ end }}",
+    )
+    .unwrap();
+    for (local, expected) in [
+        (true, "a.example. 60 IN A 10.0.0.1"),
+        (false, "a.example. 60 IN A 192.0.2.1"),
+    ] {
+        let variables = [("local", pharos_plugins::expression::Value::Bool(local))];
+        let mut data = Data::new("a.example.", &metadata);
+        data.variables = &variables;
+        let mut output = String::new();
+        template.render(&data, &mut output).unwrap();
+        assert_eq!(output, expected);
+    }
+    assert!(Template::compile("{{ if .Name }}missing end").is_err());
+    assert!(Template::compile("{{ else }}").is_err());
+}
