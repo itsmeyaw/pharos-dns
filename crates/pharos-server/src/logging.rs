@@ -51,6 +51,13 @@ pub fn log(level: &str, plugin: &str, message: &str) {
 
 /// Write a bounded debug entry without allocating on the Query path.
 pub fn log_debug(plugin: &str, message: fmt::Arguments<'_>) {
+    if !debug_enabled() {
+        return;
+    }
+    log_bounded("DEBUG", plugin, message);
+}
+
+fn log_bounded(level: &str, plugin: &str, message: fmt::Arguments<'_>) {
     let mut text = StackText::<2048>::new();
     if text.write_fmt(message).is_err() {
         return;
@@ -65,7 +72,7 @@ pub fn log_debug(plugin: &str, message: fmt::Arguments<'_>) {
         &mut line,
         format,
         SystemTime::now(),
-        "DEBUG",
+        level,
         plugin,
         text.as_str(),
     );

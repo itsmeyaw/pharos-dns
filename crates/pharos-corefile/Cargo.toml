@@ -11,3 +11,6 @@ workspace = true
 
 [dependencies]
 glob = "0.3"
+
+[dev-dependencies]
+stats_alloc = "0.1.10"

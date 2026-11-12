@@ -1,0 +1,7 @@
+auth.zone:{port} {
+    tsig {
+        secret auth.zone.key. NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=
+        require all
+    }
+    whoami
+}

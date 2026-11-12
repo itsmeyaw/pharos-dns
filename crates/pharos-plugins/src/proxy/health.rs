@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncReadExt,
     net::UdpSocket,
     task::JoinHandle,
     time::{sleep, timeout},
@@ -195,10 +195,7 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
         .await??;
         timeout(IO_TIMEOUT, async {
             // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
-            stream
-                .write_all(&(query.len() as u16).to_be_bytes())
-                .await?;
-            stream.write_all(&query).await
+            super::write_tcp_frame(&mut stream, &query).await
         })
         .await??;
         timeout(IO_TIMEOUT, async {
@@ -245,6 +242,7 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
 mod tests {
     use super::*;
     use pharos_proto::{Class, Message, Type};
+    use tokio::io::AsyncWriteExt;
     use tokio::{
         net::{TcpListener, UdpSocket},
         time::timeout,

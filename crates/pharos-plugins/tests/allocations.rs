@@ -61,6 +61,12 @@ mod any {
 }
 
 #[path = "allocations"]
+mod tsig {
+    #[path = "tsig_allocations.rs"]
+    mod cases;
+}
+
+#[path = "allocations"]
 mod autopath {
     #[path = "autopath_allocations.rs"]
     mod autopath_allocations;

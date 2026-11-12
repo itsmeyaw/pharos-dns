@@ -46,6 +46,7 @@ default = [
     "plugin-dns64",
     "plugin-dnssec",
     "plugin-siit",
+    "plugin-tsig",
     "plugin-errors",
     "plugin-forward",
     "plugin-header",

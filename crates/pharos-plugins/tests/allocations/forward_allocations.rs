@@ -92,22 +92,28 @@ fn check_forward(protocol: Protocol, failover: bool) {
         let query = [0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1];
         let peer = "127.0.0.1:1000".parse().unwrap();
         let mut response = Vec::with_capacity(65535);
-        for _ in 0..10 {
+        for id in 0..10u8 {
+            let mut query = query;
+            query[1] = id;
             assert_eq!(
                 server.handle(&query, peer, protocol, &mut response).await,
                 Action::Respond
             );
+            assert_eq!(&response[..2], &query[..2]);
             assert_eq!(
                 pharos_proto::Message::parse(&response).unwrap().rcode(),
                 pharos_proto::Rcode::NOERROR
             );
         }
         let before = GLOBAL.stats();
-        for _ in 0..10 {
+        for id in 10..20u8 {
+            let mut query = query;
+            query[1] = id;
             assert_eq!(
                 server.handle(&query, peer, protocol, &mut response).await,
                 Action::Respond
             );
+            assert_eq!(&response[..2], &query[..2]);
         }
         let after = GLOBAL.stats();
         assert_eq!(after.allocations - before.allocations, 0);

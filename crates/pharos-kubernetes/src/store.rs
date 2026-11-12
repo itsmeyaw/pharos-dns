@@ -96,6 +96,31 @@ mod tests {
         )
     }
 
+    #[test]
+    fn external_name_index_tracks_updates_and_relists() {
+        let store = Store::default();
+        let mut alias = service("None");
+        alias.service_type = "ExternalName".into();
+        alias.external_name = "first.example".into();
+        store.apply_service(alias.clone());
+        store.with_read(|i| {
+            assert_eq!(
+                i.external_name("prod", "web").unwrap().to_string(),
+                "first.example."
+            )
+        });
+        alias.external_name = "second.example.".into();
+        store.apply_service(alias);
+        store.with_read(|i| {
+            assert_eq!(
+                i.external_name("prod", "web").unwrap().to_string(),
+                "second.example."
+            )
+        });
+        store.replace_services(Vec::new());
+        store.with_read(|i| assert!(i.external_name("prod", "web").is_none()));
+    }
+
     fn slice(name: &str, ip: &str) -> Endpoints {
         Endpoints::from(serde_json::from_value::<EndpointSlice>(json!({
             "metadata":{"name":name, "namespace":"prod", "labels":{"kubernetes.io/service-name":"web"}},
@@ -376,6 +401,7 @@ pub struct Index {
     allowed_namespaces: HashSet<Arc<str>>,
     require_namespace: bool,
     services: Names<Service>,
+    external_names: Names<pharos_proto::Name>,
     service_imports: Names<ServiceImport>,
     multicluster_slices: Names<MultiClusterEndpoints>,
     multicluster_endpoints: Grouped<MultiClusterEndpoints>,
@@ -474,6 +500,9 @@ impl Index {
             None
         }
     }
+    pub fn external_name(&self, namespace: &str, name: &str) -> Option<Arc<pharos_proto::Name>> {
+        by_name(&self.external_names, namespace, name).cloned()
+    }
     pub fn service_import(&self, namespace: &str, name: &str) -> Option<&ServiceImport> {
         self.namespace_allowed(namespace)
             .then(|| by_name(&self.service_imports, namespace, name))
@@ -546,6 +575,7 @@ impl Index {
     }
 
     fn delete_service(&mut self, namespace: &str, name: &str) {
+        remove(&mut self.external_names, namespace, name);
         if let Some(service) = remove(&mut self.services, namespace, name) {
             for ip in &service.cluster_ips {
                 remove_reverse(&mut self.service_ips, ip, &service);
@@ -588,6 +618,22 @@ impl Index {
     }
     fn apply_service(&mut self, service: Service) {
         self.delete_service(&service.namespace, &service.name);
+        // RFC 1034 §3.1: store ExternalName targets as absolute domain names.
+        if service.service_type == "ExternalName" {
+            let fqdn = if service.external_name.ends_with('.') {
+                service.external_name.clone()
+            } else {
+                format!("{}.", service.external_name)
+            };
+            if let Ok(name) = fqdn.parse::<pharos_proto::Name>() {
+                put(
+                    &mut self.external_names,
+                    service.namespace.clone(),
+                    service.name.clone(),
+                    Arc::new(name),
+                );
+            }
+        }
         let service = Arc::new(service);
         for ip in &service.cluster_ips {
             insert_reverse(&mut self.service_ips, ip, &service);
@@ -811,6 +857,7 @@ impl Store {
             index.mark_modified();
         }
         index.services.clear();
+        index.external_names.clear();
         index.service_ips.clear();
         index.service_external_ips.clear();
         for object in objects {

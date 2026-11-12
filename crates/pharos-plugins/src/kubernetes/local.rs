@@ -134,4 +134,21 @@ mod tests {
         assert_eq!(original.local_ips, ["192.0.2.1".parse::<IpAddr>().unwrap()]);
         assert_eq!(reloaded.local_ips, ["192.0.2.2".parse::<IpAddr>().unwrap()]);
     }
+
+    #[test]
+    fn invalid_kubernetes_zone_has_a_typed_error() {
+        use super::super::{Kubernetes, KubernetesError, setup};
+        let blocks =
+            pharos_corefile::parse("Corefile", ".:53 {\n kubernetes cluster.local\n}").unwrap();
+        let tokens = &blocks[0].directives["kubernetes"];
+        let mut config = setup::parse(
+            &mut pharos_corefile::Cursor::new("Corefile", tokens),
+            &["."],
+        )
+        .unwrap();
+        config.zones = vec!["bad..name.".into()];
+        let error = Kubernetes::new(config).unwrap_err();
+        assert!(matches!(error, KubernetesError::InvalidName(_)));
+        assert_eq!(error.to_string(), "empty label");
+    }
 }

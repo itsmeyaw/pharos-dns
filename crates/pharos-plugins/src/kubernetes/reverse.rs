@@ -32,6 +32,7 @@ pub(super) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
         }
         return Some(Ipv4Addr::from(octets).into());
     }
+    // RFC 3596 §2.5: IPv6 reverse names encode 32 nibbles; extra labels are accepted here.
     if !kind.eq_ignore_ascii_case(b"ip6") || !(32..=35).contains(&body.len()) {
         return None;
     }
