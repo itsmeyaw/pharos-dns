@@ -26,7 +26,8 @@ pub(crate) fn spawn<H: Handler>(
 ) -> JoinHandle<io::Result<()>> {
     tokio::spawn(async move {
         let mut connections = JoinSet::new();
-        let (stop, connections_stop) = watch::channel(false);
+        // One stop channel per connection: a shared watch's Notify mutex is locked on every poll by every connection.
+        let mut stops: Vec<watch::Sender<bool>> = Vec::new();
         let result = loop {
             if *shutdown.borrow() {
                 break Ok(());
@@ -38,9 +39,12 @@ pub(crate) fn spawn<H: Handler>(
                 accepted = listener.accept(), if connections.len() < MAX_CONNECTIONS => {
                     match accepted {
                         Ok((stream, peer)) => {
+                            stops.retain(|stop| !stop.is_closed());
+                            let (stop, stopped) = watch::channel(false);
+                            stops.push(stop.clone());
                             connections.spawn(serve(
                                 stream, crate::canonical_peer(peer), Arc::clone(&handler),
-                                connections_stop.clone(), handler.tcp_options(),
+                                (stop, stopped), handler.tcp_options(),
                             ));
                         }
                         Err(error) => {
@@ -54,7 +58,9 @@ pub(crate) fn spawn<H: Handler>(
                 }
             }
         };
-        stop.send_replace(true);
+        for stop in &stops {
+            stop.send_replace(true);
+        }
         drop(listener);
         while connections.join_next().await.is_some() {}
         result
@@ -96,7 +102,7 @@ async fn serve<H: Handler>(
     stream: TcpStream,
     peer: SocketAddr,
     handler: Arc<H>,
-    mut shutdown: watch::Receiver<bool>,
+    (failed, mut stopped): (watch::Sender<bool>, watch::Receiver<bool>),
     options: TcpOptions,
 ) {
     // RFC 7766 §7: send each Response as soon as it is available.
@@ -104,7 +110,6 @@ async fn serve<H: Handler>(
     let _ = stream.set_nodelay(true);
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(Some(writer)));
-    let (failed, mut write_failed) = watch::channel(false);
     let mut queries: JoinSet<Vec<u8>> = JoinSet::new();
     let mut responses = Vec::with_capacity(MAX_IN_FLIGHT_PER_CONNECTION);
     let mut count = 0usize;
@@ -115,7 +120,7 @@ async fn serve<H: Handler>(
                 responses.push(response);
             }
         }
-        if *shutdown.borrow() || *write_failed.borrow() {
+        if *stopped.borrow() {
             break;
         }
         // RFC 7766 §6.2.3: a server may close a connection at any time and clients must cope.
@@ -125,8 +130,7 @@ async fn serve<H: Handler>(
         while queries.len() >= MAX_IN_FLIGHT_PER_CONNECTION {
             tokio::select! {
                 biased;
-                _ = shutdown.changed() => break 'read,
-                _ = write_failed.changed() => break 'read,
+                _ = stopped.changed() => break 'read,
                 result = queries.join_next() => {
                     if let Some(Ok(response)) = result {
                         responses.push(response);
@@ -147,8 +151,7 @@ async fn serve<H: Handler>(
                     };
                     tokio::select! {
                         biased;
-                        _ = shutdown.changed() => break 'read,
-                        _ = write_failed.changed() => break 'read,
+                        _ = stopped.changed() => break 'read,
                         result = timeout(duration, &mut frame) => match result {
                             Ok(result) => result,
                             Err(_) => break 'read,
@@ -157,8 +160,7 @@ async fn serve<H: Handler>(
                 } else {
                     tokio::select! {
                         biased;
-                        _ = shutdown.changed() => break 'read,
-                        _ = write_failed.changed() => break 'read,
+                        _ = stopped.changed() => break 'read,
                         result = &mut frame => result,
                         result = queries.join_next() => {
                             if let Some(Ok(response)) = result { responses.push(response); }
