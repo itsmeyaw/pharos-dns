@@ -193,6 +193,7 @@ async fn axfr_inner(
         }
         let message = Message::parse(&wire).map_err(|_| invalid("invalid AXFR Message"))?;
         if coredns {
+            // RFC 5936 §2.2: a Zone Transfer begins and ends with SOA.
             if message.id() != id {
                 return Err(invalid("invalid AXFR Response ID"));
             }
