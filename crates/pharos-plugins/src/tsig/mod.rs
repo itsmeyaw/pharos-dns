@@ -36,6 +36,14 @@ impl std::fmt::Debug for Secret {
 
 impl Plugin for Tsig {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        // RFC 8945 §5.2: TSIG must be the final record in the Additional section.
+        let mut tsig_seen = false;
+        for rr in cx.query.additionals() {
+            if tsig_seen {
+                return Outcome::Unanswered(Rcode::FORMERR);
+            }
+            tsig_seen = rr.rtype == Type::TSIG;
+        }
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
@@ -55,8 +63,7 @@ impl Plugin for Tsig {
         if !matches {
             return next.run(cx).await;
         }
-        let signed = cx.query.additionals().any(|rr| rr.rtype == Type::TSIG);
-        if signed {
+        if tsig_seen {
             return self.signed(cx, next).await;
         }
         if self.all_types

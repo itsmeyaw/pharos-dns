@@ -6,6 +6,40 @@ use pharos_proto::{Message, Name, Rcode, TsigAlgorithm, TsigKey};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 #[tokio::test]
+async fn nonfinal_tsig_is_formerr_even_outside_domain() {
+    let blocks = parse("Corefile", ". {\n tsig example.com\n whoami\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut wire = Vec::with_capacity(512);
+    wire.extend_from_slice(&[0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1]);
+    key.sign(&mut wire, now, 300, None).unwrap();
+    wire.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 1, 2, 3, 4]);
+    wire[11] = 2;
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        configured[0].config.serve(&mut cx).await,
+        Outcome::Unanswered(Rcode::FORMERR)
+    );
+}
+
+#[tokio::test]
 async fn validated_key_is_visible_to_next_without_tsig_record() {
     struct Next;
     impl pharos_server::Next for Next {
