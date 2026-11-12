@@ -353,3 +353,16 @@ async fn external_alias_preserves_target_rcode_and_truncation() {
     assert!(response.tc());
     assert_eq!(response.answer_count(), 1);
 }
+
+// Derived from CoreDNS plugin/file/nsec3_test.go.
+#[test]
+fn nsec3_and_nsec3param_fail_the_entire_zone_load() {
+    for filename in ["nsec3.zone", "nsec3param.zone"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/file")
+            .join(filename);
+        let error =
+            pharos_plugins::file::Zone::load("example.org.".parse().unwrap(), &path).unwrap_err();
+        assert!(error.contains("NSEC3 zone is not supported"), "{error}");
+    }
+}
