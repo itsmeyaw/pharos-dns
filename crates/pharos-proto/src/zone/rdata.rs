@@ -7,11 +7,44 @@ const INVALID_ESCAPE: &str = "invalid escape in numeric field";
 mod advanced;
 mod legacy;
 
+/// A presentation-format RDATA error and its zero-based field position.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RdataParseError {
+    MissingField { field: usize, message: String },
+    InvalidField { field: usize, message: String },
+    UnsupportedType { field: usize, message: String },
+}
+
+impl std::fmt::Display for RdataParseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::MissingField { message, .. }
+            | Self::InvalidField { message, .. }
+            | Self::UnsupportedType { message, .. } => message,
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for RdataParseError {}
+
 /// Encodes presentation-format RDATA into uncompressed DNS wire format.
 /// `fields` are whitespace-separated tokens with surrounding quotes removed and
 /// backslash escapes preserved, as produced by the Zone lexer.
-pub fn parse_rdata(rtype: Type, fields: &[&str], origin: &Name) -> Result<Vec<u8>, String> {
-    parse_rdata_located(rtype, fields, &[], origin).map_err(|(_, message)| message)
+pub fn parse_rdata(
+    rtype: Type,
+    fields: &[&str],
+    origin: &Name,
+) -> Result<Vec<u8>, RdataParseError> {
+    parse_rdata_located(rtype, fields, &[], origin).map_err(|(field, message)| {
+        if message.starts_with("unsupported RDATA type ") {
+            RdataParseError::UnsupportedType { field, message }
+        } else if field >= fields.len() || message.starts_with("missing ") {
+            RdataParseError::MissingField { field, message }
+        } else {
+            RdataParseError::InvalidField { field, message }
+        }
+    })
 }
 
 /// `bad[i]` marks fields whose invalid digit escape the lexer already dropped (`\9` -> `9`).
@@ -866,6 +899,7 @@ fn unescape(value: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// RFC 1035 §3.3: character-strings have a one-octet length prefix.
 fn length_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), String> {
     out.push(u8::try_from(bytes.len()).map_err(|_| "character-string exceeds 255 octets")?);
     out.extend(bytes);
@@ -875,6 +909,7 @@ fn character_string(out: &mut Vec<u8>, value: &str) -> Result<(), String> {
     length_bytes(out, &unescape(value)?)
 }
 
+// RFC 4034 §5.3: DS digest fields use hexadecimal presentation.
 fn hex(value: &str) -> Result<Vec<u8>, String> {
     let b = value.as_bytes();
     if !b.len().is_multiple_of(2) {
@@ -965,6 +1000,7 @@ fn type_code(value: &str) -> Result<u16, String> {
         .ok_or_else(|| format!("unknown type {value}"))
 }
 
+// RFC 4034 §4.1.2: type bitmaps are encoded as ordered window blocks.
 fn bitmap(out: &mut Vec<u8>, fields: &[&str]) -> Result<(), String> {
     let mut types = fields
         .iter()

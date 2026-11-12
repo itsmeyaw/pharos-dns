@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt,
     path::{Component, Path, PathBuf},
 };
@@ -133,7 +133,7 @@ impl Parser<'_> {
     fn substitute(&self, text: &str) -> Result<String, Error> {
         let mut result = text.to_owned();
         for (start, end) in [("{%", "%}"), ("{$", "}")] {
-            let mut seen = BTreeSet::new();
+            let mut steps = 0;
             while let Some(index) = result.find(start) {
                 let Some(end_offset) = result[index..].find(end) else {
                     break;
@@ -145,11 +145,10 @@ impl Parser<'_> {
                 let name = &result[index + start.len()..end_index];
                 let value = (self.lookup)(name).unwrap_or_default();
                 let reference = &result[index..end_index + end.len()];
-                // shortcut: bound expansion to 10,000 steps and 16 MiB; upgrade for larger configurations.
+                // shortcut: cycles run until the 10,000-step cap; add exact compact history if needed.
                 let occurrences = result.matches(reference).count();
                 let size = result.len() - occurrences * reference.len();
-                if seen.len() >= 10_000
-                    || !seen.insert(result.clone())
+                if steps >= 10_000
                     || value
                         .len()
                         .checked_mul(occurrences)
@@ -158,6 +157,7 @@ impl Parser<'_> {
                 {
                     return Err(self.error("environment expansion limit or cycle"));
                 }
+                steps += 1;
                 result = result.replace(reference, &value);
             }
         }

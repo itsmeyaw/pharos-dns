@@ -1,6 +1,5 @@
 use pharos_proto::{
-    EdnsOptions, Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type,
-    normalized_udp_size,
+    Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type, normalized_udp_size,
 };
 use std::sync::Arc;
 
@@ -211,27 +210,11 @@ fn scrub(
     if query.opt().is_none() && message.opt().is_none() && wire.len() <= limit {
         return Ok(());
     }
-    let mut options = [0_u8; 65535];
-    let existing = message.opt().map(|opt| {
-        let bytes = opt.options().as_bytes();
-        options[..bytes.len()].copy_from_slice(bytes);
-        (
-            opt.udp_payload_size(),
-            opt.extended_rcode(),
-            opt.version(),
-            opt.flags(),
-            bytes.len(),
-        )
-    });
-    let existing = existing.map(|(size, code, version, flags, len)| {
-        Opt::new(
-            size,
-            code,
-            version,
-            flags,
-            EdnsOptions::parse(&options[..len]).expect("validated options"),
-        )
-    });
+    let existing = message.opt();
+    let existing_options = message
+        .additionals()
+        .find(|rr| rr.rtype == Type::OPT)
+        .map(|rr| (rr.rdata_offset, rr.rdata.len()));
     let rcode = message.rcode();
     // RFC 6891 §6.1.1: an EDNS request requires an OPT record in the response.
     let response_opt = query
@@ -282,19 +265,37 @@ fn scrub(
         }
     }
     let truncated = counts != original;
+    let existing_flags = existing.map(Opt::flags);
     if end + opt_len > wire.capacity() {
         if protocol == Protocol::Udp {
             return Err(Error::ResponseBufferTooSmall);
         }
         wire.reserve((end + opt_len).saturating_sub(wire.len()));
     }
-    wire.truncate(end);
+    if let (Some((offset, len)), Some(query_opt)) = (existing_options, query.opt()) {
+        // RFC 6891 §6.1.2: preserve Response options while relocating the OPT record.
+        wire.resize(wire.len().max(end + opt_len), 0);
+        wire.copy_within(offset..offset + len, end + 11);
+        wire.truncate(end + opt_len);
+        wire[end..end + 3].copy_from_slice(&[0, 0, 41]);
+        wire[end + 3..end + 5].copy_from_slice(&query_opt.udp_payload_size().to_be_bytes());
+        let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
+            | u32::from(existing_flags.unwrap_or_default() & 0xff00)
+            | if query_opt.dnssec_ok() { 0x8000 } else { 0 };
+        wire[end + 5..end + 9].copy_from_slice(&ttl.to_be_bytes());
+        wire[end + 9..end + 11].copy_from_slice(&(len as u16).to_be_bytes());
+        counts[3] += 1;
+    } else {
+        wire.truncate(end);
+        if let Some(opt) = query.opt() {
+            opt.response_registered(None, rcode)
+                .encode(wire)
+                .map_err(Error::Build)?;
+            counts[3] += 1;
+        }
+    }
     if truncated {
         wire[2] |= 0x02;
-    }
-    if let Some(opt) = response_opt {
-        opt.encode(wire).map_err(Error::Build)?;
-        counts[3] += 1;
     }
     // RFC 1035 §4.1.1: header counts describe the records in each response section.
     for (i, count) in counts.into_iter().enumerate() {

@@ -3,7 +3,7 @@
 Run `cargo xtask coredns` once with Go installed, then `cargo xtask diff`.
 `cargo xtask check` runs the scenarios when that binary is cached. The cache
 is `target/coredns/v1.15.0/coredns`. `cargo xtask diff --self-test` deliberately
-changes a Response and must fail with a diagnostic.
+changes a Response and succeeds only when it detects that injected mismatch.
 
 Each scenario is a directory containing:
 

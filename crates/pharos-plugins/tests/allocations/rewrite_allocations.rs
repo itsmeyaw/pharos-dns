@@ -154,6 +154,10 @@ fn rewrite_non_regex_rules_do_not_allocate() {
         ("rewrite cname old.example. new.example.", "example."),
         ("rewrite edns0 local set 0xffee abcd", "example."),
         ("rewrite edns0 local set 0xffee abcd revert", "example."),
+        (
+            "rewrite continue edns0 local set 0xffee old\n rewrite edns0 local replace 0xffee new revert",
+            "example.",
+        ),
         ("rewrite edns0 nsid set revert", "example."),
         ("rewrite edns0 subnet set 24 56 revert", "example."),
         ("rewrite edns0 local append 0xffee abcd", "example."),

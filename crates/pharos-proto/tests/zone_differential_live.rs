@@ -716,6 +716,11 @@ fn parallel_oracle_temp_dirs_are_distinct() {
 fn oracle() -> Option<(TempDir, PathBuf)> {
     match Command::new("go").arg("version").output() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            assert_ne!(
+                std::env::var("PHAROS_REQUIRE_INTEROP").as_deref(),
+                Ok("1"),
+                "go is not installed"
+            );
             eprintln!("skipping live zone differential test: go is not installed");
             return None;
         }
@@ -1103,4 +1108,27 @@ fn miekg_live_differential() {
         invalid_examples.len(),
         invalid_examples.join("\n")
     );
+}
+
+#[test]
+fn missing_go_fails_only_when_interop_is_required() {
+    for (required, success) in [(false, true), (true, false)] {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", "miekg_live_differential", "--nocapture"])
+            .env("PATH", "/nonexistent");
+        if required {
+            child.env("PHAROS_REQUIRE_INTEROP", "1");
+        } else {
+            child.env_remove("PHAROS_REQUIRE_INTEROP");
+        }
+        let output = child.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("go is not installed"));
+    }
 }

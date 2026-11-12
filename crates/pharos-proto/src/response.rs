@@ -31,6 +31,7 @@ pub const fn classify_response(response_type: ResponseType) -> ResponseClass {
     }
 }
 
+// RFC 2308 §2: classify NXDOMAIN and NODATA as CoreDNS does.
 /// Classifies a Response at a Unix timestamp in seconds.
 #[must_use]
 pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType {
@@ -95,6 +96,7 @@ pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType 
     }
 }
 
+// RFC 4034 §3.1.5: use miekg/dns ValidityPeriod truncation for CoreDNS compatibility.
 fn signature_valid(inception: u32, expiration: u32, now: i64) -> bool {
     let expiration = i128::from(expiration);
     let inception = i128::from(inception);

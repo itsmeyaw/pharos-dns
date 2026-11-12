@@ -11,6 +11,7 @@ use std::{
     future::Future,
     io::{self, Read},
     path::Path,
+    sync::Arc,
     time::Duration,
 };
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -241,7 +242,10 @@ async fn reload(
     listeners: &mut ListenerRegistry,
     lifecycle: &mut Lifecycle,
     metrics: &pharos_server::metrics::Registry,
-) -> Option<(ReloadConfig, String)> {
+    signals: &mut Signals,
+    pending_reload: &mut bool,
+) -> (Option<(ReloadConfig, String)>, Option<StopSignal>) {
+    let mut stop = None;
     let result = async {
         lifecycle
             .run(Phase::Restart)
@@ -254,7 +258,7 @@ async fn reload(
             let _ = next.run(Phase::Shutdown).await;
             return Err(error.to_string());
         }
-        let retired = match listeners.apply(servers).await {
+        let retired = match listeners.apply_with_keys(servers).await {
             Ok(retired) => retired,
             Err(error) => {
                 let _ = next.run(Phase::Restart).await;
@@ -263,11 +267,16 @@ async fn reload(
             }
         };
         next.run(Phase::Started).await.map_err(|e| e.to_string())?;
-        while retired
-            .iter()
-            .any(|state| std::sync::Arc::strong_count(state) > 1)
-        {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+        // CoreDNS v1.15.0 core/dnsserver/server.go:122: old servers have five seconds to drain.
+        stop = drain_retired(
+            &retired,
+            Duration::from_secs(5),
+            signals.wait_for_stop(pending_reload),
+        )
+        .await;
+        if stop == Some(StopSignal::Quit) {
+            *lifecycle = next;
+            return Ok((reload_config, hash));
         }
         if let Err(error) = lifecycle.run(Phase::Shutdown).await {
             logging::log("ERROR", "", &format!("Reload shutdown: {error}"));
@@ -276,7 +285,7 @@ async fn reload(
         Ok((reload_config, hash))
     }
     .await;
-    match result {
+    let config = match result {
         Ok(config) => Some(config),
         Err(error) => {
             logging::log("ERROR", "", &format!("Reload failed: {error}"));
@@ -285,7 +294,46 @@ async fn reload(
             }
             None
         }
+    };
+    (config, stop)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopSignal {
+    Interrupt,
+    Terminate,
+    Quit,
+}
+
+async fn drain_retired<T>(
+    retired: &[pharos_server::RetiredHandler<T>],
+    grace: Duration,
+    stop: impl Future<Output = StopSignal>,
+) -> Option<StopSignal> {
+    let deadline = tokio::time::Instant::now() + grace;
+    tokio::pin!(stop);
+    while retired.iter().any(|entry| {
+        Arc::strong_count(&entry.handler) > 1
+            || entry
+                .shutdown
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+    }) {
+        tokio::select! {
+            signal = &mut stop => return Some(signal),
+            _ = tokio::time::sleep_until(deadline) => {
+                // CoreDNS caddy Instance.Stop logs each server whose graceful stop times out.
+                for entry in retired {
+                    if entry.shutdown.is_none() && Arc::strong_count(&entry.handler) > 1 {
+                        logging::log("ERROR", "", &format!("Stopping {}: context deadline exceeded", entry.key.address));
+                    }
+                }
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
     }
+    None
 }
 
 struct Signals {
@@ -304,6 +352,21 @@ impl Signals {
             reload: signal(SignalKind::user_defined1())?,
             hangup: signal(SignalKind::hangup())?,
         })
+    }
+
+    async fn wait_for_stop(&mut self, pending_reload: &mut bool) -> StopSignal {
+        loop {
+            tokio::select! {
+                _ = self.interrupt.recv() => return StopSignal::Interrupt,
+                _ = self.terminate.recv() => return StopSignal::Terminate,
+                _ = self.quit.recv() => return StopSignal::Quit,
+                _ = self.hangup.recv() => {},
+                _ = self.reload.recv() => {
+                    logging::log("INFO", "", "SIGUSR1: Reloading");
+                    *pending_reload = true;
+                },
+            }
+        }
     }
 }
 
@@ -352,15 +415,32 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     }
     let mut poll_interval = reload_config.map(interval);
     let mut poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
+    let mut pending_reload = false;
     let terminate = loop {
         tokio::select! {
             _ = signals.interrupt.recv() => break false,
             _ = signals.terminate.recv() => break true,
             _ = signals.quit.recv() => { remove_pidfile(&options); return Ok(0); },
             _ = signals.hangup.recv() => {},
+            _ = async { if pending_reload {} else { std::future::pending::<()>().await } } => {
+                pending_reload = false;
+                let (config, stop) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics, &mut signals, &mut pending_reload).await;
+                if let Some(stop) = stop {
+                    match stop { StopSignal::Interrupt => break false, StopSignal::Terminate => break true, StopSignal::Quit => { remove_pidfile(&options); return Ok(0); } }
+                }
+                if let Some((config, loaded_hash)) = config {
+                    current_hash = loaded_hash;
+                    poll_interval = config.map(interval);
+                    poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
+                }
+            },
             _ = signals.reload.recv() => {
                 logging::log("INFO", "", "SIGUSR1: Reloading");
-                if let Some((config, loaded_hash)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
+                let (config, stop) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics, &mut signals, &mut pending_reload).await;
+                if let Some(stop) = stop {
+                    match stop { StopSignal::Interrupt => break false, StopSignal::Terminate => break true, StopSignal::Quit => { remove_pidfile(&options); return Ok(0); } }
+                }
+                if let Some((config, loaded_hash)) = config {
                     current_hash = loaded_hash;
                     poll_interval = config.map(interval);
                     poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
@@ -374,7 +454,11 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
                             let observed_hash = corefile_hash(&blocks);
                             if observed_hash != current_hash {
                                 current_hash = observed_hash;
-                                if let Some((config, loaded_hash)) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics).await {
+                                let (config, stop) = reload(&options, &input, &mut listeners, &mut lifecycle, &metrics, &mut signals, &mut pending_reload).await;
+                                if let Some(stop) = stop {
+                                    match stop { StopSignal::Interrupt => break false, StopSignal::Terminate => break true, StopSignal::Quit => { remove_pidfile(&options); return Ok(0); } }
+                                }
+                                if let Some((config, loaded_hash)) = config {
                                     current_hash = loaded_hash;
                                     poll_interval = config.map(interval);
                                     poll_at = poll_interval.map(|duration| tokio::time::Instant::now() + duration);
@@ -446,6 +530,30 @@ mod tests {
     use std::{cell::RefCell, io};
 
     use super::{corefile_hash, digest_hex, interval, shutdown};
+
+    #[tokio::test]
+    async fn retired_handlers_have_a_deadline_and_accept_shutdown_signals() {
+        use pharos_server::{ListenerKey, Transport};
+        use std::{sync::Arc, time::Duration};
+        let key = ListenerKey {
+            transport: Transport::Dns,
+            address: "127.0.0.1:53".parse().unwrap(),
+        };
+        let handler = Arc::new(());
+        let retired = vec![pharos_server::RetiredHandler {
+            key,
+            handler: Arc::clone(&handler),
+            shutdown: None,
+        }];
+        let result =
+            super::drain_retired(&retired, Duration::from_millis(10), std::future::pending()).await;
+        assert_eq!(result, None);
+        let result = super::drain_retired(&retired, Duration::from_secs(5), async {
+            super::StopSignal::Interrupt
+        })
+        .await;
+        assert_eq!(result, Some(super::StopSignal::Interrupt));
+    }
 
     #[test]
     fn startup_domains_render_bound_ipv6_addresses() {

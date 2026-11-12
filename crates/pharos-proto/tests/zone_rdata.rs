@@ -1,6 +1,33 @@
 use pharos_proto::{Name, Type, zone::parse_rdata};
 
-fn parse(rtype: Type, fields: &[&str]) -> Result<Vec<u8>, String> {
+#[test]
+fn rdata_errors_expose_field_and_preserve_messages() {
+    use pharos_proto::zone::RdataParseError;
+    let origin: Name = "example.".parse().unwrap();
+    let error = parse_rdata(Type::A, &["invalid"], &origin).unwrap_err();
+    assert!(matches!(
+        &error,
+        RdataParseError::InvalidField { field: 0, .. }
+    ));
+    assert_eq!(error.to_string(), "invalid IPv4 address");
+    let error = parse_rdata(Type::MX, &[], &origin).unwrap_err();
+    assert!(matches!(
+        &error,
+        RdataParseError::MissingField { field: 0, .. }
+    ));
+    assert_eq!(error.to_string(), "missing RDATA");
+    let error = parse_rdata(Type::MX, &["10", "bad..name."], &origin).unwrap_err();
+    assert!(matches!(
+        &error,
+        RdataParseError::InvalidField { field: 1, .. }
+    ));
+    assert_eq!(error.to_string(), "empty label");
+    let error = parse_rdata(Type(65000), &["value"], &origin).unwrap_err();
+    assert!(matches!(&error, RdataParseError::UnsupportedType { .. }));
+    assert!(error.to_string().contains("unsupported RDATA type"));
+}
+
+fn parse(rtype: Type, fields: &[&str]) -> Result<Vec<u8>, pharos_proto::zone::RdataParseError> {
     parse_rdata(rtype, fields, &"example.".parse::<Name>().unwrap())
 }
 
@@ -51,7 +78,7 @@ fn generic_rdata_and_binary_security_fields() {
         parse(Type(65000), &[r"\#", "4", "DEad", "beEF"]).unwrap(),
         [0xde, 0xad, 0xbe, 0xef]
     );
-    assert_eq!(parse(Type::A, &[r"\#", "0"]).unwrap(), []);
+    assert!(parse(Type::A, &[r"\#", "0"]).unwrap().is_empty());
     assert_eq!(
         parse(Type::DS, &["1234", "8", "2", "ABCD"]).unwrap(),
         [4, 210, 8, 2, 0xab, 0xcd]

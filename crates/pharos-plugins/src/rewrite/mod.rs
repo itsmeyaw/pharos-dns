@@ -177,6 +177,17 @@ struct EdnsScratch {
     matched: Vec<u8>,
     tags: Vec<u8>,
     snapshots: Vec<EdnsSnapshot>,
+    revert: RevertScratch,
+}
+
+// RFC 6891 §6.1.2: preserve OPT options while rebuilding Responses in reusable buffers.
+#[derive(Debug)]
+struct RevertScratch {
+    response: Vec<u8>,
+    options: Vec<u8>,
+    tags: Vec<u8>,
+    replay: Vec<u8>,
+    replay_tags: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -552,6 +563,13 @@ impl Rewrite {
                         wire: vec![0; 2 * 65535],
                         matched: vec![0; rules.len()],
                         tags: vec![0; 16384],
+                        revert: RevertScratch {
+                            response: vec![0; 65535],
+                            options: vec![0; 65535],
+                            tags: vec![0; 16384],
+                            replay: vec![0; 65535],
+                            replay_tags: vec![0; 16384],
+                        },
                         snapshots: snapshot_labels
                             .iter()
                             .map(|label| EdnsSnapshot {
@@ -1577,13 +1595,24 @@ fn edns_query(query: Message<'_>, options: &[u8], output: &mut [u8]) -> Result<u
 }
 
 #[inline(never)]
-fn build_cname_response(
+fn build_cname_response_stack(
     cx: &mut Context<'_, '_>,
     lookup: Message<'_>,
     from: &NameText,
     target: &Name,
 ) -> Result<(), ServerError> {
+    // shortcut: 64 KiB stack zeroed per Query without an edns0 rule; reuse scratch if profiling shows it matters.
     let mut scratch = [0u8; 65535];
+    build_cname_response(cx, lookup, from, target, &mut scratch)
+}
+
+fn build_cname_response(
+    cx: &mut Context<'_, '_>,
+    lookup: Message<'_>,
+    from: &NameText,
+    target: &Name,
+    scratch: &mut [u8],
+) -> Result<(), ServerError> {
     if cx.response.len() > scratch.len() {
         return Err(ServerError::InvalidQuery);
     }
@@ -1675,23 +1704,21 @@ fn revert_edns_response<'q>(
     query_options: &[u8],
     sources: EdnsHistory<'_, 'q>,
     end: usize,
+    scratch: &mut RevertScratch,
 ) -> Result<(), ServerError> {
     let (rules, matched, snapshots, name_history) = sources;
-    let mut scratch = [0; 65535];
-    if cx.response.len() > scratch.len() {
+    if cx.response.len() > scratch.response.len() {
         return Err(ServerError::InvalidQuery);
     }
-    scratch[..cx.response.len()].copy_from_slice(cx.response);
-    let response =
-        Message::parse(&scratch[..cx.response.len()]).map_err(|_| ServerError::InvalidQuery)?;
+    scratch.response[..cx.response.len()].copy_from_slice(cx.response);
+    let response = Message::parse(&scratch.response[..cx.response.len()])
+        .map_err(|_| ServerError::InvalidQuery)?;
     let response_opt = response.opt();
     if response_opt.is_none() && original.opt().is_none() {
         return Ok(());
     }
-    let mut output_options = [0; 65535];
-    let mut output_tags = [0; 16384];
     let seed = response_opt.map_or(query_options, |opt| opt.options().as_bytes());
-    let mut options = EdnsState::from_bytes(&mut output_options, &mut output_tags, seed);
+    let mut options = EdnsState::from_bytes(&mut scratch.options, &mut scratch.tags, seed);
     if response_opt.is_none() {
         let mut position = 0;
         while position < options.len {
@@ -1709,8 +1736,6 @@ fn revert_edns_response<'q>(
             }
         }
     }
-    let mut replay = [0; 65535];
-    let mut replay_tags = [0; 16384];
     let passes = if response_opt.is_some() {
         usize::from(response.answer_count())
             + usize::from(response.authority_count())
@@ -1726,7 +1751,8 @@ fn revert_edns_response<'q>(
             if !*revert || matched[index] == 0 || options.first(*code).is_none() {
                 continue;
             }
-            let mut previous_options = EdnsState::new(&mut replay, &mut replay_tags, &original);
+            let mut previous_options =
+                EdnsState::new(&mut scratch.replay, &mut scratch.replay_tags, &original);
             let mut previous_query = original;
             for earlier in 0..index {
                 if matched[earlier] == 0 {
@@ -1830,16 +1856,36 @@ fn revert_edns_response<'q>(
 }
 
 #[inline(never)]
+fn build_reverted_response_stack<'q>(
+    cx: &mut Context<'_, '_>,
+    original_query: Message<'q>,
+    rules: &[Rule],
+    recorded: Option<&[u8]>,
+    history: &NameHistory<'q>,
+    end_and_rcode: (usize, u16),
+) -> Result<(), ServerError> {
+    // shortcut: 64 KiB stack zeroed per Query without an edns0 rule; reuse scratch if profiling shows it matters.
+    let mut scratch = [0u8; 65535];
+    build_reverted_response(
+        cx,
+        original_query,
+        rules,
+        recorded,
+        history,
+        end_and_rcode,
+        &mut scratch,
+    )
+}
+
 fn build_reverted_response<'q>(
     cx: &mut Context<'_, '_>,
     original_query: Message<'q>,
     rules: &[Rule],
     recorded: Option<&[u8]>,
     history: &NameHistory<'q>,
-    end: usize,
-    rcode: u16,
+    (end, rcode): (usize, u16),
+    scratch: &mut [u8],
 ) -> Result<(), ServerError> {
-    let mut scratch = [0u8; 65535];
     if cx.response.len() > scratch.len() {
         return Err(ServerError::InvalidQuery);
     }
@@ -2016,13 +2062,14 @@ impl Plugin for Rewrite {
                     .await,
             )
         };
-        let (mut state, mut output, mut matches, mut snapshots) =
+        let (mut state, mut output, mut matches, mut snapshots, mut revert) =
             if let Some(scratch) = &mut scratch {
                 let EdnsScratch {
                     wire,
                     matched,
                     tags,
                     snapshots,
+                    revert,
                 } = &mut **scratch;
                 matched.fill(0);
                 for snapshot in snapshots.iter_mut() {
@@ -2035,9 +2082,10 @@ impl Plugin for Rewrite {
                     Some(output),
                     Some(matched.as_mut_slice()),
                     Some(snapshots.as_mut_slice()),
+                    Some(revert),
                 )
             } else {
-                (None, None, None, None)
+                (None, None, None, None, None)
             };
         for (index, rule) in self.rules.iter().enumerate() {
             let before = cx.query;
@@ -2150,6 +2198,7 @@ impl Plugin for Rewrite {
                     &name_history,
                 ),
                 end,
+                revert.as_deref_mut().expect("EDNS scratch allocated"),
             )
         {
             return Outcome::Error(error);
@@ -2212,7 +2261,16 @@ impl Plugin for Rewrite {
                         .self_lookup_with_query(lookup_query, &target, question.qtype)
                         .await
                         && let Ok(lookup) = Message::parse(&wire)
-                        && let Err(error) = build_cname_response(cx, lookup, &from, &target)
+                        && let Err(error) = match &mut revert {
+                            Some(scratch) => build_cname_response(
+                                cx,
+                                lookup,
+                                &from,
+                                &target,
+                                &mut scratch.response,
+                            ),
+                            None => build_cname_response_stack(cx, lookup, &from, &target),
+                        }
                     {
                         return Outcome::Error(error);
                     }
@@ -2314,6 +2372,7 @@ impl Plugin for Rewrite {
                         &name_history,
                     ),
                     end,
+                    revert.as_deref_mut().expect("EDNS scratch allocated"),
                 )
             {
                 return Outcome::Error(error);
@@ -2331,15 +2390,27 @@ impl Plugin for Rewrite {
             for _ in 0..records.max(1) {
                 new = rewrite_rcode(new);
             }
-            if let Err(error) = build_reverted_response(
-                cx,
-                original_query,
-                &self.rules,
-                matches.as_deref(),
-                &name_history,
-                end,
-                new,
-            ) {
+            let result = if let Some(scratch) = &mut revert {
+                build_reverted_response(
+                    cx,
+                    original_query,
+                    &self.rules,
+                    matches.as_deref(),
+                    &name_history,
+                    (end, new),
+                    &mut scratch.response,
+                )
+            } else {
+                build_reverted_response_stack(
+                    cx,
+                    original_query,
+                    &self.rules,
+                    matches.as_deref(),
+                    &name_history,
+                    (end, new),
+                )
+            };
+            if let Err(error) = result {
                 return Outcome::Error(error);
             }
         }

@@ -301,6 +301,49 @@ impl Chain for BadClosingSoa {
 }
 
 struct End;
+
+fn interop_available(available: bool, name: &str) -> bool {
+    if !available {
+        assert_ne!(
+            std::env::var("PHAROS_REQUIRE_INTEROP").as_deref(),
+            Ok("1"),
+            "{name} is not installed"
+        );
+        eprintln!("skipping interop test: {name} is not installed");
+    }
+    available
+}
+
+#[test]
+fn missing_coredns_fails_only_when_interop_is_required() {
+    if std::env::var_os("PHAROS_INTEROP_TEST_CHILD").is_some() {
+        assert!(!interop_available(false, "CoreDNS"));
+        return;
+    }
+    for (required, success) in [(false, true), (true, false)] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "missing_coredns_fails_only_when_interop_is_required",
+                "--nocapture",
+            ])
+            .env("PHAROS_INTEROP_TEST_CHILD", "1");
+        if required {
+            child.env("PHAROS_REQUIRE_INTEROP", "1");
+        } else {
+            child.env_remove("PHAROS_REQUIRE_INTEROP");
+        }
+        let output = child.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("CoreDNS is not installed"));
+    }
+}
 impl Next for End {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Drop
@@ -549,11 +592,10 @@ async fn plugin_stream_reaches_tcp_listener_as_multiple_messages() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dig_axfr_and_ixfr_interoperate_with_plugin_stream() {
-    if std::process::Command::new("dig")
-        .arg("-v")
-        .output()
-        .is_err()
-    {
+    if !interop_available(
+        std::process::Command::new("dig").arg("-v").output().is_ok(),
+        "dig",
+    ) {
         return;
     }
     let key = ListenerKey {
@@ -594,13 +636,39 @@ async fn dig_axfr_and_ixfr_interoperate_with_plugin_stream() {
     listener.shutdown().await.unwrap();
 }
 
+#[test]
+fn missing_dig_fails_only_when_interop_is_required() {
+    for (required, success) in [(false, true), (true, false)] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "dig_axfr_and_ixfr_interoperate_with_plugin_stream",
+                "--nocapture",
+            ])
+            .env("PATH", "/nonexistent");
+        if required {
+            child.env("PHAROS_REQUIRE_INTEROP", "1");
+        } else {
+            child.env_remove("PHAROS_REQUIRE_INTEROP");
+        }
+        let output = child.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("dig is not installed"));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dig_signed_axfr_and_ixfr_interoperate_with_plugin_stream() {
-    if std::process::Command::new("dig")
-        .arg("-v")
-        .output()
-        .is_err()
-    {
+    if !interop_available(
+        std::process::Command::new("dig").arg("-v").output().is_ok(),
+        "dig",
+    ) {
         return;
     }
     let key = ListenerKey {
@@ -647,7 +715,7 @@ async fn dig_signed_axfr_and_ixfr_interoperate_with_plugin_stream() {
 async fn axfr_client_interoperates_with_coredns_file_and_transfer() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
     let binary = root.join("coredns/v1.15.0/coredns");
-    if !binary.exists() {
+    if !interop_available(binary.exists(), "CoreDNS") {
         return;
     }
     let dir = root.join(format!("transfer-test-{}", std::process::id()));
@@ -746,7 +814,7 @@ async fn axfr_client_interoperates_with_coredns_file_and_transfer() {
 async fn coredns_secondary_receives_plugin_axfr_stream() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
     let binary = root.join("coredns/v1.15.0/coredns");
-    if !binary.exists() {
+    if !interop_available(binary.exists(), "CoreDNS") {
         return;
     }
     struct UnsignedProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
