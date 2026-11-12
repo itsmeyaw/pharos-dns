@@ -140,6 +140,13 @@ impl WorkspacePool {
                 };
                 (Arc::downgrade(&self.identity), workspace)
             });
+            workspace
+                .variables
+                .resize(self.variable_count, ("", Value::Nil));
+            workspace.matches.resize(self.group_count, "");
+            workspace
+                .groups
+                .resize(self.group_count.saturating_mul(2), ("", ""));
             f(workspace)
         })
     }
@@ -431,7 +438,7 @@ impl Template {
                                     && m.address.port() == cx.local.port())
                     });
                     let result = evaluate(rule, cx, &data, scratch, variables, metrics);
-                    // Replace borrowed entries before returning storage to the worker.
+                    // Replace borrows; warmed allocation tests verify std reuses these Vec allocations.
                     *match_slots = matches.into_iter().map(|_| "").collect();
                     *group_slots = groups.into_iter().map(|_| ("", "")).collect();
                     return match result {
@@ -521,7 +528,7 @@ fn evaluate<'a>(
     query.matches = data.matches;
     let mut variables = std::mem::take(storage);
     let result = evaluate_slots(rule, cx, data, scratch, &query, &mut variables, metrics);
-    // Replace borrowed entries before returning storage to the worker.
+    // Replace borrows; warmed allocation tests verify std reuses this Vec allocation.
     *storage = variables.into_iter().map(|_| ("", Value::Nil)).collect();
     result
 }
@@ -775,6 +782,63 @@ mod tests {
     fn zone_matching_respects_escaped_dots() {
         assert!(!in_zone(r"foo\.example.", "example."));
         assert!(in_zone(r"foo\\.example.", "example."));
+    }
+    #[test]
+    fn workspace_recovers_after_panics_with_taken_slots() {
+        let pattern = format!("^{}(?P<host>x)[.]$", "()".repeat(128));
+        let variables = (0..40)
+            .map(|i| {
+                if i == 0 {
+                    "var v0 group('host')\n".to_owned()
+                } else {
+                    format!("var v{i} v{}\n", i - 1)
+                }
+            })
+            .collect::<String>();
+        let text = format!(
+            ". {{\n template IN A {{\n match {pattern}\n {variables} answer \"{{{{ .Name }}}} 60 IN TXT \\\"{{{{ index .Match 129 }}}}:{{{{ .Group.129 }}}}:{{{{ .Var.v39 }}}}\\\"\"\n }}\n}}"
+        );
+        let config = configure(&text).unwrap();
+        let template = config[0].config.template.as_ref().unwrap();
+        let pool = template.rules[0].workspace.as_ref().unwrap();
+        let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+        let root: Name = ".".parse().unwrap();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let context = Context {
+            query: Message::parse(wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: pharos_server::Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: pharos_server::Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        for stage in 0..5 {
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pool.with(|workspace| {
+                    let _matches = (stage <= 2).then(|| std::mem::take(&mut workspace.matches));
+                    let _groups = (1..=3)
+                        .contains(&stage)
+                        .then(|| std::mem::take(&mut workspace.groups));
+                    let _variables = (stage == 2 || stage == 4)
+                        .then(|| std::mem::take(&mut workspace.variables));
+                    panic!("simulated query panic");
+                });
+            }));
+            assert!(panic.is_err());
+            let MatchResult::Hit(hit) = template.select(&context) else {
+                panic!("query did not recover")
+            };
+            assert_eq!(hit.records[0].1.rdata, b"\x05x:x:x");
+            pool.with(|workspace| {
+                assert_eq!(workspace.variables.len(), 40);
+                assert_eq!(workspace.matches.len(), 130);
+                assert_eq!(workspace.groups.len(), 260);
+            });
+        }
     }
     #[test]
     fn many_function_variables_fit_a_small_worker_stack() {

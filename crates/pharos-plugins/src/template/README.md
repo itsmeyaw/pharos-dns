@@ -12,6 +12,8 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
 - Each worker keeps a workspace per rule; first use may allocate. Memory grows
   with the regexes and their capture groups. Workspaces for removed rules are
   reclaimed on that worker's next workspace initialization or thread exit.
+- Slot reuse relies on the standard library's current in-place `Vec` collection;
+  warmed allocation tests check this optimization on the pinned Rust toolchain.
 - On 64-bit macOS, README example rule workspaces measured 66,711 bytes
   (NXDOMAIN), 75,415 (address), 73,239 (reverse), 70,743 (hex), 77,719
   (LAN), 80,423 (two patterns), 71,319 (authority/MX), 66,807 (CNAME), and
