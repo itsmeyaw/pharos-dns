@@ -7,6 +7,7 @@ use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 async fn template_expression_scratch_accepts_large_values_and_rejects_exhaustion() {
     for (length, expected) in [
         (5000, Outcome::Response),
+        (65_534, Outcome::Response),
         (65_535, Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL)),
     ] {
         let value = "a".repeat(length);
