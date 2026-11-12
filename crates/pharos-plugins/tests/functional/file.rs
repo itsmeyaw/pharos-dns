@@ -650,7 +650,7 @@ async fn wildcard_publishes_metadata() {
     let config = format!("example.org:53 {{\n metadata\n file {path}\n}}");
     let configured =
         configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap();
-    let name: Name = "foo.wild.example.org.".parse().unwrap();
+    let name: Name = "foo.WILD.example.org.".parse().unwrap();
     let mut query = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x0100).unwrap();
     builder
