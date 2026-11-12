@@ -140,6 +140,11 @@
 
 - [whoami Plugin notes](../crates/pharos-plugins/src/whoami/README.md)
 
+## Expressions and templates
+
+- The shared [expression engine](../crates/pharos-plugins/src/expression/README.md) is not implemented yet.
+- The shared [template engine](../crates/pharos-plugins/src/gotemplate/README.md) supports only the documented subset; other actions fail compilation.
+
 ## General
 
 - Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `siit` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
