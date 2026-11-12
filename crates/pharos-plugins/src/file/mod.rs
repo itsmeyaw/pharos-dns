@@ -68,6 +68,18 @@ impl Zone {
             .any(|rr| contains_wire(rr.owner.as_wire(), name))
     }
 
+    fn cut(&self, name: &[u8], kind: Type) -> Option<&ZoneRecord> {
+        self.records
+            .iter()
+            .filter(|rr| {
+                rr.rtype == Type::NS
+                    && rr.owner != self.apex
+                    && contains_wire(name, rr.owner.as_wire())
+                    && !(kind == Type::DS && rr.owner.as_wire().eq_ignore_ascii_case(name))
+            })
+            .min_by_key(|rr| rr.owner.label_count())
+    }
+
     fn serial(&self) -> Option<u32> {
         let soa = self.records.iter().find(|rr| rr.rtype == Type::SOA)?;
         let offset = soa.rdata.len().checked_sub(20)?;
@@ -393,17 +405,7 @@ impl Plugin for File {
             return Outcome::Unanswered(Rcode::REFUSED);
         }
         // RFC 1034 §4.3.2: return the first Zone Cut between the apex and QNAME.
-        let cut = zone
-            .records
-            .iter()
-            .filter(|rr| {
-                rr.rtype == Type::NS
-                    && rr.owner != zone.apex
-                    && contains_wire(name, rr.owner.as_wire())
-                    && !(question.qtype == Type::DS
-                        && rr.owner.as_wire().eq_ignore_ascii_case(name))
-            })
-            .min_by_key(|rr| rr.owner.label_count());
+        let cut = zone.cut(name, question.qtype);
         // RFC 6672 §3.2: DNAME applies to strict descendants of its owner.
         let dname = zone
             .records
@@ -415,7 +417,7 @@ impl Plugin for File {
             })
             .min_by_key(|rr| rr.owner.label_count())
             .filter(|rr| cut.is_none_or(|cut| rr.owner.label_count() <= cut.owner.label_count()));
-        let cut = cut.filter(|_| dname.is_none());
+        let mut cut = cut.filter(|_| dname.is_none());
         let mut wildcard = [0u8; 255];
         let mut dname_target = [0u8; 255];
         let mut source = name;
@@ -452,6 +454,9 @@ impl Plugin for File {
         let mut chain = [None; 10];
         let mut count = 0;
         let mut target = source;
+        if dname.is_some() {
+            cut = zone.cut(target, question.qtype);
+        }
         if cut.is_none() && question.qtype != Type::CNAME {
             // RFC 1034 §3.6.2: follow a CNAME before answering the original QTYPE.
             while let Some(alias) = zone.records_at(target, Type::CNAME).next() {
@@ -461,9 +466,14 @@ impl Plugin for File {
                 chain[count] = Some(alias);
                 count += 1;
                 target = &alias.rdata;
+                cut = zone.cut(target, question.qtype);
+                if cut.is_some() {
+                    break;
+                }
             }
         }
-        let lookup = if (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
+        let lookup = if cut.is_none()
+            && (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
             && (!zone
                 .records
                 .iter()
@@ -523,7 +533,11 @@ impl Plugin for File {
                 max,
                 cx.query.id(),
                 0x8000
-                    | if cut.is_none() { 0x0400 } else { 0 }
+                    | if cut.is_none() || count > 0 || dname.is_some() {
+                        0x0400
+                    } else {
+                        0
+                    }
                     | (cx.query.flags() & 0x7910)
                     | if external.is_some_and(|response| response.tc()) {
                         0x0200
