@@ -1,7 +1,10 @@
 #![cfg(feature = "plugin-k8s-external")]
 
-use pharos_corefile::{Cursor, parse};
-use pharos_plugins::k8s_external::setup::{Config, parse as parse_setup};
+use pharos_corefile::{Cursor, configure, parse};
+use pharos_plugins::{
+    Chain, directives,
+    k8s_external::setup::{Config, parse as parse_setup},
+};
 
 fn config(text: &str) -> Result<Config, pharos_corefile::Error> {
     let blocks = parse("Corefile", &format!(".:53 {{\n{text}\n}}"))?;
@@ -23,6 +26,13 @@ fn coredns_setup_defaults_and_options() {
     assert_eq!(custom.ttl, 30);
     assert!(custom.headless);
     assert_eq!(custom.fallthrough.domains, ["ip6.arpa.", "in-addr.arpa."]);
+    let repeated = config(
+        "k8s_external first.example {\n ttl 20\n}\nk8s_external second.example {\n headless\n}",
+    )
+    .unwrap();
+    assert_eq!(repeated.zones, ["second.example."]);
+    assert_eq!(repeated.ttl, 20);
+    assert!(repeated.headless);
 }
 
 #[test]
@@ -37,4 +47,22 @@ fn coredns_setup_rejects_bad_options() {
         config("k8s_external example.org {\n ttl 0 extra\n apex dns extra\n headless extra\n}")
             .is_ok()
     );
+}
+
+#[test]
+fn setup_requires_kubernetes_in_same_server_block() {
+    for (text, valid) in [
+        (".:53 {\n k8s_external example.org\n}", false),
+        (
+            ".:53 {\n k8s_external example.org\n kubernetes cluster.local\n}",
+            true,
+        ),
+        (
+            ".:53 {\n k8s_external example.org\n}\nother:53 {\n kubernetes cluster.local\n}",
+            false,
+        ),
+    ] {
+        let blocks = configure::<Chain>(&parse("Corefile", text).unwrap(), directives()).unwrap();
+        assert_eq!(pharos_plugins::servers(blocks).is_ok(), valid, "{text}");
+    }
 }
