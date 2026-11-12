@@ -1648,6 +1648,7 @@ name = "pharos-corefile"
 version = "0.1.0"
 dependencies = [
  "glob",
+ "stats_alloc",
 ]
 
 [[package]]
