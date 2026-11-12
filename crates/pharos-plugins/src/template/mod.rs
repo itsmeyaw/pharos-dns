@@ -546,14 +546,13 @@ fn evaluate_slots<'a>(
     }
     let scoped = expression::ScopedQuery::new(query, variables);
     for expr in &rule.expressions {
-        let mut buf = expression::Scratch::new(scratch);
-        if expr
-            .evaluate_scoped(&scoped, &cx.metadata, &mut buf)
-            .map_err(|_| EvaluationError::Expression)?
-            != Value::Bool(true)
-        {
+        let (value, rest) = expr
+            .evaluate_scoped_split(&scoped, &cx.metadata, scratch)
+            .map_err(|_| EvaluationError::Expression)?;
+        if value != Value::Bool(true) {
             return Ok(None);
         }
+        scratch = rest;
     }
     // shortcut: new metric label combinations allocate on matched Queries; prebind when wildcard labels can be resolved at setup.
     let binding = metrics.map(|metrics| {
