@@ -12,6 +12,29 @@ use tokio::{
 
 struct Transfer;
 
+struct BadClosingSoa;
+
+impl Chain for BadClosingSoa {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        let Outcome::Stream(mut source) = Transfer.serve(cx).await else {
+            unreachable!()
+        };
+        let mut count = 0;
+        Outcome::Stream(Stream::new(move |wire| {
+            let has_message = source.next(wire)?;
+            if count == 2 && has_message {
+                let serial_last_byte = wire.len() - 17;
+                wire[serial_last_byte] = 2;
+            }
+            count += 1;
+            Ok(has_message)
+        }))
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
 impl Chain for Transfer {
     async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         let id = cx.query.id().to_be_bytes();
@@ -118,6 +141,30 @@ async fn axfr_client_reads_stream_and_checks_closing_soa() {
 }
 
 #[tokio::test]
+async fn axfr_client_rejects_a_different_closing_soa() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(BadClosingSoa), vec![]);
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+        .await
+        .unwrap();
+    let error = pharos_server::transfer::axfr(
+        listener.local_addr(),
+        &"a.".parse().unwrap(),
+        1,
+        Duration::from_secs(3),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn notify_sender_retries_refused_responses() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
@@ -217,4 +264,72 @@ async fn dig_axfr_and_ixfr_interoperate_with_plugin_stream() {
         assert_eq!(text.matches("\tSOA\t").count(), 2, "{text}");
     }
     listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn axfr_client_interoperates_with_coredns_file_and_transfer() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let binary = root.join("coredns/v1.15.0/coredns");
+    if !binary.exists() {
+        return;
+    }
+    let dir = root.join(format!("transfer-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let zone = dir.join("db.a");
+    std::fs::write(&zone, "$ORIGIN a.\n$TTL 60\n@ IN SOA ns.a. hostmaster.a. 1 3600 600 604800 60\n@ IN NS ns.a.\nns IN A 127.0.0.1\nwww IN A 192.0.2.1\n").unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = dir.join("Corefile");
+    std::fs::write(
+        &config,
+        format!(
+            "a.:{port} {{\n bind 127.0.0.1\n file {} a.\n transfer {{\n  to *\n }}\n}}\n",
+            zone.display()
+        ),
+    )
+    .unwrap();
+    struct Child(std::process::Child, std::path::PathBuf);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+    let _child = Child(
+        std::process::Command::new(binary)
+            .args(["-conf", config.to_str().unwrap()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+        dir,
+    );
+    let address = format!("127.0.0.1:{port}").parse().unwrap();
+    timeout(Duration::from_secs(5), async {
+        while TcpStream::connect(address).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut types = Vec::new();
+    pharos_server::transfer::axfr(
+        address,
+        &"a.".parse().unwrap(),
+        1,
+        Duration::from_secs(3),
+        |message| {
+            types.extend(message.answers().map(|record| record.rtype));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(types.first(), Some(&Type::SOA));
+    assert_eq!(types.last(), Some(&Type::SOA));
+    assert!(types.contains(&Type::A));
 }
