@@ -65,6 +65,7 @@ default = [
     "plugin-ready",
     "plugin-reload",
     "plugin-rewrite",
+    "plugin-view",
     "plugin-whoami",
 ]
 plugin-root = []

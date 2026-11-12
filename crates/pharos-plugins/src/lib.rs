@@ -103,6 +103,8 @@ pub mod shed;
 pub mod timeouts;
 #[cfg(feature = "plugin-tsig")]
 pub mod tsig;
+#[cfg(feature = "plugin-view")]
+pub mod view;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -145,6 +147,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("shed", include_str!("shed/README.md")),
     ("timeouts", include_str!("timeouts/README.md")),
     ("tsig", include_str!("tsig/README.md")),
+    ("view", include_str!("view/README.md")),
     ("whoami", include_str!("whoami/README.md")),
 ];
 

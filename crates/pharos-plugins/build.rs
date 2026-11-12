@@ -56,6 +56,7 @@ fn main() {
             "minimal" => "minimal::Minimal",
             "multisocket" => "Option<usize>",
             "whoami" => "whoami::Whoami",
+            "view" => "view::View",
             "log" => "log::Log",
             "metadata" => "metadata::Metadata",
             "loop" => "r#loop::Loop",
@@ -99,6 +100,7 @@ fn main() {
             "minimal" => "minimal::setup::setup",
             "multisocket" => "multisocket::setup::setup",
             "whoami" => "whoami::setup::setup",
+            "view" => "view::setup::setup",
             "log" => "log::setup::setup",
             "metadata" => "metadata::setup::setup",
             "loop" => "r#loop::setup::setup",
@@ -130,6 +132,7 @@ fn main() {
                 | "loop"
                 | "nsid"
                 | "kubernetes"
+                | "view"
         );
         writeln!(
             code,

@@ -22,6 +22,12 @@ mod any {
 }
 
 #[path = "functional"]
+mod view {
+    #[path = "view.rs"]
+    mod cases;
+}
+
+#[path = "functional"]
 mod tsig {
     #[path = "tsig.rs"]
     mod cases;
