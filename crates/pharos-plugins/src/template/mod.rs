@@ -498,6 +498,7 @@ fn evaluate<'a>(
     };
     // Rendered records are created only after every expression matches.
     data.variables = variables;
+    // shortcut: rendered strings and record vectors allocate per matched Query; reuse buffers with #91.
     let mut records = Vec::new();
     for section in [Section::Answer, Section::Additional, Section::Authority] {
         for (index, record) in rule

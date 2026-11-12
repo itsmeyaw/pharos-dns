@@ -15,6 +15,9 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
 - Failure metric `template` labels use the configured source, not Go's
   normalized template parse tree. Wildcard class/type metric labels allocate
   when a combination first matches; later increments use cached handles.
-- Zone-text parsing allocates for matched Queries; #91 tracks an allocation-free parser.
+- Rendering buffers, record vectors and zone-text parsing allocate for matched
+  Queries; #91 tracks allocation-free single-record parsing.
 - Rendered zone text cannot use `$INCLUDE`; unlike miekg/dns, it cannot read files during a Query.
+- For a non-EDNS Query, the Listener removes the `ederror` OPT from the
+  Response; CoreDNS can retain it. See the Server notes in `docs/compatibility.md`.
 - CNAME Self Lookup allocates; #86 tracks allocation-free Self Lookup.
