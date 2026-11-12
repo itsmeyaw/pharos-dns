@@ -85,8 +85,8 @@ pub(super) fn load(secret_id: &str) -> Result<KeyPair, String> {
 mod tests {
     use super::parse_secret;
 
-    const PUBLIC: &str = include_str!("../../tests/dnssec-fixtures/Kmiek.nl.+013+59725.key");
-    const PRIVATE: &str = include_str!("../../tests/dnssec-fixtures/Kmiek.nl.+013+59725.private");
+    const PUBLIC: &str = include_str!("../../tests/fixtures/dnssec/Kmiek.nl.+013+59725.key");
+    const PRIVATE: &str = include_str!("../../tests/fixtures/dnssec/Kmiek.nl.+013+59725.private");
 
     #[test]
     fn parses_coredns_secret_json_without_network() {
