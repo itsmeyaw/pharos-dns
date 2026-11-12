@@ -13,6 +13,7 @@ use pharos_proto::{
 };
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
 use std::{
+    collections::BTreeMap,
     fmt::Write,
     io::BufReader,
     path::{Path, PathBuf},
@@ -42,6 +43,15 @@ impl std::fmt::Write for NameText {
 pub struct Zone {
     apex: Name,
     records: Vec<ZoneRecord>,
+    names: Vec<ZoneNode>,
+    tree: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct ZoneNode {
+    name: Name,
+    types: BTreeMap<u16, Vec<usize>>,
+    tree: bool,
 }
 
 impl Zone {
@@ -51,10 +61,16 @@ impl Zone {
         let mut parser =
             ZoneParser::new(BufReader::new(file), apex.clone(), path.to_string_lossy());
         parser.set_include_allowed(true);
-        let mut records = Vec::new();
+        let records = parser
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        Self::from_records(apex, records)
+    }
+
+    /// Build an immutable Zone from owned, uncompressed master-file records.
+    pub fn from_records(apex: Name, records: Vec<ZoneRecord>) -> Result<Self, String> {
         let mut soa = false;
-        for record in parser {
-            let record = record.map_err(|error| error.to_string())?;
+        for record in &records {
             if record.rtype == Type::SOA {
                 if record.owner != apex {
                     return Err("SOA owner does not match Zone apex".into());
@@ -64,40 +80,134 @@ impl Zone {
             if record.rtype == Type::NSEC3 || record.rtype == Type::NSEC3PARAM {
                 return Err("NSEC3 zone is not supported".into());
             }
-            records.push(record);
         }
         if !soa {
             return Err("Zone has no SOA".into());
         }
-        Ok(Self { apex, records })
+        let mut nodes: BTreeMap<Name, ZoneNode> = BTreeMap::new();
+        for (index, record) in records.iter().enumerate() {
+            let mut suffix = record.owner.as_wire();
+            loop {
+                let name = NameRef::parse(suffix, 0)
+                    .map_err(|error| error.to_string())?
+                    .to_name();
+                let node = nodes.entry(name.clone()).or_insert_with(|| ZoneNode {
+                    name,
+                    types: BTreeMap::new(),
+                    tree: false,
+                });
+                if suffix.len() == record.owner.as_wire().len() {
+                    node.types.entry(record.rtype.0).or_default().push(index);
+                    let apex_record = record.owner == apex
+                        && (matches!(record.rtype, Type::SOA | Type::NS)
+                            || record.rtype == Type::RRSIG
+                                && record.rdata.get(..2).is_some_and(|covered| {
+                                    covered == Type::SOA.0.to_be_bytes()
+                                        || covered == Type::NS.0.to_be_bytes()
+                                }));
+                    node.tree |= !apex_record;
+                }
+                if suffix[0] == 0 {
+                    break;
+                }
+                suffix = &suffix[1 + usize::from(suffix[0])..];
+            }
+        }
+        let names: Vec<_> = nodes.into_values().collect();
+        let tree = names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| node.tree.then_some(index))
+            .collect();
+        Ok(Self {
+            apex,
+            records,
+            names,
+            tree,
+        })
+    }
+
+    /// Return this Zone's apex.
+    #[must_use]
+    pub fn apex(&self) -> &Name {
+        &self.apex
+    }
+
+    /// Find the records at an owner and type, without allocating.
+    pub fn rrset(&self, name: NameRef<'_>, kind: Type) -> impl Iterator<Item = &ZoneRecord> {
+        let mut wire = [0u8; 255];
+        let mut len = 0;
+        for label in name.labels() {
+            wire[len] = label.len() as u8;
+            len += 1;
+            wire[len..len + label.len()].copy_from_slice(label);
+            len += label.len();
+        }
+        self.records_at(&wire[..len + 1], kind)
+    }
+
+    fn node(&self, name: &[u8]) -> Option<&ZoneNode> {
+        self.names
+            .binary_search_by(|node| canonical_cmp(node.name.as_wire(), name))
+            .ok()
+            .map(|index| &self.names[index])
     }
 
     fn records_at<'a>(
         &'a self,
-        name: &'a [u8],
+        name: &[u8],
         kind: Type,
-    ) -> impl Iterator<Item = &'a ZoneRecord> {
-        self.records
+    ) -> impl Iterator<Item = &'a ZoneRecord> + use<'a> {
+        self.node(name)
+            .and_then(|node| node.types.get(&kind.0))
+            .map_or(&[][..], Vec::as_slice)
             .iter()
-            .filter(move |rr| rr.rtype == kind && rr.owner.as_wire().eq_ignore_ascii_case(name))
+            .map(|index| &self.records[*index])
     }
 
     fn exists(&self, name: &[u8]) -> bool {
-        self.records
-            .iter()
-            .any(|rr| contains_wire(rr.owner.as_wire(), name))
+        self.node(name).is_some()
+    }
+
+    fn exact(&self, name: &[u8]) -> bool {
+        self.node(name).is_some_and(|node| !node.types.is_empty())
     }
 
     fn cut(&self, name: &[u8], kind: Type) -> Option<&ZoneRecord> {
-        self.records
-            .iter()
-            .filter(|rr| {
-                rr.rtype == Type::NS
-                    && rr.owner != self.apex
-                    && contains_wire(name, rr.owner.as_wire())
-                    && !(kind == Type::DS && rr.owner.as_wire().eq_ignore_ascii_case(name))
-            })
-            .min_by_key(|rr| rr.owner.label_count())
+        if !contains_wire(name, self.apex.as_wire()) {
+            return None;
+        }
+        let mut suffix = name;
+        let mut cut = None;
+        while !suffix.eq_ignore_ascii_case(self.apex.as_wire()) {
+            if !(kind == Type::DS && suffix.len() == name.len())
+                && let Some(rr) = self.records_at(suffix, Type::NS).next()
+            {
+                cut = Some(rr);
+            }
+            suffix = &suffix[1 + usize::from(suffix[0])..];
+        }
+        cut
+    }
+
+    fn dname(&self, name: &[u8]) -> Option<&ZoneRecord> {
+        if !contains_wire(name, self.apex.as_wire())
+            || name.eq_ignore_ascii_case(self.apex.as_wire())
+        {
+            return None;
+        }
+        let mut suffix = &name[1 + usize::from(name[0])..];
+        let mut dname = None;
+        loop {
+            if let Some(rr) = self.records_at(suffix, Type::DNAME).next() {
+                dname = Some(rr);
+            }
+            if suffix.eq_ignore_ascii_case(self.apex.as_wire()) {
+                break;
+            }
+            suffix = &suffix[1 + usize::from(suffix[0])..];
+        }
+        dname
     }
 
     fn serial(&self) -> Option<u32> {
@@ -109,13 +219,14 @@ impl Zone {
     }
 
     fn previous_nsec(&self, name: &[u8]) -> Option<&ZoneRecord> {
-        self.records
-            .iter()
-            .filter(|rr| {
-                rr.rtype == Type::NSEC
-                    && canonical_cmp(rr.owner.as_wire(), name) != std::cmp::Ordering::Greater
-            })
-            .max_by(|a, b| a.owner.cmp(&b.owner))
+        let end = self.tree.partition_point(|index| {
+            canonical_cmp(self.names[*index].name.as_wire(), name) != std::cmp::Ordering::Greater
+        });
+        let node = self
+            .tree
+            .get(end.checked_sub(1)?)
+            .map(|index| &self.names[*index])?;
+        self.records_at(node.name.as_wire(), Type::NSEC).next()
     }
 }
 
@@ -431,24 +542,14 @@ impl Plugin for File {
         let cut = zone.cut(name, question.qtype);
         // RFC 6672 §3.2: DNAME applies to strict descendants of its owner.
         let dname = zone
-            .records
-            .iter()
-            .filter(|rr| {
-                rr.rtype == Type::DNAME
-                    && !rr.owner.as_wire().eq_ignore_ascii_case(name)
-                    && contains_wire(name, rr.owner.as_wire())
-            })
-            .min_by_key(|rr| rr.owner.label_count())
+            .dname(name)
             .filter(|rr| cut.is_none_or(|cut| rr.owner.label_count() <= cut.owner.label_count()));
         let mut cut = cut.filter(|_| dname.is_none());
         let mut wildcard = [0u8; 255];
         let mut dname_target = [0u8; 255];
         let mut source = name;
         let exists = zone.exists(name);
-        let exact = zone
-            .records
-            .iter()
-            .any(|rr| rr.owner.as_wire().eq_ignore_ascii_case(name));
+        let exact = zone.exact(name);
         if let Some(rr) = dname {
             let prefix = name.len() - rr.owner.as_wire().len();
             let len = prefix + rr.rdata.len();
@@ -478,13 +579,7 @@ impl Plugin for File {
             }
         }
         let synthesized = dname.is_none() && !std::ptr::eq(source.as_ptr(), name.as_ptr());
-        if synthesized
-            && cx.metadata.enabled()
-            && zone
-                .records
-                .iter()
-                .any(|rr| rr.owner.as_wire().eq_ignore_ascii_case(source))
-        {
+        if synthesized && cx.metadata.enabled() && zone.exact(source) {
             let mut text = NameText {
                 bytes: [0; 1024],
                 len: 0,
@@ -519,10 +614,7 @@ impl Plugin for File {
         }
         let lookup = if cut.is_none()
             && (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
-            && (!zone
-                .records
-                .iter()
-                .any(|rr| rr.owner.as_wire().eq_ignore_ascii_case(target))
+            && (!zone.exact(target)
                 || target.eq_ignore_ascii_case(zone.apex.as_wire())
                     && matches!(question.qtype, Type::NS | Type::SOA))
         {
@@ -784,22 +876,18 @@ impl Plugin for File {
             // RFC 1034 §4.3.2: Referrals include available address glue.
             if let Some(cut) = cut {
                 for ns in zone.records_at(cut.owner.as_wire(), Type::NS) {
-                    for rr in zone.records.iter().filter(|rr| {
-                        rr.owner.as_wire().eq_ignore_ascii_case(&ns.rdata)
-                            && matches!(rr.rtype, Type::A | Type::AAAA)
-                    }) {
-                        let owner = NameRef::parse(rr.owner.as_wire(), 0)
-                            .map_err(|_| pharos_server::Error::InvalidQuery)?;
-                        builder
-                            .record(
-                                Section::Additional,
+                    if let Ok(owner) = NameRef::parse(&ns.rdata, 0) {
+                        for kind in [Type::A, Type::AAAA] {
+                            write_set(
+                                &mut builder,
+                                zone,
+                                &ns.rdata,
                                 owner,
-                                rr.rtype,
-                                rr.class,
-                                rr.ttl,
-                                &rr.rdata,
-                            )
-                            .map_err(pharos_server::Error::Build)?;
+                                kind,
+                                Section::Additional,
+                                dnssec,
+                            )?;
+                        }
                     }
                 }
             }
@@ -812,22 +900,20 @@ impl Plugin for File {
                     _ => None,
                 };
                 if let Some(offset) = offset {
-                    for (index, rr) in zone.records.iter().enumerate().filter(|(_, rr)| {
-                        rr.rtype == question.qtype
-                            && rr.owner.as_wire().eq_ignore_ascii_case(target)
-                    }) {
+                    for (index, rr) in zone.records_at(target, question.qtype).enumerate() {
                         let Some(address) = rr.rdata.get(offset..) else {
                             continue;
                         };
                         if !contains(address, &zone.apex)
-                            || zone.records[..index].iter().any(|earlier| {
-                                earlier.rtype == rr.rtype
-                                    && earlier.owner == rr.owner
-                                    && earlier
+                            || zone
+                                .records_at(target, question.qtype)
+                                .take(index)
+                                .any(|earlier| {
+                                    earlier
                                         .rdata
                                         .get(offset..)
                                         .is_some_and(|name| name.eq_ignore_ascii_case(address))
-                            })
+                                })
                         {
                             continue;
                         }
