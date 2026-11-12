@@ -618,3 +618,27 @@ fn disabled_metadata_is_not_exposed_to_expressions() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn signed_remainder_extreme_matches_go_int() {
+    let message = Message::parse(WIRE).unwrap();
+    let mut query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    query.variables = &[("n", Value::Int(i64::MIN))];
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    let expression =
+        Expression::compile_with_variables("n % -1 == 0", &[("n", ValueType::Int)]).unwrap();
+    assert_eq!(
+        expression
+            .evaluate(&query, &metadata, &mut scratch)
+            .unwrap(),
+        Value::Bool(true)
+    );
+}

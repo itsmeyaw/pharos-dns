@@ -271,10 +271,13 @@ impl Node {
                     (Sub, a, b) => Ok(Temporary::Float(a.number()? - b.number()?)),
                     (Mul, a, b) => Ok(Temporary::Float(a.number()? * b.number()?)),
                     (Div, a, b) => Ok(Temporary::Float(a.number()? / b.number()?)),
-                    (Rem, Temporary::Int(a), Temporary::Int(b)) => a
-                        .checked_rem(b)
-                        .map(Temporary::Int)
-                        .ok_or("integer division error"),
+                    (Rem, Temporary::Int(a), Temporary::Int(b)) => {
+                        if b == 0 {
+                            Err("integer division error")
+                        } else {
+                            Ok(Temporary::Int(a.wrapping_rem(b)))
+                        }
+                    }
                     (op @ (Contains | StartsWith | EndsWith), a, b) => {
                         let (a, b) = (a.text(scratch)?, b.text(scratch)?);
                         Ok(Temporary::Bool(match op {
