@@ -2,9 +2,9 @@
 #![cfg(feature = "plugin-forward")]
 
 use pharos_corefile::{configure, parse};
-use pharos_plugins::{Chain, directives};
+use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::{Message, Name};
-use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
+use pharos_server::{Action, Context, Handler, Metadata, Outcome, Protocol, Transport};
 use tokio::net::UdpSocket;
 
 const QUERY: &[u8] = b"\x12\x34\x01\x00\x00\x01\0\0\0\0\0\0\x03www\x07example\x03com\0\0\x01\0\x01";
@@ -55,6 +55,36 @@ async fn fake(
         socket.send_to(&wire[..len], peer).await.unwrap();
     });
     (address, task)
+}
+
+#[tokio::test]
+async fn forward_alone_allows_non_in_queries_through_listener_admission() {
+    let (address, upstream) = fake(0, false).await;
+    let text = format!(".:0 {{\n forward . {address}\n}}");
+    let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    let mut query = QUERY.to_vec();
+    *query.last_mut().unwrap() = 3;
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &query,
+                "127.0.0.1:1000".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let reply = Message::parse(&response).unwrap();
+    assert_eq!(reply.rcode(), pharos_proto::Rcode::NOERROR);
+    assert_eq!(
+        reply.questions().next().unwrap().qclass,
+        pharos_proto::Class::CH
+    );
+    upstream.await.unwrap();
 }
 
 #[tokio::test]

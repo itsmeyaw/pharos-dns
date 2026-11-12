@@ -418,6 +418,8 @@ pub fn servers_with_registry(
         let allow_non_in = chain.chaos.is_some();
         #[cfg(not(feature = "plugin-chaos"))]
         let allow_non_in = false;
+        #[cfg(feature = "plugin-forward")]
+        let allow_non_in = allow_non_in || chain.forward.is_some();
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &chain.cache {
             cache.bind(&chain);
