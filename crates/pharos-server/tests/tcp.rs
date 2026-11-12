@@ -1,6 +1,13 @@
 #![forbid(unsafe_code)]
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use pharos_server::{Action, Handler, Listener, Protocol, Stream};
 use tokio::{
@@ -37,6 +44,40 @@ async fn tcp_writes_every_transfer_message_on_the_same_connection() {
     }
     drop(stream);
     listener.shutdown().await.unwrap();
+}
+
+struct LargeTransfer(Arc<AtomicUsize>);
+
+impl Handler for LargeTransfer {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        let produced = Arc::clone(&self.0);
+        Action::Stream(Stream::new(move |wire| {
+            let index = produced.fetch_add(1, Ordering::SeqCst);
+            if index == 10_000 {
+                return Ok(false);
+            }
+            wire.resize(65_535, 0);
+            Ok(true)
+        }))
+    }
+}
+
+#[tokio::test]
+async fn slow_transfer_client_limits_message_production() {
+    let produced = Arc::new(AtomicUsize::new(0));
+    let (listener, mut stream) = connect(LargeTransfer(Arc::clone(&produced))).await;
+    send(&mut stream, b"transfer").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let count = produced.load(Ordering::SeqCst);
+    assert!(
+        count > 0 && count < 10_000,
+        "produced {count} Messages without a reader"
+    );
+    drop(stream);
+    timeout(Duration::from_secs(7), listener.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 struct Echo;
