@@ -389,3 +389,29 @@ fn range_accepts_pipelines_and_integer_counts() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "0=one;1=two;|012|empty");
 }
+
+#[test]
+fn printf_supports_go_numeric_string_and_type_formats() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template =
+        Template::compile(r#"{{ printf "%04x:%g:%q:%T:%t" 127 3.5 "a\nb" 0xef true }}"#).unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "007f:3.5:\"a\\nb\":int:true");
+}
+
+#[test]
+fn metadata_method_accepts_variable_and_pipeline_arguments() {
+    use pharos_plugins::expression::Value;
+    let mut slots = [None];
+    let mut metadata = Metadata::new(&mut slots);
+    assert!(metadata.insert("region", "eu"));
+    let mut data = Data::new("example.", &metadata);
+    data.variables = &[("key", Value::String("region"))];
+    let template = Template::compile("{{ .Meta .Var.key }}|{{ \"region\" | .Meta }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "eu|eu");
+}

@@ -5,6 +5,7 @@ enum Atom {
     Field(Field),
     Nested(Box<Pipeline>),
     Int(i64),
+    Float(f64),
     Bool(bool),
     Nil,
 }
@@ -28,6 +29,7 @@ enum Function {
     Html,
     Js(Box<crate::regex_match::Regex>),
     UrlQuery,
+    Meta(bool),
 }
 enum Command {
     Atom(Atom),
@@ -99,6 +101,8 @@ impl Pipeline {
                     r"^[\p{L}\p{M}\p{N}\p{P}\p{S}]$",
                 )?))),
                 "urlquery" => Some(Function::UrlQuery),
+                ".Meta" => Some(Function::Meta(false)),
+                "$.Meta" => Some(Function::Meta(true)),
                 _ => None,
             };
             let command = if let Some(function) = function {
@@ -152,6 +156,7 @@ impl Pipeline {
                         | Function::Js(_)
                         | Function::UrlQuery => true,
                         Function::Printf => count >= 1,
+                        Function::Meta(_) => count == 1,
                     };
                     if !valid {
                         return Err(fmt::Error);
@@ -228,6 +233,19 @@ impl Pipeline {
                                 indexed = indexed.index(key, scratch)?;
                             }
                             indexed
+                        }
+                        Function::Meta(root) => {
+                            if !root && !matches!(dot, Dot::Root) {
+                                return Err(fmt::Error);
+                            }
+                            let label = argument(args, 0, value, data, dot, scratch)?;
+                            let label = label.text(scratch)?;
+                            let result = if data.metadata.enabled() {
+                                data.metadata.get(label).unwrap_or("")
+                            } else {
+                                ""
+                            };
+                            ResultValue::Scalar(Some(Value::String(result)))
                         }
                         Function::Slice => {
                             let input = argument(args, 0, value, data, dot, scratch)?;
@@ -408,6 +426,7 @@ impl Atom {
     ) -> Result<ResultValue<'a>, fmt::Error> {
         match self {
             Self::Int(value) => Ok(ResultValue::Scalar(Some(Value::Int(*value)))),
+            Self::Float(value) => Ok(ResultValue::Scalar(Some(Value::Float(*value)))),
             Self::Bool(value) => Ok(ResultValue::Scalar(Some(Value::Bool(*value)))),
             Self::Nil => Ok(ResultValue::Scalar(Some(Value::Nil))),
             Self::Nested(pipeline) => pipeline.evaluate(data, dot, scratch),
@@ -482,7 +501,7 @@ fn format_values(
                 scratch.write_char(ch)?;
                 continue;
             }
-            let verb = format.text(scratch)?[cursor..]
+            let mut verb = format.text(scratch)?[cursor..]
                 .chars()
                 .next()
                 .ok_or(fmt::Error)?;
@@ -491,15 +510,81 @@ fn format_values(
                 scratch.write_char('%')?;
                 continue;
             }
+            let zero = verb == '0';
+            let mut width = 0usize;
+            while verb.is_ascii_digit() {
+                width = width
+                    .checked_mul(10)
+                    .and_then(|n| n.checked_add(verb.to_digit(10)? as usize))
+                    .ok_or(fmt::Error)?;
+                if width > 65535 {
+                    return Err(fmt::Error);
+                }
+                verb = format.text(scratch)?[cursor..]
+                    .chars()
+                    .next()
+                    .ok_or(fmt::Error)?;
+                cursor += verb.len_utf8();
+            }
             let value = values.get(argument).copied().flatten().ok_or(fmt::Error)?;
             argument += 1;
             match verb {
-                's' if value.is_string() => scratch.append(value)?,
+                's' if value.is_string() => {
+                    for _ in value.text(scratch)?.chars().count()..width {
+                        scratch.write_char(' ')?;
+                    }
+                    scratch.append(value)?;
+                }
                 'd' => match value {
-                    ResultValue::Scalar(Some(Value::Int(v))) => write!(scratch, "{v}")?,
-                    ResultValue::Uint(v) => write!(scratch, "{v}")?,
+                    ResultValue::Scalar(Some(Value::Int(v))) if zero => {
+                        write!(scratch, "{v:0width$}")?
+                    }
+                    ResultValue::Scalar(Some(Value::Int(v))) => write!(scratch, "{v:width$}")?,
+                    ResultValue::Uint(v) if zero => write!(scratch, "{v:0width$}")?,
+                    ResultValue::Uint(v) => write!(scratch, "{v:width$}")?,
                     _ => return Err(fmt::Error),
                 },
+                'x' | 'X' => {
+                    let (negative, number) = match value {
+                        ResultValue::Scalar(Some(Value::Int(v))) => (v < 0, v.unsigned_abs()),
+                        ResultValue::Uint(v) => (false, v),
+                        _ => return Err(fmt::Error),
+                    };
+                    let digits = if number == 0 {
+                        1
+                    } else {
+                        ((64 - number.leading_zeros()) as usize).div_ceil(4)
+                    };
+                    let padding = width.saturating_sub(digits + usize::from(negative));
+                    if !zero {
+                        for _ in 0..padding {
+                            scratch.write_char(' ')?;
+                        }
+                    }
+                    if negative {
+                        scratch.write_char('-')?;
+                    }
+                    if zero {
+                        for _ in 0..padding {
+                            scratch.write_char('0')?;
+                        }
+                    }
+                    if verb == 'x' {
+                        write!(scratch, "{number:x}")?;
+                    } else {
+                        write!(scratch, "{number:X}")?;
+                    }
+                }
+                'g' => match value {
+                    ResultValue::Scalar(Some(Value::Float(v))) => write!(scratch, "{v}")?,
+                    _ => return Err(fmt::Error),
+                },
+                't' => match value {
+                    ResultValue::Scalar(Some(Value::Bool(v))) => write!(scratch, "{v}")?,
+                    _ => return Err(fmt::Error),
+                },
+                'q' if value.is_string() => quote_value(value, scratch)?,
+                'T' => scratch.write_str(value.type_name())?,
                 'v' => scratch.append(value)?,
                 _ => return Err(fmt::Error),
             }
@@ -521,6 +606,32 @@ fn format_values(
         scratch.write_char('\n')?;
     }
     Ok(())
+}
+
+fn quote_value(value: ResultValue<'_>, scratch: &mut Scratch<'_>) -> fmt::Result {
+    scratch.write_char('"')?;
+    let mut offset = 0;
+    while offset < value.text(scratch)?.len() {
+        let ch = value.text(scratch)?[offset..]
+            .chars()
+            .next()
+            .ok_or(fmt::Error)?;
+        offset += ch.len_utf8();
+        match ch {
+            '"' => scratch.write_str("\\\"")?,
+            '\\' => scratch.write_str("\\\\")?,
+            '\n' => scratch.write_str("\\n")?,
+            '\r' => scratch.write_str("\\r")?,
+            '\t' => scratch.write_str("\\t")?,
+            '\u{7}' => scratch.write_str("\\a")?,
+            '\u{8}' => scratch.write_str("\\b")?,
+            '\u{b}' => scratch.write_str("\\v")?,
+            '\u{c}' => scratch.write_str("\\f")?,
+            ch if ch.is_ascii_control() => write!(scratch, "\\x{:02x}", ch as u32)?,
+            _ => scratch.write_char(ch)?,
+        }
+    }
+    scratch.write_char('"')
 }
 
 impl Scratch<'_> {
@@ -711,6 +822,19 @@ impl<'a> ResultValue<'a> {
             Self::Stored(..) | Self::Scalar(Some(Value::String(_)))
         )
     }
+    fn type_name(self) -> &'static str {
+        match self {
+            Self::Scalar(None | Some(Value::Nil)) => "<nil>",
+            Self::Scalar(Some(Value::Bool(_))) => "bool",
+            Self::Scalar(Some(Value::Int(_))) => "int",
+            Self::Scalar(Some(Value::Float(_))) => "float64",
+            Self::Scalar(Some(Value::String(_))) | Self::Stored(..) => "string",
+            Self::Uint(_) => "uint64",
+            Self::Matches(_) => "[]string",
+            Self::Groups(_) => "map[string]string",
+            Self::Variables(_) => "map[string]interface {}",
+        }
+    }
 }
 
 fn atom(word: &str) -> Result<Atom, String> {
@@ -736,11 +860,43 @@ fn atom(word: &str) -> Result<Atom, String> {
         _ => {
             if let Ok(value) = word.parse::<i64>() {
                 Ok(Atom::Int(value))
+            } else if let Some(value) = parse_base_integer(word) {
+                Ok(Atom::Int(value))
+            } else if (word.contains('.') || word.contains('e') || word.contains('E'))
+                && word.parse::<f64>().is_ok()
+            {
+                Ok(Atom::Float(
+                    word.parse::<f64>().map_err(|_| "invalid float")?,
+                ))
             } else {
                 Ok(Atom::Field(parse_field(word)?))
             }
         }
     }
+}
+
+fn parse_base_integer(word: &str) -> Option<i64> {
+    let (negative, word) = word
+        .strip_prefix('-')
+        .map_or((false, word), |word| (true, word));
+    let (radix, digits) =
+        if let Some(value) = word.strip_prefix("0x").or_else(|| word.strip_prefix("0X")) {
+            (16, value)
+        } else if let Some(value) = word.strip_prefix("0o").or_else(|| word.strip_prefix("0O")) {
+            (8, value)
+        } else {
+            (
+                2,
+                word.strip_prefix("0b")
+                    .or_else(|| word.strip_prefix("0B"))?,
+            )
+        };
+    let value = i64::from_str_radix(digits, radix).ok()?;
+    Some(if negative {
+        value.checked_neg()?
+    } else {
+        value
+    })
 }
 
 fn split(source: &str, separator: char) -> Result<Vec<&str>, String> {
