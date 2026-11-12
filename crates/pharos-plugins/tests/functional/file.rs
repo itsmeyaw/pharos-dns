@@ -279,8 +279,24 @@ async fn dnssec_ok_serves_rrsigs_and_nsec_denial() {
     }
 }
 
-#[tokio::test]
-async fn external_alias_preserves_target_rcode_and_truncation() {
+#[test]
+fn external_alias_preserves_target_rcode_and_truncation() {
+    // Debug Plugin Chain futures exceed 2 MiB; see #90.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(external_alias_test());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn external_alias_test() {
     use pharos_server::{Action, Handler, ListenerKey, Router, Server};
     use std::sync::Arc;
     enum Route {
