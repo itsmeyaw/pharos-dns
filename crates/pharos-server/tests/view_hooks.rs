@@ -21,7 +21,8 @@ impl Chain for View {
         Outcome::Unanswered(self.result)
     }
 
-    async fn serve_with_collected_metadata(&self, cx: &mut Context<'_, '_>) -> Outcome {
+    async fn serve_routed(&self, cx: &mut Context<'_, '_>, collected: bool) -> Outcome {
+        assert!(collected);
         assert_eq!(cx.metadata.get("test/value"), self.expected);
         Outcome::Unanswered(self.result)
     }
@@ -98,8 +99,9 @@ async fn no_view_keeps_existing_response_bytes_and_never_calls_view_hooks() {
         fn matches_view(&self, _: &Context<'_, '_>) -> bool {
             panic!("unexpected view check")
         }
-        async fn serve_with_collected_metadata(&self, _: &mut Context<'_, '_>) -> Outcome {
-            panic!("unexpected collected serve")
+        async fn serve_routed(&self, _: &mut Context<'_, '_>, collected: bool) -> Outcome {
+            assert!(!collected);
+            Outcome::Unanswered(Rcode::REFUSED)
         }
     }
     let mut router = Router::default();
@@ -119,6 +121,54 @@ async fn no_view_keeps_existing_response_bytes_and_never_calls_view_hooks() {
         )
         .await;
     assert_eq!(response, expected);
+}
+
+#[tokio::test]
+async fn routed_dispatch_uses_one_small_future_through_arc() {
+    struct Routed(bool);
+    impl Chain for Routed {
+        async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
+            let large = [0_u8; 65_536];
+            std::future::pending::<()>().await;
+            std::hint::black_box(large);
+            Outcome::Drop
+        }
+        fn serve_routed(
+            &self,
+            _: &mut Context<'_, '_>,
+            collected: bool,
+        ) -> impl std::future::Future<Output = Outcome> + Send {
+            assert_eq!(collected, self.0);
+            std::future::ready(Outcome::Unanswered(Rcode::REFUSED))
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+        fn has_view(&self) -> bool {
+            self.0
+        }
+    }
+    for has_view in [false, true] {
+        let mut router = Router::default();
+        router.add(
+            key(),
+            ".".parse().unwrap(),
+            Some(Arc::new(Routed(has_view))),
+            vec![],
+        );
+        let server = Server::new(router, key());
+        let request = query("example.org.", Type::A);
+        let mut response = Vec::new();
+        let future = server.handle(
+            &request,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response,
+        );
+        assert!(std::mem::size_of_val(&future) < 65_536);
+        future.await;
+        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+    }
 }
 
 #[tokio::test]

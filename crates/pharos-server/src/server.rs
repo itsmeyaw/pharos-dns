@@ -38,10 +38,18 @@ pub trait Chain: Send + Sync + 'static {
     fn view_name(&self) -> &str {
         ""
     }
-    /// Serve with the Metadata already collected while routing; do not collect it again.
+    /// Legacy collected-Metadata entry point; routed dispatch uses `serve_routed` instead.
     fn serve_with_collected_metadata(
         &self,
         context: &mut Context<'_, '_>,
+    ) -> impl Future<Output = Outcome> + Send {
+        self.serve(context)
+    }
+    /// Serve a routed Query. Override to preserve Metadata when `collected` is true.
+    fn serve_routed(
+        &self,
+        context: &mut Context<'_, '_>,
+        _collected: bool,
     ) -> impl Future<Output = Outcome> + Send {
         self.serve(context)
     }
@@ -91,6 +99,13 @@ impl<C: Chain> Chain for Arc<C> {
         context: &mut Context<'_, '_>,
     ) -> impl Future<Output = Outcome> + Send {
         self.as_ref().serve_with_collected_metadata(context)
+    }
+    fn serve_routed(
+        &self,
+        context: &mut Context<'_, '_>,
+        collected: bool,
+    ) -> impl Future<Output = Outcome> + Send {
+        self.as_ref().serve_routed(context, collected)
     }
     fn parallel_query(
         &self,
@@ -425,26 +440,20 @@ impl<C: Chain> Server<C> {
         };
         // shortcut: no-View Queries read a routing flag; specialize Listener dispatch to remove this cost.
         let has_views = self.has_views.load(Ordering::Relaxed);
-        let mut view_slots;
-        let mut view_metadata = if has_views {
-            view_slots = [None; 18];
-            view_slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
-            view_slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
-            view_slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
-            let mut metadata = Metadata::new(&mut view_slots);
-            metadata.self_lookup = Some(crate::SelfLookupState {
-                server: lookup_server,
-                depth: lookup.0,
-                siit: lookup.1,
-                autopath: lookup.2,
-            });
+        let mut slots = [None; 18];
+        slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
+        slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
+        slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
+        let mut metadata = Metadata::new(&mut slots);
+        metadata.self_lookup = Some(crate::SelfLookupState {
+            server: lookup_server,
+            depth: lookup.0,
+            siit: lookup.1,
+            autopath: lookup.2,
+        });
+        let (block, view) = if has_views {
             metadata.set_enabled(false);
-            Some(metadata)
-        } else {
-            None
-        };
-        let (block, view) = if let Some(metadata) = &mut view_metadata {
-            self.route_view(query, peer, protocol, response, metadata)
+            self.route_view(query, peer, protocol, response, &mut metadata)
         } else {
             (self.router.route(&self.key, query, peer, protocol), "")
         };
@@ -455,23 +464,6 @@ impl<C: Chain> Server<C> {
         let mut tsig_signing = None;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
-                let mut slots;
-                let mut metadata = if let Some(metadata) = view_metadata {
-                    metadata
-                } else {
-                    slots = [None; 18];
-                    slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
-                    slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
-                    slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
-                    let mut metadata = Metadata::new(&mut slots);
-                    metadata.self_lookup = Some(crate::SelfLookupState {
-                        server: lookup_server,
-                        depth: lookup.0,
-                        siit: lookup.1,
-                        autopath: lookup.2,
-                    });
-                    metadata
-                };
                 if has_views {
                     metadata.set_metric_view(view);
                 }
@@ -486,21 +478,12 @@ impl<C: Chain> Server<C> {
                     response,
                     max_response_size: response_limit(query, protocol),
                 };
-                let outcome = if has_views {
-                    crate::panic::contain_panic_with_stacktrace(
-                        chain.serve_with_collected_metadata(&mut context),
-                        self.debug,
-                        chain.stacktrace(),
-                    )
-                    .await
-                } else {
-                    crate::panic::contain_panic_with_stacktrace(
-                        chain.serve(&mut context),
-                        self.debug,
-                        chain.stacktrace(),
-                    )
-                    .await
-                };
+                let outcome = crate::panic::contain_panic_with_stacktrace(
+                    chain.serve_routed(&mut context, has_views),
+                    self.debug,
+                    chain.stacktrace(),
+                )
+                .await;
                 if let Some(opt) = context.query.opt() {
                     query = query.with_udp_payload_limit(opt.udp_payload_size());
                 }
