@@ -119,7 +119,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
                     return Err(format!("invalid flag: {flag}"));
                 }
                 let mode = values.get(2).copied().unwrap_or("valid");
-                if !matches!(mode, "valid" | "badsig" | "badtime") {
+                if !matches!(mode, "valid" | "badkey" | "badsig" | "badtime") {
                     return Err(format!("invalid flag: {flag}"));
                 }
                 let name = Name::parse(values[0], &root).map_err(|e| e.to_string())?;
@@ -178,6 +178,48 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
 }
 
 impl Query {
+    pub(crate) fn check_response_tsig(
+        &self,
+        query: &[u8],
+        response: &[u8],
+    ) -> Result<bool, String> {
+        let Some((name, secret, mode)) = &self.tsig else {
+            return Ok(false);
+        };
+        let request = pharos_proto::TsigRecord::parse(query).map_err(|e| e.to_string())?;
+        let record = pharos_proto::TsigRecord::parse(response).map_err(|e| e.to_string())?;
+        let expected = match mode.as_str() {
+            "badkey" => 17,
+            "badsig" => 16,
+            "badtime" => 18,
+            _ => 0,
+        };
+        if record.error != expected
+            || record.owner != request.owner
+            || record.algorithm != request.algorithm
+        {
+            return Err(format!(
+                "unexpected TSIG response fields: error {} expected {expected}",
+                record.error
+            ));
+        }
+        if expected == 16 || expected == 17 {
+            if !record.mac.is_empty() || !record.other.is_empty() {
+                return Err("authentication error has nonempty MAC or other data".into());
+            }
+        } else {
+            if (expected == 18 && record.other.len() != 6)
+                || (expected == 0 && !record.other.is_empty())
+            {
+                return Err("unexpected TSIG other data".into());
+            }
+            let key = TsigKey::new(name.clone(), TsigAlgorithm::Sha256, secret);
+            // RFC 8945 §4.3.1: verify the Response against the Query MAC.
+            key.verify(response, record.time_signed, Some(request.mac), 0)
+                .map_err(|e| format!("invalid response signature: {e}"))?;
+        }
+        Ok(true)
+    }
     pub(crate) fn wire(&self) -> Result<Vec<u8>, String> {
         let mut wire = Vec::new();
         let flags = (u16::from(self.opcode) << 11) | if self.recursion { 0x0100 } else { 0 };
@@ -284,6 +326,29 @@ mod tests {
                 "{flag}"
             );
         }
+    }
+
+    #[test]
+    fn response_authentication_rejects_tampering() {
+        let query = parse("example. A IN udp +tsig=key.:c2VjcmV0").unwrap();
+        let wire = query.wire().unwrap();
+        let request_mac = pharos_proto::TsigRecord::parse(&wire).unwrap().mac;
+        let key = pharos_proto::TsigKey::new(
+            "key.".parse().unwrap(),
+            pharos_proto::TsigAlgorithm::Sha256,
+            b"secret",
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut response = Vec::new();
+        response.extend_from_slice(&[0, 0, 0x81, 0x80, 0, 0, 0, 0, 0, 0, 0, 0]);
+        key.sign(&mut response, now, 300, Some(request_mac))
+            .unwrap();
+        assert!(query.check_response_tsig(&wire, &response).is_ok());
+        response[3] ^= 1;
+        assert!(query.check_response_tsig(&wire, &response).is_err());
     }
 
     #[test]
