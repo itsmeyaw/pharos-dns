@@ -40,6 +40,7 @@ fn main() {
             "dnssec" => "dnssec::Dnssec",
             "siit" => "siit::Siit",
             "tsig" => "tsig::Tsig",
+            "transfer" => "transfer::Transfer",
             "rewrite" => "rewrite::Rewrite",
             "autopath" => "autopath::AutoPath",
             "root" => "std::path::PathBuf",
@@ -83,6 +84,7 @@ fn main() {
             "dnssec" => "dnssec::setup::setup",
             "siit" => "siit::setup::setup",
             "tsig" => "tsig::setup::setup",
+            "transfer" => "transfer::setup::setup",
             "rewrite" => "rewrite::setup::setup",
             "autopath" => "autopath::setup::setup",
             "root" => "root::setup::setup",
@@ -178,7 +180,12 @@ fn main() {
             continue;
         }
         let next = next_plugin(&enabled, i + 1);
-        writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => {{ let outcome = pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await; if outcome == pharos_server::Outcome::Response && cx.metadata.get(pharos_server::metrics::WRITER_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::metrics::WRITER_METADATA, {name:?}); }} else if matches!(outcome, pharos_server::Outcome::Error(_)) && cx.metadata.get(pharos_server::logging::PLUGIN_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::logging::PLUGIN_METADATA, {name:?}); }} outcome }}, None => self.serve_{next}(cx).await, }} }}").unwrap();
+        let call = if *name == "transfer" && enabled.contains(&"kubernetes") {
+            format!("plugin.serve_with(cx, Next{i}(self), self.kubernetes.as_ref()).await")
+        } else {
+            format!("pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await")
+        };
+        writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => {{ let outcome = {call}; if outcome == pharos_server::Outcome::Response && cx.metadata.get(pharos_server::metrics::WRITER_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::metrics::WRITER_METADATA, {name:?}); }} else if matches!(outcome, pharos_server::Outcome::Error(_)) && cx.metadata.get(pharos_server::logging::PLUGIN_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::logging::PLUGIN_METADATA, {name:?}); }} outcome }}, None => self.serve_{next}(cx).await, }} }}").unwrap();
     }
     writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
     code.push_str("}\n");

@@ -11,6 +11,7 @@
 - The BIND key pair in `crates/pharos-dnssec/tests/fixtures` is from CoreDNS v1.15.0's `plugin/sign/testdata`.
 - `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
 - The acl Plugin setup and tests follow CoreDNS v1.15.0's `plugin/acl`.
+- The transfer Plugin setup and tests follow CoreDNS v1.15.0's `plugin/transfer`.
 - The dns64 Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/dns64`.
 - The siit Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/siit`.
 - The rewrite Plugin and tests follow CoreDNS v1.15.0's `plugin/rewrite`.

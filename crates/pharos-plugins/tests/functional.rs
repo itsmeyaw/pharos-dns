@@ -22,6 +22,14 @@ mod any {
 }
 
 #[path = "functional"]
+mod transfer {
+    #[path = "transfer_setup.rs"]
+    mod setup;
+    #[path = "transfer.rs"]
+    mod cases;
+}
+
+#[path = "functional"]
 mod tsig {
     #[path = "tsig.rs"]
     mod cases;

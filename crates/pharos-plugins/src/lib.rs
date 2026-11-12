@@ -101,6 +101,8 @@ pub mod root;
 pub mod shed;
 #[cfg(feature = "plugin-timeouts")]
 pub mod timeouts;
+#[cfg(feature = "plugin-transfer")]
+pub mod transfer;
 #[cfg(feature = "plugin-tsig")]
 pub mod tsig;
 #[cfg(feature = "plugin-whoami")]

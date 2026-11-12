@@ -1,0 +1,269 @@
+//! Outgoing Zone Transfers.
+
+pub(crate) mod setup;
+
+use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
+use pharos_proto::{Class, Name, NameRef, Rcode, Rdata, Type};
+use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
+use std::net::IpAddr;
+
+/// Supplies an authoritative Zone's records to the transfer Plugin.
+pub trait Transferer {
+    /// Return None if this Plugin is not authoritative for the requested Zone.
+    fn transfer(
+        &self,
+        zone: Name,
+        serial: u32,
+        id: u16,
+        qtype: Type,
+        qclass: Class,
+    ) -> Result<Option<pharos_server::Stream>, pharos_server::Error>;
+}
+
+#[derive(Clone, Debug)]
+pub struct Transfer {
+    pub(crate) zones: Vec<TransferZone>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TransferZone {
+    pub domains: Vec<Name>,
+    pub destinations: Vec<Destination>,
+    pub source: Option<IpAddr>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum Destination {
+    All,
+    Address { host: String, port: String },
+}
+
+impl Transfer {
+    /// Notify the configured Secondary Servers that a Zone changed.
+    pub async fn notify(&self, zone: &Name) -> std::io::Result<()> {
+        let Some(rule) = self
+            .zones
+            .iter()
+            .flat_map(|rule| {
+                rule.domains.iter().filter_map(move |domain| {
+                    zone.is_subdomain_of(domain)
+                        .then_some((domain.label_count(), rule))
+                })
+            })
+            .max_by_key(|(count, _)| *count)
+            .map(|(_, rule)| rule)
+        else {
+            return Ok(());
+        };
+        let mut errors = Vec::new();
+        for destination in &rule.destinations {
+            let Destination::Address { host, port } = destination else {
+                continue;
+            };
+            let endpoint = if host.contains(':') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            };
+            let result = async {
+                let address = tokio::net::lookup_host(&endpoint)
+                    .await?
+                    .next()
+                    .ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid destination")
+                    })?;
+                let mut random = [0; 2];
+                getrandom::getrandom(&mut random)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                pharos_server::transfer::notify_from(
+                    address,
+                    rule.source,
+                    zone,
+                    u16::from_ne_bytes(random),
+                    std::time::Duration::from_secs(2),
+                )
+                .await
+            }
+            .await;
+            if let Err(error) = result {
+                errors.push(format!("{endpoint}: {error}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(errors.join("; ")))
+        }
+    }
+
+    fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Self, Error> {
+        let mut zones = Vec::new();
+        while cursor.next() {
+            let args = cursor.remaining_args();
+            let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+            let domains = origins_from_args_or_server_block(&args, server_domains)
+                .iter()
+                .map(|zone| {
+                    zone.parse()
+                        .map_err(|_| cursor.error("invalid transfer zone"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut destinations = Vec::new();
+            let mut source = None;
+            while cursor.next_block() {
+                let property = cursor.val().to_owned();
+                let args = cursor.remaining_args();
+                match property.as_str() {
+                    "to" if !args.is_empty() => {
+                        for arg in args {
+                            destinations.push(
+                                destination(&arg)
+                                    .ok_or_else(|| cursor.error("invalid transfer destination"))?,
+                            );
+                        }
+                    }
+                    "source" if args.len() == 1 && source.is_none() => {
+                        source = Some(
+                            args[0]
+                                .parse()
+                                .map_err(|_| cursor.error("invalid transfer source"))?,
+                        );
+                    }
+                    _ => return Err(cursor.arg_err()),
+                }
+            }
+            if destinations.is_empty() {
+                return Err(cursor.error("transfer requires to"));
+            }
+            zones.push(TransferZone {
+                domains,
+                destinations,
+                source,
+            });
+        }
+        Ok(Self { zones })
+    }
+
+    /// Process a transfer using a statically dispatched authoritative Plugin.
+    pub async fn serve_with<N: Next + Send, T: Transferer + Sync>(
+        &self,
+        cx: &mut Context<'_, '_>,
+        next: N,
+        provider: Option<&T>,
+    ) -> Outcome {
+        let Some(question) = cx.query.questions().next() else {
+            return next.run(cx).await;
+        };
+        if !matches!(question.qtype, Type::AXFR | Type::IXFR) {
+            return next.run(cx).await;
+        }
+        // RFC 5936 §4.2: AXFR uses TCP rather than UDP.
+        if question.qtype == Type::AXFR && cx.protocol == Protocol::Udp {
+            return Outcome::Unanswered(Rcode::REFUSED);
+        }
+        let rule = self
+            .zones
+            .iter()
+            .flat_map(|zone| {
+                zone.domains.iter().filter_map(move |domain| {
+                    let base = NameRef::parse(domain.as_wire(), 0).ok()?;
+                    let count = question.name.labels().count();
+                    let base_count = base.labels().count();
+                    (count >= base_count
+                        && question
+                            .name
+                            .labels()
+                            .skip(count - base_count)
+                            .zip(base.labels())
+                            .all(|(a, b)| a.eq_ignore_ascii_case(b)))
+                    .then_some((base_count, zone))
+                })
+            })
+            .max_by_key(|(count, _)| *count)
+            .map(|(_, zone)| zone);
+        let Some(rule) = rule else {
+            return next.run(cx).await;
+        };
+        let allowed = rule
+            .destinations
+            .iter()
+            .any(|destination| match destination {
+                Destination::All => true,
+                Destination::Address { host, .. } => {
+                    host.parse::<IpAddr>().ok() == Some(cx.client.ip())
+                }
+            });
+        if !allowed {
+            return Outcome::Unanswered(Rcode::REFUSED);
+        }
+        let serial = if question.qtype == Type::IXFR {
+            let mut authority = cx.query.authorities();
+            let serial = authority
+                .next()
+                .and_then(|record| match record.data().ok()? {
+                    Rdata::Soa { serial, .. } => Some(serial),
+                    _ => None,
+                });
+            match (serial, authority.next()) {
+                (Some(serial), None) => serial,
+                _ => return Outcome::Unanswered(Rcode::SERVFAIL),
+            }
+        } else {
+            0
+        };
+        let Some(provider) = provider else {
+            return next.run(cx).await;
+        };
+        match provider.transfer(
+            question.name.to_name(),
+            serial,
+            cx.query.id(),
+            question.qtype,
+            question.qclass,
+        ) {
+            Ok(Some(stream)) => Outcome::Stream(stream),
+            Ok(None) => next.run(cx).await,
+            Err(error) => Outcome::Error(error),
+        }
+    }
+}
+
+fn destination(value: &str) -> Option<Destination> {
+    if value == "*" {
+        return Some(Destination::All);
+    }
+    let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:")?;
+        (host, if port.is_empty() { "53" } else { port })
+    } else if value.split('%').next()?.parse::<IpAddr>().is_ok() {
+        (value, "53")
+    } else {
+        let (host, port) = value.rsplit_once(':')?;
+        (host, if port.is_empty() { "53" } else { port })
+    };
+    host.split('%').next()?.parse::<IpAddr>().ok()?;
+    Some(Destination::Address {
+        host: host.into(),
+        port: port.into(),
+    })
+}
+
+impl Plugin for Transfer {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        self.serve_with(cx, next, None::<&NoTransferer>).await
+    }
+}
+
+struct NoTransferer;
+impl Transferer for NoTransferer {
+    fn transfer(
+        &self,
+        _: Name,
+        _: u32,
+        _: u16,
+        _: Type,
+        _: Class,
+    ) -> Result<Option<pharos_server::Stream>, pharos_server::Error> {
+        Ok(None)
+    }
+}
