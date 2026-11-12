@@ -9,7 +9,7 @@ pub(super) fn is_reverse(labels: &[&[u8]]) -> bool {
             || labels[labels.len() - 2].eq_ignore_ascii_case(b"ip6"))
 }
 
-pub(super) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
+pub(crate) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
     let (suffix, body) = labels.split_last()?;
     if !suffix.eq_ignore_ascii_case(b"arpa") {
         return None;
