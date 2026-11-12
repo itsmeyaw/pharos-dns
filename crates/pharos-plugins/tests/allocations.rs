@@ -97,6 +97,12 @@ mod dns64 {
 }
 
 #[path = "allocations"]
+mod dnssec {
+    #[path = "dnssec_allocations.rs"]
+    mod cases;
+}
+
+#[path = "allocations"]
 mod forward {
     #[path = "forward_allocations.rs"]
     mod forward_allocations;

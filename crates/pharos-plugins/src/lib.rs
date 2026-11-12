@@ -33,6 +33,8 @@ pub mod chaos;
 pub mod debug;
 #[cfg(feature = "plugin-dns64")]
 pub mod dns64;
+#[cfg(feature = "plugin-dnssec")]
+pub mod dnssec;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 #[cfg(feature = "plugin-header")]
@@ -229,6 +231,7 @@ pub fn servers_with_registry(
             feature = "plugin-local",
             feature = "plugin-acl",
             feature = "plugin-dns64",
+            feature = "plugin-dnssec",
             feature = "plugin-siit",
             feature = "plugin-autopath"
         ))]
@@ -345,6 +348,11 @@ pub fn servers_with_registry(
         if let Some(dns64) = &mut block.config.dns64 {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             dns64.set_metrics(&metrics, &listeners);
+        }
+        #[cfg(feature = "plugin-dnssec")]
+        if let Some(dnssec) = &mut block.config.dnssec {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            dnssec.set_metrics(&metrics, &listeners);
         }
         #[cfg(feature = "plugin-siit")]
         if let Some(siit) = &mut block.config.siit {
@@ -615,7 +623,11 @@ impl pharos_server::Plugin for Unimplemented {
     }
 }
 
-#[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
+#[cfg(any(
+    feature = "plugin-hosts",
+    feature = "plugin-loadbalance",
+    feature = "plugin-dnssec"
+))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     #[cfg(feature = "plugin-root")]
     {
@@ -628,7 +640,11 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     }
 }
 
-#[cfg(any(feature = "plugin-hosts", feature = "plugin-loadbalance"))]
+#[cfg(any(
+    feature = "plugin-hosts",
+    feature = "plugin-loadbalance",
+    feature = "plugin-dnssec"
+))]
 fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std::path::PathBuf {
     use std::path::{Component, PathBuf};
     let Some(root) = root.filter(|_| path.is_relative()) else {

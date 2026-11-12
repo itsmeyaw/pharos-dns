@@ -59,6 +59,7 @@ struct RegistryInner {
     statuses: Mutex<BTreeMap<StatusKey, Arc<AtomicU64>>>,
     proxies: Mutex<BTreeMap<(String, String), Arc<Proxy>>>,
     caches: Mutex<BTreeMap<Key, Arc<Cache>>>,
+    dnssec: Mutex<BTreeMap<String, Arc<DnssecCounters>>>,
     acl: Mutex<BTreeMap<Key, Arc<[AtomicU64; 4]>>>,
     dns64: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
     siit: Mutex<BTreeMap<String, Arc<AtomicU64>>>,
@@ -93,6 +94,29 @@ pub struct ForwardMetrics(Arc<ForwardCounters>);
 /// Cache metrics with labels resolved once during setup.
 #[derive(Clone)]
 pub struct CacheMetrics(Arc<Cache>);
+
+#[derive(Debug, Default)]
+struct DnssecCounters {
+    entries: AtomicU64,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+/// DNSSEC cache metrics resolved during Listener setup.
+#[derive(Clone, Debug)]
+pub struct DnssecMetrics(Arc<DnssecCounters>);
+
+impl DnssecMetrics {
+    pub fn hit(&self, count: usize) {
+        self.0.hits.fetch_add(count as u64, Ordering::Relaxed);
+    }
+    pub fn miss(&self, count: usize) {
+        self.0.misses.fetch_add(count as u64, Ordering::Relaxed);
+    }
+    pub fn entries(&self, count: usize) {
+        self.0.entries.store(count as u64, Ordering::Relaxed);
+    }
+}
 
 /// ACL counters with labels resolved during setup.
 #[derive(Clone, Debug)]
@@ -356,6 +380,7 @@ impl Registry {
             statuses: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             caches: Mutex::new(BTreeMap::new()),
+            dnssec: Mutex::new(BTreeMap::new()),
             acl: Mutex::new(BTreeMap::new()),
             dns64: Mutex::new(BTreeMap::new()),
             siit: Mutex::new(BTreeMap::new()),
@@ -407,6 +432,17 @@ impl Registry {
         CacheMetrics(Arc::clone(
             caches
                 .entry((server.into(), zones.into(), view.into()))
+                .or_default(),
+        ))
+    }
+
+    pub fn dnssec(&self, server: &str) -> DnssecMetrics {
+        DnssecMetrics(Arc::clone(
+            self.0
+                .dnssec
+                .lock()
+                .unwrap()
+                .entry(server.into())
                 .or_default(),
         ))
     }
@@ -681,6 +717,7 @@ impl Registry {
         out.push_str("} 1\n");
 
         self.encode_caches(out);
+        self.encode_dnssec(out);
         let acl = self.0.acl.lock().unwrap();
         for (index, name, help) in [
             (0, "allowed", "Counter of DNS requests being allowed."),
@@ -1042,6 +1079,52 @@ impl Registry {
         }
         if self.0.process.load(Ordering::Relaxed) {
             crate::process_metrics::encode_process(out);
+        }
+    }
+
+    fn encode_dnssec(&self, out: &mut String) {
+        let metrics = self.0.dnssec.lock().unwrap();
+        if metrics.is_empty() {
+            return;
+        }
+        for (name, help, kind, field) in [
+            (
+                "dnssec_cache_entries",
+                "The number of elements in the dnssec cache.",
+                "gauge",
+                (|m: &DnssecCounters| &m.entries) as fn(&DnssecCounters) -> &AtomicU64,
+            ),
+            (
+                "dnssec_cache_hits_total",
+                "The count of cache hits.",
+                "counter",
+                |m: &DnssecCounters| &m.hits,
+            ),
+            (
+                "dnssec_cache_misses_total",
+                "The count of cache misses.",
+                "counter",
+                |m: &DnssecCounters| &m.misses,
+            ),
+        ] {
+            header(out, name, help, kind);
+            for (server, counters) in metrics.iter() {
+                if kind == "gauge" {
+                    sample(
+                        out,
+                        name,
+                        &[("server", server), ("type", "signature")],
+                        field(counters).load(Ordering::Relaxed),
+                    );
+                } else {
+                    sample(
+                        out,
+                        name,
+                        &[("server", server)],
+                        field(counters).load(Ordering::Relaxed),
+                    );
+                }
+            }
         }
     }
 
