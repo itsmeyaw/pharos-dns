@@ -2,7 +2,7 @@
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use pharos_server::{Action, Handler, Listener, Protocol};
+use pharos_server::{Action, Handler, Listener, Protocol, Stream};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -11,6 +11,33 @@ use tokio::{
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+struct Transfer;
+
+impl Handler for Transfer {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        let mut next = 0;
+        Action::Stream(Stream::new(move |response: &mut Vec<u8>| {
+            if next == 3 {
+                return Ok(false);
+            }
+            response.push(next);
+            next += 1;
+            Ok(true)
+        }))
+    }
+}
+
+#[tokio::test]
+async fn tcp_writes_every_transfer_message_on_the_same_connection() {
+    let (listener, mut stream) = connect(Transfer).await;
+    send(&mut stream, b"transfer").await;
+    for message in 0..3 {
+        assert_eq!(receive(&mut stream).await, [message]);
+    }
+    drop(stream);
+    listener.shutdown().await.unwrap();
+}
 
 struct Echo;
 

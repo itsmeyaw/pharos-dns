@@ -101,7 +101,7 @@ impl Plugin for Log {
         };
         let start = Instant::now();
         let outcome = next.run(cx).await;
-        let (kind, class, bit) = classify(cx, outcome);
+        let (kind, class, bit) = classify(cx, &outcome);
         if cx.metadata.enabled() {
             cx.metadata.insert("log/type", kind);
             cx.metadata.insert("log/class", class);
@@ -109,7 +109,7 @@ impl Plugin for Log {
         if rule.classes & (1 | bit) != 0 {
             BUFFER.with_borrow_mut(|buffer| {
                 buffer.clear();
-                rule.format.format(buffer, cx, outcome, start.elapsed());
+                rule.format.format(buffer, cx, &outcome, start.elapsed());
                 pharos_server::logging::log("INFO", "log", buffer);
             });
         }
@@ -117,8 +117,8 @@ impl Plugin for Log {
     }
 }
 
-fn classify(cx: &Context<'_, '_>, outcome: Outcome) -> (&'static str, &'static str, u8) {
-    let message = (outcome == Outcome::Response)
+fn classify(cx: &Context<'_, '_>, outcome: &Outcome) -> (&'static str, &'static str, u8) {
+    let message = (*outcome == Outcome::Response)
         .then(|| Message::parse(cx.response).ok())
         .flatten();
     let code = match outcome {
@@ -126,11 +126,11 @@ fn classify(cx: &Context<'_, '_>, outcome: Outcome) -> (&'static str, &'static s
         Outcome::Error(_) => Some(Rcode::SERVFAIL),
         Outcome::Unanswered(code)
             if matches!(
-                code,
+                *code,
                 Rcode::SERVFAIL | Rcode::FORMERR | Rcode::REFUSED | Rcode::NOTIMP
             ) =>
         {
-            Some(code)
+            Some(*code)
         }
         _ => None,
     };

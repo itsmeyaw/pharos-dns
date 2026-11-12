@@ -158,12 +158,31 @@ async fn serve<H: Handler>(
         let mut response = responses.pop().unwrap_or_default();
         response.clear();
         queries.spawn(async move {
-            if H::handle_shared(&handler, &query, peer, Protocol::Tcp, &mut response).await
-                == Action::Respond
-                && let Ok(length) = u16::try_from(response.len())
-            {
-                // RFC 7766 §5: TCP responses use the same connection as the query.
-                let mut writer = writer.lock().await;
+            let action =
+                H::handle_shared(&handler, &query, peer, Protocol::Tcp, &mut response).await;
+            let mut transfer = match action {
+                Action::Drop => return response,
+                Action::Respond => None,
+                Action::Stream(transfer) => Some(transfer),
+            };
+            // RFC 5936 §2.2: each Transfer Message is separately framed on one TCP connection.
+            let mut writer = writer.lock().await;
+            loop {
+                if let Some(transfer) = transfer.as_mut() {
+                    response.clear();
+                    match transfer.next(&mut response) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(_) => {
+                            *writer = None;
+                            let _ = failed.send(true);
+                            break;
+                        }
+                    }
+                }
+                let Ok(length) = u16::try_from(response.len()) else {
+                    break;
+                };
                 if let Some(stream) = writer.as_mut() {
                     let result = timeout(options.write, async {
                         stream.write_all(&length.to_be_bytes()).await?;
@@ -173,7 +192,13 @@ async fn serve<H: Handler>(
                     if !matches!(result, Ok(Ok(()))) {
                         *writer = None;
                         let _ = failed.send(true);
+                        break;
                     }
+                } else {
+                    break;
+                }
+                if transfer.is_none() {
+                    break;
                 }
             }
             response

@@ -383,10 +383,10 @@ impl<C: Chain> Server<C> {
         let duration = chain_start.elapsed().as_secs_f64();
         let default_logger = std::ptr::fn_addr_eq(self.logger, log_error as fn(Error));
         let mut first_error = true;
+        let plugin_panic = outcome == Outcome::Error(Error::PluginPanic);
+        let plugin_error = matches!(outcome, Outcome::Error(e) if e != Error::PluginPanic);
         let action = finish_outcome(query, protocol, outcome, response, |error| {
-            let suppress = first_error
-                && (error_logged || default_logger)
-                && matches!(outcome, Outcome::Error(e) if e != Error::PluginPanic);
+            let suppress = first_error && (error_logged || default_logger) && plugin_error;
             first_error = false;
             if suppress {
                 return;
@@ -397,9 +397,7 @@ impl<C: Chain> Server<C> {
                 (self.logger)(error);
             }
         });
-        let code = if (block.is_none() || outcome == Outcome::Error(Error::PluginPanic))
-            && action == Action::Respond
-        {
+        let code = if (block.is_none() || plugin_panic) && action == Action::Respond {
             pharos_proto::Message::parse(response).map_or(0, |message| message.rcode().0)
         } else {
             recorded_code
@@ -407,9 +405,7 @@ impl<C: Chain> Server<C> {
         // shortcut: compressed Query lengths differ until decoded Message lengths are available.
         let qtype = query.questions().next().map_or(0, |q| q.qtype.0);
         let dnssec = query.opt().is_some_and(|opt| opt.dnssec_ok());
-        let response_len = if (block.is_none() || outcome == Outcome::Error(Error::PluginPanic))
-            && action == Action::Respond
-        {
+        let response_len = if (block.is_none() || plugin_panic) && action == Action::Respond {
             response.len()
         } else {
             recorded_size
@@ -426,7 +422,7 @@ impl<C: Chain> Server<C> {
                 duration,
             );
         } else {
-            let metrics = if outcome == Outcome::Error(Error::PluginPanic) {
+            let metrics = if plugin_panic {
                 self.dropped.as_ref()
             } else {
                 block.map_or(self.dropped.as_ref(), |block| block.metrics())

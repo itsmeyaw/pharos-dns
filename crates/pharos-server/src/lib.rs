@@ -90,12 +90,37 @@ pub enum Protocol {
     Tcp,
 }
 
-/// A placeholder for a future Zone Transfer stream.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Stream;
+/// Lazily produces complete wire-format Messages into a reusable buffer.
+#[derive(Clone)]
+pub struct Stream(Arc<std::sync::Mutex<dyn FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send>>);
+
+impl Stream {
+    pub fn new(produce: impl FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send + 'static) -> Self {
+        // shortcut: one allocation per Zone Transfer; remove when a concrete stream type exists.
+        Self(Arc::new(std::sync::Mutex::new(produce)))
+    }
+
+    pub fn next(&mut self, response: &mut Vec<u8>) -> Result<bool, Error> {
+        (self.0.lock().map_err(|_| Error::PluginPanic)?)(response)
+    }
+}
+
+impl fmt::Debug for Stream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Stream(..)")
+    }
+}
+
+impl PartialEq for Stream {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Stream {}
 
 /// Explicit result of running a Plugin Chain.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
     Response,
     Stream(Stream),
@@ -558,7 +583,7 @@ impl Context<'_, '_> {
             }));
             return match (&mut task.0).await {
                 Ok((Action::Respond, response)) => Ok(response),
-                Ok((Action::Drop, _)) => Err(Error::SelfLookupDropped),
+                Ok((Action::Drop | Action::Stream(_), _)) => Err(Error::SelfLookupDropped),
                 Err(_) => Err(Error::PluginPanic),
             };
         }
@@ -576,7 +601,7 @@ impl Context<'_, '_> {
             .await
         {
             Action::Respond => Ok(response),
-            Action::Drop => Err(Error::SelfLookupDropped),
+            Action::Drop | Action::Stream(_) => Err(Error::SelfLookupDropped),
         }
     }
 }
@@ -595,10 +620,11 @@ fn canonical_peer(mut peer: SocketAddr) -> SocketAddr {
     peer
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum Action {
     Respond,
     Drop,
+    Stream(Stream),
 }
 
 /// TCP connection limits selected by the Listener configuration.
