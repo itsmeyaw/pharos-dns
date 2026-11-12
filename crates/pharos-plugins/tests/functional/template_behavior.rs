@@ -3,6 +3,66 @@ use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
+#[test]
+fn template_renders_concurrently_on_multiple_threads() {
+    let text = ".:53 {\n template IN A {\n match ^(?P<host>[0-9]+)[.]example[.]$\n var host group('host')\n expr host matches '^[0-9]+$'\n answer \"{{ .Name }} 60 IN A 192.0.2.{{ .Var.host }}\"\n }\n}";
+    let configured = configure::<Chain>(&parse("Corefile", text).unwrap(), directives()).unwrap();
+    let chain = &configured[0].config;
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        for i in 1..=8 {
+            let barrier = &barrier;
+            scope.spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                let root: Name = ".".parse().unwrap();
+                let name: Name = format!("{i}.example.").parse().unwrap();
+                let mut wire = Vec::with_capacity(512);
+                let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+                builder
+                    .question(
+                        NameRef::parse(name.as_wire(), 0).unwrap(),
+                        Type::A,
+                        Class::IN,
+                    )
+                    .unwrap();
+                let _ = builder.finish();
+                let mut response = Vec::with_capacity(512);
+                let mut slots = [];
+                let mut context = Context {
+                    query: Message::parse(&wire).unwrap(),
+                    client: "127.0.0.1:1234".parse().unwrap(),
+                    local: "127.0.0.1:53".parse().unwrap(),
+                    transport: Transport::Dns,
+                    protocol: Protocol::Udp,
+                    domain: &root,
+                    metadata: Metadata::new(&mut slots),
+                    response: &mut response,
+                    max_response_size: 512,
+                };
+                barrier.wait();
+                for _ in 0..20 {
+                    assert_eq!(
+                        runtime.block_on(chain.serve(&mut context)),
+                        Outcome::Response
+                    );
+                    assert_eq!(
+                        Message::parse(context.response)
+                            .unwrap()
+                            .answers()
+                            .next()
+                            .unwrap()
+                            .rdata,
+                        &[192, 0, 2, i]
+                    );
+                    context.response.clear();
+                }
+            });
+        }
+    });
+}
+
 #[tokio::test]
 async fn template_expression_scratch_accepts_large_values_and_rejects_exhaustion() {
     for (length, expected) in [

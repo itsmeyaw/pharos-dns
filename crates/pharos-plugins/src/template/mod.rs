@@ -523,12 +523,15 @@ fn evaluate<'a>(
             .filter(|(_, record)| record.section == section)
         {
             let mut output = String::new();
-            record.compiled.render(&data, &mut output).map_err(|_| {
-                if let Some(binding) = &binding {
-                    binding.failures[index].render_failure();
-                }
-                EvaluationError::Record
-            })?;
+            record
+                .compiled
+                .render_with_scratch(&data, &mut output, scratch)
+                .map_err(|_| {
+                    if let Some(binding) = &binding {
+                        binding.failures[index].render_failure();
+                    }
+                    EvaluationError::Record
+                })?;
             // RFC 1035 §5: rendered records use zone-file presentation format.
             // shortcut: zone-text parse allocates per matched Query; see #91.
             let origin: Name = ".".parse().map_err(|_| EvaluationError::Record)?;
