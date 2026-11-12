@@ -22,6 +22,7 @@ struct Expect {
     ttl: u32,
     mask_srv_port: bool,
     mask_soa_serial: bool,
+    mask_rrsig: bool,
     dedupe_additional: bool,
     deviations: Vec<(String, u16, u16)>,
 }
@@ -41,6 +42,7 @@ fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
             "ttl" => expect.ttl = value.parse().map_err(|_| format!("invalid TTL: {value}"))?,
             "mask" if value == "additional.srv.port" => expect.mask_srv_port = true,
             "mask" if value == "soa.serial" => expect.mask_soa_serial = true,
+            "mask" if value == "rrsig" => expect.mask_rrsig = true,
             "mask" if value == "additional.duplicates" => expect.dedupe_additional = true,
             "deviation" => {
                 let parts: Vec<_> = value.split('|').map(str::trim).collect();
@@ -584,6 +586,7 @@ fn scenario(
             expect.mask_srv_port,
             expect.mask_soa_serial,
             expect.dedupe_additional,
+            expect.mask_rrsig,
         );
         if self_test {
             let mut corrupted = pwire.clone();
@@ -606,6 +609,7 @@ fn scenario(
                 expect.mask_srv_port,
                 expect.mask_soa_serial,
                 expect.dedupe_additional,
+                expect.mask_rrsig,
             );
             verify_self_test(result, injected, &expected).map_err(|e| format!("{line}: {e}"))?;
             println!("self-test detected injected header mismatch: {line}");
@@ -797,6 +801,13 @@ mod tests {
         assert!(!parse_expect("", "").unwrap().mask_soa_serial);
         assert!(parse_expect("mask soa.serial", "").unwrap().mask_soa_serial);
         assert!(parse_expect("mask soa", "").is_err());
+    }
+
+    #[test]
+    fn rrsig_mask_is_an_explicit_expectation() {
+        assert!(!parse_expect("", "").unwrap().mask_rrsig);
+        assert!(parse_expect("mask rrsig", "").unwrap().mask_rrsig);
+        assert!(parse_expect("mask rrsig.extra", "").is_err());
     }
 
     #[test]

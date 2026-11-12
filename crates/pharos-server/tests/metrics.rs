@@ -17,6 +17,7 @@ fn migration_table_matches_all_registry_metric_families() {
             .increment();
     }
     registry.cache("dns://:53", ".", "");
+    registry.dnssec("dns://:53");
     registry.hosts("hosts").update(2, 123.0);
     let proxy = registry.proxy("forward", "192.0.2.1:53");
     proxy.request_duration("NOERROR").observe(0.001);

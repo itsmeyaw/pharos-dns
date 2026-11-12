@@ -7,6 +7,7 @@
 - Copyright 2016-2020 The CoreDNS authors and contributors
 - DNS wire fixture in `crates/pharos-proto/tests/corpus` is from CoreDNS test source; see the corpus README for the revision and original test.
 - DNSSEC black-lie bitmaps and tests in `crates/pharos-dnssec` follow CoreDNS v1.15.0's `plugin/dnssec/black_lies.go`.
+- The dnssec Plugin, setup, metrics and tests follow CoreDNS v1.15.0's `plugin/dnssec`; the BIND key fixtures in `crates/pharos-plugins/tests/fixtures/dnssec` derive from its `plugin/sign/testdata`.
 - The BIND key pair in `crates/pharos-dnssec/tests/fixtures` is from CoreDNS v1.15.0's `plugin/sign/testdata`.
 - `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
 - The acl Plugin setup and tests follow CoreDNS v1.15.0's `plugin/acl`.

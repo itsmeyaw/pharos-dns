@@ -90,6 +90,20 @@ mod dns64 {
 }
 
 #[path = "functional"]
+mod dnssec {
+    #[path = "dnssec.rs"]
+    mod cases;
+    #[path = "dnssec_extra.rs"]
+    mod extra;
+    #[path = "dnssec_metrics.rs"]
+    mod metrics;
+    #[path = "dnssec_more.rs"]
+    mod more;
+    #[path = "dnssec_setup.rs"]
+    mod setup;
+}
+
+#[path = "functional"]
 mod errors {
     #[path = "errors_outcomes.rs"]
     mod errors_outcomes;

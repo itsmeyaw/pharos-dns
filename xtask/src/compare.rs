@@ -7,7 +7,15 @@ fn compare(
     tolerance: u32,
     mask_srv_port: bool,
 ) -> Result<(), String> {
-    compare_with_soa_serial(pharos, coredns, tolerance, mask_srv_port, false, false)
+    compare_with_soa_serial(
+        pharos,
+        coredns,
+        tolerance,
+        mask_srv_port,
+        false,
+        false,
+        false,
+    )
 }
 
 pub(crate) fn compare_with_soa_serial(
@@ -17,6 +25,7 @@ pub(crate) fn compare_with_soa_serial(
     mask_srv_port: bool,
     mask_soa_serial: bool,
     dedupe_additional: bool,
+    mask_rrsig: bool,
 ) -> Result<(), String> {
     let questions = |message: &Message<'_>| {
         message
@@ -74,11 +83,11 @@ pub(crate) fn compare_with_soa_serial(
                 record_equal(
                     a,
                     b,
-                    pharos,
-                    coredns,
+                    (pharos, coredns),
                     tolerance,
                     additional && mask_srv_port,
                     mask_soa_serial,
+                    mask_rrsig,
                 )
             }) {
                 unmatched.remove(index);
@@ -179,11 +188,11 @@ fn whoami_srv(record: &Record<'_>, message: &Message<'_>) -> bool {
 fn record_equal(
     a: &Record<'_>,
     b: &Record<'_>,
-    left: &Message<'_>,
-    right: &Message<'_>,
+    messages: (&Message<'_>, &Message<'_>),
     tolerance: u32,
     mask: bool,
     mask_soa_serial: bool,
+    mask_rrsig: bool,
 ) -> bool {
     if a.name.to_string() != b.name.to_string()
         || a.rtype != b.rtype
@@ -198,7 +207,7 @@ fn record_equal(
     }
     let mut a_data = a.data().unwrap_or(Rdata::Unknown(a.rtype, a.rdata));
     let mut b_data = b.data().unwrap_or(Rdata::Unknown(b.rtype, b.rdata));
-    if mask && whoami_srv(a, left) && whoami_srv(b, right) {
+    if mask && whoami_srv(a, messages.0) && whoami_srv(b, messages.1) {
         if let Rdata::Srv { ref mut port, .. } = a_data {
             *port = 0;
         }
@@ -213,13 +222,149 @@ fn record_equal(
         *a = 0;
         *b = 0;
     }
+    // RFC 4034 §3.1: retain RRSIG metadata and signature length while masking dynamic values.
+    if mask_rrsig
+        && let (
+            Rdata::Rrsig {
+                original_ttl: at,
+                expiration: ae,
+                inception: ai,
+                signature: asig,
+                ..
+            },
+            Rdata::Rrsig {
+                original_ttl: bt,
+                expiration: be,
+                inception: bi,
+                signature: bsig,
+                ..
+            },
+        ) = (&mut a_data, &mut b_data)
+    {
+        // RFC 4034 §3.1.5: signature times use 32-bit serial arithmetic.
+        let validity = ae.wrapping_sub(*ai);
+        if asig.len() != bsig.len() || validity >= 0x8000_0000 || validity != be.wrapping_sub(*bi) {
+            return false;
+        }
+        // RFC 4034 §3.1.4: Original TTL is the signed RRset's TTL; CoreDNS hardcodes 3600.
+        *at = 0;
+        *bt = 0;
+        *ae = 0;
+        *be = 0;
+        *ai = 0;
+        *bi = 0;
+        *asig = &[];
+        *bsig = &[];
+    }
     a_data == b_data && a_data.to_string() == b_data.to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compare, compare_with_soa_serial};
+    use super::compare;
     use pharos_proto::Message;
+
+    fn compare_with_soa_serial(
+        left: &Message<'_>,
+        right: &Message<'_>,
+        ttl: u32,
+        srv: bool,
+        soa: bool,
+        dedupe: bool,
+    ) -> Result<(), String> {
+        super::compare_with_soa_serial(left, right, ttl, srv, soa, dedupe, false)
+    }
+
+    #[test]
+    fn rrsig_original_ttl_mask_is_opt_in() {
+        let left = [
+            0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, b'x', 0, 0, 46, 0, 1, 0, 0, 0, 60, 0, 24, 0,
+            1, 15, 1, 0, 0, 0, 60, 0, 0, 0, 10, 0, 0, 0, 2, 0x12, 0x34, 1, b'a', 0, 10, 11, 12,
+        ];
+        for offset in 29..33 {
+            let mut right = left;
+            right[offset] ^= 1;
+            let (a, b) = (
+                Message::parse(&left).unwrap(),
+                Message::parse(&right).unwrap(),
+            );
+            assert!(super::compare_with_soa_serial(&a, &b, 0, false, false, false, false).is_err());
+            assert!(super::compare_with_soa_serial(&a, &b, 0, false, false, false, true).is_ok());
+        }
+    }
+
+    #[test]
+    fn rrsig_mask_is_opt_in_and_preserves_other_fields_and_counts() {
+        let left = [
+            0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, b'x', 0, 0, 46, 0, 1, 0, 0, 0, 60, 0, 24, 0,
+            1, 15, 1, 0, 0, 0, 60, 0, 0, 0, 10, 0, 0, 0, 2, 0x12, 0x34, 1, b'a', 0, 10, 11, 12,
+        ];
+        let mut right = left;
+        right[29..33].copy_from_slice(&7200_u32.to_be_bytes()); // Original TTL
+        right[36] = 12; // expiration
+        right[40] = 4; // inception
+        right[46] = 13; // signature
+        let masked = |a: &[u8], b: &[u8], mask| {
+            super::compare_with_soa_serial(
+                &Message::parse(a).unwrap(),
+                &Message::parse(b).unwrap(),
+                0,
+                false,
+                false,
+                false,
+                mask,
+            )
+        };
+        assert!(masked(&left, &right, false).is_err());
+        assert!(masked(&left, &right, true).is_ok());
+        let mut wrong_window = right;
+        wrong_window[36] += 1;
+        assert!(masked(&left, &wrong_window, true).is_err());
+        let mut expired_before_inception = right;
+        expired_before_inception[36] = 1;
+        assert!(masked(&left, &expired_before_inception, true).is_err());
+        let mut invalid_window = right;
+        invalid_window[36] = 1;
+        let mut same_invalid_window = invalid_window;
+        same_invalid_window[46] ^= 1;
+        assert!(masked(&invalid_window, &same_invalid_window, true).is_err());
+        let mut wrapping = left;
+        wrapping[33..37].copy_from_slice(&3_u32.to_be_bytes());
+        wrapping[37..41].copy_from_slice(&(u32::MAX - 4).to_be_bytes());
+        let mut shifted = wrapping;
+        shifted[33..37].copy_from_slice(&5_u32.to_be_bytes());
+        shifted[37..41].copy_from_slice(&(u32::MAX - 2).to_be_bytes());
+        assert!(masked(&wrapping, &shifted, true).is_ok());
+        for offset in [3, 13, 16, 18, 22, 25, 26, 27, 28, 41, 42, 44] {
+            let mut changed = right;
+            changed[offset] ^= 1;
+            assert!(masked(&left, &changed, true).is_err(), "offset {offset}");
+        }
+        let mut longer = right.to_vec();
+        longer[24] += 1;
+        longer.push(14);
+        assert!(masked(&left, &longer, true).is_err());
+        let mut duplicate = right.to_vec();
+        duplicate[7] = 2;
+        duplicate.extend_from_slice(&right[12..]);
+        assert!(masked(&left, &duplicate, true).is_err());
+        for count in [9, 11] {
+            let mut a = left;
+            let mut b = right;
+            a[7] = 0;
+            b[7] = 0;
+            a[count] = 1;
+            b[count] = 1;
+            assert!(masked(&a, &b, true).is_ok());
+            assert!(masked(&left, &b, true).is_err());
+        }
+        let a = [
+            0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1,
+        ];
+        let mut b = a;
+        *b.last_mut().unwrap() = 2;
+        assert!(masked(&a, &b, true).is_err());
+    }
 
     #[test]
     fn soa_serial_mask_is_opt_in_and_preserves_every_other_field() {
