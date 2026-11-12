@@ -2,6 +2,48 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
+use pharos_proto::{Message, Name, Rcode};
+use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
+
+#[tokio::test]
+async fn require_applies_only_to_matching_domains_and_types() {
+    let blocks = parse(
+        "Corefile",
+        ". {\n tsig example.com {\n require A\n }\n whoami\n}",
+    )
+    .unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let domain: Name = ".".parse().unwrap();
+    for (name, typ, expected) in [
+        (b"example".as_slice(), 1, Rcode::REFUSED),
+        (b"example", 28, Rcode::NOERROR),
+        (b"other", 1, Rcode::NOERROR),
+    ] {
+        let mut wire = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, name.len() as u8];
+        wire.extend_from_slice(name);
+        wire.extend_from_slice(&[3, b'c', b'o', b'm', 0, 0, typ, 0, 1]);
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        let outcome = configured[0].config.serve(&mut cx).await;
+        if expected == Rcode::REFUSED {
+            assert_eq!(outcome, Outcome::Unanswered(expected));
+        } else {
+            assert_eq!(outcome, Outcome::Response);
+            assert_eq!(Message::parse(&response).unwrap().rcode(), expected);
+        }
+    }
+}
 
 #[test]
 fn setup_accepts_coredns_requirement_options() {
