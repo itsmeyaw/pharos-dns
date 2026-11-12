@@ -1,0 +1,3 @@
+ip0a7b7b7b.example. A IN udp
+ip0a00ff10.example. A IN tcp
+other.example. A IN udp

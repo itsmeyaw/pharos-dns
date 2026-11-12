@@ -1,0 +1,14 @@
+.:{port} {
+    template IN ANY foogle.com {
+        match "^foogle\.com\.$"
+        answer "foogle.com 60 IN CNAME google.com"
+    }
+    forward . 127.0.0.1:{port2}
+}
+.:{port2} {
+    hosts empty.hosts {
+        192.0.2.9 google.com
+        2001:db8::9 google.com
+        reload 0
+    }
+}
