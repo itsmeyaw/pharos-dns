@@ -204,6 +204,60 @@ fn axfr_and_current_ixfr_have_soa_framing() {
     }
 }
 
+#[cfg(feature = "plugin-transfer")]
+#[test]
+fn large_zone_transfer_streams_without_losing_records() {
+    use pharos_plugins::transfer::{TransferRequest, Transferer};
+    use std::fmt::Write;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/file-large-transfer.zone");
+    let mut text = String::from(
+        "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\n",
+    );
+    for index in 0..900 {
+        writeln!(text, "n{index} 60 IN TXT \"{}\"", "x".repeat(100)).unwrap();
+    }
+    std::fs::write(&path, text).unwrap();
+    let corefile = format!("example.org:53 {{\n file {}\n}}", path.display());
+    let configured =
+        configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let apex: Name = "example.org.".parse().unwrap();
+    let mut stream = configured[0]
+        .config
+        .file
+        .as_ref()
+        .unwrap()
+        .transfer(TransferRequest {
+            zone: NameRef::parse(apex.as_wire(), 0).unwrap(),
+            serial: 0,
+            id: 1,
+            flags: 0,
+            protocol: Protocol::Tcp,
+            qtype: Type::AXFR,
+            qclass: Class::IN,
+        })
+        .unwrap()
+        .unwrap();
+    let mut wire = Vec::with_capacity(65535);
+    let mut count = 0;
+    let mut messages = 0;
+    let mut first = None;
+    let mut last = None;
+    while stream.next(&mut wire).unwrap() {
+        messages += 1;
+        for rr in Message::parse(&wire).unwrap().answers() {
+            first.get_or_insert(rr.rtype);
+            last = Some(rr.rtype);
+            count += 1;
+        }
+    }
+    assert!(messages > 1);
+    assert_eq!(first, Some(Type::SOA));
+    assert_eq!(last, Some(Type::SOA));
+    assert_eq!(count, 903);
+    std::fs::remove_file(path).unwrap();
+}
+
 #[tokio::test]
 async fn dnssec_ok_serves_rrsigs_and_nsec_denial() {
     let path = concat!(
