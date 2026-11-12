@@ -210,24 +210,62 @@ async fn signed_empty_nonterminal_includes_predecessor_nsec() {
 #[tokio::test]
 async fn nxdomain_below_empty_nonterminal_uses_coredns_closest_encloser() {
     struct DropNext;
-    impl Next for DropNext { async fn run(self, _: &mut Context<'_, '_>) -> Outcome { Outcome::Drop } }
+    impl Next for DropNext {
+        async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+            Outcome::Drop
+        }
+    }
     let apex: Name = "example.org.".parse().unwrap();
     let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\n@ 3600 IN NSEC *.example.org. SOA NS NSEC\n*.example.org. 60 IN TXT \"wild\"\n*.example.org. 60 IN NSEC a.example.org. TXT NSEC\na 60 IN A 192.0.2.1\na 60 IN NSEC leaf.empty.example.org. A NSEC\nleaf.empty 60 IN A 192.0.2.2\n";
-    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test").collect::<Result<Vec<_>, _>>().unwrap();
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let zone = Zone::from_records(apex.clone(), records).unwrap();
     let name: Name = "x.empty.example.org.".parse().unwrap();
     let mut query = Vec::with_capacity(1232);
     let mut builder = MessageBuilder::new(&mut query, 1232, 1, 0).unwrap();
-    builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN).unwrap();
-    builder.record(Section::Additional, NameRef::parse(&[0], 0).unwrap(), Type::OPT, Class(1232), 0x8000, &[]).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(1232),
+            0x8000,
+            &[],
+        )
+        .unwrap();
     let _ = builder.finish();
     let mut response = Vec::with_capacity(1232);
     let mut slots = [None; 8];
-    let mut cx = Context { query: Message::parse(&query).unwrap(), client: "127.0.0.1:1234".parse().unwrap(), local: "127.0.0.1:53".parse().unwrap(), transport: pharos_server::Transport::Dns, protocol: Protocol::Udp, domain: &apex, metadata: pharos_server::Metadata::new(&mut slots), response: &mut response, max_response_size: 1232 };
+    let mut cx = Context {
+        query: Message::parse(&query).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: pharos_server::Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &apex,
+        metadata: pharos_server::Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 1232,
+    };
     assert_eq!(zone.lookup(&mut cx, DropNext, &[]).await, Outcome::Response);
     let response = Message::parse(&response).unwrap();
     assert_eq!(response.rcode(), Rcode::NXDOMAIN);
-    assert_eq!(response.authorities().filter(|rr| rr.rtype == Type::NSEC).map(|rr| rr.name.to_string()).collect::<Vec<_>>(), ["a.example.org.", "*.example.org."]);
+    assert_eq!(
+        response
+            .authorities()
+            .filter(|rr| rr.rtype == Type::NSEC)
+            .map(|rr| rr.name.to_string())
+            .collect::<Vec<_>>(),
+        ["*.example.org."]
+    );
 }
 
 #[test]

@@ -1001,7 +1001,7 @@ impl Zone {
                     )?;
                 }
                 let mut parent = name;
-                while parent[0] != 0 && !zone.exists(parent) {
+                while parent[0] != 0 && !zone.node(parent).is_some_and(|node| node.tree) {
                     parent = &parent[1 + usize::from(parent[0])..];
                 }
                 let mut proof = [0u8; 255];
