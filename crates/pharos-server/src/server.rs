@@ -172,13 +172,9 @@ impl<C: Chain> Server<C> {
             return self.router.route(&self.key, query, peer, protocol);
         }
         let mut slots = [None; 18];
-        self.route_view(
-            query,
-            peer,
-            protocol,
-            &mut Vec::new(),
-            &mut Metadata::new(&mut slots),
-        )
+        let mut metadata = Metadata::new(&mut slots);
+        metadata.set_enabled(false);
+        self.route_view(query, peer, protocol, &mut Vec::new(), &mut metadata)
     }
 
     pub fn new(router: Router<C>, key: ListenerKey) -> Self {
@@ -433,6 +429,7 @@ impl<C: Chain> Server<C> {
         });
         let has_views = self.has_views.load(Ordering::Relaxed);
         let block = if has_views {
+            metadata.set_enabled(false);
             self.route_view(query, peer, protocol, response, &mut metadata)
         } else {
             self.router.route(&self.key, query, peer, protocol)

@@ -400,3 +400,37 @@ async fn root_ds_uses_last_matching_view() {
         .await;
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
 }
+
+#[tokio::test]
+async fn view_without_collector_does_not_enable_metadata() {
+    struct NoCollector;
+    impl Chain for NoCollector {
+        async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+            assert!(!cx.metadata.enabled());
+            Outcome::Unanswered(Rcode::REFUSED)
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+        fn has_view(&self) -> bool {
+            true
+        }
+        fn matches_view(&self, cx: &Context<'_, '_>) -> bool {
+            assert!(!cx.metadata.enabled());
+            true
+        }
+    }
+    let mut router = Router::default();
+    router.add(key(), ".".parse().unwrap(), Some(NoCollector), vec![]);
+    let server = Server::new(router, key());
+    let mut response = Vec::new();
+    server
+        .handle(
+            &query("example.org.", Type::A),
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response,
+        )
+        .await;
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+}
