@@ -21,6 +21,7 @@ Each scenario is a directory containing:
 - `queries`: one Query per line, `name type class udp|tcp [flags...]`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
   `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, `+opcode=NAME` or a number,
+  `+ixfr=SERIAL` for an IXFR SOA in Authority,
   and `+tsig=NAME:BASE64[:badkey|badsig|badtime]` (HMAC-SHA256).
 - `expect` (optional): one setting per line. `ttl N` permits a TTL difference
   of N seconds for ordinary records; default is zero. `mask
