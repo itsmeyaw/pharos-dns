@@ -763,6 +763,7 @@ impl Zone {
         }
         let mut chain = [None; 10];
         let mut count = 0;
+        let mut chain_limited = false;
         let mut target = source;
         if dname.is_some() {
             cut = zone.cut(target, question.qtype);
@@ -771,6 +772,10 @@ impl Zone {
             // RFC 1034 §3.6.2: follow a CNAME before answering the original QTYPE.
             while let Some(alias) = zone.records_at(target, Type::CNAME).next() {
                 if count == chain.len() {
+                    chain_limited = true;
+                    break;
+                }
+                if alias.owner.as_wire().eq_ignore_ascii_case(&alias.rdata) {
                     return Outcome::Unanswered(Rcode::SERVFAIL);
                 }
                 chain[count] = Some(alias);
@@ -784,6 +789,7 @@ impl Zone {
         }
         let mut lookup_failed = false;
         let lookup = if cut.is_none()
+            && !chain_limited
             && (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
             && (!zone.exact(target)
                 || target.eq_ignore_ascii_case(zone.apex.as_wire())
@@ -903,7 +909,10 @@ impl Zone {
                     dnssec,
                 )?;
             }
-            if cut.is_none() && !(dname.is_some() && question.qtype == Type::CNAME) {
+            if cut.is_none()
+                && !chain_limited
+                && !(dname.is_some() && question.qtype == Type::CNAME)
+            {
                 let owner = if count == 0 && synthesized {
                     question.name
                 } else if let Some(rr) = zone.records_at(target, question.qtype).next() {
