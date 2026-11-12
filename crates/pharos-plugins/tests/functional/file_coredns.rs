@@ -1428,3 +1428,173 @@ async fn coredns_apex_ns_includes_signed_glue() {
     assert!(extra.iter().any(|rr| matches!(rr.data(), Ok(Rdata::A(address)) if address == std::net::Ipv4Addr::new(176, 58, 119, 54))));
     assert!(extra.iter().any(|rr| matches!(rr.data(), Ok(Rdata::Aaaa(address)) if address == "2a01:7e00::f03c:91ff:fe79:234c".parse::<std::net::Ipv6Addr>().unwrap())));
 }
+
+// Derived from CoreDNS alias_delegation_test.go TestAliasToDelegation.
+#[tokio::test]
+async fn coredns_aliases_to_delegated_zones() {
+    let zone = zone(
+        "example.org.",
+        include_str!("../fixtures/file/coredns-alias-cut.zone"),
+    )
+    .unwrap();
+    let child_ns = ["child.example.org. 300 IN NS ns.child.example.org."];
+    let child_glue = [
+        "ns.child.example.org. 300 IN A 192.0.2.2",
+        "ns.child.example.org. 300 IN AAAA 2001:db8::2",
+    ];
+    let host_ns = ["host.example.org. 300 IN NS ns.host.example.org."];
+    let host_glue = [
+        "ns.host.example.org. 300 IN A 192.0.2.3",
+        "ns.host.example.org. 300 IN AAAA 2001:db8::3",
+    ];
+    let cases: &[(&str, Type, bool, &[&str], &[&str], &[&str])] = &[
+        (
+            "alias.example.org.",
+            Type::A,
+            true,
+            &["alias.example.org. 300 IN CNAME host.child.example.org."],
+            &child_ns,
+            &child_glue,
+        ),
+        (
+            "chain.example.org.",
+            Type::A,
+            true,
+            &[
+                "chain.example.org. 300 IN CNAME alias.example.org.",
+                "alias.example.org. 300 IN CNAME host.child.example.org.",
+            ],
+            &child_ns,
+            &child_glue,
+        ),
+        (
+            "name.wild.example.org.",
+            Type::A,
+            true,
+            &["name.wild.example.org. 300 IN CNAME host.child.example.org."],
+            &child_ns,
+            &child_glue,
+        ),
+        (
+            "host.mapped.example.org.",
+            Type::A,
+            true,
+            &[
+                "mapped.example.org. 300 IN DNAME example.org.",
+                "host.mapped.example.org. 300 IN CNAME host.example.org.",
+            ],
+            &host_ns,
+            &host_glue,
+        ),
+        (
+            "host.mapped.example.org.",
+            Type::NS,
+            true,
+            &[
+                "mapped.example.org. 300 IN DNAME example.org.",
+                "host.mapped.example.org. 300 IN CNAME host.example.org.",
+            ],
+            &host_ns,
+            &host_glue,
+        ),
+        (
+            "host.child.example.org.",
+            Type::A,
+            false,
+            &[],
+            &child_ns,
+            &child_glue,
+        ),
+    ];
+    for (name, kind, authoritative, answer, authority, additional) in cases {
+        let (outcome, wire) = query(&zone, name, *kind, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.aa(), *authoritative, "{name}");
+        assert_records(response.answers(), answer);
+        assert_records(response.authorities(), authority);
+        assert_records(response.additionals(), additional);
+    }
+}
+
+// Derived from CoreDNS alias_delegation_test.go TestSignedAliasToDelegation.
+#[tokio::test]
+async fn coredns_signed_aliases_to_delegated_zones() {
+    let zone = zone(
+        "example.org.",
+        include_str!("../fixtures/file/coredns-signed-delegation.zone"),
+    )
+    .unwrap();
+    let (outcome, wire) = query(&zone, "alias.example.org.", Type::A, true, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(response.aa());
+    assert_records(
+        response.answers(),
+        &["alias.example.org. 1800 IN CNAME a.delegated.example.org."],
+    );
+    assert_eq!(
+        response
+            .authorities()
+            .filter(|rr| rr.rtype == Type::NS)
+            .count(),
+        2
+    );
+    assert_eq!(
+        response
+            .authorities()
+            .filter(|rr| rr.rtype == Type::DS)
+            .count(),
+        2
+    );
+    assert!(response.authorities().any(|rr| matches!(
+        rr.data(),
+        Ok(Rdata::Rrsig {
+            type_covered: Type::DS,
+            ..
+        })
+    )));
+    assert_records(
+        response.additionals(),
+        &[
+            "a.delegated.example.org. 1800 IN A 139.162.196.78",
+            "a.delegated.example.org. 1800 IN AAAA 2a01:7e00::f03c:91ff:fef1:6735",
+        ],
+    );
+    let (outcome, wire) = query(&zone, "ds-alias.example.org.", Type::DS, true, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(response.aa());
+    assert_eq!(
+        response
+            .answers()
+            .filter(|rr| rr.rtype == Type::CNAME)
+            .count(),
+        1
+    );
+    assert_eq!(
+        response.answers().filter(|rr| rr.rtype == Type::DS).count(),
+        2
+    );
+    assert!(response.answers().any(|rr| matches!(
+        rr.data(),
+        Ok(Rdata::Rrsig {
+            type_covered: Type::DS,
+            ..
+        })
+    )));
+    assert_eq!(
+        response
+            .authorities()
+            .filter(|rr| rr.rtype == Type::NS)
+            .count(),
+        2
+    );
+    assert!(response.authorities().any(|rr| matches!(
+        rr.data(),
+        Ok(Rdata::Rrsig {
+            type_covered: Type::NS,
+            ..
+        })
+    )));
+}
