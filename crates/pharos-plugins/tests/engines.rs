@@ -806,6 +806,18 @@ fn printf_q_escapes_non_printable_unicode_like_go() {
 }
 
 #[test]
+fn printf_q_supports_ascii_raw_precision_and_runes() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template =
+        Template::compile(r#"{{ printf "%+q|%#q|%.2q|%q" "é" "a b" "héllo" 65 }}"#).unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "\"\\u00e9\"|`a b`|\"hé\"|'A'");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

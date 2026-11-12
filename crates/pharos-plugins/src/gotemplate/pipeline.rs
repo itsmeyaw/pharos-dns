@@ -726,7 +726,13 @@ fn format_values(
             argument += 1;
             let compatible = match verb {
                 's' => value.is_string() || matches!(value, ResultValue::QuestionPointer(_)),
-                'q' => value.is_string(),
+                'q' => {
+                    value.is_string()
+                        || matches!(
+                            value,
+                            ResultValue::Scalar(Some(Value::Int(_))) | ResultValue::Uint(_)
+                        )
+                }
                 'd' | 'x' | 'X' | 'o' | 'b' | 'c' => matches!(
                     value,
                     ResultValue::Scalar(Some(Value::Int(_))) | ResultValue::Uint(_)
@@ -913,7 +919,33 @@ fn format_values(
                 },
                 'q' if value.is_string() => {
                     let start = scratch.len;
-                    quote_value(value, scratch, printable)?;
+                    let text = value.text(scratch)?;
+                    let end = precision
+                        .and_then(|n| text.char_indices().nth(n).map(|(index, _)| index))
+                        .unwrap_or(text.len());
+                    let value = value.prefix(end)?;
+                    let raw = alternate
+                        && value.text(scratch)?.chars().all(|ch| {
+                            ch != '`'
+                                && ch != '\u{feff}'
+                                && (ch as u32 >= 128 || (!ch.is_ascii_control() || ch == '\t'))
+                        });
+                    if raw {
+                        scratch.write_char('`')?;
+                        scratch.append(value)?;
+                        scratch.write_char('`')?;
+                    } else {
+                        quote_value(value, scratch, printable, plus)?;
+                    }
+                    pad_segment(scratch, start, width, left, zero)?;
+                }
+                'q' => {
+                    let start = scratch.len;
+                    let scalar = u32::try_from(value.integer()?).unwrap_or(u32::MAX);
+                    let ch = char::from_u32(scalar).unwrap_or('\u{fffd}');
+                    scratch.write_char('\'')?;
+                    write_quoted_char(scratch, ch, '\'', plus, printable)?;
+                    scratch.write_char('\'')?;
                     pad_segment(scratch, start, width, left, zero)?;
                 }
                 'c' => {
@@ -1001,6 +1033,7 @@ fn quote_value(
     value: ResultValue<'_>,
     scratch: &mut Scratch<'_>,
     printable: &crate::regex_match::Regex,
+    ascii_only: bool,
 ) -> fmt::Result {
     scratch.write_char('"')?;
     let mut offset = 0;
@@ -1010,28 +1043,43 @@ fn quote_value(
             .next()
             .ok_or(fmt::Error)?;
         offset += ch.len_utf8();
-        match ch {
-            '"' => scratch.write_str("\\\"")?,
-            '\\' => scratch.write_str("\\\\")?,
-            '\n' => scratch.write_str("\\n")?,
-            '\r' => scratch.write_str("\\r")?,
-            '\t' => scratch.write_str("\\t")?,
-            '\u{7}' => scratch.write_str("\\a")?,
-            '\u{8}' => scratch.write_str("\\b")?,
-            '\u{b}' => scratch.write_str("\\v")?,
-            '\u{c}' => scratch.write_str("\\f")?,
-            ch if ch.is_ascii_control() => write!(scratch, "\\x{:02x}", ch as u32)?,
-            ch if !ch.is_ascii() && !printable.is_match(ch.encode_utf8(&mut [0; 4])) => {
-                if (ch as u32) <= 0xffff {
-                    write!(scratch, "\\u{:04x}", ch as u32)?;
-                } else {
-                    write!(scratch, "\\U{:08x}", ch as u32)?;
-                }
-            }
-            _ => scratch.write_char(ch)?,
-        }
+        write_quoted_char(scratch, ch, '"', ascii_only, printable)?;
     }
     scratch.write_char('"')
+}
+
+fn write_quoted_char(
+    scratch: &mut Scratch<'_>,
+    ch: char,
+    quote: char,
+    ascii_only: bool,
+    printable: &crate::regex_match::Regex,
+) -> fmt::Result {
+    match ch {
+        ch if ch == quote => {
+            scratch.write_char('\\')?;
+            scratch.write_char(ch)
+        }
+        '\\' => scratch.write_str("\\\\"),
+        '\n' => scratch.write_str("\\n"),
+        '\r' => scratch.write_str("\\r"),
+        '\t' => scratch.write_str("\\t"),
+        '\u{7}' => scratch.write_str("\\a"),
+        '\u{8}' => scratch.write_str("\\b"),
+        '\u{b}' => scratch.write_str("\\v"),
+        '\u{c}' => scratch.write_str("\\f"),
+        ch if ch.is_ascii_control() => write!(scratch, "\\x{:02x}", ch as u32),
+        ch if !ch.is_ascii()
+            && (ascii_only || !printable.is_match(ch.encode_utf8(&mut [0; 4]))) =>
+        {
+            if (ch as u32) <= 0xffff {
+                write!(scratch, "\\u{:04x}", ch as u32)
+            } else {
+                write!(scratch, "\\U{:08x}", ch as u32)
+            }
+        }
+        _ => scratch.write_char(ch),
+    }
 }
 
 impl Scratch<'_> {
