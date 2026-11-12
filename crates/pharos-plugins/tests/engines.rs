@@ -541,3 +541,46 @@ fn printf_supports_common_flags_precision_and_radices() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "go      |+3.50|0xff|10|101|A");
 }
+
+#[test]
+fn coredns_readme_expression_variables_feed_answer_template() {
+    use pharos_plugins::expression::{Value, ValueType};
+    let wire =
+        b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let mut query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    query.groups = &[("ip", "192-168-1-2")];
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let ip = Expression::compile("replace(group('ip'), '-', '.')").unwrap();
+    let mut first_bytes = [0; 2048];
+    let mut first_scratch = Scratch::new(&mut first_bytes);
+    let value = ip.evaluate(&query, &metadata, &mut first_scratch).unwrap();
+    let variables = [("ip", value)];
+    let mut filtered = Query::new(&message, query.client, query.local, query.protocol);
+    filtered.variables = &variables;
+    let filter = Expression::compile_with_variables(
+        "any(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'], incidr(ip, #))",
+        &[("ip", ValueType::String)],
+    )
+    .unwrap();
+    let mut second_bytes = [0; 2048];
+    let mut second_scratch = Scratch::new(&mut second_bytes);
+    assert_eq!(
+        filter
+            .evaluate(&filtered, &metadata, &mut second_scratch)
+            .unwrap(),
+        Value::Bool(true)
+    );
+    let mut data = Data::new("example.org.", &metadata);
+    data.variables = &variables;
+    let template = Template::compile("{{ .Name }} 60 IN A {{ .Var.ip }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "example.org. 60 IN A 192.168.1.2");
+}
