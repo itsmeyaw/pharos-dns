@@ -1,0 +1,4 @@
+wild.w.example.org. TXT IN udp
+wild.c.example.org. TXT IN udp
+wild.d.example.org. TXT IN udp
+alias.example.org. TXT IN udp

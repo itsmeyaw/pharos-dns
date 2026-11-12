@@ -1,0 +1,8 @@
+$TTL 30M
+$ORIGIN example.org.
+@	IN SOA	ns.example.org. admin.example.org. 2024010100 14400 3600 604800 14400
+	IN NS	ns.example.org.
+ns	IN A	192.0.2.1
+mail	IN A	192.0.2.10
+	IN AAAA	2001:db8::10
+*.wild	IN MX	10 mail.example.org.
