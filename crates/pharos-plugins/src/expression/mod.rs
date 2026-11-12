@@ -893,9 +893,18 @@ impl Expression {
         metadata: &'a Metadata<'_>,
         scratch: &'a mut Scratch<'_>,
     ) -> Result<Value<'a>, &'static str> {
-        scratch.len = 0;
         let scoped = ScopedQuery::new(query, query.variables);
-        let value = self.root.eval(&scoped, metadata, scratch, None)?;
+        self.evaluate_scoped(&scoped, metadata, scratch)
+    }
+
+    pub(crate) fn evaluate_scoped<'a>(
+        &'a self,
+        query: &ScopedQuery<'a, '_>,
+        metadata: &'a Metadata<'_>,
+        scratch: &'a mut Scratch<'_>,
+    ) -> Result<Value<'a>, &'static str> {
+        scratch.len = 0;
+        let value = self.root.eval(query, metadata, scratch, None)?;
         match value {
             Temporary::Nil => Ok(Value::Nil),
             Temporary::Bool(value) => Ok(Value::Bool(value)),
