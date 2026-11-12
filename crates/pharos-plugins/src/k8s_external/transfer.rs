@@ -234,14 +234,16 @@ fn weight(count: usize) -> u16 {
     (100 / count.max(1)).max(1) as u16
 }
 
-fn non_headless(
+fn non_headless<'a>(
     snapshot: &mut Snapshot<'_>,
-    service: &Service,
+    service: &'a Service,
     base: NameRef<'_>,
+    seen: &mut HashMap<Seen<'a>, usize>,
 ) -> Result<(), Error> {
+    seen.clear();
     let mut bare_seen = false;
-    for (ip_index, ip) in service.external_ips.iter().enumerate() {
-        for (port_index, port) in service.ports.iter().enumerate() {
+    for ip in &service.external_ips {
+        for port in &service.ports {
             snapshot.address(base, ip)?;
             if port.port == -1 {
                 continue;
@@ -256,17 +258,13 @@ fn non_headless(
                 snapshot.srv(base, target, port.port, 100)?;
                 bare_seen = true;
             }
-            let seen = service.ports.iter().take(port_index).any(|p| {
-                p.port != -1
-                    && p.name.eq_ignore_ascii_case(&port.name)
-                    && p.protocol.eq_ignore_ascii_case(&port.protocol)
-            }) || ip_index > 0
-                && service.ports.iter().any(|p| {
-                    p.port != -1
-                        && p.name.eq_ignore_ascii_case(&port.name)
-                        && p.protocol.eq_ignore_ascii_case(&port.protocol)
-                });
-            if seen {
+            if seen
+                .insert(
+                    Seen::Count(CaseInsensitive(&port.name), CaseInsensitive(&port.protocol)),
+                    0,
+                )
+                .is_some()
+            {
                 continue;
             }
             let mut owner_wire = [0; 255];
@@ -514,7 +512,7 @@ fn generate<'a>(
                     seen,
                 )?;
             } else {
-                non_headless(snapshot, service, base)?;
+                non_headless(snapshot, service, base, seen)?;
             }
         }
     }
@@ -546,24 +544,25 @@ fn encode(
         bytes: None,
         size: 0,
     };
-    let max_entries = if plugin.config.headless {
-        index
-            .services_unfiltered()
-            .filter(|service| service.external_ips.is_empty() && service.headless())
-            .map(|service| entries(index, service).count())
-            .max()
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    let mut capacity = 0;
+    for service in index.services_unfiltered() {
+        let needed =
+            if plugin.config.headless && service.external_ips.is_empty() && service.headless() {
+                entries(index, service)
+                    .count()
+                    .checked_mul(4)
+                    .ok_or(Error::ResponseBufferTooSmall)?
+            } else if !service.external_ips.is_empty() {
+                service.ports.len()
+            } else {
+                0
+            };
+        capacity = capacity.max(needed);
+    }
     // shortcut: allocate transfer scratch once; reuse immutable snapshots for incremental streaming.
     let mut seen = HashMap::new();
-    seen.try_reserve(
-        max_entries
-            .checked_mul(4)
-            .ok_or(Error::ResponseBufferTooSmall)?,
-    )
-    .map_err(|_| Error::ResponseBufferTooSmall)?;
+    seen.try_reserve(capacity)
+        .map_err(|_| Error::ResponseBufferTooSmall)?;
     generate(&mut snapshot, plugin, kubernetes, index, &mut seen)?;
     // shortcut: the snapshot and Stream each allocate once; use immutable snapshots for incremental streaming.
     let mut bytes = Vec::new();
@@ -852,6 +851,7 @@ mod tests {
             &mut snapshot,
             &fixture_service(),
             NameRef::parse(base.as_wire(), 0).unwrap(),
+            &mut HashMap::with_capacity(2),
         )
         .unwrap();
         let mut stream = stream_snapshot(snapshot.bytes.unwrap());
@@ -889,6 +889,99 @@ mod tests {
     }
 
     #[test]
+    fn non_headless_many_ports_and_ips_preserve_name_seen_order() {
+        use pharos_kubernetes::object::Port;
+        let plugin = plugin();
+        let zone: Name = "example.com.".parse().unwrap();
+        let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let mut service = fixture_service();
+        service.external_ips = vec![
+            "192.0.2.1".into(),
+            "lb.example.net".into(),
+            "192.0.2.2".into(),
+        ];
+        service.ports = vec![Port {
+            name: "port0".into(),
+            protocol: "TCP".into(),
+            port: -1,
+        }];
+        service.ports.extend((0..200).map(|i| Port {
+            name: if i % 2 == 0 {
+                format!("port{}", i / 2)
+            } else {
+                format!("PORT{}", i / 2)
+            },
+            protocol: if i % 2 == 0 { "TCP" } else { "tcp" }.into(),
+            port: 1000 + i,
+        }));
+        let mut snapshot = fixture_snapshot(&plugin, &zone);
+        let mut seen = HashMap::with_capacity(service.ports.len());
+        let capacity = seen.capacity();
+        non_headless(
+            &mut snapshot,
+            &service,
+            NameRef::parse(base.as_wire(), 0).unwrap(),
+            &mut seen,
+        )
+        .unwrap();
+        assert_eq!(seen.capacity(), capacity);
+        let first = snapshot.bytes.clone().unwrap();
+        snapshot.bytes.as_mut().unwrap().clear();
+        snapshot.size = 0;
+        non_headless(
+            &mut snapshot,
+            &service,
+            NameRef::parse(base.as_wire(), 0).unwrap(),
+            &mut seen,
+        )
+        .unwrap();
+        assert_eq!(seen.capacity(), capacity);
+        assert_eq!(snapshot.bytes.as_ref().unwrap(), &first);
+        let mut stream = stream_snapshot(snapshot.bytes.unwrap());
+        let mut wire = Vec::new();
+        let mut actual = Vec::new();
+        while stream.next(&mut wire).unwrap() {
+            for rr in Message::parse(&wire).unwrap().answers() {
+                actual.push(match rr.data().unwrap() {
+                    Rdata::A(ip) => format!("{} A {ip}", rr.name),
+                    Rdata::Cname(target) => format!("{} CNAME {target}", rr.name),
+                    Rdata::Srv {
+                        weight,
+                        port,
+                        target,
+                        ..
+                    } => {
+                        format!("{} SRV {weight} {port} {target}", rr.name)
+                    }
+                    _ => panic!("unexpected record"),
+                });
+            }
+        }
+        let mut expected = Vec::new();
+        for (ip_index, ip) in service.external_ips.iter().enumerate() {
+            for (port_index, port) in service.ports.iter().enumerate() {
+                if ip_index == 1 {
+                    for _ in 0..2 {
+                        expected.push(format!("{base} CNAME lb.example.net."));
+                    }
+                } else {
+                    expected.push(format!("{base} A {ip}"));
+                }
+                if ip_index == 0 && port_index == 1 {
+                    expected.push(format!("{base} SRV 100 1000 {base}"));
+                }
+                if ip_index == 0 && port_index > 0 && port_index % 2 == 1 {
+                    expected.push(format!(
+                        "_{}._tcp.{base} SRV 100 {} {base}",
+                        port.name, port.port
+                    ));
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn axfr_hostname_emits_cname_without_target_addresses() {
         let plugin = plugin();
         let zone: Name = "example.com.".parse().unwrap();
@@ -900,6 +993,7 @@ mod tests {
             &mut snapshot,
             &service,
             NameRef::parse(base.as_wire(), 0).unwrap(),
+            &mut HashMap::with_capacity(2),
         )
         .unwrap();
         let mut stream = stream_snapshot(snapshot.bytes.unwrap());
