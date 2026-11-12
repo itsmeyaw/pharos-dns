@@ -113,6 +113,7 @@ thread_local! {
 }
 
 impl WorkspacePool {
+    // f must not re-enter select: the RefCell borrow is held across f, and Self Lookup runs after select returns.
     fn with<T>(&self, f: impl FnOnce(&mut RuleWorkspace) -> T) -> T {
         let key = Arc::as_ptr(&self.identity) as usize;
         WORKSPACES.with(|workspaces| {
@@ -449,8 +450,9 @@ impl Template {
                         variables,
                         metrics,
                     );
-                    // Replace borrows; warmed allocation tests verify std reuses these Vec allocations.
+                    // shortcut: relies on std in-place collect to reuse the buffer; warmed allocation tests catch a regression, switch to index-based engine access if they fail.
                     *match_slots = matches.into_iter().map(|_| "").collect();
+                    // shortcut: relies on std in-place collect to reuse the buffer; warmed allocation tests catch a regression, switch to index-based engine access if they fail.
                     *group_slots = groups.into_iter().map(|_| ("", "")).collect();
                     return match result {
                         Ok(Some(records)) => MatchResult::Hit(Hit { rule, records }),
@@ -539,7 +541,7 @@ fn evaluate<'a>(
     query.matches = data.matches;
     let mut variables = std::mem::take(storage);
     let result = evaluate_slots(rule, cx, data, scratch, &query, &mut variables, metrics);
-    // Replace borrows; warmed allocation tests verify std reuses this Vec allocation.
+    // shortcut: relies on std in-place collect to reuse the buffer; warmed allocation tests catch a regression, switch to index-based engine access if they fail.
     *storage = variables.into_iter().map(|_| ("", Value::Nil)).collect();
     result
 }
