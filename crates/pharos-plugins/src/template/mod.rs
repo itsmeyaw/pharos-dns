@@ -25,6 +25,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+const EXPRESSION_SCRATCH: usize = 65_535;
+
 pub struct Template {
     rules: Vec<Rule>,
     metrics: Vec<Vec<RuleMetrics>>,
@@ -127,7 +129,7 @@ impl Matcher {
         let state = Mutex::new(MatcherState {
             cache,
             captures,
-            scratch: vec![0; 33 * 4096],
+            scratch: vec![0; EXPRESSION_SCRATCH],
         });
         drop(
             state
@@ -438,7 +440,7 @@ fn evaluate<'a>(
     metrics: Option<&RuleMetrics>,
 ) -> Result<Option<Vec<(Section, ZoneRecord)>>, EvaluationError> {
     if let Some(variable) = rule.variables.get(index) {
-        let (current, rest) = scratch.split_at_mut(4096);
+        let (current, rest) = scratch.split_at_mut(EXPRESSION_SCRATCH);
         let mut query = expression::Query::new(&cx.query, cx.client, cx.local, cx.protocol);
         query.groups = data.groups;
         query.matches = data.matches;

@@ -3,6 +3,43 @@ use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
+#[tokio::test]
+async fn template_expression_scratch_accepts_large_values_and_rejects_exhaustion() {
+    for (length, expected) in [
+        (5000, Outcome::Response),
+        (65_535, Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL)),
+    ] {
+        let value = "a".repeat(length);
+        let text = format!(
+            ".:53 {{\n template IN A {{\n var value '{value}' + 'b'\n expr value == '{value}b'\n rcode NXDOMAIN\n }}\n}}"
+        );
+        let configured =
+            configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+        let root: Name = ".".parse().unwrap();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut context = Context {
+            query: Message::parse(wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(configured[0].config.serve(&mut context).await, expected);
+        if expected == Outcome::Response {
+            assert_eq!(
+                Message::parse(&response).unwrap().rcode(),
+                pharos_proto::Rcode::NXDOMAIN
+            );
+        }
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/template/setup_test.go.
 #[test]
 fn template_setup_validates_options() {

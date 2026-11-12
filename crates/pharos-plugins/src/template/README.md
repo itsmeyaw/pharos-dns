@@ -8,7 +8,7 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
   [template engine](../gotemplate/README.md) and [expression engine](../expression/README.md).
 - Match expressions use Rust regex syntax and Unicode rules rather than Go RE2.
 - Setup rejects more than 127 capture groups per match and more than 32 variables
-  per rule. Expression evaluation has 4,096 bytes of scratch per variable and
+  per rule. Expression evaluation has 65,535 bytes of scratch per variable and
   expression; exhausting it returns SERVFAIL.
 - Queries using the same match expression serialize while its capture and
   expression workspaces are in use, including record rendering.
