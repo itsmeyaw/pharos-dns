@@ -727,6 +727,21 @@ fn printf_applies_width_and_integer_precision_to_common_verbs() {
 }
 
 #[test]
+fn control_actions_accept_go_whitespace_and_comments() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["x"];
+    let template = Template::compile("a {{- /* comment with }} text */ -}} \n {{ if\t.Name }}{{ range\t.Match }}{{ . }}{{ end }}{{ else\tif .Zone }}wrong{{ end }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "ax");
+    assert!(Template::compile("{{ /* not a Go comment */ }}").is_err());
+    assert!(Template::compile("{{/* comment */ }}").is_err());
+    assert!(Template::compile("{{/* comment */}}").is_ok());
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

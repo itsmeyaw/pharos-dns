@@ -627,9 +627,10 @@ fn parse_parts(
                 .is_some_and(|byte| is_space(*byte))
         {
             text = text.trim_end_matches(|ch: char| ch.is_ascii() && is_space(ch as u8));
-            action_source = &action_source[1..];
+            action_source = &action_source[2..];
         }
         parts.push(Part::Text(text.to_owned()));
+        let is_comment = action_source.starts_with("/*");
         *source = action_source;
         let end = action_end(source).ok_or("unclosed template action")?;
         let mut raw = &source[..end];
@@ -646,19 +647,23 @@ fn parse_parts(
         if trim_right {
             *source = source.trim_start_matches(|ch: char| ch.is_ascii() && is_space(ch as u8));
         }
+        if is_comment && action.starts_with("/*") && action.ends_with("*/") {
+            continue;
+        }
         match action {
             "else" => return Ok((parts, Some(Marker::Else))),
             "end" => return Ok((parts, Some(Marker::End))),
             _ => {}
         }
-        if let Some(condition) = action.strip_prefix("else if ") {
+        if let Some(condition) =
+            control_arg(action, "else").and_then(|rest| control_arg(rest, "if"))
+        {
             validate_variables(condition, scope)?;
             return Ok((parts, Some(Marker::ElseIf(condition.trim().to_owned()))));
         }
-        let range = action.starts_with("range ");
-        let part = if let Some(condition) = action
-            .strip_prefix("if ")
-            .or_else(|| action.strip_prefix("range "))
+        let range = control_arg(action, "range").is_some();
+        let part = if let Some(condition) =
+            control_arg(action, "if").or_else(|| control_arg(action, "range"))
         {
             let condition = condition.trim();
             let (field, names) = if range {
@@ -783,7 +788,32 @@ fn is_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
+fn control_arg<'a>(source: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = source.strip_prefix(keyword)?;
+    rest.as_bytes()
+        .first()
+        .is_some_and(|byte| is_space(*byte))
+        .then(|| rest.trim_start_matches(|ch: char| ch.is_ascii() && is_space(ch as u8)))
+}
+
 fn action_end(source: &str) -> Option<usize> {
+    if let Some(comment) = source.strip_prefix("/*") {
+        let end = source.len() - comment.len() + comment.find("*/")? + 2;
+        let suffix = &source[end..];
+        if suffix.starts_with("}}") {
+            return Some(end);
+        }
+        if suffix
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| is_space(*byte))
+            && suffix.as_bytes().get(1) == Some(&b'-')
+            && suffix.get(2..).is_some_and(|rest| rest.starts_with("}}"))
+        {
+            return Some(end + 2);
+        }
+        return None;
+    }
     let bytes = source.as_bytes();
     let mut quote = None;
     let mut escaped = false;
