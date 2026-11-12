@@ -27,7 +27,7 @@ nix = { version = "0.31", features = ["net", "socket", "hostname"] }
 aws-lc-rs = "1"
 criterion = "0.5"
 stats_alloc = "0.1.10"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "test-util"] }
 
 [features]
 default = [

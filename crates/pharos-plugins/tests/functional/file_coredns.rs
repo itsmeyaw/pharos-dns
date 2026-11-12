@@ -307,3 +307,255 @@ async fn coredns_setup_soa_owner_with_implicit_and_explicit_origin() {
     }
     std::fs::remove_file(path).unwrap();
 }
+
+// Derived from CoreDNS setup_test.go TestParseReload and reload_test.go TestZoneReload.
+#[tokio::test(start_paused = true)]
+async fn coredns_default_and_configured_reload_intervals() {
+    use std::time::{Duration, Instant};
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/file-p75-interval-{}.zone",
+        std::process::id()
+    ));
+    let original = "@ 500 IN SOA ns.example. hostmaster.example. 3 3600 600 86400 300\n@ 500 IN NS ns.example.\nfoo 500 IN A 192.0.2.1\n";
+    for (option, interval) in [("", 60), (" {\n reload 5s\n }", 5)] {
+        std::fs::write(&path, original).unwrap();
+        let text = format!("example.org:53 {{\n file {}{option}\n}}", path.display());
+        let configured =
+            configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        let chain = &configured[0].config;
+        chain
+            .lifecycle
+            .run(pharos_server::Phase::Startup)
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        std::fs::write(
+            &path,
+            original
+                .replace(" 3 3600", " 4 3600")
+                .replace("192.0.2.1", "192.0.2.2"),
+        )
+        .unwrap();
+        tokio::time::advance(Duration::from_secs(interval - 1)).await;
+        let (_, wire) = query_chain(
+            chain,
+            &"example.org.".parse().unwrap(),
+            "foo.example.org.",
+            Type::A,
+        )
+        .await;
+        assert_eq!(
+            Message::parse(&wire)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .rdata,
+            [192, 0, 2, 1]
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let (_, wire) = query_chain(
+                chain,
+                &"example.org.".parse().unwrap(),
+                "foo.example.org.",
+                Type::A,
+            )
+            .await;
+            if Message::parse(&wire)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .rdata
+                == [192, 0, 2, 2]
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reload did not run after {interval}s"
+            );
+            tokio::task::yield_now().await;
+        }
+        chain
+            .lifecycle
+            .run(pharos_server::Phase::Shutdown)
+            .await
+            .unwrap();
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+async fn wait_for_address(chain: &Chain, domain: &Name, name: &str, expected: [u8; 4]) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (outcome, wire) = query_chain(chain, domain, name, Type::A).await;
+        if outcome == Outcome::Response
+            && Message::parse(&wire)
+                .unwrap()
+                .answers()
+                .next()
+                .is_some_and(|record| record.rdata == expected)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Zone did not serve {expected:?}"
+        );
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+// Derived from CoreDNS reload_test.go TestZoneReloadByMtime and TestZoneReloadSOAOrigin.
+#[tokio::test(start_paused = true)]
+async fn coredns_mtime_reload_keeps_last_valid_zone_and_recovers() {
+    use std::time::{Duration, SystemTime};
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/file-p75-mtime-{}.zone",
+        std::process::id()
+    ));
+    let original = "@ 500 IN SOA ns.example. hostmaster.example. 3 3600 600 86400 300\n@ 500 IN NS ns.example.\nfoo 500 IN A 192.0.2.1\n";
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let set_time = |time| {
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(time))
+            .unwrap()
+    };
+    std::fs::write(&path, original).unwrap();
+    set_time(old);
+    let config = format!(
+        "example.org:53 {{\n file {} {{\n reload 5s\n reload_by_mtime\n }}\n}}",
+        path.display()
+    );
+    let configured =
+        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap();
+    let chain = &configured[0].config;
+    let apex: Name = "example.org.".parse().unwrap();
+    chain
+        .lifecycle
+        .run(pharos_server::Phase::Startup)
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    std::fs::write(&path, original.replace("192.0.2.1", "192.0.2.2")).unwrap();
+    set_time(old);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let (_, wire) = query_chain(chain, &apex, "foo.example.org.", Type::A).await;
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 1]
+    );
+    set_time(old + Duration::from_secs(10));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    wait_for_address(chain, &apex, "foo.example.org.", [192, 0, 2, 2]).await;
+    std::fs::remove_file(&path).unwrap();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::task::yield_now().await;
+    let (_, wire) = query_chain(chain, &apex, "foo.example.org.", Type::A).await;
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 2]
+    );
+    std::fs::write(
+        &path,
+        original
+            .replace("@ 500 IN SOA", "child 500 IN SOA")
+            .replace(" 3 3600", " 4 3600"),
+    )
+    .unwrap();
+    set_time(old + Duration::from_secs(20));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::task::yield_now().await;
+    let (_, wire) = query_chain(chain, &apex, "foo.example.org.", Type::A).await;
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 2]
+    );
+    std::fs::write(
+        &path,
+        original
+            .replace(" 3 3600", " 4 3600")
+            .replace("192.0.2.1", "192.0.2.3"),
+    )
+    .unwrap();
+    set_time(old + Duration::from_secs(30));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    wait_for_address(chain, &apex, "foo.example.org.", [192, 0, 2, 3]).await;
+    chain
+        .lifecycle
+        .run(pharos_server::Phase::Shutdown)
+        .await
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+}
+
+// Derived from CoreDNS setup_test.go TestFileParseReloadByMtimeMissingFileLeavesBaselineUnset
+// and TestFileParseReloadByMtimeRecoversLaterZoneAfterMissingFile.
+#[tokio::test(start_paused = true)]
+async fn coredns_missing_zone_and_later_zone_recover_by_mtime() {
+    use std::time::Duration;
+    let missing = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/file-p75-missing-{}.zone",
+        std::process::id()
+    ));
+    assert!(!missing.exists());
+    let existing = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/external.zone"
+    );
+    let config = format!(
+        ".:53 {{\n file {} example.org {{\n reload 5s\n reload_by_mtime\n }}\n file {existing} external.test {{\n reload 5s\n reload_by_mtime\n }}\n}}",
+        missing.display()
+    );
+    let configured =
+        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap();
+    let chain = &configured[0].config;
+    let apex: Name = ".".parse().unwrap();
+    assert_eq!(
+        query_chain(chain, &apex, "leaf.external.test.", Type::A)
+            .await
+            .0,
+        Outcome::Unanswered(Rcode::SERVFAIL)
+    );
+    chain
+        .lifecycle
+        .run(pharos_server::Phase::Startup)
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    wait_for_address(chain, &apex, "leaf.external.test.", [192, 0, 2, 88]).await;
+    std::fs::write(
+        &missing,
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\nfoo 60 IN A 192.0.2.10\n",
+    )
+    .unwrap();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    wait_for_address(chain, &apex, "foo.example.org.", [192, 0, 2, 10]).await;
+    chain
+        .lifecycle
+        .run(pharos_server::Phase::Shutdown)
+        .await
+        .unwrap();
+    std::fs::remove_file(missing).unwrap();
+}
