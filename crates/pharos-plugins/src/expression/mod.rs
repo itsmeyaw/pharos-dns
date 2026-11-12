@@ -308,7 +308,7 @@ enum Node {
     Current(Kind),
     Any(Vec<Node>, Box<Node>),
     Call(String, Vec<Node>, Kind),
-    Matches(Box<Node>, Box<crate::regex_match::Regex>),
+    Matches(Box<Node>, Box<crate::regex_match::ThreadRegex>),
     Unary(Unary, Box<Node>),
     Binary(Binary, Box<Node>, Box<Node>, Kind),
 }

@@ -116,7 +116,7 @@ fn warmed_rule_workspace_on_worker_does_not_allocate() {
         .collect::<String>();
     let pattern = format!("^{}(?P<host>[a-z]+)[.]example[.]$", "()".repeat(128));
     let corefile = format!(
-        ". {{\n template IN A example {{\n match {pattern}\n {vars} expr v39 == 'no'\n fallthrough\n }}\n whoami\n}}"
+        ". {{\n template IN A example {{\n match {pattern}\n {vars} expr v39 matches '^no$'\n fallthrough\n }}\n whoami\n}}"
     );
     let configured =
         configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
