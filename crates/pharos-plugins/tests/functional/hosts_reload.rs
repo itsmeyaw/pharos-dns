@@ -7,8 +7,12 @@ use pharos_proto::Message;
 use pharos_server::{Action, Handler, Phase, Protocol};
 use std::time::Duration;
 
-#[tokio::test]
-async fn updates_changed_file_and_zero_disables_reload() {
+#[test]
+fn updates_changed_file_and_zero_disables_reload() {
+    crate::on_plugin_stack(changed_file_and_zero_reload);
+}
+
+async fn changed_file_and_zero_reload() {
     for (interval, expected) in [("10ms", [192, 0, 2, 22]), ("0", [192, 0, 2, 1])] {
         let path =
             std::env::temp_dir().join(format!("pharos-hosts-{}-{interval}", std::process::id()));

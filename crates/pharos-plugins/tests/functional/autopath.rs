@@ -564,8 +564,13 @@ async fn coredns_autopath_search_and_passthrough() {
 }
 
 #[cfg(feature = "plugin-whoami")]
-#[tokio::test]
-async fn autopath_counts_non_nxdomain_search_responses() {
+#[test]
+fn autopath_counts_non_nxdomain_search_responses() {
+    crate::on_plugin_stack(autopath_counts_responses);
+}
+
+#[cfg(feature = "plugin-whoami")]
+async fn autopath_counts_responses() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/autopath-search.conf"

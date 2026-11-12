@@ -19,12 +19,18 @@ fn query(name: &str, kind: Type) -> Vec<u8> {
 }
 
 async fn metrics(corefile: &str, name: &str, kind: Type) -> String {
-    let blocks = parse("Corefile", corefile).unwrap();
+    let corefile = corefile.to_owned();
+    let name = name.to_owned();
+    crate::on_plugin_stack(move || metrics_on_stack(corefile, name, kind))
+}
+
+async fn metrics_on_stack(corefile: String, name: String, kind: Type) -> String {
+    let blocks = parse("Corefile", &corefile).unwrap();
     let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let server = servers.values().next().unwrap();
     server
         .handle(
-            &query(name, kind),
+            &query(&name, kind),
             "127.0.0.1:1234".parse().unwrap(),
             Protocol::Udp,
             &mut Vec::with_capacity(512),
