@@ -575,6 +575,69 @@ async fn stopped_secondary_cannot_spawn_catalog_member_tasks() {
 }
 
 #[tokio::test]
+async fn catalog_migration_respects_restrictions_and_changed_identity() {
+    let (shared, old, new) = catalog_shared();
+    catalog::apply(
+        &shared,
+        &old,
+        catalog_for(&old.config.apex, Some("a"), Some("new.catalog.example.")),
+    );
+    let first = shared
+        .zones
+        .load()
+        .iter()
+        .find(|zone| zone.config.apex.to_string() == "example.org.")
+        .unwrap()
+        .clone();
+    let records = ZoneParser::new(
+        "@ 60 IN SOA ns. hostmaster. 7 10 10 100 60\n".as_bytes(),
+        first.config.apex.clone(),
+        "member",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    first.current.store(Some(Arc::new(
+        crate::zone::Zone::from_records(first.config.apex.clone(), records).unwrap(),
+    )));
+    let restricted = SecondaryZone::new(ZoneConfig {
+        apex: new.config.apex.clone(),
+        from: new.config.from.clone(),
+        catalog: Some(vec!["other.example.".parse().unwrap()]),
+    });
+    catalog::apply(
+        &shared,
+        &restricted,
+        catalog_for(&new.config.apex, Some("b"), None),
+    );
+    assert!(Arc::ptr_eq(
+        &first,
+        shared
+            .zones
+            .load()
+            .iter()
+            .find(|zone| zone.config.apex == first.config.apex)
+            .unwrap()
+    ));
+    catalog::apply(
+        &shared,
+        &new,
+        catalog_for(&new.config.apex, Some("b"), None),
+    );
+    let migrated = shared
+        .zones
+        .load()
+        .iter()
+        .find(|zone| zone.config.apex == first.config.apex)
+        .unwrap()
+        .clone();
+    assert!(!Arc::ptr_eq(&first, &migrated));
+    assert!(migrated.current.load().is_none());
+    for task in shared.tasks.lock().unwrap().drain(..) {
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn secondary_shutdown_cancels_initial_transfer_retry() {
     let blocks = pharos_corefile::parse(
         "Corefile",

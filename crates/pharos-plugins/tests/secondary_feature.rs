@@ -29,6 +29,18 @@ fn coredns_secondary_setup_cases() {
         ),
         ("secondary {\n transfer from *\n}", false),
         ("secondary {\n transfer from fe80::1%en0\n}", true),
+        (
+            "secondary {\n transfer from 127.0.0.1\n fallthrough\n}",
+            true,
+        ),
+        (
+            "secondary catalog.example {\n transfer from 127.0.0.1\n catalog EXAMPLE.ORG example.org\n catalog internal.example\n}",
+            true,
+        ),
+        (
+            "secondary catalog.example {\n transfer from 127.0.0.1\n catalog example.org\n catalog\n}",
+            true,
+        ),
     ] {
         let corefile = format!("example.org:53 {{\n {directive}\n}}");
         let parsed = pharos_corefile::parse("Corefile", &corefile).unwrap();
