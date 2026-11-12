@@ -142,7 +142,7 @@
 
 ## Expressions and templates
 
-- The shared [expression engine](../crates/pharos-plugins/src/expression/README.md) is not implemented yet.
+- The shared [expression engine](../crates/pharos-plugins/src/expression/README.md) supports only the documented subset; other expressions fail compilation.
 - The shared [template engine](../crates/pharos-plugins/src/gotemplate/README.md) supports only the documented subset; other actions fail compilation.
 
 ## General
