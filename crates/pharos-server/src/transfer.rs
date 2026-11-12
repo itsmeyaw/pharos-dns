@@ -1,8 +1,10 @@
-//! Unsigned Zone Transfer client helpers.
+//! Zone Transfer client helpers.
 
 use std::{io, net::SocketAddr, time::Duration};
 
-use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
+use pharos_proto::{
+    Class, Message, MessageBuilder, Name, NameRef, Rcode, TsigKey, TsigRecord, TsigStream, Type,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
@@ -74,6 +76,29 @@ pub async fn axfr(
     zone: &Name,
     id: u16,
     deadline: Duration,
+    on_message: impl FnMut(Message<'_>) -> io::Result<()>,
+) -> io::Result<()> {
+    axfr_inner(address, zone, id, deadline, None, on_message).await
+}
+
+/// Receive an authenticated AXFR incrementally. Discard partial data on error.
+pub async fn axfr_signed(
+    address: SocketAddr,
+    zone: &Name,
+    id: u16,
+    deadline: Duration,
+    key: &TsigKey,
+    on_message: impl FnMut(Message<'_>) -> io::Result<()>,
+) -> io::Result<()> {
+    axfr_inner(address, zone, id, deadline, Some(key), on_message).await
+}
+
+async fn axfr_inner(
+    address: SocketAddr,
+    zone: &Name,
+    id: u16,
+    deadline: Duration,
+    key: Option<&TsigKey>,
     mut on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
     // shortcut: buffers are allocated once per Zone Transfer; reuse across transfers when needed.
@@ -87,6 +112,21 @@ pub async fn axfr(
         )
         .map_err(io::Error::other)?;
     let _ = builder.finish();
+    if let Some(key) = key {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_secs();
+        // RFC 8945 §4.3: authenticate the complete AXFR Query.
+        key.sign(&mut query, now, 300, None)
+            .map_err(io::Error::other)?;
+    }
+    let mut verifier = if let Some(key) = key {
+        let mac = TsigRecord::parse(&query).map_err(io::Error::other)?.mac;
+        Some(TsigStream::new(key, mac))
+    } else {
+        None
+    };
     let mut socket = timeout(deadline, TcpStream::connect(address)).await??;
     // RFC 1035 §4.2.2: TCP Messages are prefixed with a two-octet length.
     timeout(deadline, async {
@@ -106,6 +146,16 @@ pub async fn axfr(
             Ok::<_, io::Error>(())
         })
         .await??;
+        if let Some(verifier) = verifier.as_mut() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(io::Error::other)?
+                .as_secs();
+            // RFC 8945 §5.3.1: authenticate each Message and chain its MAC.
+            verifier
+                .verify(&wire, now, 0)
+                .map_err(|_| invalid("invalid AXFR TSIG"))?;
+        }
         let message = Message::parse(&wire).map_err(|_| invalid("invalid AXFR Message"))?;
         // RFC 5936 §2.2: every Response belongs to the Query and carries its ID.
         if message.id() != id || message.flags() & 0x8000 == 0 || message.rcode() != Rcode::NOERROR
@@ -150,6 +200,14 @@ pub async fn axfr(
                     return Err(invalid("invalid closing AXFR SOA"));
                 }
                 done = true;
+            }
+        }
+        if done {
+            // RFC 8945 §5.3.1: the final stream Message must be signed.
+            if let Some(verifier) = &verifier {
+                verifier
+                    .finish()
+                    .map_err(|_| invalid("unsigned final AXFR Message"))?;
             }
         }
         on_message(message)?;

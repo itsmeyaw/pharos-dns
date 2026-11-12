@@ -104,6 +104,48 @@ async fn signed_axfr_stream_authenticates_every_message() {
     listener.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn signed_axfr_client_authenticates_stream() {
+    let listener_key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        listener_key,
+        ".".parse().unwrap(),
+        Some(SignedTransfer),
+        vec![],
+    );
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Server::new(router, listener_key),
+    )
+    .await
+    .unwrap();
+    let key = pharos_proto::TsigKey::new(
+        "key.".parse().unwrap(),
+        pharos_proto::TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let mut types = Vec::new();
+    pharos_server::transfer::axfr_signed(
+        listener.local_addr(),
+        &"a.".parse().unwrap(),
+        1,
+        Duration::from_secs(3),
+        &key,
+        |message| {
+            types.extend(message.answers().map(|r| r.rtype));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(types, [Type::SOA, Type::A, Type::SOA]);
+    listener.shutdown().await.unwrap();
+}
+
 struct BadClosingSoa;
 
 struct PanickingTransfer;
