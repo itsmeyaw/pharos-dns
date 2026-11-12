@@ -1,5 +1,6 @@
 ## Development
 
+- Use `caveman` skill, including for subagents.
 - Use `caveman-commit` skill for commit message.
 - Use `rust-*` skills for implementation and test.
 - Commit in small functional changes.
