@@ -274,7 +274,32 @@ impl Parser<'_, '_> {
     }
 
     fn binary_tail(&mut self, mut left: Node, minimum: u8) -> Result<Node, String> {
-        while let Some((op, precedence)) = self.binary() {
+        loop {
+            let negated = matches!(&self.token, Token::Ident(name) if name == "not");
+            if negated {
+                if minimum > 3 {
+                    break;
+                }
+                self.advance()?;
+            }
+            let Some((op, precedence)) = self.binary() else {
+                if negated {
+                    return Err("not must precede a membership or string operator".into());
+                }
+                break;
+            };
+            if negated
+                && !matches!(
+                    op,
+                    Binary::In
+                        | Binary::Contains
+                        | Binary::StartsWith
+                        | Binary::EndsWith
+                        | Binary::Matches
+                )
+            {
+                return Err("not must precede a membership or string operator".into());
+            }
             if precedence < minimum {
                 break;
             }
@@ -291,6 +316,9 @@ impl Parser<'_, '_> {
                     Box::new(left),
                     Box::new(crate::regex_match::Regex::new(&pattern)?),
                 );
+                if negated {
+                    left = Node::Unary(Unary::Not, Box::new(left));
+                }
                 continue;
             }
             let kind = match op {
@@ -323,6 +351,9 @@ impl Parser<'_, '_> {
                 _ => return Err("incompatible expression operands".into()),
             };
             left = Node::Binary(op, Box::new(left), Box::new(right), kind);
+            if negated {
+                left = Node::Unary(Unary::Not, Box::new(left));
+            }
         }
         Ok(left)
     }

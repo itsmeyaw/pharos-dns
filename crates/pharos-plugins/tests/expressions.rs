@@ -399,3 +399,34 @@ fn chained_variables_keep_borrowed_string_results_in_separate_scratch() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn negated_membership_and_string_operators_match_expr() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "3 not in [1, 2]",
+        "'abc' not contains 'z'",
+        "'abc' not startsWith 'z'",
+        "'abc' not endsWith 'z'",
+        "name() not matches '^other'",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+}
