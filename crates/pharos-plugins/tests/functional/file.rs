@@ -440,9 +440,16 @@ async fn notifies_on_startup_and_reload() {
         servers(configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap())
             .unwrap();
     lifecycle.run(Phase::Startup).await.unwrap();
-    for stage in 0..2 {
+    for stage in 0..4 {
         if stage == 1 {
             std::fs::write(&path, original.replace(" 1 7200", " 2 7200")).unwrap();
+        }
+        if stage == 2 {
+            lifecycle.run(Phase::Restart).await.unwrap();
+            lifecycle.run(Phase::RestartFailed).await.unwrap();
+        }
+        if stage == 3 {
+            std::fs::write(&path, original.replace(" 1 7200", " 3 7200")).unwrap();
         }
         let mut wire = [0; 512];
         let (len, peer) = tokio::time::timeout(
