@@ -671,7 +671,7 @@ mod tests {
     fn setup_checks_bounds_and_rcodes() {
         for (rcode, valid) in [
             ("NOTIMP", true),
-            ("NOTIMPL", false),
+            ("NOTIMPL", true),
             ("BADSIG", true),
             ("BADVERS", false),
         ] {

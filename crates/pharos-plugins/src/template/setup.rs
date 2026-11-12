@@ -109,9 +109,13 @@ pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
                     );
                 }
                 "rcode" if !args.is_empty() => {
-                    rule.rcode = Rcode::from_mnemonic(&args[0])
-                        .filter(|rcode| rcode.to_string() == args[0])
-                        .ok_or_else(|| cursor.error("unknown rcode"))?
+                    // CoreDNS accepts the NOTIMPL alias that miekg/dns keeps for NOTIMP.
+                    let rcode = if args[0] == "NOTIMPL" {
+                        Some(Rcode::NOTIMP)
+                    } else {
+                        Rcode::from_mnemonic(&args[0]).filter(|rcode| rcode.to_string() == args[0])
+                    };
+                    rule.rcode = rcode.ok_or_else(|| cursor.error("unknown rcode"))?
                 }
                 "ederror" if (1..=2).contains(&args.len()) => {
                     rule.ederror = Some((
