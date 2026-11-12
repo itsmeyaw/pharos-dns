@@ -51,6 +51,8 @@ enum Reply {
     MixedCase,
     MixedTtl,
     CrossSectionTtl,
+    OutOfZoneTtl,
+    ReferralTtl,
     ExistingSignatures,
     Large,
 }
@@ -58,10 +60,10 @@ enum Reply {
 impl Next for Reply {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
-        let flags = if matches!(self, Self::Negative { nxdomain: true, .. }) {
-            0x8403
-        } else {
-            0x8400
+        let flags = match self {
+            Self::Negative { nxdomain: true, .. } => 0x8403,
+            Self::ReferralTtl => 0x8000,
+            _ => 0x8400,
         };
         let mut b =
             MessageBuilder::new(cx.response, cx.max_response_size, cx.query.id(), flags).unwrap();
@@ -152,6 +154,53 @@ impl Next for Reply {
                 ] {
                     b.record(section, q.name, Type::A, Class::IN, ttl, &[192, 0, 2, last])
                         .unwrap();
+                }
+            }
+            Self::OutOfZoneTtl => {
+                let other: Name = "outside.example.".parse().unwrap();
+                let other = NameRef::parse(other.as_wire(), 0).unwrap();
+                for section in [Section::Answer, Section::Authority, Section::Additional] {
+                    for (name, ttl, last) in [
+                        (q.name, 240, 1),
+                        (q.name, 60, 2),
+                        (other, 300, 3),
+                        (other, 30, 4),
+                    ] {
+                        b.record(section, name, Type::A, Class::IN, ttl, &[192, 0, 2, last])
+                            .unwrap();
+                    }
+                    for ttl in [300, 30] {
+                        let sig = Rdata::Rrsig {
+                            type_covered: Type::A,
+                            algorithm: 13,
+                            labels: 2,
+                            original_ttl: ttl,
+                            expiration: 0,
+                            inception: 0,
+                            key_tag: 1,
+                            signer: other,
+                            signature: &[1],
+                        };
+                        b.record_with(section, other, Type::RRSIG, Class::IN, ttl, |writer| {
+                            sig.write(writer)
+                        })
+                        .unwrap();
+                    }
+                }
+            }
+            Self::ReferralTtl => {
+                for ttl in [300, 30] {
+                    b.record(Section::Authority, q.name, Type::NS, Class::IN, ttl, &[0])
+                        .unwrap();
+                    b.record(
+                        Section::Authority,
+                        q.name,
+                        Type::DS,
+                        Class::IN,
+                        ttl,
+                        &[0, 1, 13, 2, 42],
+                    )
+                    .unwrap();
                 }
             }
             Self::ExistingSignatures => {
@@ -255,6 +304,100 @@ fn covered<'a>(records: impl Iterator<Item = pharos_proto::Record<'a>>) -> Vec<T
             _ => None,
         })
         .collect()
+}
+
+// RFC 2181 §5.2: normalize the signed RRset without changing out-of-Zone TTLs.
+#[tokio::test]
+async fn signed_response_preserves_out_of_zone_rrset_ttls() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    for _ in 0..2 {
+        let (outcome, wire) =
+            serve(&dnssec, &q, Reply::OutOfZoneTtl, Protocol::Udp, 4096, 4096).await;
+        assert_eq!(outcome, Outcome::Response);
+        let msg = Message::parse(&wire).unwrap();
+        for records in [msg.answers(), msg.authorities(), msg.additionals()] {
+            let records: Vec<_> = records.collect();
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|rr| rr.rtype == Type::A)
+                    .map(|rr| rr.ttl.to_be_bytes())
+                    .collect::<Vec<_>>(),
+                [
+                    60u32.to_be_bytes(),
+                    60u32.to_be_bytes(),
+                    300u32.to_be_bytes(),
+                    30u32.to_be_bytes()
+                ]
+            );
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(
+                        |rr| rr.rtype == Type::RRSIG && rr.name.to_string() == "outside.example."
+                    )
+                    .map(|rr| rr.ttl.to_be_bytes())
+                    .collect::<Vec<_>>(),
+                [300u32.to_be_bytes(), 30u32.to_be_bytes()]
+            );
+            assert_eq!(
+                records.iter().filter(|rr| rr.rtype == Type::RRSIG).count(),
+                3
+            );
+        }
+    }
+}
+
+// RFC 2181 §5.2: a keyless Plugin leaves unsigned RRsets unchanged.
+#[tokio::test]
+async fn keyless_response_preserves_unsigned_rrset_ttls() {
+    let mut chain = configure::<Chain>(
+        &parse("Corefile", "miek.nl {\n dnssec miek.nl\n}").unwrap(),
+        directives(),
+    )
+    .unwrap();
+    let dnssec = chain[0].config.dnssec.take().unwrap();
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(&dnssec, &q, Reply::MixedTtl, Protocol::Udp, 4096, 4096).await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    assert_eq!(
+        msg.answers()
+            .filter(|rr| rr.rtype == Type::A)
+            .map(|rr| rr.ttl)
+            .collect::<Vec<_>>(),
+        [240, 60, 3600]
+    );
+    assert!(msg.answers().all(|rr| rr.rtype != Type::RRSIG));
+}
+
+// RFC 4035 §3.1.4: Referral NS records are not signed, unlike DS records.
+#[tokio::test]
+async fn referral_preserves_unsigned_ns_ttls() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("child.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(&dnssec, &q, Reply::ReferralTtl, Protocol::Udp, 4096, 4096).await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    let records: Vec<_> = msg.authorities().collect();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|rr| rr.rtype == Type::NS)
+            .map(|rr| rr.ttl)
+            .collect::<Vec<_>>(),
+        [300, 30]
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|rr| rr.rtype == Type::DS)
+            .map(|rr| rr.ttl)
+            .collect::<Vec<_>>(),
+        [30, 30]
+    );
+    assert_eq!(covered(msg.authorities()), [Type::DS]);
 }
 
 // RFC 2181 §5.2: inconsistent TTLs in an RRset are reduced to the lowest value.

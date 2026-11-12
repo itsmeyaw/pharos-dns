@@ -178,6 +178,12 @@ impl Dnssec {
         }
         let mut signed_sets = 0;
         let mut attempted_sets = 0;
+        // RFC 4035 §3.1.4: Referral signatures cover DS, not delegation NS or glue.
+        let signs_section = |section, rtype| {
+            !special_nsec
+                && (!referral || (section == Section::Authority && rtype == Type::DS))
+                && (!denial || section == Section::Authority)
+        };
         for (section, records) in [
             (Section::Answer, message.answers()),
             (Section::Authority, message.authorities()),
@@ -189,12 +195,34 @@ impl Dnssec {
                     continue;
                 }
                 let data = rr.data().map_err(|_| Error::InvalidQuery)?;
+                let covered = match data {
+                    Rdata::Rrsig { type_covered, .. } => type_covered,
+                    _ => rr.rtype,
+                };
+                // RFC 2181 §5.2: use one TTL for each RRset selected for signing.
+                let signed = !self.keys.is_empty()
+                    && !matches!(covered, Type::RRSIG | Type::OPT | Type::TSIG)
+                    && self.zone_for(rr.name).is_some()
+                    && [
+                        (Section::Answer, message.answers()),
+                        (Section::Authority, message.authorities()),
+                        (Section::Additional, message.additionals()),
+                    ]
+                    .into_iter()
+                    .any(|(section, mut records)| {
+                        signs_section(section, covered)
+                            && records.any(|other| {
+                                other.name == rr.name
+                                    && other.class == rr.class
+                                    && other.rtype == covered
+                            })
+                    });
                 // RFC 4034 §3: RRSIG TTLs may differ when they cover different RRsets.
                 let ttl = match data {
+                    _ if !signed => rr.ttl,
                     Rdata::Rrsig { type_covered, .. } => {
                         rrset_ttl(&message, rr, Some(type_covered))
                     }
-                    _ if matches!(rr.rtype, Type::OPT | Type::TSIG) => rr.ttl,
                     _ => rrset_ttl(&message, rr, None),
                 };
                 builder
@@ -204,10 +232,7 @@ impl Dnssec {
                     .map_err(Error::Build)?;
             }
             for (i, rr) in records.iter().enumerate() {
-                if special_nsec
-                    || (referral && (section != Section::Authority || rr.rtype != Type::DS))
-                    || (denial && section != Section::Authority)
-                {
+                if !signs_section(section, rr.rtype) {
                     continue;
                 }
                 // RFC 4035 §2.2: an RRSIG RR is never signed; OPT and TSIG are not zone data.
