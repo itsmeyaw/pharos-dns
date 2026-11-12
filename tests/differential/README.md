@@ -32,7 +32,7 @@ Each scenario is a directory containing:
   `mask soa.serial` ignores only the SOA serial, for scenarios that explicitly
   opt in; Kubernetes SOA serials can depend on each process's startup time.
   `mask rrsig` ignores only RRSIG signature contents and inception/expiration
-  timestamps; signature lengths, all other fields and record counts are compared.
+  timestamps; signature validity duration, lengths, all other fields and record counts are compared.
 - Any other files or subdirectories are copied into separate temporary working
   directories for both processes, preserving relative paths.
 

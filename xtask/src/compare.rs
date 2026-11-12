@@ -239,7 +239,9 @@ fn record_equal(
             },
         ) = (&mut a_data, &mut b_data)
     {
-        if asig.len() != bsig.len() {
+        // RFC 4034 §3.1.5: signature times use 32-bit serial arithmetic.
+        let validity = ae.wrapping_sub(*ai);
+        if asig.len() != bsig.len() || validity >= 0x8000_0000 || validity != be.wrapping_sub(*bi) {
             return false;
         }
         *ae = 0;
@@ -272,10 +274,10 @@ mod tests {
     fn rrsig_mask_is_opt_in_and_preserves_other_fields_and_counts() {
         let left = [
             0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, b'x', 0, 0, 46, 0, 1, 0, 0, 0, 60, 0, 24, 0,
-            1, 15, 1, 0, 0, 0, 60, 0, 0, 0, 1, 0, 0, 0, 2, 0x12, 0x34, 1, b'a', 0, 10, 11, 12,
+            1, 15, 1, 0, 0, 0, 60, 0, 0, 0, 10, 0, 0, 0, 2, 0x12, 0x34, 1, b'a', 0, 10, 11, 12,
         ];
         let mut right = left;
-        right[36] = 3; // expiration
+        right[36] = 12; // expiration
         right[40] = 4; // inception
         right[46] = 13; // signature
         let masked = |a: &[u8], b: &[u8], mask| {
@@ -291,7 +293,15 @@ mod tests {
         };
         assert!(masked(&left, &right, false).is_err());
         assert!(masked(&left, &right, true).is_ok());
-        for offset in [3, 13, 16, 18, 22, 26, 27, 28, 32, 42, 44] {
+        let mut wrong_window = right;
+        wrong_window[36] += 1;
+        assert!(masked(&left, &wrong_window, true).is_err());
+        let mut expired_before_inception = right;
+        expired_before_inception[36] = 1;
+        assert!(masked(&left, &expired_before_inception, true).is_err());
+        for offset in [
+            3, 13, 16, 18, 22, 25, 26, 27, 28, 29, 30, 31, 32, 41, 42, 44,
+        ] {
             let mut changed = right;
             changed[offset] ^= 1;
             assert!(masked(&left, &changed, true).is_err(), "offset {offset}");
