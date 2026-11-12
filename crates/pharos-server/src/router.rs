@@ -134,6 +134,22 @@ impl<C> Router<C> {
         let blocks = self.listeners.get(key)?;
         let ds = query.opcode() == Opcode::QUERY && question.qtype == Type::DS;
         let labels = question.name.labels().count();
+        if labels == 0 {
+            let mut selected = None;
+            for block in blocks
+                .iter()
+                .filter(|block| block.domain.label_count() == 0)
+            {
+                block.chain.as_ref()?;
+                if matches(block) {
+                    if !ds {
+                        return Some(block);
+                    }
+                    selected = Some(block);
+                }
+            }
+            return selected;
+        }
         let mut selected = None;
         for block in blocks
             .iter()

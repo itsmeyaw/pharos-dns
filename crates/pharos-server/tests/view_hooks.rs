@@ -372,3 +372,31 @@ async fn ds_uses_last_matching_handler_but_metadata_from_later_rejected_collecto
         .await;
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
 }
+
+#[tokio::test]
+async fn root_ds_uses_last_matching_view() {
+    let mut router = Router::default();
+    add(
+        &mut router,
+        ".",
+        view("first", None, None, true, Rcode::SERVFAIL, false),
+        vec![],
+    );
+    add(
+        &mut router,
+        ".",
+        view("last", None, None, true, Rcode::REFUSED, false),
+        vec![],
+    );
+    let server = Server::new(router, key());
+    let mut response = Vec::new();
+    server
+        .handle(
+            &query(".", Type::DS),
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response,
+        )
+        .await;
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+}
