@@ -39,6 +39,9 @@ Each scenario is a directory containing:
   directories for both processes, preserving relative paths.
 
 IDs and RR order within each section are ignored; all other fields are compared.
+Unsigned TCP AXFR comparisons collect the complete stream through its closing
+SOA before comparing records, independent of Message boundaries. The combined
+records must fit into one 65,535-octet comparison Message.
 
 The `tsig` transfer README example is skipped until the `transfer` Plugin is
 available. Signed scenarios authenticate each Response before comparing its

@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use pharos_proto::{Message, Rdata};
+use pharos_proto::{Message, MessageBuilder, Rcode, Rdata, Section, Type};
 
 use crate::{
     compare,
@@ -334,9 +334,76 @@ fn exchange(port: u16, transport: Transport, wire: &[u8]) -> Result<Vec<u8>, Str
             stream.read_exact(&mut len).map_err(|e| e.to_string())?;
             let mut data = vec![0; u16::from_be_bytes(len) as usize];
             stream.read_exact(&mut data).map_err(|e| e.to_string())?;
-            Ok(data)
+            let query = Message::parse(wire).map_err(|e| e.to_string())?;
+            if query
+                .questions()
+                .next()
+                .is_some_and(|q| q.qtype == Type::AXFR)
+                && !query.additionals().any(|rr| rr.rtype == Type::TSIG)
+                && Message::parse(&data).map_err(|e| e.to_string())?.rcode() == Rcode::NOERROR
+            {
+                collect_axfr(&mut stream, data)
+            } else {
+                Ok(data)
+            }
         }
     }
+}
+
+fn collect_axfr(stream: &mut TcpStream, first: Vec<u8>) -> Result<Vec<u8>, String> {
+    let mut messages = vec![first];
+    let mut soa_count = 0;
+    loop {
+        let current = Message::parse(messages.last().ok_or("missing AXFR Message")?)
+            .map_err(|e| e.to_string())?;
+        for record in current.answers() {
+            if record.rtype == Type::SOA {
+                soa_count += 1;
+            }
+        }
+        // RFC 5936 §2.2: the second SOA terminates an AXFR stream.
+        if soa_count >= 2 {
+            break;
+        }
+        let mut length = [0; 2];
+        stream.read_exact(&mut length).map_err(|e| e.to_string())?;
+        let mut wire = vec![0; usize::from(u16::from_be_bytes(length))];
+        stream.read_exact(&mut wire).map_err(|e| e.to_string())?;
+        messages.push(wire);
+    }
+    let first = Message::parse(&messages[0]).map_err(|e| e.to_string())?;
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 65535, first.id(), first.flags())
+        .map_err(|e| e.to_string())?;
+    for question in first.questions() {
+        if !builder
+            .question(question.name, question.qtype, question.qclass)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("AXFR comparison exceeds one Message".into());
+        }
+    }
+    for message in &messages {
+        let message = Message::parse(message).map_err(|e| e.to_string())?;
+        for record in message.answers() {
+            let data = record.data().map_err(|e| e.to_string())?;
+            if !builder
+                .record_with(
+                    Section::Answer,
+                    record.name,
+                    record.rtype,
+                    record.class,
+                    record.ttl,
+                    |writer| data.write(writer),
+                )
+                .map_err(|e| e.to_string())?
+            {
+                return Err("AXFR comparison exceeds one Message".into());
+            }
+        }
+    }
+    let _ = builder.finish();
+    Ok(wire)
 }
 
 pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(), String> {
@@ -698,6 +765,62 @@ mod tests {
         TempDir, apply_deviation, copy_fixtures, kubernetes_corefile, kubernetes_ready,
         parse_expect, reserve_port, start,
     };
+
+    #[test]
+    fn axfr_comparison_collects_all_messages() {
+        use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut length = [0; 2];
+            socket.read_exact(&mut length).unwrap();
+            let mut request = vec![0; usize::from(u16::from_be_bytes(length))];
+            socket.read_exact(&mut request).unwrap();
+            let name: Name = "example.org.".parse().unwrap();
+            let name = NameRef::parse(name.as_wire(), 0).unwrap();
+            for last in [false, true] {
+                let mut wire = Vec::new();
+                let mut builder = MessageBuilder::new(&mut wire, 65535, 1, 0x8400).unwrap();
+                builder.question(name, Type::AXFR, Class::IN).unwrap();
+                if last {
+                    builder
+                        .record(
+                            Section::Answer,
+                            name,
+                            Type::A,
+                            Class::IN,
+                            60,
+                            &[192, 0, 2, 1],
+                        )
+                        .unwrap();
+                }
+                builder
+                    .record_with(Section::Answer, name, Type::SOA, Class::IN, 60, |w| {
+                        w.write_name(name)?;
+                        w.write_name(name)?;
+                        for v in [1_u32, 2, 3, 4, 5] {
+                            w.write_bytes(&v.to_be_bytes())?;
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                let _ = builder.finish();
+                socket
+                    .write_all(&(wire.len() as u16).to_be_bytes())
+                    .unwrap();
+                socket.write_all(&wire).unwrap();
+            }
+        });
+        let request = crate::query::parse("example.org. AXFR IN tcp +norec")
+            .unwrap()
+            .wire()
+            .unwrap();
+        let wire = super::exchange(port, crate::query::Transport::Tcp, &request).unwrap();
+        assert_eq!(Message::parse(&wire).unwrap().answer_count(), 3);
+        server.join().unwrap();
+    }
 
     #[test]
     fn self_test_accepts_only_the_injected_header_mismatch() {
