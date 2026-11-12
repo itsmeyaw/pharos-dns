@@ -543,6 +543,7 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
     }
 }
 
+// RFC 1035 §2.3.4: wire names consist of labels terminated by a root octet.
 fn check_uncompressed(wire: &[u8]) -> Result<(), NameError> {
     if wire.len() > MAX_NAME_LEN {
         return Err(NameError::NameTooLong);
