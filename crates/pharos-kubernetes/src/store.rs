@@ -6,6 +6,134 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn change_signals_do_not_depend_on_serial_advancing() {
+        let store = Store::default();
+        let mut changes = store.subscribe_changes();
+        let mut old = service("10.0.0.1");
+        old.version = "1".into();
+        store.apply_service(old.clone());
+        let mut same_second = false;
+        for version in 2..10 {
+            let first = *changes.borrow_and_update();
+            let serial = store.with_read(|index| index.serial());
+            old.version = version.to_string();
+            old.external_name = format!("changed{version}.example");
+            store.apply_service(old.clone());
+            assert!(changes.has_changed().unwrap());
+            assert_ne!(changes.borrow_and_update().internal, first.internal);
+            if store.with_read(|index| index.serial()) == serial {
+                same_second = true;
+                break;
+            }
+        }
+        assert!(same_second);
+        old.version = "metadata-only".into();
+        store.apply_service(old);
+        assert!(!changes.has_changed().unwrap());
+    }
+
+    #[test]
+    fn multicluster_change_has_separate_signal() {
+        let store = Store::default();
+        let mut changes = store.subscribe_changes();
+        let mut import = crate::object::ServiceImport {
+            version: "1".into(),
+            name: "web".into(),
+            namespace: "prod".into(),
+            cluster_ips: vec![],
+            service_type: "Headless".into(),
+            ports: vec![],
+        };
+        store.apply_service_import(import.clone());
+        let first = *changes.borrow_and_update();
+        import.version = "2".into();
+        import.service_type = "ClusterSetIP".into();
+        store.apply_service_import(import);
+        let second = *changes.borrow_and_update();
+        assert_eq!(first.internal, second.internal);
+        assert_ne!(first.multicluster, second.multicluster);
+    }
+
+    #[test]
+    fn dns_changes_ignored_by_coredns_serial_still_signal() {
+        let store = Store::default();
+        let mut changes = store.subscribe_changes();
+        let mut item = service("10.0.0.1");
+        item.version = "1".into();
+        store.apply_service(item.clone());
+        store.0.write().unwrap().serial = 1;
+        changes.borrow_and_update();
+        item.version = "2".into();
+        item.cluster_ips = vec!["10.0.0.2".into()];
+        store.apply_service(item);
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(store.with_read(|i| i.serial()), 1);
+        changes.borrow_and_update();
+        store.apply_namespace(Namespace {
+            name: "prod".into(),
+            version: "1".into(),
+        });
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(store.with_read(|i| i.serial()), 1);
+    }
+
+    #[test]
+    fn multicluster_ips_and_endpoint_pod_names_signal_without_serial_change() {
+        let store = Store::default();
+        let mut changes = store.subscribe_changes();
+        let mut import = crate::object::ServiceImport {
+            version: "1".into(),
+            name: "web".into(),
+            namespace: "prod".into(),
+            cluster_ips: vec!["10.0.0.1".into()],
+            service_type: "ClusterSetIP".into(),
+            ports: vec![],
+        };
+        store.apply_service_import(import.clone());
+        store.0.write().unwrap().multicluster_serial = 1;
+        changes.borrow_and_update();
+        import.version = "2".into();
+        import.cluster_ips[0] = "10.0.0.2".into();
+        store.apply_service_import(import);
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(store.with_read(|i| i.multicluster_serial()), 1);
+
+        let mut endpoints = slice("one", "10.0.1.1");
+        endpoints.version = "1".into();
+        store.apply_endpoints(endpoints.clone());
+        store.0.write().unwrap().serial = 1;
+        changes.borrow_and_update();
+        endpoints.version = "2".into();
+        endpoints.addresses[0].target_ref_name = "renamed-pod".into();
+        store.apply_endpoints(endpoints);
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(store.with_read(|i| i.serial()), 1);
+    }
+
+    #[test]
+    fn transfer_lists_only_visible_services_and_imports() {
+        let store = Store::new(&["prod".into()], false);
+        store.apply_service(service("10.0.0.1"));
+        let mut hidden = service("10.0.0.2");
+        hidden.namespace = "hidden".into();
+        store.apply_service(hidden);
+        let import = |namespace: &str| crate::object::ServiceImport {
+            version: "1".into(),
+            name: "web".into(),
+            namespace: namespace.into(),
+            cluster_ips: vec![],
+            service_type: "Headless".into(),
+            ports: vec![],
+        };
+        store.apply_service_import(import("prod"));
+        store.apply_service_import(import("hidden"));
+        store.with_read(|index| {
+            assert_eq!(index.services().count(), 1);
+            assert_eq!(index.service_imports().count(), 1);
+        });
+    }
+
+    #[test]
     fn multicluster_indices_track_updates_deletes_and_relists() {
         let store = Store::default();
         let import = |version: &str, ip: &str| {
@@ -394,10 +522,18 @@ type Names<T> = HashMap<Arc<str>, HashMap<Arc<str>, Arc<T>>>;
 type Reverse<T> = HashMap<Arc<str>, Vec<Arc<T>>>;
 type Grouped<T> = HashMap<Arc<str>, Reverse<T>>;
 
+/// Change counters independent of the second-resolution SOA serials.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub internal: u64,
+    pub multicluster: u64,
+}
+
 #[derive(Default)]
 pub struct Index {
     serial: u32,
     multicluster_serial: u32,
+    changes: tokio::sync::watch::Sender<Changes>,
     allowed_namespaces: HashSet<Arc<str>>,
     require_namespace: bool,
     services: Names<Service>,
@@ -462,7 +598,20 @@ impl Index {
         self.multicluster_serial
     }
 
+    fn signal_multicluster(&self) {
+        self.changes.send_modify(|changes| {
+            changes.multicluster = changes.multicluster.wrapping_add(1);
+        });
+    }
+
+    fn signal_internal(&self) {
+        self.changes.send_modify(|changes| {
+            changes.internal = changes.internal.wrapping_add(1);
+        });
+    }
+
     fn mark_multicluster_modified(&mut self) {
+        self.signal_multicluster();
         self.multicluster_serial = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -470,6 +619,7 @@ impl Index {
     }
 
     fn mark_modified(&mut self) {
+        self.signal_internal();
         self.serial = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -499,6 +649,21 @@ impl Index {
         } else {
             None
         }
+    }
+    /// Iterate Services visible to DNS readers.
+    pub fn services(&self) -> impl Iterator<Item = &Service> {
+        self.services
+            .iter()
+            .filter(|(ns, _)| self.namespace_allowed(ns))
+            .flat_map(|(_, services)| services.values().map(Arc::as_ref))
+    }
+
+    /// Iterate ServiceImports visible to DNS readers.
+    pub fn service_imports(&self) -> impl Iterator<Item = &ServiceImport> {
+        self.service_imports
+            .iter()
+            .filter(|(ns, _)| self.namespace_allowed(ns))
+            .flat_map(|(_, services)| services.values().map(Arc::as_ref))
     }
     pub fn external_name(&self, namespace: &str, name: &str) -> Option<Arc<pharos_proto::Name>> {
         by_name(&self.external_names, namespace, name).cloned()
@@ -711,6 +876,10 @@ impl Index {
 pub struct Store(Arc<RwLock<Index>>);
 
 impl Store {
+    /// Subscribe before starting a watcher to avoid missing later changes.
+    pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<Changes> {
+        self.0.read().unwrap().changes.subscribe()
+    }
     pub(crate) fn new(namespaces: &[String], require_namespace: bool) -> Self {
         let index = Index {
             allowed_namespaces: namespaces
@@ -730,6 +899,9 @@ impl Store {
         match by_name(&index.service_imports, &object.namespace, &object.name) {
             None => index.mark_modified(),
             Some(old) if service_import_changed(old, &object) => index.mark_multicluster_modified(),
+            Some(old) if old.version != object.version && old.cluster_ips != object.cluster_ips => {
+                index.signal_multicluster()
+            }
             _ => {}
         }
         put(
@@ -763,6 +935,11 @@ impl Store {
                 .is_some_and(|old| service_import_changed(old, o))
         }) {
             index.mark_multicluster_modified();
+        } else if objects.iter().any(|o| {
+            by_name(&index.service_imports, &o.namespace, &o.name)
+                .is_some_and(|old| old.cluster_ips != o.cluster_ips)
+        }) {
+            index.signal_multicluster();
         }
         index.service_imports.clear();
         for object in objects {
@@ -784,6 +961,9 @@ impl Store {
             None => index.mark_modified(),
             Some(old) if multicluster_endpoints_changed(old, &object) => {
                 index.mark_multicluster_modified()
+            }
+            Some(old) if endpoint_target_changed(&old.endpoints, &object.endpoints) => {
+                index.signal_multicluster()
             }
             _ => {}
         }
@@ -822,6 +1002,15 @@ impl Store {
             .is_some_and(|old| multicluster_endpoints_changed(old, o))
         }) {
             index.mark_multicluster_modified();
+        } else if objects.iter().any(|o| {
+            by_name(
+                &index.multicluster_slices,
+                &o.endpoints.namespace,
+                &o.endpoints.name,
+            )
+            .is_some_and(|old| endpoint_target_changed(&old.endpoints, &o.endpoints))
+        }) {
+            index.signal_multicluster();
         }
         index.multicluster_slices.clear();
         index.multicluster_endpoints.clear();
@@ -836,6 +1025,15 @@ impl Store {
             &object,
         ) {
             index.mark_modified();
+        } else if index
+            .service_unfiltered(&object.namespace, &object.name)
+            .is_some_and(|old| {
+                old.version != object.version
+                    && (old.cluster_ips != object.cluster_ips
+                        || old.service_type != object.service_type)
+            })
+        {
+            index.signal_internal();
         }
         index.apply_service(object);
     }
@@ -855,6 +1053,14 @@ impl Store {
             })
         {
             index.mark_modified();
+        } else if objects.iter().any(|object| {
+            index
+                .service_unfiltered(&object.namespace, &object.name)
+                .is_some_and(|old| {
+                    old.cluster_ips != object.cluster_ips || old.service_type != object.service_type
+                })
+        }) {
+            index.signal_internal();
         }
         index.services.clear();
         index.external_names.clear();
@@ -871,6 +1077,10 @@ impl Store {
             &object,
         ) {
             index.mark_modified();
+        } else if by_name(&index.slices, &object.namespace, &object.name)
+            .is_some_and(|old| endpoint_target_changed(old, &object))
+        {
+            index.signal_internal();
         }
         index.apply_endpoints(object);
     }
@@ -894,6 +1104,11 @@ impl Store {
             })
         {
             index.mark_modified();
+        } else if objects.iter().any(|object| {
+            by_name(&index.slices, &object.namespace, &object.name)
+                .is_some_and(|old| endpoint_target_changed(old, object))
+        }) {
+            index.signal_internal();
         }
         index.slices.clear();
         index.endpoints.clear();
@@ -950,17 +1165,28 @@ impl Store {
         }
     }
     pub(crate) fn apply_namespace(&self, object: Namespace) {
-        self.0
-            .write()
-            .unwrap()
-            .namespaces
-            .insert(object.name.clone(), object);
+        let mut index = self.0.write().unwrap();
+        if !index.namespaces.contains_key(&object.name) {
+            index.signal_internal();
+        }
+        index.namespaces.insert(object.name.clone(), object);
     }
     pub(crate) fn delete_namespace(&self, name: &str) {
-        self.0.write().unwrap().namespaces.remove(name);
+        let mut index = self.0.write().unwrap();
+        if index.namespaces.remove(name).is_some() {
+            index.signal_internal();
+        }
     }
     pub(crate) fn replace_namespaces(&self, objects: Vec<Namespace>) {
-        self.0.write().unwrap().namespaces = objects
+        let mut index = self.0.write().unwrap();
+        if index.namespaces.len() != objects.len()
+            || objects
+                .iter()
+                .any(|object| !index.namespaces.contains_key(&object.name))
+        {
+            index.signal_internal();
+        }
+        index.namespaces = objects
             .into_iter()
             .map(|object| (object.name.clone(), object))
             .collect();
@@ -999,6 +1225,15 @@ fn endpoints_changed(old: Option<&Endpoints>, new: &Endpoints) -> bool {
                     .zip(&new.addresses)
                     .any(|(a, b)| a.ip != b.ip || a.hostname != b.hostname))
     })
+}
+
+fn endpoint_target_changed(old: &Endpoints, new: &Endpoints) -> bool {
+    old.version != new.version
+        && old
+            .addresses
+            .iter()
+            .zip(&new.addresses)
+            .any(|(a, b)| a.target_ref_name != b.target_ref_name)
 }
 
 fn pod_changed(old: Option<&Pod>, new: &Pod) -> bool {
