@@ -40,6 +40,25 @@ fn setup(options: &str) -> impl Handler {
     servers.drain().next().unwrap().1
 }
 
+#[cfg(feature = "plugin-forward")]
+fn with_cache_stack<F: std::future::Future<Output = ()>>(
+    test: impl FnOnce() -> F + Send + 'static,
+) {
+    // ADR-0007: the combined Plugin Chain future needs a larger test thread stack.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(test());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn immediate_serves_stale_then_refreshes() {
     let server = setup("serve_stale 10s immediate 7s");
@@ -202,24 +221,28 @@ fn expired_entry_does_not_transfer_popularity_to_a_new_miss() {
 }
 
 #[cfg(feature = "plugin-forward")]
-#[tokio::test]
-async fn prefetched_servfail_does_not_shadow_a_valid_positive() {
-    let response = prefetched_result("", 0x8082).await;
-    assert_eq!(
-        Message::parse(&response).unwrap().rcode(),
-        pharos_proto::Rcode::NOERROR
-    );
+#[test]
+fn prefetched_servfail_does_not_shadow_a_valid_positive() {
+    with_cache_stack(|| async {
+        let response = prefetched_result("", 0x8082).await;
+        assert_eq!(
+            Message::parse(&response).unwrap().rcode(),
+            pharos_proto::Rcode::NOERROR
+        );
+    });
 }
 
 #[cfg(feature = "plugin-forward")]
-#[tokio::test]
-async fn prefer_positive_retains_last_good_answer_after_nonanswer_prefetch() {
-    let response = prefetched_result(
-        "serve_stale 10s\n serve_stale_policy prefer_positive",
-        0x8080,
-    )
-    .await;
-    assert_eq!(Message::parse(&response).unwrap().answer_count(), 1);
+#[test]
+fn prefer_positive_retains_last_good_answer_after_nonanswer_prefetch() {
+    with_cache_stack(|| async {
+        let response = prefetched_result(
+            "serve_stale 10s\n serve_stale_policy prefer_positive",
+            0x8080,
+        )
+        .await;
+        assert_eq!(Message::parse(&response).unwrap().answer_count(), 1);
+    });
 }
 
 #[cfg(feature = "plugin-forward")]
