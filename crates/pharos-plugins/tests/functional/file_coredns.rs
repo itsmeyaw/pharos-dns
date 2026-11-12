@@ -832,6 +832,59 @@ async fn coredns_apex_only_zone_returns_nxdomain_for_missing_type() {
     assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::NXDOMAIN);
 }
 
+// Adapted from CoreDNS delete_test.go TestZoneInsertAndDelete and xfr_test.go TestAllNewZone.
+#[test]
+fn coredns_record_removal_builds_new_immutable_snapshots() {
+    let apex: Name = "example.org.".parse().unwrap();
+    assert!(Zone::from_records(apex.clone(), Vec::new()).is_err());
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\na 3600 IN A 127.0.0.1\na 3600 IN MX 10 mx.example.org.\n";
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let before = Zone::from_records(apex.clone(), records.clone()).unwrap();
+    let after_mx = Zone::from_records(
+        apex.clone(),
+        records
+            .iter()
+            .filter(|rr| rr.rtype != Type::MX)
+            .cloned()
+            .collect(),
+    )
+    .unwrap();
+    let after_all = Zone::from_records(
+        apex,
+        records
+            .into_iter()
+            .filter(|rr| rr.rtype != Type::MX && rr.rtype != Type::A)
+            .collect(),
+    )
+    .unwrap();
+    let owner: Name = "a.example.org.".parse().unwrap();
+    let owner = NameRef::parse(owner.as_wire(), 0).unwrap();
+    assert_eq!(
+        (
+            before.rrset(owner, Type::A).count(),
+            before.rrset(owner, Type::MX).count()
+        ),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            after_mx.rrset(owner, Type::A).count(),
+            after_mx.rrset(owner, Type::MX).count()
+        ),
+        (1, 0)
+    );
+    assert_eq!(
+        (
+            after_all.rrset(owner, Type::A).count(),
+            after_all.rrset(owner, Type::MX).count()
+        ),
+        (0, 0)
+    );
+    assert_eq!(before.rrset(owner, Type::MX).count(), 1);
+}
+
 // Derived from CoreDNS delegation_test.go TestLookupDelegation and ds_test.go TestLookupDS.
 #[tokio::test]
 async fn coredns_unsigned_delegation_and_ds_queries() {
