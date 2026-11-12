@@ -3,7 +3,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, transfer::Transferer};
-use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
+use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type};
 use pharos_server::{Context, Metadata, Next, Outcome, Protocol, Stream, Transport};
 
 struct Provider;
@@ -185,4 +185,73 @@ async fn notify_reports_each_secondary_failure() {
     assert!(error.contains(&second_addr.to_string()), "{error}");
     first_task.await.unwrap();
     second_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn ixfr_passes_requested_serial_and_rejects_missing_soa() {
+    struct SerialProvider(std::sync::atomic::AtomicU32);
+    impl Transferer for SerialProvider {
+        fn transfer(
+            &self,
+            _: Name,
+            serial: u32,
+            _: u16,
+            _: Type,
+            _: Class,
+        ) -> Result<Option<Stream>, pharos_server::Error> {
+            self.0.store(serial, std::sync::atomic::Ordering::Relaxed);
+            Ok(Some(Stream::new(|_| Ok(false))))
+        }
+    }
+    let blocks = parse("Corefile", ". {\n transfer {\n to *\n }\n}").unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let provider = SerialProvider(std::sync::atomic::AtomicU32::new(0));
+    let zone: Name = "example.org.".parse().unwrap();
+    let name = NameRef::parse(zone.as_wire(), 0).unwrap();
+    for include_soa in [false, true] {
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+        builder.question(name, Type::IXFR, Class::IN).unwrap();
+        if include_soa {
+            builder
+                .record_with(Section::Authority, name, Type::SOA, Class::IN, 0, |w| {
+                    w.write_name(name)?;
+                    w.write_name(name)?;
+                    for field in [12345_u32, 7200, 1800, 86400, 300] {
+                        w.write_bytes(&field.to_be_bytes())?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let _ = builder.finish();
+        let mut response = Vec::new();
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:42".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Tcp,
+            domain: &zone,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        let result = chain
+            .transfer
+            .as_ref()
+            .unwrap()
+            .serve_with(&mut cx, DropNext, Some(&provider))
+            .await;
+        if include_soa {
+            assert!(matches!(result, Outcome::Stream(_)));
+            assert_eq!(provider.0.load(std::sync::atomic::Ordering::Relaxed), 12345);
+        } else {
+            assert_eq!(result, Outcome::Unanswered(Rcode::SERVFAIL));
+        }
+    }
 }

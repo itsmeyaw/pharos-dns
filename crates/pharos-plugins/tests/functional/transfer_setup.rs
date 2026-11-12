@@ -13,6 +13,11 @@ fn coredns_transfer_setup_cases() {
             true,
         ),
         ("transfer {\n to * 1.2.3.4\n}", true),
+        (
+            "transfer example.org {\n to 192.0.2.1\n}\ntransfer example.net {\n to *\n}",
+            true,
+        ),
+        ("transfer {\n to [fe80::1%eth0]:53\n}", true),
         ("transfer example.net example.org {\n}", false),
         ("transfer {\n invalid option\n}", false),
         ("transfer {\n to 1.2.3.4\n source example.org\n}", false),
