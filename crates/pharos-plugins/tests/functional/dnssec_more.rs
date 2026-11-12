@@ -322,6 +322,9 @@ async fn signed_rrsets_use_the_lowest_ttl_for_records_and_signatures() {
 // RFC 2181 §5.2: one RRset has one TTL across the entire Response.
 #[tokio::test]
 async fn rrset_ttl_is_normalized_across_response_sections() {
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
+    use pharos_dnssec::canonical::{CanonicalRecord, signed_data};
+
     let dnssec = plugin("miek.nl", KEY);
     let q = query("www.miek.nl.", Type::A, 1, Some(true));
     let (outcome, wire) = serve(
@@ -335,19 +338,37 @@ async fn rrset_ttl_is_normalized_across_response_sections() {
     .await;
     assert_eq!(outcome, Outcome::Response);
     let msg = Message::parse(&wire).unwrap();
+    let key = pharos_dnssec::keys::parse_dnskey(include_str!(
+        "../fixtures/dnssec/Kmiek.nl.+013+59725.key"
+    ))
+    .unwrap();
+    let mut point = vec![4];
+    point.extend_from_slice(&key.public_key);
+    let verifier = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point);
     for records in [msg.answers(), msg.authorities(), msg.additionals()] {
         let records: Vec<_> = records.collect();
         let rr = records.iter().find(|rr| rr.rtype == Type::A).unwrap();
         assert_eq!(rr.ttl, 30);
         let sig = records.iter().find(|rr| rr.rtype == Type::RRSIG).unwrap();
         assert_eq!(sig.ttl, 30);
-        assert!(matches!(
-            sig.data().unwrap(),
-            Rdata::Rrsig {
-                original_ttl: 30,
-                ..
-            }
-        ));
+        let data = sig.data().unwrap();
+        let Rdata::Rrsig {
+            original_ttl,
+            signature,
+            ..
+        } = data
+        else {
+            unreachable!()
+        };
+        assert_eq!(original_ttl, 30);
+        let rrset = [CanonicalRecord {
+            owner: rr.name,
+            class: rr.class,
+            data: rr.data().unwrap(),
+        }];
+        verifier
+            .verify(&signed_data(&data, &rrset).unwrap(), signature)
+            .unwrap();
     }
 }
 
