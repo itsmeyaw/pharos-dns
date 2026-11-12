@@ -339,12 +339,36 @@ struct Loaded {
 
 impl Loaded {
     fn reload(&self) -> bool {
-        let Ok(file) = std::fs::File::open(&self.path) else {
-            return false;
+        let file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) => {
+                pharos_server::logging::log(
+                    "ERROR",
+                    "file",
+                    &format!(
+                        "Failed to open Zone {} in {}: {error}",
+                        self.apex,
+                        self.path.display()
+                    ),
+                );
+                return false;
+            }
         };
         let modified = if self.by_mtime {
-            let Ok(modified) = file.metadata().and_then(|metadata| metadata.modified()) else {
-                return false;
+            let modified = match file.metadata().and_then(|metadata| metadata.modified()) {
+                Ok(modified) => modified,
+                Err(error) => {
+                    pharos_server::logging::log(
+                        "ERROR",
+                        "file",
+                        &format!(
+                            "Failed to stat Zone {} in {}: {error}",
+                            self.apex,
+                            self.path.display()
+                        ),
+                    );
+                    return false;
+                }
             };
             if self
                 .modified
@@ -363,13 +387,27 @@ impl Loaded {
         } else {
             self.current.load().as_ref().and_then(|zone| zone.serial())
         };
-        let Ok(next) = Zone::load_reader_with_serial(
+        let next = match Zone::load_reader_with_serial(
             self.apex.clone(),
             &self.path,
             BufReader::new(file),
             serial,
-        ) else {
-            return false;
+        ) {
+            Ok(next) => next,
+            Err(error) => {
+                if error != "no change in SOA serial" {
+                    pharos_server::logging::log(
+                        "ERROR",
+                        "file",
+                        &format!(
+                            "Failed to parse Zone {} in {}: {error}",
+                            self.apex,
+                            self.path.display()
+                        ),
+                    );
+                }
+                return false;
+            }
         };
         self.current.store(Some(Arc::new(next)));
         if self.by_mtime {
@@ -477,10 +515,15 @@ impl File {
                 }));
             }
         }
-        if reload.is_zero()
-            && let Some(error) = open_error
-        {
-            return Err(cursor.error(error));
+        if let Some(error) = open_error {
+            if reload.is_zero() {
+                return Err(cursor.error(error));
+            }
+            pharos_server::logging::log(
+                "WARN",
+                "file",
+                &format!("Failed to open Zone file: {error}; retrying on reload"),
+            );
         }
         Ok(Self {
             zones,
@@ -540,7 +583,13 @@ impl File {
                                 #[cfg(feature = "plugin-transfer")]
                                 if let Some(transfer) = transfer {
                                     // RFC 1996 §3.1: notify Secondary Servers after Zone changes.
-                                    let _ = transfer.notify(&zone.apex).await;
+                                    if let Err(error) = transfer.notify(&zone.apex).await {
+                                        pharos_server::logging::log(
+                                            "WARN",
+                                            "file",
+                                            &format!("NOTIFY {}: {error}", zone.apex),
+                                        );
+                                    }
                                 }
                             }
                         }
