@@ -717,9 +717,13 @@ impl Zone {
             if source.eq_ignore_ascii_case(name) {
                 return Outcome::Unanswered(Rcode::SERVFAIL);
             }
-        } else if !exists && cut.is_none() {
+        } else if !exact && cut.is_none() {
             // RFC 4592 §3.3.1: the closest encloser determines wildcard synthesis.
-            let mut parent = name;
+            let mut parent = if name[0] == 0 {
+                name
+            } else {
+                &name[1 + usize::from(name[0])..]
+            };
             while parent[0] != 0 && !zone.exists(parent) {
                 parent = &parent[1 + usize::from(parent[0])..];
             }
