@@ -642,3 +642,32 @@ fn signed_remainder_extreme_matches_go_int() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn membership_in_mixed_literal_lists_compares_each_value() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "'x' in [1, 'x', false]",
+        "not ('z' in [1, 'x'])",
+        "1 in ['x', 1.0]",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+}

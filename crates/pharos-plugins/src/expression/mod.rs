@@ -322,7 +322,11 @@ fn equal(a: Temporary<'_>, b: Temporary<'_>, scratch: &Scratch<'_>) -> Result<bo
             a @ (Temporary::Int(_) | Temporary::Float(_)),
             b @ (Temporary::Int(_) | Temporary::Float(_)),
         ) => Ok(a.number()? == b.number()?),
-        (a, b) => Ok(a.text(scratch)? == b.text(scratch)?),
+        (
+            a @ (Temporary::Borrowed(_) | Temporary::Stored(_, _)),
+            b @ (Temporary::Borrowed(_) | Temporary::Stored(_, _)),
+        ) => Ok(a.text(scratch)? == b.text(scratch)?),
+        _ => Ok(false),
     }
 }
 

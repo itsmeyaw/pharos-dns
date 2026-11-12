@@ -452,7 +452,7 @@ impl Parser<'_, '_> {
                 Binary::Add if left.kind() == Kind::String && right.kind() == Kind::String => {
                     Kind::String
                 }
-                Binary::In if matches!(&right, Node::List(values) if values.iter().all(|value| value.kind() == left.kind() || (value.kind().numeric() && left.kind().numeric()))) => {
+                Binary::In if matches!(&right, Node::List(values) if values.is_empty() || values.iter().any(|value| value.kind() != values[0].kind()) || values[0].kind() == left.kind() || (values[0].kind().numeric() && left.kind().numeric())) => {
                     Kind::Bool
                 }
                 Binary::Contains | Binary::StartsWith | Binary::EndsWith
