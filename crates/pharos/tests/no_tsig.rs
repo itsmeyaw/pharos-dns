@@ -82,12 +82,12 @@ fn unsigned_listener_matches_pre_tsig_udp_and_tcp_wire() {
         if edns {
             query.extend_from_slice(&[0, 0, 41, 2, 0, 0, 0, 0x80, 0, 0, 0]);
         }
-        let expected: Vec<u8> = hex
-            .as_bytes()
-            .chunks_exact(2)
+        let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+        assert!(remainder.is_empty());
+        let expected: Vec<u8> = pairs
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect();
-        assert_eq!(hex.len() % 2, 0);
         let actual = if tcp {
             let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
             socket
