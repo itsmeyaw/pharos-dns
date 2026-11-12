@@ -54,8 +54,6 @@ struct MetricContext<C> {
     registry: Registry,
     server: String,
     prepare: fn(&mut ServerBlock<C>, &Registry, &str),
-    has_view: fn(&ServerBlock<C>) -> bool,
-    views: bool,
 }
 
 impl<C> Default for Router<C> {
@@ -83,9 +81,8 @@ impl<C> Router<C> {
             plugin_metrics: Vec::new(),
             plugin_names: Vec::new(),
         };
-        if let Some(context) = self.metric_contexts.get_mut(&key) {
+        if let Some(context) = self.metric_contexts.get(&key) {
             (context.prepare)(&mut block, &context.registry, &context.server);
-            context.views |= (context.has_view)(&block);
         }
         let blocks = self.listeners.entry(key).or_default();
         blocks.push(block);
@@ -99,17 +96,6 @@ impl<C> Router<C> {
         query: Message<'_>,
         peer: SocketAddr,
         protocol: Protocol,
-    ) -> Option<&ServerBlock<C>> {
-        self.route_with(key, query, peer, protocol, |_| true)
-    }
-
-    pub(crate) fn route_with(
-        &self,
-        key: &ListenerKey,
-        query: Message<'_>,
-        peer: SocketAddr,
-        protocol: Protocol,
-        mut matches: impl FnMut(&ServerBlock<C>) -> bool,
     ) -> Option<&ServerBlock<C>> {
         let question = query.questions().next()?;
         let blocks = self.listeners.get(key)?;
@@ -140,7 +126,6 @@ impl<C> Router<C> {
                 .filters
                 .iter()
                 .all(|filter| filter(&query, peer, protocol))
-                && matches(block)
             {
                 if !ds {
                     return Some(block);
@@ -159,15 +144,11 @@ impl<C> Router<C> {
                     .filters
                     .iter()
                     .all(|filter| filter(&query, peer, protocol))
-                    && matches(block)
             })
     }
 }
 
 impl<C: Chain> Router<C> {
-    pub(crate) fn has_views(&self, key: &ListenerKey) -> bool {
-        self.metric_contexts.get(key).is_some_and(|context| context.views)
-    }
     pub(crate) fn shed_enabled(&self, key: &ListenerKey) -> bool {
         self.listeners.get(key).is_some_and(|blocks| {
             blocks
@@ -189,8 +170,6 @@ impl<C: Chain> Router<C> {
                 registry: registry.clone(),
                 server: server.to_owned(),
                 prepare: prepare_block::<C>,
-                has_view: |block| block.chain.as_ref().is_some_and(|chain| !chain.view_name().is_empty()),
-                views: self.listeners.get(key).is_some_and(|blocks| blocks.iter().any(|block| block.chain.as_ref().is_some_and(|chain| !chain.view_name().is_empty()))),
             },
         );
         if let Some(blocks) = self.listeners.get_mut(key) {
@@ -202,6 +181,7 @@ impl<C: Chain> Router<C> {
 }
 
 fn prepare_block<C: Chain>(block: &mut ServerBlock<C>, registry: &Registry, server: &str) {
+    // shortcut: View names are unavailable until named View filters are implemented.
     block.plugin_metrics.clear();
     block.plugin_names.clear();
     if let Some(chain) = &block.chain {
@@ -210,7 +190,7 @@ fn prepare_block<C: Chain>(block: &mut ServerBlock<C>, registry: &Registry, serv
         }
         let metrics = chain
             .metrics_enabled()
-            .then(|| registry.block(server, &block.domain.to_string(), chain.view_name()));
+            .then(|| registry.block(server, &block.domain.to_string(), ""));
         chain.visit_enabled(&mut |name| {
             block.plugin_names.push(name);
             if let Some(metrics) = &metrics {

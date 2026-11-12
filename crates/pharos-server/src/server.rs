@@ -12,16 +12,6 @@ use pharos_proto::Rcode;
 pub trait Chain: Send + Sync + 'static {
     fn serve(&self, context: &mut Context<'_, '_>) -> impl Future<Output = Outcome> + Send;
     fn is_empty(&self) -> bool;
-    /// Collect candidate Metadata before evaluating its View.
-    fn collect_metadata(&self, _context: &mut Context<'_, '_>) {}
-    /// Evaluate this candidate's compiled View filter.
-    fn matches_view(&self, _context: &Context<'_, '_>) -> bool {
-        true
-    }
-    /// Return the candidate's View name, or an empty string when absent.
-    fn view_name(&self) -> &str {
-        ""
-    }
     fn parallel_query(
         &self,
         _query: &pharos_proto::Message<'_>,
@@ -47,15 +37,6 @@ impl<C: Chain> Chain for Arc<C> {
     }
     fn is_empty(&self) -> bool {
         self.as_ref().is_empty()
-    }
-    fn collect_metadata(&self, context: &mut Context<'_, '_>) {
-        self.as_ref().collect_metadata(context);
-    }
-    fn matches_view(&self, context: &Context<'_, '_>) -> bool {
-        self.as_ref().matches_view(context)
-    }
-    fn view_name(&self) -> &str {
-        self.as_ref().view_name()
     }
     fn parallel_query(
         &self,
@@ -92,57 +73,6 @@ pub struct Server<C> {
 }
 
 impl<C: Chain> Server<C> {
-    fn route_view<'s, 'm>(
-        &'s self,
-        query: pharos_proto::Message<'_>,
-        peer: SocketAddr,
-        protocol: Protocol,
-        response: &mut Vec<u8>,
-        selected: &mut Metadata<'m>,
-        candidate: &mut Metadata<'m>,
-    ) -> Option<&'s crate::ServerBlock<C>> {
-        self.router.route_with(&self.key, query, peer, protocol, |block| {
-            let Some(chain) = block.chain() else { return false };
-            candidate.clear_candidate();
-            candidate.insert(crate::metrics::WRITER_METADATA, "");
-            candidate.insert(crate::logging::PLUGIN_METADATA, "");
-            candidate.insert(crate::logging::ERROR_LOGGED_METADATA, "");
-            let metadata = std::mem::replace(candidate, Metadata::new(&mut []));
-            let mut context = Context {
-                query,
-                client: peer,
-                local: self.key.address,
-                transport: self.key.transport,
-                protocol,
-                domain: block.domain(),
-                metadata,
-                response,
-                max_response_size: response_limit(query, protocol),
-            };
-            chain.collect_metadata(&mut context);
-            let matches = chain.matches_view(&context);
-            *candidate = context.metadata;
-            if matches {
-                std::mem::swap(candidate, selected);
-            }
-            matches
-        })
-    }
-
-    fn route_for_dispatch(
-        &self,
-        query: pharos_proto::Message<'_>,
-        peer: SocketAddr,
-        protocol: Protocol,
-    ) -> Option<&crate::ServerBlock<C>> {
-        if !self.router.has_views(&self.key) {
-            return self.router.route(&self.key, query, peer, protocol);
-        }
-        let mut slots = [None; 18];
-        let mut scratch = [None; 18];
-        self.route_view(query, peer, protocol, &mut Vec::new(), &mut Metadata::new(&mut slots), &mut Metadata::new(&mut scratch))
-    }
-
     pub fn new(router: Router<C>, key: ListenerKey) -> Self {
         let metrics = Registry::default();
         Self::with_registry(router, key, metrics)
@@ -205,8 +135,8 @@ impl<C: Chain> Handler for Server<C> {
         let Admission::Query(query) = admit(wire, self.allow_non_in, &mut response) else {
             return false;
         };
-        self
-            .route_for_dispatch(query, peer, Protocol::Udp)
+        self.router
+            .route(&self.key, query, peer, Protocol::Udp)
             .and_then(|block| block.chain())
             .is_some_and(Chain::shed_enabled)
     }
@@ -232,8 +162,8 @@ impl<C: Chain> Handler for Server<C> {
         {
             return None;
         }
-        self
-            .route_for_dispatch(query, peer, Protocol::Udp)
+        self.router
+            .route(&self.key, query, peer, Protocol::Udp)
             .and_then(|block| block.chain())
             .and_then(|chain| chain.parallel_query(&query))
     }
@@ -382,18 +312,7 @@ impl<C: Chain> Server<C> {
             }
             Admission::Drop => return Action::Drop,
         };
-        let mut slots = [None; 18];
-        slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
-        slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
-        slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
-        let mut metadata = Metadata::new(&mut slots);
-        let mut candidate_slots = [None; 18];
-        let mut candidate = Metadata::new(&mut candidate_slots);
-        let block = if self.router.has_views(&self.key) {
-            self.route_view(query, peer, protocol, response, &mut metadata, &mut candidate)
-        } else {
-            self.router.route(&self.key, query, peer, protocol)
-        };
+        let block = self.router.route(&self.key, query, peer, protocol);
         let chain_start = Instant::now();
         let mut producer = None;
         let mut error_plugin = None;
@@ -401,6 +320,11 @@ impl<C: Chain> Server<C> {
         let mut tsig_signing = None;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
+                let mut slots = [None; 18];
+                slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
+                slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
+                slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
+                let mut metadata = Metadata::new(&mut slots);
                 metadata.self_lookup = Some(crate::SelfLookupState {
                     server: lookup_server,
                     depth: lookup.0,

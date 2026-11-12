@@ -217,19 +217,6 @@ impl<'a> Metadata<'a> {
         }
     }
 
-    pub(crate) fn clear_candidate(&mut self) {
-        self.slots.fill(None);
-        self.inline_name = None;
-        self.inline_len = 0;
-        self.copied.fill(None);
-        self.copied_len = 0;
-        self.validated_tsig_len = 0;
-        self.tsig_signing = None;
-        self.source = None;
-        self.enabled = true;
-        self.self_lookup = None;
-    }
-
     /// Retain an existing shared source of Metadata without allocating per Query.
     pub fn set_source(&mut self, source: Arc<dyn MetadataSource>) {
         self.source = Some(source);
