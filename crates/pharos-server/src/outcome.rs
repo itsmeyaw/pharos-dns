@@ -1,4 +1,6 @@
-use pharos_proto::{EdnsOptions, Message, Opt, Rcode, Type, normalized_udp_size};
+use pharos_proto::{
+    EdnsOptions, Message, MessageBuilder, Opt, Rcode, Section, Type, normalized_udp_size,
+};
 
 use crate::{Action, Error, Outcome, Protocol, admission::write_error};
 
@@ -21,12 +23,20 @@ pub fn finish_outcome(
 ) -> Action {
     match outcome {
         Outcome::Drop => return Action::Drop,
-        Outcome::Stream(stream) => {
-            return if protocol == Protocol::Tcp {
-                Action::Stream(stream)
+        Outcome::Stream(mut stream) => {
+            if protocol == Protocol::Tcp {
+                return Action::Stream(stream);
+            }
+            let qtype = query.questions().next().map(|q| q.qtype);
+            if qtype == Some(Type::IXFR) {
+                if let Err(error) = udp_ixfr(query, &mut stream, response) {
+                    log(error);
+                    write_error(query, response, Rcode::SERVFAIL);
+                }
             } else {
-                Action::Drop
-            };
+                // RFC 5936 §4.2: AXFR is carried over TCP, not UDP.
+                write_error(query, response, Rcode::REFUSED);
+            }
         }
         Outcome::Unanswered(code) => {
             if !matches!(
@@ -48,6 +58,49 @@ pub fn finish_outcome(
         write_error(query, response, Rcode::SERVFAIL);
     }
     Action::Respond
+}
+
+fn udp_ixfr(
+    query: Message<'_>,
+    stream: &mut crate::Stream,
+    response: &mut Vec<u8>,
+) -> Result<(), Error> {
+    // shortcut: one temporary Message allocation per UDP IXFR; reuse a transfer buffer when available.
+    let mut first = Vec::new();
+    if !stream.next(&mut first)? {
+        return Err(Error::InvalidQuery);
+    }
+    let message = Message::parse(&first).map_err(|_| Error::InvalidQuery)?;
+    let record = message
+        .answers()
+        .next()
+        .filter(|record| record.rtype == Type::SOA)
+        .ok_or(Error::InvalidQuery)?;
+    let data = record.data().map_err(|_| Error::InvalidQuery)?;
+    let question = query.questions().next().ok_or(Error::InvalidQuery)?;
+    // RFC 1995 §2: UDP IXFR returns the current SOA when the full transfer does not fit.
+    let mut builder = MessageBuilder::new(
+        response,
+        response_limit(query, Protocol::Udp),
+        query.id(),
+        message.flags(),
+    )
+    .map_err(Error::Build)?;
+    builder
+        .question(question.name, question.qtype, question.qclass)
+        .map_err(Error::Build)?;
+    builder
+        .record_with(
+            Section::Answer,
+            record.name,
+            Type::SOA,
+            record.class,
+            record.ttl,
+            |writer| data.write(writer),
+        )
+        .map_err(Error::Build)?;
+    let _ = builder.finish();
+    Ok(())
 }
 
 fn scrub(

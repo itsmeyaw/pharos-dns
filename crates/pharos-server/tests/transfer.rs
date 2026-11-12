@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 
-use pharos_proto::{Message, Type};
+use pharos_proto::{Message, Rcode, Type};
 use pharos_server::{
     Chain, Context, Listener, ListenerKey, Outcome, Router, Server, Stream, Transport,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpStream, UdpSocket},
     time::{Duration, timeout},
 };
 
@@ -37,6 +37,38 @@ impl Chain for Transfer {
     fn is_empty(&self) -> bool {
         false
     }
+}
+
+#[tokio::test]
+async fn udp_axfr_is_refused_and_ixfr_returns_only_current_soa() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(Transfer), vec![]);
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+        .await
+        .unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for (qtype, rcode) in [(252, Rcode::REFUSED), (251, Rcode::NOERROR)] {
+        let query = [
+            0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, qtype, 0, 1,
+        ];
+        socket.send_to(&query, listener.local_addr()).await.unwrap();
+        let mut wire = [0; 512];
+        let (len, _) = timeout(Duration::from_secs(3), socket.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        let message = Message::parse(&wire[..len]).unwrap();
+        assert_eq!(message.rcode(), rcode);
+        if qtype == 251 {
+            assert_eq!(message.answer_count(), 1);
+            assert_eq!(message.answers().next().unwrap().rtype, Type::SOA);
+        }
+    }
+    listener.shutdown().await.unwrap();
 }
 
 #[tokio::test]
