@@ -1,0 +1,632 @@
+use pharos_kubernetes::{
+    object::{EndpointAddress, Endpoints, Port, Service},
+    store::Index,
+};
+use pharos_proto::Rcode;
+use std::sync::Arc;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Request<'a> {
+    pub(super) namespace: &'a [u8],
+    pub(super) service: &'a [u8],
+    pub(super) endpoint: &'a [u8],
+    pub(super) port: &'a [u8],
+    pub(super) protocol: &'a [u8],
+}
+
+pub(super) enum Snapshot {
+    Service(Arc<Service>),
+    Headless {
+        _service: Arc<Service>,
+        endpoints: Option<Arc<Vec<Arc<Endpoints>>>>,
+    },
+    MissingNamespace,
+    MissingService,
+    NamespaceOnly,
+}
+
+// CoreDNS retains lookup results across Self Lookups, even if the Kubernetes data changes.
+pub(super) fn capture(index: &Index, req: &Request<'_>, headless: bool) -> Snapshot {
+    let Ok(namespace) = std::str::from_utf8(req.namespace) else {
+        return Snapshot::MissingNamespace;
+    };
+    if !index.namespace_exposed(namespace) {
+        return Snapshot::MissingNamespace;
+    }
+    if req.service.is_empty() {
+        return Snapshot::NamespaceOnly;
+    }
+    let Ok(name) = std::str::from_utf8(req.service) else {
+        return Snapshot::MissingService;
+    };
+    let Some(service) = index.service_snapshot(namespace, name) else {
+        return Snapshot::MissingService;
+    };
+    if uses_endpoints(&service, req, headless) {
+        Snapshot::Headless {
+            _service: service,
+            endpoints: index.endpoints_snapshot(namespace, name),
+        }
+    } else {
+        Snapshot::Service(service)
+    }
+}
+
+fn uses_endpoints(svc: &Service, req: &Request<'_>, headless: bool) -> bool {
+    headless && svc.external_ips.is_empty() && (svc.headless() || !req.endpoint.is_empty())
+}
+
+pub(super) fn parse<'a>(labels: &'a [&'a [u8]]) -> Result<Request<'a>, Rcode> {
+    let Some((&namespace, remaining)) = labels.split_last() else {
+        return Err(Rcode::SERVFAIL);
+    };
+    let mut req = Request {
+        namespace,
+        ..Request::default()
+    };
+    let Some((&service, remaining)) = remaining.split_last() else {
+        return Ok(req);
+    };
+    req.service = service;
+    match remaining {
+        [] => {}
+        [endpoint] => req.endpoint = endpoint.strip_prefix(b"_").unwrap_or(endpoint),
+        [port, protocol] => {
+            // Kubernetes DNS spec 1.1.0 §2.3.2: SRV names contain port and protocol labels.
+            req.port = port.strip_prefix(b"_").unwrap_or(port);
+            req.protocol = protocol.strip_prefix(b"_").unwrap_or(protocol);
+        }
+        _ => return Err(Rcode::NXDOMAIN),
+    }
+    Ok(req)
+}
+
+pub(super) fn lookup(
+    index: &Index,
+    req: &Request<'_>,
+    headless: bool,
+    endpoint_pod_names: bool,
+    callback: impl FnMut(&str, &Port, Option<&[u8]>),
+) -> Rcode {
+    let Ok(namespace) = std::str::from_utf8(req.namespace) else {
+        return Rcode::NXDOMAIN;
+    };
+    if !index.namespace_exposed(namespace) {
+        return Rcode::NXDOMAIN;
+    }
+    if req.service.is_empty() {
+        return Rcode::NOERROR;
+    }
+    let Ok(service) = std::str::from_utf8(req.service) else {
+        return Rcode::NXDOMAIN;
+    };
+    let Some(svc) = index.service(namespace, service) else {
+        return Rcode::NXDOMAIN;
+    };
+    if uses_endpoints(svc, req, headless) {
+        // Kubernetes DNS spec 1.1.0 §2.4.1: headless records use ready endpoint addresses.
+        endpoints(
+            index.endpoints(namespace, service),
+            req,
+            endpoint_pod_names,
+            callback,
+        )
+    } else {
+        external(svc, req, callback)
+    }
+}
+
+fn endpoints<'a>(
+    slices: impl IntoIterator<Item = &'a Endpoints>,
+    req: &Request<'_>,
+    endpoint_pod_names: bool,
+    mut callback: impl FnMut(&str, &Port, Option<&[u8]>),
+) -> Rcode {
+    let mut code = Rcode::NXDOMAIN;
+    for ep in slices {
+        for addr in &ep.addresses {
+            let mut buf = [0; 64];
+            let label = endpoint_label(addr, endpoint_pod_names, &mut buf);
+            if !req.endpoint.is_empty() && !req.endpoint.eq_ignore_ascii_case(label) {
+                continue;
+            }
+            for port in &ep.ports {
+                if matches(req, port) {
+                    code = Rcode::NOERROR;
+                    callback(&addr.ip, port, Some(label));
+                }
+            }
+        }
+    }
+    code
+}
+
+fn matches(req: &Request<'_>, port: &Port) -> bool {
+    (req.port.is_empty() || req.port.eq_ignore_ascii_case(port.name.as_bytes()))
+        && (req.protocol.is_empty() || req.protocol.eq_ignore_ascii_case(port.protocol.as_bytes()))
+}
+
+pub(super) fn external(
+    svc: &Service,
+    req: &Request<'_>,
+    mut callback: impl FnMut(&str, &Port, Option<&[u8]>),
+) -> Rcode {
+    let mut code = Rcode::NXDOMAIN;
+    for ip in &svc.external_ips {
+        for port in &svc.ports {
+            if matches(req, port) {
+                code = Rcode::NOERROR;
+                callback(ip, port, None);
+            }
+        }
+    }
+    code
+}
+
+pub(super) fn snapshot_or_lookup(
+    index: &Index,
+    req: &Request<'_>,
+    headless: bool,
+    endpoint_pod_names: bool,
+    snapshot: Option<&Snapshot>,
+    callback: impl FnMut(&str, &Port, Option<&[u8]>),
+) -> Rcode {
+    match snapshot {
+        Some(Snapshot::Headless {
+            endpoints: slices, ..
+        }) => endpoints(
+            slices
+                .iter()
+                .flat_map(|slices| slices.iter())
+                .map(Arc::as_ref),
+            req,
+            endpoint_pod_names,
+            callback,
+        ),
+        Some(Snapshot::Service(service)) => external(service, req, callback),
+        Some(Snapshot::MissingNamespace | Snapshot::MissingService) => Rcode::NXDOMAIN,
+        Some(Snapshot::NamespaceOnly) => Rcode::NOERROR,
+        None => lookup(index, req, headless, endpoint_pod_names, callback),
+    }
+}
+
+pub(super) fn endpoint_label<'a>(
+    addr: &'a EndpointAddress,
+    pod_names: bool,
+    buf: &'a mut [u8; 64],
+) -> &'a [u8] {
+    // Kubernetes DNS spec 1.1.0 §2.1: an explicit endpoint hostname takes precedence.
+    if !addr.hostname.is_empty() {
+        return addr.hostname.as_bytes();
+    }
+    if pod_names && !addr.target_ref_name.is_empty() {
+        return addr.target_ref_name.as_bytes();
+    }
+    let ip = addr.ip.as_bytes();
+    let separator = if ip.contains(&b'.') {
+        b'.'
+    } else if ip.contains(&b':') {
+        b':'
+    } else {
+        return b"";
+    };
+    let suffix = separator == b':' && ip.last() == Some(&b':');
+    if ip.len() + usize::from(suffix) > buf.len() {
+        return b"";
+    }
+    for (slot, byte) in buf.iter_mut().zip(ip) {
+        *slot = if *byte == separator { b'-' } else { *byte };
+    }
+    if suffix {
+        buf[ip.len()] = b'0';
+    }
+    &buf[..ip.len() + usize::from(suffix)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_endpoint_group_preserves_order_and_filters() {
+        use pharos_kubernetes::object::{EndpointAddress, Endpoints, Port};
+        use std::sync::Arc;
+        let slice = |name: &str, address: &str, hostname: &str| {
+            Arc::new(Endpoints {
+                version: "1".into(),
+                name: name.into(),
+                namespace: "prod".into(),
+                service_name: "head".into(),
+                addresses: vec![EndpointAddress {
+                    ip: address.into(),
+                    hostname: hostname.into(),
+                    node_name: String::new(),
+                    target_ref_name: String::new(),
+                }],
+                ports: vec![
+                    Port {
+                        name: "http".into(),
+                        protocol: "TCP".into(),
+                        port: 80,
+                    },
+                    Port {
+                        name: "https".into(),
+                        protocol: "TCP".into(),
+                        port: 443,
+                    },
+                ],
+                zones: None,
+            })
+        };
+        let mut current = Arc::new(vec![
+            slice("one", "lb.target.test", "pod1"),
+            slice("two", "192.0.2.2", "pod2"),
+        ]);
+        let snapshot = Snapshot::Headless {
+            _service: Arc::new(Service {
+                version: "1".into(),
+                name: "head".into(),
+                namespace: "prod".into(),
+                cluster_ips: vec!["None".into()],
+                service_type: String::new(),
+                external_name: String::new(),
+                ports: vec![],
+                external_ips: vec![],
+            }),
+            endpoints: Some(Arc::clone(&current)),
+        };
+        Arc::make_mut(&mut current).reverse();
+        let index = Index::default();
+        let request = parse(&[b"_HTTP", b"_tcp", b"head", b"prod"]).unwrap();
+        let mut rows = Vec::new();
+        let code = snapshot_or_lookup(
+            &index,
+            &request,
+            true,
+            false,
+            Some(&snapshot),
+            |host, port, endpoint| {
+                rows.push((
+                    host.to_owned(),
+                    port.port,
+                    String::from_utf8(endpoint.unwrap().to_vec()).unwrap(),
+                ));
+            },
+        );
+        assert_eq!(code, Rcode::NOERROR);
+        assert_eq!(
+            rows,
+            [
+                ("lb.target.test".into(), 80, "pod1".into()),
+                ("192.0.2.2".into(), 80, "pod2".into())
+            ]
+        );
+        let request = parse(&[b"pod2", b"head", b"prod"]).unwrap();
+        rows.clear();
+        snapshot_or_lookup(
+            &index,
+            &request,
+            true,
+            false,
+            Some(&snapshot),
+            |host, port, endpoint| {
+                rows.push((
+                    host.to_owned(),
+                    port.port,
+                    String::from_utf8(endpoint.unwrap().to_vec()).unwrap(),
+                ));
+            },
+        );
+        assert_eq!(
+            rows,
+            [
+                ("192.0.2.2".into(), 80, "pod2".into()),
+                ("192.0.2.2".into(), 443, "pod2".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn retained_external_service_keeps_order_and_port_filter_after_update() {
+        use pharos_kubernetes::object::{Port, Service};
+        use std::sync::Arc;
+        let mut current = Arc::new(Service {
+            version: "1".into(),
+            name: "web".into(),
+            namespace: "prod".into(),
+            cluster_ips: vec![],
+            service_type: "LoadBalancer".into(),
+            external_name: String::new(),
+            external_ips: vec!["192.0.2.1".into(), "old.example".into(), "192.0.2.2".into()],
+            ports: vec![
+                Port {
+                    name: "http".into(),
+                    protocol: "TCP".into(),
+                    port: 80,
+                },
+                Port {
+                    name: "https".into(),
+                    protocol: "TCP".into(),
+                    port: 443,
+                },
+            ],
+        });
+        let snapshot = Arc::clone(&current);
+        Arc::make_mut(&mut current).external_ips = vec!["new.example".into()];
+        let request = parse(&[b"web", b"prod"]).unwrap();
+        let mut rows = Vec::new();
+        assert_eq!(
+            external(&snapshot, &request, |host, port, _| rows
+                .push((host.to_owned(), port.port))),
+            Rcode::NOERROR
+        );
+        assert_eq!(
+            rows,
+            [
+                ("192.0.2.1".into(), 80),
+                ("192.0.2.1".into(), 443),
+                ("old.example".into(), 80),
+                ("old.example".into(), 443),
+                ("192.0.2.2".into(), 80),
+                ("192.0.2.2".into(), 443)
+            ]
+        );
+        let request = parse(&[b"_HTTP", b"_tcp", b"web", b"prod"]).unwrap();
+        rows.clear();
+        assert_eq!(
+            external(&snapshot, &request, |host, port, _| rows
+                .push((host.to_owned(), port.port))),
+            Rcode::NOERROR
+        );
+        assert_eq!(
+            rows,
+            [
+                ("192.0.2.1".into(), 80),
+                ("old.example".into(), 80),
+                ("192.0.2.2".into(), 80)
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_namespace_service_endpoint_and_port_names() {
+        let req = parse(&[b"prod"]).unwrap();
+        assert_eq!(req.namespace, b"prod");
+        assert!(req.service.is_empty());
+        let req = parse(&[b"web", b"prod"]).unwrap();
+        assert_eq!(req.service, b"web");
+        let req = parse(&[b"_pod-1", b"web", b"prod"]).unwrap();
+        assert_eq!(req.endpoint, b"pod-1");
+        let req = parse(&[b"_http", b"_tcp", b"web", b"prod"]).unwrap();
+        assert_eq!((req.port, req.protocol), (&b"http"[..], &b"tcp"[..]));
+        let req = parse(&[b"__http", b"tcp", b"web", b"prod"]).unwrap();
+        assert_eq!((req.port, req.protocol), (&b"_http"[..], &b"tcp"[..]));
+    }
+
+    #[test]
+    fn rejects_empty_or_too_long_relative_names() {
+        assert_eq!(parse(&[]), Err(Rcode::SERVFAIL));
+        assert_eq!(
+            parse(&[b"a", b"b", b"c", b"web", b"prod"]),
+            Err(Rcode::NXDOMAIN)
+        );
+    }
+
+    #[test]
+    fn missing_namespace_is_nxdomain() {
+        let index = Index::default();
+        let req = parse(&[b"missing"]).unwrap();
+        assert_eq!(
+            lookup(&index, &req, true, false, |_, _, _| panic!(
+                "unexpected result"
+            )),
+            Rcode::NXDOMAIN
+        );
+    }
+
+    #[test]
+    fn endpoint_labels_follow_hostname_pod_and_ip_precedence() {
+        let mut addr = EndpointAddress {
+            ip: "2001:db8::".into(),
+            hostname: "explicit".into(),
+            node_name: String::new(),
+            target_ref_name: "pod".into(),
+        };
+        let mut buf = [0; 64];
+        assert_eq!(endpoint_label(&addr, true, &mut buf), b"explicit");
+        addr.hostname.clear();
+        assert_eq!(endpoint_label(&addr, true, &mut buf), b"pod");
+        assert_eq!(endpoint_label(&addr, false, &mut buf), b"2001-db8--0");
+        addr.ip = "192.0.2.1".into();
+        assert_eq!(endpoint_label(&addr, false, &mut buf), b"192-0-2-1");
+        addr.ip = "::ffff:192.0.2.1".into();
+        assert_eq!(endpoint_label(&addr, false, &mut buf), b"::ffff:192-0-2-1");
+        addr.ip = "not-an-ip".into();
+        assert_eq!(endpoint_label(&addr, false, &mut buf), b"");
+    }
+
+    #[tokio::test]
+    async fn lookup_matches_external_ips_headless_endpoints_and_visibility() {
+        use pharos_corefile::{configure, parse as parse_corefile};
+        use pharos_server::Phase;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = [0; 4096];
+                    let n = socket.read(&mut request).await.unwrap();
+                    let request = String::from_utf8_lossy(&request[..n]);
+                    let (kind, items) = if request.contains("/services") {
+                        (
+                            "ServiceList",
+                            r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"clusterIP":"None","externalIPs":["192.0.2.1"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},{"metadata":{"name":"head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"head-empty","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"noport","namespace":"prod"},"spec":{"clusterIP":"10.0.0.1","externalIPs":["192.0.2.2"]}},{"metadata":{"name":"ordinary","namespace":"prod"},"spec":{"clusterIP":"10.0.0.1"}},{"metadata":{"name":"hidden","namespace":"secret"},"spec":{"externalIPs":["192.0.2.3"]}}]"#,
+                        )
+                    } else if request.contains("/endpointslices") {
+                        (
+                            "EndpointSliceList",
+                            r#"[{"metadata":{"name":"web-1","namespace":"prod","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.0.1"],"hostname":"pod-1"}],"ports":[{"name":"http","protocol":"TCP","port":8080}]},{"metadata":{"name":"head-1","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.0.2"],"hostname":"pod-2"}]},{"metadata":{"name":"ordinary-1","namespace":"prod","labels":{"kubernetes.io/service-name":"ordinary"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.0.3"],"hostname":"pod-3"}]}]"#,
+                        )
+                    } else {
+                        (
+                            "NamespaceList",
+                            r#"[{"metadata":{"name":"prod"}},{"metadata":{"name":"empty"}},{"metadata":{"name":"secret"}}]"#,
+                        )
+                    };
+                    let body = if request.contains("watch=true") {
+                        String::new()
+                    } else {
+                        format!(
+                            r#"{{"apiVersion":"v1","kind":"{kind}","metadata":{{"resourceVersion":"1"}},"items":{items}}}"#
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let text = format!(
+            ".:53 {{\n kubernetes cluster.local {{\n  endpoint http://{server}\n  namespaces prod empty\n  startup_timeout 3s\n }}\n}}"
+        );
+        let chain = configure::<crate::Chain>(
+            &parse_corefile("Corefile", &text).unwrap(),
+            crate::directives(),
+        )
+        .unwrap()
+        .remove(0)
+        .config;
+        chain.lifecycle.run(Phase::Startup).await.unwrap();
+        let store = chain.kubernetes.as_ref().unwrap().store().unwrap();
+        store.with_read(|index| {
+            let empty_request = parse(&[b"head-empty", b"prod"]).unwrap();
+            let captured = capture(index, &empty_request, true);
+            assert!(matches!(
+                captured,
+                Snapshot::Headless {
+                    endpoints: None,
+                    ..
+                }
+            ));
+            assert_eq!(
+                snapshot_or_lookup(
+                    index,
+                    &empty_request,
+                    true,
+                    false,
+                    Some(&captured),
+                    |_, _, _| panic!("empty group returned data")
+                ),
+                Rcode::NXDOMAIN
+            );
+            assert!(matches!(
+                capture(index, &parse(&[b"missing", b"prod"]).unwrap(), true),
+                Snapshot::MissingService
+            ));
+            assert!(matches!(
+                capture(index, &parse(&[b"web", b"missing"]).unwrap(), true),
+                Snapshot::MissingNamespace
+            ));
+            assert!(matches!(
+                capture(index, &parse(&[b"prod"]).unwrap(), true),
+                Snapshot::NamespaceOnly
+            ));
+            let req = parse(&[b"web", b"prod"]).unwrap();
+            let empty = Snapshot::Headless {
+                _service: index.service_snapshot("prod", "web").unwrap(),
+                endpoints: None,
+            };
+            assert_eq!(
+                snapshot_or_lookup(index, &req, true, false, Some(&empty), |_, _, _| panic!(
+                    "empty snapshot read live data"
+                )),
+                Rcode::NXDOMAIN
+            );
+            for (empty, expected) in [
+                (Snapshot::NamespaceOnly, Rcode::NOERROR),
+                (Snapshot::MissingService, Rcode::NXDOMAIN),
+                (Snapshot::MissingNamespace, Rcode::NXDOMAIN),
+            ] {
+                assert_eq!(
+                    snapshot_or_lookup(index, &req, true, false, Some(&empty), |_, _, _| panic!(
+                        "missing snapshot read live data"
+                    )),
+                    expected
+                );
+            }
+            let mut answers = Vec::new();
+            let mut check = |labels: &[&[u8]],
+                             headless,
+                             expected,
+                             rows: &[(&str, i32, Option<&str>)]| {
+                answers.clear();
+                let req = parse(labels).unwrap();
+                let rcode = lookup(index, &req, headless, false, |host, port, label| {
+                    answers.push((
+                        host.to_owned(),
+                        port.port,
+                        label.map(|label| String::from_utf8(label.to_vec()).unwrap()),
+                    ));
+                });
+                assert_eq!(rcode, expected);
+                let expected: Vec<_> = rows
+                    .iter()
+                    .map(|(host, port, label)| (host.to_string(), *port, label.map(str::to_owned)))
+                    .collect();
+                assert_eq!(answers, expected);
+            };
+            check(&[b"prod"], true, Rcode::NOERROR, &[]);
+            check(&[b"empty"], true, Rcode::NOERROR, &[]);
+            check(&[b"secret"], true, Rcode::NXDOMAIN, &[]);
+            check(&[b"hidden", b"secret"], true, Rcode::NXDOMAIN, &[]);
+            check(&[b"absent"], true, Rcode::NXDOMAIN, &[]);
+            check(&[b"missing", b"prod"], true, Rcode::NXDOMAIN, &[]);
+            check(
+                &[b"_http", b"_tcp", b"web", b"prod"],
+                true,
+                Rcode::NOERROR,
+                &[("192.0.2.1", 80, None)],
+            );
+            check(
+                &[b"pod-1", b"web", b"prod"],
+                true,
+                Rcode::NOERROR,
+                &[("192.0.2.1", 80, None)],
+            );
+            check(
+                &[b"pod-2", b"head", b"prod"],
+                true,
+                Rcode::NOERROR,
+                &[("10.0.0.2", -1, Some("pod-2"))],
+            );
+            check(&[b"wrong", b"head", b"prod"], true, Rcode::NXDOMAIN, &[]);
+            check(&[b"head", b"prod"], false, Rcode::NXDOMAIN, &[]);
+            check(&[b"ordinary", b"prod"], true, Rcode::NXDOMAIN, &[]);
+            check(
+                &[b"pod-3", b"ordinary", b"prod"],
+                true,
+                Rcode::NOERROR,
+                &[("10.0.0.3", -1, Some("pod-3"))],
+            );
+            check(
+                &[b"noport", b"prod"],
+                false,
+                Rcode::NOERROR,
+                &[("192.0.2.2", -1, None)],
+            );
+            check(
+                &[b"_http", b"_tcp", b"noport", b"prod"],
+                false,
+                Rcode::NXDOMAIN,
+                &[],
+            );
+        });
+        chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+        task.abort();
+    }
+}

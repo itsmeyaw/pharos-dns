@@ -24,10 +24,11 @@ fn resources(name: &str) -> Option<(&'static str, &'static str, Vec<Value>)> {
             "v1",
             "Service",
             vec![
-                json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"web","namespace":"default","resourceVersion":"1","uid":"web","labels":{"app":"web"}},"spec":{"type":"ClusterIP","clusterIP":"10.96.0.10","clusterIPs":["10.96.0.10"],"ports":[{"name":"http","protocol":"TCP","port":80}]}}),
+                json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"web","namespace":"default","resourceVersion":"1","uid":"web","labels":{"app":"web"}},"spec":{"type":"ClusterIP","clusterIP":"10.96.0.10","clusterIPs":["10.96.0.10"],"externalIPs":["192.168.200.123"],"ports":[{"name":"http","protocol":"TCP","port":80}]}}),
+                json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"test","namespace":"default","resourceVersion":"1","uid":"test","labels":{"app":"web"}},"spec":{"type":"ClusterIP","clusterIP":"None","externalIPs":["192.168.200.123"]}}),
                 json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"dual","namespace":"default","resourceVersion":"1","uid":"dual","labels":{"app":"db"}},"spec":{"type":"ClusterIP","clusterIP":"10.96.0.11","clusterIPs":["10.96.0.11","fd00::11"],"ipFamilies":["IPv4","IPv6"],"ports":[{"name":"http","protocol":"TCP","port":80}]}}),
                 json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"headless","namespace":"default","resourceVersion":"1","uid":"headless"},"spec":{"type":"ClusterIP","clusterIP":"None","clusterIPs":["None"],"ports":[{"name":"http","protocol":"TCP","port":8080}]}}),
-                json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"alias","namespace":"default","resourceVersion":"1","uid":"alias"},"spec":{"type":"ExternalName","externalName":"target.example.test"}}),
+                json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"alias","namespace":"default","resourceVersion":"1","uid":"alias"},"spec":{"type":"ExternalName","externalName":"target.example.test","ports":[{"name":"http","protocol":"TCP","port":80}]},"status":{"loadBalancer":{"ingress":[{"hostname":"destination.test"}]}}}),
                 json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"hidden","namespace":"other","resourceVersion":"1","uid":"hidden","labels":{"app":"web","tier":"hidden"}},"spec":{"type":"ClusterIP","clusterIP":"10.96.0.12","clusterIPs":["10.96.0.12"]}}),
             ],
         ),
@@ -443,7 +444,7 @@ mod tests {
         let services = "/api/v1/services";
         assert_eq!(
             names(&list(services, Some("labelSelector=app%3Dweb")).await),
-            ["web", "hidden"]
+            ["web", "test", "hidden"]
         );
         assert_eq!(
             names(
@@ -453,7 +454,7 @@ mod tests {
                 )
                 .await
             ),
-            ["web", "dual"]
+            ["web", "test", "dual"]
         );
         assert_eq!(
             names(&list(services, Some("labelSelector=%21app")).await),
@@ -505,12 +506,13 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 4);
         assert_eq!(events[0]["object"]["metadata"]["name"], "web");
-        assert_eq!(events[1]["object"]["metadata"]["name"], "hidden");
-        assert_eq!(events[2]["type"], "BOOKMARK");
+        assert_eq!(events[1]["object"]["metadata"]["name"], "test");
+        assert_eq!(events[2]["object"]["metadata"]["name"], "hidden");
+        assert_eq!(events[3]["type"], "BOOKMARK");
         assert_eq!(
-            events[2]["object"]["metadata"]["annotations"]["k8s.io/initial-events-end"],
+            events[3]["object"]["metadata"]["annotations"]["k8s.io/initial-events-end"],
             "true"
         );
     }

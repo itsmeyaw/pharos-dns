@@ -3,10 +3,12 @@
 #[cfg(test)]
 #[allow(unused_attributes)]
 mod authority_test;
+#[cfg(feature = "plugin-k8s-external")]
+pub(crate) mod external;
 mod local;
 mod name;
-mod reverse;
-mod scratch;
+pub(crate) mod reverse;
+pub(crate) mod scratch;
 pub mod setup;
 #[cfg(feature = "plugin-transfer")]
 mod transfer;

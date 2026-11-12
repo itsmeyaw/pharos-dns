@@ -55,10 +55,23 @@ The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS
 Responses, and the harness cannot mask that difference.
 
+The `erratic-drop` scenario uses a root zone so the startup probe consumes the
+first two queries: the first is dropped, the second answered, and the single
+compared query is answered under `drop 3`. The harness cannot compare dropped
+queries because a timeout aborts the scenario; the default and `drop 2` plus
+`truncate 2` examples are therefore skipped. `erratic-delay` and
+`erratic-truncate-delay` compare responses from the other README examples, not
+elapsed time. The latter exercises CoreDNS's truncation bitmask on UDP and TCP.
+Truncated AXFR is skipped because the harness requires a closing SOA.
+
 The `tsig` transfer README example uses a small file Zone. Signed scenarios authenticate each Response before comparing its
 other fields; TSIG timestamps and MAC bytes are not compared between servers.
 The `tsig-forward` README example replaces its unreachable external Upstream
 with a local deterministic fixture.
+
+The literal `k8s_external` fallthrough example forwards to 8.8.8.8 and is
+skipped because the differential suite must not depend on an external network.
+`k8s-external-fallthrough` uses `whoami` as a deterministic Next instead.
 
 The `kubernetes-*` scenarios exercise the small, read-only API fixture in
 `crates/pharos-kubernetes/examples/differential.rs`, sharing the HTTP server

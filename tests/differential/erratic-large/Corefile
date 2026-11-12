@@ -1,0 +1,6 @@
+example.org:{port} {
+    erratic {
+        drop 0
+        large
+    }
+}

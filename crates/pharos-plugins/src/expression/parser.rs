@@ -460,7 +460,7 @@ impl Parser<'_, '_> {
                 };
                 left = Node::Matches(
                     Box::new(left),
-                    Box::new(crate::regex_match::Regex::new(&pattern)?),
+                    Box::new(crate::regex_match::ThreadRegex::new(&pattern)?),
                 );
                 if negated {
                     left = Node::Unary(Unary::Not, Box::new(left));

@@ -41,6 +41,68 @@ impl<'a> Query<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ScopedQuery<'a, 'v> {
+    base: &'a Query<'a>,
+    pub message: &'a Message<'a>,
+    pub client: SocketAddr,
+    pub local: SocketAddr,
+    pub protocol: Protocol,
+    pub groups: &'a [(&'a str, &'a str)],
+    pub matches: &'a [&'a str],
+    pub variables: &'v [(&'a str, Value<'a>)],
+}
+
+impl<'a, 'v> ScopedQuery<'a, 'v> {
+    pub(crate) fn new(query: &'a Query<'a>, variables: &'v [(&'a str, Value<'a>)]) -> Self {
+        Self {
+            base: query,
+            message: query.message,
+            client: query.client,
+            local: query.local,
+            protocol: query.protocol,
+            groups: query.groups,
+            matches: query.matches,
+            variables,
+        }
+    }
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::*;
+
+    #[test]
+    fn variable_slice_can_grow_after_scoped_evaluation() {
+        let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+        let message = Message::parse(wire).unwrap();
+        let query = Query::new(
+            &message,
+            "127.0.0.1:1234".parse().unwrap(),
+            "127.0.0.1:53".parse().unwrap(),
+            Protocol::Udp,
+        );
+        let mut metadata_slots = [];
+        let metadata = Metadata::new(&mut metadata_slots);
+        let first = Expression::compile("name").unwrap();
+        let second =
+            Expression::compile_with_variables("f", &[("f", ValueType::Function)]).unwrap();
+        let mut variables = Vec::with_capacity(2);
+        let mut buffer = [0; 16];
+        let scoped = ScopedQuery::new(&query, &variables);
+        let (function, rest) = first
+            .evaluate_scoped_split(&scoped, &metadata, &mut buffer)
+            .unwrap();
+        variables.push(("f", function));
+        let scoped = ScopedQuery::new(&query, &variables);
+        let (copy, _) = second
+            .evaluate_scoped_split(&scoped, &metadata, rest)
+            .unwrap();
+        variables.push(("copy", copy));
+        assert!(matches!(variables[1].1, Value::Function(_)));
+    }
+}
+
 /// Reusable caller-owned evaluation storage.
 pub struct Scratch<'a> {
     buffer: &'a mut [u8],
@@ -112,6 +174,7 @@ impl Callable<'_> {
         args: &[Value<'_>],
         buffer: &'a mut [u8],
     ) -> Result<Value<'a>, &'static str> {
+        let query = ScopedQuery::new(self.query, &[]);
         match (self.name, args) {
             ("metadata", [Value::String(label)]) => {
                 return Ok(Value::String(self.metadata.get(label).unwrap_or("")));
@@ -125,7 +188,7 @@ impl Callable<'_> {
                         .ok()
                         .and_then(|index| self.query.matches.get(index).copied())
                         .unwrap_or(""),
-                    Value::String(name) => group_name(self.query, name),
+                    Value::String(name) => group_name(&query, name),
                     _ => "",
                 }));
             }
@@ -136,7 +199,7 @@ impl Callable<'_> {
         let mut slots = [];
         let metadata = Metadata::new(&mut slots);
         let mut scratch = Scratch::new(buffer);
-        let value = call(self.name, &[], self.query, &metadata, &mut scratch, None)?;
+        let value = call(self.name, &[], &query, &metadata, &mut scratch, None)?;
         match value {
             Temporary::Bool(value) => Ok(Value::Bool(value)),
             Temporary::Int(value) => Ok(Value::Int(value)),
@@ -245,7 +308,7 @@ enum Node {
     Current(Kind),
     Any(Vec<Node>, Box<Node>),
     Call(String, Vec<Node>, Kind),
-    Matches(Box<Node>, Box<crate::regex_match::Regex>),
+    Matches(Box<Node>, Box<crate::regex_match::ThreadRegex>),
     Unary(Unary, Box<Node>),
     Binary(Binary, Box<Node>, Box<Node>, Kind),
 }
@@ -272,7 +335,7 @@ impl Node {
 
     fn eval<'a>(
         &'a self,
-        query: &'a Query<'_>,
+        query: &ScopedQuery<'a, '_>,
         metadata: &'a Metadata<'_>,
         scratch: &mut Scratch<'_>,
         current: Option<Temporary<'a>>,
@@ -285,7 +348,7 @@ impl Node {
             Self::String(value) => Ok(Temporary::Borrowed(value)),
             Self::Function(name) => Ok(Temporary::Function(Callable {
                 name,
-                query,
+                query: query.base,
                 metadata,
             })),
             Self::Variable(name, kind) => {
@@ -563,7 +626,7 @@ fn replace<'a>(
 fn call<'a>(
     name: &str,
     args: &'a [Node],
-    query: &'a Query<'_>,
+    query: &ScopedQuery<'a, '_>,
     metadata: &'a Metadata<'_>,
     scratch: &mut Scratch<'_>,
     current: Option<Temporary<'a>>,
@@ -693,7 +756,7 @@ fn call<'a>(
     Ok(Temporary::Stored(start, scratch.len))
 }
 
-fn group_name<'a>(query: &'a Query<'_>, key: &str) -> &'a str {
+fn group_name<'a>(query: &ScopedQuery<'a, '_>, key: &str) -> &'a str {
     query
         .groups
         .iter()
@@ -790,9 +853,53 @@ impl Expression {
         self.value_type
     }
 
+    /// Evaluate while retaining the used portion of the caller's buffer.
+    pub fn evaluate_split<'a>(
+        &'a self,
+        query: &'a Query<'_>,
+        metadata: &'a Metadata<'_>,
+        buffer: &'a mut [u8],
+    ) -> Result<(Value<'a>, &'a mut [u8]), &'static str> {
+        let scoped = ScopedQuery::new(query, query.variables);
+        self.evaluate_scoped_split(&scoped, metadata, buffer)
+    }
+
+    pub(crate) fn evaluate_scoped_split<'a>(
+        &'a self,
+        query: &ScopedQuery<'a, '_>,
+        metadata: &'a Metadata<'_>,
+        buffer: &'a mut [u8],
+    ) -> Result<(Value<'a>, &'a mut [u8]), &'static str> {
+        let mut scratch = Scratch::new(buffer);
+        let value = self.root.eval(query, metadata, &mut scratch, None)?;
+        let (used, remaining) = scratch.buffer.split_at_mut(scratch.len);
+        let value = match value {
+            Temporary::Nil => Value::Nil,
+            Temporary::Bool(value) => Value::Bool(value),
+            Temporary::Int(value) => Value::Int(value),
+            Temporary::Float(value) => Value::Float(value),
+            Temporary::Function(value) => Value::Function(value),
+            Temporary::Borrowed(value) => Value::String(value),
+            Temporary::Stored(start, end) => {
+                Value::String(std::str::from_utf8(&used[start..end]).map_err(|_| "invalid UTF-8")?)
+            }
+        };
+        Ok((value, remaining))
+    }
+
     pub fn evaluate<'a>(
         &'a self,
         query: &'a Query<'_>,
+        metadata: &'a Metadata<'_>,
+        scratch: &'a mut Scratch<'_>,
+    ) -> Result<Value<'a>, &'static str> {
+        let scoped = ScopedQuery::new(query, query.variables);
+        self.evaluate_scoped(&scoped, metadata, scratch)
+    }
+
+    pub(crate) fn evaluate_scoped<'a>(
+        &'a self,
+        query: &ScopedQuery<'a, '_>,
         metadata: &'a Metadata<'_>,
         scratch: &'a mut Scratch<'_>,
     ) -> Result<Value<'a>, &'static str> {

@@ -6,6 +6,35 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn external_serial_tracks_service_updates_without_changing_internal_serial() {
+        let store = Store::default();
+        let mut item = service("10.0.0.1");
+        item.version = "1".into();
+        store.apply_service(item.clone());
+        store.0.write().unwrap().serial = 1;
+        assert_eq!(store.with_read(|index| index.external_serial()), 0);
+        item.version = "2".into();
+        item.external_ips = vec!["192.0.2.2".into()];
+        store.apply_service(item);
+        store.with_read(|index| {
+            assert_ne!(index.external_serial(), 0);
+            assert_eq!(index.serial(), 1);
+        });
+    }
+
+    #[test]
+    fn external_serial_tracks_service_updates_after_relist() {
+        let store = Store::default();
+        let mut item = service("10.0.0.1");
+        item.version = "1".into();
+        store.replace_services(vec![item.clone()]);
+        item.version = "2".into();
+        item.external_ips = vec!["192.0.2.2".into()];
+        store.replace_services(vec![item]);
+        assert_ne!(store.with_read(|index| index.external_serial()), 0);
+    }
+
+    #[test]
     fn change_signals_do_not_depend_on_serial_advancing() {
         let store = Store::default();
         let mut changes = store.subscribe_changes();
@@ -130,6 +159,102 @@ mod tests {
         store.with_read(|index| {
             assert_eq!(index.services().len(), 1);
             assert_eq!(index.service_imports().len(), 1);
+        });
+    }
+
+    #[test]
+    fn external_transfer_visits_services_and_endpoints_in_hidden_namespaces() {
+        let store = Store::new(&["prod".into()], false);
+        let mut hidden = service("10.0.0.2");
+        hidden.namespace = "hidden".into();
+        store.apply_service(hidden);
+        let mut ep = slice("one", "10.0.1.2");
+        ep.namespace = "hidden".into();
+        store.apply_endpoints(ep);
+        store.with_read(|index| {
+            assert_eq!(index.services_unfiltered().count(), 1);
+            assert_eq!(index.endpoints_unfiltered("hidden", "web").count(), 1);
+            assert!(index.services().is_empty());
+            assert_eq!(index.endpoints("hidden", "web").count(), 0);
+        });
+    }
+
+    #[test]
+    fn namespace_exposure_requires_presence_and_configuration() {
+        let store = Store::new(&["prod".into()], false);
+        for name in ["prod", "hidden"] {
+            store.apply_namespace(Namespace {
+                name: name.into(),
+                version: "1".into(),
+            });
+        }
+        store.with_read(|index| {
+            assert!(index.namespace_exposed("prod"));
+            assert!(!index.namespace_exposed("hidden"));
+            assert!(!index.namespace_exposed("absent"));
+        });
+    }
+
+    #[test]
+    fn service_snapshot_retains_ordered_data_and_requires_exposed_namespace() {
+        let store = Store::new(&["prod".into()], false);
+        let mut old = service("10.0.0.1");
+        old.external_ips = vec!["192.0.2.1".into(), "old.example".into(), "192.0.2.2".into()];
+        store.apply_service(old.clone());
+        assert!(
+            store
+                .with_read(|index| index.service_snapshot("prod", "web"))
+                .is_none()
+        );
+        store.apply_namespace(Namespace {
+            name: "prod".into(),
+            version: "1".into(),
+        });
+        store.apply_namespace(Namespace {
+            name: "hidden".into(),
+            version: "1".into(),
+        });
+        let mut hidden = old.clone();
+        hidden.namespace = "hidden".into();
+        store.apply_service(hidden);
+        let snapshot = store.with_read(|index| {
+            assert!(index.service_snapshot("hidden", "web").is_none());
+            assert!(index.service_snapshot("prod", "missing").is_none());
+            let first = index.service_snapshot("prod", "web").unwrap();
+            let second = index.service_snapshot("prod", "web").unwrap();
+            assert!(std::sync::Arc::ptr_eq(&first, &second));
+            first
+        });
+        old.external_ips = vec!["new.example".into()];
+        store.apply_service(old);
+        assert_eq!(
+            snapshot.external_ips,
+            ["192.0.2.1", "old.example", "192.0.2.2"]
+        );
+        assert_eq!(
+            store.with_read(|index| index
+                .service_snapshot("prod", "web")
+                .unwrap()
+                .external_ips
+                .clone()),
+            ["new.example"]
+        );
+    }
+
+    #[test]
+    fn external_reverse_index_can_read_hidden_services() {
+        let store = Store::new(&["prod".into()], false);
+        let mut hidden = service("10.0.0.1");
+        hidden.namespace = "hidden".into();
+        store.apply_service(hidden);
+        store.with_read(|index| {
+            assert_eq!(index.services_by_external_ip("192.0.2.1").count(), 0);
+            assert_eq!(
+                index
+                    .services_by_external_ip_unfiltered("192.0.2.1")
+                    .count(),
+                1
+            );
         });
     }
 
@@ -293,6 +418,92 @@ mod tests {
         });
         store.delete_endpoints("prod", "two");
         store.with_read(|index| assert_eq!(index.endpoints("prod", "web").count(), 1));
+    }
+
+    #[test]
+    fn endpoint_group_snapshot_survives_update_delete_relist_and_reassignment() {
+        let store = Store::new(&["prod".into()], false);
+        store.apply_namespace(Namespace {
+            name: "prod".into(),
+            version: "1".into(),
+        });
+        store.apply_namespace(Namespace {
+            name: "hidden".into(),
+            version: "1".into(),
+        });
+        store.apply_endpoints(slice("one", "10.0.1.1"));
+        store.apply_endpoints(slice("two", "10.0.1.2"));
+        let mut hidden = slice("hidden", "10.0.1.9");
+        hidden.namespace = "hidden".into();
+        store.apply_endpoints(hidden);
+        let snapshot = store.with_read(|index| {
+            let first = index.endpoints_snapshot("prod", "web").unwrap();
+            let second = index.endpoints_snapshot("prod", "web").unwrap();
+            assert!(std::sync::Arc::ptr_eq(&first, &second));
+            assert!(index.endpoints_snapshot("hidden", "web").is_none());
+            assert_eq!(index.endpoints_unfiltered("hidden", "web").count(), 1);
+            first
+        });
+        store.apply_endpoints(slice("one", "10.0.1.3"));
+        store.with_read(|index| {
+            assert_eq!(
+                index
+                    .endpoints("prod", "web")
+                    .map(|ep| ep.name.as_ref())
+                    .collect::<Vec<_>>(),
+                ["two", "one"]
+            )
+        });
+        let mut reassigned = slice("two", "10.0.1.4");
+        reassigned.service_name = "other".into();
+        store.apply_endpoints(reassigned);
+        store.with_read(|index| {
+            assert_eq!(
+                index
+                    .endpoints("prod", "web")
+                    .map(|ep| ep.name.as_ref())
+                    .collect::<Vec<_>>(),
+                ["one"]
+            );
+            assert_eq!(
+                index
+                    .endpoints("prod", "other")
+                    .map(|ep| ep.name.as_ref())
+                    .collect::<Vec<_>>(),
+                ["two"]
+            );
+        });
+        store.delete_endpoints("prod", "one");
+        store.replace_endpoints(vec![slice("three", "10.0.1.5")], |_| ());
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|ep| (ep.name.as_ref(), ep.addresses[0].ip.as_str()))
+                .collect::<Vec<_>>(),
+            [("one", "10.0.1.1"), ("two", "10.0.1.2")]
+        );
+        store.with_read(|index| {
+            assert_eq!(
+                index
+                    .endpoints("prod", "web")
+                    .map(|ep| ep.name.as_ref())
+                    .collect::<Vec<_>>(),
+                ["three"]
+            )
+        });
+    }
+
+    #[test]
+    fn endpoint_group_updates_in_place_without_retained_snapshot() {
+        let store = Store::default();
+        store.apply_endpoints(slice("one", "10.0.1.1"));
+        store.apply_endpoints(slice("two", "10.0.1.2"));
+        let before = store
+            .with_read(|index| std::sync::Arc::as_ptr(&index.endpoints["prod"]["web"]) as usize);
+        store.apply_endpoints(slice("one", "10.0.1.3"));
+        let after = store
+            .with_read(|index| std::sync::Arc::as_ptr(&index.endpoints["prod"]["web"]) as usize);
+        assert_eq!(before, after);
     }
 
     #[test]
@@ -550,6 +761,7 @@ pub struct Changes {
 #[derive(Default)]
 pub struct Index {
     serial: u32,
+    external_serial: u32,
     multicluster_serial: u32,
     changes: tokio::sync::watch::Sender<Changes>,
     allowed_namespaces: HashSet<Arc<str>>,
@@ -562,7 +774,7 @@ pub struct Index {
     service_ips: Reverse<Service>,
     service_external_ips: Reverse<Service>,
     slices: Names<Endpoints>,
-    endpoints: Grouped<Endpoints>,
+    endpoints: Names<Vec<Arc<Endpoints>>>,
     endpoint_ips: Reverse<Endpoints>,
     pods: Names<Pod>,
     pod_ips: Reverse<Pod>,
@@ -616,6 +828,10 @@ impl Index {
         self.multicluster_serial
     }
 
+    pub fn external_serial(&self) -> u32 {
+        self.external_serial
+    }
+
     fn signal_multicluster(&self) {
         self.changes.send_modify(|changes| {
             changes.multicluster = changes.multicluster.wrapping_add(1);
@@ -636,6 +852,13 @@ impl Index {
             .as_secs() as u32;
     }
 
+    fn mark_external_modified(&mut self) {
+        self.external_serial = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+    }
+
     fn mark_modified(&mut self) {
         self.signal_internal();
         self.serial = std::time::SystemTime::now()
@@ -647,6 +870,10 @@ impl Index {
     fn namespace_allowed(&self, name: &str) -> bool {
         (self.allowed_namespaces.is_empty() || self.allowed_namespaces.contains(name))
             && (!self.require_namespace || self.namespaces.contains_key(name))
+    }
+    /// Whether a Namespace exists and is exposed to DNS lookups.
+    pub fn namespace_exposed(&self, name: &str) -> bool {
+        self.namespace_allowed(name) && self.namespaces.contains_key(name)
     }
     /// Service, EndpointSlice, endpoint-address, Pod and Namespace counts.
     pub fn counts(&self) -> (usize, usize, usize, usize, usize) {
@@ -668,6 +895,14 @@ impl Index {
             None
         }
     }
+    /// Retain an exposed Service after releasing the index lock.
+    pub fn service_snapshot(&self, namespace: &str, name: &str) -> Option<Arc<Service>> {
+        if self.namespace_exposed(namespace) {
+            by_name(&self.services, namespace, name).cloned()
+        } else {
+            None
+        }
+    }
     /// Services visible to DNS readers, in CoreDNS Zone Transfer order (by name).
     pub fn services(&self) -> Vec<&Service> {
         let mut services: Vec<_> = self
@@ -678,6 +913,13 @@ impl Index {
             .collect();
         services.sort_by(|a, b| (&a.name, &a.namespace).cmp(&(&b.name, &b.namespace)));
         services
+    }
+
+    /// Visit all Services without namespace filtering, as external transfers do.
+    pub fn services_unfiltered(&self) -> impl Iterator<Item = &Service> {
+        self.services
+            .values()
+            .flat_map(|services| services.values().map(Arc::as_ref))
     }
 
     /// ServiceImports visible to DNS readers, in CoreDNS Zone Transfer order (by name).
@@ -726,17 +968,41 @@ impl Index {
         lookup_reverse(&self.service_ips, ip)
     }
     pub fn services_by_external_ip(&self, ip: &str) -> impl Iterator<Item = &Service> {
-        lookup_reverse(&self.service_external_ips, ip)
+        self.services_by_external_ip_unfiltered(ip)
             .filter(|service| self.namespace_allowed(&service.namespace))
     }
+    /// Look up external addresses without applying Namespace visibility.
+    pub fn services_by_external_ip_unfiltered(&self, ip: &str) -> impl Iterator<Item = &Service> {
+        lookup_reverse(&self.service_external_ips, ip)
+    }
     pub fn endpoints(&self, namespace: &str, service: &str) -> impl Iterator<Item = &Endpoints> {
+        self.endpoints_unfiltered(namespace, service)
+            .filter(|slice| self.namespace_allowed(&slice.namespace))
+    }
+    /// Retain an exposed Service's ordered EndpointSlices after releasing the index lock.
+    pub fn endpoints_snapshot(
+        &self,
+        namespace: &str,
+        service: &str,
+    ) -> Option<Arc<Vec<Arc<Endpoints>>>> {
+        if self.namespace_exposed(namespace) {
+            by_name(&self.endpoints, namespace, service).cloned()
+        } else {
+            None
+        }
+    }
+    /// Visit EndpointSlices without namespace filtering, as external transfers do.
+    pub fn endpoints_unfiltered(
+        &self,
+        namespace: &str,
+        service: &str,
+    ) -> impl Iterator<Item = &Endpoints> {
         self.endpoints
             .get(namespace)
             .and_then(|services| services.get(service))
             .into_iter()
-            .flatten()
+            .flat_map(|slices| slices.iter())
             .map(Arc::as_ref)
-            .filter(|slice| self.namespace_allowed(&slice.namespace))
     }
     pub fn endpoints_by_ip(&self, ip: &str) -> impl Iterator<Item = &Endpoints> {
         self.endpoints_by_ip_unfiltered(ip)
@@ -846,7 +1112,7 @@ impl Index {
             }
             if let Some(services) = self.endpoints.get_mut(namespace) {
                 if let Some(slices) = services.get_mut(slice.service_name.as_ref()) {
-                    slices.retain(|item| !Arc::ptr_eq(item, &slice));
+                    Arc::make_mut(slices).retain(|item| !Arc::ptr_eq(item, &slice));
                     if slices.is_empty() {
                         services.remove(slice.service_name.as_ref());
                     }
@@ -863,12 +1129,13 @@ impl Index {
         for address in &slice.addresses {
             insert_reverse(&mut self.endpoint_ips, &address.ip, &slice);
         }
-        self.endpoints
+        let slices = self
+            .endpoints
             .entry(slice.namespace.clone())
             .or_default()
             .entry(slice.service_name.clone())
-            .or_default()
-            .push(slice.clone());
+            .or_default();
+        Arc::make_mut(slices).push(slice.clone());
         put(
             &mut self.slices,
             slice.namespace.clone(),
@@ -1046,6 +1313,12 @@ impl Store {
     }
     pub(crate) fn apply_service(&self, object: Service) {
         let mut index = self.0.write().unwrap();
+        if index
+            .service_unfiltered(&object.namespace, &object.name)
+            .is_some_and(|old| service_external_changed(old, &object))
+        {
+            index.mark_external_modified();
+        }
         if service_changed(
             index.service_unfiltered(&object.namespace, &object.name),
             &object,
@@ -1070,6 +1343,13 @@ impl Store {
     }
     pub(crate) fn replace_services(&self, objects: Vec<Service>) {
         let mut index = self.0.write().unwrap();
+        if objects.iter().any(|object| {
+            index
+                .service_unfiltered(&object.namespace, &object.name)
+                .is_some_and(|old| service_external_changed(old, object))
+        }) {
+            index.mark_external_modified();
+        }
         if index.services.values().map(HashMap::len).sum::<usize>() != objects.len()
             || objects.iter().any(|object| {
                 service_changed(
@@ -1224,6 +1504,10 @@ fn service_changed(old: Option<&Service>, new: &Service) -> bool {
         old.version != new.version
             && (old.external_name != new.external_name || old.ports != new.ports)
     })
+}
+
+fn service_external_changed(old: &Service, new: &Service) -> bool {
+    old.version != new.version && (old.external_ips != new.external_ips || old.ports != new.ports)
 }
 
 fn service_import_changed(old: &ServiceImport, new: &ServiceImport) -> bool {

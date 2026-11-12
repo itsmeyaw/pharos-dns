@@ -1,0 +1,2 @@
+# The readiness probe consumes queries 0 (dropped) and 1 (answered).
+example.org. A IN udp

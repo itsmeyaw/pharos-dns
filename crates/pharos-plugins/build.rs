@@ -26,7 +26,7 @@ fn next_plugin(enabled: &[&str], start: usize) -> usize {
 
 fn transferer(name: &str) -> bool {
     // Add each implemented Transferer here; enabled retains Plugin Order.
-    matches!(name, "kubernetes" | "file")
+    matches!(name, "k8s_external" | "kubernetes" | "file")
 }
 
 fn registered_handler(name: &str) -> bool {
@@ -85,6 +85,7 @@ fn main() {
             "forward" => "forward::Forward",
             "health" => "health::Health",
             "hosts" => "hosts::Hosts",
+            "k8s_external" => "k8s_external::External",
             "kubernetes" => "kubernetes::Kubernetes",
             "loadbalance" => "loadbalance::LoadBalance",
             "local" => "local::Local",
@@ -92,6 +93,7 @@ fn main() {
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",
             "file" => "file::File",
+            "erratic" => "erratic::Erratic",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -135,12 +137,14 @@ fn main() {
             "forward" => "forward::setup::setup",
             "health" => "health::setup::setup",
             "hosts" => "hosts::setup::setup",
+            "k8s_external" => "k8s_external::setup::setup",
             "loadbalance" => "loadbalance::setup::setup",
             "local" => "local::setup::setup",
             "nsid" => "nsid::setup::setup",
             "reload" => "reload::setup::setup",
             "errors" => "errors::setup::setup",
             "file" => "file::setup::setup",
+            "erratic" => "erratic::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",
         };

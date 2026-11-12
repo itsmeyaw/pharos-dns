@@ -40,6 +40,17 @@ mod file;
 #[path = "functional/file_coredns.rs"]
 mod file_coredns;
 
+#[cfg(feature = "plugin-k8s-external")]
+#[path = "functional/k8s_external_setup.rs"]
+mod k8s_external_setup;
+
+#[cfg(feature = "plugin-k8s-external")]
+#[path = "functional/k8s_external_coredns.rs"]
+mod k8s_external_coredns;
+
+#[path = "functional/erratic.rs"]
+mod erratic;
+
 #[cfg(feature = "plugin-template")]
 #[path = "functional/template.rs"]
 mod template;

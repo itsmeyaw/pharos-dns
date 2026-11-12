@@ -78,17 +78,19 @@ fn prepare(
         Domains,
         ReloadConfig,
         String,
+        bool,
     ),
     String,
 > {
     let blocks = parse_blocks(options, file, input)?;
-    prepare_blocks(options, blocks, metrics)
+    prepare_blocks(options, blocks, metrics, false)
 }
 
 fn prepare_blocks(
     options: &Options,
     mut blocks: Vec<pharos_corefile::ServerBlock>,
     metrics: &pharos_server::metrics::Registry,
+    check: bool,
 ) -> Result<
     (
         pharos_plugins::Servers,
@@ -96,6 +98,7 @@ fn prepare_blocks(
         Domains,
         ReloadConfig,
         String,
+        bool,
     ),
     String,
 > {
@@ -105,6 +108,11 @@ fn prepare_blocks(
     }
     let blocks = pharos_corefile::configure(&blocks, pharos_plugins::directives())
         .map_err(|e| e.to_string())?;
+    let validation = pharos_plugins::validate_configuration(&blocks);
+    let startup_before_bind = validation.is_err();
+    if check {
+        validation.map_err(|e| e.to_string())?;
+    }
     let reload_config = blocks.iter().filter_map(|block| block.config.reload).last();
     let mut domains = Domains::new();
     for block in &blocks {
@@ -124,7 +132,14 @@ fn prepare_blocks(
     }
     let (servers, lifecycle) = pharos_plugins::servers_with_registry(blocks, metrics.clone())
         .map_err(|e| e.to_string())?;
-    Ok((servers, lifecycle, domains, reload_config, hash))
+    Ok((
+        servers,
+        lifecycle,
+        domains,
+        reload_config,
+        hash,
+        startup_before_bind,
+    ))
 }
 
 pub fn check(options: &Options) -> Result<(), String> {
@@ -140,7 +155,7 @@ pub fn check(options: &Options) -> Result<(), String> {
         .flat_map(|block| block.directives.keys().map(String::as_str))
         .collect();
     let metrics = pharos_server::metrics::Registry::default();
-    prepare_blocks(options, blocks.clone(), &metrics)?;
+    prepare_blocks(options, blocks.clone(), &metrics, true)?;
     println!(
         "Corefile: {file}; Server Blocks: {}; Directives: {}",
         keys.join(", "),
@@ -252,7 +267,7 @@ async fn reload(
             .await
             .map_err(|e| e.to_string())?;
         let (file, input) = reread(options, initial)?;
-        let (servers, next, _, reload_config, hash) = prepare(options, &file, &input, metrics)?;
+        let (servers, next, _, reload_config, hash, _) = prepare(options, &file, &input, metrics)?;
         if let Err(error) = next.run(Phase::Startup).await {
             let _ = next.run(Phase::Restart).await;
             let _ = next.run(Phase::Shutdown).await;
@@ -376,17 +391,26 @@ pub async fn run(options: Options) -> Result<u8, (u8, String)> {
     let (file, input) = configuration(&options).map_err(|e| (1, e))?;
     let metrics = pharos_server::metrics::Registry::default();
     metrics.enable_reload_metrics();
-    let (servers, mut lifecycle, domains, reload_config, mut current_hash) =
+    let (servers, mut lifecycle, domains, reload_config, mut current_hash, startup_before_bind) =
         prepare(&options, &file, &input, &metrics).map_err(|e| (1, e))?;
+    if startup_before_bind {
+        // CoreDNS Caddy v1.1.4 caddy.go:537-544: Startup errors precede DNS listener binding.
+        lifecycle
+            .run(Phase::Startup)
+            .await
+            .map_err(|e| (1, e.to_string()))?;
+    }
     let mut listeners = ListenerRegistry::default();
     listeners
         .apply(servers)
         .await
         .map_err(|e| (1, e.to_string()))?;
-    lifecycle
-        .run(Phase::Startup)
-        .await
-        .map_err(|e| (1, e.to_string()))?;
+    if !startup_before_bind {
+        lifecycle
+            .run(Phase::Startup)
+            .await
+            .map_err(|e| (1, e.to_string()))?;
+    }
     lifecycle
         .run(Phase::Started)
         .await
@@ -557,7 +581,7 @@ mod tests {
 
     #[test]
     fn startup_domains_render_bound_ipv6_addresses() {
-        let (_, _, domains, _, _) = super::prepare(
+        let (_, _, domains, _, _, _) = super::prepare(
             &crate::Options::default(),
             "Corefile",
             ".:1053 {\n bind ::1\n whoami\n}",
