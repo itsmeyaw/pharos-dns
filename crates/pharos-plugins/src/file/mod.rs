@@ -461,6 +461,40 @@ impl File {
             let path = crate::resolve_path(path.into(), root);
             let names = args[1..].iter().map(String::as_str).collect::<Vec<_>>();
             let origins = origins_from_args_or_server_block(&names, server_domains);
+            let mut opened = match std::fs::File::open(&path) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    open_error = Some(error.to_string());
+                    None
+                }
+            };
+            let opened_mtime = opened
+                .as_ref()
+                .and_then(|file| file.metadata().ok())
+                .and_then(|metadata| metadata.modified().ok());
+            let mut parsed = Vec::new();
+            for origin in origins {
+                let apex: Name = origin.parse().map_err(|_| cursor.error("invalid Zone"))?;
+                #[cfg(feature = "plugin-transfer")]
+                notify_names.push(apex.clone());
+                let current = match opened.as_mut().filter(|_| open_error.is_none()) {
+                    Some(file) => {
+                        file.seek(SeekFrom::Start(0))
+                            .map_err(|error| cursor.error(error.to_string()))?;
+                        Some(Arc::new(
+                            Zone::load_reader_with_serial(
+                                apex.clone(),
+                                &path,
+                                BufReader::new(file),
+                                Some(0),
+                            )
+                            .map_err(|error| cursor.error(error))?,
+                        ))
+                    }
+                    None => None,
+                };
+                parsed.push((apex, current));
+            }
             while cursor.next_block() {
                 let option = cursor.val().to_owned();
                 let args = cursor.remaining_args();
@@ -491,41 +525,12 @@ impl File {
                     _ => return Err(cursor.arg_err()),
                 }
             }
-            let mut opened = match std::fs::File::open(&path) {
-                Ok(file) => Some(file),
-                Err(error) => {
-                    open_error = Some(error.to_string());
-                    None
-                }
-            };
             let modified = if by_mtime && open_error.is_none() {
-                opened
-                    .as_ref()
-                    .and_then(|file| file.metadata().ok())
-                    .and_then(|metadata| metadata.modified().ok())
+                opened_mtime
             } else {
                 None
             };
-            for origin in origins {
-                let apex: Name = origin.parse().map_err(|_| cursor.error("invalid Zone"))?;
-                #[cfg(feature = "plugin-transfer")]
-                notify_names.push(apex.clone());
-                let current = match opened.as_mut().filter(|_| open_error.is_none()) {
-                    Some(file) => {
-                        file.seek(SeekFrom::Start(0))
-                            .map_err(|error| cursor.error(error.to_string()))?;
-                        Some(Arc::new(
-                            Zone::load_reader_with_serial(
-                                apex.clone(),
-                                &path,
-                                BufReader::new(file),
-                                Some(0),
-                            )
-                            .map_err(|error| cursor.error(error))?,
-                        ))
-                    }
-                    None => None,
-                };
+            for (apex, current) in parsed {
                 zones.retain(|zone: &Arc<Loaded>| zone.apex != apex);
                 zones.push(Arc::new(Loaded {
                     apex,
