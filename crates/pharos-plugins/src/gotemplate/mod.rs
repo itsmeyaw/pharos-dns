@@ -5,6 +5,7 @@ use pharos_proto::{Message, NameRef, Question};
 use pharos_server::Metadata;
 use std::fmt::{self, Write};
 
+mod display;
 mod float;
 mod pipeline;
 mod quote;
@@ -521,6 +522,21 @@ fn write_field(
 ) -> fmt::Result {
     match field {
         Field::Root(field) => write_field(field, data, Dot::Root, output),
+        Field::Matches if matches!(dot.base(), Dot::Root) => display::matches(output, data.matches),
+        Field::Groups if matches!(dot.base(), Dot::Root) => display::map(
+            output,
+            data.groups
+                .iter()
+                .map(|(key, value)| (*key, Value::String(value))),
+        ),
+        Field::Variables if matches!(dot.base(), Dot::Root) => display::map(
+            output,
+            data.variables.iter().map(|(key, value)| (*key, *value)),
+        ),
+        Field::Questions if matches!(dot.base(), Dot::Root) => display::questions(
+            output,
+            pipeline::QuestionSlice::new(data.message.ok_or(fmt::Error)?),
+        ),
         Field::QuestionName if matches!(dot.base(), Dot::Root) => {
             write!(output, "{}", question_name(data)?)
         }

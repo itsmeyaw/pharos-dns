@@ -48,7 +48,7 @@ pub(super) struct QuestionSlice<'a> {
 }
 
 impl<'a> QuestionSlice<'a> {
-    fn new(message: &'a pharos_proto::Message<'a>) -> Self {
+    pub(super) fn new(message: &'a pharos_proto::Message<'a>) -> Self {
         Self {
             message,
             start: 0,
@@ -390,10 +390,17 @@ impl Pipeline {
                 "{{{} {} {}}}",
                 question.name, question.qtype.0, question.qclass.0
             ),
-            ResultValue::Matches(_)
-            | ResultValue::Groups(_)
-            | ResultValue::Variables(_)
-            | ResultValue::Questions(_) => Err(fmt::Error),
+            ResultValue::Matches(values) => super::display::matches(output, values),
+            ResultValue::Groups(values) => super::display::map(
+                output,
+                values
+                    .iter()
+                    .map(|(key, value)| (*key, Value::String(value))),
+            ),
+            ResultValue::Variables(values) => {
+                super::display::map(output, values.iter().map(|(key, value)| (*key, *value)))
+            }
+            ResultValue::Questions(values) => super::display::questions(output, values),
         }
     }
 
@@ -912,6 +919,17 @@ impl Scratch<'_> {
                 "{{{} {} {}}}",
                 value.name, value.qtype.0, value.qclass.0
             ),
+            ResultValue::Matches(values) => super::display::matches(self, values),
+            ResultValue::Groups(values) => super::display::map(
+                self,
+                values
+                    .iter()
+                    .map(|(key, value)| (*key, Value::String(value))),
+            ),
+            ResultValue::Variables(values) => {
+                super::display::map(self, values.iter().map(|(key, value)| (*key, *value)))
+            }
+            ResultValue::Questions(values) => super::display::questions(self, values),
             _ => Err(fmt::Error),
         }
     }

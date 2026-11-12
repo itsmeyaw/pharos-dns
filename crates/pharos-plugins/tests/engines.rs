@@ -637,6 +637,21 @@ fn caller_scratch_supports_large_intermediate_pipelines() {
 }
 
 #[test]
+fn default_and_print_format_capture_lists_and_maps_like_go() {
+    use pharos_plugins::expression::Value;
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["one", "two"];
+    data.groups = &[("z", "last"), ("a", "first")];
+    data.variables = &[("b", Value::String("two")), ("a", Value::Int(1))];
+    let template = Template::compile("{{ .Match }}|{{ print .Group }}|{{ print .Var }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "[one two]|map[a:first z:last]|map[a:1 b:two]");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];
