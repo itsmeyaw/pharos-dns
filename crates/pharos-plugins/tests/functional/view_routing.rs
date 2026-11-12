@@ -9,6 +9,48 @@ use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::Message;
 use pharos_server::{Handler, Protocol};
 
+#[tokio::test]
+async fn readme_cidr_routes_ipv4_ipv6_and_fallback_responses() {
+    let text = ".:53 {\n view first {\n  expr incidr(client_ip(), '127.0.0.0/24')\n }\n hosts {\n  1.1.1.1 test\n }\n}\n.:53 {\n view second {\n  expr incidr(client_ip(), '192.168.0.0/16')\n }\n hosts {\n  2.2.2.2 test\n }\n}\n.:53 {\n view v6 {\n  expr incidr(client_ip(), '2001:db8::/32')\n }\n hosts {\n  2001:db8::1 test\n }\n}\n.:53 {\n hosts {\n  3.3.3.3 test\n }\n}";
+    let blocks = parse("Corefile", text).unwrap();
+    let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let server = servers.values().next().unwrap();
+    for (peer, qtype, expected) in [
+        ("127.0.0.1:1234", 1u8, vec![1, 1, 1, 1]),
+        ("192.168.1.2:1234", 1, vec![2, 2, 2, 2]),
+        (
+            "[2001:db8::1]:1234",
+            28,
+            "2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets()
+                .to_vec(),
+        ),
+        ("203.0.113.1:1234", 1, vec![3, 3, 3, 3]),
+    ] {
+        let wire = [
+            0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 4, b't', b'e', b's', b't', 0, 0, qtype, 0, 1,
+        ];
+        for protocol in [Protocol::Udp, Protocol::Tcp] {
+            let mut response = Vec::with_capacity(65_535);
+            server
+                .handle(&wire, peer.parse().unwrap(), protocol, &mut response)
+                .await;
+            assert_eq!(
+                Message::parse(&response)
+                    .unwrap()
+                    .answers()
+                    .next()
+                    .unwrap()
+                    .rdata,
+                expected,
+                "{peer}"
+            );
+        }
+    }
+}
+
 const QUERY: &[u8] =
     b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
 
