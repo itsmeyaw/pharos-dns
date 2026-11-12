@@ -17,12 +17,14 @@ use regex_automata::{
         Builder, NFA, State,
         pikevm::{Cache, PikeVM},
     },
-    util::{captures::Captures, pool::Pool, primitives::PatternID},
+    util::{captures::Captures, primitives::PatternID},
 };
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     fmt::{self, Write},
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 const EXPRESSION_SCRATCH: usize = 65_535;
@@ -51,7 +53,7 @@ struct Rule {
     rcode: Rcode,
     ederror: Option<(u16, String)>,
     fallthrough: Fallthrough,
-    workspace: Option<Pool<RuleWorkspace, Box<dyn Fn() -> RuleWorkspace + Send + Sync>>>,
+    workspace: Option<WorkspacePool>,
 }
 struct RuleMetrics {
     address: SocketAddr,
@@ -95,6 +97,53 @@ struct RuleWorkspace {
     variables: Vec<(&'static str, Value<'static>)>,
     matches: Vec<&'static str>,
     groups: Vec<(&'static str, &'static str)>,
+}
+
+struct WorkspacePool {
+    identity: Arc<()>,
+    matchers: Vec<(PikeVM, PikeVM)>,
+    variable_count: usize,
+    group_count: usize,
+}
+
+thread_local! {
+    static WORKSPACES: RefCell<HashMap<usize, (Weak<()>, RuleWorkspace)>> = RefCell::new(HashMap::new());
+}
+
+impl WorkspacePool {
+    fn with<T>(&self, f: impl FnOnce(&mut RuleWorkspace) -> T) -> T {
+        let key = Arc::as_ptr(&self.identity) as usize;
+        WORKSPACES.with(|workspaces| {
+            let mut workspaces = workspaces.borrow_mut();
+            if !workspaces.contains_key(&key) {
+                workspaces.retain(|_, (owner, _)| owner.strong_count() != 0);
+                let matchers = self
+                    .matchers
+                    .iter()
+                    .map(|(vm, warmer)| {
+                        let mut cache = warmer.create_cache();
+                        let _ = warmer.is_match(&mut cache, "");
+                        cache.reset(vm);
+                        let mut captures = vm.create_captures();
+                        vm.captures(&mut cache, "www.example.", &mut captures);
+                        MatcherState { cache, captures }
+                    })
+                    .collect();
+                let workspace = RuleWorkspace {
+                    matchers,
+                    scratch: vec![0; EXPRESSION_SCRATCH],
+                    variables: vec![("", Value::Nil); self.variable_count],
+                    matches: vec![""; self.group_count],
+                    groups: vec![("", ""); self.group_count.saturating_mul(2)],
+                };
+                workspaces.insert(key, (Arc::downgrade(&self.identity), workspace));
+            }
+            f(&mut workspaces
+                .get_mut(&key)
+                .expect("workspace just initialized")
+                .1)
+        })
+    }
 }
 
 impl Matcher {
@@ -154,27 +203,13 @@ impl Rule {
             .iter()
             .map(|m| (m.vm.clone(), m.warmer.clone()))
             .collect();
-        let workspace = Pool::new(Box::new(move || {
-            let matchers = matchers
-                .iter()
-                .map(|(vm, warmer)| {
-                    let mut cache = warmer.create_cache();
-                    let _ = warmer.is_match(&mut cache, "");
-                    cache.reset(vm);
-                    let mut captures = vm.create_captures();
-                    vm.captures(&mut cache, "www.example.", &mut captures);
-                    MatcherState { cache, captures }
-                })
-                .collect();
-            RuleWorkspace {
-                matchers,
-                scratch: vec![0; EXPRESSION_SCRATCH],
-                variables: vec![("", Value::Nil); variable_count],
-                matches: vec![""; group_count],
-                groups: vec![("", ""); group_count.saturating_mul(2)],
-            }
-        }) as Box<dyn Fn() -> RuleWorkspace + Send + Sync>);
-        drop(workspace.get());
+        let workspace = WorkspacePool {
+            identity: Arc::new(()),
+            matchers,
+            variable_count,
+            group_count,
+        };
+        workspace.with(|_| ());
         self.workspace = Some(workspace);
     }
 }
@@ -321,93 +356,99 @@ impl Template {
             {
                 continue;
             }
-            let mut matched = false;
             let Some(pool) = &rule.workspace else {
                 return MatchResult::Failed;
             };
-            let mut workspace = pool.get();
-            let RuleWorkspace {
-                matchers,
-                scratch,
-                variables,
-                matches: match_slots,
-                groups: group_slots,
-            } = &mut *workspace;
-            for (matcher, state) in rule.regex.iter().zip(matchers) {
-                let MatcherState { cache, captures } = state;
-                matcher.vm.captures(cache, name, captures);
-                if !captures.is_match() {
-                    continue;
-                }
-                matched = true;
-                let mut matches = std::mem::take(match_slots);
-                let mut groups = std::mem::take(group_slots);
-                let mut group_count = 0;
-                for (i, slot) in matches.iter_mut().enumerate().take(captures.group_len()) {
-                    *slot = captures
-                        .get_group(i)
-                        .and_then(|s| name.get(s.start..s.end))
-                        .unwrap_or("");
-                    groups[group_count] = (&matcher.numbers[i], *slot);
-                    group_count += 1;
-                    if let Some(Some(group)) = matcher.names.get(i) {
-                        groups[group_count] = (group, *slot);
-                        group_count += 1;
+            let result = pool.with(|workspace| {
+                let mut matched = false;
+                let RuleWorkspace {
+                    matchers,
+                    scratch,
+                    variables,
+                    matches: match_slots,
+                    groups: group_slots,
+                } = workspace;
+                for (matcher, state) in rule.regex.iter().zip(matchers) {
+                    let MatcherState { cache, captures } = state;
+                    matcher.vm.captures(cache, name, captures);
+                    if !captures.is_match() {
+                        continue;
                     }
+                    matched = true;
+                    let mut matches = std::mem::take(match_slots);
+                    let mut groups = std::mem::take(group_slots);
+                    let mut group_count = 0;
+                    for (i, slot) in matches.iter_mut().enumerate().take(captures.group_len()) {
+                        *slot = captures
+                            .get_group(i)
+                            .and_then(|s| name.get(s.start..s.end))
+                            .unwrap_or("");
+                        groups[group_count] = (&matcher.numbers[i], *slot);
+                        group_count += 1;
+                        if let Some(Some(group)) = matcher.names.get(i) {
+                            groups[group_count] = (group, *slot);
+                            group_count += 1;
+                        }
+                    }
+                    let mut class = Text::new();
+                    let mut qtype = Text::new();
+                    let mut remote = Text::new();
+                    let qc = if question.qclass == Class::ANY {
+                        rule.class
+                    } else {
+                        question.qclass
+                    };
+                    let qt = if question.qtype == Type::ANY {
+                        rule.qtype
+                    } else {
+                        question.qtype
+                    };
+                    if qc == Class::ANY {
+                        let _ = write!(class, "ANY");
+                    } else {
+                        let _ = write!(class, "{qc}");
+                    }
+                    let _ = write!(qtype, "{qt}");
+                    if qc != Class::ANY && Class::from_mnemonic(class.as_str()).is_none() {
+                        class.len = 0;
+                    }
+                    if Type::from_mnemonic(qtype.as_str()).is_none() {
+                        qtype.len = 0;
+                    }
+                    let _ = write!(remote, "{}", cx.client.ip());
+                    let mut data = gotemplate::Data::new(name, &cx.metadata);
+                    data.zone = zone;
+                    data.class = class.as_str();
+                    data.qtype = qtype.as_str();
+                    data.remote = remote.as_str();
+                    data.regex = &matcher.source;
+                    data.matches = &matches[..captures.group_len()];
+                    data.groups = &groups[..group_count];
+                    data.message = Some(&cx.query);
+                    let metrics = rule_metrics.iter().find(|m| {
+                        m.zone == *zone
+                            && (m.address == cx.local
+                                || m.address.ip().is_unspecified()
+                                    && m.address.port() == cx.local.port())
+                    });
+                    let result = evaluate(rule, cx, &data, scratch, variables, metrics);
+                    *match_slots = matches.into_iter().map(|_| "").collect();
+                    *group_slots = groups.into_iter().map(|_| ("", "")).collect();
+                    return match result {
+                        Ok(Some(records)) => MatchResult::Hit(Hit { rule, records }),
+                        Ok(None) if rule.fallthrough.through(name) => break,
+                        Ok(None) | Err(EvaluationError::Expression) => MatchResult::Failed,
+                        Err(EvaluationError::Record) => MatchResult::RecordError,
+                    };
                 }
-                let mut class = Text::new();
-                let mut qtype = Text::new();
-                let mut remote = Text::new();
-                let qc = if question.qclass == Class::ANY {
-                    rule.class
+                if !matched && !rule.fallthrough.through(name) {
+                    MatchResult::Failed
                 } else {
-                    question.qclass
-                };
-                let qt = if question.qtype == Type::ANY {
-                    rule.qtype
-                } else {
-                    question.qtype
-                };
-                if qc == Class::ANY {
-                    let _ = write!(class, "ANY");
-                } else {
-                    let _ = write!(class, "{qc}");
+                    MatchResult::Next
                 }
-                let _ = write!(qtype, "{qt}");
-                if qc != Class::ANY && Class::from_mnemonic(class.as_str()).is_none() {
-                    class.len = 0;
-                }
-                if Type::from_mnemonic(qtype.as_str()).is_none() {
-                    qtype.len = 0;
-                }
-                let _ = write!(remote, "{}", cx.client.ip());
-                let mut data = gotemplate::Data::new(name, &cx.metadata);
-                data.zone = zone;
-                data.class = class.as_str();
-                data.qtype = qtype.as_str();
-                data.remote = remote.as_str();
-                data.regex = &matcher.source;
-                data.matches = &matches[..captures.group_len()];
-                data.groups = &groups[..group_count];
-                data.message = Some(&cx.query);
-                let metrics = rule_metrics.iter().find(|m| {
-                    m.zone == *zone
-                        && (m.address == cx.local
-                            || m.address.ip().is_unspecified()
-                                && m.address.port() == cx.local.port())
-                });
-                let result = evaluate(rule, cx, &data, scratch, variables, metrics);
-                *match_slots = matches.into_iter().map(|_| "").collect();
-                *group_slots = groups.into_iter().map(|_| ("", "")).collect();
-                return match result {
-                    Ok(Some(records)) => MatchResult::Hit(Hit { rule, records }),
-                    Ok(None) if rule.fallthrough.through(name) => break,
-                    Ok(None) | Err(EvaluationError::Expression) => MatchResult::Failed,
-                    Err(EvaluationError::Record) => MatchResult::RecordError,
-                };
-            }
-            if !matched && !rule.fallthrough.through(name) {
-                return MatchResult::Failed;
+            });
+            if !matches!(result, MatchResult::Next) {
+                return result;
             }
         }
         MatchResult::Next
@@ -738,6 +779,35 @@ mod tests {
     fn zone_matching_respects_escaped_dots() {
         assert!(!in_zone(r"foo\.example.", "example."));
         assert!(in_zone(r"foo\\.example.", "example."));
+    }
+    #[test]
+    fn workspace_is_stable_and_distinct_on_each_worker() {
+        let configured = configure(". {\n template IN A\n}").unwrap();
+        let workspace = configured[0].config.template.as_ref().unwrap().rules[0]
+            .workspace
+            .as_ref()
+            .unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let one = scope.spawn(|| {
+                workspace.with(|state| {
+                    let address = std::ptr::from_ref(state) as usize;
+                    barrier.wait();
+                    address
+                })
+            });
+            let two = scope.spawn(|| {
+                workspace.with(|state| {
+                    let address = std::ptr::from_ref(state) as usize;
+                    barrier.wait();
+                    address
+                })
+            });
+            assert_ne!(one.join().unwrap(), two.join().unwrap());
+        });
+        let first = workspace.with(|state| std::ptr::from_ref(state) as usize);
+        let second = workspace.with(|state| std::ptr::from_ref(state) as usize);
+        assert_eq!(first, second);
     }
     #[test]
     fn wildcard_metric_bindings_handle_concurrent_first_use() {

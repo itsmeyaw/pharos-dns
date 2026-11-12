@@ -9,8 +9,9 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
 - Match expressions use Rust regex syntax and Unicode rules rather than Go RE2.
 - Variables and expressions of one rule share 65,535 bytes of scratch;
   exhausting it returns SERVFAIL.
-- Matching and expression workspaces are pooled per rule; a worker's first use
-  may allocate. Memory grows with the regexes and their capture groups.
+- Each worker keeps a workspace per rule; first use may allocate. Memory grows
+  with the regexes and their capture groups. Workspaces for removed rules are
+  reclaimed on that worker's next workspace initialization or thread exit.
 - Failure metric `template` labels use the configured source, not Go's
   normalized template parse tree. Wildcard class/type metric labels allocate
   when a combination first matches; later increments use cached handles.
