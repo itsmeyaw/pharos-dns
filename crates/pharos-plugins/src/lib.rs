@@ -417,6 +417,7 @@ pub fn servers_with_registry(
             .as_ref()
             .and_then(|plugin| plugin.provider.as_deref())
             && provider != "kubernetes"
+            && !(cfg!(feature = "plugin-erratic") && provider == "erratic")
         {
             let mut found = false;
             pharos_server::Chain::visit_enabled(&block.config, &mut |name| {
@@ -435,6 +436,8 @@ pub fn servers_with_registry(
             autopath.set_metrics(&metrics, &listeners);
             #[cfg(feature = "plugin-kubernetes")]
             autopath.bind_kubernetes(block.config.kubernetes.as_ref());
+            #[cfg(feature = "plugin-erratic")]
+            autopath.bind_erratic(block.config.erratic.as_ref());
         }
         #[cfg(feature = "plugin-multisocket")]
         let workers = block.config.multisocket.flatten();

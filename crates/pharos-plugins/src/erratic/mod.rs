@@ -1,4 +1,5 @@
 pub(crate) mod setup;
+mod xfr;
 
 use pharos_proto::{Class, MessageBuilder, Opcode, Rcode, Section, Type};
 use pharos_server::{Context, Error, Next, Outcome, Plugin, Protocol, Readiness};
@@ -32,7 +33,8 @@ impl Default for Erratic {
 
 impl Plugin for Erratic {
     async fn serve<N: Next + Send>(&self, context: &mut Context<'_, '_>, _next: N) -> Outcome {
-        let number = self.query.fetch_add(1, Ordering::Relaxed);
+        let number = self.query.load(Ordering::SeqCst);
+        self.query.fetch_add(1, Ordering::SeqCst);
         if self.drop > 0 && number % self.drop == 0 {
             return Outcome::Drop;
         }
@@ -43,6 +45,12 @@ impl Plugin for Erratic {
         let Some(question) = context.query.questions().next() else {
             return Outcome::Unanswered(Rcode::SERVFAIL);
         };
+        if question.qtype == Type::AXFR {
+            return match xfr::stream(context, truncated) {
+                Ok(stream) => Outcome::Stream(stream),
+                Err(error) => Outcome::Error(error),
+            };
+        }
         let data: &[u8] = match question.qtype {
             Type::A => &[192, 0, 2, 53],
             Type::AAAA => &[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53],

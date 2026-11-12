@@ -1,7 +1,17 @@
+#![cfg(feature = "plugin-erratic")]
+
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Readiness, Transport};
+
+#[cfg(feature = "plugin-autopath")]
+#[test]
+fn erratic_is_an_autopath_provider() {
+    let blocks = parse("Corefile", ".:53 {\n autopath @erratic\n erratic\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    assert!(pharos_plugins::servers(configured).is_ok());
+}
 
 #[test]
 fn coredns_setup_cases() {
@@ -49,7 +59,7 @@ async fn coredns_drop_answers_and_readiness() {
         builder
             .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
             .unwrap();
-        builder.finish();
+        let _ = builder.finish();
         let mut response = Vec::with_capacity(512);
         let mut slots = [];
         let mut context = Context {
@@ -73,4 +83,129 @@ async fn coredns_drop_answers_and_readiness() {
             assert_eq!(answer.rdata, [192, 0, 2, 53]);
         }
     }
+}
+
+#[tokio::test]
+async fn coredns_axfr_complete_and_truncated() {
+    for (options, count) in [("drop 0", 6), ("truncate 2", 5)] {
+        let blocks = parse(
+            "Corefile",
+            &format!(".:53 {{\n erratic {{\n {options}\n }}\n}}"),
+        )
+        .unwrap();
+        let configured = configure::<Chain>(&blocks, directives()).unwrap();
+        let name: Name = "example.org.".parse().unwrap();
+        let mut query_wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut query_wire, 512, 42, 0x0100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::AXFR,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(65535);
+        let mut slots = [];
+        let mut context = Context {
+            query: Message::parse(&query_wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Tcp,
+            domain: &name,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 65535,
+        };
+        let Outcome::Stream(mut stream) = configured[0].config.serve(&mut context).await else {
+            panic!("expected stream")
+        };
+        assert!(stream.next(&mut response).unwrap());
+        let message = Message::parse(&response).unwrap();
+        assert!(message.aa() && !message.tc());
+        assert_eq!(message.answer_count(), count);
+        let types: Vec<_> = message.answers().map(|rr| rr.rtype).collect();
+        assert_eq!(
+            &types[..5],
+            &[Type::SOA, Type::NS, Type::NS, Type::AAAA, Type::AAAA]
+        );
+        if count == 6 {
+            assert_eq!(types[5], Type::SOA);
+        }
+        assert!(!stream.next(&mut response).unwrap());
+    }
+}
+
+#[tokio::test]
+async fn coredns_truncate_bitmask_and_large_answers() {
+    let blocks = parse("Corefile", ".:53 {\n erratic {\n truncate 2\n large\n }\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let name: Name = "example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    let mut slots = [];
+    let mut context = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &name,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 65535,
+    };
+    for truncated in [true, true, false, false, true, true] {
+        assert_eq!(
+            configured[0].config.serve(&mut context).await,
+            Outcome::Response
+        );
+        let reply = Message::parse(context.response).unwrap();
+        assert_eq!(reply.tc(), truncated);
+        assert_eq!(reply.answer_count(), 30);
+    }
+}
+
+#[tokio::test]
+async fn delayed_query_does_not_block_other_queries() {
+    let blocks = parse("Corefile", ". {\n erratic {\n delay 2 100ms\n }\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let chain = &configured[0].config;
+    let wire = [0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1];
+    let name: Name = ".".parse().unwrap();
+    let mut first_response = Vec::with_capacity(512);
+    let mut second_response = Vec::with_capacity(512);
+    let mut first_slots = [];
+    let mut second_slots = [];
+    let context = |response, slots| Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &name,
+        metadata: Metadata::new(slots),
+        response,
+        max_response_size: 512,
+    };
+    let mut first = context(&mut first_response, &mut first_slots);
+    let mut second = context(&mut second_response, &mut second_slots);
+    let delayed = chain.serve(&mut first);
+    tokio::pin!(delayed);
+    tokio::select! {
+        _ = &mut delayed => panic!("first Query should be delayed"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+    }
+    assert_eq!(chain.serve(&mut second).await, Outcome::Response);
+    assert_eq!(delayed.await, Outcome::Response);
 }
