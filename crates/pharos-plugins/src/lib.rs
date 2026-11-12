@@ -35,6 +35,7 @@ pub mod debug;
 pub mod dns64;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
+pub mod gotemplate;
 #[cfg(feature = "plugin-header")]
 pub mod header;
 #[cfg(any(
