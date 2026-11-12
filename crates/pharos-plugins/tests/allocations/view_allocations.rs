@@ -93,3 +93,55 @@ async fn no_view_preserves_response_bytes_without_allocating() {
     let stats = region.change();
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
 }
+
+#[cfg(feature = "plugin-whoami")]
+#[tokio::test(flavor = "current_thread")]
+async fn first_no_view_whoami_query_does_not_allocate() {
+    if crate::run_isolated("view::cases::first_no_view_whoami_query_does_not_allocate") {
+        return;
+    }
+    let blocks = parse("Corefile", ".:53 {\n whoami\n}").unwrap();
+    let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let server = servers.values().next().unwrap();
+    let wire =
+        b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
+    let peer = "127.0.0.1:1234".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    assert_eq!(
+        server
+            .handle(wire, peer, Protocol::Udp, &mut response)
+            .await,
+        Action::Respond
+    );
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+}
+
+#[cfg(feature = "plugin-whoami")]
+#[tokio::test(flavor = "current_thread")]
+async fn first_view_whoami_query_does_not_allocate() {
+    if crate::run_isolated("view::cases::first_view_whoami_query_does_not_allocate") {
+        return;
+    }
+    let blocks = parse(
+        "Corefile",
+        ".:53 {\n view first {\n  expr true\n }\n whoami\n}",
+    )
+    .unwrap();
+    let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let server = servers.values().next().unwrap();
+    let wire =
+        b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
+    let peer = "127.0.0.1:1234".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    assert_eq!(
+        server
+            .handle(wire, peer, Protocol::Udp, &mut response)
+            .await,
+        Action::Respond
+    );
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+}

@@ -176,7 +176,7 @@ fn main() {
         }
         code.push_str("}\n");
     }
-    code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { ");
+    code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_routed(cx, false) }\nfn serve_routed(&self, cx: &mut pharos_server::Context<'_>, collected: bool) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { if !collected { ");
     if enabled.contains(&"metadata") {
         code.push_str("cx.metadata.set_enabled(self.metadata.is_some()); ");
     } else {
@@ -185,7 +185,7 @@ fn main() {
     if enabled.contains(&"metadata") && enabled.contains(&"kubernetes") {
         code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) && let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); } ");
     }
-    writeln!(code, "self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
+    writeln!(code, "}} self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
     if let Some(index) = enabled.iter().position(|name| *name == "cache") {
         writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ #[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] if let Some(plugin) = &self.self_lookup_test {{ return plugin.serve(cx).await; }} self.serve_{}(cx).await }}", next_plugin(&enabled, index + 1)).unwrap();
     }
@@ -232,7 +232,7 @@ fn main() {
         }
         code.push_str("}\n");
     }
-    writeln!(code, "fn serve_with_collected_metadata(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send {{ self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
+    code.push_str("fn serve_routed(&self, cx: &mut pharos_server::Context<'_>, collected: bool) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve_routed(self, cx, collected) }\n");
     if enabled.contains(&"loop") {
         code.push_str("fn parallel_query(&self, query: &pharos_proto::Message<'_>) -> Option<tokio::sync::watch::Receiver<bool>> { self.r#loop.as_ref().and_then(|plugin| plugin.parallel_query(query)) }\n");
     }

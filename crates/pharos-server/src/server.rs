@@ -38,13 +38,6 @@ pub trait Chain: Send + Sync + 'static {
     fn view_name(&self) -> &str {
         ""
     }
-    /// Legacy collected-Metadata entry point; routed dispatch uses `serve_routed` instead.
-    fn serve_with_collected_metadata(
-        &self,
-        context: &mut Context<'_, '_>,
-    ) -> impl Future<Output = Outcome> + Send {
-        self.serve(context)
-    }
     /// Serve a routed Query. Override to preserve Metadata when `collected` is true.
     fn serve_routed(
         &self,
@@ -93,12 +86,6 @@ impl<C: Chain> Chain for Arc<C> {
     }
     fn view_name(&self) -> &str {
         self.as_ref().view_name()
-    }
-    fn serve_with_collected_metadata(
-        &self,
-        context: &mut Context<'_, '_>,
-    ) -> impl Future<Output = Outcome> + Send {
-        self.as_ref().serve_with_collected_metadata(context)
     }
     fn serve_routed(
         &self,
@@ -438,7 +425,7 @@ impl<C: Chain> Server<C> {
             }
             Admission::Drop => return Action::Drop,
         };
-        // shortcut: no-View Queries read a routing flag; specialize Listener dispatch to remove this cost.
+        // shortcut: no-View routing reads a flag and initializes Metadata early; specialize Listener dispatch to remove this cost.
         let has_views = self.has_views.load(Ordering::Relaxed);
         let mut slots = [None; 18];
         slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
