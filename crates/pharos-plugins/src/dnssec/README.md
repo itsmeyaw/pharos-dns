@@ -5,8 +5,8 @@
 ## dnssec
 
 - RRSIG Original TTL and RRSIG TTL use the covered RRset's TTL (RFC 4034 §3, §3.1.4). If its records have different TTLs, Pharos uses the lowest for every record (RFC 2181 §5.2). This also applies to apex DNSKEY answers without DO. CoreDNS hardcodes Original TTL to 3600 and uses a 3600-second RRSIG TTL for intercepted DNSKEY answers.
-- If a Response already contains covering RRSIGs, their TTLs and the covered RRset are limited to the lowest received TTL without extending any record's lifetime. Existing signatures retain their Original TTL fields.
-- In a signed Response, the lowest-TTL rule applies to every record, including records outside the Zones and unsigned records; CoreDNS leaves them unchanged.
+- If a Response already contains RRSIGs covering RRsets Pharos signs, their TTLs and the covered RRset are limited to the lowest received TTL without extending any record's lifetime. Existing signatures retain their Original TTL fields.
+- In a signed Response, TTL normalization applies only to signed RRsets and their covering RRSIGs. Records outside configured Zones and unsigned RRsets retain their TTLs.
 - Like CoreDNS, Pharos signs RRsets separately in each section. If an upstream Response splits one RRset across sections, its signatures do not cover the union; TTL normalization still considers all sections.
 - The signature cache key includes the Response's TTLs. RRsets whose TTL counts down behind `cache` or `forward` can miss more often than in CoreDNS.
 - On a cache miss, TTL normalization rescans the Response for each record; its cost grows quadratically with the record count.
