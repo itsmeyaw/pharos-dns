@@ -54,8 +54,17 @@ impl Local {
 
 impl Plugin for Local {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        match self.answer(cx) {
+            Some(outcome) => outcome,
+            None => next.run(cx).await,
+        }
+    }
+}
+
+impl Local {
+    fn answer(&self, cx: &mut Context<'_, '_>) -> Option<Outcome> {
         let Some(question) = cx.query.questions().next() else {
-            return next.run(cx).await;
+            return None;
         };
         let mut labels = [&[][..]; 127];
         let mut count = 0;
@@ -83,7 +92,7 @@ impl Plugin for Local {
             None
         };
         if !special && zone_start.is_none() {
-            return next.run(cx).await;
+            return None;
         }
         if special {
             if pharos_server::logging::debug_enabled() {
@@ -189,9 +198,9 @@ impl Plugin for Local {
             let _ = builder.finish();
             Ok(())
         })();
-        match result {
+        Some(match result {
             Ok(()) => Outcome::Response,
             Err(error) => Outcome::Error(error),
-        }
+        })
     }
 }
