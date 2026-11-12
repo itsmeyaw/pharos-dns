@@ -1,0 +1,30 @@
+$TTL 30M
+$ORIGIN example.com.
+@	IN SOA	ns.example.com. admin.example.com. (
+			2024010100 ; serial
+			14400      ; refresh (4 hours)
+			3600       ; retry (1 hour)
+			604800     ; expire (1 week)
+			14400      ; minimum (4 hours)
+			)
+	IN NS	ns.example.com.
+
+; A/AAAA records for glue
+ns		IN A	192.0.2.1
+svc-target	IN A	192.0.2.10
+		IN AAAA	2001:db8::10
+
+; SVCB ServiceMode with in-bailiwick target (tests additional section processing)
+_8443._foo	IN SVCB	1 svc-target.example.com. alpn=h2,h3 port=8443
+
+; HTTPS ServiceMode with in-bailiwick target
+www		IN HTTPS 1 svc-target.example.com. alpn=h2,h3
+
+; SVCB AliasMode (Priority=0)
+_alias._foo	IN SVCB	0 svc-target.example.com.
+
+; Wildcard SVCB
+*._tcp		IN SVCB	1 svc-target.example.com. port=443
+
+; DNS-AID private-use keys (65400-65408)
+_dnsaid		IN HTTPS 1 svc-target.example.com. alpn=h2 key65400="https://aid.example.com/cap" key65401="sha256:e3b0c44298fc" key65406="apphub-psc"

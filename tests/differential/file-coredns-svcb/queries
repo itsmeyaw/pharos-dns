@@ -1,0 +1,7 @@
+_8443._foo.example.com. SVCB IN udp
+www.example.com. HTTPS IN udp
+_alias._foo.example.com. SVCB IN udp
+_http._tcp.example.com. SVCB IN udp
+svc-target.example.com. SVCB IN udp
+nonexistent.example.com. SVCB IN udp
+_dnsaid.example.com. HTTPS IN udp
