@@ -93,6 +93,36 @@ fn escape_builtins_do_not_allocate_on_first_render() {
 }
 
 #[test]
+fn long_escape_builtins_do_not_allocate() {
+    if crate::run_isolated(
+        "gotemplate::gotemplate_allocations::long_escape_builtins_do_not_allocate",
+    ) {
+        return;
+    }
+    let input = "Aé€🦀<& \0".repeat(1024);
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new(&input, &metadata);
+    let templates = ["html", "js", "urlquery"]
+        .map(|function| Template::compile(&format!("{{{{ {function} .Name }}}}")).unwrap());
+    let mut scratch = vec![0; 100_000];
+    let mut output = String::with_capacity(100_000);
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    for template in &templates {
+        output.clear();
+        template
+            .render_with_scratch(&data, &mut output, &mut scratch)
+            .unwrap();
+    }
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+    assert_eq!(
+        output,
+        "A%C3%A9%E2%82%AC%F0%9F%A6%80%3C%26+%00".repeat(1024)
+    );
+}
+
+#[test]
 fn borrowed_question_fields_render_without_allocating() {
     if crate::run_isolated(
         "gotemplate::gotemplate_allocations::borrowed_question_fields_render_without_allocating",

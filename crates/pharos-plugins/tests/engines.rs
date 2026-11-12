@@ -317,6 +317,39 @@ fn go_escaping_builtins_return_pipeline_strings() {
 }
 
 #[test]
+fn escaping_builtins_handle_long_utf8_and_scratch_boundaries() {
+    let input = "Aé€🦀<& \0".repeat(1024);
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new(&input, &metadata);
+    let mut scratch = vec![0; 100_000];
+    for (function, expected) in [
+        ("html", "Aé€🦀&lt;&amp; �"),
+        ("js", "Aé€🦀\\u003C\\u0026 \\u0000"),
+        ("urlquery", "A%C3%A9%E2%82%AC%F0%9F%A6%80%3C%26+%00"),
+    ] {
+        let template = Template::compile(&format!("{{{{ {function} .Name }}}}")).unwrap();
+        let mut output = String::new();
+        template
+            .render_with_scratch(&data, &mut output, &mut scratch)
+            .unwrap();
+        assert_eq!(output, expected.repeat(1024), "{function}");
+        assert!(
+            template
+                .render_with_scratch(&data, &mut String::new(), &mut [0; 3])
+                .is_err(),
+            "{function}"
+        );
+        let empty = Data::new("", &metadata);
+        output.clear();
+        template
+            .render_with_scratch(&empty, &mut output, &mut [])
+            .unwrap();
+        assert!(output.is_empty());
+    }
+}
+
+#[test]
 fn template_rejects_surrogate_escapes_like_go_unquote() {
     for source in [
         r#"{{ "\uD800" }}"#,

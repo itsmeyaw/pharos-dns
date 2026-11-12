@@ -556,11 +556,14 @@ fn escape_values(
 ) -> fmt::Result {
     let mut offset = start;
     while offset < end {
-        let ch = std::str::from_utf8(&scratch.bytes[offset..end])
-            .map_err(|_| fmt::Error)?
-            .chars()
-            .next()
-            .ok_or(fmt::Error)?;
+        let window = &scratch.bytes[offset..end.min(offset.saturating_add(4))];
+        let valid = match std::str::from_utf8(window) {
+            Ok(text) => text,
+            Err(error) => {
+                std::str::from_utf8(&window[..error.valid_up_to()]).map_err(|_| fmt::Error)?
+            }
+        };
+        let ch = valid.chars().next().ok_or(fmt::Error)?;
         offset += ch.len_utf8();
         match function {
             Function::Html => match ch {
@@ -603,6 +606,24 @@ fn escape_values(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::{Function, Scratch, escape_values};
+
+    #[test]
+    fn malformed_or_truncated_escape_input_returns_error() {
+        for input in [&b"a\xff"[..], &b"a\xf0\x9f\xa6"[..], &b"\xed\xa0\x80"[..]] {
+            let mut buffer = [0; 32];
+            buffer[..input.len()].copy_from_slice(input);
+            let mut scratch = Scratch {
+                bytes: &mut buffer,
+                len: input.len(),
+            };
+            assert!(escape_values(&Function::Html, 0, input.len(), &mut scratch).is_err());
+        }
+    }
 }
 
 impl Atom {
