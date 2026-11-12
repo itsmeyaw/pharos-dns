@@ -178,7 +178,7 @@ impl Next for Reply {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs() as u32;
-                for (covered, ttl) in [(Type::A, 300), (Type::A, 120), (Type::TXT, 300)] {
+                for (covered, ttl) in [(Type::A, 300), (Type::A, 30), (Type::TXT, 300)] {
                     let sig = Rdata::Rrsig {
                         type_covered: covered,
                         algorithm: 13,
@@ -371,14 +371,28 @@ async fn existing_rrsig_ttls_are_grouped_by_covered_type() {
     for rr in msg.answers().filter(|rr| rr.rtype == Type::RRSIG) {
         if let Rdata::Rrsig {
             type_covered,
+            original_ttl,
             signature: [1],
             ..
         } = rr.data().unwrap()
         {
-            existing.push((type_covered, rr.ttl));
+            existing.push((type_covered, rr.ttl, original_ttl));
         }
     }
-    assert_eq!(existing, [(Type::A, 120), (Type::A, 120), (Type::TXT, 300)]);
+    assert_eq!(
+        existing,
+        [(Type::A, 30, 300), (Type::A, 30, 30), (Type::TXT, 300, 300)]
+    );
+    assert_eq!(
+        msg.answers().find(|rr| rr.rtype == Type::A).unwrap().ttl,
+        30
+    );
+    assert!(msg.answers().any(|rr| {
+        rr.rtype == Type::RRSIG && rr.ttl == 30 && matches!(
+            rr.data().unwrap(),
+            Rdata::Rrsig { type_covered: Type::A, original_ttl: 30, signature, .. } if signature.len() > 1
+        )
+    }));
 }
 
 // RFC 2181 §5.2: DNSKEYs at the same Apex share their lowest TTL, even without DO.

@@ -45,16 +45,19 @@ fn same_rrset(left: &Record<'_>, right: &Record<'_>) -> bool {
 
 fn rrset_ttl(message: &Message<'_>, rr: &Record<'_>, covered: Option<Type>) -> u32 {
     // RFC 2181 §5.2: records in one RRset use the lowest received TTL.
+    // RFC 4034 §3: a covering RRSIG shares that TTL without extending its lifetime.
     // shortcut: scans the Message for each RR on a cache miss; index RRsets if miss cost becomes significant.
+    let target = covered.unwrap_or(rr.rtype);
     message
         .answers()
         .chain(message.authorities())
         .chain(message.additionals())
         .filter(|other| {
-            same_rrset(other, rr)
-                && covered.is_none_or(|covered| {
-                    matches!(other.data(), Ok(Rdata::Rrsig { type_covered, .. }) if type_covered == covered)
-                })
+            other.name == rr.name
+                && other.class == rr.class
+                && ((other.rtype == target && target != Type::RRSIG)
+                    || (other.rtype == Type::RRSIG
+                        && matches!(other.data(), Ok(Rdata::Rrsig { type_covered, .. }) if type_covered == target)))
         })
         .map(|other| other.ttl)
         .min()
