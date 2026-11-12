@@ -1017,6 +1017,29 @@ async fn coredns_unsigned_delegation_and_ds_queries() {
         assert_eq!(response.rcode(), expected);
         assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
     }
+    let (outcome, wire) = query(&zone, "miek.nl.", Type::SOA, false, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(matches!(
+        response.answers().next().unwrap().data(),
+        Ok(Rdata::Soa {
+            serial: 1282630057,
+            ..
+        })
+    ));
+    assert_eq!(
+        response
+            .authorities()
+            .filter(|rr| rr.rtype == Type::NS)
+            .count(),
+        4
+    );
+    let (outcome, wire) = query(&zone, "miek.nl.", Type::AAAA, false, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    assert_eq!(response.answer_count(), 0);
+    assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
 }
 
 // Derived from CoreDNS delegation_test.go TestLookupSecureDelegation.
