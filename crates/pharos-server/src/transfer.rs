@@ -41,13 +41,14 @@ pub async fn notify(
     socket.connect(address).await?;
     let mut wire = [0; 65535];
     let mut last_error = invalid("NOTIFY was not accepted");
+    // RFC 1996 §3.6: a master retransmits NOTIFY until a matching Response or the retry limit.
     for _ in 0..3 {
         let result = timeout(deadline, async {
             socket.send(&query).await?;
             let len = socket.recv(&mut wire).await?;
             let response =
                 Message::parse(&wire[..len]).map_err(|_| invalid("invalid NOTIFY Response"))?;
-            // RFC 1996 §3.8: NOTIFY Responses acknowledge the original Message.
+            // RFC 1996 §3.3, §3.6: a NOTIFY Response has QR set and the request's ID.
             if response.id() != id
                 || response.flags() & 0x8000 == 0
                 || response.opcode() != pharos_proto::Opcode::NOTIFY

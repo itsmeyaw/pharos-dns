@@ -177,6 +177,7 @@ async fn serve<H: Handler>(
                         Ok(true) => {}
                         Ok(false) => break,
                         Err(failure) => {
+                            // RFC 5936 §2.3: closing the connection terminates the client's AXFR session.
                             crate::logging::log(
                                 "ERROR",
                                 "server",
