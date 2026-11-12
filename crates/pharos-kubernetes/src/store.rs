@@ -128,8 +128,26 @@ mod tests {
         store.apply_service_import(import("prod"));
         store.apply_service_import(import("hidden"));
         store.with_read(|index| {
-            assert_eq!(index.services().count(), 1);
-            assert_eq!(index.service_imports().count(), 1);
+            assert_eq!(index.services().len(), 1);
+            assert_eq!(index.service_imports().len(), 1);
+        });
+    }
+
+    #[test]
+    fn transfer_lists_services_in_name_order() {
+        let store = Store::default();
+        for name in ["web", "api", "db"] {
+            let mut item = service("10.0.0.1");
+            item.name = name.into();
+            store.apply_service(item);
+        }
+        store.with_read(|index| {
+            let names: Vec<_> = index
+                .services()
+                .iter()
+                .map(|s| s.name.to_string())
+                .collect();
+            assert_eq!(names, ["api", "db", "web"]);
         });
     }
 
@@ -650,20 +668,28 @@ impl Index {
             None
         }
     }
-    /// Iterate Services visible to DNS readers.
-    pub fn services(&self) -> impl Iterator<Item = &Service> {
-        self.services
+    /// Services visible to DNS readers, in CoreDNS Zone Transfer order (by name).
+    pub fn services(&self) -> Vec<&Service> {
+        let mut services: Vec<_> = self
+            .services
             .iter()
             .filter(|(ns, _)| self.namespace_allowed(ns))
             .flat_map(|(_, services)| services.values().map(Arc::as_ref))
+            .collect();
+        services.sort_by(|a, b| (&a.name, &a.namespace).cmp(&(&b.name, &b.namespace)));
+        services
     }
 
-    /// Iterate ServiceImports visible to DNS readers.
-    pub fn service_imports(&self) -> impl Iterator<Item = &ServiceImport> {
-        self.service_imports
+    /// ServiceImports visible to DNS readers, in CoreDNS Zone Transfer order (by name).
+    pub fn service_imports(&self) -> Vec<&ServiceImport> {
+        let mut imports: Vec<_> = self
+            .service_imports
             .iter()
             .filter(|(ns, _)| self.namespace_allowed(ns))
             .flat_map(|(_, services)| services.values().map(Arc::as_ref))
+            .collect();
+        imports.sort_by(|a, b| (&a.name, &a.namespace).cmp(&(&b.name, &b.namespace)));
+        imports
     }
     pub fn external_name(&self, namespace: &str, name: &str) -> Option<Arc<pharos_proto::Name>> {
         by_name(&self.external_names, namespace, name).cloned()

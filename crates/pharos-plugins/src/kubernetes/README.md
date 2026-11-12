@@ -36,7 +36,6 @@
 - Zone Transfers encode the entire Zone synchronously under the store's read lock before sending. Memory and worker time therefore grow with Zone size; CoreDNS streams the transfer in batches.
 - Zone Transfers allocate one encoded snapshot and one shared Stream producer, not per record. macOS also allocates the producer's mutex on first use.
 - Kubernetes NOTIFY coalesces changes received while an earlier NOTIFY is being sent, then sends again for the latest state.
-- Zone Transfers enumerate Services and ServiceImports in store order instead of CoreDNS's name order; record order has no DNS meaning.
 
 ## Sources
 
