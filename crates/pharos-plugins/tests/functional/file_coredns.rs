@@ -1598,3 +1598,193 @@ async fn coredns_signed_aliases_to_delegated_zones() {
         })
     )));
 }
+
+// Derived from CoreDNS wildcard_test.go TestLookupWildcard.
+#[tokio::test]
+async fn coredns_signed_wildcard_and_nodata_cases() {
+    let zone = zone(
+        "dnssex.nl.",
+        include_str!("../fixtures/file/dnssex-signed.zone"),
+    )
+    .unwrap();
+    for name in ["wild.dnssex.nl.", "a.wild.dnssex.nl."] {
+        for dnssec in [false, true] {
+            let (outcome, wire) = query(&zone, name, Type::TXT, dnssec, &[]).await;
+            assert_eq!(outcome, Outcome::Response);
+            let response = Message::parse(&wire).unwrap();
+            let expected = format!("{name} 1800 IN TXT \"Doing It Safe Is Better\"");
+            assert_records(
+                response.answers().filter(|rr| rr.rtype == Type::TXT),
+                &[&expected],
+            );
+            assert_eq!(
+                response
+                    .answers()
+                    .filter(|rr| rr.rtype == Type::RRSIG)
+                    .count(),
+                usize::from(dnssec)
+            );
+            assert_eq!(
+                response
+                    .authorities()
+                    .filter(|rr| rr.rtype == Type::NS)
+                    .count(),
+                3
+            );
+            if dnssec {
+                assert!(response.answers().any(|rr| matches!(
+                    rr.data(),
+                    Ok(Rdata::Rrsig {
+                        type_covered: Type::TXT,
+                        ..
+                    })
+                ) && rr.name.to_string() == name));
+                assert!(
+                    response
+                        .authorities()
+                        .any(|rr| rr.rtype == Type::NSEC && rr.name.to_string() == "a.dnssex.nl.")
+                );
+            }
+        }
+    }
+    for dnssec in [false, true] {
+        let (outcome, wire) = query(&zone, "wild.dnssex.nl.", Type::SRV, dnssec, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), Rcode::NOERROR);
+        assert_eq!(response.answer_count(), 0);
+        assert!(response.authorities().any(|rr| rr.rtype == Type::SOA));
+        if dnssec {
+            assert!(
+                response
+                    .authorities()
+                    .any(|rr| rr.rtype == Type::NSEC && rr.name.to_string() == "*.dnssex.nl.")
+            );
+        }
+    }
+}
+
+// Derived from CoreDNS wildcard_test.go TestLookupDoubleWildcard and TestLookupWildcardAdditional.
+#[tokio::test]
+async fn coredns_wildcard_alias_and_additional_cases() {
+    let zone = zone(
+        "example.org.",
+        include_str!("../fixtures/file/coredns-wildcard-alias.zone"),
+    )
+    .unwrap();
+    for (name, answer) in [
+        (
+            "wild.w.example.org.",
+            vec!["wild.w.example.org. 3600 IN TXT \"Wildcard\""],
+        ),
+        (
+            "wild.c.example.org.",
+            vec!["wild.c.example.org. 3600 IN TXT \"c Wildcard\""],
+        ),
+        (
+            "wild.d.example.org.",
+            vec![
+                "wild.d.example.org. 3600 IN CNAME alias.example.org.",
+                "alias.example.org. 3600 IN TXT \"Wildcard CNAME expansion\"",
+            ],
+        ),
+        (
+            "alias.example.org.",
+            vec!["alias.example.org. 3600 IN TXT \"Wildcard CNAME expansion\""],
+        ),
+    ] {
+        let (outcome, wire) = query(&zone, name, Type::TXT, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_records(Message::parse(&wire).unwrap().answers(), &answer);
+    }
+    let zone = self::zone(
+        "example.org.",
+        include_str!("../fixtures/file/coredns-wildcard-glue.zone"),
+    )
+    .unwrap();
+    let (outcome, wire) = query(&zone, "foo.wild.example.org.", Type::MX, false, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_records(
+        response.answers(),
+        &["foo.wild.example.org. 1800 IN MX 10 mail.example.org."],
+    );
+    assert_records(
+        response.additionals(),
+        &[
+            "mail.example.org. 1800 IN A 192.0.2.10",
+            "mail.example.org. 1800 IN AAAA 2001:db8::10",
+        ],
+    );
+}
+
+// Derived from CoreDNS wildcard_test.go TestLookupEmptyNonTerminalWildcard and TestLookupWildcardRespectsCloserEmptyNonTerminal.
+#[tokio::test]
+async fn coredns_empty_nonterminal_wildcard_cases() {
+    let zone = zone(
+        "example.org.",
+        include_str!("../fixtures/file/coredns-wildcard-ent.zone"),
+    )
+    .unwrap();
+    for (name, kind, code, answer) in [
+        ("something.e.example.org.", Type::A, Rcode::NOERROR, None),
+        ("something.e.example.org.", Type::AAAA, Rcode::NOERROR, None),
+        (
+            "something.somewhere.e.example.org.",
+            Type::A,
+            Rcode::NOERROR,
+            None,
+        ),
+        (
+            "f.*.e.example.org.",
+            Type::A,
+            Rcode::NOERROR,
+            Some([192, 0, 2, 1]),
+        ),
+        ("missing.*.e.example.org.", Type::A, Rcode::NXDOMAIN, None),
+        (
+            "missing.deep.e.example.org.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            None,
+        ),
+        (
+            "something.ordinary.example.org.",
+            Type::A,
+            Rcode::NOERROR,
+            Some([192, 0, 2, 4]),
+        ),
+    ] {
+        let (outcome, wire) = query(&zone, name, kind, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), code, "{name}");
+        assert_eq!(
+            response.answers().next().map(|rr| rr.rdata.to_vec()),
+            answer.map(|address| address.to_vec()),
+            "{name}"
+        );
+    }
+    let zone = self::zone(
+        "example.org.",
+        include_str!("../fixtures/file/coredns-closer-ent.zone"),
+    )
+    .unwrap();
+    for (name, code, answer) in [
+        ("nonexistent.deeper.example.org.", Rcode::NXDOMAIN, None),
+        (
+            "nonexistent.example.org.",
+            Rcode::NOERROR,
+            Some([127, 0, 0, 53]),
+        ),
+    ] {
+        let (outcome, wire) = query(&zone, name, Type::A, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), code);
+        assert_eq!(
+            response.answers().next().map(|rr| rr.rdata.to_vec()),
+            answer.map(|address| address.to_vec())
+        );
+    }
+}

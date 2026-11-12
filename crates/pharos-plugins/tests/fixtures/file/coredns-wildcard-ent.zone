@@ -1,0 +1,8 @@
+; example.org test file with an empty non-terminal wildcard
+$TTL 3600
+example.org.             IN     SOA     ns.example.org. hostmaster.example.org. 1 7200 3600 1209600 3600
+example.org.             IN     NS      ns.example.org.
+f.*.e.example.org.       IN     A       192.0.2.1
+t.e.example.org.         IN     A       192.0.2.2
+real.deep.e.example.org. IN     A       192.0.2.3
+*.ordinary.example.org.  IN     A       192.0.2.4
