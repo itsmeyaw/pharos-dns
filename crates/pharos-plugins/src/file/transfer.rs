@@ -21,6 +21,7 @@ impl Transferer for File {
             .position(|rr| rr.rtype == Type::SOA)
             .ok_or(Error::InvalidQuery)?;
         let current = zone.serial().ok_or(Error::InvalidQuery)?;
+        // RFC 1995 §2: an up-to-date IXFR returns only the current SOA.
         let only_soa = request.qtype == Type::IXFR
             && (request.protocol == Protocol::Udp
                 || request.serial != 0 && request.serial == current);
@@ -41,6 +42,7 @@ impl Transferer for File {
                 response.reserve(65535 - response.len());
             }
             let apex = NameRef::parse(zone.apex.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
+            // RFC 8945 §5.3: reserve room for Listener-applied TSIG on each Message.
             let mut builder = MessageBuilder::new(
                 response,
                 64500,
@@ -92,6 +94,7 @@ impl Transferer for File {
                 let Some(rr) = next else {
                     break;
                 };
+                // RFC 1035 §§4.1.3, 4.2.2: keep RR batches within the TCP Message limit.
                 let estimate = rr.owner.as_wire().len() + 10 + rr.rdata.len();
                 if size > 0 && size + estimate > 63000 {
                     (phase, index) = previous;

@@ -288,6 +288,7 @@ impl Zone {
 }
 
 fn soa_serial(soa: &ZoneRecord) -> Option<u32> {
+    // RFC 1035 §3.3.13: SOA ends with serial and four 32-bit timing fields.
     let offset = soa.rdata.len().checked_sub(20)?;
     Some(u32::from_be_bytes(
         soa.rdata.get(offset..offset + 4)?.try_into().ok()?,
