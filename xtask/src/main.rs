@@ -111,6 +111,31 @@ fn fuzz_args(target: &str, short: bool) -> Vec<&str> {
     args
 }
 
+#[cfg(unix)]
+fn configure_fuzz_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_fuzz_command(_: &mut Command) {}
+
+fn stop_fuzz_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // POSIX process groups let cancellation include cargo-fuzz and libFuzzer descendants.
+        let result = Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !matches!(result, Ok(status) if status.success()) {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+}
+
 fn fuzz(short: bool) -> ExitCode {
     if Command::new("cargo-fuzz")
         .arg("--version")
@@ -143,17 +168,18 @@ fn fuzz(short: bool) -> ExitCode {
 
     let mut children = Vec::new();
     for target in FUZZ_TARGETS {
-        match Command::new("cargo")
+        let mut command = Command::new("cargo");
+        command
             .args(fuzz_args(target, short))
             .env("PHAROS_ZONE_ORACLE", &oracle)
-            .current_dir(root.join("crates/pharos-proto"))
-            .spawn()
-        {
+            .current_dir(root.join("crates/pharos-proto"));
+        configure_fuzz_command(&mut command);
+        match command.spawn() {
             Ok(child) => children.push((*target, child)),
             Err(error) => {
                 eprintln!("could not start {target}: {error}");
                 for (_, mut child) in children {
-                    let _ = child.kill();
+                    stop_fuzz_group(&mut child);
                     let _ = child.wait();
                 }
                 return ExitCode::FAILURE;
@@ -170,7 +196,7 @@ fn fuzz(short: bool) -> ExitCode {
                 result => {
                     eprintln!("fuzz target {} failed: {result:?}", children[index].0);
                     for (_, mut child) in children {
-                        let _ = child.kill();
+                        stop_fuzz_group(&mut child);
                         let _ = child.wait();
                     }
                     return ExitCode::FAILURE;
@@ -477,6 +503,48 @@ mod tests {
     use super::{fuzz_args, pharos_crates, seed_corpus, unsafe_gate};
 
     static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(unix)]
+    #[test]
+    fn fuzz_cleanup_terminates_grandchild_processes() {
+        use std::{
+            io::{BufRead, BufReader},
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(Stdio::piped());
+        super::configure_fuzz_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let grandchild: u32 = line.trim().parse().unwrap();
+        super::stop_fuzz_group(&mut child);
+        let _ = child.wait();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let alive = Command::new("kill")
+                .args(["-0", &grandchild.to_string()])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = Command::new("kill")
+                    .args(["-KILL", &grandchild.to_string()])
+                    .status();
+                panic!("fuzzer grandchild survived cleanup");
+            }
+            std::thread::yield_now();
+        }
+    }
 
     #[test]
     fn fuzz_commands_limit_only_short_runs() {
