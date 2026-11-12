@@ -478,6 +478,11 @@ struct NestedContext<'s, 'q, 'a> {
     child: Context<'s, 'a>,
 }
 
+struct QueryView<'s, 'q, 'a> {
+    context: &'s mut Context<'q, 'a>,
+    original: Message<'q>,
+}
+
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
@@ -487,27 +492,34 @@ impl<T> Drop for AbortOnDrop<T> {
 
 impl Drop for NestedContext<'_, '_, '_> {
     fn drop(&mut self) {
-        let mut query = self.parent_query.with_flags(self.child.query.flags());
-        if let (Some(parent), Some(child)) = (
-            self.parent_query.questions().next(),
-            self.child.query.questions().next(),
-        ) {
-            if !parent.name.labels().eq(child.name.labels()) {
-                query = query.with_question_name(child.name);
-            }
-            if parent.qtype != child.qtype {
-                query = query.with_question_type(child.qtype);
-            }
-            if parent.qclass != child.qclass {
-                query = query.with_question_class(child.qclass);
-            }
-        }
-        if let Some(opt) = self.child.query.opt() {
-            query = query.with_udp_payload_limit(opt.udp_payload_size());
-        }
-        *self.parent_query = query;
+        *self.parent_query = merge_query(*self.parent_query, self.child.query);
         std::mem::swap(self.parent_metadata, &mut self.child.metadata);
     }
+}
+
+impl Drop for QueryView<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.context.query = merge_query(self.original, self.context.query);
+    }
+}
+
+fn merge_query<'q>(parent: Message<'q>, child: Message<'_>) -> Message<'q> {
+    let mut query = parent.with_flags(child.flags());
+    if let (Some(parent), Some(child)) = (parent.questions().next(), child.questions().next()) {
+        if !parent.name.labels().eq(child.name.labels()) {
+            query = query.with_question_name(child.name);
+        }
+        if parent.qtype != child.qtype {
+            query = query.with_question_type(child.qtype);
+        }
+        if parent.qclass != child.qclass {
+            query = query.with_question_class(child.qclass);
+        }
+    }
+    if let Some(opt) = child.opt() {
+        query = query.with_udp_payload_limit(opt.udp_payload_size());
+    }
+    query
 }
 
 /// The Listener state and depth associated with a Query.
@@ -573,7 +585,7 @@ impl SelfLookupServer for SelfLookupHandle {
     }
 }
 
-impl Context<'_, '_> {
+impl<'q> Context<'q, '_> {
     /// Return the nesting depth of this Query's Self Lookup, or zero for an external Query.
     #[must_use]
     pub fn self_lookup_depth(&self) -> u8 {
@@ -581,6 +593,20 @@ impl Context<'_, '_> {
             .self_lookup
             .as_ref()
             .map_or(0, |state| state.depth)
+    }
+
+    /// Run Next with a temporary view of the original Query bytes.
+    pub async fn run_with_query_view<N: Next + Send>(
+        &mut self,
+        query: Message<'q>,
+        next: N,
+    ) -> Outcome {
+        let original = std::mem::replace(&mut self.query, query);
+        let view = QueryView {
+            context: self,
+            original,
+        };
+        next.run(view.context).await
     }
 
     /// Run Next with temporary Query bytes while preserving Metadata and Response state.

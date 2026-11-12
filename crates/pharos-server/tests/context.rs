@@ -49,6 +49,42 @@ impl pharos_server::Next for PendingChild {
     }
 }
 
+#[test]
+fn cancelled_query_view_restores_parent_and_keeps_metadata() {
+    use std::{
+        future::Future,
+        task::{Context as TaskContext, Poll, Waker},
+    };
+    let wire = [0_u8; 12];
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::new();
+    let mut slots = [None; 2];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    let query = cx.query.with_flags(0x0100);
+    {
+        let future = cx.run_with_query_view(query, PendingChild);
+        let mut future = std::pin::pin!(future);
+        assert_eq!(
+            future
+                .as_mut()
+                .poll(&mut TaskContext::from_waker(Waker::noop())),
+            Poll::Pending
+        );
+    }
+    assert_eq!(cx.query.flags(), 0x0100);
+    assert_eq!(cx.metadata.get("test/after"), Some("new"));
+}
+
 struct MutateChild;
 impl pharos_server::Next for MutateChild {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
