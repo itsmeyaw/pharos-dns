@@ -1,0 +1,6 @@
+alias.example.org. A IN udp
+chain.example.org. A IN udp
+name.wild.example.org. A IN udp
+host.mapped.example.org. A IN udp
+host.mapped.example.org. NS IN udp
+host.child.example.org. A IN udp
