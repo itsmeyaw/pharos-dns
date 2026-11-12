@@ -48,3 +48,44 @@ async fn serves_zone_and_negative_answers() {
         assert_eq!(response.authority_count(), authorities);
     }
 }
+
+#[tokio::test]
+async fn serves_aliases_wildcards_and_referrals() {
+    let zonefile = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone");
+    let corefile = format!("example.org:53 {{\n file {zonefile}\n}}");
+    let blocks = parse("Corefile", &corefile).unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let domain: Name = "example.org.".parse().unwrap();
+    for (name, aa, answers, authority, additional) in [
+        ("alias.example.org.", true, 2, 1, 0),
+        ("foo.wild.example.org.", true, 1, 1, 0),
+        ("foo.child.example.org.", false, 0, 1, 1),
+        ("empty.example.org.", true, 0, 1, 0),
+    ] {
+        let name: Name = name.parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+        builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN).unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.rcode(), Rcode::NOERROR, "{name}");
+        assert_eq!(response.aa(), aa, "{name}");
+        assert_eq!(response.answer_count(), answers, "{name}");
+        assert_eq!(response.authority_count(), authority, "{name}");
+        assert_eq!(response.additional_count(), additional, "{name}");
+    }
+}
