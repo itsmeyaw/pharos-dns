@@ -3,6 +3,7 @@
 use std::{env, fmt::Write, fs, path::PathBuf};
 
 fn config_only(name: &str) -> bool {
+    // View's pass-through handler is redundant once the Listener routes the Query.
     matches!(
         name,
         "root"

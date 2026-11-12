@@ -166,6 +166,14 @@ async fn request_and_response_metrics_carry_view_name() {
     assert!(
         metrics
             .lines()
+            .any(|line| line.starts_with("pharos_plugin_enabled{")
+                && line.contains("name=\"view\"")
+                && line.contains("view=\"local\"")),
+        "{metrics}"
+    );
+    assert!(
+        metrics
+            .lines()
             .any(|line| line.starts_with("pharos_dns_requests_total{")
                 && line.contains("view=\"local\"")
                 && line.ends_with(" 1")),
