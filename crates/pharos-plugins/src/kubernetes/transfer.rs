@@ -225,6 +225,9 @@ impl Snapshot<'_> {
         base_srv: bool,
     ) -> Result<(), Error> {
         for port in ports {
+            if port.port == -1 {
+                continue;
+            }
             if base_srv {
                 self.srv(base, target, port.port, weight)?;
             }
@@ -336,7 +339,10 @@ fn generate(
         snapshot.authoritative = false;
     }
     snapshot.soa(current)?;
-    if serial != 0 && serial == current {
+    // RFC 1995 §2: UDP IXFR returns the current SOA to trigger TCP fallback.
+    if serial != 0 && serial == current
+        || snapshot.qtype == Type::IXFR && snapshot.protocol == Protocol::Udp
+    {
         return Ok(());
     }
 
@@ -499,7 +505,7 @@ impl crate::transfer::Transferer for Kubernetes {
                 size: 0,
             };
             generate(&mut snapshot, index, self, serial, current, multi)?;
-            // shortcut: one Zone Transfer snapshot allocation; stream directly when snapshots can retain a read view.
+            // shortcut: snapshot the whole Zone synchronously; stream incrementally when the store retains immutable snapshots.
             let mut bytes = Vec::new();
             bytes
                 .try_reserve_exact(snapshot.size)
@@ -780,6 +786,38 @@ mod tests {
     }
 
     #[test]
+    fn service_without_ports_does_not_transfer_sentinel_srv() {
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let mut snapshot = snapshot(&zone);
+        snapshot
+            .service(
+                &Index::default(),
+                "prod",
+                "web",
+                &["10.0.0.1".into()],
+                &[Port {
+                    name: String::new(),
+                    protocol: String::new(),
+                    port: -1,
+                }],
+                false,
+            )
+            .unwrap();
+        let bytes = snapshot.bytes.unwrap();
+        let messages = messages(&bytes);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            Message::parse(messages[0])
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .rtype,
+            Type::A
+        );
+    }
+
+    #[test]
     fn headless_endpoints_transfer_hostnames_and_weighted_srv() {
         let zone: Name = "cluster.local.".parse().unwrap();
         let base_name: Name = "web.prod.svc.cluster.local.".parse().unwrap();
@@ -852,6 +890,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn current_udp_ixfr_keeps_authoritative_flag() {
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let mut snapshot = snapshot(&zone);
+        snapshot.qtype = Type::IXFR;
+        snapshot.protocol = Protocol::Udp;
+        generate(&mut snapshot, &Index::default(), &plugin(), 123, 123, false).unwrap();
+        let bytes = snapshot.bytes.unwrap();
+        let messages = messages(&bytes);
+        assert_ne!(Message::parse(messages[0]).unwrap().flags() & 0x0400, 0);
+    }
+
+    #[test]
+    fn outdated_udp_ixfr_snapshots_only_current_soa() {
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let mut snapshot = snapshot(&zone);
+        snapshot.qtype = Type::IXFR;
+        snapshot.protocol = Protocol::Udp;
+        generate(&mut snapshot, &Index::default(), &plugin(), 1, 123, false).unwrap();
+        let bytes = snapshot.bytes.unwrap();
+        let messages = messages(&bytes);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            Message::parse(messages[0])
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .rtype,
+            Type::SOA
+        );
     }
 
     #[tokio::test]
