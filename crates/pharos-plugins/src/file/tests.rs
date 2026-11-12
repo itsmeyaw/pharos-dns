@@ -223,6 +223,17 @@ fn multiple_soa_records_keep_last_like_coredns() {
     );
 }
 
+#[test]
+fn zero_serial_is_rejected_at_file_setup_like_coredns() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-zero-serial.zone");
+    let original = include_str!("../../tests/fixtures/file/example.zone");
+    std::fs::write(&path, original.replace(" 1 7200", " 0 7200")).unwrap();
+    let corefile = format!("example.org:53 {{\n file {}\n}}", path.display());
+    let blocks = pharos_corefile::parse("Corefile", &corefile).unwrap();
+    assert!(pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).is_err());
+    std::fs::remove_file(path).unwrap();
+}
+
 // Derived from CoreDNS plugin/file/reload_test.go.
 #[test]
 fn serial_reload_retains_old_zone_on_unchanged_or_invalid_data() {
