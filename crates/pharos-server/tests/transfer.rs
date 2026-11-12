@@ -15,12 +15,30 @@ struct Transfer;
 impl Chain for Transfer {
     async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
         let id = cx.query.id().to_be_bytes();
+        let qtype = cx.query.questions().next().unwrap().qtype.0.to_be_bytes();
         let mut count = 0;
         Outcome::Stream(Stream::new(move |wire| {
             if count == 3 {
                 return Ok(false);
             }
-            wire.extend_from_slice(&[id[0], id[1], 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+            wire.extend_from_slice(&[
+                id[0],
+                id[1],
+                0x84,
+                0,
+                0,
+                u8::from(count == 0),
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+            ]);
+            if count == 0 {
+                // RFC 5936 §2.2: the first AXFR Response repeats the Question.
+                wire.extend_from_slice(&[1, b'a', 0, qtype[0], qtype[1], 0, 1]);
+            }
             if count == 1 {
                 wire.extend_from_slice(&[1, b'a', 0, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
             } else {
@@ -151,5 +169,52 @@ async fn plugin_stream_reaches_tcp_listener_as_multiple_messages() {
         assert_eq!(message.answers().next().unwrap().rtype, expected);
     }
     drop(socket);
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dig_axfr_and_ixfr_interoperate_with_plugin_stream() {
+    if std::process::Command::new("dig")
+        .arg("-v")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(Transfer), vec![]);
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+        .await
+        .unwrap();
+    for qtype in ["AXFR", "IXFR=0"] {
+        let output = std::process::Command::new("dig")
+            .args([
+                "@127.0.0.1",
+                "-p",
+                &listener.local_addr().port().to_string(),
+                "a.",
+                qtype,
+                "+tcp",
+                "+time=2",
+                "+tries=1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.contains("XFR size:") || text.contains("Transfer completed"),
+            "{text}"
+        );
+        assert_eq!(text.matches("\tSOA\t").count(), 2, "{text}");
+    }
     listener.shutdown().await.unwrap();
 }
