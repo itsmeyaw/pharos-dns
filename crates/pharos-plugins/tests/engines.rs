@@ -113,3 +113,18 @@ fn coredns_if_else_uses_expression_variable_truth() {
     assert!(Template::compile("{{ if .Name }}missing end").is_err());
     assert!(Template::compile("{{ else }}").is_err());
 }
+
+#[test]
+fn trim_markers_remove_go_template_whitespace() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile(
+        "prefix \t{{- .Name -}}\r\n suffix {{ if .Name -}} \n yes {{- else }} no {{- end }}",
+    )
+    .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "prefixexample.suffix yes");
+    assert!(Template::compile("{{-.Name}}").is_err());
+}

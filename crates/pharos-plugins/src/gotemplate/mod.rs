@@ -123,11 +123,34 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
     }
     let mut parts = Vec::new();
     while let Some(start) = source.find("{{") {
-        parts.push(Part::Text(source[..start].to_owned()));
-        *source = &source[start + 2..];
+        let mut text = &source[..start];
+        let mut action_source = &source[start + 2..];
+        if action_source.starts_with('-')
+            && action_source
+                .as_bytes()
+                .get(1)
+                .is_some_and(|byte| is_space(*byte))
+        {
+            text = text.trim_end_matches(|ch: char| ch.is_ascii() && is_space(ch as u8));
+            action_source = &action_source[1..];
+        }
+        parts.push(Part::Text(text.to_owned()));
+        *source = action_source;
         let end = source.find("}}").ok_or("unclosed template action")?;
-        let action = source[..end].trim();
+        let mut raw = &source[..end];
+        let trim_right = raw.ends_with('-')
+            && raw
+                .as_bytes()
+                .get(raw.len().saturating_sub(2))
+                .is_some_and(|byte| is_space(*byte));
+        if trim_right {
+            raw = &raw[..raw.len() - 1];
+        }
+        let action = raw.trim();
         *source = &source[end + 2..];
+        if trim_right {
+            *source = source.trim_start_matches(|ch: char| ch.is_ascii() && is_space(ch as u8));
+        }
         match action {
             "else" => return Ok((parts, Some(Marker::Else))),
             "end" => return Ok((parts, Some(Marker::End))),
@@ -173,6 +196,10 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
     parts.push(Part::Text((*source).to_owned()));
     *source = "";
     Ok((parts, None))
+}
+
+fn is_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
 fn parse_field(action: &str) -> Result<Field, String> {
