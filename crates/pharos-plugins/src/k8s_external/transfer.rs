@@ -469,7 +469,7 @@ fn encode(
         size: 0,
     };
     generate(&mut snapshot, plugin, kubernetes, index)?;
-    // shortcut: snapshot the whole Zone synchronously; stream incrementally when the store retains immutable snapshots.
+    // shortcut: the snapshot and Stream each allocate once; use immutable snapshots for incremental streaming.
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(snapshot.size)

@@ -573,17 +573,12 @@ impl Plugin for External {
 
 impl External {
     async fn answer(&self, cx: &mut Context<'_, '_>) -> Option<Outcome> {
-        let Some(q) = cx.query.questions().next() else {
-            return None;
-        };
-        let Some(zone) = self
+        let q = cx.query.questions().next()?;
+        let zone = self
             .zones
             .iter()
             .filter(|zone| contains(q.name, &zone.name))
-            .max_by_key(|zone| zone.name.label_count())
-        else {
-            return None;
-        };
+            .max_by_key(|zone| zone.name.label_count())?;
         let zone_ref = NameRef::parse(zone.name.as_wire(), 0).unwrap();
         let is_apex = q.name == zone_ref;
         let subapex = self.zones.iter().any(|candidate| {

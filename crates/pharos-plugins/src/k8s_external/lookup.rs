@@ -184,6 +184,8 @@ mod tests {
         assert_eq!(endpoint_label(&addr, false, &mut buf), b"2001-db8--0");
         addr.ip = "192.0.2.1".into();
         assert_eq!(endpoint_label(&addr, false, &mut buf), b"192-0-2-1");
+        addr.ip = "::ffff:192.0.2.1".into();
+        assert_eq!(endpoint_label(&addr, false, &mut buf), b"::ffff:192-0-2-1");
         addr.ip = "not-an-ip".into();
         assert_eq!(endpoint_label(&addr, false, &mut buf), b"");
     }
