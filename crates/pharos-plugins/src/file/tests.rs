@@ -368,6 +368,36 @@ fn mtime_reload_accepts_unchanged_serial() {
 }
 
 #[test]
+fn reload_uses_path_mtime_sampled_before_open() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-stat-race.zone");
+    let replacement = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-stat-race-new.zone");
+    let original = include_str!("../../tests/fixtures/file/example.zone");
+    let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let observed_time = old_time + Duration::from_secs(10);
+    let new_time = observed_time + Duration::from_secs(10);
+    std::fs::write(&path, original).unwrap();
+    let apex: Name = "example.org.".parse().unwrap();
+    let loaded = Loaded {
+        apex: apex.clone(), path: path.clone(),
+        current: arc_swap::ArcSwapOption::from(Some(Arc::new(Zone::load(apex, &path).unwrap()))),
+        interval: Duration::from_secs(1), negative_interval: false, by_mtime: true,
+        modified: Mutex::new(Some(old_time)), reload_gate: Mutex::new(()),
+    };
+    std::fs::File::open(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(observed_time)).unwrap();
+    std::fs::write(&replacement, original.replace(" 1 7200", " 2 7200")).unwrap();
+    std::fs::File::open(&replacement).unwrap().set_times(std::fs::FileTimes::new().set_modified(new_time)).unwrap();
+    assert!(loaded.reload_with_open(|path| {
+        std::fs::rename(&replacement, path)?;
+        std::fs::File::open(path)
+    }));
+    assert_eq!(loaded.current.load().as_ref().unwrap().serial(), Some(2));
+    assert_eq!(*loaded.modified.lock().unwrap(), Some(observed_time));
+    assert!(loaded.reload());
+    assert_eq!(*loaded.modified.lock().unwrap(), Some(new_time));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn reload_gate_prevents_overlapping_blocking_reload_generations() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-concurrent-reload.zone");
@@ -407,9 +437,15 @@ fn parse_opened_file_keeps_its_version_after_path_replacement() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-opened-replacement.zone");
     let original = include_str!("../../tests/fixtures/file/example.zone");
     std::fs::write(&path, original).unwrap();
+    let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let new_time = old_time + Duration::from_secs(10);
+    std::fs::File::open(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(old_time)).unwrap();
     let opened = std::fs::File::open(&path).unwrap();
     std::fs::write(&replacement, original.replace(" 1 7200", " 2 7200")).unwrap();
+    std::fs::File::open(&replacement).unwrap().set_times(std::fs::FileTimes::new().set_modified(new_time)).unwrap();
     std::fs::rename(&replacement, &path).unwrap();
+    assert_eq!(opened.metadata().unwrap().modified().unwrap(), old_time);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), new_time);
     let zone = Zone::load_opened("example.org.".parse().unwrap(), &path, opened).unwrap();
     assert_eq!(zone.serial(), Some(1));
     assert_eq!(
