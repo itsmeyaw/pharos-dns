@@ -46,7 +46,12 @@ pub(super) fn write_float(output: &mut impl Write, value: f64) -> fmt::Result {
     write!(output, "{value}")
 }
 
-pub(super) fn write_g(output: &mut impl Write, value: f64, precision: usize) -> fmt::Result {
+pub(super) fn write_g(
+    output: &mut impl Write,
+    value: f64,
+    precision: usize,
+    alternate: bool,
+) -> fmt::Result {
     if !value.is_finite() {
         return write_float(output, value);
     }
@@ -61,10 +66,19 @@ pub(super) fn write_g(output: &mut impl Write, value: f64, precision: usize) -> 
     let (mantissa, exponent) = text.split_once('e').ok_or(fmt::Error)?;
     let exponent: i32 = exponent.parse().map_err(|_| fmt::Error)?;
     if exponent < -4 || exponent >= precision as i32 {
-        let mantissa = trim_fraction(mantissa);
+        let mantissa = if alternate {
+            mantissa
+        } else {
+            trim_fraction(mantissa)
+        };
+        if alternate && !mantissa.contains('.') {
+            write!(output, "{mantissa}.")?;
+        } else {
+            output.write_str(mantissa)?;
+        }
         return write!(
             output,
-            "{mantissa}e{}{abs:02}",
+            "e{}{abs:02}",
             if exponent < 0 { '-' } else { '+' },
             abs = exponent.unsigned_abs()
         );
@@ -73,7 +87,12 @@ pub(super) fn write_g(output: &mut impl Write, value: f64, precision: usize) -> 
     buffer.len = 0;
     write!(buffer, "{value:.places$}")?;
     let text = std::str::from_utf8(&buffer.bytes[..buffer.len]).map_err(|_| fmt::Error)?;
-    output.write_str(trim_fraction(text))
+    let text = if alternate { text } else { trim_fraction(text) };
+    output.write_str(text)?;
+    if alternate && !text.contains('.') {
+        output.write_char('.')?;
+    }
+    Ok(())
 }
 
 fn trim_fraction(value: &str) -> &str {

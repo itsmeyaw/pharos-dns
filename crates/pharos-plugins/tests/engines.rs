@@ -771,6 +771,17 @@ fn printf_g_precision_uses_go_significant_digit_rules() {
 }
 
 #[test]
+fn printf_alternate_g_retains_decimal_point_and_zeros() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile(r#"{{ printf "%#g|%#.3g|%#.0g" 1.2 12000.0 4.0 }}"#).unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "1.20000|1.20e+04|4.");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];
