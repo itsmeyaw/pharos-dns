@@ -145,6 +145,12 @@ mod log {
 }
 
 #[path = "allocations"]
+mod gotemplate {
+    #[path = "gotemplate_allocations.rs"]
+    mod gotemplate_allocations;
+}
+
+#[path = "allocations"]
 mod minimal {
     #[path = "minimal_allocations.rs"]
     mod minimal_allocations;
