@@ -83,9 +83,7 @@ async fn query_chain(chain: &Chain, domain: &Name, name: &str, kind: Type) -> (O
 }
 
 fn zone(origin: &str, text: &str) -> Result<Zone, String> {
-    let origin: Name = origin
-        .parse()
-        .map_err(|error: pharos_proto::NameError| error.to_string())?;
+    let origin = Name::parse(origin, &".".parse().unwrap()).map_err(|error| error.to_string())?;
     let records = ZoneParser::new(text.as_bytes(), origin.clone(), "db.test")
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
@@ -146,6 +144,7 @@ fn coredns_soa_owner_origin_cases() {
         ("example.org.", "", "example.org.", true),
         ("example.org.", "", "ExAmPlE.OrG.", true),
         ("ExAmPlE.OrG.", "", "example.org.", true),
+        ("example.org", "", "@", true),
         ("example.org.", "$ORIGIN org.\n", "example", true),
         ("example.org.", "", r"\101xample.org.", true),
         (r"has\.dot.example.", "", r"has\046dot.example.", true),
@@ -162,6 +161,19 @@ fn coredns_soa_owner_origin_cases() {
         );
         assert_eq!(zone(origin, &input).is_ok(), valid, "{origin} {owner}");
     }
+}
+
+// Derived from CoreDNS file_test.go TestParseSOAOrigin with an unchanged serial.
+#[test]
+fn coredns_rejects_wrong_soa_owner_before_unchanged_serial() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../target/file-p75-soa-order-{}.zone", std::process::id()));
+    std::fs::write(&path, "$ORIGIN example.org.\n@ 60 IN SOA ns.example.org. hostmaster.example.org. 0 2 3 4 5\n").unwrap();
+    let config = format!(".:53 {{\n file {}\n}}", path.display());
+    let blocks = parse("Corefile", &config).unwrap();
+    let error = configure::<Chain>(&blocks, directives()).unwrap_err();
+    assert!(error.message.contains("SOA owner"), "{error}");
+    std::fs::remove_file(path).unwrap();
 }
 
 // Derived from CoreDNS include_test.go TestInclude.
