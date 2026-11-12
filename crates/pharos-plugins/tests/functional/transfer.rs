@@ -2,7 +2,10 @@
 #![cfg(feature = "plugin-transfer")]
 
 use pharos_corefile::{configure, parse};
-use pharos_plugins::{Chain, directives, transfer::Transferer};
+use pharos_plugins::{
+    Chain, directives,
+    transfer::{TransferRequest, Transferer},
+};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type};
 use pharos_server::{Context, Metadata, Next, Outcome, Protocol, Stream, Transport};
 
@@ -10,14 +13,7 @@ struct Provider;
 impl Transferer for Provider {
     fn bind_transfer(&self, _: Option<&pharos_plugins::transfer::Transfer>) {}
 
-    fn transfer(
-        &self,
-        _: Name,
-        _: u32,
-        _: u16,
-        _: Type,
-        _: Class,
-    ) -> Result<Option<Stream>, pharos_server::Error> {
+    fn transfer(&self, _: TransferRequest<'_>) -> Result<Option<Stream>, pharos_server::Error> {
         Ok(Some(Stream::new(|_| Ok(false))))
     }
 }
@@ -204,13 +200,10 @@ async fn ixfr_passes_requested_serial_and_rejects_missing_soa() {
 
         fn transfer(
             &self,
-            _: Name,
-            serial: u32,
-            _: u16,
-            _: Type,
-            _: Class,
+            request: TransferRequest<'_>,
         ) -> Result<Option<Stream>, pharos_server::Error> {
-            self.0.store(serial, std::sync::atomic::Ordering::Relaxed);
+            self.0
+                .store(request.serial, std::sync::atomic::Ordering::Relaxed);
             Ok(Some(Stream::new(|_| Ok(false))))
         }
     }

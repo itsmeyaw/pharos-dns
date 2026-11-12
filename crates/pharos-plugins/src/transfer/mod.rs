@@ -15,12 +15,19 @@ pub trait Transferer {
     /// Return None if this Plugin is not authoritative for the requested Zone.
     fn transfer(
         &self,
-        zone: Name,
-        serial: u32,
-        id: u16,
-        qtype: Type,
-        qclass: Class,
+        request: TransferRequest<'_>,
     ) -> Result<Option<pharos_server::Stream>, pharos_server::Error>;
+}
+
+/// Query metadata needed to generate a transfer stream.
+pub struct TransferRequest<'a> {
+    pub zone: NameRef<'a>,
+    pub serial: u32,
+    pub id: u16,
+    pub flags: u16,
+    pub protocol: Protocol,
+    pub qtype: Type,
+    pub qclass: Class,
 }
 
 #[derive(Clone, Debug)]
@@ -227,13 +234,15 @@ impl Transfer {
         let Some(provider) = provider else {
             return next.run(cx).await;
         };
-        match provider.transfer(
-            question.name.to_name(),
+        match provider.transfer(TransferRequest {
+            zone: question.name,
             serial,
-            cx.query.id(),
-            question.qtype,
-            question.qclass,
-        ) {
+            id: cx.query.id(),
+            flags: cx.query.flags(),
+            protocol: cx.protocol,
+            qtype: question.qtype,
+            qclass: question.qclass,
+        }) {
             Ok(Some(stream)) => Outcome::Stream(stream),
             Ok(None) => next.run(cx).await,
             Err(error) => Outcome::Error(error),
@@ -294,11 +303,7 @@ impl Transferer for NoTransferer {
 
     fn transfer(
         &self,
-        _: Name,
-        _: u32,
-        _: u16,
-        _: Type,
-        _: Class,
+        _: TransferRequest<'_>,
     ) -> Result<Option<pharos_server::Stream>, pharos_server::Error> {
         Ok(None)
     }

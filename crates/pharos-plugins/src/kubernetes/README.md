@@ -30,6 +30,11 @@
 - Shared with CoreDNS v1.15.0: `dns-version` in a multicluster zone returns `1.1.0`; the multicluster DNS specification 1.0.0 (KEP-1645) says `1.0.0`.
 - Shared with CoreDNS v1.15.0: a ServiceImport without ports gets NXDOMAIN for A/AAAA, and a ServiceImport port without a protocol never matches `_tcp`; the MCS API defaults the protocol to TCP only in its documentation.
 - Shared with CoreDNS v1.15.0: ANY queries get NODATA, even at the zone (RFC 8482 §4 recommends at least one RRset).
+- Shared with CoreDNS v1.15.0: the SOA serial uses the last change's Unix time in seconds. A Secondary Server can miss a second change within the same second, even after NOTIFY.
+- Shared with CoreDNS v1.15.0: a multicluster Zone Transfer uses the internal SOA serial, which can differ from a multicluster SOA Query.
+- Shared with CoreDNS v1.15.0: some DNS-visible changes, including Service IP and endpoint Pod-name changes, do not change the SOA serial; a Secondary Server may skip an update even after NOTIFY.
+- Zone Transfers allocate a single encoded snapshot plus the shared Stream producer, not per record.
+- Zone Transfers enumerate Services and ServiceImports in store order instead of CoreDNS's name order; record order has no DNS meaning.
 
 ## Sources
 

@@ -147,6 +147,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("shed", include_str!("shed/README.md")),
     ("timeouts", include_str!("timeouts/README.md")),
     ("tsig", include_str!("tsig/README.md")),
+    ("transfer", include_str!("transfer/README.md")),
     ("whoami", include_str!("whoami/README.md")),
 ];
 
@@ -264,6 +265,10 @@ pub fn servers_with_registry(
         #[cfg(feature = "plugin-kubernetes")]
         if let Some(kubernetes) = &block.config.kubernetes {
             kubernetes.set_metrics(&metrics);
+        }
+        #[cfg(all(feature = "plugin-kubernetes", feature = "plugin-transfer"))]
+        if let Some(kubernetes) = &block.config.kubernetes {
+            transfer::Transferer::bind_transfer(kubernetes, block.config.transfer.as_ref());
         }
         #[cfg(feature = "plugin-health")]
         if let Some(health) = &block.config.health
