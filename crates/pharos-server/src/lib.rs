@@ -842,11 +842,16 @@ impl Listener {
     }
 
     /// Stop accepting Queries and drain for at most five seconds.
-    pub async fn shutdown(mut self) -> io::Result<()> {
+    pub async fn shutdown(self) -> io::Result<()> {
+        self.shutdown_with_status().await.map(|_| ())
+    }
+
+    async fn shutdown_with_status(mut self) -> io::Result<bool> {
         self.stop.send_replace(true);
         self.udp_stop.send_replace(true);
         self.tasks.append(&mut self.udp_tasks);
         let mut result = Ok(());
+        let mut timed_out = false;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while let Some(mut task) = self.tasks.pop() {
             match tokio::time::timeout_at(deadline, &mut task).await {
@@ -857,6 +862,7 @@ impl Listener {
                     }
                 }
                 Err(_) => {
+                    timed_out = true;
                     task.abort();
                     for task in &self.tasks {
                         task.abort();
@@ -869,7 +875,7 @@ impl Listener {
                 }
             }
         }
-        result
+        result.map(|()| timed_out)
     }
 }
 
@@ -1177,6 +1183,13 @@ pub struct ListenerRegistry {
     handlers: HashMap<ListenerKey, Box<dyn Any + Send + Sync>>,
 }
 
+/// A replaced Handler and any removed Listener still being stopped.
+pub struct RetiredHandler<H> {
+    pub key: ListenerKey,
+    pub handler: Arc<H>,
+    pub shutdown: Option<JoinHandle<io::Result<bool>>>,
+}
+
 impl ListenerRegistry {
     pub fn insert(&mut self, key: ListenerKey, listener: Listener) -> Option<Listener> {
         self.handlers.remove(&key);
@@ -1210,19 +1223,21 @@ impl ListenerRegistry {
         &mut self,
         servers: HashMap<ListenerKey, H>,
     ) -> io::Result<Vec<Arc<H>>> {
-        Ok(self
-            .apply_with_keys(servers)
-            .await?
-            .into_iter()
-            .map(|(_, handler)| handler)
-            .collect())
+        let mut handlers = Vec::new();
+        for retired in self.apply_with_keys(servers).await? {
+            if let Some(shutdown) = retired.shutdown {
+                let _ = shutdown.await;
+            }
+            handlers.push(retired.handler);
+        }
+        Ok(handlers)
     }
 
     /// Bind new Listeners and retain each retired handler's Listener address.
     pub async fn apply_with_keys<H: Handler>(
         &mut self,
         mut servers: HashMap<ListenerKey, H>,
-    ) -> io::Result<Vec<(ListenerKey, Arc<H>)>> {
+    ) -> io::Result<Vec<RetiredHandler<H>>> {
         let desired: HashSet<_> = servers.keys().copied().collect();
         if desired.iter().any(|key| key.transport != Transport::Dns) {
             return Err(io::Error::new(
@@ -1297,16 +1312,17 @@ impl ListenerRegistry {
         }
         let mut retired = Vec::new();
         for (key, server) in servers {
-            retired.push((
-                ListenerKey {
+            retired.push(RetiredHandler {
+                key: ListenerKey {
                     address: self.listeners[&key].local_addr(),
                     ..key
                 },
-                self.handlers[&key]
+                handler: self.handlers[&key]
                     .downcast_ref::<Arc<ArcSwap<H>>>()
                     .expect("validated handler")
                     .swap(Arc::new(server)),
-            ));
+                shutdown: None,
+            });
         }
         for (key, sockets) in replacements {
             let handler = self.handlers[&key]
@@ -1345,23 +1361,43 @@ impl ListenerRegistry {
             self.handlers.insert(key, Box::new(handler));
         }
         for key in removed {
+            let mut retired_index = None;
             if let Some(handler) = self
                 .handlers
                 .get(&key)
                 .and_then(|handler| handler.downcast_ref::<Arc<ArcSwap<H>>>())
             {
-                retired.push((
-                    ListenerKey {
+                retired_index = Some(retired.len());
+                retired.push(RetiredHandler {
+                    key: ListenerKey {
                         address: self.listeners[&key].local_addr(),
                         ..key
                     },
-                    handler.load_full(),
-                ));
+                    handler: handler.load_full(),
+                    shutdown: None,
+                });
             }
-            if let Some(listener) = self.remove(&key)
-                && let Err(error) = listener.shutdown().await
-            {
-                logging::log("ERROR", "", &format!("Listener shutdown: {error}"));
+            if let Some(listener) = self.remove(&key) {
+                let address = listener.local_addr();
+                let task = tokio::spawn(async move {
+                    let result = listener.shutdown_with_status().await;
+                    if matches!(result, Ok(true)) {
+                        logging::log(
+                            "ERROR",
+                            "",
+                            &format!("Stopping {address}: context deadline exceeded"),
+                        );
+                    }
+                    if let Err(error) = &result {
+                        logging::log("ERROR", "", &format!("Listener shutdown: {error}"));
+                    }
+                    result
+                });
+                if let Some(index) = retired_index {
+                    retired[index].shutdown = Some(task);
+                } else {
+                    let _ = task.await;
+                }
             }
         }
         Ok(retired)

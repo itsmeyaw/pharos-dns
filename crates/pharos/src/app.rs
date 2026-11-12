@@ -306,23 +306,26 @@ enum StopSignal {
 }
 
 async fn drain_retired<T>(
-    retired: &[(pharos_server::ListenerKey, Arc<T>)],
+    retired: &[pharos_server::RetiredHandler<T>],
     grace: Duration,
     stop: impl Future<Output = StopSignal>,
 ) -> Option<StopSignal> {
     let deadline = tokio::time::Instant::now() + grace;
     tokio::pin!(stop);
-    while retired
-        .iter()
-        .any(|(_, state)| Arc::strong_count(state) > 1)
-    {
+    while retired.iter().any(|entry| {
+        Arc::strong_count(&entry.handler) > 1
+            || entry
+                .shutdown
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+    }) {
         tokio::select! {
             signal = &mut stop => return Some(signal),
             _ = tokio::time::sleep_until(deadline) => {
                 // CoreDNS caddy Instance.Stop logs each server whose graceful stop times out.
-                for (key, state) in retired {
-                    if Arc::strong_count(state) > 1 {
-                        logging::log("ERROR", "", &format!("Stopping {}: context deadline exceeded", key.address));
+                for entry in retired {
+                    if entry.shutdown.is_none() && Arc::strong_count(&entry.handler) > 1 {
+                        logging::log("ERROR", "", &format!("Stopping {}: context deadline exceeded", entry.key.address));
                     }
                 }
                 break;
@@ -537,7 +540,11 @@ mod tests {
             address: "127.0.0.1:53".parse().unwrap(),
         };
         let handler = Arc::new(());
-        let retired = vec![(key, Arc::clone(&handler))];
+        let retired = vec![pharos_server::RetiredHandler {
+            key,
+            handler: Arc::clone(&handler),
+            shutdown: None,
+        }];
         let result =
             super::drain_retired(&retired, Duration::from_millis(10), std::future::pending()).await;
         assert_eq!(result, None);
