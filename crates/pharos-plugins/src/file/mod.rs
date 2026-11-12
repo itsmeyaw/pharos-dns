@@ -78,14 +78,23 @@ impl Zone {
     ) -> Result<Self, String> {
         let mut parser = ZoneParser::new(reader, apex.clone(), path.to_string_lossy());
         parser.set_include_allowed(true);
-        let records = parser
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        if let Some(previous) = previous
-            && let Some(soa) = records.iter().find(|record| record.rtype == Type::SOA)
-            && soa_serial(soa) == Some(previous)
-        {
-            return Err("no change in SOA serial".into());
+        let mut records = Vec::new();
+        let mut seen_soa = false;
+        for record in parser {
+            let record = record.map_err(|error| error.to_string())?;
+            if record.rtype == Type::SOA {
+                if record.owner != apex {
+                    return Err("SOA owner does not match Zone apex".into());
+                }
+                if !seen_soa && previous.is_some_and(|serial| soa_serial(&record) == Some(serial)) {
+                    return Err("no change in SOA serial".into());
+                }
+                seen_soa = true;
+            }
+            if matches!(record.rtype, Type::NSEC3 | Type::NSEC3PARAM) {
+                return Err("NSEC3 zone is not supported".into());
+            }
+            records.push(record);
         }
         Self::from_records(apex, records)
     }

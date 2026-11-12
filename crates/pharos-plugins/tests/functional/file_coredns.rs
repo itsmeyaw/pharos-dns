@@ -166,9 +166,15 @@ fn coredns_soa_owner_origin_cases() {
 // Derived from CoreDNS file_test.go TestParseSOAOrigin with an unchanged serial.
 #[test]
 fn coredns_rejects_wrong_soa_owner_before_unchanged_serial() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../target/file-p75-soa-order-{}.zone", std::process::id()));
-    std::fs::write(&path, "$ORIGIN example.org.\n@ 60 IN SOA ns.example.org. hostmaster.example.org. 0 2 3 4 5\n").unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/file-p75-soa-order-{}.zone",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        "$ORIGIN example.org.\n@ 60 IN SOA ns.example.org. hostmaster.example.org. 0 2 3 4 5\n",
+    )
+    .unwrap();
     let config = format!(".:53 {{\n file {}\n}}", path.display());
     let blocks = parse("Corefile", &config).unwrap();
     let error = configure::<Chain>(&blocks, directives()).unwrap_err();
