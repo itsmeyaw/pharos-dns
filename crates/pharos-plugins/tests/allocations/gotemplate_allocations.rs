@@ -5,6 +5,28 @@ use pharos_server::Metadata;
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region};
 
 #[test]
+fn nested_range_budget_does_not_allocate() {
+    if crate::run_isolated(
+        "gotemplate::gotemplate_allocations::nested_range_budget_does_not_allocate",
+    ) {
+        return;
+    }
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["a", "b"];
+    let template =
+        Template::compile("{{ range .Match }}{{ range 65535 }}{{ end }}{{ end }}").unwrap();
+    let mut output = String::new();
+    let mut scratch = [0; 128];
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    let result = template.render_with_scratch(&data, &mut output, &mut scratch);
+    let stats = region.change();
+    assert!(result.is_err());
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+}
+
+#[test]
 fn renders_fields_and_numbers_without_allocating() {
     if crate::run_isolated(
         "gotemplate::gotemplate_allocations::renders_fields_and_numbers_without_allocating",

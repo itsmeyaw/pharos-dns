@@ -31,7 +31,8 @@ Templates are compiled at setup and rendered into a caller-provided `String`.
 - Other Message sections and the complete Message string representation are
   not implemented. Go function values not produced by the expression engine
   cannot be supplied to `call`.
-- Integer ranges above 65,535 iterations fail at render time; CoreDNS's Go
+- All ranges share a budget of 65,535 iterations per render, including nested
+  and sequential ranges; exceeding it returns a render error. CoreDNS's Go
   `text/template` does not impose this cap.
 - `printf` is a subset of Go's `fmt`: other verbs and some
   formatting flags are unsupported or produce format diagnostics. Floating

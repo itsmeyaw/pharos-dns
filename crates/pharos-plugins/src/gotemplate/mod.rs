@@ -11,6 +11,7 @@ mod pipeline;
 mod quote;
 
 const MAX_NESTING: usize = 8;
+const MAX_RANGE_ITERATIONS: usize = 65_535;
 
 /// Borrowed template values for a Query.
 pub struct Data<'a, 'm> {
@@ -161,7 +162,24 @@ impl Template {
         output: &mut String,
         scratch: &mut [u8],
     ) -> fmt::Result {
-        render_parts(&self.parts, data, Dot::Root, output, scratch)
+        let mut state = RenderState {
+            scratch,
+            remaining: MAX_RANGE_ITERATIONS,
+        };
+        render_parts(&self.parts, data, Dot::Root, output, &mut state)
+    }
+}
+
+struct RenderState<'a> {
+    scratch: &'a mut [u8],
+    remaining: usize,
+}
+
+impl RenderState<'_> {
+    fn iterate(&mut self) -> fmt::Result {
+        // Go text/template §Actions: Pharos bounds total range iterations per render (#51).
+        self.remaining = self.remaining.checked_sub(1).ok_or(fmt::Error)?;
+        Ok(())
     }
 }
 
@@ -314,14 +332,14 @@ fn render_parts(
     data: &Data<'_, '_>,
     dot: Dot<'_>,
     output: &mut String,
-    scratch: &mut [u8],
+    state: &mut RenderState<'_>,
 ) -> fmt::Result {
     for part in parts {
         match part {
             Part::Text(text) => output.write_str(text)?,
             Part::Field(field) => write_field(field, data, dot, output)?,
             Part::If(condition, yes, no) => render_parts(
-                if condition.truthy(data, dot, scratch)? {
+                if condition.truthy(data, dot, state.scratch)? {
                     yes
                 } else {
                     no
@@ -329,10 +347,10 @@ fn render_parts(
                 data,
                 dot,
                 output,
-                scratch,
+                state,
             )?,
             Part::Range(pipeline, names, body, otherwise) => {
-                match pipeline.range(data, dot, scratch)? {
+                match pipeline.range(data, dot, state.scratch)? {
                     pipeline::RangeValue::Empty => render_empty(
                         names,
                         pipeline::RangeValue::Empty,
@@ -340,11 +358,11 @@ fn render_parts(
                         data,
                         dot,
                         output,
-                        scratch,
+                        state,
                     )?,
                     pipeline::RangeValue::Integer(count) => {
                         // Bound Query-driven loops; Go text/template has no cap.
-                        if count > 65_535 {
+                        if count > MAX_RANGE_ITERATIONS as i64 {
                             return Err(fmt::Error);
                         }
                         if names.len() > 1 {
@@ -358,17 +376,18 @@ fn render_parts(
                                 data,
                                 dot,
                                 output,
-                                scratch,
+                                state,
                             )?;
                         }
                         for value in 0..count {
+                            state.iterate()?;
                             let nested = Dot::Range {
                                 value: Value::Int(value),
                                 key: Value::Nil,
                                 names,
                                 parent: &dot,
                             };
-                            render_parts(body, data, nested, output, scratch)?;
+                            render_parts(body, data, nested, output, state)?;
                         }
                     }
                     pipeline::RangeValue::Matches(matches) => {
@@ -380,17 +399,18 @@ fn render_parts(
                                 data,
                                 dot,
                                 output,
-                                scratch,
+                                state,
                             )?;
                         }
                         for (index, value) in matches.iter().enumerate() {
+                            state.iterate()?;
                             let nested = Dot::Range {
                                 value: Value::String(value),
                                 key: Value::Int(index as i64),
                                 names,
                                 parent: &dot,
                             };
-                            render_parts(body, data, nested, output, scratch)?;
+                            render_parts(body, data, nested, output, state)?;
                         }
                     }
                     pipeline::RangeValue::Groups(groups) => render_map(
@@ -402,7 +422,7 @@ fn render_parts(
                         (body, otherwise),
                         data,
                         dot,
-                        (output, scratch),
+                        (output, state),
                     )?,
                     pipeline::RangeValue::Variables(variables) => render_map(
                         variables.iter().map(|(key, value)| (*key, *value)),
@@ -411,7 +431,7 @@ fn render_parts(
                         (body, otherwise),
                         data,
                         dot,
-                        (output, scratch),
+                        (output, state),
                     )?,
                     pipeline::RangeValue::Questions(questions) => {
                         let mut any = false;
@@ -422,6 +442,7 @@ fn render_parts(
                             .take(questions.end - questions.start)
                             .enumerate()
                         {
+                            state.iterate()?;
                             any = true;
                             let nested = Dot::Question {
                                 value: question,
@@ -429,7 +450,7 @@ fn render_parts(
                                 names,
                                 parent: &dot,
                             };
-                            render_parts(body, data, nested, output, scratch)?;
+                            render_parts(body, data, nested, output, state)?;
                         }
                         if !any {
                             render_empty(
@@ -439,13 +460,13 @@ fn render_parts(
                                 data,
                                 dot,
                                 output,
-                                scratch,
+                                state,
                             )?;
                         }
                     }
                 }
             }
-            Part::Pipeline(pipeline) => pipeline.write(data, dot, output, scratch)?,
+            Part::Pipeline(pipeline) => pipeline.write(data, dot, output, state.scratch)?,
         }
     }
     Ok(())
@@ -458,14 +479,14 @@ fn render_empty(
     data: &Data<'_, '_>,
     dot: Dot<'_>,
     output: &mut String,
-    scratch: &mut [u8],
+    state: &mut RenderState<'_>,
 ) -> fmt::Result {
     let context = Dot::EmptyRange {
         value,
         names,
         parent: &dot,
     };
-    render_parts(body, data, context, output, scratch)
+    render_parts(body, data, context, output, state)
 }
 
 fn render_map<'a>(
@@ -475,9 +496,9 @@ fn render_map<'a>(
     branches: (&[Part], &[Part]),
     data: &Data<'_, '_>,
     dot: Dot<'_>,
-    buffers: (&mut String, &mut [u8]),
+    buffers: (&mut String, &mut RenderState<'_>),
 ) -> fmt::Result {
-    let (output, scratch) = buffers;
+    let (output, state) = buffers;
     let (body, otherwise) = branches;
     // shortcut: map iteration scans quadratically; pre-sort keys at setup if large maps are needed.
     let mut last = None;
@@ -487,6 +508,7 @@ fn render_map<'a>(
         .filter(|(key, _)| last.is_none_or(|previous| *key > previous))
         .min_by_key(|(key, _)| *key)
     {
+        state.iterate()?;
         any = true;
         let nested = Dot::Range {
             value,
@@ -494,11 +516,11 @@ fn render_map<'a>(
             names,
             parent: &dot,
         };
-        render_parts(body, data, nested, output, scratch)?;
+        render_parts(body, data, nested, output, state)?;
         last = Some(key);
     }
     if !any {
-        render_empty(names, empty_value, otherwise, data, dot, output, scratch)?;
+        render_empty(names, empty_value, otherwise, data, dot, output, state)?;
     }
     Ok(())
 }
