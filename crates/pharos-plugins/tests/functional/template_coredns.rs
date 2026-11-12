@@ -407,24 +407,6 @@ template IN A example. {
  additional "{{ index .Match 1 }}.example. 60 IN A 192.0.2.1"
 }
 
-#[tokio::test]
-async fn coredns_group_map_contains_numeric_and_unmatched_groups() {
-    let chain = chain(
-        r#"
-template IN TXT example. {
- match ^(?P<first>[a-z]+)(?:-(?P<second>[a-z]+))?[.]example[.]$
- answer "{{ .Name }} 60 IN TXT \"{{ index .Group \"0\" }}/{{ index .Group \"1\" }}/{{ .Group.first }}/{{ .Group.second }}\""
-}
-"#,
-    );
-    let (outcome, wire) = query(&chain, "first.example.", Type::TXT, Class::IN, &[]).await;
-    assert_eq!(outcome, Outcome::Response);
-    let response = Message::parse(&wire).unwrap();
-    let answer = response.answers().next().unwrap();
-    let text = b"first.example./first/first/";
-    assert_eq!(answer.rdata[0] as usize, text.len());
-    assert_eq!(&answer.rdata[1..], text);
-}
 "#,
     );
     let (outcome, wire) = query(
@@ -444,6 +426,25 @@ template IN TXT example. {
         response.additionals().next().unwrap().name.to_string(),
         "12.example."
     );
+}
+
+#[tokio::test]
+async fn coredns_group_map_contains_numeric_and_unmatched_groups() {
+    let chain = chain(
+        r#"
+template IN TXT example. {
+ match ^(?P<first>[a-z]+)(?:-(?P<second>[a-z]+))?[.]example[.]$
+ answer "{{ .Name }} 60 IN TXT \"{{ index .Group \"0\" }}/{{ index .Group \"1\" }}/{{ .Group.first }}/{{ .Group.second }}\""
+}
+"#,
+    );
+    let (outcome, wire) = query(&chain, "first.example.", Type::TXT, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    let answer = response.answers().next().unwrap();
+    let text = b"first.example./first/first/";
+    assert_eq!(answer.rdata[0] as usize, text.len());
+    assert_eq!(&answer.rdata[1..], text);
 }
 
 #[tokio::test]
