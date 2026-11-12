@@ -441,8 +441,14 @@ impl Parser<'_, '_> {
                 {
                     Kind::Bool
                 }
-                Binary::Eq | Binary::Ne | Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge
+                Binary::Eq | Binary::Ne
                     if (left.kind() == right.kind() && left.kind() != Kind::List)
+                        || (left.kind().numeric() && right.kind().numeric()) =>
+                {
+                    Kind::Bool
+                }
+                Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge
+                    if (left.kind() == Kind::String && right.kind() == Kind::String)
                         || (left.kind().numeric() && right.kind().numeric()) =>
                 {
                     Kind::Bool

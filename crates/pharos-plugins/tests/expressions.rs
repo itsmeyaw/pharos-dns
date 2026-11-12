@@ -579,3 +579,10 @@ fn query_functions_normalize_mapped_addresses_and_keep_ipv6_scope() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn typed_operators_reject_invalid_comparisons_at_startup() {
+    for source in ["true < false", "true > false", "[1] == [1]", "'x' + 2"] {
+        assert!(Expression::compile(source).is_err(), "{source}");
+    }
+}
