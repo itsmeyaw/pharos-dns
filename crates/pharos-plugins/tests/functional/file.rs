@@ -374,3 +374,25 @@ fn nsec3_and_nsec3param_fail_the_entire_zone_load() {
         assert!(error.contains("NSEC3 zone is not supported"), "{error}");
     }
 }
+
+#[tokio::test]
+async fn apex_ns_mx_and_srv_include_addresses() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone");
+    let corefile = format!("example.org:53 {{\n file {path}\n}}");
+    let configured = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    for (name, kind, authority) in [("example.org.", Type::NS, 0), ("example.org.", Type::MX, 1), ("_sip._tcp.example.org.", Type::SRV, 1)] {
+        let name: Name = name.parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+        builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN).unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None; 8];
+        let mut cx = Context { query: Message::parse(&wire).unwrap(), client: "127.0.0.1:1234".parse().unwrap(), local: "127.0.0.1:53".parse().unwrap(), transport: Transport::Dns, protocol: Protocol::Udp, domain: &name, metadata: Metadata::new(&mut slots), response: &mut response, max_response_size: 512 };
+        assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.authority_count(), authority);
+        assert_eq!(response.additional_count(), 1);
+        assert_eq!(response.additionals().next().unwrap().rtype, Type::A);
+    }
+}
