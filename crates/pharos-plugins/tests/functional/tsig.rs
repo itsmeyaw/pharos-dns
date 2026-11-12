@@ -630,6 +630,16 @@ async fn coredns_serve_dns_requirement_and_next_cases() {
         (".", "require_opcode UPDATE", 6, 5, false, true, false),
         (".", "require_opcode UPDATE", 1, 0, false, false, false),
         (".", "require_opcode NOTIFY", 6, 4, true, false, true),
+        (
+            ".",
+            "require AXFR\n require_opcode UPDATE",
+            1,
+            5,
+            true,
+            false,
+            true,
+        ),
+        (".", "require_opcode all", 1, 0, true, false, true),
         (".", "require_opcode all", 1, 0, false, true, false),
     ] {
         let source = format!(". {{\n tsig {zone} {{\n secret key. c2VjcmV0\n {require}\n }}\n}}");

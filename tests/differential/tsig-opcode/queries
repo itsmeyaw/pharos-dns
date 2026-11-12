@@ -2,3 +2,5 @@ dynamic.zone. SOA IN udp +opcode=UPDATE
 dynamic.zone. SOA IN tcp +opcode=UPDATE
 dynamic.zone. SOA IN udp +opcode=NOTIFY
 dynamic.zone. SOA IN tcp +opcode=NOTIFY
+dynamic.zone. SOA IN udp +opcode=NOTIFY +tsig=dynamic.zone.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=
+dynamic.zone. SOA IN tcp +opcode=NOTIFY +tsig=dynamic.zone.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=

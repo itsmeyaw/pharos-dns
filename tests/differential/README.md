@@ -20,7 +20,8 @@ Each scenario is a directory containing:
   The API and DNS Listeners use the same non-ephemeral port reservation helper.
 - `queries`: one Query per line, `name type class udp|tcp [flags...]`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
-  `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, and `+opcode=NAME` or a number.
+  `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, `+opcode=NAME` or a number,
+  and `+tsig=NAME:BASE64[:badkey|badsig|badtime]` (HMAC-SHA256).
 - `expect` (optional): one setting per line. `ttl N` permits a TTL difference
   of N seconds for ordinary records; default is zero. `mask
   additional.srv.port` ignores only the SRV port in Additional (whoami reports
@@ -36,9 +37,11 @@ Each scenario is a directory containing:
 
 IDs and RR order within each section are ignored; all other fields are compared.
 
-The `tsig` transfer README example is skipped until the `transfer` Plugin and
-Zone Transfer streams are available. The current differential harness sends
-unsigned Queries only; signed TSIG Responses are verified by functional tests.
+The `tsig` transfer README example is skipped until the `transfer` Plugin is
+available. Signed scenarios authenticate each Response before comparing its
+other fields; TSIG timestamps and MAC bytes are not compared between servers.
+The `tsig-forward` README example replaces its unreachable external Upstream
+with a local deterministic fixture.
 
 The `kubernetes-*` scenarios exercise the small, read-only API fixture in
 `crates/pharos-kubernetes/examples/differential.rs`, sharing the HTTP server

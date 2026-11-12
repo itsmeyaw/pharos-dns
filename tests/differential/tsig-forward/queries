@@ -1,2 +1,4 @@
 auth.zone. A IN udp
 auth.zone. AAAA IN tcp
+auth.zone. A IN udp +tsig=auth.zone.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=
+auth.zone. A IN tcp +tsig=auth.zone.key.:NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=

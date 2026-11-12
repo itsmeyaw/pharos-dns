@@ -197,6 +197,8 @@ impl Query {
         if record.error != expected
             || record.owner != request.owner
             || record.algorithm != request.algorithm
+            || record.original_id != request.original_id
+            || record.fudge != request.fudge
         {
             return Err(format!(
                 "unexpected TSIG response fields: error {} expected {expected}",
@@ -213,9 +215,26 @@ impl Query {
             {
                 return Err("unexpected TSIG other data".into());
             }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs();
+            let checked_time = if expected == 18 {
+                if record.time_signed != request.time_signed {
+                    return Err("BADTIME did not echo Query time".into());
+                }
+                let mut server_time = [0; 8];
+                server_time[2..].copy_from_slice(record.other);
+                if now.abs_diff(u64::from_be_bytes(server_time)) > 300 {
+                    return Err("BADTIME server time is outside fudge".into());
+                }
+                request.time_signed
+            } else {
+                now
+            };
             let key = TsigKey::new(name.clone(), TsigAlgorithm::Sha256, secret);
             // RFC 8945 §4.3.1: verify the Response against the Query MAC.
-            key.verify(response, record.time_signed, Some(request.mac), 0)
+            key.verify(response, checked_time, Some(request.mac), 0)
                 .map_err(|e| format!("invalid response signature: {e}"))?;
         }
         Ok(true)

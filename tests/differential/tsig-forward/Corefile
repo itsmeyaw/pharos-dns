@@ -3,5 +3,12 @@ auth.zone:{port} {
         secret auth.zone.key. NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=
         require all
     }
-    forward . 10.1.0.2
+    forward . 127.0.0.1:{port2}
+}
+.:{port2} {
+    hosts empty.hosts {
+        192.0.2.30 auth.zone
+        fallthrough
+    }
+    whoami
 }
