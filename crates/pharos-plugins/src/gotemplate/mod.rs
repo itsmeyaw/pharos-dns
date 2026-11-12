@@ -118,20 +118,69 @@ fn render_parts(
                 output,
             )?,
             Part::Range(field, body, otherwise) => {
-                let is_matches = matches!(field, Field::Matches) && matches!(dot, Dot::Root)
-                    || matches!(field, Field::Root(inner) if matches!(inner.as_ref(), Field::Matches));
-                if !is_matches {
-                    return Err(fmt::Error);
-                }
-                if data.matches.is_empty() {
-                    render_parts(otherwise, data, dot, output)?;
-                }
-                for value in data.matches {
-                    render_parts(body, data, Dot::Value(Value::String(value)), output)?;
+                let field = match field {
+                    Field::Root(field) => field.as_ref(),
+                    field if matches!(dot, Dot::Root) => field,
+                    _ => return Err(fmt::Error),
+                };
+                match field {
+                    Field::Matches => {
+                        if data.matches.is_empty() {
+                            render_parts(otherwise, data, dot, output)?;
+                        }
+                        for value in data.matches {
+                            render_parts(body, data, Dot::Value(Value::String(value)), output)?;
+                        }
+                    }
+                    Field::Groups => render_map(
+                        data.groups
+                            .iter()
+                            .map(|(key, value)| (*key, Value::String(value))),
+                        body,
+                        otherwise,
+                        data,
+                        dot,
+                        output,
+                    )?,
+                    Field::Variables => render_map(
+                        data.variables.iter().map(|(key, value)| (*key, *value)),
+                        body,
+                        otherwise,
+                        data,
+                        dot,
+                        output,
+                    )?,
+                    _ => return Err(fmt::Error),
                 }
             }
             Part::Pipeline(pipeline) => pipeline.write(data, dot, output)?,
         }
+    }
+    Ok(())
+}
+
+fn render_map<'a>(
+    entries: impl Iterator<Item = (&'a str, Value<'a>)> + Clone,
+    body: &[Part],
+    otherwise: &[Part],
+    data: &Data<'_, '_>,
+    dot: Dot<'_>,
+    output: &mut String,
+) -> fmt::Result {
+    // shortcut: map iteration scans quadratically; pre-sort keys at setup if large maps are needed.
+    let mut last = None;
+    let mut any = false;
+    while let Some((key, value)) = entries
+        .clone()
+        .filter(|(key, _)| last.is_none_or(|previous| *key > previous))
+        .min_by_key(|(key, _)| *key)
+    {
+        any = true;
+        render_parts(body, data, Dot::Value(value), output)?;
+        last = Some(key);
+    }
+    if !any {
+        render_parts(otherwise, data, dot, output)?;
     }
     Ok(())
 }

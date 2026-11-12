@@ -244,3 +244,19 @@ fn coredns_accepts_unknown_fields_until_execution() {
     let template = Template::compile("{{ .Name }} A {{ .Grup.d }}").unwrap();
     assert!(template.render(&data, &mut String::new()).is_err());
 }
+
+#[test]
+fn range_visits_group_and_variable_maps_in_go_key_order() {
+    use pharos_plugins::expression::Value;
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.groups = &[("z", "last"), ("a", "first")];
+    data.variables = &[("z", Value::Int(2)), ("a", Value::Int(1))];
+    let template =
+        Template::compile("{{ range .Group }}[{{ . }}]{{ end }}|{{ range .Var }}{{ . }}{{ end }}")
+            .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "[first][last]|12");
+}
