@@ -768,7 +768,10 @@ impl Zone {
         if dname.is_some() {
             cut = zone.cut(target, question.qtype);
         }
-        if cut.is_none() && question.qtype != Type::CNAME {
+        if cut.is_none()
+            && question.qtype != Type::CNAME
+            && !(dname.is_some() && question.qtype == Type::NS)
+        {
             // RFC 1034 §3.6.2: follow a CNAME before answering the original QTYPE.
             while let Some(alias) = zone.records_at(target, Type::CNAME).next() {
                 if count == chain.len() {
@@ -782,7 +785,11 @@ impl Zone {
                 count += 1;
                 target = &alias.rdata;
                 cut = zone.cut(target, question.qtype);
-                if cut.is_some() {
+                if cut.is_some()
+                    || question.qtype == Type::NS
+                    || question.qtype == Type::SOA
+                        && target.eq_ignore_ascii_case(zone.apex.as_wire())
+                {
                     break;
                 }
             }
@@ -792,8 +799,8 @@ impl Zone {
             && !chain_limited
             && (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
             && (!zone.exact(target)
-                || target.eq_ignore_ascii_case(zone.apex.as_wire())
-                    && matches!(question.qtype, Type::NS | Type::SOA))
+                || question.qtype == Type::NS
+                || question.qtype == Type::SOA && target.eq_ignore_ascii_case(zone.apex.as_wire()))
         {
             let target = match NameRef::parse(target, 0) {
                 Ok(target) => target.to_name(),
@@ -911,6 +918,8 @@ impl Zone {
             }
             if cut.is_none()
                 && !chain_limited
+                && lookup.is_none()
+                && !lookup_failed
                 && !(dname.is_some() && question.qtype == Type::CNAME)
             {
                 let owner = if count == 0 && synthesized {
