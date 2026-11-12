@@ -75,9 +75,20 @@ impl Zone {
     }
 
     /// Build an immutable Zone from owned, uncompressed master-file records.
-    pub fn from_records(apex: Name, records: Vec<ZoneRecord>) -> Result<Self, String> {
+    pub fn from_records(apex: Name, mut records: Vec<ZoneRecord>) -> Result<Self, String> {
+        let apex: Name = apex
+            .canonical()
+            .parse()
+            .map_err(|error: pharos_proto::NameError| error.to_string())?;
         let mut soa = false;
-        for record in &records {
+        for record in &mut records {
+            if record.rtype != Type::SRV {
+                record.owner = record
+                    .owner
+                    .canonical()
+                    .parse()
+                    .map_err(|error: pharos_proto::NameError| error.to_string())?;
+            }
             if record.rtype == Type::SOA {
                 if record.owner != apex {
                     return Err("SOA owner does not match Zone apex".into());
@@ -86,6 +97,22 @@ impl Zone {
             }
             if record.rtype == Type::NSEC3 || record.rtype == Type::NSEC3PARAM {
                 return Err("NSEC3 zone is not supported".into());
+            }
+            let offset = match record.rtype {
+                Type::NS | Type::CNAME | Type::SOA => Some((0, true)),
+                Type::DNAME => Some((0, false)),
+                Type::MX | Type::SVCB | Type::HTTPS => Some((2, true)),
+                Type::SRV => Some((6, false)),
+                _ => None,
+            };
+            if let Some((offset, lowercase)) = offset {
+                let end = normalize_rdata_name(&mut record.rdata, offset, lowercase)?;
+                if record.rtype == Type::SOA {
+                    let end = normalize_rdata_name(&mut record.rdata, end, true)?;
+                    if record.rdata.len() != end + 20 {
+                        return Err("invalid SOA RDATA".into());
+                    }
+                }
             }
         }
         if !soa {
@@ -234,6 +261,34 @@ impl Zone {
             .get(end.checked_sub(1)?)
             .map(|index| &self.names[*index])?;
         self.records_at(node.name.as_wire(), Type::NSEC).next()
+    }
+}
+
+fn normalize_rdata_name(
+    data: &mut [u8],
+    mut offset: usize,
+    lowercase: bool,
+) -> Result<usize, String> {
+    let start = offset;
+    loop {
+        let len = usize::from(*data.get(offset).ok_or("invalid domain name RDATA")?);
+        if len > 63 {
+            return Err("invalid domain name RDATA".into());
+        }
+        offset += 1;
+        if offset - start > 255 {
+            return Err("invalid domain name RDATA".into());
+        }
+        if len == 0 {
+            return Ok(offset);
+        }
+        let label = data
+            .get_mut(offset..offset + len)
+            .ok_or("invalid domain name RDATA")?;
+        if lowercase {
+            label.make_ascii_lowercase();
+        }
+        offset += len;
     }
 }
 
@@ -804,6 +859,9 @@ impl Zone {
             if cut.is_none() && !(dname.is_some() && question.qtype == Type::CNAME) {
                 let owner = if count == 0 && synthesized {
                     question.name
+                } else if let Some(rr) = zone.records_at(target, question.qtype).next() {
+                    NameRef::parse(rr.owner.as_wire(), 0)
+                        .map_err(|_| pharos_server::Error::InvalidQuery)?
                 } else {
                     NameRef::parse(target, 0).map_err(|_| pharos_server::Error::InvalidQuery)?
                 };
