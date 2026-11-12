@@ -1,6 +1,8 @@
 //! Authoritative Zones loaded from master files.
 
 pub(crate) mod setup;
+#[cfg(test)]
+mod tests;
 #[cfg(feature = "plugin-transfer")]
 mod transfer;
 
