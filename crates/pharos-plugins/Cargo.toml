@@ -12,7 +12,12 @@ tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "ma
 pharos-corefile = { version = "0.1.0", path = "../pharos-corefile" }
 pharos-proto = { version = "0.1.0", path = "../pharos-proto" }
 pharos-server = { version = "0.1.0", path = "../pharos-server" }
+pharos-dnssec = { version = "0.1.0", path = "../pharos-dnssec", optional = true }
 pharos-kubernetes = { version = "0.1.0", path = "../pharos-kubernetes", optional = true }
+aws-config = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"], optional = true }
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 regex = { version = "1", optional = true }
 regex-automata = { version = "0.4", optional = true }
 arc-swap = "1"
@@ -38,6 +43,7 @@ default = [
     "plugin-cache",
     "plugin-chaos",
     "plugin-dns64",
+    "plugin-dnssec",
     "plugin-siit",
     "plugin-errors",
     "plugin-forward",
@@ -96,7 +102,8 @@ plugin-autopath = []
 plugin-acl = []
 plugin-cache = []
 plugin-header = []
-plugin-dnssec = []
+plugin-dnssec = ["dep:pharos-dnssec"]
+dnssec-aws = ["plugin-dnssec", "dep:aws-config", "dep:aws-sdk-secretsmanager", "dep:serde", "dep:serde_json"]
 plugin-tls = []
 plugin-minimal = []
 plugin-template = []
