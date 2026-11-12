@@ -84,6 +84,7 @@ pub(crate) fn setup(
             return Err(cursor.error("DNSKEY owner cannot sign any configured domain"));
         }
     }
+    // RFC 4034 §2.1: DNSKEY RDATA is flags, protocol, algorithm, then the public key.
     let public = keys
         .iter()
         .map(|key| {

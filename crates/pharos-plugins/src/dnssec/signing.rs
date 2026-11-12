@@ -191,6 +191,7 @@ impl Dnssec {
                 {
                     continue;
                 }
+                // RFC 4035 §2.2: an RRSIG RR is never signed; OPT and TSIG are not zone data.
                 if matches!(rr.rtype, Type::RRSIG | Type::OPT | Type::TSIG)
                     || records[..i]
                         .iter()
@@ -298,6 +299,7 @@ impl Dnssec {
             SignMode::Last => (first.ttl, true),
         };
         let signer = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
+        // RFC 4034 §2.1.1: the SEP bit (257) marks a KSK; the Zone Key bit alone (256) marks a ZSK.
         let has_ksk = self.keys.iter().any(|k| k.public.flags & 257 == 257);
         let has_zsk = self.keys.iter().any(|k| k.public.flags & 257 == 256);
         let canonical: Vec<_> = records
@@ -329,6 +331,7 @@ impl Dnssec {
             if last_only && !last_key.is_some_and(|last| std::ptr::eq(last, key)) {
                 continue;
             }
+            // RFC 4034 §3.1.3: a leading wildcard label is not counted in Labels.
             let labels = first.name.labels().count()
                 - usize::from(first.name.labels().next() == Some(b"*".as_slice()));
             // RFC 4034 §3.1.8: the signature covers the RRSIG prefix and canonical RRset.
