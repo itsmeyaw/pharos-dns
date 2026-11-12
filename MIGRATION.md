@@ -76,6 +76,9 @@ The following table lists metric families, not individual histogram samples.
 | `pharos_dns_requests_total` | `coredns_dns_requests_total` |
 | `pharos_dns_response_size_bytes` | `coredns_dns_response_size_bytes` |
 | `pharos_dns_responses_total` | `coredns_dns_responses_total` |
+| `pharos_dnssec_cache_entries` | `coredns_dnssec_cache_entries` |
+| `pharos_dnssec_cache_hits_total` | `coredns_dnssec_cache_hits_total` |
+| `pharos_dnssec_cache_misses_total` | `coredns_dnssec_cache_misses_total` |
 | `pharos_forward_healthcheck_broken_total` | `coredns_forward_healthcheck_broken_total` |
 | `pharos_forward_max_concurrent_rejects_total` | `coredns_forward_max_concurrent_rejects_total` |
 | `pharos_health_request_duration_seconds` | `coredns_health_request_duration_seconds` |
