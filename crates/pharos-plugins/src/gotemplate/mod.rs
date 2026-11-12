@@ -1,5 +1,6 @@
 //! Compiled Go-template expressions used by the template Plugin.
 
+use crate::expression::Value;
 use pharos_server::Metadata;
 use std::fmt::{self, Write};
 
@@ -13,6 +14,7 @@ pub struct Data<'a, 'm> {
     pub regex: &'a str,
     pub matches: &'a [&'a str],
     pub groups: &'a [(&'a str, &'a str)],
+    pub variables: &'a [(&'a str, Value<'a>)],
     pub metadata: &'a Metadata<'m>,
 }
 
@@ -29,6 +31,7 @@ impl<'a, 'm> Data<'a, 'm> {
             regex: "",
             matches: &[],
             groups: &[],
+            variables: &[],
         }
     }
 }
@@ -42,6 +45,7 @@ enum Field {
     Remote,
     Regex,
     Group(String),
+    Variable(String),
     Match(usize),
     Metadata(String),
 }
@@ -96,6 +100,17 @@ impl Template {
         for part in &self.0 {
             match part {
                 Part::Text(text) => output.write_str(text)?,
+                Part::Field(Field::Variable(name)) => match data
+                    .variables
+                    .iter()
+                    .find_map(|(key, value)| (*key == name).then_some(value))
+                {
+                    Some(Value::Nil) | None => output.write_str("<no value>")?,
+                    Some(Value::Bool(value)) => write!(output, "{value}")?,
+                    Some(Value::Int(value)) => write!(output, "{value}")?,
+                    Some(Value::Float(value)) => write!(output, "{value}")?,
+                    Some(Value::String(value)) => output.write_str(value)?,
+                },
                 Part::Field(field) => output.write_str(field.value(data)?)?,
                 Part::ParseInt(field, base, bits) => {
                     if (*base != 0 && !(2..=36).contains(base)) || *bits > 64 {
@@ -132,6 +147,11 @@ fn parse_field(action: &str) -> Result<Field, String> {
                 .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'))
             {
                 Ok(Field::Group(name.to_owned()))
+            } else if let Some(name) = action
+                .strip_prefix(".Var.")
+                .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            {
+                Ok(Field::Variable(name.to_owned()))
             } else if let Some(index) = action.strip_prefix("index .Match ") {
                 Ok(Field::Match(
                     index.trim().parse().map_err(|_| "invalid .Match index")?,
@@ -168,6 +188,15 @@ impl Field {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then_some(*value))
                 .unwrap_or("<no value>")),
+            Self::Variable(name) => match data
+                .variables
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(value))
+            {
+                Some(Value::String(value)) => Ok(value),
+                None => Ok("<no value>"),
+                _ => Err(fmt::Error),
+            },
             Self::Match(index) => data.matches.get(*index).copied().ok_or(fmt::Error),
             Self::Metadata(label) => Ok(data.metadata.get(label).unwrap_or("")),
         }
