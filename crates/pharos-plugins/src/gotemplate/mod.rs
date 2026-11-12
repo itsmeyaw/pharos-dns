@@ -1,6 +1,7 @@
 //! Compiled Go-template expressions used by the template Plugin.
 
 use crate::expression::Value;
+use pharos_proto::{Message, NameRef};
 use pharos_server::Metadata;
 use std::fmt::{self, Write};
 
@@ -18,6 +19,7 @@ pub struct Data<'a, 'm> {
     pub matches: &'a [&'a str],
     pub groups: &'a [(&'a str, &'a str)],
     pub variables: &'a [(&'a str, Value<'a>)],
+    pub message: Option<&'a Message<'a>>,
     pub metadata: &'a Metadata<'m>,
 }
 
@@ -35,6 +37,7 @@ impl<'a, 'm> Data<'a, 'm> {
             matches: &[],
             groups: &[],
             variables: &[],
+            message: None,
         }
     }
 }
@@ -47,6 +50,8 @@ enum Field {
     Groups,
     Variables,
     Unknown,
+    QuestionName,
+    QueryScalar(QueryField),
     Name,
     Zone,
     Class,
@@ -57,6 +62,15 @@ enum Field {
     Variable(String),
     Match(usize),
     Metadata(String),
+}
+
+enum QueryField {
+    Id,
+    Opcode,
+    Rcode,
+    Flag(u16),
+    QuestionType,
+    QuestionClass,
 }
 
 enum Part {
@@ -218,6 +232,12 @@ fn write_field(
 ) -> fmt::Result {
     match field {
         Field::Root(field) => write_field(field, data, Dot::Root, output),
+        Field::QuestionName if matches!(dot, Dot::Root) => {
+            write!(output, "{}", question_name(data)?)
+        }
+        Field::QueryScalar(field) if matches!(dot, Dot::Root) => {
+            write_value(Some(field.value(data)?), output)
+        }
         Field::Dot => match dot {
             Dot::Value(value) => write_value(Some(value), output),
             Dot::Root => Err(fmt::Error),
@@ -365,11 +385,36 @@ fn parse_field(action: &str) -> Result<Field, String> {
     if let Some(field) = action.strip_prefix("$.") {
         return Ok(Field::Root(Box::new(parse_field(&format!(".{field}"))?)));
     }
+    let header = action
+        .strip_prefix(".Message.MsgHdr.")
+        .or_else(|| action.strip_prefix(".Message."));
+    if let Some(header) = header {
+        let value = match header {
+            "Id" => Some(QueryField::Id),
+            "Opcode" => Some(QueryField::Opcode),
+            "Rcode" => Some(QueryField::Rcode),
+            "Response" => Some(QueryField::Flag(0x8000)),
+            "Authoritative" => Some(QueryField::Flag(0x0400)),
+            "Truncated" => Some(QueryField::Flag(0x0200)),
+            "RecursionDesired" => Some(QueryField::Flag(0x0100)),
+            "RecursionAvailable" => Some(QueryField::Flag(0x0080)),
+            "Zero" => Some(QueryField::Flag(0x0040)),
+            "AuthenticatedData" => Some(QueryField::Flag(0x0020)),
+            "CheckingDisabled" => Some(QueryField::Flag(0x0010)),
+            _ => None,
+        };
+        if let Some(value) = value {
+            return Ok(Field::QueryScalar(value));
+        }
+    }
     match action {
         "." => Ok(Field::Dot),
         ".Match" => Ok(Field::Matches),
         ".Group" => Ok(Field::Groups),
         ".Var" => Ok(Field::Variables),
+        ".Question.Name" => Ok(Field::QuestionName),
+        ".Question.Qtype" => Ok(Field::QueryScalar(QueryField::QuestionType)),
+        ".Question.Qclass" => Ok(Field::QueryScalar(QueryField::QuestionClass)),
         ".Name" => Ok(Field::Name),
         ".Zone" => Ok(Field::Zone),
         ".Class" => Ok(Field::Class),
@@ -416,6 +461,7 @@ impl Field {
     ) -> Result<Option<Value<'a>>, fmt::Error> {
         match self {
             Self::Root(field) => field.scalar(data, Dot::Root),
+            Self::QueryScalar(field) if matches!(dot, Dot::Root) => Ok(Some(field.value(data)?)),
             Self::Dot => match dot {
                 Dot::Value(value) => Ok(Some(value)),
                 Dot::Root => Err(fmt::Error),
@@ -446,6 +492,17 @@ impl Field {
             Self::Matches if matches!(dot, Dot::Root) => Ok(!data.matches.is_empty()),
             Self::Groups if matches!(dot, Dot::Root) => Ok(!data.groups.is_empty()),
             Self::Variables if matches!(dot, Dot::Root) => Ok(!data.variables.is_empty()),
+            Self::QueryScalar(field) if matches!(dot, Dot::Root) => {
+                Ok(match field.value(data)? {
+                    Value::Bool(value) => value,
+                    Value::Int(value) => value != 0,
+                    _ => return Err(fmt::Error),
+                })
+            }
+            Self::QuestionName if matches!(dot, Dot::Root) => {
+                question_name(data)?;
+                Ok(true)
+            }
             Self::Literal(_) => Ok(!self.value(data, dot)?.is_empty()),
             _ if !matches!(dot, Dot::Root) => Err(fmt::Error),
             Self::Variable(name) => Ok(
@@ -478,7 +535,12 @@ impl Field {
             },
             Self::Literal(value) => Ok(value),
             _ if !matches!(dot, Dot::Root) => Err(fmt::Error),
-            Self::Matches | Self::Groups | Self::Variables | Self::Unknown => Err(fmt::Error),
+            Self::Matches
+            | Self::Groups
+            | Self::Variables
+            | Self::Unknown
+            | Self::QuestionName
+            | Self::QueryScalar(_) => Err(fmt::Error),
             Self::Name => Ok(data.name),
             Self::Zone => Ok(data.zone),
             Self::Class => Ok(data.class),
@@ -500,8 +562,41 @@ impl Field {
                 _ => Err(fmt::Error),
             },
             Self::Match(index) => data.matches.get(*index).copied().ok_or(fmt::Error),
-            Self::Metadata(label) => Ok(data.metadata.get(label).unwrap_or("")),
+            Self::Metadata(label) => Ok(if data.metadata.enabled() {
+                data.metadata.get(label).unwrap_or("")
+            } else {
+                ""
+            }),
         }
+    }
+}
+
+fn question_name<'a>(data: &'a Data<'_, '_>) -> Result<NameRef<'a>, fmt::Error> {
+    Ok(data
+        .message
+        .ok_or(fmt::Error)?
+        .questions()
+        .next()
+        .ok_or(fmt::Error)?
+        .name)
+}
+
+impl QueryField {
+    fn value(&self, data: &Data<'_, '_>) -> Result<Value<'static>, fmt::Error> {
+        let message = data.message.ok_or(fmt::Error)?;
+        // RFC 1035 §4.1.1–4.1.2: header flags and first Question carry these values.
+        Ok(match self {
+            Self::Id => Value::Int(i64::from(message.id())),
+            Self::Opcode => Value::Int(i64::from(message.opcode().0)),
+            Self::Rcode => Value::Int(i64::from(message.rcode().0)),
+            Self::Flag(mask) => Value::Bool(message.flags() & mask != 0),
+            Self::QuestionType => Value::Int(i64::from(
+                message.questions().next().ok_or(fmt::Error)?.qtype.0,
+            )),
+            Self::QuestionClass => Value::Int(i64::from(
+                message.questions().next().ok_or(fmt::Error)?.qclass.0,
+            )),
+        })
     }
 }
 

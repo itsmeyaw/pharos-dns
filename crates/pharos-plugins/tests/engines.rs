@@ -326,3 +326,31 @@ fn js_escapes_non_printable_unicode_like_go() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "\\uE000é\\u00A0");
 }
+
+#[test]
+fn template_reads_borrowed_message_and_question_fields() {
+    let wire =
+        b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.org.", &metadata);
+    data.message = Some(&message);
+    let template = Template::compile("{{ .Message.Id }}|{{ .Message.Opcode }}|{{ .Message.RecursionDesired }}|{{ .Question.Name }}|{{ .Question.Qtype }}|{{ .Question.Qclass }}|{{ if .Message.RecursionDesired }}yes{{ end }}|{{ .Question.Name | eq \"Example.Org.\" }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "1053|0|true|Example.Org.|1|1|yes|true");
+}
+
+#[test]
+fn template_meta_hides_values_when_metadata_is_disabled() {
+    let mut slots = [None];
+    let mut metadata = Metadata::new(&mut slots);
+    assert!(metadata.insert("region", "eu"));
+    metadata.set_enabled(false);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile("{{ .Meta \"region\" }}{{ .Name }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "example.");
+}

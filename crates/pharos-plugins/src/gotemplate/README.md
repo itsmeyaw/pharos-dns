@@ -12,3 +12,6 @@ String literals that decode to non-UTF-8 bytes are rejected because the output b
 String slices must end at UTF-8 boundaries; capture slices cannot expose capacity beyond their supplied length.
 Pipeline formatting uses a 65,535-byte stack scratch buffer and at most 1,024 arguments; overflowing either bound is an error.
 `js` uses Rust regex Unicode character categories, which may differ from Go's Unicode version.
+When `Data.message` is supplied, `.Message` exposes the header fields (`Id`,
+`Opcode`, `Rcode`, and flag booleans) and `.Question` exposes `Name`, `Qtype`,
+and `Qclass`. Other Message and Question fields are not yet implemented.

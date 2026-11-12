@@ -380,6 +380,16 @@ impl Atom {
             Self::Bool(value) => Ok(ResultValue::Scalar(Some(Value::Bool(*value)))),
             Self::Nil => Ok(ResultValue::Scalar(Some(Value::Nil))),
             Self::Nested(pipeline) => pipeline.evaluate(data, dot, scratch),
+            Self::Field(Field::QuestionName) if matches!(dot, Dot::Root) => {
+                let start = scratch.len;
+                write!(scratch, "{}", super::question_name(data)?)?;
+                Ok(ResultValue::Stored(start, scratch.len))
+            }
+            Self::Field(Field::Root(field)) if matches!(field.as_ref(), Field::QuestionName) => {
+                let start = scratch.len;
+                write!(scratch, "{}", super::question_name(data)?)?;
+                Ok(ResultValue::Stored(start, scratch.len))
+            }
             Self::Field(Field::Matches) if matches!(dot, Dot::Root) => {
                 Ok(ResultValue::Matches(data.matches))
             }
