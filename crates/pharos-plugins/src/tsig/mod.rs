@@ -193,6 +193,7 @@ fn tsig_error(
         .map(|l| l.len() + 1)
         .sum::<usize>()
         + 1;
+    // RFC 8945 §5.3.2: a keyed error may carry a MAC of up to 64 octets and 6 octets of Other Data.
     let size = owner_len + algorithm_len + 26 + if key.is_some() { 70 } else { 0 };
     let flags = 0x8000 | (cx.query.flags() & 0x7910) | Rcode::NOTAUTH.0;
     let Ok(mut builder) = MessageBuilder::new(
