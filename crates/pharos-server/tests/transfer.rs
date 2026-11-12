@@ -578,15 +578,17 @@ async fn notify_sender_uses_configured_source_address() {
     .await
     .unwrap();
     responder.await.unwrap();
-    assert!(pharos_server::transfer::notify_from(
-        address,
-        Some("192.0.2.1".parse().unwrap()),
-        &"a.".parse().unwrap(),
-        42,
-        Duration::from_secs(1),
-    )
-    .await
-    .is_err());
+    assert!(
+        pharos_server::transfer::notify_from(
+            address,
+            Some("192.0.2.1".parse().unwrap()),
+            &"a.".parse().unwrap(),
+            42,
+            Duration::from_secs(1),
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[tokio::test]

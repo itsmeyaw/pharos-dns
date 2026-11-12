@@ -23,10 +23,10 @@ mod any {
 
 #[path = "functional"]
 mod transfer {
-    #[path = "transfer_setup.rs"]
-    mod setup;
     #[path = "transfer.rs"]
     mod cases;
+    #[path = "transfer_setup.rs"]
+    mod setup;
 }
 
 #[path = "functional"]
