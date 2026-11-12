@@ -683,13 +683,15 @@ fn format_values(
             argument += 1;
             match verb {
                 's' if value.is_string() => {
-                    let chars = value.text(scratch)?.chars().count();
-                    if precision.is_some() {
-                        return Err(fmt::Error);
-                    }
+                    let text = value.text(scratch)?;
+                    let end = precision
+                        .and_then(|n| text.char_indices().nth(n).map(|(index, _)| index))
+                        .unwrap_or(text.len());
+                    let chars = text[..end].chars().count();
+                    let value = value.prefix(end)?;
                     if !left {
                         for _ in chars..width {
-                            scratch.write_char(' ')?;
+                            scratch.write_char(if zero { '0' } else { ' ' })?;
                         }
                     }
                     scratch.append(value)?;
@@ -760,16 +762,24 @@ fn format_values(
                 'f' => match value {
                     ResultValue::Scalar(Some(Value::Float(v))) => {
                         let precision = precision.unwrap_or(6);
-                        if plus {
-                            write!(scratch, "{v:+width$.precision$}")?;
-                        } else {
-                            write!(scratch, "{v:width$.precision$}")?;
+                        match (plus, left, zero) {
+                            (true, true, _) => write!(scratch, "{v:<+width$.precision$}")?,
+                            (false, true, _) => write!(scratch, "{v:<width$.precision$}")?,
+                            (true, false, true) => write!(scratch, "{v:+0width$.precision$}")?,
+                            (false, false, true) => write!(scratch, "{v:0width$.precision$}")?,
+                            (true, false, false) => write!(scratch, "{v:+width$.precision$}")?,
+                            (false, false, false) => write!(scratch, "{v:width$.precision$}")?,
                         }
                     }
                     _ => return Err(fmt::Error),
                 },
                 'g' => match value {
-                    ResultValue::Scalar(Some(Value::Float(v))) => write!(scratch, "{v}")?,
+                    ResultValue::Scalar(Some(Value::Float(v))) => {
+                        if width != 0 || precision.is_some() || plus || left || zero || alternate {
+                            return Err(fmt::Error);
+                        }
+                        super::float::write_float(scratch, v)?;
+                    }
                     _ => return Err(fmt::Error),
                 },
                 't' => match value {
@@ -847,7 +857,9 @@ impl Scratch<'_> {
             ResultValue::Scalar(Some(Value::String(value))) => self.write_str(value),
             ResultValue::Scalar(Some(Value::Bool(value))) => write!(self, "{value}"),
             ResultValue::Scalar(Some(Value::Int(value))) => write!(self, "{value}"),
-            ResultValue::Scalar(Some(Value::Float(value))) => write!(self, "{value}"),
+            ResultValue::Scalar(Some(Value::Float(value))) => {
+                super::float::write_float(self, value)
+            }
             ResultValue::Scalar(None | Some(Value::Nil)) => self.write_str("<nil>"),
             ResultValue::Uint(value) => write!(self, "{value}"),
             ResultValue::Question(value) => write!(
@@ -861,6 +873,17 @@ impl Scratch<'_> {
 }
 
 impl<'a> ResultValue<'a> {
+    fn prefix(self, end: usize) -> Result<Self, fmt::Error> {
+        match self {
+            Self::Scalar(Some(Value::String(value))) => Ok(Self::Scalar(Some(Value::String(
+                value.get(..end).ok_or(fmt::Error)?,
+            )))),
+            Self::Stored(start, limit) if start + end <= limit => {
+                Ok(Self::Stored(start, start + end))
+            }
+            _ => Err(fmt::Error),
+        }
+    }
     fn truthy(self, scratch: &Scratch<'_>) -> bool {
         match self {
             Self::Scalar(None | Some(Value::Nil)) => false,

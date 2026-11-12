@@ -584,3 +584,19 @@ fn coredns_readme_expression_variables_feed_answer_template() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "example.org. 60 IN A 192.168.1.2");
 }
+
+#[test]
+fn printf_and_variable_floats_follow_go_width_and_exponents() {
+    use pharos_plugins::expression::Value;
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.variables = &[("big", Value::Float(1_000_000.0))];
+    let template = Template::compile(
+        r#"{{ printf "%05.3s|%-8.2f|%g|%g" "éclair" 3.5 1000000.0 0.00001 }}|{{ .Var.big }}"#,
+    )
+    .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "00écl|3.50    |1e+06|1e-05|1e+06");
+}

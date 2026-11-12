@@ -5,6 +5,7 @@ use pharos_proto::{Message, NameRef, Question};
 use pharos_server::Metadata;
 use std::fmt::{self, Write};
 
+mod float;
 mod pipeline;
 mod quote;
 
@@ -473,7 +474,7 @@ fn write_value(value: Option<Value<'_>>, output: &mut String) -> fmt::Result {
         Some(Value::Nil) | None => output.write_str("<no value>"),
         Some(Value::Bool(value)) => write!(output, "{value}"),
         Some(Value::Int(value)) => write!(output, "{value}"),
-        Some(Value::Float(value)) => write!(output, "{value}"),
+        Some(Value::Float(value)) => float::write_float(output, value),
         Some(Value::String(value)) => output.write_str(value),
         Some(Value::Function(_)) => Err(fmt::Error),
     }
