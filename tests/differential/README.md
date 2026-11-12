@@ -38,6 +38,8 @@ Each scenario is a directory containing:
   all other fields and record counts are compared.
 - Any other files or subdirectories are copied into separate temporary working
   directories for both processes, preserving relative paths.
+- `wait-zone` (optional): a Query whose positive answer indicates that an
+  asynchronously transferred secondary Zone is ready for comparisons.
 
 IDs and RR order within each section are ignored; all other fields are compared.
 Unsigned TCP AXFR comparisons collect the complete stream through its closing

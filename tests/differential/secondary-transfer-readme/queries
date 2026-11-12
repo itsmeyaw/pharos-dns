@@ -1,0 +1,3 @@
+www.example.org. A IN udp
+example.org. AXFR IN tcp
+example.org. IXFR IN tcp +ixfr=2017042745

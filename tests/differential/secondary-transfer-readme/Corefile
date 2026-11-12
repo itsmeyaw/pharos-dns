@@ -1,0 +1,14 @@
+example.org:{port} {
+    secondary {
+        transfer from 127.0.0.1:{port2}
+    }
+    transfer {
+        to *
+    }
+}
+example.org:{port2} {
+    file db.example.org
+    transfer {
+        to *
+    }
+}

@@ -1,0 +1,6 @@
+$ORIGIN catalog.example.
+@ 60 IN SOA invalid. hostmaster.invalid. 1 3600 600 604800 60
+@ 60 IN NS invalid.
+version 60 IN TXT "2"
+a.zones 60 IN PTR example.org.
+group.a.zones 60 IN TXT "default"
