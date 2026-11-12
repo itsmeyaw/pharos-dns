@@ -455,6 +455,25 @@ impl Zone {
         next: N,
         fallthrough: &[Name],
     ) -> Outcome {
+        self.lookup_inner(cx, next, fallthrough, true).await
+    }
+
+    #[cfg(feature = "plugin-auto")]
+    pub(crate) async fn lookup_auto<N: Next + Send>(
+        &self,
+        cx: &mut Context<'_, '_>,
+        next: N,
+    ) -> Outcome {
+        self.lookup_inner(cx, next, &[], false).await
+    }
+
+    async fn lookup_inner<N: Next + Send>(
+        &self,
+        cx: &mut Context<'_, '_>,
+        next: N,
+        fallthrough: &[Name],
+        drop_notify: bool,
+    ) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
@@ -475,7 +494,7 @@ impl Zone {
             return Outcome::Unanswered(Rcode::REFUSED);
         }
         // RFC 1996 §3.10: a server ignores NOTIFY from a host that is not a known master.
-        if cx.query.opcode() == pharos_proto::Opcode::NOTIFY {
+        if drop_notify && cx.query.opcode() == pharos_proto::Opcode::NOTIFY {
             return Outcome::Drop;
         }
         // RFC 1034 §4.3.2: return the first Zone Cut between the apex and QNAME.
@@ -644,7 +663,12 @@ impl Zone {
                     } else {
                         0
                     }
-                    | (cx.query.flags() & 0x7910)
+                    | (cx.query.flags()
+                        & if !drop_notify && cx.query.opcode() != pharos_proto::Opcode::QUERY {
+                            0x7800
+                        } else {
+                            0x7910
+                        })
                     | if external.is_some_and(|response| response.tc()) {
                         0x0200
                     } else {

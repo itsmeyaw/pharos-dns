@@ -1,0 +1,265 @@
+//! Automatically discovered authoritative Zones.
+
+pub(crate) mod setup;
+#[cfg(test)]
+mod tests;
+#[cfg(feature = "plugin-transfer")]
+mod transfer;
+mod walk;
+
+use crate::zone::{Zone, ZoneHolder, contains};
+use pharos_proto::{Name, Rcode};
+use pharos_server::{Context, Next, Outcome, Plugin};
+use std::{
+    collections::HashMap,
+    fmt::Write,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+#[derive(Debug)]
+struct Entry {
+    origin: String,
+    apex: Name,
+    path: Mutex<PathBuf>,
+    current: ZoneHolder,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[derive(Debug)]
+struct Shared {
+    directory: PathBuf,
+    regex: regex::Regex,
+    template: String,
+    zones: arc_swap::ArcSwap<HashMap<String, Arc<Entry>>>,
+    scan_gate: Mutex<()>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    #[cfg(feature = "plugin-transfer")]
+    notifier: crate::zone::ZoneNotifier,
+}
+
+/// Directory-backed authoritative Zones.
+#[derive(Debug)]
+pub struct Auto {
+    origins: Vec<Name>,
+    interval: Duration,
+    shared: Arc<Shared>,
+}
+
+impl Auto {
+    fn new(
+        origins: Vec<Name>,
+        directory: PathBuf,
+        regex: regex::Regex,
+        template: String,
+        interval: Duration,
+    ) -> Self {
+        Self {
+            origins,
+            interval,
+            shared: Arc::new(Shared {
+                directory,
+                regex,
+                template,
+                zones: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+                scan_gate: Mutex::new(()),
+                tasks: Mutex::new(Vec::new()),
+                #[cfg(feature = "plugin-transfer")]
+                notifier: crate::zone::ZoneNotifier::default(),
+            }),
+        }
+    }
+
+    fn register_hooks(&self, lifecycle: &mut pharos_server::Lifecycle) {
+        let shared = Arc::clone(&self.shared);
+        let interval = self.interval;
+        let start = move || {
+            let shared = Arc::clone(&shared);
+            async move {
+                let worker = Arc::clone(&shared);
+                tokio::task::spawn_blocking(move || worker.scan())
+                    .await
+                    .map_err(std::io::Error::other)?;
+                shared.start_watchers(interval);
+                #[cfg(feature = "plugin-transfer")]
+                notify_all(&shared).await;
+                if !interval.is_zero() {
+                    let scan = Arc::clone(&shared);
+                    let scan_task = tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(interval).await;
+                            let worker = Arc::clone(&scan);
+                            let _ = tokio::task::spawn_blocking(move || worker.scan()).await;
+                            scan.start_watchers(interval);
+                            #[cfg(feature = "plugin-transfer")]
+                            notify_all(&scan).await;
+                        }
+                    });
+                    shared.tasks.lock().unwrap().push(scan_task);
+                }
+                Ok(())
+            }
+        };
+        lifecycle.register(pharos_server::Phase::Startup, start.clone());
+        lifecycle.register(pharos_server::Phase::RestartFailed, start);
+        let shared = Arc::clone(&self.shared);
+        let stop = move || {
+            let tasks = std::mem::take(&mut *shared.tasks.lock().unwrap());
+            let shared = Arc::clone(&shared);
+            async move {
+                for task in tasks {
+                    task.abort();
+                    let _ = task.await;
+                }
+                let zones = shared.zones.load_full();
+                for entry in zones.values() {
+                    let task = entry.task.lock().unwrap().take();
+                    if let Some(task) = task {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                }
+                Ok(())
+            }
+        };
+        lifecycle.register(pharos_server::Phase::Restart, stop.clone());
+        lifecycle.register(pharos_server::Phase::Shutdown, stop);
+    }
+
+    pub(crate) async fn serve_with<N: Next + Send>(
+        &self,
+        cx: &mut Context<'_, '_>,
+        next: N,
+        has_next: bool,
+    ) -> Outcome {
+        let Some(question) = cx.query.questions().next() else {
+            return next.run(cx).await;
+        };
+        let mut wire = [0u8; 255];
+        let mut len = 0;
+        for label in question.name.labels() {
+            wire[len] = label.len() as u8;
+            len += 1;
+            wire[len..len + label.len()].copy_from_slice(label);
+            wire[len..len + label.len()].make_ascii_lowercase();
+            len += label.len();
+        }
+        let name = &wire[..len + 1];
+        if !self.origins.iter().any(|origin| contains(name, origin)) {
+            return next.run(cx).await;
+        }
+        let Some(entry) = self.shared.find(name) else {
+            return if has_next {
+                next.run(cx).await
+            } else {
+                Outcome::Unanswered(Rcode::REFUSED)
+            };
+        };
+        let zone = entry.current.load_full();
+        match zone {
+            Some(zone) => zone.lookup_auto(cx, next).await,
+            None => Outcome::Unanswered(Rcode::SERVFAIL),
+        }
+    }
+}
+
+struct NameText {
+    bytes: [u8; 1024],
+    len: usize,
+}
+
+impl std::fmt::Write for NameText {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(std::fmt::Error)?;
+        self.bytes
+            .get_mut(self.len..end)
+            .ok_or(std::fmt::Error)?
+            .copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+impl Shared {
+    fn find(&self, mut name: &[u8]) -> Option<Arc<Entry>> {
+        let zones = self.zones.load();
+        // RFC 1034 §4.3.2: choose the closest enclosing authoritative Zone.
+        loop {
+            let mut text = NameText {
+                bytes: [0; 1024],
+                len: 0,
+            };
+            let suffix = pharos_proto::NameRef::parse(name, 0).ok()?;
+            write!(&mut text, "{suffix}").ok()?;
+            let key = std::str::from_utf8(&text.bytes[..text.len]).ok()?;
+            if let Some(entry) = zones.get(key) {
+                return Some(Arc::clone(entry));
+            }
+            if name[0] == 0 {
+                return None;
+            }
+            name = &name[usize::from(name[0]) + 1..];
+        }
+    }
+
+    fn start_watchers(self: &Arc<Self>, interval: Duration) {
+        if interval.is_zero() {
+            return;
+        }
+        for entry in self.zones.load().values() {
+            let mut task = entry.task.lock().unwrap();
+            if task.is_some() {
+                continue;
+            }
+            let entry = Arc::clone(entry);
+            #[cfg(feature = "plugin-transfer")]
+            let notifier = self.notifier.clone();
+            *task = Some(tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(interval).await;
+                    let worker = Arc::clone(&entry);
+                    let changed = tokio::task::spawn_blocking(move || worker.reload())
+                        .await
+                        .unwrap_or(false);
+                    #[cfg(feature = "plugin-transfer")]
+                    if changed && let Some(transfer) = notifier.get() {
+                        // RFC 1996 §3.1: notify Secondary Servers after Zone changes.
+                        if let Err(error) = transfer.notify(&entry.apex).await {
+                            pharos_server::logging::log(
+                                "WARN",
+                                "auto",
+                                &format!("NOTIFY {}: {error}", entry.apex),
+                            );
+                        }
+                    }
+                    #[cfg(not(feature = "plugin-transfer"))]
+                    let _ = changed;
+                }
+            }));
+        }
+    }
+}
+
+impl Plugin for Auto {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        self.serve_with(cx, next, true).await
+    }
+}
+
+#[cfg(feature = "plugin-transfer")]
+async fn notify_all(shared: &Shared) {
+    if let Some(transfer) = shared.notifier.get() {
+        let zones = shared.zones.load_full();
+        for zone in zones.values() {
+            // RFC 1996 §4.1: notify Secondary Servers when a Zone is loaded.
+            if let Err(error) = transfer.notify(&zone.apex).await {
+                pharos_server::logging::log(
+                    "WARN",
+                    "auto",
+                    &format!("NOTIFY {}: {error}", zone.apex),
+                );
+            }
+        }
+    }
+}

@@ -1,0 +1,168 @@
+use super::*;
+use std::{collections::HashSet, io::BufReader, path::Path};
+
+impl Shared {
+    pub(super) fn scan(&self) {
+        let _gate = self.scan_gate.lock().unwrap();
+        let old = self.zones.load_full();
+        let mut zones = HashMap::new();
+        let mut seen = HashSet::new();
+        let root =
+            std::fs::canonicalize(&self.directory).unwrap_or_else(|_| self.directory.clone());
+        visit(&root, &mut |path| {
+            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+                return;
+            };
+            let Some(captures) = self.regex.captures(filename) else {
+                return;
+            };
+            let mut origin = String::new();
+            captures.expand(&self.template, &mut origin);
+            if origin.is_empty() {
+                return;
+            }
+            if !origin.ends_with('.') {
+                origin.push('.');
+            }
+            if !seen.insert(origin.clone()) {
+                pharos_server::logging::log(
+                    "WARN",
+                    "auto",
+                    &format!(
+                        "Multiple Zone files match {origin}: ignoring {}",
+                        path.display()
+                    ),
+                );
+                return;
+            }
+            let Ok(apex) = origin.parse::<Name>() else {
+                return;
+            };
+            if let Some(entry) = old.get(&origin) {
+                *entry.path.lock().unwrap() = path.to_owned();
+                zones.insert(origin, Arc::clone(entry));
+            } else {
+                let result = std::fs::File::open(path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|file| {
+                        Zone::load_reader_with_serial(
+                            apex.clone(),
+                            path,
+                            BufReader::new(file),
+                            Some(0),
+                        )
+                    });
+                match result {
+                    Ok(zone) => {
+                        pharos_server::logging::log(
+                            "INFO",
+                            "auto",
+                            &format!("Inserting Zone {origin} from {}", path.display()),
+                        );
+                        zones.insert(
+                            origin.clone(),
+                            Arc::new(Entry {
+                                origin,
+                                apex,
+                                path: Mutex::new(path.to_owned()),
+                                current: ZoneHolder::from(Some(Arc::new(zone))),
+                                task: Mutex::new(None),
+                            }),
+                        );
+                    }
+                    Err(error) => pharos_server::logging::log(
+                        "WARN",
+                        "auto",
+                        &format!("Cannot load Zone {origin} from {}: {error}", path.display()),
+                    ),
+                }
+            }
+        });
+        for entry in old
+            .values()
+            .filter(|entry| !zones.contains_key(&entry.origin))
+        {
+            pharos_server::logging::log("INFO", "auto", &format!("Deleting Zone {}", entry.origin));
+            if let Some(task) = entry.task.lock().unwrap().take() {
+                task.abort();
+            }
+        }
+        self.zones.store(Arc::new(zones));
+    }
+}
+
+impl Entry {
+    pub(super) fn reload(&self) -> bool {
+        let path = self.path.lock().unwrap();
+        let file = match std::fs::File::open(&*path) {
+            Ok(file) => file,
+            Err(error) => {
+                pharos_server::logging::log(
+                    "WARN",
+                    "auto",
+                    &format!("Cannot open {}: {error}", path.display()),
+                );
+                return false;
+            }
+        };
+        let serial = self.current.load().as_ref().and_then(|zone| zone.serial());
+        match Zone::load_reader_with_serial(self.apex.clone(), &path, BufReader::new(file), serial)
+        {
+            Ok(zone) => {
+                self.current.store(Some(Arc::new(zone)));
+                true
+            }
+            Err(error) => {
+                if error != "no change in SOA serial" {
+                    pharos_server::logging::log(
+                        "WARN",
+                        "auto",
+                        &format!(
+                            "Cannot reload Zone {} from {}: {error}",
+                            self.apex,
+                            path.display()
+                        ),
+                    );
+                }
+                false
+            }
+        }
+    }
+}
+
+fn visit(path: &Path, callback: &mut impl FnMut(&Path)) {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            pharos_server::logging::log(
+                "WARN",
+                "auto",
+                &format!("Cannot read {}: {error}", path.display()),
+            );
+            return;
+        }
+    };
+    if metadata.is_dir() {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                pharos_server::logging::log(
+                    "WARN",
+                    "auto",
+                    &format!("Cannot read directory {}: {error}", path.display()),
+                );
+                return;
+            }
+        };
+        let mut paths: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+        for path in paths {
+            visit(&path, callback);
+        }
+    } else {
+        callback(path);
+    }
+}
