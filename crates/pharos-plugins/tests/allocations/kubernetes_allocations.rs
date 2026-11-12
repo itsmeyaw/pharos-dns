@@ -188,8 +188,9 @@ async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
             .unwrap()
             .unwrap();
         let after = GLOBAL.stats();
-        // One snapshot and one shared Stream handle, independent of record count.
-        assert_eq!(after.allocations - before.allocations, 2);
+        // One snapshot, one sorted Service list per encoding pass, and one shared Stream
+        // handle, independent of record count.
+        assert_eq!(after.allocations - before.allocations, 4);
         assert_eq!(after.reallocations - before.reallocations, 0);
         let mut wire = Vec::with_capacity(65535);
         let before = GLOBAL.stats();
