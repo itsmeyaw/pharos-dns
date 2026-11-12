@@ -49,6 +49,7 @@ enum Reply {
     Negative { nxdomain: bool, extra: bool },
     Positive(Type),
     MixedCase,
+    MixedTtl,
     Large,
 }
 
@@ -117,6 +118,30 @@ impl Next for Reply {
                         .unwrap();
                 }
             }
+            Self::MixedTtl => {
+                let other: Name = "wWw.MiEk.nL.".parse().unwrap();
+                for (name, ttl, data) in [
+                    (q.name, 240, [192, 0, 2, 1]),
+                    (
+                        NameRef::parse(other.as_wire(), 0).unwrap(),
+                        60,
+                        [192, 0, 2, 2],
+                    ),
+                    (q.name, 3600, [192, 0, 2, 3]),
+                ] {
+                    b.record(Section::Answer, name, Type::A, Class::IN, ttl, &data)
+                        .unwrap();
+                }
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::TXT,
+                    Class::IN,
+                    480,
+                    b"\x04test",
+                )
+                .unwrap();
+            }
             Self::Large => {
                 for i in 0..27 {
                     assert!(
@@ -171,6 +196,111 @@ fn covered<'a>(records: impl Iterator<Item = pharos_proto::Record<'a>>) -> Vec<T
             _ => None,
         })
         .collect()
+}
+
+// RFC 2181 §5.2: inconsistent TTLs in an RRset are reduced to the lowest value.
+#[tokio::test]
+async fn signed_rrsets_use_the_lowest_ttl_for_records_and_signatures() {
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
+    use pharos_dnssec::canonical::{CanonicalRecord, signed_data};
+
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(&dnssec, &q, Reply::MixedTtl, Protocol::Udp, 4096, 4096).await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    let records: Vec<_> = msg.answers().collect();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|rr| rr.rtype == Type::A)
+            .map(|rr| rr.ttl)
+            .collect::<Vec<_>>(),
+        [60, 60, 60]
+    );
+    assert_eq!(
+        records.iter().find(|rr| rr.rtype == Type::TXT).unwrap().ttl,
+        480
+    );
+    let key = pharos_dnssec::keys::parse_dnskey(include_str!(
+        "../fixtures/dnssec/Kmiek.nl.+013+59725.key"
+    ))
+    .unwrap();
+    let mut point = vec![4];
+    point.extend_from_slice(&key.public_key);
+    let verifier = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point);
+    let mut checked = 0;
+    for rr in records.iter().filter(|rr| rr.rtype == Type::RRSIG) {
+        let sig = rr.data().unwrap();
+        let Rdata::Rrsig {
+            type_covered,
+            original_ttl,
+            signature,
+            ..
+        } = sig
+        else {
+            unreachable!()
+        };
+        let expected = if type_covered == Type::A { 60 } else { 480 };
+        assert_eq!((rr.ttl, original_ttl), (expected, expected));
+        let set: Vec<_> = records
+            .iter()
+            .filter(|r| r.rtype == type_covered)
+            .map(|r| CanonicalRecord {
+                owner: r.name,
+                class: r.class,
+                data: r.data().unwrap(),
+            })
+            .collect();
+        verifier
+            .verify(&signed_data(&sig, &set).unwrap(), signature)
+            .unwrap();
+        checked += 1;
+    }
+    assert_eq!(checked, 2);
+}
+
+// RFC 2181 §5.2: DNSKEYs at the same Apex share their lowest TTL, even without DO.
+#[tokio::test]
+async fn apex_dnskeys_use_the_lowest_ttl_with_and_without_do() {
+    let long_key = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/miek-ttl7200"
+    );
+    let dnssec = plugin("miek.nl", &format!("{long_key} {OTHER_KEY}"));
+    for opt in [Some(false), Some(true)] {
+        let q = query("miek.nl.", Type::DNSKEY, 1, opt);
+        let (outcome, wire) = serve(
+            &dnssec,
+            &q,
+            Reply::Positive(Type::A),
+            Protocol::Udp,
+            4096,
+            4096,
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Response);
+        let msg = Message::parse(&wire).unwrap();
+        let records: Vec<_> = msg.answers().collect();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|rr| rr.rtype == Type::DNSKEY)
+                .map(|rr| rr.ttl)
+                .collect::<Vec<_>>(),
+            [3600, 3600]
+        );
+        for rr in records.iter().filter(|rr| rr.rtype == Type::RRSIG) {
+            assert_eq!(rr.ttl, 3600);
+            assert!(matches!(
+                rr.data().unwrap(),
+                Rdata::Rrsig {
+                    original_ttl: 3600,
+                    ..
+                }
+            ));
+        }
+    }
 }
 
 // CoreDNS v1.15.0 plugin/dnssec/handler.go: requests without DO bypass signing.

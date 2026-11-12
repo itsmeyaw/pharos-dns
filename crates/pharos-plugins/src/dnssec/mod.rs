@@ -100,14 +100,21 @@ impl Dnssec {
         builder
             .question(question.name, question.qtype, question.qclass)
             .map_err(Error::Build)?;
-        for (key, rdata) in self.keys.iter().zip(&self.public) {
+        // RFC 2181 §5.2: every record in an RRset uses its lowest TTL.
+        let ttl = self
+            .keys
+            .iter()
+            .map(|key| key.public.ttl.unwrap_or(3600))
+            .min()
+            .unwrap_or(3600);
+        for rdata in &self.public {
             builder
                 .record(
                     Section::Answer,
                     question.name,
                     Type::DNSKEY,
                     Class::IN,
-                    key.public.ttl.unwrap_or(3600),
+                    ttl,
                     rdata,
                 )
                 .map_err(Error::Build)?;

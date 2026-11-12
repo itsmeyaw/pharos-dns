@@ -38,6 +38,18 @@ impl CacheEntry {
     }
 }
 
+fn rrset_ttl(message: &Message<'_>, rr: &Record<'_>) -> u32 {
+    // RFC 2181 §5.2: records in one RRset use the lowest received TTL.
+    message
+        .answers()
+        .chain(message.authorities())
+        .chain(message.additionals())
+        .filter(|other| other.name == rr.name && other.rtype == rr.rtype && other.class == rr.class)
+        .map(|other| other.ttl)
+        .min()
+        .unwrap_or(rr.ttl)
+}
+
 impl Dnssec {
     pub(super) fn sign_response(&self, cx: &mut Context<'_, '_>) -> Result<(), Error> {
         let max_size = cx.max_response_size.max(512);
@@ -174,8 +186,13 @@ impl Dnssec {
                     continue;
                 }
                 let data = rr.data().map_err(|_| Error::InvalidQuery)?;
+                let ttl = if matches!(rr.rtype, Type::RRSIG | Type::OPT | Type::TSIG) {
+                    rr.ttl
+                } else {
+                    rrset_ttl(&message, rr)
+                };
                 builder
-                    .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
+                    .record_with(section, rr.name, rr.rtype, rr.class, ttl, |writer| {
                         data.write(writer)
                     })
                     .map_err(Error::Build)?;
@@ -210,7 +227,7 @@ impl Dnssec {
                     &group,
                     zone,
                     now,
-                    SignMode::All(rr.ttl),
+                    SignMode::All(rrset_ttl(&message, rr)),
                 )?);
                 attempted_sets += 1;
             }
@@ -351,6 +368,7 @@ impl Dnssec {
             {
                 *signature = &bytes;
             }
+            // RFC 4034 §3: the RRSIG RR's TTL matches the covered RRset's TTL.
             builder
                 .record_with(
                     section,
