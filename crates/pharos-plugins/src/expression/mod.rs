@@ -69,6 +69,61 @@ pub enum Value<'a> {
     Int(i64),
     Float(f64),
     String(&'a str),
+    Function(Callable<'a>),
+}
+
+/// A query function bound to the Query where it was evaluated.
+#[derive(Clone, Copy)]
+pub struct Callable<'a> {
+    name: &'a str,
+    query: &'a Query<'a>,
+}
+
+impl fmt::Debug for Callable<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("Callable").field(&self.name).finish()
+    }
+}
+
+impl PartialEq for Callable<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && std::ptr::eq(self.query, other.query)
+    }
+}
+
+impl Callable<'_> {
+    pub(crate) fn type_name(&self) -> &'static str {
+        match self.name {
+            "do" => "func() bool",
+            "size" | "id" | "opcode" | "bufsize" => "func() int",
+            _ => "func() string",
+        }
+    }
+    pub(crate) fn invoke<'a>(&self, buffer: &'a mut [u8]) -> Result<Value<'a>, &'static str> {
+        let mut slots = [];
+        let metadata = Metadata::new(&mut slots);
+        let mut scratch = Scratch::new(buffer);
+        let value = call(self.name, &[], self.query, &metadata, &mut scratch, None)?;
+        match value {
+            Temporary::Bool(value) => Ok(Value::Bool(value)),
+            Temporary::Int(value) => Ok(Value::Int(value)),
+            Temporary::Borrowed(value) => {
+                let start = scratch.len;
+                scratch
+                    .write_str(value)
+                    .map_err(|_| "expression scratch buffer is too small")?;
+                let end = scratch.len;
+                Ok(Value::String(
+                    std::str::from_utf8(&scratch.buffer[start..end])
+                        .map_err(|_| "invalid UTF-8")?,
+                ))
+            }
+            Temporary::Stored(start, end) => Ok(Value::String(
+                std::str::from_utf8(&scratch.buffer[start..end]).map_err(|_| "invalid UTF-8")?,
+            )),
+            _ => Err("unsupported query function"),
+        }
+    }
 }
 
 /// Types of variables declared before this expression.
@@ -79,6 +134,7 @@ pub enum ValueType {
     Int,
     Float,
     String,
+    Function,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,6 +146,7 @@ enum Kind {
     Float,
     String,
     List,
+    Function,
 }
 
 impl From<ValueType> for Kind {
@@ -100,6 +157,7 @@ impl From<ValueType> for Kind {
             ValueType::Int => Self::Int,
             ValueType::Float => Self::Float,
             ValueType::String => Self::String,
+            ValueType::Function => Self::Function,
         }
     }
 }
@@ -148,6 +206,7 @@ enum Node {
     Int(i64),
     Float(f64),
     String(String),
+    Function(String),
     Variable(String, Kind),
     List(Vec<Node>),
     Current(Kind),
@@ -167,6 +226,7 @@ impl Node {
             Self::Float(_) => Kind::Float,
             Self::Unary(Unary::Neg, node) => node.kind(),
             Self::String(_) => Kind::String,
+            Self::Function(_) => Kind::Function,
             Self::Variable(_, kind) => *kind,
             Self::List(_) => Kind::List,
             Self::Current(kind) => *kind,
@@ -190,6 +250,7 @@ impl Node {
             Self::Int(value) => Ok(Temporary::Int(*value)),
             Self::Float(value) => Ok(Temporary::Float(*value)),
             Self::String(value) => Ok(Temporary::Borrowed(value)),
+            Self::Function(name) => Ok(Temporary::Function(Callable { name, query })),
             Self::Variable(name, kind) => {
                 let value = query
                     .variables
@@ -202,6 +263,7 @@ impl Node {
                     (Kind::Int, Value::Int(value)) => Ok(Temporary::Int(value)),
                     (Kind::Float, Value::Float(value)) => Ok(Temporary::Float(value)),
                     (Kind::String, Value::String(value)) => Ok(Temporary::Borrowed(value)),
+                    (Kind::Function, Value::Function(value)) => Ok(Temporary::Function(value)),
                     _ => Err("expression variable has wrong type"),
                 }
             }
@@ -356,6 +418,7 @@ enum Temporary<'a> {
     Float(f64),
     Borrowed(&'a str),
     Stored(usize, usize),
+    Function(Callable<'a>),
 }
 
 impl<'a> Temporary<'a> {
@@ -674,6 +737,7 @@ impl Expression {
             Kind::Int => ValueType::Int,
             Kind::Float => ValueType::Float,
             Kind::String => ValueType::String,
+            Kind::Function => ValueType::Function,
             Kind::List => unreachable!("list results are rejected at compile time"),
             Kind::Dynamic => unreachable!("dynamic predicate values are not expression results"),
         }
@@ -692,6 +756,7 @@ impl Expression {
             Temporary::Bool(value) => Ok(Value::Bool(value)),
             Temporary::Int(value) => Ok(Value::Int(value)),
             Temporary::Float(value) => Ok(Value::Float(value)),
+            Temporary::Function(value) => Ok(Value::Function(value)),
             Temporary::Borrowed(value) => Ok(Value::String(value)),
             Temporary::Stored(start, end) => Ok(Value::String(
                 std::str::from_utf8(&scratch.buffer[start..end]).map_err(|_| "invalid UTF-8")?,

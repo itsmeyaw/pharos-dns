@@ -371,6 +371,7 @@ fn write_value(value: Option<Value<'_>>, output: &mut String) -> fmt::Result {
         Some(Value::Int(value)) => write!(output, "{value}"),
         Some(Value::Float(value)) => write!(output, "{value}"),
         Some(Value::String(value)) => output.write_str(value),
+        Some(Value::Function(_)) => Err(fmt::Error),
     }
 }
 
@@ -820,6 +821,7 @@ impl Field {
                     Some(Value::Float(value)) => *value != 0.0,
                     Some(Value::String(value)) => !value.is_empty(),
                     Some(Value::Nil) | None => false,
+                    Some(Value::Function(_)) => true,
                 },
             ),
             Self::Group(name) => Ok(data
@@ -890,6 +892,7 @@ fn truth_value(value: Value<'_>) -> bool {
         Value::Int(value) => value != 0,
         Value::Float(value) => value != 0.0,
         Value::String(value) => !value.is_empty(),
+        Value::Function(_) => true,
     }
 }
 

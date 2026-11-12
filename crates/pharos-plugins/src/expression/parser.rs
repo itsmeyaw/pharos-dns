@@ -254,6 +254,24 @@ impl Parser<'_, '_> {
             Token::Ident(name) => {
                 self.advance()?;
                 if self.token != Token::Left {
+                    if matches!(
+                        name.as_str(),
+                        "type"
+                            | "name"
+                            | "class"
+                            | "proto"
+                            | "size"
+                            | "client_ip"
+                            | "port"
+                            | "id"
+                            | "opcode"
+                            | "do"
+                            | "bufsize"
+                            | "server_ip"
+                            | "server_port"
+                    ) {
+                        return self.binary_tail(Node::Function(name), minimum);
+                    }
                     let kind = self
                         .variables
                         .iter()

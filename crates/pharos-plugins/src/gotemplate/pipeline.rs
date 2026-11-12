@@ -31,6 +31,7 @@ enum Function {
     Js(Box<crate::regex_match::Regex>),
     UrlQuery,
     Meta(bool),
+    Call,
 }
 enum Command {
     Atom(Atom),
@@ -107,6 +108,7 @@ impl Pipeline {
                 "urlquery" => Some(Function::UrlQuery),
                 ".Meta" => Some(Function::Meta(false)),
                 "$.Meta" => Some(Function::Meta(true)),
+                "call" => Some(Function::Call),
                 _ => None,
             };
             let command = if let Some(function) = function {
@@ -161,6 +163,7 @@ impl Pipeline {
                         | Function::UrlQuery => true,
                         Function::Printf => count >= 1,
                         Function::Meta(_) => count == 1,
+                        Function::Call => count >= 1,
                     };
                     if !valid {
                         return Err(fmt::Error);
@@ -250,6 +253,31 @@ impl Pipeline {
                                 ""
                             };
                             ResultValue::Scalar(Some(Value::String(result)))
+                        }
+                        Function::Call => {
+                            let ResultValue::Scalar(Some(Value::Function(function))) =
+                                argument(args, 0, value, data, dot, scratch)?
+                            else {
+                                return Err(fmt::Error);
+                            };
+                            if count != 1 {
+                                return Err(fmt::Error);
+                            }
+                            let mut buffer = [0; 2048];
+                            match function.invoke(&mut buffer).map_err(|_| fmt::Error)? {
+                                Value::String(value) => {
+                                    let start = scratch.len;
+                                    scratch.write_str(value)?;
+                                    ResultValue::Stored(start, scratch.len)
+                                }
+                                Value::Bool(value) => ResultValue::Scalar(Some(Value::Bool(value))),
+                                Value::Int(value) => ResultValue::Scalar(Some(Value::Int(value))),
+                                Value::Float(value) => {
+                                    ResultValue::Scalar(Some(Value::Float(value)))
+                                }
+                                Value::Nil => ResultValue::Scalar(Some(Value::Nil)),
+                                Value::Function(_) => return Err(fmt::Error),
+                            }
                         }
                         Function::Slice => {
                             let input = argument(args, 0, value, data, dot, scratch)?;
@@ -729,6 +757,7 @@ impl<'a> ResultValue<'a> {
             Self::Scalar(Some(Value::Int(value))) => value != 0,
             Self::Scalar(Some(Value::Float(value))) => value != 0.0,
             Self::Scalar(Some(Value::String(value))) => !value.is_empty(),
+            Self::Scalar(Some(Value::Function(_))) => true,
             Self::Uint(value) => value != 0,
             Self::Matches(value) => !value.is_empty(),
             Self::Groups(value) => !value.is_empty(),
@@ -901,6 +930,7 @@ impl<'a> ResultValue<'a> {
             Self::Scalar(Some(Value::Int(_))) => "int",
             Self::Scalar(Some(Value::Float(_))) => "float64",
             Self::Scalar(Some(Value::String(_))) | Self::Stored(..) => "string",
+            Self::Scalar(Some(Value::Function(value))) => value.type_name(),
             Self::Uint(_) => "uint64",
             Self::Matches(_) => "[]string",
             Self::Groups(_) => "map[string]string",

@@ -445,3 +445,31 @@ fn question_range_variables_and_indexed_fields_are_borrowed() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "0=Example.Org./1|Example.Org.");
 }
+
+#[test]
+fn call_invokes_a_query_function_stored_in_expression_variables() {
+    let wire =
+        b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let expression = Expression::compile("name").unwrap();
+    let mut bytes = [0; 2048];
+    let mut scratch = Scratch::new(&mut bytes);
+    let function = expression
+        .evaluate(&query, &metadata, &mut scratch)
+        .unwrap();
+    let variables = [("f", function)];
+    let mut data = Data::new("example.org.", &metadata);
+    data.variables = &variables;
+    let template = Template::compile("{{ call .Var.f }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "example.org.");
+}
