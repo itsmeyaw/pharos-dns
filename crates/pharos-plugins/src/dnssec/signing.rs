@@ -81,12 +81,16 @@ impl Dnssec {
         let original = cx.response.clone();
         let message = Message::parse(&original).map_err(|_| Error::InvalidQuery)?;
         let kind = typify_response(Some(&message), now as i64);
-        let denial = matches!(kind, ResponseType::NxDomain | ResponseType::NoData)
-            && message.authority_count() == 1
-            && message
-                .authorities()
-                .next()
-                .is_some_and(|rr| rr.rtype == Type::SOA);
+        let denial = matches!(kind, ResponseType::NxDomain | ResponseType::NoData);
+        if denial
+            && (message.authority_count() != 1
+                || !message
+                    .authorities()
+                    .next()
+                    .is_some_and(|rr| rr.rtype == Type::SOA))
+        {
+            return Ok(());
+        }
         let referral = kind == ResponseType::Referral && message.authority_count() > 0;
         let make_lie =
             denial || (referral && !message.authorities().any(|rr| rr.rtype == Type::DS));

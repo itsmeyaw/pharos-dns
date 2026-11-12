@@ -247,6 +247,48 @@ async fn non_apex_dnskey_and_out_of_zone_do_pass_through() {
     }
 }
 
+// CoreDNS v1.15.0 plugin/dnssec/dnssec.go: negative Responses require exactly one SOA.
+async fn multiple_authorities_pass_through(nxdomain: bool) {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("missing.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(
+        &dnssec,
+        &q,
+        Reply::Negative {
+            nxdomain,
+            extra: true,
+        },
+        Protocol::Udp,
+        4096,
+        4096,
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    assert_eq!(
+        msg.rcode(),
+        if nxdomain {
+            Rcode::NXDOMAIN
+        } else {
+            Rcode::NOERROR
+        }
+    );
+    assert_eq!(
+        msg.authorities().map(|rr| rr.rtype).collect::<Vec<_>>(),
+        [Type::SOA, Type::NS]
+    );
+}
+
+#[tokio::test]
+async fn nodata_with_multiple_authority_records_passes_through() {
+    multiple_authorities_pass_through(false).await;
+}
+
+#[tokio::test]
+async fn nxdomain_with_multiple_authority_records_passes_through() {
+    multiple_authorities_pass_through(true).await;
+}
+
 // CoreDNS v1.15.0 plugin/dnssec/handler_test.go: positive DS and authority NS are signed.
 #[tokio::test]
 async fn positive_ds_is_signed_without_synthetic_nsec() {
