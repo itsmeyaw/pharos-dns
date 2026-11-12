@@ -558,3 +558,24 @@ fn quoted_and_raw_string_literals_decode_expr_escapes() {
         assert!(Expression::compile(source).is_err());
     }
 }
+
+#[test]
+fn query_functions_normalize_mapped_addresses_and_keep_ipv6_scope() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "[::ffff:192.0.2.1]:1234".parse().unwrap(),
+        "[fe80::1%3]:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    let expr =
+        Expression::compile("client_ip() == '192.0.2.1' && server_ip() == 'fe80::1%3'").unwrap();
+    assert_eq!(
+        expr.evaluate(&query, &metadata, &mut scratch).unwrap(),
+        Value::Bool(true)
+    );
+}

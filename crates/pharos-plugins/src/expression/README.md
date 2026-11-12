@@ -12,6 +12,10 @@ storage and returns an error if the buffer is too small. The uncompressed
 `size` inherits the log formatter's documented limitation on unsupported or
 malformed name-bearing RDATA.
 
+For scoped IPv6 addresses, `client_ip` and `server_ip` use the numeric scope
+ID; CoreDNS may use an interface name. The Listener exposes only a wildcard
+local address when the destination address is not tracked.
+
 `#` requires a nonempty homogeneous list so its type is known at setup;
 `any([], true)` is accepted. List values cannot otherwise be returned from
 an expression. String conversion uses the caller's scratch space.

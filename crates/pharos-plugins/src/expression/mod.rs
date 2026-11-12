@@ -562,8 +562,8 @@ fn call<'a>(
                 Ok(())
             }
         }
-        "client_ip" => write!(scratch, "{}", query.client.ip()),
-        "server_ip" => write!(scratch, "{}", query.local.ip()),
+        "client_ip" => write_ip(scratch, query.client),
+        "server_ip" => write_ip(scratch, query.local),
         "port" => write!(scratch, "{}", query.client.port()),
         "server_port" => write!(scratch, "{}", query.local.port()),
         _ => return Err("unknown function"),
@@ -573,6 +573,21 @@ fn call<'a>(
         scratch.buffer[start..scratch.len].make_ascii_lowercase();
     }
     Ok(Temporary::Stored(start, scratch.len))
+}
+
+fn write_ip(output: &mut Scratch<'_>, address: SocketAddr) -> fmt::Result {
+    match address {
+        SocketAddr::V4(address) => write!(output, "{}", address.ip()),
+        SocketAddr::V6(address) => {
+            if let Some(ip) = address.ip().to_ipv4_mapped() {
+                write!(output, "{ip}")
+            } else if address.scope_id() == 0 {
+                write!(output, "{}", address.ip())
+            } else {
+                write!(output, "{}%{}", address.ip(), address.scope_id())
+            }
+        }
+    }
 }
 
 fn incidr(ip: &str, cidr: &str) -> Result<bool, &'static str> {
