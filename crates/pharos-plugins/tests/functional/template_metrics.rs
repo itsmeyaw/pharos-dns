@@ -27,30 +27,42 @@ async fn metric_for(option: &str) -> String {
     text
 }
 
+fn counter<'a>(text: &'a str, name: &str) -> &'a str {
+    let line = text
+        .lines()
+        .find(|line| line.starts_with(name))
+        .unwrap_or_else(|| panic!("missing {name}: {text}"));
+    for label in [
+        "server=\"dns://:0\"",
+        "zone=\".\"",
+        "view=\"\"",
+        "class=\"IN\"",
+        "type=\"A\"",
+    ] {
+        assert!(line.contains(label), "{line}");
+    }
+    assert!(line.ends_with(" 1"), "{line}");
+    line
+}
+
 #[tokio::test]
 async fn template_counts_matches() {
     let text = metric_for("rcode NXDOMAIN").await;
-    assert!(text.contains("pharos_template_matches_total{"), "{text}");
-    assert!(text.contains("class=\"IN\""), "{text}");
-    assert!(text.contains("type=\"A\""), "{text}");
+    counter(&text, "pharos_template_matches_total{");
 }
 
 #[tokio::test]
 async fn template_counts_render_failures() {
     let text = metric_for("answer \"{{ .Missing }}\"").await;
-    assert!(
-        text.contains("pharos_template_template_failures_total{"),
-        "{text}"
-    );
-    assert!(text.contains("section=\"answer\""), "{text}");
+    let line = counter(&text, "pharos_template_template_failures_total{");
+    assert!(line.contains("section=\"answer\""), "{line}");
+    assert!(line.contains("template=\""), "{line}");
 }
 
 #[tokio::test]
 async fn template_counts_invalid_record_failures() {
     let text = metric_for("answer \"invalid record\"").await;
-    assert!(
-        text.contains("pharos_template_rr_failures_total{"),
-        "{text}"
-    );
-    assert!(text.contains("section=\"answer\""), "{text}");
+    let line = counter(&text, "pharos_template_rr_failures_total{");
+    assert!(line.contains("section=\"answer\""), "{line}");
+    assert!(line.contains("template=\""), "{line}");
 }
