@@ -16,6 +16,15 @@ fn rdata_errors_expose_field_and_preserve_messages() {
         RdataParseError::MissingField { field: 0, .. }
     ));
     assert_eq!(error.to_string(), "missing RDATA");
+    let error = parse_rdata(Type::MX, &["10", "bad..name."], &origin).unwrap_err();
+    assert!(matches!(
+        &error,
+        RdataParseError::InvalidField { field: 1, .. }
+    ));
+    assert_eq!(error.to_string(), "empty label");
+    let error = parse_rdata(Type(65000), &["value"], &origin).unwrap_err();
+    assert!(matches!(&error, RdataParseError::UnsupportedType { .. }));
+    assert!(error.to_string().contains("unsupported RDATA type"));
 }
 
 fn parse(rtype: Type, fields: &[&str]) -> Result<Vec<u8>, pharos_proto::zone::RdataParseError> {
