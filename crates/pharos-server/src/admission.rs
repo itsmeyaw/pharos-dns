@@ -11,15 +11,6 @@ pub enum Admission<'a> {
 
 /// Apply the DNS Listener's header, class, and EDNS admission policy.
 pub fn admit<'a>(wire: &'a [u8], allow_non_in: bool, response: &mut Vec<u8>) -> Admission<'a> {
-    admit_with_update(wire, allow_non_in, false, response)
-}
-
-pub(crate) fn admit_with_update<'a>(
-    wire: &'a [u8],
-    allow_non_in: bool,
-    allow_update: bool,
-    response: &mut Vec<u8>,
-) -> Admission<'a> {
     // RFC 1035 §4.1.1: the DNS header consists of six 16-bit fields.
     if wire.len() < 12 {
         return Admission::Drop;
@@ -30,14 +21,13 @@ pub(crate) fn admit_with_update<'a>(
         return Admission::Drop;
     }
     let opcode = (flags >> 11) & 15;
-    if opcode != 0 && opcode != 4 && !(allow_update && opcode == 5) {
+    if opcode != 0 && opcode != 4 {
         header_error(wire, response, Rcode::NOTIMP, true);
         return Admission::Respond;
     }
     let count = |i| u16::from_be_bytes([wire[i], wire[i + 1]]);
     // RFC 9619 §4: a QUERY with more than one question requires FORMERR.
-    // RFC 2136 §2.3: UPDATE uses the answer and authority sections for arbitrary RRsets.
-    if count(4) != 1 || (opcode != 5 && (count(6) > 1 || count(8) > 1 || count(10) > 2)) {
+    if count(4) != 1 || count(6) > 1 || count(8) > 1 || count(10) > 2 {
         header_error(wire, response, Rcode::FORMERR, false);
         return Admission::Respond;
     }

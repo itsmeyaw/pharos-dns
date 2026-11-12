@@ -522,32 +522,3 @@ async fn badtime_response_is_signed_and_contains_server_time() {
         pharos_proto::TsigError::BadTime
     );
 }
-
-#[tokio::test]
-async fn listener_applies_update_signature_policy() {
-    use pharos_server::{Action, Handler};
-    let blocks = parse(
-        "Corefile",
-        ".:53 {\n tsig {\n require_opcode UPDATE\n }\n whoami\n}",
-    )
-    .unwrap();
-    let (servers, _) =
-        pharos_plugins::servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
-    let server = servers.values().next().unwrap();
-    let wire = [
-        0, 1, 0x28, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 6, 0, 1,
-    ];
-    let mut response = Vec::with_capacity(512);
-    assert_eq!(
-        server
-            .handle(
-                &wire,
-                "127.0.0.1:1234".parse().unwrap(),
-                Protocol::Udp,
-                &mut response
-            )
-            .await,
-        Action::Respond
-    );
-    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
-}
