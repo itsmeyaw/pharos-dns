@@ -21,13 +21,14 @@ impl<'de> Deserialize<'de> for Secret {
             fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Secret, M::Error> {
                 let mut secret = Secret::default();
                 while let Some(field) = map.next_key::<String>()? {
-                    let target = if field.eq_ignore_ascii_case("key") {
-                        Some(&mut secret.key)
-                    } else if field.eq_ignore_ascii_case("private") {
-                        Some(&mut secret.private)
-                    } else {
-                        None
-                    };
+                    let target =
+                        if field.eq_ignore_ascii_case("key") || field.to_lowercase() == "key" {
+                            Some(&mut secret.key)
+                        } else if field.eq_ignore_ascii_case("private") {
+                            Some(&mut secret.private)
+                        } else {
+                            None
+                        };
                     if let Some(target) = target {
                         if let Some(value) = map.next_value::<Option<String>>()? {
                             *target = value;

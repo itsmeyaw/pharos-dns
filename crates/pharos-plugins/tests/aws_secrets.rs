@@ -21,6 +21,8 @@ fn accepts_case_insensitive_and_repeated_secret_fields() {
     let private = serde_json::to_string(PRIVATE).unwrap();
     let secret = format!(r#"{{"KEY":"bad","Key":{public},"key":null,"PRIVATE":{private}}}"#);
     assert_eq!(aws::parse_secret(&secret).unwrap().public.algorithm, 13);
+    let secret = format!(r#"{{"Key":{public},"private":{private}}}"#);
+    assert_eq!(aws::parse_secret(&secret).unwrap().public.algorithm, 13);
 }
 
 #[test]
