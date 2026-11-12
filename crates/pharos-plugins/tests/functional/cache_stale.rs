@@ -44,7 +44,7 @@ fn setup(options: &str) -> impl Handler {
 fn with_cache_stack<F: std::future::Future<Output = ()>>(
     test: impl FnOnce() -> F + Send + 'static,
 ) {
-    // ADR-0007: the combined Plugin Chain future needs a larger test thread stack.
+    // The cache/forward test future overflowed a 2 MiB test thread stack; see #90.
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
