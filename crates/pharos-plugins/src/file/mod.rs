@@ -118,6 +118,13 @@ impl Zone {
         if !soa {
             return Err("Zone has no SOA".into());
         }
+        let last_soa = records.iter().rposition(|record| record.rtype == Type::SOA);
+        let mut index = 0;
+        records.retain(|record| {
+            let keep = record.rtype != Type::SOA || Some(index) == last_soa;
+            index += 1;
+            keep
+        });
         let mut nodes: BTreeMap<Name, ZoneNode> = BTreeMap::new();
         for (index, record) in records.iter().enumerate() {
             let mut suffix = record.owner.as_wire();
@@ -919,13 +926,33 @@ impl Zone {
                 )?;
             }
             // RFC 4035 §3.1.3.1: authenticated NODATA includes the owner's NSEC proof.
-            if dnssec && !found && cut.is_none() && (exists || synthesized) {
+            if dnssec && !found && cut.is_none() && (exact || synthesized) {
                 let owner =
                     NameRef::parse(source, 0).map_err(|_| pharos_server::Error::InvalidQuery)?;
                 write_set(
                     &mut builder,
                     zone,
                     source,
+                    owner,
+                    Type::NSEC,
+                    Section::Authority,
+                    true,
+                )?;
+            }
+            if dnssec
+                && !found
+                && cut.is_none()
+                && exists
+                && !exact
+                && !synthesized
+                && let Some(rr) = zone.previous_nsec(name)
+            {
+                let owner = NameRef::parse(rr.owner.as_wire(), 0)
+                    .map_err(|_| pharos_server::Error::InvalidQuery)?;
+                write_set(
+                    &mut builder,
+                    zone,
+                    rr.owner.as_wire(),
                     owner,
                     Type::NSEC,
                     Section::Authority,
