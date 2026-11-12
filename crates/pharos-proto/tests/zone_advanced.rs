@@ -5,7 +5,7 @@ use pharos_proto::{
     zone::{ZoneParser, parse_rdata},
 };
 
-fn parse(rtype: Type, fields: &[&str]) -> Result<Vec<u8>, String> {
+fn parse(rtype: Type, fields: &[&str]) -> Result<Vec<u8>, pharos_proto::zone::RdataParseError> {
     parse_rdata(rtype, fields, &"example.".parse::<Name>().unwrap())
 }
 

@@ -1,7 +1,7 @@
 //! Streaming presentation-format Zone records.
 
 mod rdata;
-pub use rdata::parse_rdata;
+pub use rdata::{RdataParseError, parse_rdata};
 
 use std::{
     fmt::{self, Write},
