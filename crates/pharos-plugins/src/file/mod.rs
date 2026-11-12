@@ -422,6 +422,10 @@ impl Plugin for File {
         let mut dname_target = [0u8; 255];
         let mut source = name;
         let exists = zone.exists(name);
+        let exact = zone
+            .records
+            .iter()
+            .any(|rr| rr.owner.as_wire().eq_ignore_ascii_case(name));
         if let Some(rr) = dname {
             let prefix = name.len() - rr.owner.as_wire().len();
             let len = prefix + rr.rdata.len();
@@ -499,7 +503,7 @@ impl Plugin for File {
             || count > 0
             || zone.records_at(target, question.qtype).next().is_some();
         let dnssec = cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
-        if !exists
+        if !exact
             && !synthesized
             && cut.is_none()
             && dname.is_none()
