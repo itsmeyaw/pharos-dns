@@ -6,12 +6,12 @@ use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rdata, Type};
 use pharos_server::{Action, Handler, Protocol};
 use stats_alloc::INSTRUMENTED_SYSTEM;
 
-#[test]
-fn file_queries_do_not_allocate() {
+#[tokio::test]
+async fn file_queries_do_not_allocate() {
     if crate::run_isolated("file_allocations::file_queries_do_not_allocate") {
         return;
     }
-    crate::on_allocation_stack(file_queries_do_not_allocate_body);
+    file_queries_do_not_allocate_body().await;
 }
 
 async fn file_queries_do_not_allocate_body() {
@@ -73,24 +73,12 @@ async fn file_queries_do_not_allocate_body() {
     assert_eq!(after.reallocations - before.reallocations, 0);
 }
 
-#[test]
-fn dname_self_lookup_allocates_and_resolves_target() {
+#[tokio::test]
+async fn dname_self_lookup_allocates_and_resolves_target() {
     if crate::run_isolated("file_allocations::dname_self_lookup_allocates_and_resolves_target") {
         return;
     }
-    // Debug Plugin Chain futures exceed 2 MiB; see #90.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(dname_self_lookup());
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    dname_self_lookup().await;
 }
 
 async fn dname_self_lookup() {
@@ -140,25 +128,13 @@ async fn dname_self_lookup() {
     assert!(response.answers().any(|record| matches!(record.data(), Ok(Rdata::A(address)) if address == std::net::Ipv4Addr::new(192, 0, 2, 88))));
 }
 
-#[test]
-fn in_zone_cname_ns_and_apex_soa_self_lookups_allocate() {
+#[tokio::test]
+async fn in_zone_cname_ns_and_apex_soa_self_lookups_allocate() {
     if crate::run_isolated("file_allocations::in_zone_cname_ns_and_apex_soa_self_lookups_allocate")
     {
         return;
     }
-    // Debug Plugin Chain futures exceed 2 MiB; see #90.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(in_zone_cname_self_lookups());
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    in_zone_cname_self_lookups().await;
 }
 
 async fn in_zone_cname_self_lookups() {
@@ -210,24 +186,12 @@ async fn in_zone_cname_self_lookups() {
 }
 
 #[cfg(feature = "plugin-metadata")]
-#[test]
-fn signed_wildcard_and_denial_queries_do_not_allocate() {
+#[tokio::test]
+async fn signed_wildcard_and_denial_queries_do_not_allocate() {
     if crate::run_isolated("file_allocations::signed_wildcard_and_denial_queries_do_not_allocate") {
         return;
     }
-    // Debug Plugin Chain futures exceed 2 MiB; see #90.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(signed_queries());
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    signed_queries().await;
 }
 
 #[cfg(feature = "plugin-metadata")]

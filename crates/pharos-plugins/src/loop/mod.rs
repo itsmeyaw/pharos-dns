@@ -142,8 +142,9 @@ impl State {
     async fn probe(&self) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let address = *self.address.lock().unwrap();
+        let mut response = vec![0; 65535];
         while Instant::now() < deadline {
-            if timeout_at(deadline, self.exchange(address))
+            if timeout_at(deadline, self.exchange(address, &mut response))
                 .await
                 .is_ok_and(|result| result.is_ok())
             {
@@ -156,7 +157,7 @@ impl State {
         self.disabled.store(true, Ordering::Release);
     }
 
-    async fn exchange(&self, address: SocketAddr) -> io::Result<()> {
+    async fn exchange(&self, address: SocketAddr, response: &mut [u8]) -> io::Result<()> {
         let name = self
             .probe
             .as_ref()
@@ -183,9 +184,7 @@ impl State {
         let socket = UdpSocket::bind(bind).await?;
         socket.connect(address).await?;
         socket.send(&wire).await?;
-        let mut response = [0; 65535];
-        let len =
-            tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut response)).await??;
+        let len = tokio::time::timeout(Duration::from_secs(2), socket.recv(response)).await??;
         let message = Message::parse(&response[..len]).map_err(io::Error::other)?;
         // RFC 1035 §4.1.1: the response ID matches the query ID.
         if message.id() != id {

@@ -11,27 +11,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[test]
-fn routed_k8s_external_queries_do_not_allocate() {
+#[tokio::test]
+async fn routed_k8s_external_queries_do_not_allocate() {
     if crate::run_isolated(
         "k8s_external::k8s_external_allocations::routed_k8s_external_queries_do_not_allocate",
     ) {
         return;
     }
 
-    // Plugin Chain futures exceed the default debug test-thread stack; see #90.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(scenario())
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    scenario().await;
 }
 
 async fn scenario() {

@@ -10,12 +10,12 @@ use std::alloc::System;
 
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[test]
-fn routed_hosts_hit_has_no_allocations() {
+#[tokio::test]
+async fn routed_hosts_hit_has_no_allocations() {
     if crate::run_isolated("hosts::hosts_allocations::routed_hosts_hit_has_no_allocations") {
         return;
     }
-    crate::on_allocation_stack(routed_hosts_hit);
+    routed_hosts_hit().await;
 }
 
 async fn routed_hosts_hit() {

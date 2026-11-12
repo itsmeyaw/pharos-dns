@@ -399,9 +399,9 @@ async fn registry_counts_each_api_request_once_across_restart() {
     server.abort();
 }
 
-#[test]
-fn registry_records_endpoint_programming_once_per_list() {
-    crate::on_plugin_stack(registry_records_endpoint_programming);
+#[tokio::test]
+async fn registry_records_endpoint_programming_once_per_list() {
+    registry_records_endpoint_programming().await;
 }
 
 async fn registry_records_endpoint_programming() {

@@ -175,7 +175,7 @@ impl Tsig {
                 reserved: size,
             });
         let query = cx.query.without_final_tsig().expect("verified TSIG");
-        cx.run_with_message(query, next).await
+        cx.run_with_query_view(query, next).await
     }
 }
 

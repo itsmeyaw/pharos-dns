@@ -564,9 +564,9 @@ async fn coredns_autopath_search_and_passthrough() {
 }
 
 #[cfg(feature = "plugin-whoami")]
-#[test]
-fn autopath_counts_non_nxdomain_search_responses() {
-    crate::on_plugin_stack(autopath_counts_responses);
+#[tokio::test]
+async fn autopath_counts_non_nxdomain_search_responses() {
+    autopath_counts_responses().await;
 }
 
 #[cfg(feature = "plugin-whoami")]

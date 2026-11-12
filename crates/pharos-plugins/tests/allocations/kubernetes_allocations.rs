@@ -13,14 +13,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[test]
-fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
+#[tokio::test]
+async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
     if crate::run_isolated(
         "kubernetes::kubernetes_allocations::routed_kubernetes_cluster_ip_queries_do_not_allocate",
     ) {
         return;
     }
-    crate::on_allocation_stack(routed_kubernetes_cluster_ip_queries);
+    routed_kubernetes_cluster_ip_queries().await;
 }
 
 async fn routed_kubernetes_cluster_ip_queries() {

@@ -54,9 +54,9 @@ async fn upstream_nsid_must_not_invalidate_tsig() {
     key.verify(&response, now, Some(mac), 0).unwrap();
 }
 
-#[test]
-fn keys_are_shared_by_server_blocks_on_the_same_listener() {
-    crate::on_plugin_stack(shared_listener_keys);
+#[tokio::test]
+async fn keys_are_shared_by_server_blocks_on_the_same_listener() {
+    shared_listener_keys().await;
 }
 
 async fn shared_listener_keys() {
@@ -527,9 +527,9 @@ async fn badtime_response_is_signed_and_contains_server_time() {
     );
 }
 
-#[test]
-fn accepts_all_coredns_hmac_algorithms_and_rejects_md5() {
-    crate::on_plugin_stack(coredns_hmac_algorithms);
+#[tokio::test]
+async fn accepts_all_coredns_hmac_algorithms_and_rejects_md5() {
+    coredns_hmac_algorithms().await;
 }
 
 async fn coredns_hmac_algorithms() {

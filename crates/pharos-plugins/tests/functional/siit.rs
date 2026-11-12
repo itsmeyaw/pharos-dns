@@ -261,9 +261,9 @@ async fn siit_rfc6052_vectors() {
 }
 
 #[cfg(feature = "plugin-hosts")]
-#[test]
-fn siit_metrics_count_translations_only() {
-    crate::on_plugin_stack(siit_metrics_count_translations);
+#[tokio::test]
+async fn siit_metrics_count_translations_only() {
+    siit_metrics_count_translations().await;
 }
 
 #[cfg(feature = "plugin-hosts")]

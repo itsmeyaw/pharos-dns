@@ -6,12 +6,12 @@ use pharos_proto::Message;
 use pharos_server::{Action, Handler, Protocol};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region};
 
-#[test]
-fn filtered_routing_does_not_allocate() {
+#[tokio::test]
+async fn filtered_routing_does_not_allocate() {
     if crate::run_isolated("view::cases::filtered_routing_does_not_allocate") {
         return;
     }
-    crate::on_allocation_stack(filtered_routing);
+    filtered_routing().await;
 }
 
 async fn filtered_routing() {

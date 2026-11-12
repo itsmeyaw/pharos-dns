@@ -465,12 +465,15 @@ impl<C: Chain> Server<C> {
                     response,
                     max_response_size: response_limit(query, protocol),
                 };
-                let outcome = crate::panic::contain_panic_with_stacktrace(
-                    chain.serve_routed(&mut context, has_views),
-                    self.debug,
-                    chain.stacktrace(),
-                )
-                .await;
+                let outcome = {
+                    let future = std::pin::pin!(chain.serve_routed(&mut context, has_views));
+                    crate::panic::contain_panic_with_stacktrace(
+                        future,
+                        self.debug,
+                        chain.stacktrace(),
+                    )
+                    .await
+                };
                 if let Some(opt) = context.query.opt() {
                     query = query.with_udp_payload_limit(opt.udp_payload_size());
                 }

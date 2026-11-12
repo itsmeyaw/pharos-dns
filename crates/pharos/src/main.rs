@@ -103,10 +103,8 @@ fn options() -> Result<Options, (u8, String)> {
 }
 
 fn main() -> ExitCode {
-    // Plugin Chain poll depth can exceed Tokio's 2 MiB default; see #90.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_stack_size(8 * 1024 * 1024)
         .build()
     {
         Ok(runtime) => runtime,

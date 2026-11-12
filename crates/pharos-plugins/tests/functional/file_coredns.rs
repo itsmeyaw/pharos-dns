@@ -1492,67 +1492,52 @@ async fn coredns_lookup_records_and_negative_responses() {
 }
 
 // Derived from CoreDNS lookup_test.go TestLookupRefusedUpstream.
-#[test]
-fn coredns_refused_target_keeps_alias_and_noerror() {
-    // Debug Plugin Chain futures exceed 2 MiB; see #90.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
-                    use pharos_server::{Action, Handler};
-                    let path = concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/tests/fixtures/file/coredns-outside.zone"
-                    );
-                    let config = format!(".:0 {{\n file {path} example.org\n}}");
-                    let (mut servers, _) = pharos_plugins::servers(
-                        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
-                            .unwrap(),
-                    )
-                    .unwrap();
-                    let (_, server) = servers.drain().next().unwrap();
-                    let name: Name = "www.example.org.".parse().unwrap();
-                    let mut wire = Vec::with_capacity(512);
-                    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
-                    builder
-                        .question(
-                            NameRef::parse(name.as_wire(), 0).unwrap(),
-                            Type::A,
-                            Class::IN,
-                        )
-                        .unwrap();
-                    let _ = builder.finish();
-                    let mut response = Vec::with_capacity(65535);
-                    assert_eq!(
-                        server
-                            .handle(
-                                &wire,
-                                "127.0.0.1:1234".parse().unwrap(),
-                                Protocol::Udp,
-                                &mut response
-                            )
-                            .await,
-                        Action::Respond
-                    );
-                    let response = Message::parse(&response).unwrap();
-                    assert_eq!(response.rcode(), Rcode::NOERROR);
-                    assert_records(
-                        response.answers(),
-                        &["www.example.org. 3600 IN CNAME www.example.net."],
-                    );
-                    assert_records(
-                        response.authorities(),
-                        &["example.org. 3600 IN NS a.iana-servers.net."],
-                    );
-                });
-        })
-        .unwrap()
-        .join()
+#[tokio::test]
+async fn coredns_refused_target_keeps_alias_and_noerror() {
+    use pharos_server::{Action, Handler};
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/coredns-outside.zone"
+    );
+    let config = format!(".:0 {{\n file {path} example.org\n}}");
+    let (mut servers, _) = pharos_plugins::servers(
+        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap(),
+    )
+    .unwrap();
+    let (_, server) = servers.drain().next().unwrap();
+    let name: Name = "www.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
         .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+        Action::Respond
+    );
+    let response = Message::parse(&response).unwrap();
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    assert_records(
+        response.answers(),
+        &["www.example.org. 3600 IN CNAME www.example.net."],
+    );
+    assert_records(
+        response.authorities(),
+        &["example.org. 3600 IN NS a.iana-servers.net."],
+    );
 }
 
 // Derived from CoreDNS xfr_test.go TestAXFRWithOutTransferPlugin and TestTransferRequiresExactZone.
@@ -2399,58 +2384,106 @@ async fn coredns_additional_processing_deduplicates_targets() {
 
 // CoreDNS tsig README: require signatures for IXFR as well as AXFR.
 #[cfg(all(feature = "plugin-transfer", feature = "plugin-tsig"))]
-#[test]
-fn coredns_tsig_readme_requires_signed_ixfr() {
-    // Debug Plugin Chain futures exceed 2 MiB; see #90.
-    std::thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(|| {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            use pharos_server::Listener;
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/coredns-tsig-zone.zone");
-            let config = format!("example.zone:0 {{\n tsig {{\n secret example.zone.key. NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=\n require AXFR IXFR\n }}\n transfer {{\n to *\n }}\n file {path}\n}}");
-            let (mut servers, lifecycle) = pharos_plugins::servers(configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap()).unwrap();
-            lifecycle.run(pharos_server::Phase::Startup).await.unwrap();
-            let (_, server) = servers.drain().next().unwrap();
-            let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), server).await.unwrap();
-            let apex: Name = "example.zone.".parse().unwrap();
-            let records = ZoneParser::new(include_str!("../fixtures/file/coredns-tsig-zone.zone").as_bytes(), apex.clone(), "test").collect::<Result<Vec<_>, _>>().unwrap();
-            let soa = records.iter().find(|record| record.rtype == Type::SOA).unwrap();
-            let make_query = || {
-                let mut wire = Vec::with_capacity(512);
-                let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
-                let owner = NameRef::parse(apex.as_wire(), 0).unwrap();
-                builder.question(owner, Type::IXFR, Class::IN).unwrap();
-                builder.record(Section::Authority, owner, Type::SOA, Class::IN, soa.ttl, &soa.rdata).unwrap();
-                let _ = builder.finish();
-                wire
-            };
-            let secret = [54, 132, 194, 37, 79, 131, 50, 161, 86, 203, 6, 143, 203, 20, 162, 142, 176, 196, 3, 247, 130, 222, 114, 180, 198, 45, 192, 48, 70, 110, 61, 89];
-            let key = pharos_proto::TsigKey::new("example.zone.key.".parse().unwrap(), pharos_proto::TsigAlgorithm::Sha256, &secret);
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            for signed in [false, true] {
-                let mut query = make_query();
-                if signed { key.sign(&mut query, now, 300, None).unwrap(); }
-                let mac = signed.then(|| pharos_proto::TsigRecord::parse(&query).unwrap().mac.to_vec());
-                let mut socket = tokio::net::TcpStream::connect(listener.local_addr()).await.unwrap();
-                socket.write_all(&(query.len() as u16).to_be_bytes()).await.unwrap();
-                socket.write_all(&query).await.unwrap();
-                let len = tokio::time::timeout(std::time::Duration::from_secs(3), socket.read_u16()).await.unwrap().unwrap();
-                let mut response = vec![0; usize::from(len)];
-                socket.read_exact(&mut response).await.unwrap();
-                let message = Message::parse(&response).unwrap();
-                if signed {
-                    assert_eq!(message.rcode(), Rcode::NOERROR);
-                    assert_eq!(message.answer_count(), 1);
-                    assert_eq!(message.answers().next().unwrap().rtype, Type::SOA);
-                    let mut verifier = pharos_proto::TsigStream::new(&key, mac.as_deref().unwrap());
-                    assert!(verifier.verify(&response, now, 0).unwrap().is_some());
-                    verifier.finish().unwrap();
-                } else {
-                    assert_eq!(message.rcode(), Rcode::REFUSED);
-                }
-            }
-            listener.shutdown().await.unwrap();
-            lifecycle.run(pharos_server::Phase::Shutdown).await.unwrap();
+#[tokio::test]
+async fn coredns_tsig_readme_requires_signed_ixfr() {
+    use pharos_server::Listener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/coredns-tsig-zone.zone"
+    );
+    let config = format!(
+        "example.zone:0 {{\n tsig {{\n secret example.zone.key. NoTCJU+DMqFWywaPyxSijrDEA/eC3nK0xi3AMEZuPVk=\n require AXFR IXFR\n }}\n transfer {{\n to *\n }}\n file {path}\n}}"
+    );
+    let (mut servers, lifecycle) = pharos_plugins::servers(
+        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap(),
+    )
+    .unwrap();
+    lifecycle.run(pharos_server::Phase::Startup).await.unwrap();
+    let (_, server) = servers.drain().next().unwrap();
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), server)
+        .await
+        .unwrap();
+    let apex: Name = "example.zone.".parse().unwrap();
+    let records = ZoneParser::new(
+        include_str!("../fixtures/file/coredns-tsig-zone.zone").as_bytes(),
+        apex.clone(),
+        "test",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    let soa = records
+        .iter()
+        .find(|record| record.rtype == Type::SOA)
+        .unwrap();
+    let make_query = || {
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+        let owner = NameRef::parse(apex.as_wire(), 0).unwrap();
+        builder.question(owner, Type::IXFR, Class::IN).unwrap();
+        builder
+            .record(
+                Section::Authority,
+                owner,
+                Type::SOA,
+                Class::IN,
+                soa.ttl,
+                &soa.rdata,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        wire
+    };
+    let secret = [
+        54, 132, 194, 37, 79, 131, 50, 161, 86, 203, 6, 143, 203, 20, 162, 142, 176, 196, 3, 247,
+        130, 222, 114, 180, 198, 45, 192, 48, 70, 110, 61, 89,
+    ];
+    let key = pharos_proto::TsigKey::new(
+        "example.zone.key.".parse().unwrap(),
+        pharos_proto::TsigAlgorithm::Sha256,
+        &secret,
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for signed in [false, true] {
+        let mut query = make_query();
+        if signed {
+            key.sign(&mut query, now, 300, None).unwrap();
+        }
+        let mac = signed.then(|| {
+            pharos_proto::TsigRecord::parse(&query)
+                .unwrap()
+                .mac
+                .to_vec()
         });
-    }).unwrap().join().unwrap();
+        let mut socket = tokio::net::TcpStream::connect(listener.local_addr())
+            .await
+            .unwrap();
+        socket
+            .write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        socket.write_all(&query).await.unwrap();
+        let len = tokio::time::timeout(std::time::Duration::from_secs(3), socket.read_u16())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut response = vec![0; usize::from(len)];
+        socket.read_exact(&mut response).await.unwrap();
+        let message = Message::parse(&response).unwrap();
+        if signed {
+            assert_eq!(message.rcode(), Rcode::NOERROR);
+            assert_eq!(message.answer_count(), 1);
+            assert_eq!(message.answers().next().unwrap().rtype, Type::SOA);
+            let mut verifier = pharos_proto::TsigStream::new(&key, mac.as_deref().unwrap());
+            assert!(verifier.verify(&response, now, 0).unwrap().is_some());
+            verifier.finish().unwrap();
+        } else {
+            assert_eq!(message.rcode(), Rcode::REFUSED);
+        }
+    }
+    listener.shutdown().await.unwrap();
+    lifecycle.run(pharos_server::Phase::Shutdown).await.unwrap();
 }
