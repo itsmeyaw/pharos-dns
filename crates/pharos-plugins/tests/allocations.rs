@@ -55,6 +55,12 @@ mod whoami {
 }
 
 #[path = "allocations"]
+mod view {
+    #[path = "view_allocations.rs"]
+    mod cases;
+}
+
+#[path = "allocations"]
 mod any {
     #[path = "any_allocations.rs"]
     mod any_allocations;
