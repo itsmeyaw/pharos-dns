@@ -74,9 +74,14 @@ pub async fn notify_from(
             if response.id() != id
                 || response.flags() & 0x8000 == 0
                 || response.opcode() != pharos_proto::Opcode::NOTIFY
-                || response.rcode() != Rcode::NOERROR
             {
                 return Err(invalid("NOTIFY was not accepted"));
+            }
+            if response.rcode() != Rcode::NOERROR {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("NOTIFY returned {}", response.rcode()),
+                ));
             }
             Ok(())
         })

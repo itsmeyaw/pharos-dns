@@ -160,19 +160,19 @@ async fn notify_reports_each_secondary_failure() {
     let second = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let first_addr = first.local_addr().unwrap();
     let second_addr = second.local_addr().unwrap();
-    let respond = |socket: tokio::net::UdpSocket| {
+    let respond = |socket: tokio::net::UdpSocket, rcode: u8| {
         tokio::spawn(async move {
             let mut wire = [0; 512];
             for _ in 0..3 {
                 let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
                 wire[2] |= 0x80;
-                wire[3] = 5;
+                wire[3] = rcode;
                 socket.send_to(&wire[..len], peer).await.unwrap();
             }
         })
     };
-    let first_task = respond(first);
-    let second_task = respond(second);
+    let first_task = respond(first, 2);
+    let second_task = respond(second, 5);
     let config = format!(".:53 {{\n transfer {{\n to {first_addr} {second_addr}\n }}\n}}");
     let blocks = parse("Corefile", &config).unwrap();
     let chain = configure::<Chain>(&blocks, directives())
@@ -188,6 +188,8 @@ async fn notify_reports_each_secondary_failure() {
         .to_string();
     assert!(error.contains(&first_addr.to_string()), "{error}");
     assert!(error.contains(&second_addr.to_string()), "{error}");
+    assert!(error.contains("SERVFAIL"), "{error}");
+    assert!(error.contains("REFUSED"), "{error}");
     first_task.await.unwrap();
     second_task.await.unwrap();
 }
