@@ -211,6 +211,62 @@ async fn signed_axfr_client_rejects_unsigned_last_and_tampering() {
     }
 }
 
+#[tokio::test]
+async fn signed_transfer_failure_closes_without_unsigned_message() {
+    struct Broken;
+    impl Chain for Broken {
+        async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+            if !matches!(Chain::serve(&SignedTransfer, cx).await, Outcome::Stream(_)) {
+                return Outcome::Drop;
+            }
+            Outcome::Stream(Stream::new(|wire| {
+                wire.extend_from_slice(&[0; 13]);
+                Ok(true)
+            }))
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+    }
+    let listener_key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(listener_key, ".".parse().unwrap(), Some(Broken), vec![]);
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Server::new(router, listener_key),
+    )
+    .await
+    .unwrap();
+    let key = pharos_proto::TsigKey::new(
+        "key.".parse().unwrap(),
+        pharos_proto::TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut query = vec![0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 252, 0, 1];
+    key.sign(&mut query, now, 300, None).unwrap();
+    let mut socket = TcpStream::connect(listener.local_addr()).await.unwrap();
+    socket
+        .write_all(&(query.len() as u16).to_be_bytes())
+        .await
+        .unwrap();
+    socket.write_all(&query).await.unwrap();
+    assert!(
+        timeout(Duration::from_secs(3), socket.read_u16())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    drop(socket);
+    listener.shutdown().await.unwrap();
+}
+
 struct BadClosingSoa;
 
 struct PanickingTransfer;
