@@ -58,6 +58,7 @@ struct RuleMetrics {
     bindings: Mutex<Vec<Arc<MetricBinding>>>,
 }
 struct MetricBinding {
+    view: String,
     class: String,
     qtype: String,
     matched: pharos_server::metrics::TemplateMetrics,
@@ -219,6 +220,7 @@ impl Template {
         &mut self,
         registry: &pharos_server::metrics::Registry,
         listeners: &[pharos_server::ListenerKey],
+        views: &[String],
     ) {
         for listener in listeners {
             let address = listener.address;
@@ -237,11 +239,14 @@ impl Template {
                         bindings: Mutex::new(Vec::new()),
                     };
                     if rule.class != Class::ANY && rule.qtype != Type::ANY {
-                        metrics.binding(
-                            &rule.class.to_string(),
-                            &rule.qtype.to_string(),
-                            &rule.records,
-                        );
+                        for view in views.iter().map(String::as_str).chain([""]) {
+                            metrics.binding(
+                                view,
+                                &rule.class.to_string(),
+                                &rule.qtype.to_string(),
+                                &rule.records,
+                            );
+                        }
                     }
                     rule_metrics.push(metrics);
                 }
@@ -392,20 +397,25 @@ impl Template {
 }
 
 impl RuleMetrics {
-    fn binding(&self, class: &str, qtype: &str, records: &[TemplateRecord]) -> Arc<MetricBinding> {
+    fn binding(
+        &self,
+        view: &str,
+        class: &str,
+        qtype: &str,
+        records: &[TemplateRecord],
+    ) -> Arc<MetricBinding> {
         let mut bindings = self
             .bindings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(binding) = bindings
-            .iter()
-            .find(|binding| binding.class == class && binding.qtype == qtype)
-        {
+        if let Some(binding) = bindings.iter().find(|binding| {
+            binding.view == view && binding.class == class && binding.qtype == qtype
+        }) {
             return Arc::clone(binding);
         }
         let matched = self
             .registry
-            .template(&self.server, &self.zone, "", class, qtype);
+            .template(&self.server, &self.zone, view, class, qtype);
         let failures = records
             .iter()
             .map(|record| {
@@ -418,6 +428,7 @@ impl RuleMetrics {
             })
             .collect();
         let binding = Arc::new(MetricBinding {
+            view: view.to_owned(),
             class: class.to_owned(),
             qtype: qtype.to_owned(),
             matched,
@@ -476,7 +487,14 @@ fn evaluate<'a>(
         }
     }
     // shortcut: new metric label combinations allocate on matched Queries; prebind when wildcard labels can be resolved at setup.
-    let binding = metrics.map(|metrics| metrics.binding(data.class, data.qtype, &rule.records));
+    let binding = metrics.map(|metrics| {
+        metrics.binding(
+            cx.metadata.metric_view(),
+            data.class,
+            data.qtype,
+            &rule.records,
+        )
+    });
     if let Some(binding) = &binding {
         binding.matched.matched();
     }
@@ -702,6 +720,7 @@ mod tests {
                 transport: pharos_server::Transport::Dns,
                 address: local,
             }],
+            &[],
         );
         let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x10\0\x03";
         let domain: Name = ".".parse().unwrap();

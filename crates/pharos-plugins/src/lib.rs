@@ -240,7 +240,7 @@ pub fn servers_with_registry(
     }
     #[cfg(feature = "plugin-tsig")]
     let mut tsig_keyrings = tsig::KeyRings::default();
-    #[cfg(feature = "plugin-acl")]
+    #[cfg(any(feature = "plugin-acl", feature = "plugin-template"))]
     let view_names = {
         let mut names = blocks
             .iter()
@@ -389,7 +389,7 @@ pub fn servers_with_registry(
         #[cfg(feature = "plugin-template")]
         if let Some(template) = &mut block.config.template {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
-            template.set_metrics(&metrics, &listeners);
+            template.set_metrics(&metrics, &listeners, &view_names);
         }
         #[cfg(feature = "plugin-dnssec")]
         if let Some(dnssec) = &mut block.config.dnssec {
