@@ -1123,7 +1123,7 @@ mod tests {
 
         let mut stale_wire = chased[0].answers[0].clone().unwrap();
         stale_wire[2] |= 0x02;
-        let stale = [
+        let mut stale = [
             Chased {
                 ordinal: 2,
                 host: "old.example.net".into(),
@@ -1176,6 +1176,38 @@ mod tests {
             Rdata::Cname(target) => target.to_string() == "lb.example.net.",
             _ => true,
         }));
+
+        stale[0].host = "lb.example.net".into();
+        response.clear();
+        let mut valid_slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &zone,
+            metadata: Metadata::new(&mut valid_slots),
+            response: &mut response,
+            max_response_size: 4096,
+        };
+        assert!(matches!(
+            external.service_response(
+                &mut cx,
+                &external.zones[0],
+                kubernetes,
+                &store,
+                Some(&request),
+                None,
+                Rcode::NOERROR,
+                &stale
+            ),
+            Outcome::Response
+        ));
+        assert!(
+            Message::parse(&response).unwrap().tc(),
+            "followed lookup must preserve TC"
+        );
 
         let srv_chased = [Chased {
             ordinal: 2,
