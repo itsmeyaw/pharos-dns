@@ -146,3 +146,20 @@ fn range_visits_matches_and_uses_else_for_empty_input() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "empty");
 }
+
+#[test]
+fn coredns_variable_examples_use_eq_and_len_builtins() {
+    use pharos_plugins::expression::Value;
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("a.example.", &metadata);
+    let vars = [("missing", Value::String(""))];
+    data.variables = &vars;
+    let template = Template::compile(
+        "{{ .Name }} 60 IN TXT \"empty={{ eq .Var.missing \"\" }},count={{ len .Var }}\"",
+    )
+    .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "a.example. 60 IN TXT \"empty=true,count=1\"");
+}

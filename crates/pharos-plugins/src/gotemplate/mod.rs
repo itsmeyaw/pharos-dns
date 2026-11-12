@@ -41,6 +41,8 @@ enum Field {
     Dot,
     Root(Box<Field>),
     Matches,
+    Groups,
+    Variables,
     Name,
     Zone,
     Class,
@@ -59,6 +61,8 @@ enum Part {
     ParseInt(Field, u32, u32),
     If(Field, Vec<Part>, Vec<Part>),
     Range(Field, Vec<Part>, Vec<Part>),
+    Len(Field),
+    Eq(Vec<Field>),
 }
 
 /// A template parsed at setup time.
@@ -128,6 +132,15 @@ fn render_parts(
                 for value in data.matches {
                     render_parts(body, data, Dot::Value(Value::String(value)), output)?;
                 }
+            }
+            Part::Len(field) => write!(output, "{}", field.length(data, dot)?)?,
+            Part::Eq(fields) => {
+                let first = fields[0].scalar(data, dot)?;
+                let mut equal = false;
+                for field in &fields[1..] {
+                    equal |= compare(first, field.scalar(data, dot)?)?;
+                }
+                write!(output, "{equal}")?;
             }
         }
     }
@@ -235,6 +248,17 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             } else {
                 Part::If(condition, yes, no)
             }
+        } else if let Some(args) = action.strip_prefix("len ") {
+            Part::Len(parse_field(args.trim())?)
+        } else if let Some(args) = action.strip_prefix("eq ") {
+            let fields = args
+                .split_whitespace()
+                .map(parse_field)
+                .collect::<Result<Vec<_>, _>>()?;
+            if fields.len() < 2 {
+                return Err("eq needs at least two arguments".into());
+            }
+            Part::Eq(fields)
         } else if let Some(args) = action.strip_prefix("parseInt ") {
             let mut args = args.split_whitespace();
             let field = parse_field(args.next().ok_or("parseInt needs three arguments")?)?;
@@ -273,6 +297,8 @@ fn parse_field(action: &str) -> Result<Field, String> {
     match action {
         "." => Ok(Field::Dot),
         ".Match" => Ok(Field::Matches),
+        ".Group" => Ok(Field::Groups),
+        ".Var" => Ok(Field::Variables),
         ".Name" => Ok(Field::Name),
         ".Zone" => Ok(Field::Zone),
         ".Class" => Ok(Field::Class),
@@ -317,6 +343,41 @@ fn parse_field(action: &str) -> Result<Field, String> {
 }
 
 impl Field {
+    fn scalar<'a>(
+        &'a self,
+        data: &'a Data<'_, '_>,
+        dot: Dot<'a>,
+    ) -> Result<Option<Value<'a>>, fmt::Error> {
+        match self {
+            Self::Root(field) => field.scalar(data, Dot::Root),
+            Self::Dot => match dot {
+                Dot::Value(value) => Ok(Some(value)),
+                Dot::Root => Err(fmt::Error),
+            },
+            Self::Variable(name) if matches!(dot, Dot::Root) => Ok(data
+                .variables
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(*value))),
+            Self::Group(name) if matches!(dot, Dot::Root) => Ok(data
+                .groups
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(Value::String(value)))),
+            _ => Ok(Some(Value::String(self.value(data, dot)?))),
+        }
+    }
+
+    fn length(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<usize, fmt::Error> {
+        match self {
+            Self::Root(field) => field.length(data, Dot::Root),
+            Self::Matches if matches!(dot, Dot::Root) => Ok(data.matches.len()),
+            Self::Groups if matches!(dot, Dot::Root) => Ok(data.groups.len()),
+            Self::Variables if matches!(dot, Dot::Root) => Ok(data.variables.len()),
+            _ => match self.scalar(data, dot)? {
+                Some(Value::String(value)) => Ok(value.len()),
+                _ => Err(fmt::Error),
+            },
+        }
+    }
     fn truthy(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<bool, fmt::Error> {
         match self {
             Self::Root(field) => field.truthy(data, Dot::Root),
@@ -329,6 +390,8 @@ impl Field {
                 Dot::Value(Value::String(value)) => !value.is_empty(),
             }),
             Self::Matches if matches!(dot, Dot::Root) => Ok(!data.matches.is_empty()),
+            Self::Groups if matches!(dot, Dot::Root) => Ok(!data.groups.is_empty()),
+            Self::Variables if matches!(dot, Dot::Root) => Ok(!data.variables.is_empty()),
             Self::Literal(_) => Ok(!self.value(data, dot)?.is_empty()),
             _ if !matches!(dot, Dot::Root) => Err(fmt::Error),
             Self::Variable(name) => Ok(
@@ -361,7 +424,7 @@ impl Field {
             },
             Self::Literal(value) => Ok(value),
             _ if !matches!(dot, Dot::Root) => Err(fmt::Error),
-            Self::Matches => Err(fmt::Error),
+            Self::Matches | Self::Groups | Self::Variables => Err(fmt::Error),
             Self::Name => Ok(data.name),
             Self::Zone => Ok(data.zone),
             Self::Class => Ok(data.class),
@@ -385,6 +448,18 @@ impl Field {
             Self::Match(index) => data.matches.get(*index).copied().ok_or(fmt::Error),
             Self::Metadata(label) => Ok(data.metadata.get(label).unwrap_or("")),
         }
+    }
+}
+
+fn compare(a: Option<Value<'_>>, b: Option<Value<'_>>) -> Result<bool, fmt::Error> {
+    match (a, b) {
+        (None | Some(Value::Nil), None | Some(Value::Nil)) => Ok(true),
+        (None | Some(Value::Nil), _) | (_, None | Some(Value::Nil)) => Ok(false),
+        (Some(Value::Bool(a)), Some(Value::Bool(b))) => Ok(a == b),
+        (Some(Value::Int(a)), Some(Value::Int(b))) => Ok(a == b),
+        (Some(Value::Float(a)), Some(Value::Float(b))) => Ok(a == b),
+        (Some(Value::String(a)), Some(Value::String(b))) => Ok(a == b),
+        _ => Err(fmt::Error),
     }
 }
 
