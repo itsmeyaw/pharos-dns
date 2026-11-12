@@ -1,0 +1,10 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    transfer {
+        to 2001:db8::1
+        source 2001:db8::53
+    }
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+    }
+}

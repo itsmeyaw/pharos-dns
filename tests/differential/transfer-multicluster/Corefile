@@ -1,0 +1,10 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    transfer {
+        to *
+    }
+    kubernetes cluster.local clusterset.local {
+        kubeconfig {kubeconfig}
+        multicluster clusterset.local
+    }
+}

@@ -1,0 +1,15 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    acl {
+        allow type AXFR net 10.1.0.0/16
+        allow type IXFR net 10.1.0.0/16
+        block type AXFR net *
+        block type IXFR net *
+    }
+    transfer {
+        to *
+    }
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+    }
+}
