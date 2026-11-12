@@ -194,6 +194,7 @@ pub struct Metadata<'a> {
     validated_tsig_len: usize,
     tsig_signing: Option<TsigSigning>,
     source: Option<Arc<dyn MetadataSource>>,
+    view_name: Option<Arc<str>>,
     enabled: bool,
     self_lookup: Option<SelfLookupState<'a>>,
 }
@@ -212,14 +213,51 @@ impl<'a> Metadata<'a> {
             validated_tsig_len: 0,
             tsig_signing: None,
             source: None,
+            view_name: None,
             enabled: true,
             self_lookup: None,
         }
     }
 
+    pub(crate) fn clear_collected(&mut self) {
+        for slot in self.slots.iter_mut() {
+            if slot.is_some_and(|(name, _)| {
+                !matches!(
+                    name,
+                    crate::metrics::WRITER_METADATA
+                        | crate::logging::PLUGIN_METADATA
+                        | crate::logging::ERROR_LOGGED_METADATA
+                )
+            }) {
+                *slot = None;
+            }
+        }
+        self.inline_name = None;
+        self.inline_len = 0;
+        self.copied.fill(None);
+        self.copied_len = 0;
+        self.source = None;
+        self.view_name = None;
+        self.enabled = true;
+    }
+
     /// Retain an existing shared source of Metadata without allocating per Query.
     pub fn set_source(&mut self, source: Arc<dyn MetadataSource>) {
         self.source = Some(source);
+    }
+
+    /// Set the View provider's label without copying or replacing another source.
+    pub fn set_view_name(&mut self, name: Arc<str>) {
+        self.remove_copied("view/name");
+        if self.inline_name == Some("view/name") {
+            self.inline_name = None;
+        }
+        for slot in self.slots.iter_mut() {
+            if slot.is_some_and(|(key, _)| key == "view/name") {
+                *slot = None;
+            }
+        }
+        self.view_name = Some(name);
     }
 
     /// Enable public Plugin Metadata for the current Server Block.
@@ -281,6 +319,9 @@ impl<'a> Metadata<'a> {
             .position(|slot| slot.is_some_and(|(existing, _)| existing == name))
             .or_else(|| self.slots.iter().position(Option::is_none));
         let Some(slot) = slot else { return false };
+        if name == "view/name" {
+            self.view_name = None;
+        }
         self.remove_copied(name);
         if self.inline_name == Some(name) {
             self.inline_name = None;
@@ -295,6 +336,9 @@ impl<'a> Metadata<'a> {
             || self.inline_name.is_some_and(|existing| existing != name)
         {
             return false;
+        }
+        if name == "view/name" {
+            self.view_name = None;
         }
         self.remove_copied(name);
         for slot in self.slots.iter_mut() {
@@ -327,6 +371,9 @@ impl<'a> Metadata<'a> {
         else {
             return false;
         };
+        if name == "view/name" {
+            self.view_name = None;
+        }
         self.remove_copied(name);
         if self.inline_name == Some(name) {
             self.inline_name = None;
@@ -379,6 +426,11 @@ impl<'a> Metadata<'a> {
             .iter()
             .flatten()
             .find_map(|(key, value)| (*key == name).then_some(*value))
+            .or_else(|| {
+                (name == "view/name")
+                    .then_some(self.view_name.as_deref())
+                    .flatten()
+            })
             .or_else(|| self.source.as_ref().and_then(|source| source.get(name)))
     }
 }

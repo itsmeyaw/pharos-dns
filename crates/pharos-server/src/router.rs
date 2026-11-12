@@ -1,4 +1,11 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use pharos_proto::{Message, Name, NameRef, Opcode, Type};
 
@@ -27,6 +34,16 @@ impl<C> ServerBlock<C> {
     pub fn chain(&self) -> Option<&C> {
         self.chain.as_ref()
     }
+    pub(crate) fn matches_filters(
+        &self,
+        query: &Message<'_>,
+        peer: SocketAddr,
+        protocol: Protocol,
+    ) -> bool {
+        self.filters
+            .iter()
+            .all(|filter| filter(query, peer, protocol))
+    }
     pub(crate) fn metrics(&self) -> Option<&BlockMetrics> {
         self.metrics.as_ref()
     }
@@ -54,6 +71,8 @@ struct MetricContext<C> {
     registry: Registry,
     server: String,
     prepare: fn(&mut ServerBlock<C>, &Registry, &str),
+    has_view: fn(&ServerBlock<C>) -> bool,
+    views: Arc<AtomicBool>,
 }
 
 impl<C> Default for Router<C> {
@@ -81,8 +100,11 @@ impl<C> Router<C> {
             plugin_metrics: Vec::new(),
             plugin_names: Vec::new(),
         };
-        if let Some(context) = self.metric_contexts.get(&key) {
+        if let Some(context) = self.metric_contexts.get_mut(&key) {
             (context.prepare)(&mut block, &context.registry, &context.server);
+            if (context.has_view)(&block) {
+                context.views.store(true, Ordering::Relaxed);
+            }
         }
         let blocks = self.listeners.entry(key).or_default();
         blocks.push(block);
@@ -96,6 +118,17 @@ impl<C> Router<C> {
         query: Message<'_>,
         peer: SocketAddr,
         protocol: Protocol,
+    ) -> Option<&ServerBlock<C>> {
+        self.route_with(key, query, |block| {
+            block.matches_filters(&query, peer, protocol)
+        })
+    }
+
+    pub(crate) fn route_with(
+        &self,
+        key: &ListenerKey,
+        query: Message<'_>,
+        mut matches: impl FnMut(&ServerBlock<C>) -> bool,
     ) -> Option<&ServerBlock<C>> {
         let question = query.questions().next()?;
         let blocks = self.listeners.get(key)?;
@@ -122,11 +155,7 @@ impl<C> Router<C> {
                 continue;
             }
             block.chain.as_ref()?;
-            if block
-                .filters
-                .iter()
-                .all(|filter| filter(&query, peer, protocol))
-            {
+            if matches(block) {
                 if !ds {
                     return Some(block);
                 }
@@ -139,12 +168,7 @@ impl<C> Router<C> {
         blocks
             .iter()
             .filter(|block| block.domain.label_count() == 0 && block.chain.is_some())
-            .find(|block| {
-                block
-                    .filters
-                    .iter()
-                    .all(|filter| filter(&query, peer, protocol))
-            })
+            .find(|block| matches(block))
     }
 }
 
@@ -163,13 +187,27 @@ impl<C: Chain> Router<C> {
                 .any(|block| block.chain.as_ref().is_some_and(Chain::metrics_enabled))
         })
     }
-    pub(crate) fn prepare_metrics(&mut self, key: &ListenerKey, registry: &Registry, server: &str) {
+    pub(crate) fn prepare_metrics(
+        &mut self,
+        key: &ListenerKey,
+        registry: &Registry,
+        server: &str,
+    ) -> Arc<AtomicBool> {
+        let views = Arc::new(AtomicBool::new(self.listeners.get(key).is_some_and(
+            |blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block.chain.as_ref().is_some_and(Chain::has_view))
+            },
+        )));
         self.metric_contexts.insert(
             *key,
             MetricContext {
                 registry: registry.clone(),
                 server: server.to_owned(),
                 prepare: prepare_block::<C>,
+                has_view: |block| block.chain.as_ref().is_some_and(Chain::has_view),
+                views: Arc::clone(&views),
             },
         );
         if let Some(blocks) = self.listeners.get_mut(key) {
@@ -177,11 +215,11 @@ impl<C: Chain> Router<C> {
                 prepare_block(block, registry, server);
             }
         }
+        views
     }
 }
 
 fn prepare_block<C: Chain>(block: &mut ServerBlock<C>, registry: &Registry, server: &str) {
-    // shortcut: View names are unavailable until named View filters are implemented.
     block.plugin_metrics.clear();
     block.plugin_names.clear();
     if let Some(chain) = &block.chain {
@@ -190,7 +228,7 @@ fn prepare_block<C: Chain>(block: &mut ServerBlock<C>, registry: &Registry, serv
         }
         let metrics = chain
             .metrics_enabled()
-            .then(|| registry.block(server, &block.domain.to_string(), ""));
+            .then(|| registry.block(server, &block.domain.to_string(), chain.view_name()));
         chain.visit_enabled(&mut |name| {
             block.plugin_names.push(name);
             if let Some(metrics) = &metrics {
