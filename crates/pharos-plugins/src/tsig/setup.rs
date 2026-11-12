@@ -91,6 +91,7 @@ fn add_secret(
     let name: Name = absolute
         .parse()
         .map_err(|_| cursor.error("invalid key name"))?;
+    let name: Name = name.canonical().parse().expect("canonical name");
     if plugin.secrets.iter().any(|existing| existing.name == name) {
         return Err(cursor.error("key redefined"));
     }

@@ -20,6 +20,12 @@ struct Secret {
     keys: Option<[TsigKey; 5]>,
 }
 
+/// Return the normalized TSIG key name authenticated for this Query.
+#[must_use]
+pub fn validated_key_name<'a>(cx: &'a Context<'_, '_>) -> Option<NameRef<'a>> {
+    cx.metadata.validated_tsig()
+}
+
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Secret")
@@ -102,6 +108,7 @@ impl Tsig {
             Err(TsigError::Format) => return Outcome::Unanswered(Rcode::FORMERR),
             Err(_) => return tsig_error(cx, &record, 16, None, 0),
         }
+        cx.metadata.set_validated_tsig(&secret.name);
         let query = cx.query.without_final_tsig().expect("verified TSIG");
         let outcome = cx.run_with_message(query, next).await;
         let error_code = match outcome {

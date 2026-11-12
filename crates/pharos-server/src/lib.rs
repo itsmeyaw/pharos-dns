@@ -146,6 +146,8 @@ pub struct Metadata<'a> {
     copied: [Option<(&'static str, usize, usize)>; 12],
     copied_data: [u8; 1024],
     copied_len: usize,
+    validated_tsig: [u8; 255],
+    validated_tsig_len: usize,
     source: Option<Arc<dyn MetadataSource>>,
     enabled: bool,
     self_lookup: Option<SelfLookupState<'a>>,
@@ -161,6 +163,8 @@ impl<'a> Metadata<'a> {
             copied: [None; 12],
             copied_data: [0; 1024],
             copied_len: 0,
+            validated_tsig: [0; 255],
+            validated_tsig_len: 0,
             source: None,
             enabled: true,
             self_lookup: None,
@@ -175,6 +179,22 @@ impl<'a> Metadata<'a> {
     /// Enable public Plugin Metadata for the current Server Block.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+    }
+
+    /// Set the authenticated TSIG key name for downstream Plugins.
+    pub fn set_validated_tsig(&mut self, name: &Name) {
+        let wire = name.as_wire();
+        self.validated_tsig[..wire.len()].copy_from_slice(wire);
+        self.validated_tsig_len = wire.len();
+    }
+
+    /// Return the authenticated TSIG key name, if the Query was verified.
+    #[must_use]
+    pub fn validated_tsig(&self) -> Option<pharos_proto::NameRef<'_>> {
+        (self.validated_tsig_len != 0).then(|| {
+            pharos_proto::NameRef::parse(&self.validated_tsig[..self.validated_tsig_len], 0)
+                .expect("validated TSIG name")
+        })
     }
 
     #[must_use]
