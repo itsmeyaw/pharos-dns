@@ -65,3 +65,65 @@ fn arithmetic_comparisons_and_logical_operators_follow_precedence() {
         assert!(Expression::compile(source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn query_and_metadata_functions_read_borrowed_data() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [None];
+    let mut metadata = Metadata::new(&mut slots);
+    assert!(metadata.insert("test/region", "eu"));
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "name() == 'example.org.'",
+        "type() == 'A' && class() == 'IN'",
+        "metadata('test/region') == 'eu'",
+        "metadata('missing') == ''",
+        "client_ip() == '10.0.0.1' && port() == '1234'",
+        "server_ip() == '127.0.0.1' && server_port() == '53'",
+        "proto() == 'udp' && id() == 1053 && opcode() == 0 && !do()",
+        "size() == 29 && bufsize() == 512",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+    assert!(Expression::compile("name(1)").is_err());
+    assert!(Expression::compile("metadata()").is_err());
+}
+
+#[test]
+fn query_size_expands_compressed_names_like_coredns() {
+    let mut wire = WIRE.to_vec();
+    wire[5] = 2;
+    wire.extend_from_slice(b"\xc0\x0c\x00\x01\x00\x01");
+    let message = Message::parse(&wire).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    assert_eq!(
+        Expression::compile("size()")
+            .unwrap()
+            .evaluate(&query, &metadata, &mut scratch)
+            .unwrap(),
+        Value::Int(46)
+    );
+}

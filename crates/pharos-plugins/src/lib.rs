@@ -58,6 +58,7 @@ pub mod kubernetes;
 pub mod loadbalance;
 #[cfg(feature = "plugin-local")]
 pub mod local;
+mod message_len;
 #[cfg(feature = "plugin-minimal")]
 pub mod minimal;
 #[cfg(feature = "plugin-multisocket")]

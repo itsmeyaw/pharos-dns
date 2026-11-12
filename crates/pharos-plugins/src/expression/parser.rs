@@ -8,6 +8,7 @@ enum Token {
     Op(String),
     Left,
     Right,
+    Comma,
     End,
 }
 
@@ -77,12 +78,12 @@ impl Parser<'_> {
             }
             self.offset += end.ok_or("unterminated string")?;
             self.token = Token::String(value);
-        } else if first == '(' || first == ')' {
+        } else if first == '(' || first == ')' || first == ',' {
             self.offset += 1;
-            self.token = if first == '(' {
-                Token::Left
-            } else {
-                Token::Right
+            self.token = match first {
+                '(' => Token::Left,
+                ')' => Token::Right,
+                _ => Token::Comma,
             };
         } else {
             let op = [
@@ -114,6 +115,40 @@ impl Parser<'_> {
             Token::Ident(name) if name == "not" => {
                 self.advance()?;
                 self.unary(Unary::Not)?
+            }
+            Token::Ident(name) => {
+                self.advance()?;
+                if self.token != Token::Left {
+                    return Err(format!("unknown identifier: {name}"));
+                }
+                self.advance()?;
+                let mut args = Vec::new();
+                if self.token != Token::Right {
+                    loop {
+                        args.push(self.expression(0)?);
+                        if self.token != Token::Comma {
+                            break;
+                        }
+                        self.advance()?;
+                    }
+                }
+                if self.token != Token::Right {
+                    return Err(format!("missing closing parenthesis in {name}"));
+                }
+                self.advance()?;
+                let kind = match name.as_str() {
+                    "metadata" if args.len() == 1 && args[0].kind() == Kind::String => Kind::String,
+                    "type" | "name" | "class" | "proto" | "client_ip" | "port" | "server_ip"
+                    | "server_port"
+                        if args.is_empty() =>
+                    {
+                        Kind::String
+                    }
+                    "size" | "id" | "opcode" | "bufsize" if args.is_empty() => Kind::Int,
+                    "do" if args.is_empty() => Kind::Bool,
+                    _ => return Err(format!("unsupported function or arguments: {name}")),
+                };
+                Node::Call(name, args, kind)
             }
             Token::Op(op) if op == "!" || op == "-" => {
                 self.advance()?;
