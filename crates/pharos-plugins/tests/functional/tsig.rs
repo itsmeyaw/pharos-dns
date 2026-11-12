@@ -573,7 +573,9 @@ async fn accepts_all_coredns_hmac_algorithms_and_rejects_md5() {
     );
     let wire: Vec<u8> = fixture
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect();
     let mut response = Vec::with_capacity(512);

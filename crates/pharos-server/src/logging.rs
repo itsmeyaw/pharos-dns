@@ -57,11 +57,6 @@ pub fn log_debug(plugin: &str, message: fmt::Arguments<'_>) {
     log_bounded("DEBUG", plugin, message);
 }
 
-/// Write a bounded error entry without allocating on the Query path.
-pub fn log_error(plugin: &str, message: fmt::Arguments<'_>) {
-    log_bounded("ERROR", plugin, message);
-}
-
 fn log_bounded(level: &str, plugin: &str, message: fmt::Arguments<'_>) {
     let mut text = StackText::<2048>::new();
     if text.write_fmt(message).is_err() {

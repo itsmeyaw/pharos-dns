@@ -1,5 +1,6 @@
 use pharos_proto::{
-    EdnsOptions, Message, Opt, Rcode, TsigKey, TsigRecord, Type, normalized_udp_size,
+    EdnsOptions, Message, MessageBuilder, Opt, Rcode, TsigKey, TsigRecord, Type,
+    normalized_udp_size,
 };
 use std::sync::Arc;
 
@@ -73,16 +74,65 @@ pub fn finish_outcome_signed(
     let reserved = signing.as_ref().map_or(0, |request| match request {
         TsigSigning::Signed { reserved, .. } | TsigSigning::Error { reserved, .. } => *reserved,
     });
+    let signed = signing.is_some();
+    let before = signed
+        .then(|| Message::parse(response).ok())
+        .flatten()
+        .map(|message| {
+            message.answer_count() as usize
+                + message.authority_count() as usize
+                + message
+                    .additionals()
+                    .filter(|rr| rr.rtype != Type::OPT)
+                    .count()
+        });
     let result = response_limit(query, protocol)
         .checked_sub(reserved)
         .ok_or(Error::ResponseBufferTooSmall)
         .and_then(|limit| scrub(query, limit, protocol, response))
+        .and_then(|()| {
+            if !signed {
+                return Ok(());
+            }
+            let message = Message::parse(response).map_err(|_| Error::InvalidQuery)?;
+            let after = message.answer_count() as usize
+                + message.authority_count() as usize
+                + message
+                    .additionals()
+                    .filter(|rr| rr.rtype != Type::OPT)
+                    .count();
+            if before.is_some_and(|count| count > after) {
+                // RFC 8945 §5.3: a TSIG-truncated Response contains only the Question and TSIG.
+                let flags = (message.flags() | 0x0200) & !0x000f;
+                let mut builder = MessageBuilder::new(
+                    response,
+                    response_limit(query, protocol) - reserved,
+                    query.id(),
+                    flags,
+                )
+                .map_err(Error::Build)?;
+                for question in query.questions() {
+                    if !builder
+                        .question(question.name, question.qtype, question.qclass)
+                        .map_err(Error::Build)?
+                    {
+                        return Err(Error::ResponseBufferTooSmall);
+                    }
+                }
+                let _ = builder.finish();
+            }
+            Ok(())
+        })
         .and_then(|()| match signing {
             Some(request) => append_tsig(query, protocol, response, request),
             None => Ok(()),
         });
     if let Err(error) = result {
         log(error);
+        // RFC 8945 §5.3: never substitute an unsigned Response to a signed Query.
+        if signed {
+            return Action::Drop;
+        }
         write_error(query, response, Rcode::SERVFAIL);
     }
     Action::Respond

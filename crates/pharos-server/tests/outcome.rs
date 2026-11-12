@@ -263,7 +263,41 @@ fn signed_response_reserves_room_before_truncation() {
     );
     assert!(response.len() <= 512);
     assert!(Message::parse(&response).unwrap().tc());
+    assert_eq!(Message::parse(&response).unwrap().answer_count(), 0);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
     key.verify(&response, 1_000, Some(mac), 0).unwrap();
+}
+
+#[test]
+fn signing_failure_never_emits_unsigned_response() {
+    use pharos_proto::{TsigAlgorithm, TsigKey};
+    use pharos_server::{TsigSigning, finish_outcome_signed};
+    use std::sync::Arc;
+    let mut wire = query(false);
+    let key = Arc::new(TsigKey::new(
+        "key.".parse().unwrap(),
+        TsigAlgorithm::Sha256,
+        b"secret",
+    ));
+    key.sign(&mut wire, 1_000, 300, None).unwrap();
+    let mut response = response(1);
+    let signing = TsigSigning::Signed {
+        key,
+        time: 1_000,
+        fudge: 300,
+        reserved: 513,
+    };
+    assert_eq!(
+        finish_outcome_signed(
+            Message::parse(&wire).unwrap(),
+            Protocol::Udp,
+            Outcome::Response,
+            &mut response,
+            Some(signing),
+            |_| {}
+        ),
+        Action::Drop
+    );
 }
 
 #[test]
