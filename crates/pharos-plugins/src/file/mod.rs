@@ -66,11 +66,26 @@ impl Zone {
     }
 
     fn load_reader(apex: Name, path: &Path, reader: impl BufRead) -> Result<Self, String> {
+        Self::load_reader_with_serial(apex, path, reader, None)
+    }
+
+    fn load_reader_with_serial(
+        apex: Name,
+        path: &Path,
+        reader: impl BufRead,
+        previous: Option<u32>,
+    ) -> Result<Self, String> {
         let mut parser = ZoneParser::new(reader, apex.clone(), path.to_string_lossy());
         parser.set_include_allowed(true);
         let records = parser
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
+        if let Some(previous) = previous
+            && let Some(soa) = records.iter().find(|record| record.rtype == Type::SOA)
+            && soa_serial(soa) == Some(previous)
+        {
+            return Err("no change in SOA serial".into());
+        }
         Self::from_records(apex, records)
     }
 
@@ -253,10 +268,7 @@ impl Zone {
 
     fn serial(&self) -> Option<u32> {
         let soa = self.records.iter().find(|rr| rr.rtype == Type::SOA)?;
-        let offset = soa.rdata.len().checked_sub(20)?;
-        Some(u32::from_be_bytes(
-            soa.rdata.get(offset..offset + 4)?.try_into().ok()?,
-        ))
+        soa_serial(soa)
     }
 
     fn previous_nsec(&self, name: &[u8]) -> Option<&ZoneRecord> {
@@ -269,6 +281,13 @@ impl Zone {
             .map(|index| &self.names[*index])?;
         self.records_at(node.name.as_wire(), Type::NSEC).next()
     }
+}
+
+fn soa_serial(soa: &ZoneRecord) -> Option<u32> {
+    let offset = soa.rdata.len().checked_sub(20)?;
+    Some(u32::from_be_bytes(
+        soa.rdata.get(offset..offset + 4)?.try_into().ok()?,
+    ))
 }
 
 fn normalize_rdata_name(
@@ -330,18 +349,19 @@ impl Loaded {
         } else {
             None
         };
-        let Ok(next) = Zone::load_opened(self.apex.clone(), &self.path, file) else {
+        let serial = if self.by_mtime {
+            Some(0)
+        } else {
+            self.current.load().as_ref().and_then(|zone| zone.serial())
+        };
+        let Ok(next) = Zone::load_reader_with_serial(
+            self.apex.clone(),
+            &self.path,
+            BufReader::new(file),
+            serial,
+        ) else {
             return false;
         };
-        if !self.by_mtime
-            && self
-                .current
-                .load()
-                .as_ref()
-                .is_some_and(|old| old.serial() == next.serial())
-        {
-            return false;
-        }
         self.current.store(Some(Arc::new(next)));
         if self.by_mtime {
             *self.modified.lock().unwrap() = modified;
@@ -426,8 +446,13 @@ impl File {
                         file.seek(SeekFrom::Start(0))
                             .map_err(|error| cursor.error(error.to_string()))?;
                         Some(Arc::new(
-                            Zone::load_reader(apex.clone(), &path, BufReader::new(file))
-                                .map_err(|error| cursor.error(error))?,
+                            Zone::load_reader_with_serial(
+                                apex.clone(),
+                                &path,
+                                BufReader::new(file),
+                                Some(0),
+                            )
+                            .map_err(|error| cursor.error(error))?,
                         ))
                     }
                     None => None,
