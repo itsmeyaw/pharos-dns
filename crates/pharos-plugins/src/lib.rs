@@ -35,6 +35,8 @@ pub mod debug;
 pub mod dns64;
 #[cfg(feature = "plugin-dnssec")]
 pub mod dnssec;
+#[cfg(feature = "plugin-erratic")]
+pub mod erratic;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 pub mod expression;
@@ -49,7 +51,8 @@ pub mod header;
     feature = "plugin-loadbalance",
     feature = "plugin-kubernetes",
     feature = "plugin-cancel",
-    feature = "plugin-timeouts"
+    feature = "plugin-timeouts",
+    feature = "plugin-erratic"
 ))]
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
@@ -128,6 +131,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("dns64", include_str!("dns64/README.md")),
     ("dnssec", include_str!("dnssec/README.md")),
     ("errors", include_str!("errors/README.md")),
+    ("erratic", include_str!("erratic/README.md")),
     ("forward", include_str!("forward/README.md")),
     ("header", include_str!("header/README.md")),
     ("health", include_str!("health/README.md")),

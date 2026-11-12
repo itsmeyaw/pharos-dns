@@ -49,6 +49,7 @@ default = [
     "plugin-tsig",
     "plugin-transfer",
     "plugin-errors",
+    "plugin-erratic",
     "plugin-forward",
     "plugin-header",
     "plugin-health",
