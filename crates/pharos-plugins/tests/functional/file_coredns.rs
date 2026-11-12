@@ -8,6 +8,25 @@ use pharos_proto::{
 use pharos_server::{Context, Metadata, Next, Outcome, Protocol, Transport};
 
 struct ErrorNext;
+
+type LookupCase<'a> = (
+    &'a str,
+    Type,
+    Rcode,
+    &'a [&'a str],
+    &'a [&'a str],
+    &'a [&'a str],
+);
+type SignedCase<'a> = (&'a str, Type, Rcode, &'a [Type], &'a [Type], &'a [&'a str]);
+type ReferralCase<'a> = (
+    &'a str,
+    Type,
+    bool,
+    &'a [&'a str],
+    &'a [&'a str],
+    &'a [&'a str],
+);
+
 impl Next for ErrorNext {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Unanswered(Rcode::SERVFAIL)
@@ -1286,7 +1305,7 @@ async fn coredns_lookup_records_and_negative_responses() {
     ];
     let soa =
         ["miek.nl. 1800 IN SOA linode.atoom.net. miek.miek.nl. 1282630057 14400 3600 604800 14400"];
-    let cases: &[(&str, Type, Rcode, &[&str], &[&str], &[&str])] = &[
+    let cases: &[LookupCase<'_>] = &[
         (
             "www.miek.nl.",
             Type::A,
@@ -1630,7 +1649,7 @@ async fn coredns_signed_lookup_and_denial_cases() {
         include_str!("../fixtures/file/coredns-miek-signed.zone"),
     )
     .unwrap();
-    let cases: &[(&str, Type, Rcode, &[Type], &[Type], &[&str])] = &[
+    let cases: &[SignedCase<'_>] = &[
         (
             "miek.nl.",
             Type::SOA,
@@ -1824,7 +1843,7 @@ async fn coredns_aliases_to_delegated_zones() {
         "ns.host.example.org. 300 IN A 192.0.2.3",
         "ns.host.example.org. 300 IN AAAA 2001:db8::3",
     ];
-    let cases: &[(&str, Type, bool, &[&str], &[&str], &[&str])] = &[
+    let cases: &[ReferralCase<'_>] = &[
         (
             "alias.example.org.",
             Type::A,
