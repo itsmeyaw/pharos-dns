@@ -1,8 +1,9 @@
 use pharos_kubernetes::{
-    object::{EndpointAddress, Port, Service},
+    object::{EndpointAddress, Endpoints, Port, Service},
     store::Index,
 };
 use pharos_proto::Rcode;
+use std::sync::Arc;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Request<'a> {
@@ -11,6 +12,47 @@ pub(super) struct Request<'a> {
     pub(super) endpoint: &'a [u8],
     pub(super) port: &'a [u8],
     pub(super) protocol: &'a [u8],
+}
+
+pub(super) enum Snapshot {
+    Service(Arc<Service>),
+    Headless {
+        _service: Arc<Service>,
+        endpoints: Option<Arc<Vec<Arc<Endpoints>>>>,
+    },
+    MissingNamespace,
+    MissingService,
+    NamespaceOnly,
+}
+
+pub(super) fn capture(index: &Index, req: &Request<'_>, headless: bool) -> Snapshot {
+    let Ok(namespace) = std::str::from_utf8(req.namespace) else {
+        return Snapshot::MissingNamespace;
+    };
+    if !index.namespace_exposed(namespace) {
+        return Snapshot::MissingNamespace;
+    }
+    if req.service.is_empty() {
+        return Snapshot::NamespaceOnly;
+    }
+    let Ok(name) = std::str::from_utf8(req.service) else {
+        return Snapshot::MissingService;
+    };
+    let Some(service) = index.service_snapshot(namespace, name) else {
+        return Snapshot::MissingService;
+    };
+    if uses_endpoints(&service, req, headless) {
+        Snapshot::Headless {
+            _service: service,
+            endpoints: index.endpoints_snapshot(namespace, name),
+        }
+    } else {
+        Snapshot::Service(service)
+    }
+}
+
+fn uses_endpoints(svc: &Service, req: &Request<'_>, headless: bool) -> bool {
+    headless && svc.external_ips.is_empty() && (svc.headless() || !req.endpoint.is_empty())
 }
 
 pub(super) fn parse<'a>(labels: &'a [&'a [u8]]) -> Result<Request<'a>, Rcode> {
@@ -43,7 +85,7 @@ pub(super) fn lookup(
     req: &Request<'_>,
     headless: bool,
     endpoint_pod_names: bool,
-    mut callback: impl FnMut(&str, &Port, Option<&[u8]>),
+    callback: impl FnMut(&str, &Port, Option<&[u8]>),
 ) -> Rcode {
     let Ok(namespace) = std::str::from_utf8(req.namespace) else {
         return Rcode::NXDOMAIN;
@@ -60,26 +102,40 @@ pub(super) fn lookup(
     let Some(svc) = index.service(namespace, service) else {
         return Rcode::NXDOMAIN;
     };
-    let mut code = Rcode::NXDOMAIN;
-    if headless && svc.external_ips.is_empty() && (svc.headless() || !req.endpoint.is_empty()) {
+    if uses_endpoints(svc, req, headless) {
         // Kubernetes DNS spec 1.1.0 §2.4.1: headless records use ready endpoint addresses.
-        for ep in index.endpoints(namespace, service) {
-            for addr in &ep.addresses {
-                let mut buf = [0; 64];
-                let label = endpoint_label(addr, endpoint_pod_names, &mut buf);
-                if !req.endpoint.is_empty() && !req.endpoint.eq_ignore_ascii_case(label) {
-                    continue;
-                }
-                for port in &ep.ports {
-                    if matches(req, port) {
-                        code = Rcode::NOERROR;
-                        callback(&addr.ip, port, Some(label));
-                    }
+        endpoints(
+            index.endpoints(namespace, service),
+            req,
+            endpoint_pod_names,
+            callback,
+        )
+    } else {
+        external(svc, req, callback)
+    }
+}
+
+fn endpoints<'a>(
+    slices: impl IntoIterator<Item = &'a Endpoints>,
+    req: &Request<'_>,
+    endpoint_pod_names: bool,
+    mut callback: impl FnMut(&str, &Port, Option<&[u8]>),
+) -> Rcode {
+    let mut code = Rcode::NXDOMAIN;
+    for ep in slices {
+        for addr in &ep.addresses {
+            let mut buf = [0; 64];
+            let label = endpoint_label(addr, endpoint_pod_names, &mut buf);
+            if !req.endpoint.is_empty() && !req.endpoint.eq_ignore_ascii_case(label) {
+                continue;
+            }
+            for port in &ep.ports {
+                if matches(req, port) {
+                    code = Rcode::NOERROR;
+                    callback(&addr.ip, port, Some(label));
                 }
             }
         }
-    } else {
-        return external(svc, req, callback);
     }
     code
 }
@@ -111,13 +167,25 @@ pub(super) fn snapshot_or_lookup(
     req: &Request<'_>,
     headless: bool,
     endpoint_pod_names: bool,
-    snapshot: Option<&Service>,
+    snapshot: Option<&Snapshot>,
     callback: impl FnMut(&str, &Port, Option<&[u8]>),
 ) -> Rcode {
-    if let Some(snapshot) = snapshot {
-        external(snapshot, req, callback)
-    } else {
-        lookup(index, req, headless, endpoint_pod_names, callback)
+    match snapshot {
+        Some(Snapshot::Headless {
+            endpoints: slices, ..
+        }) => endpoints(
+            slices
+                .iter()
+                .flat_map(|slices| slices.iter())
+                .map(Arc::as_ref),
+            req,
+            endpoint_pod_names,
+            callback,
+        ),
+        Some(Snapshot::Service(service)) => external(service, req, callback),
+        Some(Snapshot::MissingNamespace | Snapshot::MissingService) => Rcode::NXDOMAIN,
+        Some(Snapshot::NamespaceOnly) => Rcode::NOERROR,
+        None => lookup(index, req, headless, endpoint_pod_names, callback),
     }
 }
 
@@ -157,6 +225,105 @@ pub(super) fn endpoint_label<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_endpoint_group_preserves_order_and_filters() {
+        use pharos_kubernetes::object::{EndpointAddress, Endpoints, Port};
+        use std::sync::Arc;
+        let slice = |name: &str, address: &str, hostname: &str| {
+            Arc::new(Endpoints {
+                version: "1".into(),
+                name: name.into(),
+                namespace: "prod".into(),
+                service_name: "head".into(),
+                addresses: vec![EndpointAddress {
+                    ip: address.into(),
+                    hostname: hostname.into(),
+                    node_name: String::new(),
+                    target_ref_name: String::new(),
+                }],
+                ports: vec![
+                    Port {
+                        name: "http".into(),
+                        protocol: "TCP".into(),
+                        port: 80,
+                    },
+                    Port {
+                        name: "https".into(),
+                        protocol: "TCP".into(),
+                        port: 443,
+                    },
+                ],
+                zones: None,
+            })
+        };
+        let mut current = Arc::new(vec![
+            slice("one", "lb.target.test", "pod1"),
+            slice("two", "192.0.2.2", "pod2"),
+        ]);
+        let snapshot = Snapshot::Headless {
+            _service: Arc::new(Service {
+                version: "1".into(),
+                name: "head".into(),
+                namespace: "prod".into(),
+                cluster_ips: vec!["None".into()],
+                service_type: String::new(),
+                external_name: String::new(),
+                ports: vec![],
+                external_ips: vec![],
+            }),
+            endpoints: Some(Arc::clone(&current)),
+        };
+        Arc::make_mut(&mut current).reverse();
+        let index = Index::default();
+        let request = parse(&[b"_HTTP", b"_tcp", b"head", b"prod"]).unwrap();
+        let mut rows = Vec::new();
+        let code = snapshot_or_lookup(
+            &index,
+            &request,
+            true,
+            false,
+            Some(&snapshot),
+            |host, port, endpoint| {
+                rows.push((
+                    host.to_owned(),
+                    port.port,
+                    String::from_utf8(endpoint.unwrap().to_vec()).unwrap(),
+                ));
+            },
+        );
+        assert_eq!(code, Rcode::NOERROR);
+        assert_eq!(
+            rows,
+            [
+                ("lb.target.test".into(), 80, "pod1".into()),
+                ("192.0.2.2".into(), 80, "pod2".into())
+            ]
+        );
+        let request = parse(&[b"pod2", b"head", b"prod"]).unwrap();
+        rows.clear();
+        snapshot_or_lookup(
+            &index,
+            &request,
+            true,
+            false,
+            Some(&snapshot),
+            |host, port, endpoint| {
+                rows.push((
+                    host.to_owned(),
+                    port.port,
+                    String::from_utf8(endpoint.unwrap().to_vec()).unwrap(),
+                ));
+            },
+        );
+        assert_eq!(
+            rows,
+            [
+                ("192.0.2.2".into(), 80, "pod2".into()),
+                ("192.0.2.2".into(), 443, "pod2".into())
+            ]
+        );
+    }
 
     #[test]
     fn retained_external_service_keeps_order_and_port_filter_after_update() {
@@ -295,7 +462,7 @@ mod tests {
                     let (kind, items) = if request.contains("/services") {
                         (
                             "ServiceList",
-                            r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"clusterIP":"None","externalIPs":["192.0.2.1"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},{"metadata":{"name":"head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"noport","namespace":"prod"},"spec":{"clusterIP":"10.0.0.1","externalIPs":["192.0.2.2"]}},{"metadata":{"name":"ordinary","namespace":"prod"},"spec":{"clusterIP":"10.0.0.1"}},{"metadata":{"name":"hidden","namespace":"secret"},"spec":{"externalIPs":["192.0.2.3"]}}]"#,
+                            r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"clusterIP":"None","externalIPs":["192.0.2.1"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},{"metadata":{"name":"head","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"head-empty","namespace":"prod"},"spec":{"clusterIP":"None"}},{"metadata":{"name":"noport","namespace":"prod"},"spec":{"clusterIP":"10.0.0.1","externalIPs":["192.0.2.2"]}},{"metadata":{"name":"ordinary","namespace":"prod"},"spec":{"clusterIP":"10.0.0.1"}},{"metadata":{"name":"hidden","namespace":"secret"},"spec":{"externalIPs":["192.0.2.3"]}}]"#,
                         )
                     } else if request.contains("/endpointslices") {
                         (
@@ -336,6 +503,61 @@ mod tests {
         chain.lifecycle.run(Phase::Startup).await.unwrap();
         let store = chain.kubernetes.as_ref().unwrap().store().unwrap();
         store.with_read(|index| {
+            let empty_request = parse(&[b"head-empty", b"prod"]).unwrap();
+            let captured = capture(index, &empty_request, true);
+            assert!(matches!(
+                captured,
+                Snapshot::Headless {
+                    endpoints: None,
+                    ..
+                }
+            ));
+            assert_eq!(
+                snapshot_or_lookup(
+                    index,
+                    &empty_request,
+                    true,
+                    false,
+                    Some(&captured),
+                    |_, _, _| panic!("empty group returned data")
+                ),
+                Rcode::NXDOMAIN
+            );
+            assert!(matches!(
+                capture(index, &parse(&[b"missing", b"prod"]).unwrap(), true),
+                Snapshot::MissingService
+            ));
+            assert!(matches!(
+                capture(index, &parse(&[b"web", b"missing"]).unwrap(), true),
+                Snapshot::MissingNamespace
+            ));
+            assert!(matches!(
+                capture(index, &parse(&[b"prod"]).unwrap(), true),
+                Snapshot::NamespaceOnly
+            ));
+            let req = parse(&[b"web", b"prod"]).unwrap();
+            let empty = Snapshot::Headless {
+                _service: index.service_snapshot("prod", "web").unwrap(),
+                endpoints: None,
+            };
+            assert_eq!(
+                snapshot_or_lookup(index, &req, true, false, Some(&empty), |_, _, _| panic!(
+                    "empty snapshot read live data"
+                )),
+                Rcode::NXDOMAIN
+            );
+            for (empty, expected) in [
+                (Snapshot::NamespaceOnly, Rcode::NOERROR),
+                (Snapshot::MissingService, Rcode::NXDOMAIN),
+                (Snapshot::MissingNamespace, Rcode::NXDOMAIN),
+            ] {
+                assert_eq!(
+                    snapshot_or_lookup(index, &req, true, false, Some(&empty), |_, _, _| panic!(
+                        "missing snapshot read live data"
+                    )),
+                    expected
+                );
+            }
             let mut answers = Vec::new();
             let mut check = |labels: &[&[u8]],
                              headless,

@@ -421,6 +421,92 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_group_snapshot_survives_update_delete_relist_and_reassignment() {
+        let store = Store::new(&["prod".into()], false);
+        store.apply_namespace(Namespace {
+            name: "prod".into(),
+            version: "1".into(),
+        });
+        store.apply_namespace(Namespace {
+            name: "hidden".into(),
+            version: "1".into(),
+        });
+        store.apply_endpoints(slice("one", "10.0.1.1"));
+        store.apply_endpoints(slice("two", "10.0.1.2"));
+        let mut hidden = slice("hidden", "10.0.1.9");
+        hidden.namespace = "hidden".into();
+        store.apply_endpoints(hidden);
+        let snapshot = store.with_read(|index| {
+            let first = index.endpoints_snapshot("prod", "web").unwrap();
+            let second = index.endpoints_snapshot("prod", "web").unwrap();
+            assert!(std::sync::Arc::ptr_eq(&first, &second));
+            assert!(index.endpoints_snapshot("hidden", "web").is_none());
+            assert_eq!(index.endpoints_unfiltered("hidden", "web").count(), 1);
+            first
+        });
+        store.apply_endpoints(slice("one", "10.0.1.3"));
+        store.with_read(|index| {
+            assert_eq!(
+                index
+                    .endpoints("prod", "web")
+                    .map(|ep| ep.name.as_ref())
+                    .collect::<Vec<_>>(),
+                ["two", "one"]
+            )
+        });
+        let mut reassigned = slice("two", "10.0.1.4");
+        reassigned.service_name = "other".into();
+        store.apply_endpoints(reassigned);
+        store.with_read(|index| {
+            assert_eq!(
+                index
+                    .endpoints("prod", "web")
+                    .map(|ep| ep.name.as_ref())
+                    .collect::<Vec<_>>(),
+                ["one"]
+            );
+            assert_eq!(
+                index
+                    .endpoints("prod", "other")
+                    .map(|ep| ep.name.as_ref())
+                    .collect::<Vec<_>>(),
+                ["two"]
+            );
+        });
+        store.delete_endpoints("prod", "one");
+        store.replace_endpoints(vec![slice("three", "10.0.1.5")], |_| ());
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|ep| (ep.name.as_ref(), ep.addresses[0].ip.as_str()))
+                .collect::<Vec<_>>(),
+            [("one", "10.0.1.1"), ("two", "10.0.1.2")]
+        );
+        store.with_read(|index| {
+            assert_eq!(
+                index
+                    .endpoints("prod", "web")
+                    .map(|ep| ep.name.as_ref())
+                    .collect::<Vec<_>>(),
+                ["three"]
+            )
+        });
+    }
+
+    #[test]
+    fn endpoint_group_updates_in_place_without_retained_snapshot() {
+        let store = Store::default();
+        store.apply_endpoints(slice("one", "10.0.1.1"));
+        store.apply_endpoints(slice("two", "10.0.1.2"));
+        let before = store
+            .with_read(|index| std::sync::Arc::as_ptr(&index.endpoints["prod"]["web"]) as usize);
+        store.apply_endpoints(slice("one", "10.0.1.3"));
+        let after = store
+            .with_read(|index| std::sync::Arc::as_ptr(&index.endpoints["prod"]["web"]) as usize);
+        assert_eq!(before, after);
+    }
+
+    #[test]
     fn relist_removes_objects_absent_from_new_snapshot() {
         let store = Store::default();
         store.apply_service(service("10.0.0.1"));
@@ -688,7 +774,7 @@ pub struct Index {
     service_ips: Reverse<Service>,
     service_external_ips: Reverse<Service>,
     slices: Names<Endpoints>,
-    endpoints: Grouped<Endpoints>,
+    endpoints: Names<Vec<Arc<Endpoints>>>,
     endpoint_ips: Reverse<Endpoints>,
     pods: Names<Pod>,
     pod_ips: Reverse<Pod>,
@@ -893,6 +979,18 @@ impl Index {
         self.endpoints_unfiltered(namespace, service)
             .filter(|slice| self.namespace_allowed(&slice.namespace))
     }
+    /// Retain an exposed Service's ordered EndpointSlices after releasing the index lock.
+    pub fn endpoints_snapshot(
+        &self,
+        namespace: &str,
+        service: &str,
+    ) -> Option<Arc<Vec<Arc<Endpoints>>>> {
+        if self.namespace_exposed(namespace) {
+            by_name(&self.endpoints, namespace, service).cloned()
+        } else {
+            None
+        }
+    }
     /// Visit EndpointSlices without namespace filtering, as external transfers do.
     pub fn endpoints_unfiltered(
         &self,
@@ -903,7 +1001,7 @@ impl Index {
             .get(namespace)
             .and_then(|services| services.get(service))
             .into_iter()
-            .flatten()
+            .flat_map(|slices| slices.iter())
             .map(Arc::as_ref)
     }
     pub fn endpoints_by_ip(&self, ip: &str) -> impl Iterator<Item = &Endpoints> {
@@ -1014,7 +1112,7 @@ impl Index {
             }
             if let Some(services) = self.endpoints.get_mut(namespace) {
                 if let Some(slices) = services.get_mut(slice.service_name.as_ref()) {
-                    slices.retain(|item| !Arc::ptr_eq(item, &slice));
+                    Arc::make_mut(slices).retain(|item| !Arc::ptr_eq(item, &slice));
                     if slices.is_empty() {
                         services.remove(slice.service_name.as_ref());
                     }
@@ -1031,12 +1129,13 @@ impl Index {
         for address in &slice.addresses {
             insert_reverse(&mut self.endpoint_ips, &address.ip, &slice);
         }
-        self.endpoints
+        let slices = self
+            .endpoints
             .entry(slice.namespace.clone())
             .or_default()
             .entry(slice.service_name.clone())
-            .or_default()
-            .push(slice.clone());
+            .or_default();
+        Arc::make_mut(slices).push(slice.clone());
         put(
             &mut self.slices,
             slice.namespace.clone(),
