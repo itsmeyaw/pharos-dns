@@ -890,6 +890,12 @@ mod tests {
                 "patterns",
                 "match ^ip-(?P<a>10)-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]dc[.]example[.]$\nmatch ^(?P<a>[0-9]*)[.](?P<b>[0-9]*)[.](?P<c>[0-9]*)[.](?P<d>[0-9]*)[.]ext[.]example[.]$",
             ),
+            (
+                "authority/mx",
+                "match ^ip-10-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]example[.]$",
+            ),
+            ("cname", r#"match "^foogle\.com\.$""#),
+            ("search", r#"match "example\.com\.(dc1\.example\.com\.)$""#),
         ] {
             let configured =
                 configure(&format!(". {{\n template IN A {{\n {options}\n }}\n}}")).unwrap();

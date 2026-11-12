@@ -14,9 +14,10 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
   reclaimed on that worker's next workspace initialization or thread exit.
 - On 64-bit macOS, README example rule workspaces measured 66,711 bytes
   (NXDOMAIN), 75,415 (address), 73,239 (reverse), 70,743 (hex), 77,719
-  (LAN), and 80,423 (two patterns). These include scratch, matcher caches,
-  capture slots, and workspace vectors, but exclude thread-local hash-table
-  bookkeeping, allocator overhead, and shared compiled configuration.
+  (LAN), 80,423 (two patterns), 71,319 (authority/MX), 66,807 (CNAME), and
+  69,047 (search regex). These include scratch, matcher caches, capture slots,
+  and workspace vectors, but exclude thread-local hash-table bookkeeping,
+  allocator overhead, and shared compiled configuration.
 - Failure metric `template` labels use the configured source, not Go's
   normalized template parse tree. Wildcard class/type metric labels allocate
   when a combination first matches; later increments use cached handles.
