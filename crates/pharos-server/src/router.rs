@@ -278,6 +278,7 @@ fn prepare_blocks<C: Chain>(blocks: &mut [ServerBlock<C>], registry: &Registry, 
                 continue;
             }
             let child = NameRef::parse(candidate.domain.as_wire(), 0).expect("validated Domain");
+            // RFC 4343 §3: DNS lookup compares ASCII letters case-insensitively.
             if !child
                 .labels()
                 .skip(count - parent_labels)
