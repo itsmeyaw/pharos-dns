@@ -57,3 +57,12 @@ fn ignores_lone_surrogates_in_unknown_secret_fields() {
     let secret = format!(r#"{{"key":{public},"private":{private},"unused":"\ud800"}}"#);
     assert!(aws::parse_secret(&secret).is_ok());
 }
+
+#[test]
+fn rejects_lone_surrogates_in_key_strings() {
+    let public = serde_json::to_string(PUBLIC).unwrap();
+    let private = serde_json::to_string(PRIVATE).unwrap();
+    let private = format!(r#"{}\n;\ud800""#, &private[..private.len() - 1]);
+    let secret = format!(r#"{{"key":{public},"private":{private}}}"#);
+    assert!(aws::parse_secret(&secret).is_err());
+}
