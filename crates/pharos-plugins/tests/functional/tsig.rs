@@ -593,3 +593,113 @@ async fn accepts_all_coredns_hmac_algorithms_and_rejects_md5() {
     assert_eq!(tsig.error, 16);
     assert!(tsig.mac.is_empty());
 }
+
+#[tokio::test]
+async fn coredns_serve_dns_requirement_and_next_cases() {
+    struct Next {
+        signed: bool,
+        extra: u16,
+    }
+    impl pharos_server::Next for Next {
+        async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+            assert_eq!(
+                pharos_plugins::tsig::validated_key_name(cx).is_some(),
+                self.signed
+            );
+            assert_eq!(cx.query.additional_count(), self.extra);
+            Outcome::Unanswered(Rcode::SERVFAIL)
+        }
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let domain: Name = ".".parse().unwrap();
+    for (zone, require, qtype, opcode, signed, refused, authenticated) in [
+        (".", "require all", 1, 0, true, false, true),
+        (".", "require all", 1, 0, false, true, false),
+        ("other.", "require all", 1, 0, false, false, false),
+        ("other.", "require all", 1, 0, true, false, false),
+        (".", "require AXFR", 252, 0, true, false, true),
+        (".", "require none", 1, 0, false, false, false),
+        (".", "require none", 1, 0, true, false, true),
+        (".", "require_opcode UPDATE", 6, 5, true, false, true),
+        (".", "require_opcode UPDATE", 6, 5, false, true, false),
+        (".", "require_opcode UPDATE", 1, 0, false, false, false),
+        (".", "require_opcode NOTIFY", 6, 4, true, false, true),
+        (".", "require_opcode all", 1, 0, false, true, false),
+    ] {
+        let source = format!(". {{\n tsig {zone} {{\n secret key. c2VjcmV0\n {require}\n }}\n}}");
+        let blocks = parse("Corefile", &source).unwrap();
+        let configured = configure::<Chain>(&blocks, directives()).unwrap();
+        let mut wire = Vec::with_capacity(512);
+        wire.extend_from_slice(&[
+            0,
+            1,
+            opcode << 3,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            1,
+            b'a',
+            0,
+            0,
+            qtype,
+            0,
+            1,
+            0,
+            0,
+            41,
+            4,
+            208,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
+        if signed {
+            key.sign(&mut wire, now, 300, None).unwrap();
+        }
+        let mut response = Vec::with_capacity(1232);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 1232,
+        };
+        let result = pharos_server::Plugin::serve(
+            configured[0].config.tsig.as_ref().unwrap(),
+            &mut cx,
+            Next {
+                signed: authenticated,
+                extra: 1 + u16::from(signed && !authenticated),
+            },
+        )
+        .await;
+        assert_eq!(
+            result,
+            Outcome::Unanswered(if refused {
+                Rcode::REFUSED
+            } else {
+                Rcode::SERVFAIL
+            }),
+            "{source}"
+        );
+        assert_eq!(cx.metadata.take_tsig_signing().is_some(), authenticated);
+    }
+}
