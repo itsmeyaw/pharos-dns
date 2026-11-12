@@ -137,6 +137,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("root", include_str!("root/README.md")),
     ("shed", include_str!("shed/README.md")),
     ("timeouts", include_str!("timeouts/README.md")),
+    ("tsig", include_str!("tsig/README.md")),
     ("whoami", include_str!("whoami/README.md")),
 ];
 
