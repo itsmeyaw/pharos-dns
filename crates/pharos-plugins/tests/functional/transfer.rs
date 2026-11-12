@@ -147,3 +147,42 @@ async fn acl_does_not_normalize_configured_ipv6_text() {
         Outcome::Unanswered(Rcode::REFUSED)
     );
 }
+
+// Derived from CoreDNS v1.15.0 plugin/transfer/notify_test.go, TestNotifyMultipleFailures.
+#[tokio::test]
+async fn notify_reports_each_secondary_failure() {
+    let first = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let second = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let first_addr = first.local_addr().unwrap();
+    let second_addr = second.local_addr().unwrap();
+    let respond = |socket: tokio::net::UdpSocket| {
+        tokio::spawn(async move {
+            let mut wire = [0; 512];
+            for _ in 0..3 {
+                let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+                wire[2] |= 0x80;
+                wire[3] = 5;
+                socket.send_to(&wire[..len], peer).await.unwrap();
+            }
+        })
+    };
+    let first_task = respond(first);
+    let second_task = respond(second);
+    let config = format!(".:53 {{\n transfer {{\n to {first_addr} {second_addr}\n }}\n}}");
+    let blocks = parse("Corefile", &config).unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let error = chain
+        .transfer
+        .unwrap()
+        .notify(&"example.org.".parse().unwrap())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&first_addr.to_string()), "{error}");
+    assert!(error.contains(&second_addr.to_string()), "{error}");
+    first_task.await.unwrap();
+    second_task.await.unwrap();
+}
