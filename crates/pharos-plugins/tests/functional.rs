@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[path = "functional/auto.rs"]
+mod auto;
+
 #[cfg(feature = "plugin-file")]
 #[path = "functional/file.rs"]
 mod file;
