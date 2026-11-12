@@ -1,0 +1,5 @@
+alias.example.org. A IN udp +dnssec +bufsize=4096
+ds-alias.example.org. DS IN udp +dnssec +bufsize=4096
+a.delegated.example.org. TXT IN udp +dnssec +bufsize=4096
+delegated.example.org. DS IN udp +dnssec +bufsize=4096
+sub.example.org. DS IN udp +dnssec +bufsize=4096
