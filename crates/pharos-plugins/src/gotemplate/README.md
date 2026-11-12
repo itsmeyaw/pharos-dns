@@ -37,10 +37,12 @@ Templates are compiled at setup and rendered into a caller-provided `String`.
 - String literals decoding to non-UTF-8 bytes are rejected because the output
   buffer is a Rust `String`. String slices require UTF-8 boundaries; capture
   slices cannot expose capacity beyond their supplied length.
-- `render` uses a 65,535-byte stack scratch buffer; `render_with_scratch`
-  accepts caller-provided storage for larger intermediates. Pipelines accept
-  at most 1,024 arguments and 255 nested actions or parentheses. Overflow is
-  reported as an error rather than allocating per Query.
+- `render` uses a 65,535-byte workspace allocated at setup and serializes
+  concurrent renders of that template. `render_with_scratch` uses caller-owned
+  storage and permits parallel rendering and larger intermediates. At most 64
+  argument values may be live across nested pipelines, and the combined action
+  and parenthesis nesting limit is eight; deeper or larger templates fail at
+  setup to bound worker stack use.
 - Map ranges and printing use quadratic scans for Go's sorted key order without
   allocation. `js` and `printf %q` use Rust regex Unicode categories, which may differ from
   the Unicode version used by Go.

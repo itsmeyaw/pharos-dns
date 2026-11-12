@@ -10,6 +10,8 @@ mod float;
 mod pipeline;
 mod quote;
 
+const MAX_NESTING: usize = 8;
+
 /// Borrowed template values for a Query.
 pub struct Data<'a, 'm> {
     pub name: &'a str,
@@ -120,7 +122,10 @@ enum Condition {
 }
 
 /// A template parsed at setup time.
-pub struct Template(Vec<Part>);
+pub struct Template {
+    parts: Vec<Part>,
+    scratch: std::sync::Mutex<Vec<u8>>,
+}
 
 impl Template {
     /// Compile the supported template actions.
@@ -129,13 +134,22 @@ impl Template {
         if marker.is_some() {
             return Err("unexpected template else or end".into());
         }
-        Ok(Self(parts))
+        let scratch = std::sync::Mutex::new(vec![0; 65535]);
+        drop(
+            scratch
+                .lock()
+                .map_err(|_| "template scratch lock poisoned")?,
+        );
+        Ok(Self { parts, scratch })
     }
 
     /// Append the rendered template to a caller-provided buffer.
     pub fn render(&self, data: &Data<'_, '_>, output: &mut String) -> fmt::Result {
-        // shortcut: the default stack workspace is 65,535 bytes; use render_with_scratch for larger intermediates.
-        let mut scratch = [0; 65535];
+        // shortcut: default workspace serializes concurrent renders; use caller-owned scratch for parallelism.
+        let mut scratch = self
+            .scratch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.render_with_scratch(data, output, &mut scratch)
     }
 
@@ -146,7 +160,7 @@ impl Template {
         output: &mut String,
         scratch: &mut [u8],
     ) -> fmt::Result {
-        render_parts(&self.0, data, Dot::Root, output, scratch)
+        render_parts(&self.parts, data, Dot::Root, output, scratch)
     }
 }
 
@@ -616,9 +630,9 @@ fn parse_parts(
     depth: usize,
     scope: &[String],
 ) -> Result<(Vec<Part>, Option<Marker>), String> {
-    // shortcut: 256 nested actions bound recursive rendering; use an iterative renderer to lift this limit.
-    if depth >= 256 {
-        return Err("template nesting exceeds 256 levels".into());
+    // shortcut: eight nested actions and pipelines bound worker stack use; use an iterative renderer to lift the limit.
+    if depth > MAX_NESTING {
+        return Err("template nesting exceeds eight levels".into());
     }
     let mut parts = Vec::new();
     while let Some(start) = source.find("{{") {
@@ -654,6 +668,7 @@ fn parse_parts(
         if is_comment && action.starts_with("/*") && action.ends_with("*/") {
             continue;
         }
+        validate_depth(action, depth)?;
         match action {
             "else" => return Ok((parts, Some(Marker::Else))),
             "end" => return Ok((parts, Some(Marker::End))),
@@ -722,6 +737,33 @@ fn parse_parts(
     parts.push(Part::Text((*source).to_owned()));
     *source = "";
     Ok((parts, None))
+}
+
+fn validate_depth(action: &str, outer: usize) -> Result<(), String> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for byte in action.bytes() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' && active != b'`' {
+                escaped = true;
+            } else if byte == active {
+                quote = None;
+            }
+        } else if matches!(byte, b'"' | b'\'' | b'`') {
+            quote = Some(byte);
+        } else if byte == b'(' {
+            depth += 1;
+            if outer + depth > MAX_NESTING {
+                return Err("template nesting exceeds eight levels".into());
+            }
+        } else if byte == b')' {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    Ok(())
 }
 
 fn parse_branches(

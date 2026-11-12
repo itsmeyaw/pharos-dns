@@ -818,6 +818,94 @@ fn printf_q_supports_ascii_raw_precision_and_runes() {
 }
 
 #[test]
+fn nested_template_pipelines_fit_a_small_worker_stack() {
+    const CHILD: &str = "PHAROS_TEMPLATE_STACK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "nested_template_pipelines_fit_a_small_worker_stack",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child status: {}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let mut pipeline = "\"x\"".to_owned();
+    for _ in 0..8 {
+        pipeline = format!("printf \"%s\" ({pipeline})");
+    }
+    let too_deep = format!("{{{{ printf \"%s\" ({pipeline}) }}}}");
+    assert!(Template::compile(&too_deep).is_err());
+    let template = Template::compile(&format!("{{{{ {pipeline} }}}}")).unwrap();
+    let controls = Template::compile(&format!(
+        "{}{{{{ .Name }}}}{}",
+        "{{ if .Name }}".repeat(8),
+        "{{ end }}".repeat(8)
+    ))
+    .unwrap();
+    let mut mixed_pipeline = "\"x\"".to_owned();
+    for _ in 0..4 {
+        mixed_pipeline = format!("printf \"%s\" ({mixed_pipeline})");
+    }
+    let mixed = Template::compile(&format!(
+        "{}{{{{ {mixed_pipeline} }}}}{}",
+        "{{ if .Name }}".repeat(4),
+        "{{ end }}".repeat(4)
+    ))
+    .unwrap();
+    let result = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let mut slots = [];
+            let metadata = Metadata::new(&mut slots);
+            let data = Data::new("example.", &metadata);
+            let mut output = String::with_capacity(32);
+            template.render(&data, &mut output).unwrap();
+            assert_eq!(output, "x");
+            output.clear();
+            let mut scratch = [0; 4096];
+            template
+                .render_with_scratch(&data, &mut output, &mut scratch)
+                .unwrap();
+            assert_eq!(output, "x");
+            output.clear();
+            controls.render(&data, &mut output).unwrap();
+            assert_eq!(output, "example.");
+            output.clear();
+            mixed.render(&data, &mut output).unwrap();
+            output
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(result, "x");
+}
+
+#[test]
+fn nested_pipeline_argument_slots_are_bounded_at_setup() {
+    let prefixes = "\"x\" ".repeat(63);
+    let source = format!("{{{{ print {prefixes}(print \"a\" \"b\") }}}}");
+    assert!(Template::compile(&source).is_err());
+    let source = format!("{{{{ print {prefixes}(print \"a\") }}}}");
+    let template = Template::compile(&source).unwrap();
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, format!("{}a", "x".repeat(63)));
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

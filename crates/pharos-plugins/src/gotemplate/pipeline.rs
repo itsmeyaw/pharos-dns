@@ -1,6 +1,8 @@
 use super::{Data, Dot, Field, Value, compare, parse_field, parse_uint};
 use std::fmt::{self, Write};
 
+const MAX_ARGUMENTS: usize = 64;
+
 enum Atom {
     Field(Field),
     Nested(Box<Pipeline>),
@@ -80,6 +82,12 @@ enum ResultValue<'a> {
     Stored(usize, usize),
 }
 
+struct ValueStack<'s, 'a> {
+    slots: &'s mut [Option<ResultValue<'a>>],
+    len: usize,
+    call_buffer: &'s mut [u8],
+}
+
 struct Scratch<'a> {
     bytes: &'a mut [u8],
     len: usize,
@@ -137,8 +145,8 @@ impl Pipeline {
                     .iter()
                     .map(|word| atom(word))
                     .collect::<Result<Vec<_>, _>>()?;
-                // shortcut: up to 1,024 arguments fit the stack; use caller-provided value slots for larger calls.
-                if args.len() + usize::from(index != 0) > 1024 {
+                // shortcut: 64 live argument slots bound stack use; use caller-owned slots for larger calls.
+                if args.len() + usize::from(index != 0) > MAX_ARGUMENTS {
                     return Err("too many template arguments".into());
                 }
                 Command::Call(function, args)
@@ -150,7 +158,44 @@ impl Pipeline {
             };
             commands.push(command);
         }
-        Ok(Self(commands))
+        let pipeline = Self(commands);
+        if pipeline.required_slots() > MAX_ARGUMENTS {
+            return Err("pipeline needs more than 64 live argument slots".into());
+        }
+        Ok(pipeline)
+    }
+
+    fn required_slots(&self) -> usize {
+        self.0
+            .iter()
+            .enumerate()
+            .map(|(stage, command)| match command {
+                Command::Atom(atom) => atom.required_slots(),
+                Command::Call(function, args) => {
+                    let formatted = matches!(
+                        function,
+                        Function::Print
+                            | Function::Println
+                            | Function::Printf(_)
+                            | Function::Html
+                            | Function::Js(_)
+                            | Function::UrlQuery
+                    );
+                    let nested = args
+                        .iter()
+                        .enumerate()
+                        .map(|(index, atom)| usize::from(formatted) * index + atom.required_slots())
+                        .max()
+                        .unwrap_or(0);
+                    nested.max(if formatted {
+                        args.len() + usize::from(stage != 0)
+                    } else {
+                        0
+                    })
+                }
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     fn evaluate<'a>(
@@ -158,12 +203,13 @@ impl Pipeline {
         data: &'a Data<'_, '_>,
         dot: Dot<'a>,
         scratch: &mut Scratch<'_>,
+        stack: &mut ValueStack<'_, 'a>,
     ) -> Result<ResultValue<'a>, fmt::Error> {
         let mut value = None;
         for command in &self.0 {
             value = Some(match command {
                 Command::Atom(Atom::Nil) => return Err(fmt::Error),
-                Command::Atom(atom) => atom.value(data, dot, scratch)?,
+                Command::Atom(atom) => atom.value(data, dot, scratch, stack)?,
                 Command::Call(function, args) => {
                     let count = args.len() + usize::from(value.is_some());
                     let valid = match function {
@@ -192,22 +238,23 @@ impl Pipeline {
                     }
                     match function {
                         Function::Eq => {
-                            let first = argument(args, 0, value, data, dot, scratch)?;
+                            let first = argument(args, 0, value, data, dot, scratch, stack)?;
                             let mut same = false;
                             for index in 1..count {
-                                let other = argument(args, index, value, data, dot, scratch)?;
+                                let other =
+                                    argument(args, index, value, data, dot, scratch, stack)?;
                                 same |= first.equal(other, scratch)?;
                             }
                             ResultValue::Scalar(Some(Value::Bool(same)))
                         }
                         Function::Ne => {
-                            let a = argument(args, 0, value, data, dot, scratch)?;
-                            let b = argument(args, 1, value, data, dot, scratch)?;
+                            let a = argument(args, 0, value, data, dot, scratch, stack)?;
+                            let b = argument(args, 1, value, data, dot, scratch, stack)?;
                             ResultValue::Scalar(Some(Value::Bool(!a.equal(b, scratch)?)))
                         }
                         Function::Lt | Function::Le | Function::Gt | Function::Ge => {
-                            let a = argument(args, 0, value, data, dot, scratch)?;
-                            let b = argument(args, 1, value, data, dot, scratch)?;
+                            let a = argument(args, 0, value, data, dot, scratch, stack)?;
+                            let b = argument(args, 1, value, data, dot, scratch, stack)?;
                             let ordering = a.order(b, scratch)?;
                             let result = match function {
                                 Function::Lt => ordering.is_some_and(|v| v.is_lt()),
@@ -219,29 +266,31 @@ impl Pipeline {
                             ResultValue::Scalar(Some(Value::Bool(result)))
                         }
                         Function::And | Function::Or => {
-                            let mut result = argument(args, 0, value, data, dot, scratch)?;
+                            let mut result = argument(args, 0, value, data, dot, scratch, stack)?;
                             for index in 1..count {
                                 if matches!(function, Function::And) && !result.truthy(scratch)
                                     || matches!(function, Function::Or) && result.truthy(scratch)
                                 {
                                     break;
                                 }
-                                result = argument(args, index, value, data, dot, scratch)?;
+                                result = argument(args, index, value, data, dot, scratch, stack)?;
                             }
                             result
                         }
                         Function::Len => {
-                            let input = argument(args, 0, value, data, dot, scratch)?;
+                            let input = argument(args, 0, value, data, dot, scratch, stack)?;
                             ResultValue::Scalar(Some(Value::Int(input.length(scratch)? as i64)))
                         }
                         Function::Not => {
-                            let input = argument(args, 0, value, data, dot, scratch)?;
+                            let input = argument(args, 0, value, data, dot, scratch, stack)?;
                             ResultValue::Scalar(Some(Value::Bool(!input.truthy(scratch))))
                         }
                         Function::ParseInt => {
-                            let input = argument(args, 0, value, data, dot, scratch)?;
-                            let base = argument(args, 1, value, data, dot, scratch)?.integer()?;
-                            let bits = argument(args, 2, value, data, dot, scratch)?.integer()?;
+                            let input = argument(args, 0, value, data, dot, scratch, stack)?;
+                            let base =
+                                argument(args, 1, value, data, dot, scratch, stack)?.integer()?;
+                            let bits =
+                                argument(args, 2, value, data, dot, scratch, stack)?.integer()?;
                             let (base, bits) = (
                                 u32::try_from(base).map_err(|_| fmt::Error)?,
                                 u32::try_from(bits).map_err(|_| fmt::Error)?,
@@ -256,12 +305,12 @@ impl Pipeline {
                             ResultValue::Uint(parsed)
                         }
                         Function::Index => {
-                            let mut indexed = argument(args, 0, value, data, dot, scratch)?;
+                            let mut indexed = argument(args, 0, value, data, dot, scratch, stack)?;
                             if matches!(indexed, ResultValue::Scalar(None | Some(Value::Nil))) {
                                 return Err(fmt::Error);
                             }
                             for index in 1..count {
-                                let key = argument(args, index, value, data, dot, scratch)?;
+                                let key = argument(args, index, value, data, dot, scratch, stack)?;
                                 indexed = indexed.index(key, scratch)?;
                             }
                             indexed
@@ -270,7 +319,7 @@ impl Pipeline {
                             if !root && !matches!(dot.base(), Dot::Root) {
                                 return Err(fmt::Error);
                             }
-                            let label = argument(args, 0, value, data, dot, scratch)?;
+                            let label = argument(args, 0, value, data, dot, scratch, stack)?;
                             let label = label.text(scratch)?;
                             let result = if data.metadata.enabled() {
                                 data.metadata.get(label).unwrap_or("")
@@ -281,7 +330,7 @@ impl Pipeline {
                         }
                         Function::Call => {
                             let ResultValue::Scalar(Some(Value::Function(function))) =
-                                argument(args, 0, value, data, dot, scratch)?
+                                argument(args, 0, value, data, dot, scratch, stack)?
                             else {
                                 return Err(fmt::Error);
                             };
@@ -290,7 +339,15 @@ impl Pipeline {
                             }
                             let mut resolved = [None; 2];
                             for (index, slot) in resolved[..count - 1].iter_mut().enumerate() {
-                                *slot = Some(argument(args, index + 1, value, data, dot, scratch)?);
+                                *slot = Some(argument(
+                                    args,
+                                    index + 1,
+                                    value,
+                                    data,
+                                    dot,
+                                    scratch,
+                                    stack,
+                                )?);
                             }
                             let mut parameters = [Value::Nil; 2];
                             for (index, argument) in resolved[..count - 1].iter().enumerate() {
@@ -303,9 +360,8 @@ impl Pipeline {
                                     _ => Value::Nil,
                                 };
                             }
-                            let mut buffer = [0; 2048];
                             match function
-                                .invoke(&parameters[..count - 1], &mut buffer)
+                                .invoke(&parameters[..count - 1], stack.call_buffer)
                                 .map_err(|_| fmt::Error)?
                             {
                                 Value::String(value) => {
@@ -323,11 +379,12 @@ impl Pipeline {
                             }
                         }
                         Function::Slice => {
-                            let input = argument(args, 0, value, data, dot, scratch)?;
+                            let input = argument(args, 0, value, data, dot, scratch, stack)?;
                             let len = input.length(scratch)?;
                             let low = if count >= 2 {
                                 usize::try_from(
-                                    argument(args, 1, value, data, dot, scratch)?.integer()?,
+                                    argument(args, 1, value, data, dot, scratch, stack)?
+                                        .integer()?,
                                 )
                                 .map_err(|_| fmt::Error)?
                             } else {
@@ -335,7 +392,8 @@ impl Pipeline {
                             };
                             let high = if count >= 3 {
                                 usize::try_from(
-                                    argument(args, 2, value, data, dot, scratch)?.integer()?,
+                                    argument(args, 2, value, data, dot, scratch, stack)?
+                                        .integer()?,
                                 )
                                 .map_err(|_| fmt::Error)?
                             } else {
@@ -343,7 +401,8 @@ impl Pipeline {
                             };
                             let max = if count == 4 {
                                 usize::try_from(
-                                    argument(args, 3, value, data, dot, scratch)?.integer()?,
+                                    argument(args, 3, value, data, dot, scratch, stack)?
+                                        .integer()?,
                                 )
                                 .map_err(|_| fmt::Error)?
                             } else {
@@ -357,21 +416,37 @@ impl Pipeline {
                         | Function::Html
                         | Function::Js(_)
                         | Function::UrlQuery => {
-                            let mut values = [None; 1024];
-                            for (index, slot) in values[..count].iter_mut().enumerate() {
-                                *slot = Some(argument(args, index, value, data, dot, scratch)?);
+                            let base = stack.len;
+                            let end = base
+                                .checked_add(count)
+                                .filter(|end| *end <= stack.slots.len())
+                                .ok_or(fmt::Error)?;
+                            for index in 0..count {
+                                let item = argument(args, index, value, data, dot, scratch, stack)?;
+                                *stack.slots.get_mut(base + index).ok_or(fmt::Error)? = Some(item);
+                                stack.len = base + index + 1;
                             }
                             let start = scratch.len;
                             if matches!(
                                 function,
                                 Function::Html | Function::Js(_) | Function::UrlQuery
                             ) {
-                                format_values(&Function::Print, &values[..count], scratch)?;
+                                format_values(
+                                    &Function::Print,
+                                    stack.slots.get(base..end).ok_or(fmt::Error)?,
+                                    scratch,
+                                )?;
                                 let end = scratch.len;
                                 escape_values(function, start, end, scratch)?;
+                                stack.len = base;
                                 ResultValue::Stored(end, scratch.len)
                             } else {
-                                format_values(function, &values[..count], scratch)?;
+                                format_values(
+                                    function,
+                                    stack.slots.get(base..end).ok_or(fmt::Error)?,
+                                    scratch,
+                                )?;
+                                stack.len = base;
                                 ResultValue::Stored(start, scratch.len)
                             }
                         }
@@ -390,7 +465,14 @@ impl Pipeline {
         bytes: &mut [u8],
     ) -> fmt::Result {
         let mut scratch = Scratch { bytes, len: 0 };
-        match self.evaluate(data, dot, &mut scratch)? {
+        let mut slots = [None; MAX_ARGUMENTS];
+        let mut call_buffer = [0; 2048];
+        let mut stack = ValueStack {
+            slots: &mut slots,
+            len: 0,
+            call_buffer: &mut call_buffer,
+        };
+        match self.evaluate(data, dot, &mut scratch, &mut stack)? {
             ResultValue::Scalar(value) => super::write_value(value, output),
             ResultValue::Uint(value) => write!(output, "{value}"),
             ResultValue::Stored(start, end) => output.write_str(
@@ -425,7 +507,16 @@ impl Pipeline {
         bytes: &mut [u8],
     ) -> Result<bool, fmt::Error> {
         let mut scratch = Scratch { bytes, len: 0 };
-        Ok(self.evaluate(data, dot, &mut scratch)?.truthy(&scratch))
+        let mut slots = [None; MAX_ARGUMENTS];
+        let mut call_buffer = [0; 2048];
+        let mut stack = ValueStack {
+            slots: &mut slots,
+            len: 0,
+            call_buffer: &mut call_buffer,
+        };
+        Ok(self
+            .evaluate(data, dot, &mut scratch, &mut stack)?
+            .truthy(&scratch))
     }
 
     pub(super) fn range<'a>(
@@ -435,7 +526,14 @@ impl Pipeline {
         bytes: &mut [u8],
     ) -> Result<RangeValue<'a>, fmt::Error> {
         let mut scratch = Scratch { bytes, len: 0 };
-        match self.evaluate(data, dot, &mut scratch)? {
+        let mut slots = [None; MAX_ARGUMENTS];
+        let mut call_buffer = [0; 2048];
+        let mut stack = ValueStack {
+            slots: &mut slots,
+            len: 0,
+            call_buffer: &mut call_buffer,
+        };
+        match self.evaluate(data, dot, &mut scratch, &mut stack)? {
             ResultValue::Scalar(None | Some(Value::Nil)) => Ok(RangeValue::Empty),
             ResultValue::Scalar(Some(Value::Int(value))) => Ok(RangeValue::Integer(value)),
             ResultValue::Uint(value) => Ok(RangeValue::Integer(
@@ -508,18 +606,26 @@ fn escape_values(
 }
 
 impl Atom {
+    fn required_slots(&self) -> usize {
+        match self {
+            Self::Nested(pipeline) => pipeline.required_slots(),
+            Self::Select(atom, _) => atom.required_slots(),
+            _ => 0,
+        }
+    }
     fn value<'a>(
         &'a self,
         data: &'a Data<'_, '_>,
         dot: Dot<'a>,
         scratch: &mut Scratch<'_>,
+        stack: &mut ValueStack<'_, 'a>,
     ) -> Result<ResultValue<'a>, fmt::Error> {
         match self {
             Self::Int(value) => Ok(ResultValue::Scalar(Some(Value::Int(*value)))),
             Self::Float(value) => Ok(ResultValue::Scalar(Some(Value::Float(*value)))),
             Self::Bool(value) => Ok(ResultValue::Scalar(Some(Value::Bool(*value)))),
             Self::Nil => Ok(ResultValue::Scalar(Some(Value::Nil))),
-            Self::Nested(pipeline) => pipeline.evaluate(data, dot, scratch),
+            Self::Nested(pipeline) => pipeline.evaluate(data, dot, scratch, stack),
             Self::Field(Field::Local(name)) if dot.local_range(name).is_some() => {
                 Ok(match dot.local_range(name).ok_or(fmt::Error)? {
                     RangeValue::Empty => ResultValue::Scalar(None),
@@ -537,7 +643,7 @@ impl Atom {
                 Ok(ResultValue::Question(value))
             }
             Self::Select(atom, member) => {
-                let ResultValue::Question(question) = atom.value(data, dot, scratch)? else {
+                let ResultValue::Question(question) = atom.value(data, dot, scratch, stack)? else {
                     return Err(fmt::Error);
                 };
                 question_member(*member, question, scratch)
@@ -629,9 +735,10 @@ fn argument<'a>(
     data: &'a Data<'_, '_>,
     dot: Dot<'a>,
     scratch: &mut Scratch<'_>,
+    stack: &mut ValueStack<'_, 'a>,
 ) -> Result<ResultValue<'a>, fmt::Error> {
     if let Some(atom) = args.get(index) {
-        atom.value(data, dot, scratch)
+        atom.value(data, dot, scratch, stack)
     } else {
         previous.ok_or(fmt::Error)
     }
@@ -1445,11 +1552,11 @@ fn split(source: &str, separator: char) -> Result<Vec<&str>, String> {
             quote = Some(ch);
             continue;
         }
-        // shortcut: cap nested pipelines at 255 levels; use iterative parsing to lift the stack limit.
+        // shortcut: cap nested pipelines at eight levels; use iterative parsing to lift the stack limit.
         if quote.is_none() && ch == '(' {
             depth += 1;
-            if depth >= 256 {
-                return Err("pipeline nesting exceeds 255 levels".into());
+            if depth > super::MAX_NESTING {
+                return Err("pipeline nesting exceeds eight levels".into());
             }
         }
         if quote.is_none() && ch == ')' {
