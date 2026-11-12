@@ -442,6 +442,15 @@ impl Context<'_, '_> {
         let Ok(query) = Message::parse(wire) else {
             return Outcome::Error(Error::InvalidQuery);
         };
+        self.run_with_message(query, next).await
+    }
+
+    /// Run Next with a modified Query view while preserving Metadata and Response state.
+    pub async fn run_with_message<N: Next + Send>(
+        &mut self,
+        query: Message<'_>,
+        next: N,
+    ) -> Outcome {
         let metadata = std::mem::replace(&mut self.metadata, Metadata::new(&mut []));
         let mut nested = NestedContext {
             parent_query: &mut self.query,

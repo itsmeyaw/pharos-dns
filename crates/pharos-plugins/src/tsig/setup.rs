@@ -1,7 +1,7 @@
 use pharos_corefile::{BlockContext, Cursor, Error, origins_from_args_or_server_block};
-use pharos_proto::{Name, Opcode, Type};
+use pharos_proto::{Name, Opcode, TsigAlgorithm, TsigKey, Type};
 
-use super::Tsig;
+use super::{Secret, Tsig};
 
 pub(crate) fn setup(
     cursor: &mut Cursor<'_>,
@@ -91,9 +91,19 @@ fn add_secret(
     let name: Name = absolute
         .parse()
         .map_err(|_| cursor.error("invalid key name"))?;
-    if plugin.secrets.iter().any(|(existing, _)| *existing == name) {
+    if plugin.secrets.iter().any(|existing| existing.name == name) {
         return Err(cursor.error("key redefined"));
     }
-    plugin.secrets.push((name, secret.to_owned()));
+    let keys = pharos_proto::decode_secret(secret).ok().map(|secret| {
+        [
+            TsigAlgorithm::Sha1,
+            TsigAlgorithm::Sha224,
+            TsigAlgorithm::Sha256,
+            TsigAlgorithm::Sha384,
+            TsigAlgorithm::Sha512,
+        ]
+        .map(|algorithm| TsigKey::new(name.clone(), algorithm, &secret))
+    });
+    plugin.secrets.push(Secret { name, keys });
     Ok(())
 }
