@@ -132,7 +132,19 @@ impl Template {
 
     /// Append the rendered template to a caller-provided buffer.
     pub fn render(&self, data: &Data<'_, '_>, output: &mut String) -> fmt::Result {
-        render_parts(&self.0, data, Dot::Root, output)
+        // shortcut: the default stack workspace is 65,535 bytes; use render_with_scratch for larger intermediates.
+        let mut scratch = [0; 65535];
+        self.render_with_scratch(data, output, &mut scratch)
+    }
+
+    /// Append into `output` using caller-provided intermediate storage.
+    pub fn render_with_scratch(
+        &self,
+        data: &Data<'_, '_>,
+        output: &mut String,
+        scratch: &mut [u8],
+    ) -> fmt::Result {
+        render_parts(&self.0, data, Dot::Root, output, scratch)
     }
 }
 
@@ -285,13 +297,14 @@ fn render_parts(
     data: &Data<'_, '_>,
     dot: Dot<'_>,
     output: &mut String,
+    scratch: &mut [u8],
 ) -> fmt::Result {
     for part in parts {
         match part {
             Part::Text(text) => output.write_str(text)?,
             Part::Field(field) => write_field(field, data, dot, output)?,
             Part::If(condition, yes, no) => render_parts(
-                if condition.truthy(data, dot)? {
+                if condition.truthy(data, dot, scratch)? {
                     yes
                 } else {
                     no
@@ -299,112 +312,119 @@ fn render_parts(
                 data,
                 dot,
                 output,
+                scratch,
             )?,
-            Part::Range(pipeline, names, body, otherwise) => match pipeline.range(data, dot)? {
-                pipeline::RangeValue::Empty => render_empty(
-                    names,
-                    pipeline::RangeValue::Empty,
-                    otherwise,
-                    data,
-                    dot,
-                    output,
-                )?,
-                pipeline::RangeValue::Integer(count) => {
-                    if names.len() > 1 {
-                        return Err(fmt::Error);
+            Part::Range(pipeline, names, body, otherwise) => {
+                match pipeline.range(data, dot, scratch)? {
+                    pipeline::RangeValue::Empty => render_empty(
+                        names,
+                        pipeline::RangeValue::Empty,
+                        otherwise,
+                        data,
+                        dot,
+                        output,
+                        scratch,
+                    )?,
+                    pipeline::RangeValue::Integer(count) => {
+                        if names.len() > 1 {
+                            return Err(fmt::Error);
+                        }
+                        if count <= 0 {
+                            render_empty(
+                                names,
+                                pipeline::RangeValue::Integer(count),
+                                otherwise,
+                                data,
+                                dot,
+                                output,
+                                scratch,
+                            )?;
+                        }
+                        for value in 0..count {
+                            let nested = Dot::Range {
+                                value: Value::Int(value),
+                                key: Value::Nil,
+                                names,
+                                parent: &dot,
+                            };
+                            render_parts(body, data, nested, output, scratch)?;
+                        }
                     }
-                    if count <= 0 {
-                        render_empty(
-                            names,
-                            pipeline::RangeValue::Integer(count),
-                            otherwise,
-                            data,
-                            dot,
-                            output,
-                        )?;
+                    pipeline::RangeValue::Matches(matches) => {
+                        if matches.is_empty() {
+                            render_empty(
+                                names,
+                                pipeline::RangeValue::Matches(matches),
+                                otherwise,
+                                data,
+                                dot,
+                                output,
+                                scratch,
+                            )?;
+                        }
+                        for (index, value) in matches.iter().enumerate() {
+                            let nested = Dot::Range {
+                                value: Value::String(value),
+                                key: Value::Int(index as i64),
+                                names,
+                                parent: &dot,
+                            };
+                            render_parts(body, data, nested, output, scratch)?;
+                        }
                     }
-                    for value in 0..count {
-                        let nested = Dot::Range {
-                            value: Value::Int(value),
-                            key: Value::Nil,
-                            names,
-                            parent: &dot,
-                        };
-                        render_parts(body, data, nested, output)?;
+                    pipeline::RangeValue::Groups(groups) => render_map(
+                        groups
+                            .iter()
+                            .map(|(key, value)| (*key, Value::String(value))),
+                        names,
+                        pipeline::RangeValue::Groups(groups),
+                        (body, otherwise),
+                        data,
+                        dot,
+                        (output, scratch),
+                    )?,
+                    pipeline::RangeValue::Variables(variables) => render_map(
+                        variables.iter().map(|(key, value)| (*key, *value)),
+                        names,
+                        pipeline::RangeValue::Variables(variables),
+                        (body, otherwise),
+                        data,
+                        dot,
+                        (output, scratch),
+                    )?,
+                    pipeline::RangeValue::Questions(questions) => {
+                        let mut any = false;
+                        for (index, question) in questions
+                            .message
+                            .questions()
+                            .skip(questions.start)
+                            .take(questions.end - questions.start)
+                            .enumerate()
+                        {
+                            any = true;
+                            let nested = Dot::Question {
+                                value: question,
+                                key: Value::Int(index as i64),
+                                names,
+                                parent: &dot,
+                            };
+                            render_parts(body, data, nested, output, scratch)?;
+                        }
+                        if !any {
+                            render_empty(
+                                names,
+                                pipeline::RangeValue::Questions(questions),
+                                otherwise,
+                                data,
+                                dot,
+                                output,
+                                scratch,
+                            )?;
+                        }
                     }
                 }
-                pipeline::RangeValue::Matches(matches) => {
-                    if matches.is_empty() {
-                        render_empty(
-                            names,
-                            pipeline::RangeValue::Matches(matches),
-                            otherwise,
-                            data,
-                            dot,
-                            output,
-                        )?;
-                    }
-                    for (index, value) in matches.iter().enumerate() {
-                        let nested = Dot::Range {
-                            value: Value::String(value),
-                            key: Value::Int(index as i64),
-                            names,
-                            parent: &dot,
-                        };
-                        render_parts(body, data, nested, output)?;
-                    }
-                }
-                pipeline::RangeValue::Groups(groups) => render_map(
-                    groups
-                        .iter()
-                        .map(|(key, value)| (*key, Value::String(value))),
-                    names,
-                    pipeline::RangeValue::Groups(groups),
-                    (body, otherwise),
-                    data,
-                    dot,
-                    output,
-                )?,
-                pipeline::RangeValue::Variables(variables) => render_map(
-                    variables.iter().map(|(key, value)| (*key, *value)),
-                    names,
-                    pipeline::RangeValue::Variables(variables),
-                    (body, otherwise),
-                    data,
-                    dot,
-                    output,
-                )?,
-                pipeline::RangeValue::Questions(questions) => {
-                    let mut any = false;
-                    for (index, question) in questions
-                        .message
-                        .questions()
-                        .skip(questions.start)
-                        .take(questions.end - questions.start)
-                        .enumerate()
-                    {
-                        any = true;
-                        let nested = Dot::Question {
-                            value: question,
-                            key: Value::Int(index as i64),
-                            names,
-                            parent: &dot,
-                        };
-                        render_parts(body, data, nested, output)?;
-                    }
-                    if !any {
-                        render_empty(
-                            names,
-                            pipeline::RangeValue::Questions(questions),
-                            otherwise,
-                            data,
-                            dot,
-                            output,
-                        )?;
-                    }
-                }
-            },
-            Part::Pipeline(pipeline) => pipeline.write(data, dot, output)?,
+            }
+            Part::Pipeline(pipeline) => pipeline.write(data, dot, output, scratch)?,
         }
     }
     Ok(())
@@ -417,13 +437,14 @@ fn render_empty(
     data: &Data<'_, '_>,
     dot: Dot<'_>,
     output: &mut String,
+    scratch: &mut [u8],
 ) -> fmt::Result {
     let context = Dot::EmptyRange {
         value,
         names,
         parent: &dot,
     };
-    render_parts(body, data, context, output)
+    render_parts(body, data, context, output, scratch)
 }
 
 fn render_map<'a>(
@@ -433,8 +454,9 @@ fn render_map<'a>(
     branches: (&[Part], &[Part]),
     data: &Data<'_, '_>,
     dot: Dot<'_>,
-    output: &mut String,
+    buffers: (&mut String, &mut [u8]),
 ) -> fmt::Result {
+    let (output, scratch) = buffers;
     let (body, otherwise) = branches;
     // shortcut: map iteration scans quadratically; pre-sort keys at setup if large maps are needed.
     let mut last = None;
@@ -451,11 +473,11 @@ fn render_map<'a>(
             names,
             parent: &dot,
         };
-        render_parts(body, data, nested, output)?;
+        render_parts(body, data, nested, output, scratch)?;
         last = Some(key);
     }
     if !any {
-        render_empty(names, empty_value, otherwise, data, dot, output)?;
+        render_empty(names, empty_value, otherwise, data, dot, output, scratch)?;
     }
     Ok(())
 }
@@ -467,10 +489,15 @@ impl Condition {
             Err(_) => Ok(Self::Pipeline(pipeline::Pipeline::compile(source)?)),
         }
     }
-    fn truthy(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<bool, fmt::Error> {
+    fn truthy(
+        &self,
+        data: &Data<'_, '_>,
+        dot: Dot<'_>,
+        scratch: &mut [u8],
+    ) -> Result<bool, fmt::Error> {
         match self {
             Self::Field(field) => field.truthy(data, dot),
-            Self::Pipeline(pipeline) => pipeline.truthy(data, dot),
+            Self::Pipeline(pipeline) => pipeline.truthy(data, dot, scratch),
         }
     }
 }

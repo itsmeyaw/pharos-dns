@@ -10,7 +10,9 @@ Pipelines and nested parentheses support `and`, `or`, `not`, `eq`, `ne`, `lt`, `
 Nesting of actions and pipelines is limited to 255 levels to bound recursion.
 String literals that decode to non-UTF-8 bytes are rejected because the output buffer is a Rust `String`.
 String slices must end at UTF-8 boundaries; capture slices cannot expose capacity beyond their supplied length.
-Pipeline formatting uses a 65,535-byte stack scratch buffer and at most 1,024 arguments; overflowing either bound is an error.
+`render` uses a 65,535-byte stack scratch buffer; `render_with_scratch` accepts
+caller-provided storage for larger intermediates. Pipelines accept at most
+1,024 arguments. Overflowing either limit is an error.
 `js` uses Rust regex Unicode character categories, which may differ from Go's Unicode version.
 `printf` supports string precision and fixed-float precision; `%g` with width,
 flags, or precision is rejected, and the full Go `fmt` formatting language is

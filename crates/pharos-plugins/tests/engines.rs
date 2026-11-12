@@ -617,6 +617,26 @@ fn printf_emits_go_diagnostics_for_bad_or_missing_arguments() {
 }
 
 #[test]
+fn caller_scratch_supports_large_intermediate_pipelines() {
+    use pharos_plugins::expression::Value;
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let long = "x".repeat(60_000);
+    let vars = [("text", Value::String(long.as_str()))];
+    let mut data = Data::new("example.", &metadata);
+    data.variables = &vars;
+    let template = Template::compile("{{ print .Var.text | print | len }}").unwrap();
+    let mut output = String::new();
+    assert!(template.render(&data, &mut output).is_err());
+    output.clear();
+    let mut scratch = vec![0; 130_000];
+    template
+        .render_with_scratch(&data, &mut output, &mut scratch)
+        .unwrap();
+    assert_eq!(output, "60000");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

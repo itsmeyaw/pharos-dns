@@ -211,3 +211,25 @@ fn floating_point_formatting_does_not_allocate() {
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
     assert_eq!(output, "1e+06 1e+06");
 }
+
+#[test]
+fn caller_provided_scratch_does_not_allocate() {
+    if crate::run_isolated(
+        "gotemplate::gotemplate_allocations::caller_provided_scratch_does_not_allocate",
+    ) {
+        return;
+    }
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile("{{ printf \"%s:%d\" .Name 53 }}").unwrap();
+    let mut output = String::with_capacity(128);
+    let mut scratch = [0; 128];
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    template
+        .render_with_scratch(&data, &mut output, &mut scratch)
+        .unwrap();
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+    assert_eq!(output, "example.:53");
+}

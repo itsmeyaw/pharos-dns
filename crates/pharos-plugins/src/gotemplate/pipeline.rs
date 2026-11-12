@@ -376,13 +376,9 @@ impl Pipeline {
         data: &Data<'_, '_>,
         dot: Dot<'_>,
         output: &mut String,
+        bytes: &mut [u8],
     ) -> fmt::Result {
-        // shortcut: intermediate pipeline strings are limited to 65,535 bytes; accept caller scratch to lift this limit.
-        let mut bytes = [0; 65535];
-        let mut scratch = Scratch {
-            bytes: &mut bytes,
-            len: 0,
-        };
+        let mut scratch = Scratch { bytes, len: 0 };
         match self.evaluate(data, dot, &mut scratch)? {
             ResultValue::Scalar(value) => super::write_value(value, output),
             ResultValue::Uint(value) => write!(output, "{value}"),
@@ -401,12 +397,13 @@ impl Pipeline {
         }
     }
 
-    pub(super) fn truthy(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<bool, fmt::Error> {
-        let mut bytes = [0; 65535];
-        let mut scratch = Scratch {
-            bytes: &mut bytes,
-            len: 0,
-        };
+    pub(super) fn truthy(
+        &self,
+        data: &Data<'_, '_>,
+        dot: Dot<'_>,
+        bytes: &mut [u8],
+    ) -> Result<bool, fmt::Error> {
+        let mut scratch = Scratch { bytes, len: 0 };
         Ok(self.evaluate(data, dot, &mut scratch)?.truthy(&scratch))
     }
 
@@ -414,12 +411,9 @@ impl Pipeline {
         &'a self,
         data: &'a Data<'_, '_>,
         dot: Dot<'a>,
+        bytes: &mut [u8],
     ) -> Result<RangeValue<'a>, fmt::Error> {
-        let mut bytes = [0; 65535];
-        let mut scratch = Scratch {
-            bytes: &mut bytes,
-            len: 0,
-        };
+        let mut scratch = Scratch { bytes, len: 0 };
         match self.evaluate(data, dot, &mut scratch)? {
             ResultValue::Scalar(None | Some(Value::Nil)) => Ok(RangeValue::Empty),
             ResultValue::Scalar(Some(Value::Int(value))) => Ok(RangeValue::Integer(value)),
