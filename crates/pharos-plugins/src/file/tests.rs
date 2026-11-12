@@ -295,6 +295,15 @@ fn zero_serial_is_rejected_at_file_setup_like_coredns() {
     std::fs::remove_file(path).unwrap();
 }
 
+#[tokio::test]
+async fn negative_reload_fails_startup_instead_of_disabling_reload() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone");
+    let corefile = format!("example.org:53 {{\n file {path} {{\n reload -1s\n }}\n}}");
+    let blocks = pharos_corefile::parse("Corefile", &corefile).unwrap();
+    let configured = pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+    assert!(configured[0].config.lifecycle.run(pharos_server::Phase::Startup).await.is_err());
+}
+
 // Derived from CoreDNS plugin/file/reload_test.go.
 #[test]
 fn serial_reload_retains_old_zone_on_unchanged_or_invalid_data() {
