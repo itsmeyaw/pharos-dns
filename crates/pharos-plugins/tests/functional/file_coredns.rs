@@ -1156,3 +1156,91 @@ async fn coredns_axfr_requires_transfer_and_exact_apex() {
         assert!(outcome.is_none());
     }
 }
+
+// Adapted from CoreDNS closest_test.go TestClosestEncloserConcurrentSetData.
+#[tokio::test(start_paused = true)]
+async fn coredns_reload_and_lookup_keep_one_zone_generation() {
+    use std::{fmt::Write, sync::Arc, time::Duration};
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/file-p75-concurrent-{}.zone",
+        std::process::id()
+    ));
+    let replacement = path.with_extension("new");
+    let content = |serial: u32| {
+        let version = 1 + serial % 2;
+        let mut text = String::new();
+        writeln!(
+            text,
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. {serial} 2 3 4 5"
+        )
+        .unwrap();
+        writeln!(text, "@ 60 IN NS ns{version}.example.org.").unwrap();
+        writeln!(text, "www 60 IN A 192.0.2.{version}").unwrap();
+        text
+    };
+    std::fs::write(&path, content(1)).unwrap();
+    let config = format!(
+        "example.org:53 {{\n file {} {{\n reload 1ms\n }}\n}}",
+        path.display()
+    );
+    let chain = Arc::new(
+        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config,
+    );
+    chain
+        .lifecycle
+        .run(pharos_server::Phase::Startup)
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    let reader = Arc::clone(&chain);
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let reads = tokio::spawn(async move {
+        let domain: Name = "example.org.".parse().unwrap();
+        let mut ready = Some(ready);
+        let mut seen = [false; 2];
+        loop {
+            let (outcome, wire) = query_chain(&reader, &domain, "www.example.org.", Type::A).await;
+            assert_eq!(outcome, Outcome::Response);
+            let response = Message::parse(&wire).unwrap();
+            let address = response.answers().next().unwrap().rdata[3];
+            let ns = response.authorities().next().unwrap();
+            assert!(
+                matches!(ns.data(), Ok(Rdata::Ns(target)) if target.to_string() == format!("ns{address}.example.org."))
+            );
+            seen[usize::from(address - 1)] = true;
+            if let Some(ready) = ready.take() {
+                ready.send(()).unwrap();
+            }
+            if *stopped.borrow() {
+                return seen;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    started.await.unwrap();
+    for serial in 2..=20 {
+        std::fs::write(&replacement, content(serial)).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+    }
+    wait_for_address(
+        &chain,
+        &"example.org.".parse().unwrap(),
+        "www.example.org.",
+        [192, 0, 2, 1],
+    )
+    .await;
+    stop.send(true).unwrap();
+    assert_eq!(reads.await.unwrap(), [true, true]);
+    chain
+        .lifecycle
+        .run(pharos_server::Phase::Shutdown)
+        .await
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+}
