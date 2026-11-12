@@ -43,6 +43,9 @@ Unsigned TCP AXFR comparisons collect the complete stream through its closing
 SOA before comparing records, independent of Message boundaries. The combined
 records must fit into one 65,535-octet comparison Message.
 
+The `file` README scenarios omit the example's remote NOTIFY destination so
+the tests do not send traffic outside the local fixture.
+
 The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS
 Responses, and the harness cannot mask that difference.

@@ -1,0 +1,6 @@
+.:{port} {
+    file db.shared example.org example.net
+    transfer example.org example.net {
+        to *
+    }
+}

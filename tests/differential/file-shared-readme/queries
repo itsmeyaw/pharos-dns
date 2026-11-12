@@ -1,0 +1,6 @@
+www.example.org. A IN udp
+www.example.net. A IN udp
+example.org. SOA IN udp
+example.net. SOA IN udp
+example.org. AXFR IN tcp
+example.net. AXFR IN tcp
