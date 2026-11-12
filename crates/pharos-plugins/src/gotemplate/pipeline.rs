@@ -25,6 +25,9 @@ enum Function {
     Print,
     Println,
     Printf,
+    Html,
+    Js(Box<crate::regex_match::Regex>),
+    UrlQuery,
 }
 enum Command {
     Atom(Atom),
@@ -83,6 +86,11 @@ impl Pipeline {
                 "print" => Some(Function::Print),
                 "println" => Some(Function::Println),
                 "printf" => Some(Function::Printf),
+                "html" => Some(Function::Html),
+                "js" => Some(Function::Js(Box::new(crate::regex_match::Regex::new(
+                    r"^[\p{L}\p{M}\p{N}\p{P}\p{S}]$",
+                )?))),
+                "urlquery" => Some(Function::UrlQuery),
                 _ => None,
             };
             let command = if let Some(function) = function {
@@ -130,7 +138,11 @@ impl Pipeline {
                         Function::ParseInt => count == 3,
                         Function::Index => count >= 2,
                         Function::Slice => (2..=4).contains(&count),
-                        Function::Print | Function::Println => true,
+                        Function::Print
+                        | Function::Println
+                        | Function::Html
+                        | Function::Js(_)
+                        | Function::UrlQuery => true,
                         Function::Printf => count >= 1,
                     };
                     if !valid {
@@ -234,14 +246,29 @@ impl Pipeline {
                             };
                             input.slice(low, high, max, count == 4, scratch)?
                         }
-                        Function::Print | Function::Println | Function::Printf => {
+                        Function::Print
+                        | Function::Println
+                        | Function::Printf
+                        | Function::Html
+                        | Function::Js(_)
+                        | Function::UrlQuery => {
                             let mut values = [None; 1024];
                             for (index, slot) in values[..count].iter_mut().enumerate() {
                                 *slot = Some(argument(args, index, value, data, dot, scratch)?);
                             }
                             let start = scratch.len;
-                            format_values(function, &values[..count], scratch)?;
-                            ResultValue::Stored(start, scratch.len)
+                            if matches!(
+                                function,
+                                Function::Html | Function::Js(_) | Function::UrlQuery
+                            ) {
+                                format_values(&Function::Print, &values[..count], scratch)?;
+                                let end = scratch.len;
+                                escape_values(function, start, end, scratch)?;
+                                ResultValue::Stored(end, scratch.len)
+                            } else {
+                                format_values(function, &values[..count], scratch)?;
+                                ResultValue::Stored(start, scratch.len)
+                            }
                         }
                     }
                 }
@@ -282,6 +309,63 @@ impl Pipeline {
         };
         Ok(self.evaluate(data, dot, &mut scratch)?.truthy(&scratch))
     }
+}
+
+fn escape_values(
+    function: &Function,
+    start: usize,
+    end: usize,
+    scratch: &mut Scratch<'_>,
+) -> fmt::Result {
+    let mut offset = start;
+    while offset < end {
+        let ch = std::str::from_utf8(&scratch.bytes[offset..end])
+            .map_err(|_| fmt::Error)?
+            .chars()
+            .next()
+            .ok_or(fmt::Error)?;
+        offset += ch.len_utf8();
+        match function {
+            Function::Html => match ch {
+                '\0' => scratch.write_char('\u{fffd}')?,
+                '"' => scratch.write_str("&#34;")?,
+                '\'' => scratch.write_str("&#39;")?,
+                '&' => scratch.write_str("&amp;")?,
+                '<' => scratch.write_str("&lt;")?,
+                '>' => scratch.write_str("&gt;")?,
+                _ => scratch.write_char(ch)?,
+            },
+            Function::Js(printable) => match ch {
+                '\\' => scratch.write_str("\\\\")?,
+                '\'' => scratch.write_str("\\'")?,
+                '"' => scratch.write_str("\\\"")?,
+                '<' => scratch.write_str("\\u003C")?,
+                '>' => scratch.write_str("\\u003E")?,
+                '&' => scratch.write_str("\\u0026")?,
+                '=' => scratch.write_str("\\u003D")?,
+                ch if (ch as u32) < 32
+                    || (ch as u32 >= 128 && !printable.is_match(ch.encode_utf8(&mut [0; 4]))) =>
+                {
+                    write!(scratch, "\\u{:04X}", ch as u32)?
+                }
+                _ => scratch.write_char(ch)?,
+            },
+            Function::UrlQuery => {
+                let mut bytes = [0; 4];
+                for byte in ch.encode_utf8(&mut bytes).bytes() {
+                    match byte {
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                            scratch.write_char(char::from(byte))?
+                        }
+                        b' ' => scratch.write_char('+')?,
+                        _ => write!(scratch, "%{byte:02X}")?,
+                    }
+                }
+            }
+            _ => return Err(fmt::Error),
+        }
+    }
+    Ok(())
 }
 
 impl Atom {

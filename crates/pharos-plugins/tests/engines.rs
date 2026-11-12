@@ -301,3 +301,28 @@ fn print_and_printf_produce_pipeline_strings() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "example.:53|example.:53|a 2 b\n|9");
 }
+
+#[test]
+fn go_escaping_builtins_return_pipeline_strings() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile(r#"{{ html "<a&'\"" }}|{{ js "<>&=\n" }}|{{ urlquery "a+b c/é" }}|{{ html "<" | eq "&lt;" }}"#).unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(
+        output,
+        "&lt;a&amp;&#39;&#34;|\\u003C\\u003E\\u0026\\u003D\\u000A|a%2Bb+c%2F%C3%A9|true"
+    );
+}
+
+#[test]
+fn js_escapes_non_printable_unicode_like_go() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile("{{ js \"\\uE000é\\u00A0\" }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "\\uE000é\\u00A0");
+}

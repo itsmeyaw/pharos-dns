@@ -71,3 +71,23 @@ fn formatting_pipelines_use_no_heap_allocation() {
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
     assert_eq!(output, "example.:53 9");
 }
+
+#[test]
+fn escape_builtins_do_not_allocate_on_first_render() {
+    if crate::run_isolated(
+        "gotemplate::gotemplate_allocations::escape_builtins_do_not_allocate_on_first_render",
+    ) {
+        return;
+    }
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("é<&", &metadata);
+    let template =
+        Template::compile("{{ js .Name }}|{{ html .Name }}|{{ urlquery .Name }}").unwrap();
+    let mut output = String::with_capacity(128);
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    template.render(&data, &mut output).unwrap();
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+    assert_eq!(output, "é\\u003C\\u0026|é&lt;&amp;|%C3%A9%3C%26");
+}
