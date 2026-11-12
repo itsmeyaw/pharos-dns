@@ -4,6 +4,7 @@
 // Debug Plugin Chain futures exceed 2 MiB; see #90.
 #[cfg(any(
     all(feature = "plugin-autopath", feature = "plugin-whoami"),
+    feature = "plugin-forward",
     feature = "plugin-hosts",
     feature = "plugin-kubernetes",
     feature = "plugin-template",

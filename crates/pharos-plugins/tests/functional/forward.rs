@@ -302,8 +302,12 @@ async fn max_concurrent_rejects_without_leaking_a_slot() {
     server.await.unwrap();
 }
 
-#[tokio::test]
-async fn shutdown_stops_upstream_proxy() {
+#[test]
+fn shutdown_stops_upstream_proxy() {
+    crate::on_plugin_stack(shutdown_stops_upstream_proxy_body);
+}
+
+async fn shutdown_stops_upstream_proxy_body() {
     use pharos_server::{Action, Handler, Phase};
     let (upstream, task) = fake(0, false).await;
     let text = format!(".:0 {{\n forward . {upstream}\n}}");
