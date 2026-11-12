@@ -36,6 +36,14 @@ enum Command {
 
 pub(super) struct Pipeline(Vec<Command>);
 
+pub(super) enum RangeValue<'a> {
+    Empty,
+    Integer(i64),
+    Matches(&'a [&'a str]),
+    Groups(&'a [(&'a str, &'a str)]),
+    Variables(&'a [(&'a str, Value<'a>)]),
+}
+
 #[derive(Clone, Copy)]
 enum ResultValue<'a> {
     Scalar(Option<Value<'a>>),
@@ -308,6 +316,29 @@ impl Pipeline {
             len: 0,
         };
         Ok(self.evaluate(data, dot, &mut scratch)?.truthy(&scratch))
+    }
+
+    pub(super) fn range<'a>(
+        &'a self,
+        data: &'a Data<'_, '_>,
+        dot: Dot<'a>,
+    ) -> Result<RangeValue<'a>, fmt::Error> {
+        let mut bytes = [0; 65535];
+        let mut scratch = Scratch {
+            bytes: &mut bytes,
+            len: 0,
+        };
+        match self.evaluate(data, dot, &mut scratch)? {
+            ResultValue::Scalar(None | Some(Value::Nil)) => Ok(RangeValue::Empty),
+            ResultValue::Scalar(Some(Value::Int(value))) => Ok(RangeValue::Integer(value)),
+            ResultValue::Uint(value) => Ok(RangeValue::Integer(
+                i64::try_from(value).map_err(|_| fmt::Error)?,
+            )),
+            ResultValue::Matches(values) => Ok(RangeValue::Matches(values)),
+            ResultValue::Groups(values) => Ok(RangeValue::Groups(values)),
+            ResultValue::Variables(values) => Ok(RangeValue::Variables(values)),
+            _ => Err(fmt::Error),
+        }
     }
 }
 

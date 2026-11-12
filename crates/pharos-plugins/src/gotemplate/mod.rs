@@ -78,7 +78,7 @@ enum Part {
     Text(String),
     Field(Field),
     If(Condition, Vec<Part>, Vec<Part>),
-    Range(Field, Vec<String>, Vec<Part>, Vec<Part>),
+    Range(pipeline::Pipeline, Vec<String>, Vec<Part>, Vec<Part>),
     Pipeline(pipeline::Pipeline),
 }
 
@@ -167,50 +167,60 @@ fn render_parts(
                 dot,
                 output,
             )?,
-            Part::Range(field, names, body, otherwise) => {
-                let field = match field {
-                    Field::Root(field) => field.as_ref(),
-                    field if matches!(dot, Dot::Root) => field,
-                    _ => return Err(fmt::Error),
-                };
-                match field {
-                    Field::Matches => {
-                        if data.matches.is_empty() {
-                            render_parts(otherwise, data, dot, output)?;
-                        }
-                        for (index, value) in data.matches.iter().enumerate() {
-                            let nested = Dot::Range {
-                                value: Value::String(value),
-                                key: Value::Int(index as i64),
-                                names,
-                                parent: &dot,
-                            };
-                            render_parts(body, data, nested, output)?;
-                        }
+            Part::Range(pipeline, names, body, otherwise) => match pipeline.range(data, dot)? {
+                pipeline::RangeValue::Empty => render_parts(otherwise, data, dot, output)?,
+                pipeline::RangeValue::Integer(count) => {
+                    if names.len() > 1 {
+                        return Err(fmt::Error);
                     }
-                    Field::Groups => render_map(
-                        data.groups
-                            .iter()
-                            .map(|(key, value)| (*key, Value::String(value))),
-                        names,
-                        body,
-                        otherwise,
-                        data,
-                        dot,
-                        output,
-                    )?,
-                    Field::Variables => render_map(
-                        data.variables.iter().map(|(key, value)| (*key, *value)),
-                        names,
-                        body,
-                        otherwise,
-                        data,
-                        dot,
-                        output,
-                    )?,
-                    _ => return Err(fmt::Error),
+                    if count <= 0 {
+                        render_parts(otherwise, data, dot, output)?;
+                    }
+                    for value in 0..count {
+                        let nested = Dot::Range {
+                            value: Value::Int(value),
+                            key: Value::Nil,
+                            names,
+                            parent: &dot,
+                        };
+                        render_parts(body, data, nested, output)?;
+                    }
                 }
-            }
+                pipeline::RangeValue::Matches(matches) => {
+                    if matches.is_empty() {
+                        render_parts(otherwise, data, dot, output)?;
+                    }
+                    for (index, value) in matches.iter().enumerate() {
+                        let nested = Dot::Range {
+                            value: Value::String(value),
+                            key: Value::Int(index as i64),
+                            names,
+                            parent: &dot,
+                        };
+                        render_parts(body, data, nested, output)?;
+                    }
+                }
+                pipeline::RangeValue::Groups(groups) => render_map(
+                    groups
+                        .iter()
+                        .map(|(key, value)| (*key, Value::String(value))),
+                    names,
+                    body,
+                    otherwise,
+                    data,
+                    dot,
+                    output,
+                )?,
+                pipeline::RangeValue::Variables(variables) => render_map(
+                    variables.iter().map(|(key, value)| (*key, *value)),
+                    names,
+                    body,
+                    otherwise,
+                    data,
+                    dot,
+                    output,
+                )?,
+            },
             Part::Pipeline(pipeline) => pipeline.write(data, dot, output)?,
         }
     }
@@ -388,7 +398,7 @@ fn parse_parts(
                     None => (Vec::new(), condition),
                 };
                 validate_variables(expression, scope)?;
-                (Some(parse_field(expression)?), names)
+                (Some(pipeline::Pipeline::compile(expression)?), names)
             } else {
                 validate_variables(condition, scope)?;
                 (None, Vec::new())
@@ -396,8 +406,8 @@ fn parse_parts(
             let mut branch_scope = scope.to_vec();
             branch_scope.extend(names.iter().cloned());
             let (yes, no) = parse_branches(source, depth + 1, &branch_scope)?;
-            if let Some(field) = field {
-                Part::Range(field, names, yes, no)
+            if let Some(pipeline) = field {
+                Part::Range(pipeline, names, yes, no)
             } else {
                 Part::If(Condition::parse(condition)?, yes, no)
             }

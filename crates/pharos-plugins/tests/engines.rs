@@ -377,3 +377,15 @@ fn range_variables_are_scoped_and_undefined_names_fail_at_setup() {
             .is_ok()
     );
 }
+
+#[test]
+fn range_accepts_pipelines_and_integer_counts() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["whole", "one", "two"];
+    let template = Template::compile("{{ range $i, $v := slice .Match 1 }}{{$i}}={{$v}};{{ end }}|{{ range $n := 3 }}{{$n}}{{ else }}empty{{ end }}|{{ range .Var.missing }}bad{{ else }}empty{{ end }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "0=one;1=two;|012|empty");
+}
