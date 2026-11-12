@@ -70,6 +70,7 @@ default = [
     "plugin-reload",
     "plugin-rewrite",
     "plugin-secondary",
+    "plugin-sign",
     "plugin-template",
     "plugin-view",
     "plugin-whoami",
@@ -134,7 +135,7 @@ plugin-grpc = []
 plugin-erratic = []
 plugin-whoami = []
 plugin-on = []
-plugin-sign = []
+plugin-sign = ["dep:pharos-dnssec"]
 plugin-view = []
 plugin-nomad = []
 

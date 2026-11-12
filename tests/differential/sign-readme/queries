@@ -1,0 +1,3 @@
+www.miek.nl. A IN udp
+miek.nl. DNSKEY IN udp
+missing.miek.nl. A IN udp
