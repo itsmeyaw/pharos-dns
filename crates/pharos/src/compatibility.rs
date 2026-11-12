@@ -1,10 +1,12 @@
 #[test]
 fn compatibility_document_has_parseable_sections() {
+    assert!(include_str!("../compatibility.md").contains("## Expressions and templates\n"));
     let directives = pharos_plugins::COMPATIBILITY
         .iter()
         .map(|(name, _)| *name)
         .collect::<Vec<_>>();
     let general = [
+        "Expressions and templates",
         "General",
         "CLI",
         "Logging",

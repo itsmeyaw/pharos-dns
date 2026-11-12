@@ -19,7 +19,7 @@ aws-sdk-secretsmanager = { version = "1", default-features = false, features = [
 serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 regex = { version = "1", optional = true }
-regex-automata = { version = "0.4", optional = true }
+regex-automata = "0.4"
 arc-swap = "1"
 nix = { version = "0.31", features = ["net", "socket", "hostname"] }
 
@@ -99,7 +99,7 @@ plugin-any = []
 plugin-chaos = []
 plugin-loadbalance = []
 plugin-tsig = []
-plugin-rewrite = ["dep:regex", "dep:regex-automata"]
+plugin-rewrite = ["dep:regex"]
 plugin-autopath = []
 plugin-acl = []
 plugin-cache = []

@@ -37,6 +37,8 @@ pub mod dns64;
 pub mod dnssec;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
+pub mod expression;
+pub mod gotemplate;
 #[cfg(feature = "plugin-header")]
 pub mod header;
 #[cfg(any(
@@ -52,12 +54,14 @@ pub mod header;
 pub mod health;
 #[cfg(feature = "plugin-hosts")]
 pub mod hosts;
+mod ipnet;
 #[cfg(feature = "plugin-kubernetes")]
 pub mod kubernetes;
 #[cfg(feature = "plugin-loadbalance")]
 pub mod loadbalance;
 #[cfg(feature = "plugin-local")]
 pub mod local;
+mod message_len;
 #[cfg(feature = "plugin-minimal")]
 pub mod minimal;
 #[cfg(feature = "plugin-multisocket")]
@@ -65,6 +69,7 @@ pub mod multisocket;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 pub mod proxy;
+mod regex_match;
 #[cfg(feature = "plugin-rewrite")]
 pub mod rewrite;
 #[cfg(feature = "plugin-siit")]

@@ -144,6 +144,12 @@
 
 - [whoami Plugin notes](../crates/pharos-plugins/src/whoami/README.md)
 
+## Expressions and templates
+
+- The shared [expression engine](../crates/pharos-plugins/src/expression/README.md) supports only the documented subset; unsupported expressions fail compilation. Expressions are limited to 1,024 tokens and 16 parse/evaluation levels.
+- The shared [template engine](../crates/pharos-plugins/src/gotemplate/README.md) supports only the documented subset. Templates are limited to eight combined action/parenthesis levels and 64 live argument values. Integer `range` stops at 65,535 iterations with a render error, unlike CoreDNS; some invalid fields or function arguments fail at render time. Default rendering serializes concurrent renders of the same template; caller-owned scratch permits parallel rendering.
+- The `view` and `template` Plugins are not implemented yet; their routing, fallthrough and DNS record handling are not provided by these engines.
+
 ## General
 
 - Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `siit`, `tsig` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
