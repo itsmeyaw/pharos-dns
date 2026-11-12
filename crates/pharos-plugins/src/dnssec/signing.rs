@@ -71,6 +71,7 @@ impl Dnssec {
             .map(|(_, metrics)| metrics);
         {
             let cache = self.cache.lock().map_err(|_| Error::InvalidQuery)?;
+            // RFC 4034 §3.1.4: the unsigned Response key includes the covered RRset TTLs.
             if let Some(entry) = cache.get(cx.response.get(2..).ok_or(Error::InvalidQuery)?)
                 && entry.valid(now, cx.max_response_size)
             {
@@ -388,6 +389,74 @@ impl Dnssec {
 #[cfg(test)]
 mod tests {
     use super::CacheEntry;
+
+    #[test]
+    fn signature_cache_separates_original_ttls() {
+        use pharos_corefile::{configure, parse};
+        use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rdata, Section, Type};
+        use pharos_server::{Context, Metadata, Protocol, Transport};
+
+        let base = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+        );
+        let text = format!("miek.nl {{\n dnssec {{\n key file {base}\n }}\n}}");
+        let mut chain =
+            configure::<crate::Chain>(&parse("Corefile", &text).unwrap(), crate::directives())
+                .unwrap();
+        let dnssec = chain[0].config.dnssec.as_mut().unwrap();
+        let domain: Name = "miek.nl.".parse().unwrap();
+        let name = NameRef::parse(domain.as_wire(), 0).unwrap();
+        let mut query = Vec::new();
+        let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x100).unwrap();
+        builder.question(name, Type::A, Class::IN).unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:1".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        let mut first = Vec::new();
+        for (ttl, expected_entries) in [(120, 1), (60, 2), (120, 2)] {
+            let mut builder = MessageBuilder::new(cx.response, 512, 1, 0x8400).unwrap();
+            builder.question(name, Type::A, Class::IN).unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    name,
+                    Type::A,
+                    Class::IN,
+                    ttl,
+                    &[127, 0, 0, 1],
+                )
+                .unwrap();
+            let _ = builder.finish();
+            dnssec.sign_response(&mut cx).unwrap();
+            let message = Message::parse(cx.response).unwrap();
+            let sig = message
+                .answers()
+                .find(|rr| rr.rtype == Type::RRSIG)
+                .unwrap();
+            assert_eq!(sig.ttl, ttl);
+            assert!(
+                matches!(sig.data().unwrap(), Rdata::Rrsig { original_ttl, .. } if original_ttl == ttl)
+            );
+            assert_eq!(dnssec.cache.lock().unwrap().len(), expected_entries);
+            if first.is_empty() {
+                first = cx.response.clone();
+            } else if ttl == 120 {
+                assert_eq!(*cx.response, first);
+            }
+        }
+    }
 
     #[test]
     fn empty_response_does_not_evict_a_signed_response() {

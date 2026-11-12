@@ -67,7 +67,7 @@ async fn no_do_and_warmed_signature_hits_do_not_allocate() {
     }
 }
 
-struct Negative;
+struct Negative(u32);
 impl pharos_server::Next for Negative {
     async fn run(self, cx: &mut pharos_server::Context<'_, '_>) -> pharos_server::Outcome {
         use pharos_proto::{Class, MessageBuilder, NameRef, Section, Type};
@@ -83,7 +83,7 @@ impl pharos_server::Next for Negative {
                 NameRef::parse(cx.domain.as_wire(), 0).unwrap(),
                 Type::SOA,
                 Class::IN,
-                60,
+                self.0,
                 &[
                     0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
                 ],
@@ -124,18 +124,23 @@ async fn warmed_black_lie_hit_does_not_allocate() {
         max_response_size: 1232,
     };
     let plugin = blocks[0].config.dnssec.as_ref().unwrap();
-    assert_eq!(plugin.serve(&mut cx, Negative).await, Outcome::Response);
-    assert!(
-        Message::parse(cx.response)
-            .unwrap()
-            .authorities()
-            .any(|rr| rr.rtype == Type::NSEC)
-    );
-    let before = crate::GLOBAL.stats();
-    for _ in 0..100 {
-        assert_eq!(plugin.serve(&mut cx, Negative).await, Outcome::Response);
+    for ttl in [60, 30] {
+        assert_eq!(
+            plugin.serve(&mut cx, Negative(ttl)).await,
+            Outcome::Response
+        );
+        let reply = Message::parse(cx.response).unwrap();
+        assert!(reply.authorities().any(|rr| rr.rtype == Type::NSEC));
+        assert!(reply.authorities().filter(|rr| rr.rtype == Type::RRSIG).all(|rr| matches!(rr.data().unwrap(), pharos_proto::Rdata::Rrsig { original_ttl, .. } if original_ttl == ttl)));
+        let before = crate::GLOBAL.stats();
+        for _ in 0..100 {
+            assert_eq!(
+                plugin.serve(&mut cx, Negative(ttl)).await,
+                Outcome::Response
+            );
+        }
+        let after = crate::GLOBAL.stats();
+        assert_eq!(after.allocations - before.allocations, 0);
+        assert_eq!(after.reallocations - before.reallocations, 0);
     }
-    let after = crate::GLOBAL.stats();
-    assert_eq!(after.allocations - before.allocations, 0);
-    assert_eq!(after.reallocations - before.reallocations, 0);
 }
