@@ -975,8 +975,29 @@ impl Zone {
                     owner,
                     Type::CNAME,
                     Section::Answer,
-                    dnssec,
+                    dnssec && !(index == 0 && synthesized),
                 )?;
+                if dnssec && index == 0 && synthesized {
+                    let signature_owner = NameRef::parse(rr.owner.as_wire(), 0)
+                        .map_err(|_| pharos_server::Error::InvalidQuery)?;
+                    for sig in zone
+                        .records_at(rr.owner.as_wire(), Type::RRSIG)
+                        .filter(|sig| {
+                            sig.rdata.get(..2) == Some(Type::CNAME.0.to_be_bytes().as_slice())
+                        })
+                    {
+                        builder
+                            .record(
+                                Section::Answer,
+                                signature_owner,
+                                sig.rtype,
+                                sig.class,
+                                sig.ttl,
+                                &sig.rdata,
+                            )
+                            .map_err(pharos_server::Error::Build)?;
+                    }
+                }
             }
             if cut.is_none()
                 && !chain_limited
@@ -1125,6 +1146,7 @@ impl Zone {
             if dnssec
                 && synthesized
                 && found
+                && count == 0
                 && let Some(rr) = zone.previous_nsec(name)
             {
                 let owner = NameRef::parse(rr.owner.as_wire(), 0)
