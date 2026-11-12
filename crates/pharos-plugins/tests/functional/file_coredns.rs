@@ -92,6 +92,37 @@ fn zone(origin: &str, text: &str) -> Result<Zone, String> {
     Zone::from_records(origin, records)
 }
 
+fn assert_records<'a>(records: impl Iterator<Item = pharos_proto::Record<'a>>, expected: &[&str]) {
+    let mut actual = records
+        .map(|rr| {
+            (
+                rr.name.to_name().canonical(),
+                rr.rtype.0,
+                rr.class.0,
+                rr.ttl,
+                rr.rdata.to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut expected = expected
+        .iter()
+        .map(|text| {
+            let mut parser = ZoneParser::new(text.as_bytes(), ".".parse().unwrap(), "expected");
+            let rr = parser.next().unwrap().unwrap();
+            (
+                rr.owner.canonical(),
+                rr.rtype.0,
+                rr.class.0,
+                rr.ttl,
+                rr.rdata,
+            )
+        })
+        .collect::<Vec<_>>();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
 // Derived from CoreDNS file_test.go TestParseNoSOA, TestParseSyntaxError,
 // TestParseMalformedSOA, and TestParseSOASerialTooLarge.
 #[test]
@@ -860,4 +891,268 @@ async fn coredns_missing_zone_is_servfail() {
         .0,
         Outcome::Unanswered(Rcode::SERVFAIL)
     );
+}
+
+// Derived from CoreDNS lookup_test.go TestLookup.
+#[tokio::test]
+async fn coredns_lookup_records_and_negative_responses() {
+    let zone = zone(
+        "miek.nl.",
+        include_str!("../fixtures/file/coredns-miek.zone"),
+    )
+    .unwrap();
+    let ns = [
+        "miek.nl. 1800 IN NS ext.ns.whyscream.net.",
+        "miek.nl. 1800 IN NS linode.atoom.net.",
+        "miek.nl. 1800 IN NS ns-ext.nlnetlabs.nl.",
+        "miek.nl. 1800 IN NS omval.tednet.nl.",
+    ];
+    let soa =
+        ["miek.nl. 1800 IN SOA linode.atoom.net. miek.miek.nl. 1282630057 14400 3600 604800 14400"];
+    let cases: &[(&str, Type, Rcode, &[&str], &[&str], &[&str])] = &[
+        (
+            "www.miek.nl.",
+            Type::A,
+            Rcode::NOERROR,
+            &[
+                "www.miek.nl. 1800 IN CNAME a.miek.nl.",
+                "a.miek.nl. 1800 IN A 139.162.196.78",
+            ],
+            &ns,
+            &[],
+        ),
+        (
+            "www.miek.nl.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            &[
+                "www.miek.nl. 1800 IN CNAME a.miek.nl.",
+                "a.miek.nl. 1800 IN AAAA 2a01:7e00::f03c:91ff:fef1:6735",
+            ],
+            &ns,
+            &[],
+        ),
+        ("miek.nl.", Type::SOA, Rcode::NOERROR, &soa, &ns, &[]),
+        (
+            "miek.nl.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            &["miek.nl. 1800 IN AAAA 2a01:7e00::f03c:91ff:fef1:6735"],
+            &ns,
+            &[],
+        ),
+        (
+            "mIeK.NL.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            &["miek.nl. 1800 IN AAAA 2a01:7e00::f03c:91ff:fef1:6735"],
+            &ns,
+            &[],
+        ),
+        (
+            "miek.nl.",
+            Type::MX,
+            Rcode::NOERROR,
+            &[
+                "miek.nl. 1800 IN MX 1 aspmx.l.google.com.",
+                "miek.nl. 1800 IN MX 5 alt1.aspmx.l.google.com.",
+                "miek.nl. 1800 IN MX 5 alt2.aspmx.l.google.com.",
+                "miek.nl. 1800 IN MX 10 aspmx2.googlemail.com.",
+                "miek.nl. 1800 IN MX 10 aspmx3.googlemail.com.",
+            ],
+            &ns,
+            &[],
+        ),
+        ("a.miek.nl.", Type::SRV, Rcode::NOERROR, &[], &soa, &[]),
+        ("b.miek.nl.", Type::A, Rcode::NXDOMAIN, &[], &soa, &[]),
+        (
+            "srv.miek.nl.",
+            Type::SRV,
+            Rcode::NOERROR,
+            &["srv.miek.nl. 1800 IN SRV 10 10 8080 a.miek.nl."],
+            &ns,
+            &[
+                "a.miek.nl. 1800 IN A 139.162.196.78",
+                "a.miek.nl. 1800 IN AAAA 2a01:7e00::f03c:91ff:fef1:6735",
+            ],
+        ),
+        (
+            "mx.miek.nl.",
+            Type::MX,
+            Rcode::NOERROR,
+            &["mx.miek.nl. 1800 IN MX 10 a.miek.nl."],
+            &ns,
+            &[
+                "a.miek.nl. 1800 IN A 139.162.196.78",
+                "a.miek.nl. 1800 IN AAAA 2a01:7e00::f03c:91ff:fef1:6735",
+            ],
+        ),
+        (
+            "asterisk.x.miek.nl.",
+            Type::CNAME,
+            Rcode::NOERROR,
+            &["asterisk.x.miek.nl. 1800 IN CNAME www.miek.nl."],
+            &ns,
+            &[],
+        ),
+        (
+            "a.b.x.miek.nl.",
+            Type::CNAME,
+            Rcode::NXDOMAIN,
+            &[],
+            &soa,
+            &[],
+        ),
+        (
+            "asterisk.y.miek.nl.",
+            Type::A,
+            Rcode::NOERROR,
+            &["asterisk.y.miek.nl. 1800 IN A 139.162.196.78"],
+            &ns,
+            &[],
+        ),
+        (
+            "foo.dname.miek.nl.",
+            Type::CNAME,
+            Rcode::NOERROR,
+            &[
+                "dname.miek.nl. 1800 IN DNAME x.miek.nl.",
+                "foo.dname.miek.nl. 1800 IN CNAME foo.x.miek.nl.",
+            ],
+            &ns,
+            &[],
+        ),
+        (
+            "ext-cname.miek.nl.",
+            Type::A,
+            Rcode::SERVFAIL,
+            &["ext-cname.miek.nl. 1800 IN CNAME example.com."],
+            &ns,
+            &[],
+        ),
+        (
+            "txt.miek.nl.",
+            Type::TXT,
+            Rcode::NOERROR,
+            &["txt.miek.nl. 1800 IN TXT \"v=spf1 a mx ~all\""],
+            &ns,
+            &[],
+        ),
+        (
+            "caa.miek.nl.",
+            Type::CAA,
+            Rcode::NOERROR,
+            &["caa.miek.nl. 1800 IN CAA 0 issue letsencrypt.org"],
+            &ns,
+            &[],
+        ),
+    ];
+    for (name, kind, rcode, answer, authority, additional) in cases {
+        let (outcome, wire) = query(&zone, name, *kind, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response, "{name}");
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), *rcode, "{name}");
+        assert_records(response.answers(), answer);
+        assert_records(response.authorities(), authority);
+        assert_records(response.additionals(), additional);
+    }
+}
+
+// Derived from CoreDNS lookup_test.go TestLookupRefusedUpstream.
+#[test]
+fn coredns_refused_target_keeps_alias_and_noerror() {
+    // Debug Plugin Chain futures exceed 2 MiB; see #90.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    use pharos_server::{Action, Handler};
+                    let path = concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/tests/fixtures/file/coredns-outside.zone"
+                    );
+                    let config = format!(".:0 {{\n file {path} example.org\n}}");
+                    let (mut servers, _) = pharos_plugins::servers(
+                        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    let (_, server) = servers.drain().next().unwrap();
+                    let name: Name = "www.example.org.".parse().unwrap();
+                    let mut wire = Vec::with_capacity(512);
+                    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+                    builder
+                        .question(
+                            NameRef::parse(name.as_wire(), 0).unwrap(),
+                            Type::A,
+                            Class::IN,
+                        )
+                        .unwrap();
+                    let _ = builder.finish();
+                    let mut response = Vec::with_capacity(65535);
+                    assert_eq!(
+                        server
+                            .handle(
+                                &wire,
+                                "127.0.0.1:1234".parse().unwrap(),
+                                Protocol::Udp,
+                                &mut response
+                            )
+                            .await,
+                        Action::Respond
+                    );
+                    let response = Message::parse(&response).unwrap();
+                    assert_eq!(response.rcode(), Rcode::NOERROR);
+                    assert_records(
+                        response.answers(),
+                        &["www.example.org. 3600 IN CNAME www.example.net."],
+                    );
+                    assert_records(
+                        response.authorities(),
+                        &["example.org. 3600 IN NS a.iana-servers.net."],
+                    );
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+// Derived from CoreDNS xfr_test.go TestAXFRWithOutTransferPlugin and TestTransferRequiresExactZone.
+#[tokio::test]
+async fn coredns_axfr_requires_transfer_and_exact_apex() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/coredns-miek.zone"
+    );
+    let text = format!("miek.nl:53 {{\n file {path}\n}}");
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let apex: Name = "miek.nl.".parse().unwrap();
+    let (outcome, _) = query_chain(&configured[0].config, &apex, "miek.nl.", Type::AXFR).await;
+    assert_eq!(outcome, Outcome::Unanswered(Rcode::REFUSED));
+    #[cfg(feature = "plugin-transfer")]
+    {
+        use pharos_plugins::transfer::{TransferRequest, Transferer};
+        let child: Name = "www.miek.nl.".parse().unwrap();
+        let outcome = configured[0]
+            .config
+            .file
+            .as_ref()
+            .unwrap()
+            .transfer(TransferRequest {
+                zone: NameRef::parse(child.as_wire(), 0).unwrap(),
+                serial: 0,
+                id: 1,
+                flags: 0,
+                protocol: Protocol::Tcp,
+                qtype: Type::AXFR,
+                qclass: Class::IN,
+            })
+            .unwrap();
+        assert!(outcome.is_none());
+    }
 }
