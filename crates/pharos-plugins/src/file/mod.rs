@@ -532,6 +532,34 @@ impl Plugin for File {
         let Some(zone) = snapshot.as_ref() else {
             return Outcome::Unanswered(Rcode::SERVFAIL);
         };
+        zone.lookup(cx, next, &self.fallthrough).await
+    }
+}
+
+impl Zone {
+    /// Answer a Query using this immutable Zone, optionally falling through on absent names.
+    pub async fn lookup<N: Next + Send>(
+        &self,
+        cx: &mut Context<'_, '_>,
+        next: N,
+        fallthrough: &[Name],
+    ) -> Outcome {
+        let Some(question) = cx.query.questions().next() else {
+            return next.run(cx).await;
+        };
+        let mut wire = [0u8; 255];
+        let mut len = 0;
+        for label in question.name.labels() {
+            wire[len] = label.len() as u8;
+            len += 1;
+            wire[len..len + label.len()].copy_from_slice(label);
+            len += label.len();
+        }
+        let name = &wire[..len + 1];
+        if !contains(name, &self.apex) {
+            return next.run(cx).await;
+        }
+        let zone = self;
         if matches!(question.qtype, Type::AXFR | Type::IXFR) {
             return Outcome::Unanswered(Rcode::REFUSED);
         }
@@ -640,7 +668,7 @@ impl Plugin for File {
             && !synthesized
             && cut.is_none()
             && dname.is_none()
-            && self.fallthrough.iter().any(|apex| contains(name, apex))
+            && fallthrough.iter().any(|apex| contains(name, apex))
         {
             return next.run(cx).await;
         }
