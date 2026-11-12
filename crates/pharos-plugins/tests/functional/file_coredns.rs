@@ -224,14 +224,33 @@ async fn coredns_decimal_escape_lookup() {
     assert_eq!(rr.rdata, [192, 0, 2, 2]);
     for (left, right) in [
         (r"has\046dot.campus.edu.", r"has\.dot.campus.edu."),
-        (r"a\009b.campus.edu.", r"a\009b.campus.edu."),
+        (r"has\.dot.campus.edu.", r"has\.dot.campus.edu."),
         ("plain.campus.edu.", "plain.campus.edu."),
+        (r"a\009b.campus.edu.", r"a\009b.campus.edu."),
     ] {
-        assert_eq!(
-            left.parse::<Name>().unwrap(),
-            right.parse::<Name>().unwrap()
-        );
+        assert_eq!(left.parse::<Name>().unwrap().to_string(), right);
     }
+}
+
+// Adapted from CoreDNS zone_test.go TestNameFromRight through public lookup.
+#[tokio::test]
+async fn coredns_right_to_left_name_traversal() {
+    let input = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\na 60 IN A 192.0.2.1\na.b 60 IN A 192.0.2.2\n";
+    let zone = zone("example.org.", input).unwrap();
+    for (name, kind, expected) in [
+        ("example.org.", Type::SOA, Rcode::NOERROR),
+        ("a.example.org.", Type::A, Rcode::NOERROR),
+        ("a.b.example.org.", Type::A, Rcode::NOERROR),
+        ("x.a.example.org.", Type::A, Rcode::NXDOMAIN),
+    ] {
+        let (outcome, wire) = query(&zone, name, kind, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(Message::parse(&wire).unwrap().rcode(), expected);
+    }
+    assert_eq!(
+        query(&zone, "outside.test.", Type::A, false, &[]).await.0,
+        Outcome::Unanswered(Rcode::SERVFAIL)
+    );
 }
 
 // Derived from CoreDNS zone_test.go TestInsertPreservesSRVCase.
