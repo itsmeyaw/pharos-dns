@@ -75,6 +75,8 @@ fn coredns_setup_cases() {
         ("template ANY", false),
         ("template ANY X", false),
         ("template ANY ANY", true),
+        ("template ANY ANY {\n}", true),
+        ("template ANY ANY (?P<x>", true),
         ("template ANY ANY {\n rcode NXDOMAIN\n}", true),
         ("template ANY ANY {\n unknown\n}", false),
         ("template ANY ANY {\n match\n}", false),
@@ -93,6 +95,35 @@ fn coredns_setup_cases() {
         ),
         ("template ANY ANY {\n answer \"{{ parseInt }}\"\n}", true),
         (
+            "template ANY ANY {\n answer \"{{ parseInt }}\"\n additional \"{{ parseInt }}\"\n authority \"{{ parseInt }}\"\n}",
+            true,
+        ),
+        (
+            r#"template IN ANY example.com {
+ match "[.](example[.]com[.]dc1[.]example[.]com[.])$"
+ rcode NXDOMAIN
+ authority "{{ index .Match 1 }} 60 IN SOA ns.{{ index .Match 1 }} hostmaster.example.com (1 60 60 60 60)"
+ fallthrough example.com
+}"#,
+            true,
+        ),
+        (
+            r#"template ANY A example.com {
+ match ip-(?P<a>[0-9]*)-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]example[.]com
+ answer "{{ .Name }} A {{ .Group.a }}.{{ .Group.b }}.{{ .Group.c }}.{{ .Grup.d }}."
+ fallthrough
+}"#,
+            true,
+        ),
+        (
+            r#"template ANY AAAA example.com {
+ match ip-(?P<a>[0-9]*)-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]example[.]com
+ authority "example.com 60 IN SOA ns.example.com hostmaster.example.com (1 60 60 60 60)"
+ fallthrough
+}"#,
+            true,
+        ),
+        (
             "template ANY ANY invalid {\n rcode NXDOMAIN\n ederror 21 \"Blocked according to RFC2606\"\n}",
             true,
         ),
@@ -106,6 +137,7 @@ fn coredns_setup_cases() {
             "template IN A example. {\n var ttl 60\n expr ttl == 60\n answer \"{{ .Name }} {{ .Var.ttl }} IN A 10.0.0.1\"\n}",
             true,
         ),
+        ("template ANY ANY example. {\n var a 1\n}", true),
         (
             "template IN A example. {\n var a 1\n var b a + 1\n var c 'x' + name()\n}",
             true,
@@ -137,6 +169,10 @@ fn coredns_setup_cases() {
         ),
         (
             "template IN A example. {\n expr name() == 'a.example.'\n expr incidr(client_ip(), '10.0.0.0/8')\n}",
+            true,
+        ),
+        (
+            "template ANY ANY example. {\n match ^(?P<a>[a-z]+)[.]example[.]$\n expr group('a') != ''\n}",
             true,
         ),
         ("template IN A example. {\n expr 1\n}", true),
@@ -223,6 +259,7 @@ template IN MX example. {
  answer "{{ .Name }} 60 IN MX 10 {{ .Name }}"
  additional "{{ .Name }} 60 IN A 10.{{ .Group.b }}.{{ .Group.c }}.{{ .Group.d }}"
 }
+
 template ANY ANY invalid. {
  rcode NXDOMAIN
  answer "invalid. 60 {{ .Class }} SOA a.invalid. b.invalid. (1 60 60 60 60)"
@@ -264,6 +301,60 @@ template IN A example.net. {
         panic!("expected CNAME");
     };
     assert_eq!(target.to_string(), "target.example.com.");
+}
+
+// Derived from CoreDNS v1.15.0 plugin/template/setup_test.go TestSetupParse.
+#[tokio::test]
+async fn coredns_setup_multiple_records_preserves_sections_and_order() {
+    let configured = chain(
+        r#"template IN MX example. {
+ match ^ip-10-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]example[.]$
+ answer "{{ .Name }} 60 IN MX 10 {{ .Name }}"
+ additional "{{ .Name }} 60 IN A 10.{{ .Group.b }}.{{ .Group.c }}.{{ .Group.d }}"
+ authority "example. 60 IN NS ns0.example."
+ authority "example. 60 IN NS ns1.example."
+ additional "ns0.example. 60 IN A 203.0.113.8"
+ additional "ns1.example. 60 IN A 198.51.100.8"
+}"#,
+    );
+    let (outcome, wire) = query(
+        &configured,
+        "ip-10-95-12-8.example.",
+        Type::MX,
+        Class::IN,
+        &[],
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(
+        (
+            response.answer_count(),
+            response.authority_count(),
+            response.additional_count()
+        ),
+        (1, 2, 3)
+    );
+    let authorities: Vec<_> = response
+        .authorities()
+        .map(|record| match record.data().unwrap() {
+            Rdata::Ns(target) => target.to_string(),
+            _ => panic!("expected NS"),
+        })
+        .collect();
+    assert_eq!(authorities, ["ns0.example.", "ns1.example."]);
+    let additionals: Vec<_> = response
+        .additionals()
+        .map(|record| record.rdata.to_vec())
+        .collect();
+    assert_eq!(
+        additionals,
+        [
+            vec![10, 95, 12, 8],
+            vec![203, 0, 113, 8],
+            vec![198, 51, 100, 8]
+        ]
+    );
 }
 
 // CoreDNS treats class/type mismatches as trying the next template, but a failed match
@@ -568,6 +659,16 @@ template ANY ANY invalid. {
 async fn coredns_variable_values_in_templates() {
     let cases = [
         (
+            r#"template IN A example. {
+ var a 1
+ var b a + 1
+ var c b * 10
+ answer "{{ .Name }} 60 IN A 10.{{ .Var.a }}.{{ .Var.b }}.{{ .Var.c }}"
+}"#,
+            Type::A,
+            &[10, 1, 2, 20][..],
+        ),
+        (
             r#"template IN TXT example. {
  match ^(?P<a>[a-z]+)[.]example[.]$
  var missing group('nosuchgroup') + group(9)
@@ -677,4 +778,164 @@ template IN A example. {
     let (outcome, wire) = query(&configured, "a.example.", Type::TXT, Class::IN, &[]).await;
     assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
     assert!(wire.is_empty());
+}
+
+// Derived from CoreDNS v1.15.0 plugin/template/var_test.go TestVarMatch.
+#[tokio::test]
+async fn coredns_var_match_preserves_all_value_types() {
+    let configured = chain(
+        r#"template IN A example. {
+ match ^(?P<n>[0-9]+)[.]example[.]$
+ var num int(group('n'))
+ var double num * 2
+ var label 'x' + group('n')
+ var flag num > 1
+ answer "{{ .Name }} 60 IN TXT \"{{ len .Var }}/{{ .Var.num }}/{{ .Var.double }}/{{ .Var.label }}/{{ .Var.flag }}\""
+}"#,
+    );
+    let (outcome, wire) = query(&configured, "2.example.", Type::A, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.answer_count(), 1);
+    assert_eq!(
+        response.answers().next().unwrap().rdata,
+        b"\x0d4/2/4/x2/true"
+    );
+}
+
+// Derived from CoreDNS v1.15.0 plugin/template/expr_test.go TestExprMatch.
+#[tokio::test]
+async fn coredns_first_false_expression_short_circuits_later_error() {
+    let configured = chain(
+        r#"template IN A example. {
+ expr false
+ expr incidr('notanip', '10.0.0.0/8')
+ fallthrough
+}"#,
+    );
+    let (outcome, wire) = query(&configured, "a.example.", Type::A, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
+    assert!(wire.is_empty());
+
+    let configured = chain(
+        r#"template IN A example. {
+ expr name() == 'a.example.'
+ expr type() == 'A'
+ expr incidr(client_ip(), '192.0.2.0/24')
+ fallthrough
+}"#,
+    );
+    let (outcome, wire) = query(&configured, "a.example.", Type::A, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
+    assert!(wire.is_empty());
+}
+
+// Derived from CoreDNS v1.15.0 plugin/template/template_test.go TestHandler mdMissing.
+#[tokio::test]
+async fn coredns_missing_metadata_renders_empty_with_or_without_other_metadata() {
+    let configured = chain(
+        r#"metadata
+template IN A example. {
+ match ^ip-10-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]example[.]$
+ answer "{{ .Meta \"foofoo\" }}{{ .Name }} 60 IN A 10.{{ .Group.b }}.{{ .Group.c }}.{{ .Group.d }}"
+}"#,
+    );
+    for values in [&[][..], &[("foo", "myfoo")][..]] {
+        let (outcome, wire) = query(
+            &configured,
+            "ip-10-95-12-8.example.",
+            Type::A,
+            Class::IN,
+            values,
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        let answer = response.answers().next().unwrap();
+        assert_eq!(answer.name.to_string(), "ip-10-95-12-8.example.");
+        assert_eq!(answer.rdata, &[10, 95, 12, 8]);
+    }
+}
+
+// Derived from CoreDNS v1.15.0 plugin/template/template_test.go TestHandler mdMatch.
+#[tokio::test]
+async fn coredns_metadata_renders_in_all_record_sections() {
+    let configured = chain(
+        r#"metadata
+template IN A example. {
+ match ^ip-10-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]example[.]$
+ answer "{{ .Meta \"foo\" }}-{{ .Name }} 60 IN A 10.{{ .Group.b }}.{{ .Group.c }}.{{ .Group.d }}"
+ additional "{{ .Meta \"bar\" }}.example. 60 IN A 203.0.113.8"
+ authority "example. 60 IN NS {{ .Meta \"bar\" }}.example.com."
+}"#,
+    );
+    let (outcome, wire) = query(
+        &configured,
+        "ip-10-95-12-8.example.",
+        Type::A,
+        Class::IN,
+        &[("foo", "myfoo"), ("bar", "mybar")],
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(
+        (
+            response.answer_count(),
+            response.authority_count(),
+            response.additional_count()
+        ),
+        (1, 1, 1)
+    );
+    let answer = response.answers().next().unwrap();
+    assert_eq!(answer.name.to_string(), "myfoo-ip-10-95-12-8.example.");
+    assert_eq!(answer.rdata, &[10, 95, 12, 8]);
+    let additional = response.additionals().next().unwrap();
+    assert_eq!(additional.name.to_string(), "mybar.example.");
+    assert_eq!(additional.rdata, &[203, 0, 113, 8]);
+    let Rdata::Ns(target) = response.authorities().next().unwrap().data().unwrap() else {
+        panic!("expected NS");
+    };
+    assert_eq!(target.to_string(), "mybar.example.com.");
+}
+
+// Derived from CoreDNS v1.15.0 plugin/template/expr_test.go TestExpr NoMatchNoEvaluation.
+#[tokio::test]
+async fn coredns_unmatched_pattern_skips_expression_evaluation() {
+    let configured = chain(
+        r#"template IN A example. {
+ match ^a[.]example[.]$
+ expr incidr('notanip', '10.0.0.0/8')
+ fallthrough
+}"#,
+    );
+    let (outcome, wire) = query(&configured, "b.example.", Type::A, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
+    assert!(wire.is_empty());
+}
+
+// Derived from CoreDNS v1.15.0 plugin/template/var_test.go TestVar PerTemplateScope.
+#[tokio::test]
+async fn coredns_variables_do_not_leak_after_expression_fallthrough() {
+    let configured = chain(
+        r#"template IN A example. {
+ var v '1'
+ expr name() == 'a.example.'
+ answer "{{ .Name }} 60 IN A 10.0.0.{{ .Var.v }}"
+ fallthrough
+}
+template IN A example. {
+ answer "{{ .Name }} 60 IN TXT \"{{ len .Var }}\""
+}"#,
+    );
+    for (name, expected) in [
+        ("a.example.", &[10, 0, 0, 1][..]),
+        ("b.example.", &b"\x010"[..]),
+    ] {
+        let (outcome, wire) = query(&configured, name, Type::A, Class::IN, &[]).await;
+        assert_eq!(outcome, Outcome::Response, "{name}");
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.answer_count(), 1);
+        assert_eq!(response.answers().next().unwrap().rdata, expected, "{name}");
+    }
 }
