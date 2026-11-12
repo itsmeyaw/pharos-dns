@@ -10,7 +10,7 @@ use pharos_proto::{
     Class, Message, MessageBuilder, NameRef, Rdata, Record, ResponseType, Section, Type,
     typify_response,
 };
-use pharos_server::{Context, Error};
+use pharos_server::{Context, Error, Protocol};
 
 use super::Dnssec;
 
@@ -30,6 +30,15 @@ impl CacheEntry {
 
 impl Dnssec {
     pub(super) fn sign_response(&self, cx: &mut Context<'_, '_>) -> Result<(), Error> {
+        let max_size = cx.max_response_size.max(512);
+        if cx.response.capacity() < max_size {
+            if cx.protocol == Protocol::Tcp {
+                cx.response
+                    .reserve(max_size.saturating_sub(cx.response.len()));
+            } else {
+                return Err(Error::ResponseBufferTooSmall);
+            }
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());

@@ -289,6 +289,58 @@ async fn nxdomain_gets_signed_black_lie_and_nodata_rcode() {
     );
 }
 
+#[tokio::test]
+async fn signing_rejects_undersized_udp_response_buffer() {
+    let base = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+    );
+    let text = format!("miek.nl {{\n dnssec {{\n key file {base}\n }}\n}}");
+    let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let domain: Name = "miek.nl.".parse().unwrap();
+    let mut wire = Vec::with_capacity(1232);
+    let mut b = MessageBuilder::new(&mut wire, 1232, 1, 0x100).unwrap();
+    b.question(
+        NameRef::parse(domain.as_wire(), 0).unwrap(),
+        Type::A,
+        Class::IN,
+    )
+    .unwrap();
+    b.record(
+        Section::Additional,
+        NameRef::parse(&[0], 0).unwrap(),
+        Type::OPT,
+        Class(1232),
+        0x8000,
+        &[],
+    )
+    .unwrap();
+    let _ = b.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 1232,
+    };
+    assert_eq!(
+        chain[0]
+            .config
+            .dnssec
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, Negative)
+            .await,
+        Outcome::Error(pharos_server::Error::ResponseBufferTooSmall)
+    );
+}
+
 #[cfg(feature = "plugin-whoami")]
 #[tokio::test]
 async fn do_query_signs_whoami_records_and_reuses_signatures() {
