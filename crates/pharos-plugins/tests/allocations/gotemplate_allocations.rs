@@ -106,13 +106,13 @@ fn borrowed_question_fields_render_without_allocating() {
     let metadata = Metadata::new(&mut slots);
     let mut data = Data::new("example.org.", &metadata);
     data.message = Some(&message);
-    let template = Template::compile("{{ range .Message.Question }}{{ .Name }} {{ .Qtype }}{{ end }}|{{ .Question.Name | eq \"Example.Org.\" }}").unwrap();
+    let template = Template::compile("{{ range .Message.Question }}{{ .Name }} {{ .Qtype }}{{ end }}|{{ .Question.Name | eq \"Example.Org.\" }}|{{ slice .Message.Question 0 | len }}").unwrap();
     let mut output = String::with_capacity(128);
     let region = Region::new(&INSTRUMENTED_SYSTEM);
     template.render(&data, &mut output).unwrap();
     let stats = region.change();
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
-    assert_eq!(output, "Example.Org. 1|true");
+    assert_eq!(output, "Example.Org. 1|true|1");
 }
 
 #[test]

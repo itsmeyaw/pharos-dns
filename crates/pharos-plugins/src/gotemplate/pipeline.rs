@@ -41,13 +41,30 @@ enum Command {
 pub(super) struct Pipeline(Vec<Command>);
 
 #[derive(Clone, Copy)]
+pub(super) struct QuestionSlice<'a> {
+    pub message: &'a pharos_proto::Message<'a>,
+    pub start: usize,
+    pub end: usize,
+}
+
+impl<'a> QuestionSlice<'a> {
+    fn new(message: &'a pharos_proto::Message<'a>) -> Self {
+        Self {
+            message,
+            start: 0,
+            end: message.questions().count(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum RangeValue<'a> {
     Empty,
     Integer(i64),
     Matches(&'a [&'a str]),
     Groups(&'a [(&'a str, &'a str)]),
     Variables(&'a [(&'a str, Value<'a>)]),
-    Questions(&'a pharos_proto::Message<'a>),
+    Questions(QuestionSlice<'a>),
 }
 
 #[derive(Clone, Copy)]
@@ -57,7 +74,7 @@ enum ResultValue<'a> {
     Matches(&'a [&'a str]),
     Groups(&'a [(&'a str, &'a str)]),
     Variables(&'a [(&'a str, Value<'a>)]),
-    Questions(&'a pharos_proto::Message<'a>),
+    Questions(QuestionSlice<'a>),
     Question(pharos_proto::Question<'a>),
     Stored(usize, usize),
 }
@@ -412,7 +429,7 @@ impl Pipeline {
             ResultValue::Matches(values) => Ok(RangeValue::Matches(values)),
             ResultValue::Groups(values) => Ok(RangeValue::Groups(values)),
             ResultValue::Variables(values) => Ok(RangeValue::Variables(values)),
-            ResultValue::Questions(message) => Ok(RangeValue::Questions(message)),
+            ResultValue::Questions(questions) => Ok(RangeValue::Questions(questions)),
             _ => Err(fmt::Error),
         }
     }
@@ -545,9 +562,9 @@ impl Atom {
             Self::Field(Field::Variables) if matches!(dot.base(), Dot::Root) => {
                 Ok(ResultValue::Variables(data.variables))
             }
-            Self::Field(Field::Questions) if matches!(dot.base(), Dot::Root) => {
-                Ok(ResultValue::Questions(data.message.ok_or(fmt::Error)?))
-            }
+            Self::Field(Field::Questions) if matches!(dot.base(), Dot::Root) => Ok(
+                ResultValue::Questions(QuestionSlice::new(data.message.ok_or(fmt::Error)?)),
+            ),
             Self::Field(Field::Root(field))
                 if matches!(
                     field.as_ref(),
@@ -558,7 +575,9 @@ impl Atom {
                     Field::Matches => Ok(ResultValue::Matches(data.matches)),
                     Field::Groups => Ok(ResultValue::Groups(data.groups)),
                     Field::Variables => Ok(ResultValue::Variables(data.variables)),
-                    Field::Questions => Ok(ResultValue::Questions(data.message.ok_or(fmt::Error)?)),
+                    Field::Questions => Ok(ResultValue::Questions(QuestionSlice::new(
+                        data.message.ok_or(fmt::Error)?,
+                    ))),
                     _ => unreachable!(),
                 }
             }
@@ -896,7 +915,7 @@ impl<'a> ResultValue<'a> {
             Self::Matches(value) => !value.is_empty(),
             Self::Groups(value) => !value.is_empty(),
             Self::Variables(value) => !value.is_empty(),
-            Self::Questions(value) => value.questions().next().is_some(),
+            Self::Questions(value) => value.start < value.end,
             Self::Question(_) => true,
             Self::Stored(start, end) => {
                 let _ = scratch;
@@ -926,7 +945,7 @@ impl<'a> ResultValue<'a> {
             Self::Matches(value) => Ok(value.len()),
             Self::Groups(value) => Ok(value.len()),
             Self::Variables(value) => Ok(value.len()),
-            Self::Questions(value) => Ok(value.questions().count()),
+            Self::Questions(value) => Ok(value.end - value.start),
             Self::Stored(start, end) => Ok(end - start),
             _ => Err(fmt::Error),
         }
@@ -950,12 +969,19 @@ impl<'a> ResultValue<'a> {
                     (*name == key.text(scratch).ok()?).then_some(*value)
                 })))
             }
-            Self::Questions(message) => Ok(Self::Question(
-                message
-                    .questions()
-                    .nth(usize::try_from(key.integer()?).map_err(|_| fmt::Error)?)
-                    .ok_or(fmt::Error)?,
-            )),
+            Self::Questions(questions) => {
+                let index = usize::try_from(key.integer()?).map_err(|_| fmt::Error)?;
+                if index >= questions.end - questions.start {
+                    return Err(fmt::Error);
+                }
+                Ok(Self::Question(
+                    questions
+                        .message
+                        .questions()
+                        .nth(questions.start + index)
+                        .ok_or(fmt::Error)?,
+                ))
+            }
             Self::Scalar(Some(Value::String(value))) => Ok(Self::Uint(u64::from(
                 *value
                     .as_bytes()
@@ -992,6 +1018,16 @@ impl<'a> ResultValue<'a> {
                     return Err(fmt::Error);
                 }
                 Ok(Self::Matches(values.get(low..high).ok_or(fmt::Error)?))
+            }
+            Self::Questions(questions) => {
+                if max > questions.end - questions.start {
+                    return Err(fmt::Error);
+                }
+                Ok(Self::Questions(QuestionSlice {
+                    message: questions.message,
+                    start: questions.start + low,
+                    end: questions.start + high,
+                }))
             }
             Self::Scalar(Some(Value::String(value))) if !three_index => Ok(Self::Scalar(Some(
                 Value::String(value.get(low..high).ok_or(fmt::Error)?),

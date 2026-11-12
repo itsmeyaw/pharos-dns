@@ -374,9 +374,15 @@ fn render_parts(
                     dot,
                     output,
                 )?,
-                pipeline::RangeValue::Questions(message) => {
+                pipeline::RangeValue::Questions(questions) => {
                     let mut any = false;
-                    for (index, question) in message.questions().enumerate() {
+                    for (index, question) in questions
+                        .message
+                        .questions()
+                        .skip(questions.start)
+                        .take(questions.end - questions.start)
+                        .enumerate()
+                    {
                         any = true;
                         let nested = Dot::Question {
                             value: question,
@@ -389,7 +395,7 @@ fn render_parts(
                     if !any {
                         render_empty(
                             names,
-                            pipeline::RangeValue::Questions(message),
+                            pipeline::RangeValue::Questions(questions),
                             otherwise,
                             data,
                             dot,

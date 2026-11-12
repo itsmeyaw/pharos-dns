@@ -16,6 +16,6 @@ Pipeline formatting uses a 65,535-byte stack scratch buffer and at most 1,024 ar
 flags, or precision is rejected, and the full Go `fmt` formatting language is
 not yet implemented.
 When `Data.message` is supplied, `.Message` exposes the header fields (`Id`,
-`Opcode`, `Rcode`, and flag booleans), `.Message.Question` supports indexing
-and range, and `.Question` exposes `Name`, `Qtype`, and `Qclass`. Other Message
+`Opcode`, `Rcode`, and flag booleans), `.Message.Question` supports indexing,
+slicing and range, and `.Question` exposes `Name`, `Qtype`, and `Qclass`. Other Message
 fields and sections are not yet implemented.

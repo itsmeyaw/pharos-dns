@@ -586,6 +586,23 @@ fn coredns_readme_expression_variables_feed_answer_template() {
 }
 
 #[test]
+fn slicing_message_questions_uses_borrowed_question_views() {
+    let mut wire =
+        b"\x04\x1d\x01\x00\x00\x02\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01"
+            .to_vec();
+    wire.extend_from_slice(b"\xc0\x0c\x00\x1c\x00\x01");
+    let message = Message::parse(&wire).unwrap();
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.org.", &metadata);
+    data.message = Some(&message);
+    let template = Template::compile("{{ range slice .Message.Question 1 }}{{ .Qtype }}{{ end }}|{{ len (slice .Message.Question 1) }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "28|1");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];
