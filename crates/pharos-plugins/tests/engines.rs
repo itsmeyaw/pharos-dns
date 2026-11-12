@@ -290,3 +290,14 @@ fn slice_builtin_slices_strings_and_capture_lists() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "example|2|first");
 }
+
+#[test]
+fn print_and_printf_produce_pipeline_strings() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile("{{ print .Name \":\" 53 }}|{{ printf \"%s:%d\" .Name 53 }}|{{ println \"a\" 2 \"b\" }}|{{ print .Name \"x\" | len }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "example.:53|example.:53|a 2 b\n|9");
+}

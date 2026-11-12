@@ -22,6 +22,9 @@ enum Function {
     ParseInt,
     Index,
     Slice,
+    Print,
+    Println,
+    Printf,
 }
 enum Command {
     Atom(Atom),
@@ -37,6 +40,24 @@ enum ResultValue<'a> {
     Matches(&'a [&'a str]),
     Groups(&'a [(&'a str, &'a str)]),
     Variables(&'a [(&'a str, Value<'a>)]),
+    Stored(usize, usize),
+}
+
+struct Scratch<'a> {
+    bytes: &'a mut [u8],
+    len: usize,
+}
+
+impl Write for Scratch<'_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let end = self.len.checked_add(value.len()).ok_or(fmt::Error)?;
+        self.bytes
+            .get_mut(self.len..end)
+            .ok_or(fmt::Error)?
+            .copy_from_slice(value.as_bytes());
+        self.len = end;
+        Ok(())
+    }
 }
 
 impl Pipeline {
@@ -59,6 +80,9 @@ impl Pipeline {
                 "parseInt" => Some(Function::ParseInt),
                 "index" => Some(Function::Index),
                 "slice" => Some(Function::Slice),
+                "print" => Some(Function::Print),
+                "println" => Some(Function::Println),
+                "printf" => Some(Function::Printf),
                 _ => None,
             };
             let command = if let Some(function) = function {
@@ -66,6 +90,10 @@ impl Pipeline {
                     .iter()
                     .map(|word| atom(word))
                     .collect::<Result<Vec<_>, _>>()?;
+                // shortcut: up to 1,024 arguments fit the stack; use caller-provided value slots for larger calls.
+                if args.len() + usize::from(index != 0) > 1024 {
+                    return Err("too many template arguments".into());
+                }
                 Command::Call(function, args)
             } else {
                 if index != 0 || words.len() != 1 {
@@ -82,20 +110,14 @@ impl Pipeline {
         &'a self,
         data: &'a Data<'_, '_>,
         dot: Dot<'a>,
+        scratch: &mut Scratch<'_>,
     ) -> Result<ResultValue<'a>, fmt::Error> {
         let mut value = None;
         for command in &self.0 {
             value = Some(match command {
-                Command::Atom(atom) => atom.value(data, dot)?,
+                Command::Atom(atom) => atom.value(data, dot, scratch)?,
                 Command::Call(function, args) => {
                     let count = args.len() + usize::from(value.is_some());
-                    let get = |index: usize| -> Result<ResultValue<'a>, fmt::Error> {
-                        if let Some(atom) = args.get(index) {
-                            atom.value(data, dot)
-                        } else {
-                            value.ok_or(fmt::Error)
-                        }
-                    };
                     let valid = match function {
                         Function::Eq => count >= 2,
                         Function::And | Function::Or => count >= 1,
@@ -108,24 +130,31 @@ impl Pipeline {
                         Function::ParseInt => count == 3,
                         Function::Index => count >= 2,
                         Function::Slice => (2..=4).contains(&count),
+                        Function::Print | Function::Println => true,
+                        Function::Printf => count >= 1,
                     };
                     if !valid {
                         return Err(fmt::Error);
                     }
                     match function {
                         Function::Eq => {
-                            let first = get(0)?;
+                            let first = argument(args, 0, value, data, dot, scratch)?;
                             let mut same = false;
                             for index in 1..count {
-                                same |= first.equal(get(index)?)?;
+                                let other = argument(args, index, value, data, dot, scratch)?;
+                                same |= first.equal(other, scratch)?;
                             }
                             ResultValue::Scalar(Some(Value::Bool(same)))
                         }
                         Function::Ne => {
-                            ResultValue::Scalar(Some(Value::Bool(!get(0)?.equal(get(1)?)?)))
+                            let a = argument(args, 0, value, data, dot, scratch)?;
+                            let b = argument(args, 1, value, data, dot, scratch)?;
+                            ResultValue::Scalar(Some(Value::Bool(!a.equal(b, scratch)?)))
                         }
                         Function::Lt | Function::Le | Function::Gt | Function::Ge => {
-                            let ordering = get(0)?.order(get(1)?)?;
+                            let a = argument(args, 0, value, data, dot, scratch)?;
+                            let b = argument(args, 1, value, data, dot, scratch)?;
+                            let ordering = a.order(b, scratch)?;
                             let result = match function {
                                 Function::Lt => ordering.is_some_and(|v| v.is_lt()),
                                 Function::Le => ordering.is_some_and(|v| v.is_le()),
@@ -136,25 +165,29 @@ impl Pipeline {
                             ResultValue::Scalar(Some(Value::Bool(result)))
                         }
                         Function::And | Function::Or => {
-                            let mut result = get(0)?;
+                            let mut result = argument(args, 0, value, data, dot, scratch)?;
                             for index in 1..count {
-                                if matches!(function, Function::And) && !result.truthy()
-                                    || matches!(function, Function::Or) && result.truthy()
+                                if matches!(function, Function::And) && !result.truthy(scratch)
+                                    || matches!(function, Function::Or) && result.truthy(scratch)
                                 {
                                     break;
                                 }
-                                result = get(index)?;
+                                result = argument(args, index, value, data, dot, scratch)?;
                             }
                             result
                         }
                         Function::Len => {
-                            ResultValue::Scalar(Some(Value::Int(get(0)?.length()? as i64)))
+                            let input = argument(args, 0, value, data, dot, scratch)?;
+                            ResultValue::Scalar(Some(Value::Int(input.length(scratch)? as i64)))
                         }
-                        Function::Not => ResultValue::Scalar(Some(Value::Bool(!get(0)?.truthy()))),
+                        Function::Not => {
+                            let input = argument(args, 0, value, data, dot, scratch)?;
+                            ResultValue::Scalar(Some(Value::Bool(!input.truthy(scratch))))
+                        }
                         Function::ParseInt => {
-                            let input = get(0)?.text()?;
-                            let base = get(1)?.integer()?;
-                            let bits = get(2)?.integer()?;
+                            let input = argument(args, 0, value, data, dot, scratch)?;
+                            let base = argument(args, 1, value, data, dot, scratch)?.integer()?;
+                            let bits = argument(args, 2, value, data, dot, scratch)?.integer()?;
                             let (base, bits) = (
                                 u32::try_from(base).map_err(|_| fmt::Error)?,
                                 u32::try_from(bits).map_err(|_| fmt::Error)?,
@@ -162,35 +195,53 @@ impl Pipeline {
                             if (base != 0 && !(2..=36).contains(&base)) || bits > 64 {
                                 return Err(fmt::Error);
                             }
-                            let parsed = parse_uint(input, base)?;
+                            let parsed = parse_uint(input.text(scratch)?, base)?;
                             if bits != 0 && bits < 64 && parsed >= 1u64 << bits {
                                 return Err(fmt::Error);
                             }
                             ResultValue::Uint(parsed)
                         }
                         Function::Index => {
-                            let mut indexed = get(0)?;
+                            let mut indexed = argument(args, 0, value, data, dot, scratch)?;
                             for index in 1..count {
-                                indexed = indexed.index(get(index)?)?;
+                                let key = argument(args, index, value, data, dot, scratch)?;
+                                indexed = indexed.index(key, scratch)?;
                             }
                             indexed
                         }
                         Function::Slice => {
-                            let input = get(0)?;
-                            let len = input.length()?;
-                            let low =
-                                usize::try_from(get(1)?.integer()?).map_err(|_| fmt::Error)?;
+                            let input = argument(args, 0, value, data, dot, scratch)?;
+                            let len = input.length(scratch)?;
+                            let low = usize::try_from(
+                                argument(args, 1, value, data, dot, scratch)?.integer()?,
+                            )
+                            .map_err(|_| fmt::Error)?;
                             let high = if count >= 3 {
-                                usize::try_from(get(2)?.integer()?).map_err(|_| fmt::Error)?
+                                usize::try_from(
+                                    argument(args, 2, value, data, dot, scratch)?.integer()?,
+                                )
+                                .map_err(|_| fmt::Error)?
                             } else {
                                 len
                             };
                             let max = if count == 4 {
-                                usize::try_from(get(3)?.integer()?).map_err(|_| fmt::Error)?
+                                usize::try_from(
+                                    argument(args, 3, value, data, dot, scratch)?.integer()?,
+                                )
+                                .map_err(|_| fmt::Error)?
                             } else {
                                 len
                             };
-                            input.slice(low, high, max, count == 4)?
+                            input.slice(low, high, max, count == 4, scratch)?
+                        }
+                        Function::Print | Function::Println | Function::Printf => {
+                            let mut values = [None; 1024];
+                            for (index, slot) in values[..count].iter_mut().enumerate() {
+                                *slot = Some(argument(args, index, value, data, dot, scratch)?);
+                            }
+                            let start = scratch.len;
+                            format_values(function, &values[..count], scratch)?;
+                            ResultValue::Stored(start, scratch.len)
                         }
                     }
                 }
@@ -205,9 +256,18 @@ impl Pipeline {
         dot: Dot<'_>,
         output: &mut String,
     ) -> fmt::Result {
-        match self.evaluate(data, dot)? {
+        // shortcut: intermediate pipeline strings are limited to 65,535 bytes; accept caller scratch to lift this limit.
+        let mut bytes = [0; 65535];
+        let mut scratch = Scratch {
+            bytes: &mut bytes,
+            len: 0,
+        };
+        match self.evaluate(data, dot, &mut scratch)? {
             ResultValue::Scalar(value) => super::write_value(value, output),
             ResultValue::Uint(value) => write!(output, "{value}"),
+            ResultValue::Stored(start, end) => output.write_str(
+                std::str::from_utf8(&scratch.bytes[start..end]).map_err(|_| fmt::Error)?,
+            ),
             ResultValue::Matches(_) | ResultValue::Groups(_) | ResultValue::Variables(_) => {
                 Err(fmt::Error)
             }
@@ -215,7 +275,12 @@ impl Pipeline {
     }
 
     pub(super) fn truthy(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<bool, fmt::Error> {
-        Ok(self.evaluate(data, dot)?.truthy())
+        let mut bytes = [0; 65535];
+        let mut scratch = Scratch {
+            bytes: &mut bytes,
+            len: 0,
+        };
+        Ok(self.evaluate(data, dot, &mut scratch)?.truthy(&scratch))
     }
 }
 
@@ -224,12 +289,13 @@ impl Atom {
         &'a self,
         data: &'a Data<'_, '_>,
         dot: Dot<'a>,
+        scratch: &mut Scratch<'_>,
     ) -> Result<ResultValue<'a>, fmt::Error> {
         match self {
             Self::Int(value) => Ok(ResultValue::Scalar(Some(Value::Int(*value)))),
             Self::Bool(value) => Ok(ResultValue::Scalar(Some(Value::Bool(*value)))),
             Self::Nil => Ok(ResultValue::Scalar(Some(Value::Nil))),
-            Self::Nested(pipeline) => pipeline.evaluate(data, dot),
+            Self::Nested(pipeline) => pipeline.evaluate(data, dot, scratch),
             Self::Field(Field::Matches) if matches!(dot, Dot::Root) => {
                 Ok(ResultValue::Matches(data.matches))
             }
@@ -257,8 +323,107 @@ impl Atom {
     }
 }
 
+fn argument<'a>(
+    args: &'a [Atom],
+    index: usize,
+    previous: Option<ResultValue<'a>>,
+    data: &'a Data<'_, '_>,
+    dot: Dot<'a>,
+    scratch: &mut Scratch<'_>,
+) -> Result<ResultValue<'a>, fmt::Error> {
+    if let Some(atom) = args.get(index) {
+        atom.value(data, dot, scratch)
+    } else {
+        previous.ok_or(fmt::Error)
+    }
+}
+
+fn format_values(
+    function: &Function,
+    values: &[Option<ResultValue<'_>>],
+    scratch: &mut Scratch<'_>,
+) -> fmt::Result {
+    if matches!(function, Function::Printf) {
+        let format = values[0].ok_or(fmt::Error)?;
+        let mut cursor = 0;
+        let mut argument = 1;
+        while cursor < format.text(scratch)?.len() {
+            let ch = format.text(scratch)?[cursor..]
+                .chars()
+                .next()
+                .ok_or(fmt::Error)?;
+            cursor += ch.len_utf8();
+            if ch != '%' {
+                scratch.write_char(ch)?;
+                continue;
+            }
+            let verb = format.text(scratch)?[cursor..]
+                .chars()
+                .next()
+                .ok_or(fmt::Error)?;
+            cursor += verb.len_utf8();
+            if verb == '%' {
+                scratch.write_char('%')?;
+                continue;
+            }
+            let value = values.get(argument).copied().flatten().ok_or(fmt::Error)?;
+            argument += 1;
+            match verb {
+                's' if value.is_string() => scratch.append(value)?,
+                'd' => match value {
+                    ResultValue::Scalar(Some(Value::Int(v))) => write!(scratch, "{v}")?,
+                    ResultValue::Uint(v) => write!(scratch, "{v}")?,
+                    _ => return Err(fmt::Error),
+                },
+                'v' => scratch.append(value)?,
+                _ => return Err(fmt::Error),
+            }
+        }
+        return Ok(());
+    }
+    let mut previous_string = true;
+    for (index, value) in values.iter().enumerate() {
+        let value = value.ok_or(fmt::Error)?;
+        if index != 0
+            && (matches!(function, Function::Println) || (!previous_string && !value.is_string()))
+        {
+            scratch.write_char(' ')?;
+        }
+        scratch.append(value)?;
+        previous_string = value.is_string();
+    }
+    if matches!(function, Function::Println) {
+        scratch.write_char('\n')?;
+    }
+    Ok(())
+}
+
+impl Scratch<'_> {
+    fn append(&mut self, value: ResultValue<'_>) -> fmt::Result {
+        match value {
+            ResultValue::Stored(start, end) => {
+                let new_end = self
+                    .len
+                    .checked_add(end - start)
+                    .filter(|end| *end <= self.bytes.len())
+                    .ok_or(fmt::Error)?;
+                self.bytes.copy_within(start..end, self.len);
+                self.len = new_end;
+                Ok(())
+            }
+            ResultValue::Scalar(Some(Value::String(value))) => self.write_str(value),
+            ResultValue::Scalar(Some(Value::Bool(value))) => write!(self, "{value}"),
+            ResultValue::Scalar(Some(Value::Int(value))) => write!(self, "{value}"),
+            ResultValue::Scalar(Some(Value::Float(value))) => write!(self, "{value}"),
+            ResultValue::Scalar(None | Some(Value::Nil)) => self.write_str("<nil>"),
+            ResultValue::Uint(value) => write!(self, "{value}"),
+            _ => Err(fmt::Error),
+        }
+    }
+}
+
 impl<'a> ResultValue<'a> {
-    fn truthy(self) -> bool {
+    fn truthy(self, scratch: &Scratch<'_>) -> bool {
         match self {
             Self::Scalar(None | Some(Value::Nil)) => false,
             Self::Scalar(Some(Value::Bool(value))) => value,
@@ -269,6 +434,10 @@ impl<'a> ResultValue<'a> {
             Self::Matches(value) => !value.is_empty(),
             Self::Groups(value) => !value.is_empty(),
             Self::Variables(value) => !value.is_empty(),
+            Self::Stored(start, end) => {
+                let _ = scratch;
+                start != end
+            }
         }
     }
     fn integer(self) -> Result<i64, fmt::Error> {
@@ -278,22 +447,26 @@ impl<'a> ResultValue<'a> {
             _ => Err(fmt::Error),
         }
     }
-    fn text(self) -> Result<&'a str, fmt::Error> {
+    fn text<'s>(&'s self, scratch: &'s Scratch<'_>) -> Result<&'s str, fmt::Error> {
         match self {
             Self::Scalar(Some(Value::String(value))) => Ok(value),
+            Self::Stored(start, end) => {
+                std::str::from_utf8(&scratch.bytes[*start..*end]).map_err(|_| fmt::Error)
+            }
             _ => Err(fmt::Error),
         }
     }
-    fn length(self) -> Result<usize, fmt::Error> {
+    fn length(self, _scratch: &Scratch<'_>) -> Result<usize, fmt::Error> {
         match self {
             Self::Scalar(Some(Value::String(value))) => Ok(value.len()),
             Self::Matches(value) => Ok(value.len()),
             Self::Groups(value) => Ok(value.len()),
             Self::Variables(value) => Ok(value.len()),
+            Self::Stored(start, end) => Ok(end - start),
             _ => Err(fmt::Error),
         }
     }
-    fn index(self, key: Self) -> Result<Self, fmt::Error> {
+    fn index(self, key: Self, scratch: &Scratch<'_>) -> Result<Self, fmt::Error> {
         match self {
             Self::Matches(values) => Ok(Self::Scalar(Some(Value::String(
                 values
@@ -304,12 +477,12 @@ impl<'a> ResultValue<'a> {
             Self::Groups(values) => Ok(Self::Scalar(Some(Value::String(
                 values
                     .iter()
-                    .find_map(|(name, value)| (*name == key.text().ok()?).then_some(*value))
+                    .find_map(|(name, value)| (*name == key.text(scratch).ok()?).then_some(*value))
                     .unwrap_or(""),
             )))),
             Self::Variables(values) => {
                 Ok(Self::Scalar(values.iter().find_map(|(name, value)| {
-                    (*name == key.text().ok()?).then_some(*value)
+                    (*name == key.text(scratch).ok()?).then_some(*value)
                 })))
             }
             Self::Scalar(Some(Value::String(value))) => Ok(Self::Uint(u64::from(
@@ -318,6 +491,16 @@ impl<'a> ResultValue<'a> {
                     .get(usize::try_from(key.integer()?).map_err(|_| fmt::Error)?)
                     .ok_or(fmt::Error)?,
             ))),
+            Self::Stored(start, end) => {
+                let index = usize::try_from(key.integer()?).map_err(|_| fmt::Error)?;
+                Ok(Self::Uint(u64::from(
+                    *scratch
+                        .bytes
+                        .get(start..end)
+                        .and_then(|bytes| bytes.get(index))
+                        .ok_or(fmt::Error)?,
+                )))
+            }
             _ => Err(fmt::Error),
         }
     }
@@ -327,6 +510,7 @@ impl<'a> ResultValue<'a> {
         high: usize,
         max: usize,
         three_index: bool,
+        scratch: &Scratch<'_>,
     ) -> Result<Self, fmt::Error> {
         if low > high || high > max {
             return Err(fmt::Error);
@@ -341,10 +525,19 @@ impl<'a> ResultValue<'a> {
             Self::Scalar(Some(Value::String(value))) if !three_index => Ok(Self::Scalar(Some(
                 Value::String(value.get(low..high).ok_or(fmt::Error)?),
             ))),
+            Self::Stored(start, end) if !three_index => {
+                let text =
+                    std::str::from_utf8(&scratch.bytes[start..end]).map_err(|_| fmt::Error)?;
+                text.get(low..high).ok_or(fmt::Error)?;
+                Ok(Self::Stored(start + low, start + high))
+            }
             _ => Err(fmt::Error),
         }
     }
-    fn equal(self, other: Self) -> Result<bool, fmt::Error> {
+    fn equal(self, other: Self, scratch: &Scratch<'_>) -> Result<bool, fmt::Error> {
+        if self.is_string() && other.is_string() {
+            return Ok(self.text(scratch)? == other.text(scratch)?);
+        }
         match (self, other) {
             (Self::Scalar(a), Self::Scalar(b)) => compare(a, b),
             (Self::Uint(a), Self::Uint(b)) => Ok(a == b),
@@ -355,7 +548,14 @@ impl<'a> ResultValue<'a> {
             _ => Err(fmt::Error),
         }
     }
-    fn order(self, other: Self) -> Result<Option<std::cmp::Ordering>, fmt::Error> {
+    fn order(
+        self,
+        other: Self,
+        scratch: &Scratch<'_>,
+    ) -> Result<Option<std::cmp::Ordering>, fmt::Error> {
+        if self.is_string() && other.is_string() {
+            return Ok(Some(self.text(scratch)?.cmp(other.text(scratch)?)));
+        }
         match (self, other) {
             (Self::Scalar(Some(Value::Int(a))), Self::Scalar(Some(Value::Int(b)))) => {
                 Ok(Some(a.cmp(&b)))
@@ -379,6 +579,12 @@ impl<'a> ResultValue<'a> {
             })),
             _ => Err(fmt::Error),
         }
+    }
+    fn is_string(self) -> bool {
+        matches!(
+            self,
+            Self::Stored(..) | Self::Scalar(Some(Value::String(_)))
+        )
     }
 }
 

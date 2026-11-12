@@ -51,3 +51,23 @@ fn rendering_pipelines_and_conditionals_does_not_allocate() {
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
     assert_eq!(output, "255 remote");
 }
+
+#[test]
+fn formatting_pipelines_use_no_heap_allocation() {
+    if crate::run_isolated(
+        "gotemplate::gotemplate_allocations::formatting_pipelines_use_no_heap_allocation",
+    ) {
+        return;
+    }
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template =
+        Template::compile("{{ printf \"%s:%d\" .Name 53 }} {{ print .Name \"x\" | len }}").unwrap();
+    let mut output = String::with_capacity(64);
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    template.render(&data, &mut output).unwrap();
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+    assert_eq!(output, "example.:53 9");
+}
