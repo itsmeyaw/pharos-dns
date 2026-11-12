@@ -1,0 +1,5 @@
+.:{port} {
+    erratic {
+        drop 3
+    }
+}

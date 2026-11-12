@@ -1,0 +1,12 @@
+# CoreDNS uses a bitmask for truncation: queries 0, 2, 8 and 10 are truncated.
+example.org. A IN udp
+example.org. AAAA IN udp
+example.org. AAAA IN tcp
+example.org. A IN tcp
+example.org. A IN udp
+example.org. AAAA IN tcp
+example.org. AAAA IN udp
+example.org. A IN tcp
+example.org. A IN udp
+example.org. AAAA IN tcp
+example.org. AAAA IN udp

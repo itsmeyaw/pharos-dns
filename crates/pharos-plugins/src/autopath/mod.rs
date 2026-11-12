@@ -69,6 +69,17 @@ impl AutoPath {
         }
     }
 
+    #[cfg(feature = "plugin-erratic")]
+    pub(crate) fn bind_erratic(&mut self, erratic: Option<&crate::erratic::Erratic>) {
+        if self.provider.as_deref() == Some("erratic") && erratic.is_some() {
+            self.search = vec![
+                "a.example.org.".parse().ok(),
+                "b.example.org.".parse().ok(),
+                None,
+            ];
+        }
+    }
+
     pub(crate) fn set_metrics(
         &mut self,
         registry: &pharos_server::metrics::Registry,

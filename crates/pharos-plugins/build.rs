@@ -92,6 +92,7 @@ fn main() {
             "nsid" => "nsid::Nsid",
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",
+            "erratic" => "erratic::Erratic",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -141,6 +142,7 @@ fn main() {
             "nsid" => "nsid::setup::setup",
             "reload" => "reload::setup::setup",
             "errors" => "errors::setup::setup",
+            "erratic" => "erratic::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",
         };

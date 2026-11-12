@@ -48,6 +48,10 @@
 
 - [errors Plugin notes](../crates/pharos-plugins/src/errors/README.md)
 
+## erratic
+
+- [erratic Plugin notes](../crates/pharos-plugins/src/erratic/README.md)
+
 ## forward
 
 - [forward Plugin notes](../crates/pharos-plugins/src/forward/README.md)
@@ -167,7 +171,7 @@
 
 ## General
 
-- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `errors`, `forward`, `header`, `health`, `hosts`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `siit`, `template`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `errors`, `erratic`, `forward`, `header`, `health`, `hosts`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `siit`, `template`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - A first Zone record with an omitted owner is rejected: miekg/dns accepts it with an empty owner, which cannot be encoded as a valid DNS name without inventing one.
 - Zone records whose parsed data cannot be encoded on the wire are rejected. miekg/dns can accept such records during parsing, including invalid base64, duplicate SVCB keys and RDATA over 65,535 octets, but then fails to pack them.

@@ -8,6 +8,39 @@ const WIRE: &[u8] =
     b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
 
 #[test]
+fn split_scratch_retains_values_and_limits_later_evaluations() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let first = Expression::compile("'ab' + 'cd'").unwrap();
+    let second =
+        Expression::compile_with_variables("first + 'e'", &[("first", ValueType::String)]).unwrap();
+    let mut buffer = [0; 9];
+    let (value, remaining) = first
+        .evaluate_split(&query, &metadata, &mut buffer)
+        .unwrap();
+    let variables = [("first", value)];
+    let mut next_query = Query::new(&message, query.client, query.local, query.protocol);
+    next_query.variables = &variables;
+    let (value, remaining) = second
+        .evaluate_split(&next_query, &metadata, remaining)
+        .unwrap();
+    assert_eq!(value, Value::String("abcde"));
+    assert!(remaining.is_empty());
+    assert!(
+        second
+            .evaluate_split(&next_query, &metadata, remaining)
+            .is_err()
+    );
+}
+
+#[test]
 fn boolean_literals_are_compiled_and_evaluated_against_borrowed_query() {
     let message = Message::parse(WIRE).unwrap();
     let query = Query::new(

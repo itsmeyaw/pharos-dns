@@ -9,6 +9,9 @@ mod k8s_external_setup;
 #[path = "functional/k8s_external_coredns.rs"]
 mod k8s_external_coredns;
 
+#[path = "functional/erratic.rs"]
+mod erratic;
+
 #[cfg(feature = "plugin-template")]
 #[path = "functional/template.rs"]
 mod template;

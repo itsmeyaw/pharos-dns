@@ -28,9 +28,9 @@ enum Function {
     Slice,
     Print,
     Println,
-    Printf(Box<crate::regex_match::Regex>),
+    Printf(Box<crate::regex_match::ThreadRegex>),
     Html,
-    Js(Box<crate::regex_match::Regex>),
+    Js(Box<crate::regex_match::ThreadRegex>),
     UrlQuery,
     Meta(bool),
     Call,
@@ -127,13 +127,13 @@ impl Pipeline {
                 "slice" => Some(Function::Slice),
                 "print" => Some(Function::Print),
                 "println" => Some(Function::Println),
-                "printf" => Some(Function::Printf(Box::new(crate::regex_match::Regex::new(
-                    r"^[\p{L}\p{M}\p{N}\p{P}\p{S}]$",
-                )?))),
+                "printf" => Some(Function::Printf(Box::new(
+                    crate::regex_match::ThreadRegex::new(r"^[\p{L}\p{M}\p{N}\p{P}\p{S}]$")?,
+                ))),
                 "html" => Some(Function::Html),
-                "js" => Some(Function::Js(Box::new(crate::regex_match::Regex::new(
-                    r"^[\p{L}\p{M}\p{N}\p{P}\p{S}]$",
-                )?))),
+                "js" => Some(Function::Js(Box::new(
+                    crate::regex_match::ThreadRegex::new(r"^[\p{L}\p{M}\p{N}\p{P}\p{S}]$")?,
+                ))),
                 "urlquery" => Some(Function::UrlQuery),
                 ".Meta" => Some(Function::Meta(false)),
                 "$.Meta" => Some(Function::Meta(true)),
@@ -1142,7 +1142,7 @@ fn pad_segment(
 fn quote_value(
     value: ResultValue<'_>,
     scratch: &mut Scratch<'_>,
-    printable: &crate::regex_match::Regex,
+    printable: &crate::regex_match::ThreadRegex,
     ascii_only: bool,
 ) -> fmt::Result {
     scratch.write_char('"')?;
@@ -1163,7 +1163,7 @@ fn write_quoted_char(
     ch: char,
     quote: char,
     ascii_only: bool,
-    printable: &crate::regex_match::Regex,
+    printable: &crate::regex_match::ThreadRegex,
 ) -> fmt::Result {
     match ch {
         ch if ch == quote => {
