@@ -14,6 +14,11 @@ use pharos_server::{Context, Error, Protocol};
 
 use super::Dnssec;
 
+enum SignMode {
+    All(u32),
+    Last,
+}
+
 #[derive(Debug)]
 pub(super) struct CacheEntry {
     wire: Vec<u8>,
@@ -209,8 +214,7 @@ impl Dnssec {
                     &group,
                     zone,
                     now,
-                    ttl,
-                    false,
+                    SignMode::All(ttl),
                 )?);
                 attempted_sets += 1;
             }
@@ -229,8 +233,11 @@ impl Dnssec {
                     &[rr],
                     zone,
                     now,
-                    rr.ttl,
-                    special_nsec,
+                    if special_nsec {
+                        SignMode::Last
+                    } else {
+                        SignMode::All(rr.ttl)
+                    },
                 )?);
                 attempted_sets += 1;
                 let data = rr.data().map_err(|_| Error::InvalidQuery)?;
@@ -278,10 +285,13 @@ impl Dnssec {
         records: &[Record<'_>],
         zone: &pharos_proto::Name,
         now: u64,
-        ttl: u32,
-        last_only: bool,
+        mode: SignMode,
     ) -> Result<bool, Error> {
         let first = records.first().ok_or(Error::InvalidQuery)?;
+        let (ttl, last_only) = match mode {
+            SignMode::All(ttl) => (ttl, false),
+            SignMode::Last => (first.ttl, true),
+        };
         let signer = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
         let has_ksk = self.keys.iter().any(|k| k.public.flags & 257 == 257);
         let has_zsk = self.keys.iter().any(|k| k.public.flags & 257 == 256);
@@ -307,7 +317,7 @@ impl Dnssec {
         });
         // CoreDNS plugin/dnssec: special NSEC replies retain only the last signature.
         let last_key = last_only
-            .then(|| keys.clone().last().map(|(key, _)| key))
+            .then(|| keys.clone().next_back().map(|(key, _)| key))
             .flatten();
         let mut signed = false;
         for (key, public) in keys {
