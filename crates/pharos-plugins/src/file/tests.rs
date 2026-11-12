@@ -521,22 +521,38 @@ fn parse_opened_file_keeps_its_version_after_path_replacement() {
 #[test]
 fn setup_uses_opened_file_snapshot_before_path_replacement() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-setup-snapshot.zone");
-    let replacement = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-setup-snapshot-new.zone");
+    let replacement =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-setup-snapshot-new.zone");
     let original = include_str!("../../tests/fixtures/file/example.zone");
     let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     let new_time = old_time + Duration::from_secs(10);
     std::fs::write(&path, original).unwrap();
-    std::fs::File::open(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(old_time)).unwrap();
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old_time))
+        .unwrap();
     std::fs::write(&replacement, original.replace(" 1 7200", " 2 7200")).unwrap();
-    std::fs::File::open(&replacement).unwrap().set_times(std::fs::FileTimes::new().set_modified(new_time)).unwrap();
-    let config = format!("example.org:53 {{\n file {} {{\n reload_by_mtime\n }}\n}}", path.display());
+    std::fs::File::open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(new_time))
+        .unwrap();
+    let config = format!(
+        "example.org:53 {{\n file {} {{\n reload_by_mtime\n }}\n}}",
+        path.display()
+    );
     let blocks = pharos_corefile::parse("Corefile", &config).unwrap();
     let tokens = &blocks[0].directives["file"];
     let mut cursor = Cursor::new("Corefile", tokens);
-    let file = File::parse_with_reader(&mut cursor, &["example.org."], None, |apex, path, reader| {
-        std::fs::rename(&replacement, path).map_err(|error| error.to_string())?;
-        Zone::load_reader_with_serial(apex, path, BufReader::new(reader), Some(0))
-    }).unwrap();
+    let file = File::parse_with_reader(
+        &mut cursor,
+        &["example.org."],
+        None,
+        |apex, path, reader| {
+            std::fs::rename(&replacement, path).map_err(|error| error.to_string())?;
+            Zone::load_reader_with_serial(apex, path, BufReader::new(reader), Some(0))
+        },
+    )
+    .unwrap();
     let zone = &file.zones[0];
     assert_eq!(zone.current.load().as_ref().unwrap().serial(), Some(1));
     assert_eq!(*zone.modified.lock().unwrap(), Some(old_time));

@@ -447,6 +447,17 @@ impl File {
         server_domains: &[&str],
         root: Option<&Path>,
     ) -> Result<Self, Error> {
+        Self::parse_with_reader(cursor, server_domains, root, |apex, path, file| {
+            Zone::load_reader_with_serial(apex, path, BufReader::new(file), Some(0))
+        })
+    }
+
+    fn parse_with_reader(
+        cursor: &mut Cursor<'_>,
+        server_domains: &[&str],
+        root: Option<&Path>,
+        mut read_zone: impl FnMut(Name, &Path, &mut std::fs::File) -> Result<Zone, String>,
+    ) -> Result<Self, Error> {
         let mut zones = Vec::new();
         let mut fallthrough = Vec::new();
         let mut reload = Duration::from_secs(60);
@@ -482,13 +493,8 @@ impl File {
                         file.seek(SeekFrom::Start(0))
                             .map_err(|error| cursor.error(error.to_string()))?;
                         Some(Arc::new(
-                            Zone::load_reader_with_serial(
-                                apex.clone(),
-                                &path,
-                                BufReader::new(file),
-                                Some(0),
-                            )
-                            .map_err(|error| cursor.error(error))?,
+                            read_zone(apex.clone(), &path, file)
+                                .map_err(|error| cursor.error(error))?,
                         ))
                     }
                     None => None,
