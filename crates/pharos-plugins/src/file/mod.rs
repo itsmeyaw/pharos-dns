@@ -52,6 +52,7 @@ struct ZoneNode {
     name: Name,
     types: BTreeMap<u16, Vec<usize>>,
     tree: bool,
+    tree_exists: bool,
 }
 
 impl Zone {
@@ -142,6 +143,13 @@ impl Zone {
         });
         let mut nodes: BTreeMap<Name, ZoneNode> = BTreeMap::new();
         for (index, record) in records.iter().enumerate() {
+            let apex_record = record.owner == apex
+                && (matches!(record.rtype, Type::SOA | Type::NS)
+                    || record.rtype == Type::RRSIG
+                        && record.rdata.get(..2).is_some_and(|covered| {
+                            covered == Type::SOA.0.to_be_bytes()
+                                || covered == Type::NS.0.to_be_bytes()
+                        }));
             let mut suffix = record.owner.as_wire();
             loop {
                 let name = NameRef::parse(suffix, 0)
@@ -151,16 +159,11 @@ impl Zone {
                     name,
                     types: BTreeMap::new(),
                     tree: false,
+                    tree_exists: false,
                 });
+                node.tree_exists |= !apex_record;
                 if suffix.len() == record.owner.as_wire().len() {
                     node.types.entry(record.rtype.0).or_default().push(index);
-                    let apex_record = record.owner == apex
-                        && (matches!(record.rtype, Type::SOA | Type::NS)
-                            || record.rtype == Type::RRSIG
-                                && record.rdata.get(..2).is_some_and(|covered| {
-                                    covered == Type::SOA.0.to_be_bytes()
-                                        || covered == Type::NS.0.to_be_bytes()
-                                }));
                     node.tree |= !apex_record;
                 }
                 if suffix[0] == 0 {
@@ -222,11 +225,11 @@ impl Zone {
     }
 
     fn exists(&self, name: &[u8]) -> bool {
-        self.node(name).is_some()
+        self.node(name).is_some_and(|node| node.tree_exists)
     }
 
     fn exact(&self, name: &[u8]) -> bool {
-        self.node(name).is_some_and(|node| !node.types.is_empty())
+        self.node(name).is_some_and(|node| node.tree)
     }
 
     fn cut(&self, name: &[u8], kind: Type) -> Option<&ZoneRecord> {
@@ -704,7 +707,9 @@ impl Zone {
         let mut dname_target = [0u8; 255];
         let mut source = name;
         let exists = zone.exists(name);
-        let exact = zone.exact(name);
+        let exact = zone.exact(name)
+            || name.eq_ignore_ascii_case(zone.apex.as_wire())
+                && matches!(question.qtype, Type::SOA | Type::NS);
         if let Some(rr) = dname {
             let prefix = name.len() - rr.owner.as_wire().len();
             let len = prefix + rr.rdata.len();
@@ -815,7 +820,7 @@ impl Zone {
                 Rcode::NXDOMAIN => Rcode::NXDOMAIN,
                 _ => Rcode::NOERROR,
             }
-        } else if exists || synthesized || cut.is_some() || dname.is_some() {
+        } else if exists || synthesized || cut.is_some() || dname.is_some() || found {
             Rcode::NOERROR
         } else {
             Rcode::NXDOMAIN
