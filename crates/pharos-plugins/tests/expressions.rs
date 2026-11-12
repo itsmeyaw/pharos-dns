@@ -204,6 +204,8 @@ fn incidr_handles_ipv4_ipv6_and_reports_invalid_arguments() {
         "incidr(client_ip(), '10.0.0.0/8')",
         "incidr('2001:db8::1', '2001:db8::/32')",
         "incidr('192.0.2.1', '0.0.0.0/0')",
+        "incidr('::ffff:192.0.2.1', '192.0.2.0/24')",
+        "incidr('192.0.2.1', '::ffff:192.0.2.0/120')",
         "not incidr('192.0.2.1', '2001:db8::/32')",
     ] {
         assert_eq!(
