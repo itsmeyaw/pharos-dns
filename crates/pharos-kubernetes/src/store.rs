@@ -180,6 +180,39 @@ mod tests {
     }
 
     #[test]
+    fn namespace_exposure_requires_presence_and_configuration() {
+        let store = Store::new(&["prod".into()], false);
+        for name in ["prod", "hidden"] {
+            store.apply_namespace(Namespace {
+                name: name.into(),
+                version: "1".into(),
+            });
+        }
+        store.with_read(|index| {
+            assert!(index.namespace_exposed("prod"));
+            assert!(!index.namespace_exposed("hidden"));
+            assert!(!index.namespace_exposed("absent"));
+        });
+    }
+
+    #[test]
+    fn external_reverse_index_can_read_hidden_services() {
+        let store = Store::new(&["prod".into()], false);
+        let mut hidden = service("10.0.0.1");
+        hidden.namespace = "hidden".into();
+        store.apply_service(hidden);
+        store.with_read(|index| {
+            assert_eq!(index.services_by_external_ip("192.0.2.1").count(), 0);
+            assert_eq!(
+                index
+                    .services_by_external_ip_unfiltered("192.0.2.1")
+                    .count(),
+                1
+            );
+        });
+    }
+
+    #[test]
     fn transfer_lists_services_in_name_order() {
         let store = Store::default();
         for name in ["web", "api", "db"] {
@@ -706,6 +739,10 @@ impl Index {
         (self.allowed_namespaces.is_empty() || self.allowed_namespaces.contains(name))
             && (!self.require_namespace || self.namespaces.contains_key(name))
     }
+    /// Whether a Namespace exists and is exposed to DNS lookups.
+    pub fn namespace_exposed(&self, name: &str) -> bool {
+        self.namespace_allowed(name) && self.namespaces.contains_key(name)
+    }
     /// Service, EndpointSlice, endpoint-address, Pod and Namespace counts.
     pub fn counts(&self) -> (usize, usize, usize, usize, usize) {
         let services = self.services.values().map(HashMap::len).sum();
@@ -791,8 +828,12 @@ impl Index {
         lookup_reverse(&self.service_ips, ip)
     }
     pub fn services_by_external_ip(&self, ip: &str) -> impl Iterator<Item = &Service> {
-        lookup_reverse(&self.service_external_ips, ip)
+        self.services_by_external_ip_unfiltered(ip)
             .filter(|service| self.namespace_allowed(&service.namespace))
+    }
+    /// Look up external addresses without applying Namespace visibility.
+    pub fn services_by_external_ip_unfiltered(&self, ip: &str) -> impl Iterator<Item = &Service> {
+        lookup_reverse(&self.service_external_ips, ip)
     }
     pub fn endpoints(&self, namespace: &str, service: &str) -> impl Iterator<Item = &Endpoints> {
         self.endpoints_unfiltered(namespace, service)
