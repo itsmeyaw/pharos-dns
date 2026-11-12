@@ -22,7 +22,7 @@ Templates are compiled at setup and rendered into a caller-provided `String`.
 
 ## Errors and differences
 
-- Like Go `text/template`'s `strconv.Unquote`, surrogate `\u` escapes are rejected.
+- Like Go `text/template`'s `strconv.Unquote` (`strconv/quote.go`), surrogate `\u` escapes are rejected.
 - Unsupported template actions, unknown functions, undefined range variables,
   invalid syntax, and invalid string escapes fail at setup. Unsupported syntax
   includes `with`, `define`, `template`, `block`, `break`, `continue`, and
