@@ -107,6 +107,11 @@ fn normalize_address(value: &str) -> Option<String> {
     if let Ok(ip) = value.parse::<std::net::IpAddr>() {
         return Some(std::net::SocketAddr::new(ip, 53).to_string());
     }
+    if let Some((host, _)) = value.rsplit_once('%')
+        && host.parse::<std::net::Ipv6Addr>().is_ok()
+    {
+        return Some(format!("[{value}]:53"));
+    }
     let (host, port) = if let Some(rest) = value.strip_prefix('[') {
         let (host, rest) = rest.split_once(']')?;
         (host, rest.strip_prefix(':')?)

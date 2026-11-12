@@ -14,7 +14,7 @@ use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Rcode, Type};
 use pharos_server::{Context, Next, Outcome, Plugin};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[derive(Debug, Clone)]
@@ -30,6 +30,7 @@ struct SecondaryZone {
     current: ZoneHolder,
     expired: AtomicBool,
     notify: tokio::sync::Notify,
+    notify_pending: AtomicUsize,
     task: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
@@ -40,6 +41,7 @@ impl SecondaryZone {
             current: ZoneHolder::empty(),
             expired: AtomicBool::new(false),
             notify: tokio::sync::Notify::new(),
+            notify_pending: AtomicUsize::new(0),
             task: Mutex::new(None),
         }
     }
@@ -49,6 +51,7 @@ impl SecondaryZone {
 struct Shared {
     zones: arc_swap::ArcSwap<Vec<Arc<SecondaryZone>>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    running: AtomicBool,
     catalogs: Mutex<catalog::State>,
     #[cfg(feature = "plugin-transfer")]
     notifier: crate::zone::ZoneNotifier,
@@ -73,6 +76,7 @@ impl Secondary {
                         .collect(),
                 ),
                 tasks: Mutex::new(Vec::new()),
+                running: AtomicBool::new(false),
                 catalogs: Mutex::new(catalog::State::default()),
                 #[cfg(feature = "plugin-transfer")]
                 notifier: crate::zone::ZoneNotifier::default(),
@@ -87,6 +91,7 @@ impl Secondary {
             let shared = Arc::clone(&shared);
             async move {
                 let mut tasks = shared.tasks.lock().unwrap();
+                shared.running.store(true, Ordering::Relaxed);
                 for task in tasks.drain(..) {
                     task.abort();
                 }
@@ -102,7 +107,10 @@ impl Secondary {
         lifecycle.register(pharos_server::Phase::RestartFailed, start);
         let shared = Arc::clone(&self.shared);
         let stop = move || {
-            let tasks = std::mem::take(&mut *shared.tasks.lock().unwrap());
+            let mut locked = shared.tasks.lock().unwrap();
+            shared.running.store(false, Ordering::Relaxed);
+            let tasks = std::mem::take(&mut *locked);
+            drop(locked);
             async move {
                 for task in tasks {
                     task.abort();
@@ -163,7 +171,11 @@ impl Secondary {
             }
             let max = cx.max_response_size.max(512);
             if cx.response.capacity() < max {
-                return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
+                if cx.protocol == pharos_server::Protocol::Tcp {
+                    cx.response.reserve(max.saturating_sub(cx.response.len()));
+                } else {
+                    return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
+                }
             }
             let result = (|| {
                 let mut builder = MessageBuilder::new(
@@ -176,6 +188,7 @@ impl Secondary {
                 let _ = builder.finish();
                 Ok::<(), pharos_proto::BuildError>(())
             })();
+            zone.notify_pending.fetch_add(1, Ordering::Relaxed);
             zone.notify.notify_one();
             return result.map_or_else(
                 |error| Outcome::Error(pharos_server::Error::Build(error)),

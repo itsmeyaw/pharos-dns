@@ -124,6 +124,11 @@ pub(super) fn parse(origin: &Name, records: &[ZoneRecord]) -> Result<Catalog, &'
 }
 
 pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catalog) {
+    let mut tasks = shared.tasks.lock().unwrap();
+    if !shared.running.load(Ordering::Relaxed) {
+        return;
+    }
+    tasks.retain(|task| !task.is_finished());
     let origin = &source.config.apex;
     let mut state = shared.catalogs.lock().unwrap();
     state.catalogs.insert(origin.clone(), catalog.clone());
@@ -192,7 +197,7 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
         zones.push(Arc::clone(&zone));
         let task = tokio::spawn(update::run(Arc::clone(shared), Arc::clone(&zone)));
         *zone.task.lock().unwrap() = Some(task.abort_handle());
-        shared.tasks.lock().unwrap().push(task);
+        tasks.push(task);
     }
     let previous = state
         .members

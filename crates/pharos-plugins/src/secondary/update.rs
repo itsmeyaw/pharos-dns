@@ -78,6 +78,16 @@ pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::
             .await;
             match result {
                 Ok(()) => {
+                    let next = match crate::zone::Zone::from_records(
+                        zone.config.apex.clone(),
+                        records.clone(),
+                    ) {
+                        Ok(next) => next,
+                        Err(err) => {
+                            error = io::Error::other(err);
+                            continue;
+                        }
+                    };
                     let catalog = if zone.config.catalog.is_some() {
                         Some(
                             super::catalog::parse(&zone.config.apex, &records)
@@ -86,8 +96,6 @@ pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::
                     } else {
                         None
                     };
-                    let next = crate::zone::Zone::from_records(zone.config.apex.clone(), records)
-                        .map_err(io::Error::other)?;
                     zone.current.store(Some(Arc::new(next)));
                     zone.expired.store(false, Ordering::Relaxed);
                     if let Some(catalog) = catalog {
@@ -114,7 +122,7 @@ pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::
     Err(error)
 }
 
-async fn should_transfer(zone: &SecondaryZone) -> io::Result<bool> {
+pub(super) async fn should_transfer(zone: &SecondaryZone) -> io::Result<bool> {
     let mut error = None;
     for primary in &zone.config.from {
         let result = tokio::time::timeout(Duration::from_secs(5), async {
@@ -137,6 +145,13 @@ async fn should_transfer(zone: &SecondaryZone) -> io::Result<bool> {
             let mut response = vec![0; usize::from(len)];
             socket.read_exact(&mut response).await?;
             let message = Message::parse(&response).map_err(io::Error::other)?;
+            // RFC 1035 §4.1.1: a Response ID matches the original Query.
+            if message.id() != id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SOA Response ID mismatch",
+                ));
+            }
             if message.rcode() != Rcode::NOERROR {
                 return Ok(None);
             }
@@ -173,7 +188,8 @@ pub(super) fn serial_less(a: u32, b: u32) -> bool {
     }
 }
 
-fn timers(zone: &SecondaryZone) -> (Duration, Duration, Duration) {
+// RFC 1035 §3.3.13: SOA supplies refresh, retry and expire intervals.
+pub(super) fn timers(zone: &SecondaryZone) -> (Duration, Duration, Duration) {
     let current = zone.current.load();
     let soa = current
         .as_ref()
@@ -196,7 +212,37 @@ fn timers(zone: &SecondaryZone) -> (Duration, Duration, Duration) {
     )
 }
 
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
+    let notify_shared = Arc::clone(&shared);
+    let notify_zone = Arc::clone(&zone);
+    let _notify_task = AbortOnDrop(tokio::spawn(async move {
+        let mut checks = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = notify_zone.notify.notified() => {
+                    while notify_zone.notify_pending.try_update(Ordering::Relaxed, Ordering::Relaxed, |pending| pending.checked_sub(1)).is_ok() {
+                        let shared = Arc::clone(&notify_shared);
+                        let zone = Arc::clone(&notify_zone);
+                        // RFC 1996 §3: process each NOTIFY outside the Query path.
+                        checks.spawn(async move {
+                            if matches!(should_transfer(&zone).await, Ok(true)) {
+                                let _ = transfer(&shared, &zone).await;
+                            }
+                        });
+                    }
+                }
+                _ = checks.join_next(), if !checks.is_empty() => {}
+            }
+        }
+    }));
     let mut delay = Duration::from_millis(250);
     while transfer(&shared, &zone).await.is_err() {
         tokio::time::sleep(delay).await;
@@ -210,7 +256,6 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
         let mut retry_active = false;
         loop {
             let jitter = tokio::select! {
-                _ = zone.notify.notified() => 0,
                 _ = refresh.tick() => 5000,
                 _ = retry.tick(), if retry_active => 2000,
                 _ = expire.tick() => {
@@ -234,9 +279,7 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                     continue;
                 }
             }
-            if jitter != 0 {
-                continue 'restart;
-            }
+            continue 'restart;
         }
     }
 }
