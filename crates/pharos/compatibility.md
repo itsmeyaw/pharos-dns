@@ -124,6 +124,10 @@
 
 - [sign Plugin notes](../crates/pharos-plugins/src/sign/README.md)
 
+## tsig
+
+- [tsig Plugin notes](../crates/pharos-plugins/src/tsig/README.md)
+
 ## root
 
 - [root Plugin notes](../crates/pharos-plugins/src/root/README.md)
