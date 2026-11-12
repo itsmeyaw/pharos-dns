@@ -64,6 +64,7 @@ impl Write for Scratch<'_> {
 /// A result produced by an expression.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value<'a> {
+    Nil,
     Bool(bool),
     Int(i64),
     Float(f64),
@@ -73,6 +74,7 @@ pub enum Value<'a> {
 /// Types of variables declared before this expression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueType {
+    Nil,
     Bool,
     Int,
     Float,
@@ -81,6 +83,7 @@ pub enum ValueType {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
+    Nil,
     Bool,
     Int,
     Float,
@@ -91,6 +94,7 @@ enum Kind {
 impl From<ValueType> for Kind {
     fn from(value: ValueType) -> Self {
         match value {
+            ValueType::Nil => Self::Nil,
             ValueType::Bool => Self::Bool,
             ValueType::Int => Self::Int,
             ValueType::Float => Self::Float,
@@ -134,6 +138,7 @@ enum Binary {
 }
 
 enum Node {
+    Nil,
     Bool(bool),
     Int(i64),
     Float(f64),
@@ -151,6 +156,7 @@ enum Node {
 impl Node {
     fn kind(&self) -> Kind {
         match self {
+            Self::Nil => Kind::Nil,
             Self::Bool(_) | Self::Unary(Unary::Not, _) => Kind::Bool,
             Self::Int(_) => Kind::Int,
             Self::Float(_) => Kind::Float,
@@ -174,6 +180,7 @@ impl Node {
         current: Option<Temporary<'a>>,
     ) -> Result<Temporary<'a>, &'static str> {
         match self {
+            Self::Nil => Ok(Temporary::Nil),
             Self::Bool(value) => Ok(Temporary::Bool(*value)),
             Self::Int(value) => Ok(Temporary::Int(*value)),
             Self::Float(value) => Ok(Temporary::Float(*value)),
@@ -185,6 +192,7 @@ impl Node {
                     .find_map(|(key, value)| (*key == name).then_some(*value))
                     .ok_or("missing expression variable")?;
                 match (kind, value) {
+                    (Kind::Nil, Value::Nil) => Ok(Temporary::Nil),
                     (Kind::Bool, Value::Bool(value)) => Ok(Temporary::Bool(value)),
                     (Kind::Int, Value::Int(value)) => Ok(Temporary::Int(value)),
                     (Kind::Float, Value::Float(value)) => Ok(Temporary::Float(value)),
@@ -289,6 +297,10 @@ impl Node {
                     }
                     (op @ (Eq | Ne | Lt | Le | Gt | Ge), a, b) => {
                         let ordering = match (a, b) {
+                            (Temporary::Nil, Temporary::Nil) => Some(std::cmp::Ordering::Equal),
+                            (Temporary::Nil, _) | (_, Temporary::Nil) => {
+                                Some(std::cmp::Ordering::Less)
+                            }
                             (Temporary::Bool(a), Temporary::Bool(b)) => Some(a.cmp(&b)),
                             (Temporary::Int(a), Temporary::Int(b)) => Some(a.cmp(&b)),
                             (
@@ -316,6 +328,7 @@ impl Node {
 
 fn equal(a: Temporary<'_>, b: Temporary<'_>, scratch: &Scratch<'_>) -> Result<bool, &'static str> {
     match (a, b) {
+        (Temporary::Nil, Temporary::Nil) => Ok(true),
         (Temporary::Bool(a), Temporary::Bool(b)) => Ok(a == b),
         (Temporary::Int(a), Temporary::Int(b)) => Ok(a == b),
         (
@@ -332,6 +345,7 @@ fn equal(a: Temporary<'_>, b: Temporary<'_>, scratch: &Scratch<'_>) -> Result<bo
 
 #[derive(Clone, Copy)]
 enum Temporary<'a> {
+    Nil,
     Bool(bool),
     Int(i64),
     Float(f64),
@@ -650,6 +664,7 @@ impl Expression {
     /// Type of this expression, for compiling subsequent variables.
     pub fn value_type(&self) -> ValueType {
         match self.0.kind() {
+            Kind::Nil => ValueType::Nil,
             Kind::Bool => ValueType::Bool,
             Kind::Int => ValueType::Int,
             Kind::Float => ValueType::Float,
@@ -667,6 +682,7 @@ impl Expression {
         scratch.len = 0;
         let value = self.0.eval(query, metadata, scratch, None)?;
         match value {
+            Temporary::Nil => Ok(Value::Nil),
             Temporary::Bool(value) => Ok(Value::Bool(value)),
             Temporary::Int(value) => Ok(Value::Int(value)),
             Temporary::Float(value) => Ok(Value::Float(value)),

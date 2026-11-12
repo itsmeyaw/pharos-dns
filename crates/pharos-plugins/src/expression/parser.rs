@@ -243,6 +243,10 @@ impl Parser<'_, '_> {
                 self.advance()?;
                 Node::Bool(name == "true")
             }
+            Token::Ident(name) if name == "nil" => {
+                self.advance()?;
+                Node::Nil
+            }
             Token::Ident(name) if name == "not" => {
                 self.advance()?;
                 self.unary(Unary::Not)?
@@ -452,7 +456,7 @@ impl Parser<'_, '_> {
                 Binary::Add if left.kind() == Kind::String && right.kind() == Kind::String => {
                     Kind::String
                 }
-                Binary::In if matches!(&right, Node::List(values) if values.is_empty() || values.iter().any(|value| value.kind() != values[0].kind()) || values[0].kind() == left.kind() || (values[0].kind().numeric() && left.kind().numeric())) => {
+                Binary::In if matches!(&right, Node::List(values) if values.is_empty() || values.iter().any(|value| value.kind() != values[0].kind()) || values[0].kind() == left.kind() || values[0].kind() == Kind::Nil || left.kind() == Kind::Nil || (values[0].kind().numeric() && left.kind().numeric())) => {
                     Kind::Bool
                 }
                 Binary::Contains | Binary::StartsWith | Binary::EndsWith
@@ -461,8 +465,12 @@ impl Parser<'_, '_> {
                     Kind::Bool
                 }
                 Binary::Eq | Binary::Ne
-                    if (left.kind() == right.kind() && left.kind() != Kind::List)
-                        || (left.kind().numeric() && right.kind().numeric()) =>
+                    if left.kind() != Kind::List
+                        && right.kind() != Kind::List
+                        && (left.kind() == right.kind()
+                            || left.kind() == Kind::Nil
+                            || right.kind() == Kind::Nil
+                            || (left.kind().numeric() && right.kind().numeric())) =>
                 {
                     Kind::Bool
                 }

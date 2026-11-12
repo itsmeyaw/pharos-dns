@@ -671,3 +671,65 @@ fn membership_in_mixed_literal_lists_compares_each_value() {
         );
     }
 }
+
+#[test]
+fn logical_operators_short_circuit_runtime_errors() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for (source, expected) in [
+        ("true || incidr('bad', '10.0.0.0/8')", true),
+        ("false && 1 % 0 == 1", false),
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(expected),
+            "{source}"
+        );
+    }
+    assert!(
+        Expression::compile("1 % 0")
+            .unwrap()
+            .evaluate(&query, &metadata, &mut scratch)
+            .is_err()
+    );
+}
+
+#[test]
+fn nil_literal_and_mixed_list_membership_are_supported() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    let expression =
+        Expression::compile("nil == nil && nil in [1, nil] && nil != 'x' && nil not in [1]")
+            .unwrap();
+    assert_eq!(
+        expression
+            .evaluate(&query, &metadata, &mut scratch)
+            .unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        Expression::compile("nil").unwrap().value_type(),
+        ValueType::Nil
+    );
+}

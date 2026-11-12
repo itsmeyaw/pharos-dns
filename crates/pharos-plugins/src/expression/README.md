@@ -1,28 +1,41 @@
 # Expression subset
 
-The expression engine accepts boolean, decimal and `0x`/`0o`/`0b` integer,
-floating-point and quoted
-string literals; parentheses; `!`, `not`, unary `-`, numeric arithmetic,
-comparisons, `&&`, `and`, `||`, `or`, `in` with a literal list,
-string concatenation, `contains`, `startsWith`, `endsWith` and `matches` with a literal pattern. Declared typed variables, `group`, `int`, `replace`, and `any` with a homogeneous literal list and a `#` predicate are supported. The Query functions
-`type`, `name`, `class`, `proto`, `size`, `client_ip`, `port`, `id`, `opcode`,
-`do`, `bufsize`, `server_ip`, `server_port`, `metadata` and `incidr` are supported.
-Other constructs fail compilation. Evaluation uses caller-provided scratch
-storage and returns an error if the buffer is too small. The uncompressed
-`size` inherits the log formatter's documented limitation on unsupported or
-malformed name-bearing RDATA.
+Compiled expressions evaluate against a borrowed Query and Metadata using a
+caller-provided scratch buffer. A result may borrow that buffer; use separate
+buffers to retain string-valued variables across evaluations. `value_type`
+provides the type to pass to `compile_with_variables` for subsequent variables.
 
-For scoped IPv6 addresses, `client_ip` and `server_ip` use the numeric scope
-ID; CoreDNS may use an interface name. The Listener exposes only a wildcard
-local address when the destination address is not tracked.
+## Supported
 
-`#` requires a nonempty homogeneous list so its type is known at setup;
-`any([], true)` is accepted. List values cannot otherwise be returned from
-an expression. String conversion uses the caller's scratch space.
+- `nil`, Boolean, decimal/hex/octal/binary integer, floating-point, quoted and raw
+  string literals; parentheses; typed variables.
+- Unary `!`, `not`, `-`; numeric `+`, `-`, `*`, `/`, `%`; string `+`;
+  comparisons; `&&`/`and`, `||`/`or`; `in` with a literal list; `contains`,
+  `startsWith`, `endsWith`, and `matches` with a literal pattern. These last
+  five operators also accept the `not` form, for example `not in`.
+- `type`, `name`, `class`, `proto`, `size`, `client_ip`, `port`, `id`,
+  `opcode`, `do`, `bufsize`, `server_ip`, `server_port`, `metadata`, `incidr`,
+  `group`, `int`, `replace`, and `any` with a literal list and `#` predicate.
+  `replace` accepts its optional replacement count. `#` requires a nonempty
+  homogeneous list so its type is known at setup; `any([], true)` is accepted.
 
-Expressions exceeding 1,024 tokens or 256 recursive parse levels fail at
-setup to bound stack use. expr-lang's default limit is 10,000 AST nodes.
+## Errors and differences
 
-`matches` uses Rust regex syntax and Unicode rules rather than Go RE2, and
-rejects nonliteral patterns at setup so patterns can be compiled once. This
-differs from expr-lang, which permits dynamic patterns.
+- Unknown names, wrong argument types or counts, malformed literals, invalid
+  regexes and unsupported constructs fail at setup. Unsupported constructs
+  include maps, indexing, list-valued results or variables, nonliteral `in`
+  and `any` lists, mixed-type `any` lists, ternaries, ranges, exponentiation,
+  pipelines, closures and other expr-lang built-ins.
+- `matches` compiles literal patterns at setup using Rust regex syntax and
+  Unicode rules rather than Go RE2. Unlike expr-lang, dynamic patterns are
+  rejected at setup.
+- Expressions exceeding 1,024 tokens or 256 recursive parse levels fail at
+  setup to bound stack use. expr-lang's default limit is 10,000 AST nodes.
+- Evaluation returns an error on insufficient scratch space, invalid `int` or
+  `incidr` input, division by zero for `%`, or missing/mistyped variable values.
+  Out-of-range floating-point `int` conversion uses Rust's saturating cast;
+  Go's result is architecture-specific.
+- The uncompressed `size` inherits the log formatter's limitation for
+  unsupported or malformed name-bearing RDATA.
+- Scoped IPv6 addresses use numeric scope IDs; CoreDNS may use interface names.
+  Wildcard Listener addresses remain wildcard when the destination is unknown.
