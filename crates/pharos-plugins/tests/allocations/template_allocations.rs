@@ -1,9 +1,9 @@
 #![cfg(feature = "plugin-template")]
 
 use pharos_corefile::{configure, parse};
-use pharos_plugins::{Chain, directives};
+use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::{Message, Name};
-use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
+use pharos_server::{Action, Context, Handler, Metadata, Outcome, Protocol, Transport};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region};
 use std::{
     future::Future,
@@ -70,6 +70,31 @@ fn matched_zone_record_allocations_are_bounded() {
         ". {\n template IN A example {\n answer \"{{ .Name }} 60 IN A 192.0.2.1\"\n }\n}";
     let (outcome, stats) = measure(corefile);
     assert_eq!(outcome, Poll::Ready(Outcome::Response));
+    assert!(stats.allocations + stats.reallocations <= 100, "{stats:?}");
+    assert!(stats.bytes_allocated <= 262_144, "{stats:?}");
+}
+
+#[test]
+fn matched_query_with_metrics_allocations_are_bounded() {
+    if crate::run_isolated("template::cases::matched_query_with_metrics_allocations_are_bounded") {
+        return;
+    }
+    let corefile =
+        ".:53 {\n template IN A example {\n answer \"{{ .Name }} 60 IN A 192.0.2.1\"\n }\n}";
+    let blocks = parse("Corefile", corefile).unwrap();
+    let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (_, server) = servers.drain().next().unwrap();
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x03www\x07example\0\0\x01\0\x01";
+    let mut response = Vec::with_capacity(65535);
+    let peer = "192.0.2.1:1234".parse().unwrap();
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    let future = server.handle(wire, peer, Protocol::Udp, &mut response);
+    let mut future = std::pin::pin!(future);
+    let outcome = future
+        .as_mut()
+        .poll(&mut TaskContext::from_waker(Waker::noop()));
+    let stats = region.change();
+    assert_eq!(outcome, Poll::Ready(Action::Respond));
     assert!(stats.allocations + stats.reallocations <= 100, "{stats:?}");
     assert!(stats.bytes_allocated <= 262_144, "{stats:?}");
 }
