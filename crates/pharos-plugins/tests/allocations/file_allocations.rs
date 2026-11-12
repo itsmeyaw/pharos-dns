@@ -2,7 +2,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
-use pharos_proto::{Class, MessageBuilder, Name, NameRef, Type};
+use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rdata, Type};
 use pharos_server::{Action, Handler, Protocol};
 use stats_alloc::INSTRUMENTED_SYSTEM;
 
@@ -22,6 +22,7 @@ async fn file_queries_do_not_allocate() {
     let queries = [
         "www.example.org.",
         "alias.example.org.",
+        "foo.old.example.org.",
         "foo.wild.example.org.",
         "foo.child.example.org.",
         "absent.example.org.",
@@ -66,6 +67,73 @@ async fn file_queries_do_not_allocate() {
     let after = INSTRUMENTED_SYSTEM.stats();
     assert_eq!(after.allocations - before.allocations, 0);
     assert_eq!(after.reallocations - before.reallocations, 0);
+}
+
+#[test]
+fn dname_self_lookup_allocates_and_resolves_target() {
+    if crate::run_isolated("file_allocations::dname_self_lookup_allocates_and_resolves_target") {
+        return;
+    }
+    // Debug Plugin Chain futures exceed 2 MiB; see #90.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(dname_self_lookup());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn dname_self_lookup() {
+    let original = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
+    let external = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/external.zone"
+    );
+    let text = format!(
+        ".:0 {{\n file {original} example.org {{\n reload 0\n }}\n file {external} external.test {{\n reload 0\n }}\n}}"
+    );
+    let blocks = parse("Corefile", &text).unwrap();
+    let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (_, server) = servers.drain().next().unwrap();
+    let name: Name = "leaf.outside-dname.example.org.".parse().unwrap();
+    let mut query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let client = "127.0.0.1:1001".parse().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(&query, client, Protocol::Udp, &mut response)
+            .await,
+        Action::Respond
+    );
+    let before = INSTRUMENTED_SYSTEM.stats();
+    assert_eq!(
+        server
+            .handle(&query, client, Protocol::Udp, &mut response)
+            .await,
+        Action::Respond
+    );
+    let after = INSTRUMENTED_SYSTEM.stats();
+    assert!(after.allocations > before.allocations);
+    let response = Message::parse(&response).unwrap();
+    assert!(response.answers().any(|record| matches!(record.data(), Ok(Rdata::A(address)) if address == std::net::Ipv4Addr::new(192, 0, 2, 88))));
 }
 
 #[cfg(feature = "plugin-metadata")]

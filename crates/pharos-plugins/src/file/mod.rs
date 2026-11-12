@@ -889,8 +889,8 @@ impl Zone {
                 Ok(target) => target.to_name(),
                 Err(_) => return Outcome::Unanswered(Rcode::SERVFAIL),
             };
-            // RFC 1034 §3.6.2: restart a lookup when the CNAME target is not in the Zone.
-            // shortcut: Self Lookup allocates; remove when #86 makes it allocation-free.
+            // RFC 1034 §3.6.2 and RFC 6672 §3.2: restart at CNAME or DNAME targets.
+            // shortcut: CNAME and DNAME Self Lookup allocates; remove when #86 makes it allocation-free.
             match cx.self_lookup(&target, question.qtype).await {
                 Ok(wire) => Some(wire),
                 Err(_) => {
