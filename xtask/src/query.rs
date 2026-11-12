@@ -333,6 +333,19 @@ mod tests {
     use pharos_proto::{Class, Message, Opcode, Type};
 
     #[test]
+    fn ixfr_serial_adds_a_signed_authority_soa() {
+        let query = parse("example. IXFR IN tcp +ixfr=123 +tsig=key.:c2VjcmV0").unwrap();
+        let wire = query.wire().unwrap();
+        let message = Message::parse(&wire).unwrap();
+        assert_eq!(message.authority_count(), 1);
+        assert!(matches!(message.authorities().next().unwrap().data(), Ok(pharos_proto::Rdata::Soa { serial: 123, .. })));
+        assert_eq!(message.additionals().last().unwrap().rtype, Type::TSIG);
+        assert!(parse("example. A IN tcp +ixfr=1").is_err());
+        assert!(parse("example. IXFR IN tcp +ixfr=x").is_err());
+        assert!(parse("example. IXFR IN tcp +ixfr=1 +ixfr=2").is_err());
+    }
+
+    #[test]
     fn builds_signed_queries_and_failure_variants() {
         let key = pharos_proto::TsigKey::new(
             "key.".parse().unwrap(),
