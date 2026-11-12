@@ -18,6 +18,11 @@ in-place migration manifest: do not apply it over an existing kubeadm DNS
 installation. For that case, patch the existing CoreDNS Deployment instead,
 retaining its ConfigMap, RBAC, probes, security context and Service.
 
+For `dnssec` keys stored in AWS Secrets Manager, build with
+`cargo build --release -p pharos-dns --features pharos-plugins/dnssec-aws`.
+The feature is off by default; without it, `key aws_secretsmanager` is a
+configuration error. The SDK uses its default AWS credential chain.
+
 Before rollout, run:
 
 ```sh
