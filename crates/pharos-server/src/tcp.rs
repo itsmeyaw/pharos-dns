@@ -165,6 +165,18 @@ async fn serve<H: Handler>(
                 Action::Respond => None,
                 Action::Stream(transfer) => Some(transfer),
             };
+            let signing = transfer.as_ref().and_then(|stream| stream.1.clone());
+            let mut signer = match signing.as_ref() {
+                Some(signing) => match pharos_proto::TsigRecord::parse(&query) {
+                    Ok(record) => Some(pharos_proto::TsigStream::new(&signing.key, record.mac)),
+                    Err(_) => {
+                        *writer.lock().await = None;
+                        let _ = failed.send(true);
+                        return response;
+                    }
+                },
+                None => None,
+            };
             loop {
                 // RFC 5936 §4.1.2: a connection can serve concurrent Transfer sessions.
                 let mut writer = writer.lock().await;
@@ -187,6 +199,21 @@ async fn serve<H: Handler>(
                             let _ = failed.send(true);
                             break;
                         }
+                    }
+                }
+                if let (Some(signer), Some(signing)) = (signer.as_mut(), signing.as_ref()) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs());
+                    // RFC 8945 §5.3.1: sign every stream Message with the preceding MAC.
+                    if now.is_err()
+                        || signer
+                            .sign(&mut response, now.unwrap_or_default(), signing.fudge)
+                            .is_err()
+                    {
+                        *writer = None;
+                        let _ = failed.send(true);
+                        break;
                     }
                 }
                 let Ok(length) = u16::try_from(response.len()) else {

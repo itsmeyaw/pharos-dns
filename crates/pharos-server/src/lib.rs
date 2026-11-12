@@ -94,14 +94,20 @@ pub enum Protocol {
 /// Lazily produces complete wire-format Messages into a reusable buffer.
 /// Producers must not block the runtime; clones share the same cursor.
 #[derive(Clone)]
-pub struct Stream(Arc<std::sync::Mutex<StreamProducer>>);
+pub struct Stream(Arc<std::sync::Mutex<StreamProducer>>, Option<StreamSigning>);
+
+#[derive(Clone)]
+struct StreamSigning {
+    key: Arc<pharos_proto::TsigKey>,
+    fudge: u16,
+}
 
 type StreamProducer = dyn FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send;
 
 impl Stream {
     pub fn new(produce: impl FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send + 'static) -> Self {
         // shortcut: one allocation per Zone Transfer; remove when a concrete stream type exists.
-        Self(Arc::new(std::sync::Mutex::new(produce)))
+        Self(Arc::new(std::sync::Mutex::new(produce)), None)
     }
 
     pub fn next(&mut self, response: &mut Vec<u8>) -> Result<bool, Error> {

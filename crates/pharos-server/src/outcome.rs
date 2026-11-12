@@ -55,6 +55,13 @@ pub fn finish_outcome_signed(
         Outcome::Drop => return Action::Drop,
         Outcome::Stream(mut stream) => {
             if protocol == Protocol::Tcp {
+                match signing {
+                    Some(TsigSigning::Signed { key, fudge, .. }) => {
+                        stream.1 = Some(crate::StreamSigning { key, fudge });
+                    }
+                    Some(TsigSigning::Error { .. }) => return Action::Drop,
+                    None => {}
+                }
                 return Action::Stream(stream);
             }
             let qtype = query.questions().next().map(|q| q.qtype);
