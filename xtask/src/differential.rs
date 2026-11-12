@@ -353,13 +353,29 @@ fn exchange(port: u16, transport: Transport, wire: &[u8]) -> Result<Vec<u8>, Str
 fn collect_axfr(stream: &mut TcpStream, first: Vec<u8>) -> Result<Vec<u8>, String> {
     let mut messages = vec![first];
     let mut soa_count = 0;
+    let mut opening_soa = None;
+    let mut records = 0;
     loop {
         let current = Message::parse(messages.last().ok_or("missing AXFR Message")?)
             .map_err(|e| e.to_string())?;
         for record in current.answers() {
+            if soa_count >= 2 || (records == 0 && record.rtype != Type::SOA) {
+                return Err("invalid AXFR SOA framing".into());
+            }
             if record.rtype == Type::SOA {
+                let soa = (
+                    record.name.to_string(),
+                    record.class,
+                    record.ttl,
+                    record.data().map_err(|e| e.to_string())?.to_string(),
+                );
+                if opening_soa.as_ref().is_some_and(|opening| opening != &soa) {
+                    return Err("AXFR closing SOA differs from opening SOA".into());
+                }
+                opening_soa = Some(soa);
                 soa_count += 1;
             }
+            records += 1;
         }
         // RFC 5936 §2.2: the second SOA terminates an AXFR stream.
         if soa_count >= 2 {
