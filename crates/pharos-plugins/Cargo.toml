@@ -24,6 +24,7 @@ arc-swap = "1"
 nix = { version = "0.31", features = ["net", "socket", "hostname"] }
 
 [dev-dependencies]
+aws-lc-rs = "1"
 criterion = "0.5"
 stats_alloc = "0.1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

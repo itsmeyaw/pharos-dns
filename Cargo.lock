@@ -2271,6 +2271,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "aws-config",
+ "aws-lc-rs",
  "aws-sdk-secretsmanager",
  "criterion",
  "getrandom 0.2.17",
