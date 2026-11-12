@@ -38,6 +38,12 @@ fn run_isolated(name: &str) -> bool {
     true
 }
 
+#[path = "allocations"]
+mod template {
+    #[path = "template_allocations.rs"]
+    mod cases;
+}
+
 #[cfg(feature = "plugin-kubernetes")]
 #[path = "../../pharos/tests/support/mod.rs"]
 mod support;

@@ -1,0 +1,5 @@
+10-1-2-3.abcdefghijklmnopqrstuvwxyz.example.com. A IN udp
+172-16-1-1.abcdefghijklmnopqrstuvwxyz.example.com. A IN tcp
+192-168-1-1.abcdefghijklmnopqrstuvwxyz.example.com. A IN udp
+169-254-2-3.abcdefghijklmnopqrstuvwxyz.example.com. A IN tcp
+8-8-8-8.abcdefghijklmnopqrstuvwxyz.example.com. A IN udp

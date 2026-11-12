@@ -99,6 +99,8 @@ pub mod reload;
 pub mod root;
 #[cfg(feature = "plugin-shed")]
 pub mod shed;
+#[cfg(feature = "plugin-template")]
+pub mod template;
 #[cfg(feature = "plugin-timeouts")]
 pub mod timeouts;
 #[cfg(feature = "plugin-tsig")]
@@ -143,6 +145,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("sign", include_str!("sign/README.md")),
     ("root", include_str!("root/README.md")),
     ("shed", include_str!("shed/README.md")),
+    ("template", include_str!("template/README.md")),
     ("timeouts", include_str!("timeouts/README.md")),
     ("tsig", include_str!("tsig/README.md")),
     ("whoami", include_str!("whoami/README.md")),
@@ -244,6 +247,7 @@ pub fn servers_with_registry(
             feature = "plugin-dnssec",
             feature = "plugin-siit",
             feature = "plugin-autopath",
+            feature = "plugin-template",
             feature = "plugin-tsig"
         ))]
         let mut block = block;
@@ -364,6 +368,11 @@ pub fn servers_with_registry(
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
             dns64.set_metrics(&metrics, &listeners);
         }
+        #[cfg(feature = "plugin-template")]
+        if let Some(template) = &mut block.config.template {
+            let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            template.set_metrics(&metrics, &listeners);
+        }
         #[cfg(feature = "plugin-dnssec")]
         if let Some(dnssec) = &mut block.config.dnssec {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
@@ -409,6 +418,8 @@ pub fn servers_with_registry(
         let allow_non_in = chain.chaos.is_some();
         #[cfg(not(feature = "plugin-chaos"))]
         let allow_non_in = false;
+        #[cfg(feature = "plugin-forward")]
+        let allow_non_in = allow_non_in || chain.forward.is_some();
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &chain.cache {
             cache.bind(&chain);
