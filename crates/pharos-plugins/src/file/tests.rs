@@ -538,6 +538,17 @@ fn repeated_file_options_replace_fallthrough_and_duplicate_zones() {
     );
 }
 
+#[test]
+fn setup_parses_opened_zone_before_options() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-setup-order.zone");
+    std::fs::write(&path, "invalid zone\n").unwrap();
+    let config = format!("example.org:53 {{\n file {} {{\n unknown_option\n }}\n}}", path.display());
+    let blocks = pharos_corefile::parse("Corefile", &config).unwrap();
+    let error = pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap_err();
+    assert!(error.message.contains("invalid record header"), "{error}");
+    std::fs::remove_file(path).unwrap();
+}
+
 // Derived from CoreDNS TestFileParseReloadByMtimeRecoversLaterZoneAfterMissingFile.
 #[test]
 fn sticky_open_error_leaves_later_zone_mtime_unset_for_recovery() {
