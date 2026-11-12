@@ -233,3 +233,45 @@ fn caller_provided_scratch_does_not_allocate() {
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
     assert_eq!(output, "example.:53");
 }
+
+#[test]
+fn expression_variables_and_template_render_without_allocating() {
+    use pharos_plugins::expression::{Expression, Query, Scratch};
+    use pharos_server::Protocol;
+    if crate::run_isolated(
+        "gotemplate::gotemplate_allocations::expression_variables_and_template_render_without_allocating",
+    ) {
+        return;
+    }
+    let wire =
+        b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
+    let message = pharos_proto::Message::parse(wire).unwrap();
+    let mut query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    query.groups = &[("ip", "192-168-1-2")];
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let expression = Expression::compile("replace(group('ip'), '-', '.')").unwrap();
+    let template = Template::compile("{{ .Name }} 60 IN A {{ .Var.ip }}").unwrap();
+    let mut expression_bytes = [0; 256];
+    let mut expression_scratch = Scratch::new(&mut expression_bytes);
+    let mut template_scratch = [0; 256];
+    let mut output = String::with_capacity(128);
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    let value = expression
+        .evaluate(&query, &metadata, &mut expression_scratch)
+        .unwrap();
+    let variables = [("ip", value)];
+    let mut data = Data::new("example.org.", &metadata);
+    data.variables = &variables;
+    template
+        .render_with_scratch(&data, &mut output, &mut template_scratch)
+        .unwrap();
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+    assert_eq!(output, "example.org. 60 IN A 192.168.1.2");
+}
