@@ -491,10 +491,14 @@ impl File {
                     None
                 }
             };
-            let modified = opened
-                .as_ref()
-                .and_then(|file| file.metadata().ok())
-                .and_then(|metadata| metadata.modified().ok());
+            let modified = if by_mtime && open_error.is_none() {
+                opened
+                    .as_ref()
+                    .and_then(|file| file.metadata().ok())
+                    .and_then(|metadata| metadata.modified().ok())
+            } else {
+                None
+            };
             for origin in origins {
                 let apex: Name = origin.parse().map_err(|_| cursor.error("invalid Zone"))?;
                 #[cfg(feature = "plugin-transfer")]

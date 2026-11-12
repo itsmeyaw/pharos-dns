@@ -445,15 +445,28 @@ fn repeated_file_options_replace_fallthrough_and_duplicate_zones() {
 // Derived from CoreDNS TestFileParseReloadByMtimeRecoversLaterZoneAfterMissingFile.
 #[test]
 fn sticky_open_error_leaves_later_zone_mtime_unset_for_recovery() {
-    let missing = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../target/file-missing-{}.zone", std::process::id()));
+    let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/file-missing-{}.zone",
+        std::process::id()
+    ));
     assert!(!missing.exists());
-    let existing = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/external.zone");
-    let config = format!(".:53 {{\n file {} example.org {{\n reload 10ms\n reload_by_mtime\n }}\n file {existing} external.test {{\n reload 10ms\n reload_by_mtime\n }}\n}}", missing.display());
+    let existing = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/external.zone"
+    );
+    let config = format!(
+        ".:53 {{\n file {} example.org {{\n reload 10ms\n reload_by_mtime\n }}\n file {existing} external.test {{\n reload 10ms\n reload_by_mtime\n }}\n}}",
+        missing.display()
+    );
     let blocks = pharos_corefile::parse("Corefile", &config).unwrap();
-    let configured = pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+    let configured =
+        pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
     let file = configured[0].config.file.as_ref().unwrap();
-    let zone = file.zones.iter().find(|zone| zone.apex.to_string() == "external.test.").unwrap();
+    let zone = file
+        .zones
+        .iter()
+        .find(|zone| zone.apex.to_string() == "external.test.")
+        .unwrap();
     assert!(zone.current.load().is_none());
     assert_eq!(*zone.modified.lock().unwrap(), None);
     assert!(zone.reload());
