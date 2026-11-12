@@ -11,7 +11,11 @@ async fn metric_for(option: &str) -> String {
 async fn metric_for_query(header: &str, option: &str, qtype: u8, qclass: u8) -> String {
     let chaos = if qclass == 1 { "" } else { " chaos\n" };
     let corefile = format!(".:0 {{\n{chaos} template {header} {{\n  {option}\n }}\n}}");
-    let blocks = parse("Corefile", &corefile).unwrap();
+    metric_for_corefile(&corefile, qtype, qclass).await
+}
+
+async fn metric_for_corefile(corefile: &str, qtype: u8, qclass: u8) -> String {
+    let blocks = parse("Corefile", corefile).unwrap();
     let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let (_, server) = servers.drain().next().unwrap();
     let query = [
@@ -63,6 +67,20 @@ fn counter<'a>(text: &'a str, name: &str) -> &'a str {
     }
     assert!(line.ends_with(" 1"), "{line}");
     line
+}
+
+#[tokio::test]
+#[cfg(feature = "plugin-view")]
+async fn template_metrics_use_routed_view() {
+    let corefile =
+        ".:0 {\n view blue {\n  expr true\n }\n template IN A {\n  rcode NXDOMAIN\n }\n}";
+    let text = metric_for_corefile(corefile, 1, 1).await;
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("pharos_template_matches_total{"))
+        .expect(&text);
+    assert!(line.contains("view=\"blue\""), "{line}");
+    assert!(line.ends_with(" 1"), "{line}");
 }
 
 #[tokio::test]

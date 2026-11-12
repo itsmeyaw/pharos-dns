@@ -1,0 +1,25 @@
+.:{port} {
+    metadata
+    view first {
+        expr false
+    }
+    hosts empty.hosts {
+        192.0.2.1 example.com
+        reload 0
+    }
+}
+.:{port} {
+    view second {
+        expr metadata('view/name') == 'first'
+    }
+    hosts empty.hosts {
+        192.0.2.2 example.com
+        reload 0
+    }
+}
+.:{port} {
+    hosts empty.hosts {
+        192.0.2.3 example.com
+        reload 0
+    }
+}

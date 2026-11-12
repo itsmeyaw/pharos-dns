@@ -3,9 +3,18 @@
 use std::{env, fmt::Write, fs, path::PathBuf};
 
 fn config_only(name: &str) -> bool {
+    // View's pass-through handler is redundant once the Listener routes the Query.
     matches!(
         name,
-        "root" | "timeouts" | "debug" | "bind" | "multisocket" | "ready" | "health" | "reload"
+        "root"
+            | "timeouts"
+            | "debug"
+            | "bind"
+            | "multisocket"
+            | "ready"
+            | "health"
+            | "reload"
+            | "view"
     )
 }
 
@@ -18,6 +27,10 @@ fn next_plugin(enabled: &[&str], start: usize) -> usize {
 fn transferer(name: &str) -> bool {
     // Add each implemented Transferer here; enabled retains Plugin Order.
     matches!(name, "kubernetes")
+}
+
+fn registered_handler(name: &str) -> bool {
+    !config_only(name) || name == "view"
 }
 
 fn main() {
@@ -63,6 +76,7 @@ fn main() {
             "minimal" => "minimal::Minimal",
             "multisocket" => "Option<usize>",
             "whoami" => "whoami::Whoami",
+            "view" => "view::View",
             "log" => "log::Log",
             "metadata" => "metadata::Metadata",
             "loop" => "r#loop::Loop",
@@ -111,6 +125,7 @@ fn main() {
             "minimal" => "minimal::setup::setup",
             "multisocket" => "multisocket::setup::setup",
             "whoami" => "whoami::setup::setup",
+            "view" => "view::setup::setup",
             "log" => "log::setup::setup",
             "metadata" => "metadata::setup::setup",
             "loop" => "r#loop::setup::setup",
@@ -142,6 +157,7 @@ fn main() {
                 | "loop"
                 | "nsid"
                 | "kubernetes"
+                | "view"
         );
         writeln!(
             code,
@@ -188,7 +204,7 @@ fn main() {
         }
         code.push_str("}\n");
     }
-    code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { ");
+    code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_routed(cx, false) }\nfn serve_routed(&self, cx: &mut pharos_server::Context<'_>, collected: bool) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { if !collected { ");
     if enabled.contains(&"metadata") {
         code.push_str("cx.metadata.set_enabled(self.metadata.is_some()); ");
     } else {
@@ -197,7 +213,7 @@ fn main() {
     if enabled.contains(&"metadata") && enabled.contains(&"kubernetes") {
         code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) && let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); } ");
     }
-    writeln!(code, "self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
+    writeln!(code, "}} self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
     if let Some(index) = enabled.iter().position(|name| *name == "cache") {
         writeln!(code, "async fn cache_refresh_next(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ #[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] if let Some(plugin) = &self.self_lookup_test {{ return plugin.serve(cx).await; }} self.serve_{}(cx).await }}", next_plugin(&enabled, index + 1)).unwrap();
     }
@@ -217,7 +233,7 @@ fn main() {
     code.push_str("}\n");
     code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
-        if !config_only(name) {
+        if registered_handler(name) {
             write!(code, " && self.r#{name}.is_none()").unwrap();
         }
     }
@@ -225,11 +241,31 @@ fn main() {
         " }\nfn visit_enabled(&self, visit: &mut dyn FnMut(&'static str)) {\nlet _ = &visit;\n",
     );
     for name in &enabled {
-        if !config_only(name) {
+        if registered_handler(name) {
             writeln!(code, "if self.r#{name}.is_some() {{ visit({name:?}); }}").unwrap();
         }
     }
     code.push_str("}\n");
+    if enabled.contains(&"view") {
+        code.push_str("fn has_view(&self) -> bool { self.view.is_some() }\nfn view_name(&self) -> &str { self.view.as_ref().map_or(\"\", |view| view.name.as_ref()) }\nfn matches_view(&self, cx: &pharos_server::Context<'_>) -> bool { self.view.as_ref().is_none_or(|view| view.matches(cx)) }\n");
+    }
+    if enabled.contains(&"metadata") {
+        code.push_str("fn has_metadata_collector(&self) -> bool { self.metadata.is_some() }\nfn collect_metadata(&self, cx: &mut pharos_server::Context<'_>) { let _ = &cx; ");
+        if enabled.contains(&"view") || enabled.contains(&"kubernetes") {
+            code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { ");
+            if enabled.contains(&"view") {
+                code.push_str("if let Some(view) = &self.view { cx.metadata.set_view_name(std::sync::Arc::clone(&view.name)); }\n");
+            }
+            if enabled.contains(&"kubernetes") {
+                code.push_str(
+                    "if let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); } ",
+                );
+            }
+            code.push_str("} ");
+        }
+        code.push_str("}\n");
+    }
+    code.push_str("fn serve_routed(&self, cx: &mut pharos_server::Context<'_>, collected: bool) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve_routed(self, cx, collected) }\n");
     if enabled.contains(&"loop") {
         code.push_str("fn parallel_query(&self, query: &pharos_proto::Message<'_>) -> Option<tokio::sync::watch::Receiver<bool>> { self.r#loop.as_ref().and_then(|plugin| plugin.parallel_query(query)) }\n");
     }
