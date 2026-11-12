@@ -296,6 +296,34 @@ fn contains_wire(name: &[u8], apex: &[u8]) -> bool {
     }
 }
 
+fn write_set(
+    builder: &mut MessageBuilder<'_, Vec<u8>>,
+    zone: &Zone,
+    source: &[u8],
+    owner: NameRef<'_>,
+    kind: Type,
+    section: Section,
+    dnssec: bool,
+) -> Result<(), pharos_server::Error> {
+    for rr in zone.records_at(source, kind) {
+        builder
+            .record(section, owner, rr.rtype, rr.class, rr.ttl, &rr.rdata)
+            .map_err(pharos_server::Error::Build)?;
+    }
+    // RFC 4035 §3.1.1: include matching RRSIG records when DO is set.
+    if dnssec && kind != Type::RRSIG {
+        for rr in zone
+            .records_at(source, Type::RRSIG)
+            .filter(|rr| rr.rdata.get(..2) == Some(kind.0.to_be_bytes().as_slice()))
+        {
+            builder
+                .record(section, owner, rr.rtype, rr.class, rr.ttl, &rr.rdata)
+                .map_err(pharos_server::Error::Build)?;
+        }
+    }
+    Ok(())
+}
+
 impl Plugin for File {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
@@ -373,6 +401,7 @@ impl Plugin for File {
             }
         }
         let found = count > 0 || zone.records_at(target, question.qtype).next().is_some();
+        let dnssec = cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
         if !exists
             && !synthesized
             && cut.is_none()
@@ -415,37 +444,31 @@ impl Plugin for File {
                     NameRef::parse(rr.owner.as_wire(), 0)
                         .map_err(|_| pharos_server::Error::InvalidQuery)?
                 };
-                builder
-                    .record(
-                        Section::Answer,
-                        owner,
-                        rr.rtype,
-                        rr.class,
-                        rr.ttl,
-                        &rr.rdata,
-                    )
-                    .map_err(pharos_server::Error::Build)?;
+                write_set(
+                    &mut builder,
+                    zone,
+                    rr.owner.as_wire(),
+                    owner,
+                    Type::CNAME,
+                    Section::Answer,
+                    dnssec,
+                )?;
             }
-            for rr in zone
-                .records_at(target, question.qtype)
-                .filter(|_| cut.is_none())
-            {
+            if cut.is_none() {
                 let owner = if count == 0 && synthesized {
                     question.name
                 } else {
-                    NameRef::parse(rr.owner.as_wire(), 0)
-                        .map_err(|_| pharos_server::Error::InvalidQuery)?
+                    NameRef::parse(target, 0).map_err(|_| pharos_server::Error::InvalidQuery)?
                 };
-                builder
-                    .record(
-                        Section::Answer,
-                        owner,
-                        rr.rtype,
-                        rr.class,
-                        rr.ttl,
-                        &rr.rdata,
-                    )
-                    .map_err(pharos_server::Error::Build)?;
+                write_set(
+                    &mut builder,
+                    zone,
+                    target,
+                    owner,
+                    question.qtype,
+                    Section::Answer,
+                    dnssec,
+                )?;
             }
             // RFC 2308 §3: negative Responses include the Zone SOA.
             let authority_type = if found || cut.is_some() {
@@ -454,22 +477,48 @@ impl Plugin for File {
                 Type::SOA
             };
             let authority_owner = cut.map_or(zone.apex.as_wire(), |rr| rr.owner.as_wire());
-            for rr in zone.records.iter().filter(|rr| {
-                rr.owner.as_wire().eq_ignore_ascii_case(authority_owner)
-                    && rr.rtype == authority_type
-            }) {
-                let owner = NameRef::parse(rr.owner.as_wire(), 0)
+            if !(cut.is_none()
+                && name.eq_ignore_ascii_case(zone.apex.as_wire())
+                && question.qtype == Type::NS)
+            {
+                let owner = NameRef::parse(authority_owner, 0)
                     .map_err(|_| pharos_server::Error::InvalidQuery)?;
-                builder
-                    .record(
-                        Section::Authority,
-                        owner,
-                        rr.rtype,
-                        rr.class,
-                        rr.ttl,
-                        &rr.rdata,
-                    )
-                    .map_err(pharos_server::Error::Build)?;
+                write_set(
+                    &mut builder,
+                    zone,
+                    authority_owner,
+                    owner,
+                    authority_type,
+                    Section::Authority,
+                    dnssec && cut.is_none(),
+                )?;
+            }
+            // RFC 4035 §3.1.3.1: authenticated NODATA includes the owner's NSEC proof.
+            if dnssec && !found && cut.is_none() && (exists || synthesized) {
+                let owner =
+                    NameRef::parse(source, 0).map_err(|_| pharos_server::Error::InvalidQuery)?;
+                write_set(
+                    &mut builder,
+                    zone,
+                    source,
+                    owner,
+                    Type::NSEC,
+                    Section::Authority,
+                    true,
+                )?;
+            }
+            if dnssec && let Some(cut) = cut {
+                let owner = NameRef::parse(cut.owner.as_wire(), 0)
+                    .map_err(|_| pharos_server::Error::InvalidQuery)?;
+                write_set(
+                    &mut builder,
+                    zone,
+                    cut.owner.as_wire(),
+                    owner,
+                    Type::DS,
+                    Section::Authority,
+                    true,
+                )?;
             }
             // RFC 1034 §4.3.2: Referrals include available address glue.
             if let Some(cut) = cut {
