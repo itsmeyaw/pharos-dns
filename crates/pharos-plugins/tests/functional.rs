@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[cfg(feature = "plugin-file")]
+#[path = "functional/file.rs"]
+mod file;
+
 #[cfg(feature = "plugin-template")]
 #[path = "functional/template.rs"]
 mod template;
