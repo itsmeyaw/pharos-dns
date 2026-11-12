@@ -106,23 +106,12 @@ impl External {
         }
         let result = (|| {
             // RFC 1035 §§4.1.1–4.1.2: set authoritative flags and repeat the Question.
-            let truncated = chased.iter().any(|entry| {
-                entry.answers.iter().flatten().any(|wire| {
-                    pharos_proto::Message::parse(wire).is_ok_and(|message| message.tc())
-                })
-            });
+            let mut truncated = false;
             let mut b = MessageBuilder::new(
                 cx.response,
                 max,
                 cx.query.id(),
-                0x8400
-                    | (cx.query.flags() & 0x7910)
-                    | code.0
-                    | if truncated && matches!(q.qtype, Type::A | Type::AAAA) {
-                        0x0200
-                    } else {
-                        0
-                    },
+                0x8400 | (cx.query.flags() & 0x7910) | code.0,
             )?;
             b.question(q.name, q.qtype, q.qclass)?;
             let mut answers = 0usize;
@@ -194,6 +183,10 @@ impl External {
                                 Ok(ip) => ip,
                                 Err(_) => {
                                     if let Some(entry) = entry {
+                                        truncated |= entry.answers.iter().flatten().any(|wire| {
+                                            pharos_proto::Message::parse(wire)
+                                                .is_ok_and(|message| message.tc())
+                                        });
                                         match write_chased(
                                             &mut b,
                                             q.name,
@@ -407,6 +400,10 @@ impl External {
                 )?;
             }
             let _ = b.finish();
+            // RFC 1035 §4.1.1: preserve TC from a followed CNAME Response.
+            if truncated {
+                cx.response[2] |= 0x02;
+            }
             Ok::<_, pharos_proto::BuildError>(())
         })();
         match result {
@@ -1124,12 +1121,14 @@ mod tests {
             ]
         );
 
+        let mut stale_wire = chased[0].answers[0].clone().unwrap();
+        stale_wire[2] |= 0x02;
         let stale = [
             Chased {
                 ordinal: 2,
                 host: "old.example.net".into(),
                 name: "old.example.net.".parse().unwrap(),
-                answers: chased[0].answers.clone(),
+                answers: [Some(stale_wire), None],
             },
             Chased {
                 ordinal: 3,
@@ -1165,6 +1164,7 @@ mod tests {
             Outcome::Response
         ));
         let message = Message::parse(&response).unwrap();
+        assert!(!message.tc(), "discarded stale lookup must not set TC");
         assert_eq!(
             message
                 .answers()
