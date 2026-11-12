@@ -10,7 +10,7 @@ use tokio::{
     net::{TcpListener, TcpStream, tcp::OwnedReadHalf},
     sync::{Mutex, watch},
     task::{JoinHandle, JoinSet},
-    time::timeout,
+    time::{Instant, timeout},
 };
 
 use crate::{Action, Handler, Protocol, TcpOptions};
@@ -113,6 +113,9 @@ async fn serve<H: Handler>(
     let mut queries: JoinSet<Vec<u8>> = JoinSet::new();
     let mut responses = Vec::with_capacity(MAX_IN_FLIGHT_PER_CONNECTION);
     let mut count = 0usize;
+    // One long-lived timer, re-armed only when it fires early: a timer per frame locks the time driver per Query.
+    let idle = tokio::time::sleep(options.read);
+    tokio::pin!(idle);
 
     'read: loop {
         while let Some(result) = queries.try_join_next() {
@@ -142,6 +145,7 @@ async fn serve<H: Handler>(
         let query = {
             let frame = read_frame(&mut reader);
             tokio::pin!(frame);
+            let mut deadline = None;
             loop {
                 let result = if queries.is_empty() {
                     let duration = if count == 0 {
@@ -149,15 +153,24 @@ async fn serve<H: Handler>(
                     } else {
                         options.idle
                     };
+                    let until = *deadline.get_or_insert_with(|| Instant::now() + duration);
+                    if idle.deadline() > until {
+                        idle.as_mut().reset(until);
+                    }
                     tokio::select! {
                         biased;
                         _ = stopped.changed() => break 'read,
-                        result = timeout(duration, &mut frame) => match result {
-                            Ok(result) => result,
-                            Err(_) => break 'read,
+                        result = &mut frame => result,
+                        _ = &mut idle => {
+                            if Instant::now() >= until {
+                                break 'read;
+                            }
+                            idle.as_mut().reset(until);
+                            continue;
                         },
                     }
                 } else {
+                    deadline = None;
                     tokio::select! {
                         biased;
                         _ = stopped.changed() => break 'read,
