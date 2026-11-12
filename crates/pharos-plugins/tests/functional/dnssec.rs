@@ -85,6 +85,66 @@ async fn apex_dnskey_without_do_is_authoritative() {
     assert_eq!(reply.answers().next().unwrap().ttl, 3600);
 }
 
+// CoreDNS plugin/dnssec/dnskey.go: the intercepted DNSKEY signature uses TTL 3600.
+#[tokio::test]
+async fn apex_dnskey_signature_ttl_is_independent_of_key_ttl() {
+    let base = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/miek-ttl7200"
+    );
+    let text = format!("miek.nl {{\n dnssec {{\n key file {base}\n }}\n}}");
+    let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let domain: Name = "miek.nl.".parse().unwrap();
+    let name = NameRef::parse(domain.as_wire(), 0).unwrap();
+    let mut wire = Vec::with_capacity(1232);
+    let mut builder = MessageBuilder::new(&mut wire, 1232, 1, 0x100).unwrap();
+    builder.question(name, Type::DNSKEY, Class::IN).unwrap();
+    builder
+        .record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(1232),
+            0x8000,
+            &[],
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(1232);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 1232,
+    };
+    assert_eq!(chain[0].config.serve(&mut cx).await, Outcome::Response);
+    let reply = Message::parse(cx.response).unwrap();
+    let records: Vec<_> = reply.answers().collect();
+    assert_eq!(
+        records
+            .iter()
+            .find(|rr| rr.rtype == Type::DNSKEY)
+            .unwrap()
+            .ttl,
+        7200
+    );
+    assert_eq!(
+        records
+            .iter()
+            .find(|rr| rr.rtype == Type::RRSIG)
+            .unwrap()
+            .ttl,
+        3600
+    );
+    verify_signatures(&records);
+}
+
 #[tokio::test]
 async fn split_keys_sign_dnskey_with_ksk_only() {
     let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/dnssec/");
@@ -325,6 +385,12 @@ async fn nxdomain_gets_signed_black_lie_and_nodata_rcode() {
         let reply = Message::parse(cx.response).unwrap();
         verify_signatures(&reply.authorities().collect::<Vec<_>>());
         assert_eq!(reply.rcode(), pharos_proto::Rcode::NOERROR);
+        assert!(
+            reply
+                .authorities()
+                .filter(|rr| rr.rtype == Type::RRSIG)
+                .all(|rr| rr.ttl == 60)
+        );
         assert_eq!(
             reply
                 .authorities()

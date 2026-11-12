@@ -29,7 +29,11 @@ impl CacheEntry {
 }
 
 impl Dnssec {
-    pub(super) fn sign_response(&self, cx: &mut Context<'_, '_>) -> Result<(), Error> {
+    pub(super) fn sign_response(
+        &self,
+        cx: &mut Context<'_, '_>,
+        intercepted: bool,
+    ) -> Result<(), Error> {
         let max_size = cx.max_response_size.max(512);
         if cx.response.capacity() < max_size {
             if cx.protocol == Protocol::Tcp {
@@ -172,8 +176,14 @@ impl Dnssec {
                     .copied()
                     .filter(|r| r.name == rr.name && r.rtype == rr.rtype && r.class == rr.class)
                     .collect();
+                // CoreDNS plugin/dnssec/dnskey.go: intercepted DNSKEY signatures use TTL 3600.
+                let ttl = if intercepted && section == Section::Answer && rr.rtype == Type::DNSKEY {
+                    3600
+                } else {
+                    rr.ttl
+                };
                 signed_sets +=
-                    usize::from(self.sign_set(&mut builder, section, &group, zone, now)?);
+                    usize::from(self.sign_set(&mut builder, section, &group, zone, now, ttl)?);
                 attempted_sets += 1;
             }
             if let Some(lie) = &lie
@@ -186,7 +196,7 @@ impl Dnssec {
             {
                 let rr = lie.answers().next().ok_or(Error::InvalidQuery)?;
                 signed_sets +=
-                    usize::from(self.sign_set(&mut builder, section, &[rr], zone, now)?);
+                    usize::from(self.sign_set(&mut builder, section, &[rr], zone, now, rr.ttl)?);
                 attempted_sets += 1;
                 let data = rr.data().map_err(|_| Error::InvalidQuery)?;
                 builder
@@ -232,6 +242,7 @@ impl Dnssec {
         records: &[Record<'_>],
         zone: &pharos_proto::Name,
         now: u64,
+        ttl: u32,
     ) -> Result<bool, Error> {
         let first = records.first().ok_or(Error::InvalidQuery)?;
         let signer = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
@@ -294,7 +305,7 @@ impl Dnssec {
                     first.name,
                     Type::RRSIG,
                     first.class,
-                    first.ttl,
+                    ttl,
                     |writer| sig.write(writer),
                 )
                 .map_err(Error::Build)?;
@@ -359,7 +370,7 @@ mod tests {
                     .unwrap();
             }
             let _ = builder.finish();
-            dnssec.sign_response(&mut cx).unwrap();
+            dnssec.sign_response(&mut cx, false).unwrap();
         }
         let cache = dnssec.cache.lock().unwrap();
         assert_eq!(cache.len(), 1);

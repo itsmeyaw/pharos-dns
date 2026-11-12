@@ -30,7 +30,8 @@ impl Plugin for Dnssec {
             return next.run(cx).await;
         };
         let do_bit = cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
-        let outcome = if question.qtype == Type::DNSKEY && question.name == *zone {
+        let intercepted = question.qtype == Type::DNSKEY && question.name == *zone;
+        let outcome = if intercepted {
             match self.dnskey(cx) {
                 Ok(()) => Outcome::Response,
                 Err(error) => Outcome::Error(error),
@@ -39,7 +40,7 @@ impl Plugin for Dnssec {
             next.run(cx).await
         };
         if do_bit && outcome == Outcome::Response {
-            return match self.sign_response(cx) {
+            return match self.sign_response(cx, intercepted) {
                 Ok(()) => Outcome::Response,
                 Err(error) => Outcome::Error(error),
             };
