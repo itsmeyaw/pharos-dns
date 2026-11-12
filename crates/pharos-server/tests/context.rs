@@ -49,13 +49,33 @@ impl pharos_server::Next for PendingChild {
     }
 }
 
+struct PendingWithoutTsig;
+impl pharos_server::Next for PendingWithoutTsig {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        assert!(
+            cx.query
+                .additionals()
+                .all(|rr| rr.rtype != pharos_proto::Type::TSIG)
+        );
+        cx.query = cx.query.with_flags(0x0100);
+        cx.metadata.insert("test/after", "new");
+        std::future::pending().await
+    }
+}
+
 #[test]
 fn cancelled_query_view_restores_parent_and_keeps_metadata() {
     use std::{
         future::Future,
         task::{Context as TaskContext, Poll, Waker},
     };
-    let wire = [0_u8; 12];
+    let mut wire = vec![0_u8; 12];
+    let key = pharos_proto::TsigKey::new(
+        "key.example.".parse().unwrap(),
+        pharos_proto::TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    key.sign(&mut wire, 1, 300, None).unwrap();
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::new();
     let mut slots = [None; 2];
@@ -70,9 +90,9 @@ fn cancelled_query_view_restores_parent_and_keeps_metadata() {
         response: &mut response,
         max_response_size: 512,
     };
-    let query = cx.query.with_flags(0x0100);
+    let query = cx.query.without_final_tsig().unwrap();
     {
-        let future = cx.run_with_query_view(query, PendingChild);
+        let future = cx.run_with_query_view(query, PendingWithoutTsig);
         let mut future = std::pin::pin!(future);
         assert_eq!(
             future
@@ -82,6 +102,11 @@ fn cancelled_query_view_restores_parent_and_keeps_metadata() {
         );
     }
     assert_eq!(cx.query.flags(), 0x0100);
+    // RFC 8945 §5.2: preserve the parent's TSIG while hiding it from Next.
+    assert_eq!(
+        cx.query.additionals().last().unwrap().rtype,
+        pharos_proto::Type::TSIG
+    );
     assert_eq!(cx.metadata.get("test/after"), Some("new"));
 }
 

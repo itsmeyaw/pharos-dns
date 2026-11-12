@@ -63,9 +63,7 @@ impl Plugin for Local {
 
 impl Local {
     fn answer(&self, cx: &mut Context<'_, '_>) -> Option<Outcome> {
-        let Some(question) = cx.query.questions().next() else {
-            return None;
-        };
+        let question = cx.query.questions().next()?;
         let mut labels = [&[][..]; 127];
         let mut count = 0;
         for label in question.name.labels() {
