@@ -155,6 +155,28 @@ fn coredns_rejects_invalid_zone_input() {
     }
 }
 
+#[test]
+fn reusable_zone_rejects_trailing_name_only_rdata() {
+    use pharos_proto::zone::ZoneRecord;
+    let apex: Name = "example.org.".parse().unwrap();
+    let soa = ZoneParser::new(
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n".as_bytes(),
+        apex.clone(),
+        "test",
+    ).next().unwrap().unwrap();
+    for kind in [Type::NS, Type::CNAME, Type::DNAME] {
+        let record = ZoneRecord { owner: "test.example.org.".parse().unwrap(), ttl: 60, class: Class::IN, rtype: kind, rdata: vec![0] };
+        assert!(Zone::from_records(apex.clone(), vec![soa.clone(), record.clone()]).is_ok(), "{kind:?}");
+        for trailing in [vec![0, 0], vec![1, b'x', 0, 0xff]] {
+            let mut invalid = record.clone();
+            invalid.rdata = trailing;
+            assert!(Zone::from_records(apex.clone(), vec![soa.clone(), invalid]).is_err(), "{kind:?}");
+        }
+    }
+    let structured = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\na 60 IN MX 10 mail.example.org.\nb 60 IN SRV 1 2 3 host.example.org.\nc 60 IN SVCB 1 svc.example.org. alpn=h2\n";
+    assert!(zone("example.org.", structured).is_ok());
+}
+
 // Derived from CoreDNS file_test.go TestParseSOAOrigin.
 #[test]
 fn coredns_soa_owner_origin_cases() {
