@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[cfg(feature = "plugin-k8s-external")]
+#[path = "functional/k8s_external_setup.rs"]
+mod k8s_external_setup;
+
 #[cfg(feature = "plugin-template")]
 #[path = "functional/template.rs"]
 mod template;

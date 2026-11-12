@@ -55,6 +55,8 @@ pub mod health;
 #[cfg(feature = "plugin-hosts")]
 pub mod hosts;
 mod ipnet;
+#[cfg(feature = "plugin-k8s-external")]
+pub mod k8s_external;
 #[cfg(feature = "plugin-kubernetes")]
 pub mod kubernetes;
 #[cfg(feature = "plugin-loadbalance")]
