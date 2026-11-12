@@ -3,7 +3,7 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, file::Zone};
 use pharos_proto::{
-    Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type, zone::ZoneParser,
+    Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Section, Type, zone::ZoneParser,
 };
 use pharos_server::{Context, Metadata, Next, Outcome, Protocol, Transport};
 
@@ -558,4 +558,188 @@ async fn coredns_missing_zone_and_later_zone_recover_by_mtime() {
         .await
         .unwrap();
     std::fs::remove_file(missing).unwrap();
+}
+
+// Derived from CoreDNS ent_test.go TestLookupEnt and closest_test.go TestClosestEncloser.
+#[tokio::test]
+async fn coredns_empty_nonterminal_and_closest_encloser_proofs() {
+    let zone = zone(
+        "miek.nl.",
+        include_str!("../fixtures/file/coredns-ent.zone"),
+    )
+    .unwrap();
+    for dnssec in [false, true] {
+        let (outcome, response) = query(&zone, "b.c.miek.nl.", Type::A, dnssec, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.rcode(), Rcode::NOERROR);
+        assert_eq!(response.answer_count(), 0);
+        let authority = response.authorities().collect::<Vec<_>>();
+        assert_eq!(authority.len(), if dnssec { 4 } else { 1 });
+        assert!(authority.iter().any(|rr| matches!(
+            rr.data(),
+            Ok(Rdata::Soa {
+                serial: 1282630057,
+                ..
+            })
+        )));
+        if dnssec {
+            assert!(
+                authority
+                    .iter()
+                    .any(|rr| rr.rtype == Type::NSEC && rr.name.to_string() == "a.miek.nl.")
+            );
+            assert!(authority.iter().any(|rr| matches!(
+                rr.data(),
+                Ok(Rdata::Rrsig {
+                    type_covered: Type::NSEC,
+                    ..
+                })
+            )));
+            assert!(authority.iter().any(|rr| matches!(
+                rr.data(),
+                Ok(Rdata::Rrsig {
+                    type_covered: Type::SOA,
+                    ..
+                })
+            )));
+        }
+    }
+    for (name, expected_nsec) in [
+        ("blaat.a.miek.nl.", vec!["a.miek.nl."]),
+        ("blaat.z.a.miek.nl.", vec!["a.miek.nl."]),
+        ("blaat.miek.nl.", vec!["a.miek.nl.", "miek.nl."]),
+    ] {
+        let (outcome, response) = query(&zone, name, Type::A, true, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+        assert_eq!(
+            response
+                .authorities()
+                .filter(|rr| rr.rtype == Type::NSEC)
+                .map(|rr| rr.name.to_string())
+                .collect::<Vec<_>>(),
+            expected_nsec,
+            "{name}"
+        );
+    }
+}
+
+// Derived from CoreDNS delegation_test.go TestLookupDelegation and ds_test.go TestLookupDS.
+#[tokio::test]
+async fn coredns_unsigned_delegation_and_ds_queries() {
+    let zone = zone(
+        "miek.nl.",
+        include_str!("../fixtures/file/coredns-delegation.zone"),
+    )
+    .unwrap();
+    for (name, kind) in [
+        ("a.delegated.miek.nl.", Type::TXT),
+        ("delegated.miek.nl.", Type::NS),
+        ("foo.delegated.miek.nl.", Type::A),
+        ("foo.delegated.miek.nl.", Type::TXT),
+        ("foo.delegated.miek.nl.", Type::SOA),
+        ("a.delegated.miek.nl.", Type::DS),
+        ("_udp.delegated.miek.nl.", Type::DS),
+    ] {
+        let (outcome, wire) = query(&zone, name, kind, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response, "{name}");
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), Rcode::NOERROR);
+        assert!(!response.aa());
+        assert_eq!(response.answer_count(), 0);
+        assert_eq!(
+            response
+                .authorities()
+                .filter(|rr| rr.rtype == Type::NS && rr.name.to_string() == "delegated.miek.nl.")
+                .count(),
+            2
+        );
+        assert_eq!(
+            response
+                .additionals()
+                .filter(|rr| rr.rtype == Type::A || rr.rtype == Type::AAAA)
+                .count(),
+            2
+        );
+    }
+    for (name, expected) in [
+        ("_udp.miek.nl.", Rcode::NXDOMAIN),
+        ("miek.nl.", Rcode::NOERROR),
+    ] {
+        let (outcome, wire) = query(&zone, name, Type::DS, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), expected);
+        assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
+    }
+}
+
+// Derived from CoreDNS delegation_test.go TestLookupSecureDelegation.
+#[tokio::test]
+async fn coredns_secure_delegation_and_ds_at_cut() {
+    let zone = zone(
+        "example.org.",
+        include_str!("../fixtures/file/coredns-signed-delegation.zone"),
+    )
+    .unwrap();
+    for (name, kind) in [
+        ("a.delegated.example.org.", Type::TXT),
+        ("delegated.example.org.", Type::NS),
+        ("foo.delegated.example.org.", Type::A),
+        ("foo.delegated.example.org.", Type::DS),
+    ] {
+        let (outcome, wire) = query(&zone, name, kind, true, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert!(!response.aa());
+        let authority = response.authorities().collect::<Vec<_>>();
+        assert_eq!(
+            authority.iter().filter(|rr| rr.rtype == Type::NS).count(),
+            2
+        );
+        assert_eq!(
+            authority.iter().filter(|rr| rr.rtype == Type::DS).count(),
+            2
+        );
+        assert!(authority.iter().any(|rr| matches!(
+            rr.data(),
+            Ok(Rdata::Rrsig {
+                type_covered: Type::DS,
+                key_tag: 49035,
+                ..
+            })
+        )));
+        assert_eq!(
+            response
+                .additionals()
+                .filter(|rr| rr.rtype == Type::A || rr.rtype == Type::AAAA)
+                .count(),
+            2
+        );
+    }
+    let (outcome, wire) = query(&zone, "delegated.example.org.", Type::DS, true, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(response.aa());
+    assert_eq!(
+        response.answers().filter(|rr| rr.rtype == Type::DS).count(),
+        2
+    );
+    assert!(response.answers().any(|rr| matches!(
+        rr.data(),
+        Ok(Rdata::Rrsig {
+            type_covered: Type::DS,
+            key_tag: 49035,
+            ..
+        })
+    )));
+    assert_eq!(
+        response
+            .authorities()
+            .filter(|rr| rr.rtype == Type::NS)
+            .count(),
+        2
+    );
 }
