@@ -311,6 +311,73 @@ fn incidr_accepts_zero_padded_decimal_prefixes_like_go() {
 }
 
 #[test]
+fn deeply_nested_expressions_fit_a_small_worker_stack() {
+    const CHILD: &str = "PHAROS_EXPRESSION_STACK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "deeply_nested_expressions_fit_a_small_worker_stack",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child status: {}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let expression = Expression::compile(&format!("{}false", "not ".repeat(15))).unwrap();
+    let source = format!("{}false", "not ".repeat(15));
+    assert!(Expression::compile(&format!("{}false", "not ".repeat(16))).is_err());
+    assert!(Expression::compile(&format!("{}true", "true && ".repeat(16))).is_err());
+    let mut calls = "1".to_owned();
+    for _ in 0..15 {
+        calls = format!("int({calls})");
+    }
+    let calls = Expression::compile(&calls).unwrap();
+    let chain = Expression::compile(&format!("{}true", "true && ".repeat(15))).unwrap();
+    let result = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let message = Message::parse(WIRE).unwrap();
+            let query = Query::new(
+                &message,
+                "10.0.0.1:1234".parse().unwrap(),
+                "127.0.0.1:53".parse().unwrap(),
+                Protocol::Udp,
+            );
+            let mut slots = [];
+            let metadata = Metadata::new(&mut slots);
+            let mut bytes = [0; 512];
+            let mut scratch = Scratch::new(&mut bytes);
+            let compiled_on_worker = Expression::compile(&source).unwrap();
+            matches!(
+                expression.evaluate(&query, &metadata, &mut scratch),
+                Ok(Value::Bool(true))
+            ) && matches!(
+                compiled_on_worker.evaluate(&query, &metadata, &mut scratch),
+                Ok(Value::Bool(true))
+            ) && matches!(
+                calls.evaluate(&query, &metadata, &mut scratch),
+                Ok(Value::Int(1))
+            ) && matches!(
+                chain.evaluate(&query, &metadata, &mut scratch),
+                Ok(Value::Bool(true))
+            )
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(result);
+}
+
+#[test]
 fn template_capture_groups_variables_and_int_conversion() {
     let message = Message::parse(WIRE).unwrap();
     let mut query = Query::new(

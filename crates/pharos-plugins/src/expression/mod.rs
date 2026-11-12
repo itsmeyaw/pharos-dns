@@ -9,6 +9,8 @@ use std::{
 
 mod parser;
 
+const MAX_DEPTH: usize = 16;
+
 /// Borrowed Query and transport information.
 pub struct Query<'a> {
     pub message: &'a Message<'a>,

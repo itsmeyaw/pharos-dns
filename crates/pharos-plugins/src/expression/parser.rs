@@ -56,7 +56,7 @@ impl Parser<'_, '_> {
             self.token = Token::End;
             return Ok(());
         };
-        // shortcut: bound recursive parsing/evaluation to 256 levels and 1,024 tokens; use an iterative parser and VM to lift the limit.
+        // shortcut: bound recursive parsing/evaluation to 16 levels and 1,024 tokens; use an iterative parser and VM to lift the limit.
         self.tokens += 1;
         if self.tokens > 1024 {
             return Err("expression exceeds 1024 tokens".into());
@@ -216,8 +216,8 @@ impl Parser<'_, '_> {
     }
 
     fn expression(&mut self, minimum: u8) -> Result<Node, String> {
-        if self.depth >= 256 {
-            return Err("expression nesting exceeds 256 levels".into());
+        if self.depth >= super::MAX_DEPTH {
+            return Err("expression nesting exceeds 16 levels".into());
         }
         self.depth += 1;
         let result = self.expression_inner(minimum);
@@ -419,6 +419,7 @@ impl Parser<'_, '_> {
     }
 
     fn binary_tail(&mut self, mut left: Node, minimum: u8) -> Result<Node, String> {
+        validate_depth(&left)?;
         loop {
             let negated = matches!(&self.token, Token::Ident(name) if name == "not");
             if negated {
@@ -464,6 +465,7 @@ impl Parser<'_, '_> {
                 if negated {
                     left = Node::Unary(Unary::Not, Box::new(left));
                 }
+                validate_depth(&left)?;
                 continue;
             }
             let kind = match op {
@@ -530,6 +532,7 @@ impl Parser<'_, '_> {
             if negated {
                 left = Node::Unary(Unary::Not, Box::new(left));
             }
+            validate_depth(&left)?;
         }
         Ok(left)
     }
@@ -572,6 +575,39 @@ impl Parser<'_, '_> {
             _ => return None,
         })
     }
+}
+
+fn validate_depth(root: &Node) -> Result<(), String> {
+    let mut pending = vec![(root, 1usize)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > super::MAX_DEPTH {
+            return Err("expression evaluation exceeds 16 levels".into());
+        }
+        let next = depth + 1;
+        match node {
+            Node::Unary(_, value) | Node::Matches(value, _) => pending.push((value, next)),
+            Node::Binary(_, left, right, _) => {
+                pending.push((left, next));
+                pending.push((right, next));
+            }
+            Node::Any(items, predicate) => {
+                pending.extend(items.iter().map(|item| (item, next)));
+                pending.push((predicate, next));
+            }
+            Node::List(items) | Node::Call(_, items, _) => {
+                pending.extend(items.iter().map(|item| (item, next)))
+            }
+            Node::Nil
+            | Node::Bool(_)
+            | Node::Int(_)
+            | Node::Float(_)
+            | Node::String(_)
+            | Node::Function(_)
+            | Node::Variable(_, _)
+            | Node::Current(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn escape(first: char, chars: &mut std::str::CharIndices<'_>) -> Result<char, String> {

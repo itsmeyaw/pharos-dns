@@ -31,8 +31,8 @@ provides the type to pass to `compile_with_variables` for subsequent variables.
 - `matches` compiles literal patterns at setup using Rust regex syntax and
   Unicode rules rather than Go RE2. Unlike expr-lang, dynamic patterns are
   rejected at setup.
-- Expressions exceeding 1,024 tokens or 256 recursive parse levels fail at
-  setup to bound stack use. expr-lang's default limit is 10,000 AST nodes.
+- Expressions exceeding 1,024 tokens or 16 parse/evaluation levels fail at
+  setup to bound worker stack use. expr-lang's default limit is 10,000 AST nodes.
 - Evaluation returns an error on insufficient scratch space, invalid `int` or
   `incidr` input, division by zero for `%`, or missing/mistyped variable values.
   Out-of-range floating-point `int` conversion uses Rust's saturating cast;
