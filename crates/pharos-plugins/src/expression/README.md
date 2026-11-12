@@ -20,6 +20,9 @@ local address when the destination address is not tracked.
 `any([], true)` is accepted. List values cannot otherwise be returned from
 an expression. String conversion uses the caller's scratch space.
 
+Expressions exceeding 1,024 tokens or 256 recursive parse levels fail at
+setup to bound stack use. expr-lang's default limit is 10,000 AST nodes.
+
 `matches` uses Rust regex syntax and Unicode rules rather than Go RE2, and
 rejects nonliteral patterns at setup so patterns can be compiled once. This
 differs from expr-lang, which permits dynamic patterns.

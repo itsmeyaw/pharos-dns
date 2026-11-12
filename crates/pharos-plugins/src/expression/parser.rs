@@ -21,6 +21,8 @@ pub(super) fn parse(source: &str, variables: &[(&str, ValueType)]) -> Result<Nod
         source,
         variables,
         current: None,
+        depth: 0,
+        tokens: 0,
         offset: 0,
         token: Token::End,
     };
@@ -39,6 +41,8 @@ struct Parser<'a, 'v> {
     source: &'a str,
     variables: &'v [(&'v str, ValueType)],
     current: Option<Kind>,
+    depth: usize,
+    tokens: usize,
     offset: usize,
     token: Token,
 }
@@ -52,6 +56,11 @@ impl Parser<'_, '_> {
             self.token = Token::End;
             return Ok(());
         };
+        // shortcut: bound recursive parsing/evaluation to 256 levels and 1,024 tokens; use an iterative parser and VM to lift the limit.
+        self.tokens += 1;
+        if self.tokens > 1024 {
+            return Err("expression exceeds 1024 tokens".into());
+        }
         if first.is_ascii_digit()
             || (first == '.' && rest.as_bytes().get(1).is_some_and(u8::is_ascii_digit))
         {
@@ -207,6 +216,16 @@ impl Parser<'_, '_> {
     }
 
     fn expression(&mut self, minimum: u8) -> Result<Node, String> {
+        if self.depth >= 256 {
+            return Err("expression nesting exceeds 256 levels".into());
+        }
+        self.depth += 1;
+        let result = self.expression_inner(minimum);
+        self.depth -= 1;
+        result
+    }
+
+    fn expression_inner(&mut self, minimum: u8) -> Result<Node, String> {
         let left = match std::mem::replace(&mut self.token, Token::End) {
             Token::Integer(value) => {
                 self.advance()?;

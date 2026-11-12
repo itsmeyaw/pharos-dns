@@ -586,3 +586,11 @@ fn typed_operators_reject_invalid_comparisons_at_startup() {
         assert!(Expression::compile(source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn excessively_deep_or_large_expressions_fail_at_setup() {
+    let nested = format!("{}true{}", "(".repeat(300), ")".repeat(300));
+    assert!(Expression::compile(&nested).is_err());
+    let long = format!("{}true", "true || ".repeat(600));
+    assert!(Expression::compile(&long).is_err());
+}
