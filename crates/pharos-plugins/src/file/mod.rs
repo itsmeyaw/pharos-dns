@@ -693,6 +693,50 @@ impl Plugin for File {
                     }
                 }
             }
+            // RFC 1035 §3.3: MX and NS targets and RFC 2782 §3: SRV targets may have address glue.
+            if cut.is_none() {
+                let offset = match question.qtype {
+                    Type::MX | Type::SVCB | Type::HTTPS => Some(2),
+                    Type::SRV => Some(6),
+                    Type::NS if source.eq_ignore_ascii_case(zone.apex.as_wire()) => Some(0),
+                    _ => None,
+                };
+                if let Some(offset) = offset {
+                    for (index, rr) in zone.records.iter().enumerate().filter(|(_, rr)| {
+                        rr.rtype == question.qtype
+                            && rr.owner.as_wire().eq_ignore_ascii_case(target)
+                    }) {
+                        let Some(address) = rr.rdata.get(offset..) else {
+                            continue;
+                        };
+                        if !contains(address, &zone.apex)
+                            || zone.records[..index].iter().any(|earlier| {
+                                earlier.rtype == rr.rtype
+                                    && earlier.owner == rr.owner
+                                    && earlier
+                                        .rdata
+                                        .get(offset..)
+                                        .is_some_and(|name| name.eq_ignore_ascii_case(address))
+                            })
+                        {
+                            continue;
+                        }
+                        let owner = NameRef::parse(address, 0)
+                            .map_err(|_| pharos_server::Error::InvalidQuery)?;
+                        for kind in [Type::A, Type::AAAA] {
+                            write_set(
+                                &mut builder,
+                                zone,
+                                address,
+                                owner,
+                                kind,
+                                Section::Additional,
+                                dnssec,
+                            )?;
+                        }
+                    }
+                }
+            }
             let _ = builder.finish();
             Ok(())
         })();
