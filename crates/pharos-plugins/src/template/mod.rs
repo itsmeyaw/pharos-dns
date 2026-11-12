@@ -28,6 +28,7 @@ use std::{
 };
 
 const EXPRESSION_SCRATCH: usize = 65_535;
+const RENDER_SCRATCH: usize = 65_535;
 
 pub struct Template {
     rules: Vec<Rule>,
@@ -94,6 +95,7 @@ struct MatcherState {
 struct RuleWorkspace {
     matchers: Vec<MatcherState>,
     scratch: Vec<u8>,
+    render_scratch: Vec<u8>,
     variables: Vec<(&'static str, Value<'static>)>,
     matches: Vec<&'static str>,
     groups: Vec<(&'static str, &'static str)>,
@@ -134,6 +136,7 @@ impl WorkspacePool {
                 let workspace = RuleWorkspace {
                     matchers,
                     scratch: vec![0; EXPRESSION_SCRATCH],
+                    render_scratch: vec![0; RENDER_SCRATCH],
                     variables: vec![("", Value::Nil); self.variable_count],
                     matches: vec![""; self.group_count],
                     groups: vec![("", ""); self.group_count.saturating_mul(2)],
@@ -370,6 +373,7 @@ impl Template {
                 let RuleWorkspace {
                     matchers,
                     scratch,
+                    render_scratch,
                     variables,
                     matches: match_slots,
                     groups: group_slots,
@@ -437,7 +441,14 @@ impl Template {
                                 || m.address.ip().is_unspecified()
                                     && m.address.port() == cx.local.port())
                     });
-                    let result = evaluate(rule, cx, &data, scratch, variables, metrics);
+                    let result = evaluate(
+                        rule,
+                        cx,
+                        &data,
+                        (scratch, render_scratch),
+                        variables,
+                        metrics,
+                    );
                     // Replace borrows; warmed allocation tests verify std reuses these Vec allocations.
                     *match_slots = matches.into_iter().map(|_| "").collect();
                     *group_slots = groups.into_iter().map(|_| ("", "")).collect();
@@ -519,7 +530,7 @@ fn evaluate<'a>(
     rule: &'a Rule,
     cx: &'a Context<'_, '_>,
     data: &'a gotemplate::Data<'a, '_>,
-    scratch: &mut [u8],
+    scratch: (&mut [u8], &mut [u8]),
     storage: &mut Vec<(&'static str, Value<'static>)>,
     metrics: Option<&RuleMetrics>,
 ) -> Result<Option<Vec<(Section, ZoneRecord)>>, EvaluationError> {
@@ -537,11 +548,12 @@ fn evaluate_slots<'a>(
     rule: &'a Rule,
     cx: &'a Context<'_, '_>,
     data: &'a gotemplate::Data<'a, '_>,
-    mut scratch: &'a mut [u8],
+    scratch: (&'a mut [u8], &mut [u8]),
     query: &'a expression::Query<'a>,
     variables: &mut [(&'a str, Value<'a>)],
     metrics: Option<&RuleMetrics>,
 ) -> Result<Option<Vec<(Section, ZoneRecord)>>, EvaluationError> {
+    let (mut scratch, render_scratch) = scratch;
     for (index, variable) in rule.variables.iter().enumerate() {
         let scoped = expression::ScopedQuery::new(query, &variables[..index]);
         let (value, rest) = variable
@@ -603,7 +615,7 @@ fn evaluate_slots<'a>(
             let mut output = String::new();
             record
                 .compiled
-                .render_with_scratch(&data, &mut output, scratch)
+                .render_with_scratch(&data, &mut output, render_scratch)
                 .map_err(|_| {
                     if let Some(binding) = &binding {
                         binding.failures[index].render_failure();
@@ -920,6 +932,7 @@ mod tests {
             use std::mem::size_of;
             size_of::<RuleWorkspace>()
                 + workspace.scratch.capacity()
+                + workspace.render_scratch.capacity()
                 + workspace.matchers.capacity() * size_of::<MatcherState>()
                 + workspace.variables.capacity() * size_of::<(&str, Value<'_>)>()
                 + workspace.matches.capacity() * size_of::<&str>()
