@@ -44,6 +44,7 @@ pub use router::{Router, ServerBlock, ViewFilter};
 pub use server::{Chain, Server};
 pub use startup::startup_domains;
 mod tcp;
+pub use tcp::write_tcp_frame;
 pub mod transfer;
 mod udp;
 #[cfg(target_os = "linux")]

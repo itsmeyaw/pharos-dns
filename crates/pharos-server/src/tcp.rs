@@ -1,7 +1,12 @@
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    io::{self, IoSlice},
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, tcp::OwnedReadHalf},
     sync::{Mutex, watch},
     task::{JoinHandle, JoinSet},
@@ -56,6 +61,28 @@ pub(crate) fn spawn<H: Handler>(
     })
 }
 
+/// Writes one length-prefixed DNS Message.
+pub async fn write_tcp_frame(
+    stream: &mut (impl AsyncWrite + Unpin),
+    wire: &[u8],
+) -> io::Result<()> {
+    // RFC 7766 §8: pass the two-octet length and the Message to TCP in one write.
+    let length = (wire.len() as u16).to_be_bytes();
+    let mut written = 0;
+    while written < length.len() + wire.len() {
+        let buffers = [
+            IoSlice::new(&length[written.min(length.len())..]),
+            IoSlice::new(&wire[written.saturating_sub(length.len())..]),
+        ];
+        let n = stream.write_vectored(&buffers).await?;
+        if n == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        written += n;
+    }
+    Ok(())
+}
+
 async fn read_frame(reader: &mut OwnedReadHalf) -> io::Result<Vec<u8>> {
     // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
     let mut length = [0; 2];
@@ -72,6 +99,8 @@ async fn serve<H: Handler>(
     mut shutdown: watch::Receiver<bool>,
     options: TcpOptions,
 ) {
+    // RFC 7766 §6.2.1.1: return each Response as soon as it is available; Nagle (RFC 9293 §3.7.4) holds it for an ACK.
+    let _ = stream.set_nodelay(true);
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(Some(writer)));
     let (failed, mut write_failed) = watch::channel(false);
@@ -217,7 +246,7 @@ async fn serve<H: Handler>(
                         break;
                     }
                 }
-                let Ok(length) = u16::try_from(response.len()) else {
+                if u16::try_from(response.len()).is_err() {
                     if transfer.is_some() {
                         // RFC 1035 §4.2.2: TCP Message lengths must fit in two octets.
                         crate::logging::log(
@@ -229,14 +258,10 @@ async fn serve<H: Handler>(
                         let _ = failed.send(true);
                     }
                     break;
-                };
+                }
                 // RFC 5936 §2.2: every Transfer Message is separately framed on the connection.
                 if let Some(stream) = writer.as_mut() {
-                    let result = timeout(options.write, async {
-                        stream.write_all(&length.to_be_bytes()).await?;
-                        stream.write_all(&response).await
-                    })
-                    .await;
+                    let result = timeout(options.write, write_tcp_frame(stream, &response)).await;
                     if !matches!(result, Ok(Ok(()))) {
                         *writer = None;
                         let _ = failed.send(true);
@@ -253,4 +278,87 @@ async fn serve<H: Handler>(
         });
     }
     while queries.join_next().await.is_some() {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn tcp_frame_vectored_write_handles_partial_and_zero_writes() {
+        use std::{
+            pin::Pin,
+            task::{Context, Poll},
+        };
+        struct Writer {
+            bytes: Vec<u8>,
+            limit: usize,
+            calls: usize,
+            first_segments: usize,
+        }
+        impl AsyncWrite for Writer {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                panic!("expected vectored write")
+            }
+            fn poll_write_vectored(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buffers: &[IoSlice<'_>],
+            ) -> Poll<io::Result<usize>> {
+                if self.calls == 0 {
+                    self.first_segments = buffers.iter().filter(|b| !b.is_empty()).count();
+                }
+                self.calls += 1;
+                let mut left = self.limit;
+                let mut written = 0;
+                for buffer in buffers {
+                    let count = left.min(buffer.len());
+                    self.bytes.extend_from_slice(&buffer[..count]);
+                    written += count;
+                    left -= count;
+                }
+                Poll::Ready(Ok(written))
+            }
+            fn is_write_vectored(&self) -> bool {
+                true
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+        for limit in [1, 3, 100] {
+            let mut writer = Writer {
+                bytes: Vec::new(),
+                limit,
+                calls: 0,
+                first_segments: 0,
+            };
+            write_tcp_frame(&mut writer, b"hello").await.unwrap();
+            assert_eq!(writer.bytes, b"\0\x05hello");
+            assert_eq!(writer.first_segments, 2);
+            if limit == 100 {
+                assert_eq!(writer.calls, 1);
+            }
+        }
+        let mut writer = Writer {
+            bytes: Vec::new(),
+            limit: 0,
+            calls: 0,
+            first_segments: 0,
+        };
+        assert_eq!(
+            write_tcp_frame(&mut writer, b"hello")
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WriteZero
+        );
+    }
 }
