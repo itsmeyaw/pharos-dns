@@ -10,8 +10,8 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
 - Setup rejects more than 127 capture groups per match and more than 32 variables
   per rule. Variables and expressions of one rule share 65,535 bytes of scratch;
   exhausting it returns SERVFAIL.
-- Queries using the same match expression serialize while its capture and
-  expression workspaces are in use, including record rendering.
+- Matching and expression workspaces are pooled per rule; a worker's first use
+  may allocate. Memory grows with the regexes and their capture groups.
 - Failure metric `template` labels use the configured source, not Go's
   normalized template parse tree. Wildcard class/type metric labels allocate
   when a combination first matches; later increments use cached handles.

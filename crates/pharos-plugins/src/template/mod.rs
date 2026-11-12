@@ -17,7 +17,7 @@ use regex_automata::{
         Builder, NFA, State,
         pikevm::{Cache, PikeVM},
     },
-    util::{captures::Captures, primitives::PatternID},
+    util::{captures::Captures, pool::Pool, primitives::PatternID},
 };
 use std::{
     fmt::{self, Write},
@@ -51,6 +51,7 @@ struct Rule {
     rcode: Rcode,
     ederror: Option<(u16, String)>,
     fallthrough: Fallthrough,
+    workspace: Option<Pool<RuleWorkspace, Box<dyn Fn() -> RuleWorkspace + Send + Sync>>>,
 }
 struct RuleMetrics {
     address: SocketAddr,
@@ -81,11 +82,14 @@ struct Matcher {
     source: String,
     vm: PikeVM,
     names: Vec<Option<String>>,
-    state: Mutex<MatcherState>,
+    warmer: PikeVM,
 }
 struct MatcherState {
     cache: Cache,
     captures: Captures,
+}
+struct RuleWorkspace {
+    matchers: Vec<MatcherState>,
     scratch: Vec<u8>,
 }
 
@@ -98,7 +102,6 @@ impl Matcher {
             .pattern_names(PatternID::ZERO)
             .map(|s| s.map(str::to_owned))
             .collect();
-        let captures = vm.create_captures();
         if vm.get_nfa().group_info().group_len(PatternID::ZERO) > 128 {
             return Err("regex exceeds 127 capture groups".into());
         }
@@ -123,27 +126,41 @@ impl Matcher {
         builder.finish_pattern(start).map_err(|e| e.to_string())?;
         let nfa: NFA = builder.build(start, start).map_err(|e| e.to_string())?;
         let warmer = PikeVM::new_from_nfa(nfa).map_err(|e| e.to_string())?;
-        let mut cache = warmer.create_cache();
-        let _ = warmer.is_match(&mut cache, "");
-        cache.reset(&vm);
-        let mut warm_captures = vm.create_captures();
-        vm.captures(&mut cache, "www.example.", &mut warm_captures);
-        let state = Mutex::new(MatcherState {
-            cache,
-            captures,
-            scratch: vec![0; EXPRESSION_SCRATCH],
-        });
-        drop(
-            state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
         Ok(Self {
             source: pattern.to_owned(),
             vm,
             names,
-            state,
+            warmer,
         })
+    }
+}
+
+impl Rule {
+    fn initialize_workspace(&mut self) {
+        let matchers: Vec<_> = self
+            .regex
+            .iter()
+            .map(|m| (m.vm.clone(), m.warmer.clone()))
+            .collect();
+        let workspace = Pool::new(Box::new(move || {
+            let matchers = matchers
+                .iter()
+                .map(|(vm, warmer)| {
+                    let mut cache = warmer.create_cache();
+                    let _ = warmer.is_match(&mut cache, "");
+                    cache.reset(vm);
+                    let mut captures = vm.create_captures();
+                    vm.captures(&mut cache, "www.example.", &mut captures);
+                    MatcherState { cache, captures }
+                })
+                .collect();
+            RuleWorkspace {
+                matchers,
+                scratch: vec![0; EXPRESSION_SCRATCH],
+            }
+        }) as Box<dyn Fn() -> RuleWorkspace + Send + Sync>);
+        drop(workspace.get());
+        self.workspace = Some(workspace);
     }
 }
 
@@ -290,16 +307,13 @@ impl Template {
                 continue;
             }
             let mut matched = false;
-            for matcher in &rule.regex {
-                let mut state = matcher
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let MatcherState {
-                    cache,
-                    captures,
-                    scratch,
-                } = &mut *state;
+            let Some(pool) = &rule.workspace else {
+                return MatchResult::Failed;
+            };
+            let mut workspace = pool.get();
+            let RuleWorkspace { matchers, scratch } = &mut *workspace;
+            for (matcher, state) in rule.regex.iter().zip(matchers) {
+                let MatcherState { cache, captures } = state;
                 matcher.vm.captures(cache, name, captures);
                 if !captures.is_match() {
                     continue;

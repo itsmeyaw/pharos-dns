@@ -98,3 +98,55 @@ fn matched_query_with_metrics_allocations_are_bounded() {
     assert!(stats.allocations + stats.reallocations <= 100, "{stats:?}");
     assert!(stats.bytes_allocated <= 262_144, "{stats:?}");
 }
+
+#[test]
+#[cfg(feature = "plugin-whoami")]
+fn warmed_rule_workspace_on_worker_does_not_allocate() {
+    if crate::run_isolated("template::cases::warmed_rule_workspace_on_worker_does_not_allocate") {
+        return;
+    }
+    let corefile = ". {\n template IN A example {\n match ^(?P<host>[a-z]+)[.]example[.]$\n var host group('host')\n expr host == 'no'\n fallthrough\n }\n whoami\n}";
+    let configured =
+        configure::<Chain>(&parse("Corefile", corefile).unwrap(), directives()).unwrap();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x03www\x07example\0\0\x01\0\x01";
+                let domain: Name = ".".parse().unwrap();
+                let mut response = Vec::with_capacity(512);
+                let mut slots = [];
+                let mut context = Context {
+                    query: Message::parse(wire).unwrap(),
+                    client: "192.0.2.1:1234".parse().unwrap(),
+                    local: "127.0.0.1:53".parse().unwrap(),
+                    transport: Transport::Dns,
+                    protocol: Protocol::Udp,
+                    domain: &domain,
+                    metadata: Metadata::new(&mut slots),
+                    response: &mut response,
+                    max_response_size: 512,
+                };
+                let mut task_context = TaskContext::from_waker(Waker::noop());
+                {
+                    let mut future = std::pin::pin!(configured[0].config.serve(&mut context));
+                    assert_eq!(
+                        future.as_mut().poll(&mut task_context),
+                        Poll::Ready(Outcome::Response)
+                    );
+                }
+                context.response.clear();
+                let region = Region::new(&INSTRUMENTED_SYSTEM);
+                let mut future = std::pin::pin!(configured[0].config.serve(&mut context));
+                let outcome = future.as_mut().poll(&mut task_context);
+                let stats = region.change();
+                assert_eq!(outcome, Poll::Ready(Outcome::Response));
+                assert_eq!(
+                    (stats.allocations, stats.reallocations),
+                    (0, 0),
+                    "{stats:?}"
+                );
+            })
+            .join()
+            .unwrap();
+    });
+}

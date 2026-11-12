@@ -43,6 +43,7 @@ pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
             rcode: Rcode::NOERROR,
             ederror: None,
             fallthrough: Fallthrough::default(),
+            workspace: None,
         };
         while cursor.next_block() {
             let option = cursor.val().to_owned();
@@ -136,6 +137,7 @@ pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
             rule.regex
                 .push(super::Matcher::new(".*").map_err(|e| cursor.error(e))?);
         }
+        rule.initialize_workspace();
         rules.push(rule);
     }
     block.config.template = Some(Template::new(rules));
