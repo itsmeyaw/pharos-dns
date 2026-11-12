@@ -53,3 +53,9 @@ fn parse_int_accepts_literal_and_reports_invalid_values_at_render_time() {
             .is_err()
     );
 }
+
+#[test]
+fn template_rejects_unsupported_quoted_string_escapes() {
+    assert!(Template::compile(r#"{{ .Meta "a\nb" }}"#).is_err());
+    assert!(Template::compile(r#"{{ parseInt "1\x32" 10 8 }}"#).is_err());
+}

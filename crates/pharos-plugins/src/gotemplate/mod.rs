@@ -123,8 +123,14 @@ fn parse_field(action: &str) -> Result<Field, String> {
         ".Regex" => Ok(Field::Regex),
         _ => {
             if let Some(literal) = action.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                if literal.contains(['\\', '"', '\n', '\r']) {
+                    return Err("unsupported quoted-string escape".into());
+                }
                 Ok(Field::Literal(literal.to_owned()))
-            } else if let Some(name) = action.strip_prefix(".Group.").filter(|s| !s.is_empty()) {
+            } else if let Some(name) = action
+                .strip_prefix(".Group.")
+                .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            {
                 Ok(Field::Group(name.to_owned()))
             } else if let Some(index) = action.strip_prefix("index .Match ") {
                 Ok(Field::Match(
@@ -136,6 +142,9 @@ fn parse_field(action: &str) -> Result<Field, String> {
                     .strip_prefix('"')
                     .and_then(|s| s.strip_suffix('"'))
                     .ok_or("unsupported .Meta argument")?;
+                if label.contains(['\\', '"', '\n', '\r']) {
+                    return Err("unsupported quoted-string escape".into());
+                }
                 Ok(Field::Metadata(label.to_owned()))
             } else {
                 Err(format!("unsupported template action: {action}"))
