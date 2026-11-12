@@ -345,6 +345,7 @@ fn coredns_expression_tests_cover_query_metadata_group_and_errors() {
         ("a + 1", Value::Int(2)),
         ("a == 1", Value::Bool(true)),
         ("'x' + name()", Value::String("xa.example.")),
+        ("'ns0.example.'", Value::String("ns0.example.")),
         ("1", Value::Int(1)),
     ] {
         let expression =
@@ -394,6 +395,13 @@ fn coredns_expression_tests_cover_query_metadata_group_and_errors() {
             "{source}"
         );
     }
+    assert_eq!(
+        Expression::compile("group('a') != ''")
+            .unwrap()
+            .evaluate(&query, &metadata, &mut scratch)
+            .unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
