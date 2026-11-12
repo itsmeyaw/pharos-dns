@@ -84,6 +84,43 @@ fn view_readme_expressions_match_ipv4_ipv6_type_and_name() {
 }
 
 #[test]
+fn view_test_expressions_return_the_upstream_values() {
+    // CoreDNS v1.15.0 plugin/view/view_test.go, TestFilter_ErrorPaths.
+    let wire =
+        b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let query = Query::new(
+        &message,
+        "127.0.0.1:1000".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut bytes = [0; 1024];
+    let mut scratch = Scratch::new(&mut bytes);
+    for (source, expected) in [
+        ("name() == 'example.com.'", Value::Bool(true)),
+        ("name() == 'notexample.com.'", Value::Bool(false)),
+        ("1", Value::Int(1)),
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            expected
+        );
+    }
+    assert!(
+        Expression::compile("incidr('invalid', '1.2.3.0/24')")
+            .unwrap()
+            .evaluate(&query, &metadata, &mut scratch)
+            .is_err()
+    );
+}
+
+#[test]
 fn template_readme_record_examples_render_expected_records() {
     // CoreDNS v1.15.0 plugin/template/README.md, Examples.
     let mut slots = [];
@@ -211,6 +248,20 @@ fn coredns_captured_variable_expression_and_answer_are_connected() {
                 .evaluate(&query, &metadata, &mut scratch)
                 .unwrap(),
             Value::Bool(true)
+        );
+    }
+    for (source, expected) in [
+        ("num * 2", Value::Int(4)),
+        ("'x' + group('n')", Value::String("x2")),
+        ("group('n') != ''", Value::Bool(true)),
+    ] {
+        assert_eq!(
+            Expression::compile_with_variables(source, &[("num", ValueType::Int)])
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            expected,
+            "{source}"
         );
     }
     let mut data = Data::new("2.example.", &metadata);
