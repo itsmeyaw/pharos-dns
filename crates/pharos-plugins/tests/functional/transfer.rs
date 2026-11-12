@@ -255,3 +255,46 @@ async fn ixfr_passes_requested_serial_and_rejects_missing_soa() {
         }
     }
 }
+
+// Derived from CoreDNS v1.15.0 plugin/transfer/select_test.go, TestZoneSelection.
+#[tokio::test]
+async fn most_specific_zone_controls_acl() {
+    let config = ". {\n transfer example.org {\n to 192.0.2.1\n }\n transfer sub.example.org {\n to *\n }\n}";
+    let blocks = parse("Corefile", config).unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "sub.example.org.".parse().unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AXFR,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::new();
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:42".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &name,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert!(matches!(
+        chain
+            .transfer
+            .unwrap()
+            .serve_with(&mut cx, DropNext, Some(&Provider))
+            .await,
+        Outcome::Stream(_)
+    ));
+}

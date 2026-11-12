@@ -201,6 +201,7 @@ impl Transfer {
         if !allowed {
             return Outcome::Unanswered(Rcode::REFUSED);
         }
+        // RFC 1995 §3: an IXFR Query carries the current SOA in Authority.
         let serial = if question.qtype == Type::IXFR {
             let mut authority = cx.query.authorities();
             let serial = authority
@@ -257,17 +258,21 @@ fn destination(value: &str) -> Option<Destination> {
     let (host, port) = if let Some(rest) = value.strip_prefix('[') {
         let (host, port) = rest.split_once("]:")?;
         (host, if port.is_empty() { "53" } else { port })
-    } else if value.split('%').next()?.parse::<IpAddr>().is_ok() {
+    } else if ip_without_zone(value).parse::<IpAddr>().is_ok() {
         (value, "53")
     } else {
         let (host, port) = value.rsplit_once(':')?;
         (host, if port.is_empty() { "53" } else { port })
     };
-    host.split('%').next()?.parse::<IpAddr>().ok()?;
+    ip_without_zone(host).parse::<IpAddr>().ok()?;
     Some(Destination::Address {
         host: host.into(),
         port: port.into(),
     })
+}
+
+fn ip_without_zone(host: &str) -> &str {
+    host.rsplit_once('%').map_or(host, |(address, _)| address)
 }
 
 impl Plugin for Transfer {
