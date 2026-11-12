@@ -641,6 +641,17 @@ async fn coredns_serve_dns_requirement_and_next_cases() {
         ),
         (".", "require_opcode all", 1, 0, true, false, true),
         (".", "require_opcode all", 1, 0, false, true, false),
+        // CoreDNS retains the all flag when a later requirement says none.
+        (".", "require all\n require none", 1, 0, false, true, false),
+        (
+            ".",
+            "require_opcode all\n require_opcode none",
+            1,
+            0,
+            false,
+            true,
+            false,
+        ),
     ] {
         let source = format!(". {{\n tsig {zone} {{\n secret key. c2VjcmV0\n {require}\n }}\n}}");
         let blocks = parse("Corefile", &source).unwrap();
