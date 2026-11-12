@@ -666,6 +666,23 @@ fn index_and_slice_without_indices_keep_the_input() {
 }
 
 #[test]
+fn index_rejects_map_keys_with_the_wrong_type() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.groups = &[("1", "one")];
+    for source in ["{{ index .Group 1 }}", "{{ index .Var 1 }}"] {
+        assert!(
+            Template::compile(source)
+                .unwrap()
+                .render(&data, &mut String::new())
+                .is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

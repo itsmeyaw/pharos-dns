@@ -1009,15 +1009,19 @@ impl<'a> ResultValue<'a> {
                     .copied()
                     .ok_or(fmt::Error)?,
             )))),
-            Self::Groups(values) => Ok(Self::Scalar(Some(Value::String(
-                values
-                    .iter()
-                    .find_map(|(name, value)| (*name == key.text(scratch).ok()?).then_some(*value))
-                    .unwrap_or(""),
-            )))),
+            Self::Groups(values) => {
+                let key = key.text(scratch)?;
+                Ok(Self::Scalar(Some(Value::String(
+                    values
+                        .iter()
+                        .find_map(|(name, value)| (*name == key).then_some(*value))
+                        .unwrap_or(""),
+                ))))
+            }
             Self::Variables(values) => {
+                let key = key.text(scratch)?;
                 Ok(Self::Scalar(values.iter().find_map(|(name, value)| {
-                    (*name == key.text(scratch).ok()?).then_some(*value)
+                    (*name == key).then_some(*value)
                 })))
             }
             Self::Questions(questions) => {
