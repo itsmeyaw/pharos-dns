@@ -816,6 +816,7 @@ impl Zone {
         if matches!(question.qtype, Type::AXFR | Type::IXFR) {
             return Outcome::Unanswered(Rcode::REFUSED);
         }
+        // RFC 1996 §3.10: a server ignores NOTIFY from a host that is not a known master.
         if cx.query.opcode() == pharos_proto::Opcode::NOTIFY {
             return Outcome::Drop;
         }
