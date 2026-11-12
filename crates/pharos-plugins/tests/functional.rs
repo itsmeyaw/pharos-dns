@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[path = "functional/erratic.rs"]
+mod erratic;
+
 #[cfg(feature = "plugin-template")]
 #[path = "functional/template.rs"]
 mod template;

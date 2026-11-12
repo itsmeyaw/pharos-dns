@@ -1,0 +1,6 @@
+example.org:{port} {
+    erratic {
+        delay 3 5ms
+        truncate 5
+    }
+}

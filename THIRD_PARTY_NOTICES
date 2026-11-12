@@ -16,6 +16,7 @@
 - The siit Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/siit`.
 - The rewrite Plugin and tests follow CoreDNS v1.15.0's `plugin/rewrite`.
 - The autopath Plugin and tests follow CoreDNS v1.15.0's `plugin/autopath` and miekg/dns resolver configuration parsing.
+- The erratic Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/erratic` and miekg/dns transfer output.
 - The whoami Plugin and tests follow CoreDNS v1.15.0's `plugin/whoami`.
 - The nsid Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/nsid`.
 - The bufsize Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/bufsize`.
