@@ -139,6 +139,45 @@ async fn coredns_axfr_complete_and_truncated() {
     }
 }
 
+#[cfg(feature = "plugin-transfer")]
+#[tokio::test]
+async fn transfer_acl_refuses_erratic_axfr_before_backend() {
+    let blocks = parse(
+        "Corefile",
+        ". {\n transfer {\n to 192.0.2.1\n }\n erratic {\n drop 0\n }\n}",
+    )
+    .unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let name: Name = "example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AXFR,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    let mut slots = [];
+    let mut context = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &name,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 65535,
+    };
+    assert_eq!(
+        configured[0].config.serve(&mut context).await,
+        Outcome::Unanswered(Rcode::REFUSED)
+    );
+}
+
 #[tokio::test]
 async fn coredns_root_axfr_writes_no_message() {
     let blocks = parse("Corefile", ". {\n erratic {\n drop 0\n }\n}").unwrap();
