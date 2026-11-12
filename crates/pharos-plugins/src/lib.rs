@@ -680,6 +680,7 @@ impl pharos_server::Plugin for Unimplemented {
 
 #[cfg(any(
     feature = "plugin-hosts",
+    feature = "plugin-file",
     feature = "plugin-loadbalance",
     feature = "plugin-dnssec"
 ))]
@@ -697,6 +698,7 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
 
 #[cfg(any(
     feature = "plugin-hosts",
+    feature = "plugin-file",
     feature = "plugin-loadbalance",
     feature = "plugin-dnssec"
 ))]
