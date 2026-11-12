@@ -795,6 +795,17 @@ fn printf_scientific_and_uppercase_float_verbs_match_go() {
 }
 
 #[test]
+fn printf_q_escapes_non_printable_unicode_like_go() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile("{{ printf \"%q\" \"\\uE000\\u00A0é\" }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "\"\\ue000\\u00a0é\"");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

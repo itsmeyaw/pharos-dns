@@ -276,3 +276,22 @@ fn expression_variables_and_template_render_without_allocating() {
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
     assert_eq!(output, "example.org. 60 IN A 192.168.1.2");
 }
+
+#[test]
+fn printf_unicode_quoting_does_not_allocate_on_first_render() {
+    if crate::run_isolated(
+        "gotemplate::gotemplate_allocations::printf_unicode_quoting_does_not_allocate_on_first_render",
+    ) {
+        return;
+    }
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("\u{e000}", &metadata);
+    let template = Template::compile("{{ printf \"%q\" .Name }}").unwrap();
+    let mut output = String::with_capacity(64);
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    template.render(&data, &mut output).unwrap();
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+    assert_eq!(output, "\"\\ue000\"");
+}

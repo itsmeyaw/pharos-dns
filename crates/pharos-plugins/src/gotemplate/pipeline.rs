@@ -26,7 +26,7 @@ enum Function {
     Slice,
     Print,
     Println,
-    Printf,
+    Printf(Box<crate::regex_match::Regex>),
     Html,
     Js(Box<crate::regex_match::Regex>),
     UrlQuery,
@@ -119,7 +119,9 @@ impl Pipeline {
                 "slice" => Some(Function::Slice),
                 "print" => Some(Function::Print),
                 "println" => Some(Function::Println),
-                "printf" => Some(Function::Printf),
+                "printf" => Some(Function::Printf(Box::new(crate::regex_match::Regex::new(
+                    r"^[\p{L}\p{M}\p{N}\p{P}\p{S}]$",
+                )?))),
                 "html" => Some(Function::Html),
                 "js" => Some(Function::Js(Box::new(crate::regex_match::Regex::new(
                     r"^[\p{L}\p{M}\p{N}\p{P}\p{S}]$",
@@ -181,7 +183,7 @@ impl Pipeline {
                         | Function::Html
                         | Function::Js(_)
                         | Function::UrlQuery => true,
-                        Function::Printf => count >= 1,
+                        Function::Printf(_) => count >= 1,
                         Function::Meta(_) => count == 1,
                         Function::Call => count >= 1,
                     };
@@ -351,7 +353,7 @@ impl Pipeline {
                         }
                         Function::Print
                         | Function::Println
-                        | Function::Printf
+                        | Function::Printf(_)
                         | Function::Html
                         | Function::Js(_)
                         | Function::UrlQuery => {
@@ -640,7 +642,7 @@ fn format_values(
     values: &[Option<ResultValue<'_>>],
     scratch: &mut Scratch<'_>,
 ) -> fmt::Result {
-    if matches!(function, Function::Printf) {
+    if let Function::Printf(printable) = function {
         let format = values[0].ok_or(fmt::Error)?;
         let mut cursor = 0;
         let mut argument = 1;
@@ -911,7 +913,7 @@ fn format_values(
                 },
                 'q' if value.is_string() => {
                     let start = scratch.len;
-                    quote_value(value, scratch)?;
+                    quote_value(value, scratch, printable)?;
                     pad_segment(scratch, start, width, left, zero)?;
                 }
                 'c' => {
@@ -995,7 +997,11 @@ fn pad_segment(
     Ok(())
 }
 
-fn quote_value(value: ResultValue<'_>, scratch: &mut Scratch<'_>) -> fmt::Result {
+fn quote_value(
+    value: ResultValue<'_>,
+    scratch: &mut Scratch<'_>,
+    printable: &crate::regex_match::Regex,
+) -> fmt::Result {
     scratch.write_char('"')?;
     let mut offset = 0;
     while offset < value.text(scratch)?.len() {
@@ -1015,6 +1021,13 @@ fn quote_value(value: ResultValue<'_>, scratch: &mut Scratch<'_>) -> fmt::Result
             '\u{b}' => scratch.write_str("\\v")?,
             '\u{c}' => scratch.write_str("\\f")?,
             ch if ch.is_ascii_control() => write!(scratch, "\\x{:02x}", ch as u32)?,
+            ch if !ch.is_ascii() && !printable.is_match(ch.encode_utf8(&mut [0; 4])) => {
+                if (ch as u32) <= 0xffff {
+                    write!(scratch, "\\u{:04x}", ch as u32)?;
+                } else {
+                    write!(scratch, "\\U{:08x}", ch as u32)?;
+                }
+            }
             _ => scratch.write_char(ch)?,
         }
     }
