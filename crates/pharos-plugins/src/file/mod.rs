@@ -336,10 +336,13 @@ struct Loaded {
     negative_interval: bool,
     by_mtime: bool,
     modified: Mutex<Option<SystemTime>>,
+    reload_gate: Mutex<()>,
 }
 
 impl Loaded {
     fn reload(&self) -> bool {
+        // A cancelled blocking reload can outlive Restart; serialize generation swaps.
+        let _gate = self.reload_gate.lock().unwrap();
         let file = match std::fs::File::open(&self.path) {
             Ok(file) => file,
             Err(error) => {
@@ -519,6 +522,7 @@ impl File {
                     negative_interval: negative_reload,
                     by_mtime,
                     modified: Mutex::new(modified),
+                    reload_gate: Mutex::new(()),
                 }));
             }
         }
