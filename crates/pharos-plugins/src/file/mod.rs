@@ -75,6 +75,16 @@ impl Zone {
             soa.rdata.get(offset..offset + 4)?.try_into().ok()?,
         ))
     }
+
+    fn previous_nsec(&self, name: &[u8]) -> Option<&ZoneRecord> {
+        self.records
+            .iter()
+            .filter(|rr| {
+                rr.rtype == Type::NSEC
+                    && canonical_cmp(rr.owner.as_wire(), name) != std::cmp::Ordering::Greater
+            })
+            .max_by(|a, b| a.owner.cmp(&b.owner))
+    }
 }
 
 #[derive(Debug)]
@@ -294,6 +304,34 @@ fn contains_wire(name: &[u8], apex: &[u8]) -> bool {
         }
         suffix = &suffix[usize::from(suffix[0]) + 1..];
     }
+}
+
+// RFC 4034 §6.1: canonical name ordering compares lowercase labels from the root.
+fn canonical_cmp(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+    fn labels<'a>(mut name: &'a [u8], result: &mut [&'a [u8]; 127]) -> usize {
+        let mut count = 0;
+        while name[0] != 0 {
+            let len = usize::from(name[0]);
+            result[count] = &name[1..1 + len];
+            count += 1;
+            name = &name[1 + len..];
+        }
+        count
+    }
+    let mut a = [&[][..]; 127];
+    let mut b = [&[][..]; 127];
+    let ac = labels(left, &mut a);
+    let bc = labels(right, &mut b);
+    for (a, b) in a[..ac].iter().rev().zip(b[..bc].iter().rev()) {
+        let order = a
+            .iter()
+            .map(u8::to_ascii_lowercase)
+            .cmp(b.iter().map(u8::to_ascii_lowercase));
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+    }
+    ac.cmp(&bc)
 }
 
 fn write_set(
@@ -554,6 +592,66 @@ impl Plugin for File {
                     &mut builder,
                     zone,
                     source,
+                    owner,
+                    Type::NSEC,
+                    Section::Authority,
+                    true,
+                )?;
+            }
+            // RFC 4035 §3.1.3.2: prove the missing name and wildcard for NXDOMAIN.
+            if dnssec && cut.is_none() && !exists && !synthesized {
+                let first = zone.previous_nsec(name);
+                if let Some(rr) = first {
+                    let owner = NameRef::parse(rr.owner.as_wire(), 0)
+                        .map_err(|_| pharos_server::Error::InvalidQuery)?;
+                    write_set(
+                        &mut builder,
+                        zone,
+                        rr.owner.as_wire(),
+                        owner,
+                        Type::NSEC,
+                        Section::Authority,
+                        true,
+                    )?;
+                }
+                let mut parent = name;
+                while parent[0] != 0 && !zone.exists(parent) {
+                    parent = &parent[1 + usize::from(parent[0])..];
+                }
+                let mut proof = [0u8; 255];
+                if parent.len() + 2 <= proof.len() {
+                    proof[0] = 1;
+                    proof[1] = b'*';
+                    proof[2..2 + parent.len()].copy_from_slice(parent);
+                    if let Some(rr) = zone.previous_nsec(&proof[..2 + parent.len()])
+                        && first.is_none_or(|first| first.owner != rr.owner)
+                    {
+                        let owner = NameRef::parse(rr.owner.as_wire(), 0)
+                            .map_err(|_| pharos_server::Error::InvalidQuery)?;
+                        write_set(
+                            &mut builder,
+                            zone,
+                            rr.owner.as_wire(),
+                            owner,
+                            Type::NSEC,
+                            Section::Authority,
+                            true,
+                        )?;
+                    }
+                }
+            }
+            // RFC 4035 §3.1.3.3: a wildcard answer includes a nonexistence proof.
+            if dnssec
+                && synthesized
+                && found
+                && let Some(rr) = zone.previous_nsec(name)
+            {
+                let owner = NameRef::parse(rr.owner.as_wire(), 0)
+                    .map_err(|_| pharos_server::Error::InvalidQuery)?;
+                write_set(
+                    &mut builder,
+                    zone,
+                    rr.owner.as_wire(),
                     owner,
                     Type::NSEC,
                     Section::Authority,
