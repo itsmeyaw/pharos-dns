@@ -104,8 +104,31 @@ impl Tsig {
         }
         let query = cx.query.without_final_tsig().expect("verified TSIG");
         let outcome = cx.run_with_message(query, next).await;
-        if outcome != Outcome::Response {
-            return outcome;
+        let error_code = match outcome {
+            Outcome::Response => None,
+            Outcome::Unanswered(code) => Some(code),
+            Outcome::Error(error) => {
+                pharos_server::logging::log_error("tsig", format_args!("{error}"));
+                Some(Rcode::SERVFAIL)
+            }
+            other => return other,
+        };
+        if let Some(code) = error_code {
+            let flags = 0x8000 | (cx.query.flags() & 0x7910) | (code.0 & 15);
+            let Ok(mut builder) = MessageBuilder::new(
+                cx.response,
+                cx.max_response_size.max(512),
+                cx.query.id(),
+                flags,
+            ) else {
+                return Outcome::Error(Error::ResponseBufferTooSmall);
+            };
+            if let Some(q) = cx.query.questions().next()
+                && builder.question(q.name, q.qtype, q.qclass).is_err()
+            {
+                return Outcome::Error(Error::ResponseBufferTooSmall);
+            }
+            let _ = builder.finish();
         }
         let index = algorithm.expect("checked above");
         let size =

@@ -6,6 +6,38 @@ use pharos_proto::{Message, Name, Rcode, TsigAlgorithm, TsigKey};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 #[tokio::test]
+async fn signed_unanswered_query_gets_signed_servfail() {
+    let blocks = parse("Corefile", ". {\n tsig {\n secret key. c2VjcmV0\n }\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut wire = Vec::with_capacity(512);
+    wire.extend_from_slice(&[0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1]);
+    key.sign(&mut wire, now, 300, None).unwrap();
+    let mac = key.verify(&wire, now, None, 0).unwrap().mac;
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::SERVFAIL);
+    key.verify(&response, now, Some(mac), 0).unwrap();
+}
+
+#[tokio::test]
 async fn signed_edns_response_survives_listener_finalization() {
     let blocks = parse(
         "Corefile",
