@@ -16,7 +16,7 @@ pharos-dnssec = { version = "0.1.0", path = "../pharos-dnssec", optional = true 
 pharos-kubernetes = { version = "0.1.0", path = "../pharos-kubernetes", optional = true }
 aws-config = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"], optional = true }
 aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
+serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 regex = { version = "1", optional = true }
 regex-automata = { version = "0.4", optional = true }

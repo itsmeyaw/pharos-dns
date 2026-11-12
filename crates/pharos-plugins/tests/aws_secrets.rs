@@ -19,7 +19,7 @@ fn parses_coredns_secret_json_without_network() {
 fn accepts_case_insensitive_and_repeated_secret_fields() {
     let public = serde_json::to_string(PUBLIC).unwrap();
     let private = serde_json::to_string(PRIVATE).unwrap();
-    let secret = format!(r#"{{"KEY":"bad","Key":{public},"PRIVATE":{private}}}"#);
+    let secret = format!(r#"{{"KEY":"bad","Key":{public},"key":null,"PRIVATE":{private}}}"#);
     assert_eq!(aws::parse_secret(&secret).unwrap().public.algorithm, 13);
 }
 
@@ -43,4 +43,7 @@ fn rejects_invalid_secret_without_exposing_it() {
         let error = aws::parse_secret(secret).unwrap_err();
         assert!(!error.contains("secret-marker"));
     }
+    let missing_private = serde_json::json!({ "key": PUBLIC }).to_string();
+    assert!(aws::parse_secret(&missing_private).is_err());
+    assert!(aws::parse_secret(r#"{"key":5,"private":""}"#).is_err());
 }
