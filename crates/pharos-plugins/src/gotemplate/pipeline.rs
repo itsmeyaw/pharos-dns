@@ -608,24 +608,6 @@ fn escape_values(
     Ok(())
 }
 
-#[cfg(test)]
-mod escape_tests {
-    use super::{Function, Scratch, escape_values};
-
-    #[test]
-    fn malformed_or_truncated_escape_input_returns_error() {
-        for input in [&b"a\xff"[..], &b"a\xf0\x9f\xa6"[..], &b"\xed\xa0\x80"[..]] {
-            let mut buffer = [0; 32];
-            buffer[..input.len()].copy_from_slice(input);
-            let mut scratch = Scratch {
-                bytes: &mut buffer,
-                len: input.len(),
-            };
-            assert!(escape_values(&Function::Html, 0, input.len(), &mut scratch).is_err());
-        }
-    }
-}
-
 impl Atom {
     fn required_slots(&self) -> usize {
         match self {
@@ -1643,4 +1625,22 @@ fn split_words(source: &str) -> Result<Vec<&str>, String> {
         result.push(&source[begin..]);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::{Function, Scratch, escape_values};
+
+    #[test]
+    fn malformed_or_truncated_escape_input_returns_error() {
+        for input in [&b"a\xff"[..], &b"a\xf0\x9f\xa6"[..], &b"\xed\xa0\x80"[..]] {
+            let mut buffer = [0; 32];
+            buffer[..input.len()].copy_from_slice(input);
+            let mut scratch = Scratch {
+                bytes: &mut buffer,
+                len: input.len(),
+            };
+            assert!(escape_values(&Function::Html, 0, input.len(), &mut scratch).is_err());
+        }
+    }
 }
