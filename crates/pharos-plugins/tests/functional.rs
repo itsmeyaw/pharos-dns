@@ -89,10 +89,10 @@ mod dnssec {
     mod cases;
     #[path = "dnssec_extra.rs"]
     mod extra;
-    #[path = "dnssec_more.rs"]
-    mod more;
     #[path = "dnssec_metrics.rs"]
     mod metrics;
+    #[path = "dnssec_more.rs"]
+    mod more;
     #[path = "dnssec_setup.rs"]
     mod setup;
 }
