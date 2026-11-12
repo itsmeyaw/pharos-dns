@@ -2,18 +2,22 @@ use regex_automata::nfa::thompson::{
     Builder, NFA, State, WhichCaptures,
     pikevm::{Cache, PikeVM},
 };
+#[cfg(feature = "plugin-rewrite")]
+use std::sync::Mutex;
 use std::{
     cell::RefCell,
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
 };
 
+#[cfg(feature = "plugin-rewrite")]
 #[derive(Debug)]
 pub(crate) struct Regex {
     vm: PikeVM,
     cache: Mutex<Cache>,
 }
 
+#[cfg(feature = "plugin-rewrite")]
 impl Regex {
     pub(crate) fn new(pattern: &str) -> Result<Self, String> {
         let (vm, warmer) = build(pattern)?;
