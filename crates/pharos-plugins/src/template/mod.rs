@@ -947,7 +947,7 @@ mod tests {
                     })
                     .sum::<usize>()
         }
-        for (name, options) in [
+        for ((name, options), expected) in [
             ("nxdomain", "rcode NXDOMAIN"),
             (
                 "address",
@@ -975,7 +975,11 @@ mod tests {
             ),
             ("cname", r#"match "^foogle\.com\.$""#),
             ("search", r#"match "example\.com\.(dc1\.example\.com\.)$""#),
-        ] {
+        ]
+        .into_iter()
+        .zip([
+            132_270, 140_974, 138_798, 136_302, 143_278, 145_982, 136_878, 132_366, 134_606,
+        ]) {
             let configured =
                 configure(&format!(". {{\n template IN A {{\n {options}\n }}\n}}")).unwrap();
             let rule = &configured[0].config.template.as_ref().unwrap().rules[0];
@@ -986,6 +990,13 @@ mod tests {
                 .with(|workspace| payload(workspace));
             eprintln!("{name}: {bytes} bytes");
             assert!(bytes < 1_048_576);
+            // README: measured on 64-bit macOS; other platforms only get the 1 MiB bound.
+            if cfg!(all(target_os = "macos", target_pointer_width = "64")) {
+                assert!(
+                    bytes.abs_diff(expected) * 50 <= expected,
+                    "{name}: {bytes} bytes, README says {expected}"
+                );
+            }
         }
     }
     #[test]
