@@ -47,6 +47,15 @@ The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS
 Responses, and the harness cannot mask that difference.
 
+The `erratic-drop` scenario uses a root zone so the startup probe consumes the
+first two queries: the first is dropped, the second answered, and the single
+compared query is answered under `drop 3`. The harness cannot compare dropped
+queries because a timeout aborts the scenario; the default and `drop 2` plus
+`truncate 2` examples are therefore skipped. `erratic-delay` and
+`erratic-truncate-delay` compare responses from the other README examples, not
+elapsed time. The latter exercises CoreDNS's truncation bitmask on UDP and TCP.
+Truncated AXFR is skipped because the harness requires a closing SOA.
+
 The `tsig` transfer README example is skipped until the `file` Plugin is
 available. Signed scenarios authenticate each Response before comparing its
 other fields; TSIG timestamps and MAC bytes are not compared between servers.

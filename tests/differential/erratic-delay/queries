@@ -1,0 +1,5 @@
+example.org. A IN udp
+example.org. AAAA IN tcp
+example.org. MX IN udp
+example.org. A IN tcp
+example.org. TXT IN udp
