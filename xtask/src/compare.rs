@@ -226,12 +226,14 @@ fn record_equal(
     if mask_rrsig
         && let (
             Rdata::Rrsig {
+                original_ttl: at,
                 expiration: ae,
                 inception: ai,
                 signature: asig,
                 ..
             },
             Rdata::Rrsig {
+                original_ttl: bt,
                 expiration: be,
                 inception: bi,
                 signature: bsig,
@@ -244,6 +246,9 @@ fn record_equal(
         if asig.len() != bsig.len() || validity >= 0x8000_0000 || validity != be.wrapping_sub(*bi) {
             return false;
         }
+        // RFC 4034 §3.1.4: Original TTL is the signed RRset's TTL; CoreDNS hardcodes 3600.
+        *at = 0;
+        *bt = 0;
         *ae = 0;
         *be = 0;
         *ai = 0;
@@ -271,12 +276,31 @@ mod tests {
     }
 
     #[test]
+    fn rrsig_original_ttl_mask_is_opt_in() {
+        let left = [
+            0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, b'x', 0, 0, 46, 0, 1, 0, 0, 0, 60, 0, 24, 0,
+            1, 15, 1, 0, 0, 0, 60, 0, 0, 0, 10, 0, 0, 0, 2, 0x12, 0x34, 1, b'a', 0, 10, 11, 12,
+        ];
+        for offset in 29..33 {
+            let mut right = left;
+            right[offset] ^= 1;
+            let (a, b) = (
+                Message::parse(&left).unwrap(),
+                Message::parse(&right).unwrap(),
+            );
+            assert!(super::compare_with_soa_serial(&a, &b, 0, false, false, false, false).is_err());
+            assert!(super::compare_with_soa_serial(&a, &b, 0, false, false, false, true).is_ok());
+        }
+    }
+
+    #[test]
     fn rrsig_mask_is_opt_in_and_preserves_other_fields_and_counts() {
         let left = [
             0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, b'x', 0, 0, 46, 0, 1, 0, 0, 0, 60, 0, 24, 0,
             1, 15, 1, 0, 0, 0, 60, 0, 0, 0, 10, 0, 0, 0, 2, 0x12, 0x34, 1, b'a', 0, 10, 11, 12,
         ];
         let mut right = left;
+        right[29..33].copy_from_slice(&7200_u32.to_be_bytes()); // Original TTL
         right[36] = 12; // expiration
         right[40] = 4; // inception
         right[46] = 13; // signature
@@ -311,9 +335,7 @@ mod tests {
         shifted[33..37].copy_from_slice(&5_u32.to_be_bytes());
         shifted[37..41].copy_from_slice(&(u32::MAX - 2).to_be_bytes());
         assert!(masked(&wrapping, &shifted, true).is_ok());
-        for offset in [
-            3, 13, 16, 18, 22, 25, 26, 27, 28, 29, 30, 31, 32, 41, 42, 44,
-        ] {
+        for offset in [3, 13, 16, 18, 22, 25, 26, 27, 28, 41, 42, 44] {
             let mut changed = right;
             changed[offset] ^= 1;
             assert!(masked(&left, &changed, true).is_err(), "offset {offset}");

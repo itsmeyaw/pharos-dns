@@ -31,8 +31,9 @@ Each scenario is a directory containing:
   that exact pair of flag values on that Query; other fields remain checked.
   `mask soa.serial` ignores only the SOA serial, for scenarios that explicitly
   opt in; Kubernetes SOA serials can depend on each process's startup time.
-  `mask rrsig` ignores only RRSIG signature contents and inception/expiration
-  timestamps; signature validity duration, lengths, all other fields and record counts are compared.
+  `mask rrsig` ignores only the RRSIG Original TTL, signature contents and
+  inception/expiration timestamps; signature validity duration, signature length,
+  all other fields and record counts are compared.
 - Any other files or subdirectories are copied into separate temporary working
   directories for both processes, preserving relative paths.
 
@@ -55,7 +56,9 @@ examples with unsigned and DO-bit Queries, including apex DNSKEY, ordinary
 responses and Kubernetes Negative Responses.
 Their public test keys reuse the Ed25519 fixture in `crates/pharos-dnssec/tests`;
 they must never be used for real zones. The opt-in RRSIG mask accommodates
-independently generated signatures and signing times; it does not verify signatures.
+independently generated signatures and signing times. It also permits Pharos's
+RRset Original TTL to differ from CoreDNS's hardcoded 3600 (RFC 4034 §3.1.4).
+It does not verify signatures.
 The AWS Secrets Manager README example is skipped because it requires live AWS
 credentials and a provisioned secret; the default build also disables the AWS
 feature.
