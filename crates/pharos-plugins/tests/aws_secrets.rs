@@ -16,6 +16,14 @@ fn parses_coredns_secret_json_without_network() {
 }
 
 #[test]
+fn accepts_case_insensitive_and_repeated_secret_fields() {
+    let public = serde_json::to_string(PUBLIC).unwrap();
+    let private = serde_json::to_string(PRIVATE).unwrap();
+    let secret = format!(r#"{{"KEY":"bad","Key":{public},"PRIVATE":{private}}}"#);
+    assert_eq!(aws::parse_secret(&secret).unwrap().public.algorithm, 13);
+}
+
+#[test]
 fn rejects_invalid_secret_without_exposing_it() {
     for secret in [
         "not json",

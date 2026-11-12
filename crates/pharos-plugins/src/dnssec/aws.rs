@@ -1,10 +1,47 @@
 use pharos_dnssec::keys::{KeyPair, parse_key_pair};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::MapAccess};
 
-#[derive(Deserialize)]
+#[derive(Default)]
 struct Secret {
     key: String,
     private: String,
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Secret;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a Secrets Manager key object")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Secret, M::Error> {
+                let mut secret = Secret::default();
+                while let Some(field) = map.next_key::<String>()? {
+                    let target = if field.eq_ignore_ascii_case("key") {
+                        Some(&mut secret.key)
+                    } else if field.eq_ignore_ascii_case("private") {
+                        Some(&mut secret.private)
+                    } else {
+                        None
+                    };
+                    if let Some(target) = target {
+                        if let Some(value) = map.next_value::<Option<String>>()? {
+                            *target = value;
+                        }
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(secret)
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
+    }
 }
 
 pub(super) fn parse_secret(secret: &str) -> Result<KeyPair, String> {
