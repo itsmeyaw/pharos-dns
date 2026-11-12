@@ -12,4 +12,6 @@ external 60 IN CNAME outside.test.
 *.wild 60 IN A 192.0.2.2
 child 3600 IN NS ns.child
 ns.child 3600 IN A 192.0.2.54
+aliaschild 60 IN CNAME host.child
+host.child 60 IN A 192.0.2.55
 leaf.empty 60 IN A 192.0.2.3
