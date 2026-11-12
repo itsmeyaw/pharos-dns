@@ -4,10 +4,8 @@
 
 ## tsig
 
-- This Plugin is incomplete and is not enabled by default. Do not use it for authentication yet.
-- Earlier Plugins can modify a Response after this Plugin signs it. For example, `nsid` removes the TSIG when adding its option. Signing must be deferred until all Response modifications and Listener finalization are complete.
 - Zone Transfer streams are not yet available on this branch and therefore cannot be signed.
-- Not all CoreDNS setup, error, or differential cases have been ported or checked.
+- The Listener rejects UPDATE before the Plugin Chain, as CoreDNS v1.15.0 does without an UPDATE handler; `require_opcode UPDATE` cannot yet authenticate UPDATE traffic.
 
 ## Sources
 

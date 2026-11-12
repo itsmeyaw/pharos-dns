@@ -36,6 +36,10 @@ Each scenario is a directory containing:
 
 IDs and RR order within each section are ignored; all other fields are compared.
 
+The `tsig` transfer README example is skipped until the `transfer` Plugin and
+Zone Transfer streams are available. The current differential harness sends
+unsigned Queries only; signed TSIG Responses are verified by functional tests.
+
 The `kubernetes-*` scenarios exercise the small, read-only API fixture in
 `crates/pharos-kubernetes/examples/differential.rs`, sharing the HTTP server
 with the memory example. It serves static Services, EndpointSlices, Pods and
@@ -47,4 +51,3 @@ node name; unsupported field selectors return an error. Run its tests with
 comparisons with `cargo xtask coredns` followed by `cargo xtask diff` after the
 Kubernetes Plugin is available. The zonal scenario also requires zonal Plugin
 and store support.
-

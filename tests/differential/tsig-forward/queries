@@ -1,0 +1,2 @@
+auth.zone. A IN udp
+auth.zone. AAAA IN tcp

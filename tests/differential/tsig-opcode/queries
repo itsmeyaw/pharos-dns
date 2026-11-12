@@ -1,0 +1,4 @@
+dynamic.zone. SOA IN udp +opcode=UPDATE
+dynamic.zone. SOA IN tcp +opcode=UPDATE
+dynamic.zone. SOA IN udp +opcode=NOTIFY
+dynamic.zone. SOA IN tcp +opcode=NOTIFY
