@@ -652,6 +652,20 @@ fn default_and_print_format_capture_lists_and_maps_like_go() {
 }
 
 #[test]
+fn index_and_slice_without_indices_keep_the_input() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["one", "two"];
+    let template = Template::compile("{{ len (index .Match) }}|{{ len (slice .Match) }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "2|2");
+    let invalid = Template::compile("{{ index .Var.missing }}").unwrap();
+    assert!(invalid.render(&data, &mut String::new()).is_err());
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

@@ -172,8 +172,8 @@ impl Pipeline {
                         | Function::Ge => count == 2,
                         Function::Len | Function::Not => count == 1,
                         Function::ParseInt => count == 3,
-                        Function::Index => count >= 2,
-                        Function::Slice => (2..=4).contains(&count),
+                        Function::Index => count >= 1,
+                        Function::Slice => (1..=4).contains(&count),
                         Function::Print
                         | Function::Println
                         | Function::Html
@@ -253,6 +253,9 @@ impl Pipeline {
                         }
                         Function::Index => {
                             let mut indexed = argument(args, 0, value, data, dot, scratch)?;
+                            if matches!(indexed, ResultValue::Scalar(None | Some(Value::Nil))) {
+                                return Err(fmt::Error);
+                            }
                             for index in 1..count {
                                 let key = argument(args, index, value, data, dot, scratch)?;
                                 indexed = indexed.index(key, scratch)?;
@@ -318,10 +321,14 @@ impl Pipeline {
                         Function::Slice => {
                             let input = argument(args, 0, value, data, dot, scratch)?;
                             let len = input.length(scratch)?;
-                            let low = usize::try_from(
-                                argument(args, 1, value, data, dot, scratch)?.integer()?,
-                            )
-                            .map_err(|_| fmt::Error)?;
+                            let low = if count >= 2 {
+                                usize::try_from(
+                                    argument(args, 1, value, data, dot, scratch)?.integer()?,
+                                )
+                                .map_err(|_| fmt::Error)?
+                            } else {
+                                0
+                            };
                             let high = if count >= 3 {
                                 usize::try_from(
                                     argument(args, 2, value, data, dot, scratch)?.integer()?,
