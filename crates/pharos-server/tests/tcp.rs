@@ -533,6 +533,18 @@ async fn idle_connection_times_out() {
 }
 
 #[tokio::test]
+async fn connection_outlives_first_read_timeout_after_a_query() {
+    let (listener, mut stream) = connect(Echo).await;
+    send(&mut stream, b"one").await;
+    assert_eq!(receive(&mut stream).await, b"one");
+    // Past the 3 s first-read timeout, inside the 10 s idle timeout.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    send(&mut stream, b"two").await;
+    assert_eq!(receive(&mut stream).await, b"two");
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn shutdown_does_not_wait_for_incomplete_frame() {
     let (listener, mut stream) = connect(Echo).await;
     stream.write_all(&[0, 4, b'a']).await.unwrap();
