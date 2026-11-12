@@ -1,0 +1,4 @@
+$ORIGIN example.org.
+@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 7200 3600 1209600 3600
+@ 3600 IN NS ns.example.org.
+mapped 60 IN DNAME target.test.

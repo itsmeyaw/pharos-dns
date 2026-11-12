@@ -1,0 +1,6 @@
+example.org:{port} {
+    file db.source
+}
+leaf.target.test:{port} {
+    file db.target
+}
