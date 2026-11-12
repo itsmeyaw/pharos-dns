@@ -50,4 +50,4 @@ Templates are compiled at setup and rendered into a caller-provided `String`.
   malformed actions and exhausted workspaces return errors.
 - Map ranges and printing use quadratic scans for Go's sorted key order without
   allocation. `js` and `printf %q` use Rust regex Unicode categories, which may differ from
-  the Unicode version used by Go.
+  the Unicode version used by Go; each worker initializes those regex caches on first use.

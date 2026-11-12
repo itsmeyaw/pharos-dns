@@ -7,11 +7,20 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
 - Go templates and expressions use the supported subsets documented in the
   [template engine](../gotemplate/README.md) and [expression engine](../expression/README.md).
 - Match expressions use Rust regex syntax and Unicode rules rather than Go RE2.
-- Setup rejects more than 127 capture groups per match and more than 32 variables
-  per rule. Expression evaluation has 4,096 bytes of scratch per variable and
-  expression; exhausting it returns SERVFAIL.
-- Queries using the same match expression serialize while its capture and
-  expression workspaces are in use, including record rendering.
+- Variables and expressions of one rule share 65,535 bytes of scratch;
+  exhausting it returns SERVFAIL. Template rendering has a separate
+  65,535-byte workspace per rule and worker.
+- Each worker keeps a workspace per rule; first use may allocate. Memory grows
+  with the regexes and their capture groups. Workspaces for removed rules are
+  reclaimed on that worker's next workspace initialization or thread exit.
+- Slot reuse relies on the standard library's current in-place `Vec` collection;
+  warmed allocation tests check this optimization on the pinned Rust toolchain.
+- On 64-bit macOS, README example rule workspaces measured 132,270 bytes
+  (NXDOMAIN), 140,974 (address), 138,798 (reverse), 136,302 (hex), 143,278
+  (LAN), 145,982 (two patterns), 136,878 (authority/MX), 132,366 (CNAME), and
+  134,606 (search regex). These include scratch, matcher caches, capture slots,
+  and workspace vectors, but exclude thread-local hash-table bookkeeping,
+  allocator overhead, and shared compiled configuration.
 - Failure metric `template` labels use the configured source, not Go's
   normalized template parse tree. Wildcard class/type metric labels allocate
   when a combination first matches; later increments use cached handles.
