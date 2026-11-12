@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::{self, Write},
     hash::{Hash, Hasher},
     net::IpAddr,
 };
@@ -344,38 +345,87 @@ struct Target<'a> {
 }
 
 impl Target<'_> {
-    fn name<'a>(&self, wire: &'a mut [u8; 255]) -> Option<NameRef<'a>> {
-        if normalized_ip(&self.address.ip).is_none() {
-            return hostname(&self.address.ip, 0, wire).ok();
+    // RFC 1035 §2.3.4: 2304 bytes covers escaped input labels and the longest wire-format zone.
+    fn presentation<'a>(&self, bytes: &'a mut [u8; 2304]) -> Option<&'a [u8]> {
+        struct Output<'a> {
+            bytes: &'a mut [u8],
+            len: usize,
         }
-        let mut base_wire = [0; 255];
-        let base = child(
-            &[
-                self.service.name.as_bytes(),
-                self.service.namespace.as_bytes(),
-            ],
-            self.zone,
-            &mut base_wire,
-        )?;
-        let mut label_wire = [0; 64];
-        endpoint_owner(
-            endpoint_label(self.address, self.pod_names, &mut label_wire),
-            base,
-            wire,
-        )
+        impl Output<'_> {
+            fn append(&mut self, value: &[u8]) -> Option<()> {
+                let end = self.len.checked_add(value.len())?;
+                self.bytes.get_mut(self.len..end)?.copy_from_slice(value);
+                self.len = end;
+                Some(())
+            }
+        }
+        impl Write for Output<'_> {
+            fn write_str(&mut self, value: &str) -> fmt::Result {
+                self.append(value.as_bytes()).ok_or(fmt::Error)
+            }
+        }
+        let mut output = Output { bytes, len: 0 };
+        if normalized_ip(&self.address.ip).is_none() {
+            let host = self.address.ip.as_bytes();
+            output.append(host)?;
+            let fully_qualified = host.last() == Some(&b'.')
+                && host[..host.len() - 1]
+                    .iter()
+                    .rev()
+                    .take_while(|&&b| b == b'\\')
+                    .count()
+                    % 2
+                    == 0;
+            if !fully_qualified {
+                output.append(b".")?;
+            }
+        } else {
+            let mut label_wire = [0; 64];
+            let label = endpoint_label(self.address, self.pod_names, &mut label_wire);
+            let mut components = label.rsplit(|&byte| byte == b'/');
+            if label.is_empty() || label.last() == Some(&b'/') {
+                components.next();
+            }
+            for component in components {
+                output.append(component)?;
+                output.append(b".")?;
+            }
+            output.append(self.service.name.as_bytes())?;
+            output.append(b".")?;
+            output.append(self.service.namespace.as_bytes())?;
+            output.append(b".")?;
+            // CoreDNS msg.Path and msg.Domain reverse slash-separated zone components.
+            for label in self.zone.labels() {
+                for component in label
+                    .rsplit(|&byte| byte == b'/')
+                    .filter(|part| !part.is_empty())
+                {
+                    for &byte in component {
+                        if matches!(
+                            byte,
+                            b'.' | b' ' | b'\'' | b'@' | b';' | b'(' | b')' | b'"' | b'\\'
+                        ) {
+                            output.append(&[b'\\', byte])?;
+                        } else if (b'!'..=b'~').contains(&byte) {
+                            output.append(&[byte])?;
+                        } else {
+                            write!(output, "\\{byte:03}").ok()?;
+                        }
+                    }
+                    output.append(b".")?;
+                }
+            }
+        }
+        Some(&output.bytes[..output.len])
     }
 }
 
 impl PartialEq for Target<'_> {
     fn eq(&self, other: &Self) -> bool {
-        let mut left = [0; 255];
-        let mut right = [0; 255];
+        let mut left = [0; 2304];
+        let mut right = [0; 2304];
         // RFC 1035 §2.3.3: DNS names ignore case, but CoreDNS SRV dedup compares target bytes.
-        match (self.name(&mut left), other.name(&mut right)) {
-            (Some(left), Some(right)) => left.labels().eq(right.labels()),
-            (None, None) => true,
-            _ => false,
-        }
+        self.presentation(&mut left) == other.presentation(&mut right)
     }
 }
 
@@ -383,15 +433,8 @@ impl Eq for Target<'_> {}
 
 impl Hash for Target<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let mut wire = [0; 255];
-        if let Some(name) = self.name(&mut wire) {
-            true.hash(state);
-            for label in name.labels() {
-                label.hash(state);
-            }
-        } else {
-            false.hash(state);
-        }
+        let mut bytes = [0; 2304];
+        self.presentation(&mut bytes).hash(state);
     }
 }
 
@@ -510,6 +553,39 @@ where
     Ok(())
 }
 
+// RFC 1995 §2: current IXFR and UDP IXFR return only the current SOA.
+fn soa_only(request: TransferRequest<'_>, current: u32) -> bool {
+    request.serial != 0 && request.serial >= current
+        || request.qtype == Type::IXFR && request.protocol == Protocol::Udp
+}
+
+fn scratch_capacity<'a>(
+    index: &'a Index,
+    services: impl Iterator<Item = &'a Service>,
+    request: TransferRequest<'_>,
+    current: u32,
+    headless: bool,
+) -> Result<usize, Error> {
+    if soa_only(request, current) {
+        return Ok(0);
+    }
+    let mut capacity = 0;
+    for service in services {
+        let needed = if headless && service.external_ips.is_empty() && service.headless() {
+            entries(index, service)
+                .count()
+                .checked_mul(4)
+                .ok_or(Error::ResponseBufferTooSmall)?
+        } else if !service.external_ips.is_empty() {
+            service.ports.len()
+        } else {
+            0
+        };
+        capacity = capacity.max(needed);
+    }
+    Ok(capacity)
+}
+
 fn generate<'a>(
     snapshot: &mut Snapshot<'a>,
     plugin: &External,
@@ -526,9 +602,7 @@ fn generate<'a>(
         snapshot.authoritative = false;
     }
     snapshot.soa(current)?;
-    if snapshot.request.serial != 0 && snapshot.request.serial >= current
-        || snapshot.request.qtype == Type::IXFR && snapshot.request.protocol == Protocol::Udp
-    {
+    if soa_only(snapshot.request, current) {
         return Ok(());
     }
     let ns = snapshot.ns;
@@ -602,25 +676,19 @@ fn encode(
         bytes: None,
         size: 0,
     };
-    let mut capacity = 0;
-    for service in index.services_unfiltered() {
-        let needed =
-            if plugin.config.headless && service.external_ips.is_empty() && service.headless() {
-                entries(index, service)
-                    .count()
-                    .checked_mul(4)
-                    .ok_or(Error::ResponseBufferTooSmall)?
-            } else if !service.external_ips.is_empty() {
-                service.ports.len()
-            } else {
-                0
-            };
-        capacity = capacity.max(needed);
-    }
+    let capacity = scratch_capacity(
+        index,
+        index.services_unfiltered(),
+        request,
+        index.external_serial(),
+        plugin.config.headless,
+    )?;
     // shortcut: allocate transfer scratch once; reuse immutable snapshots for incremental streaming.
     let mut seen = HashMap::new();
-    seen.try_reserve(capacity)
-        .map_err(|_| Error::ResponseBufferTooSmall)?;
+    if capacity > 0 {
+        seen.try_reserve(capacity)
+            .map_err(|_| Error::ResponseBufferTooSmall)?;
+    }
     generate(&mut snapshot, plugin, kubernetes, index, &mut seen)?;
     // shortcut: the snapshot and Stream each allocate once; use immutable snapshots for incremental streaming.
     let mut bytes = Vec::new();
@@ -848,6 +916,49 @@ mod tests {
         assert_eq!(message.answer_count(), 1);
         assert_eq!(message.answers().next().unwrap().rtype, Type::SOA);
         assert!(!stream.next(&mut wire).unwrap());
+    }
+
+    #[test]
+    fn soa_only_ixfr_does_not_scan_services_for_scratch() {
+        let store = pharos_kubernetes::store::Store::default();
+        let zone: Name = "example.com.".parse().unwrap();
+        for (serial, protocol) in [
+            (5, Protocol::Tcp),
+            (6, Protocol::Tcp),
+            (0, Protocol::Udp),
+            (1, Protocol::Udp),
+        ] {
+            store.with_read(|index| {
+                let services = std::iter::from_fn(|| -> Option<&Service> {
+                    panic!("unexpected service scan")
+                });
+                assert_eq!(
+                    scratch_capacity(
+                        index,
+                        services,
+                        request(&zone, Type::IXFR, serial, protocol),
+                        5,
+                        true
+                    )
+                    .unwrap(),
+                    0
+                );
+            });
+        }
+        let service = fixture_service();
+        store.with_read(|index| {
+            assert_eq!(
+                scratch_capacity(
+                    index,
+                    std::iter::once(&service),
+                    request(&zone, Type::AXFR, 0, Protocol::Tcp),
+                    5,
+                    false
+                )
+                .unwrap(),
+                2
+            );
+        });
     }
 
     fn fixture_service() -> pharos_kubernetes::object::Service {
@@ -1413,6 +1524,12 @@ mod tests {
             ("192.0.2.1", "node"),
             ("node.web.hidden.example.com.", "alias"),
             ("other.web.hidden.example.com.", "alias"),
+            ("no\\100e.web.hidden.example.com", "alias"),
+            ("no\\100e.web.hidden.example.com.", "alias"),
+            ("192.0.2.2", "node."),
+            ("tail\\.", "alias"),
+            ("tail\\..", "alias"),
+            ("192.0.2.3", "no\\100e"),
         ]
         .into_iter()
         .map(|(ip, hostname)| EndpointAddress {
@@ -1434,9 +1551,65 @@ mod tests {
                 },
                 80,
             );
-            assert_eq!(seen.insert(key, i), if i == 1 { Some(0) } else { None });
+            assert_eq!(
+                seen.insert(key, i),
+                [
+                    None,
+                    Some(0),
+                    None,
+                    None,
+                    Some(3),
+                    None,
+                    None,
+                    Some(6),
+                    Some(4)
+                ][i]
+            );
         }
-        assert_eq!(seen.len(), 2);
+        assert_eq!(seen.len(), 5);
+    }
+
+    #[test]
+    fn headless_ip_target_uses_coredns_zone_path_presentation() {
+        let service = fixture_service();
+        for (zone_text, target) in [
+            ("a\\.b.example.com.", "node.web.hidden.a\\.b.example.com."),
+            ("a/b.example.com.", "node.web.hidden.b.a.example.com."),
+            (".", "node.web.hidden."),
+        ] {
+            let zone: Name = zone_text.parse().unwrap();
+            let addresses = [
+                EndpointAddress {
+                    ip: "192.0.2.1".into(),
+                    hostname: "node".into(),
+                    node_name: String::new(),
+                    target_ref_name: String::new(),
+                },
+                EndpointAddress {
+                    ip: target.into(),
+                    hostname: "alias".into(),
+                    node_name: String::new(),
+                    target_ref_name: String::new(),
+                },
+            ];
+            let mut seen = HashMap::new();
+            for (i, address) in addresses.iter().enumerate() {
+                let key = Seen::Bare(
+                    Target {
+                        address,
+                        service: &service,
+                        zone: NameRef::parse(zone.as_wire(), 0).unwrap(),
+                        pod_names: false,
+                    },
+                    80,
+                );
+                assert_eq!(
+                    seen.insert(key, i),
+                    if i == 0 { None } else { Some(0) },
+                    "{zone_text}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1454,6 +1627,9 @@ mod tests {
             ("192.0.2.2", "other"),
             ("Node.web.hidden.example.com", "alias4"),
             ("no\\100e.web.hidden.example.com", "alias5"),
+            ("192.0.2.3", "no\\100e"),
+            ("192.0.2.4", "nod\\.e"),
+            ("nod\\.e.web.hidden.example.com.", "alias6"),
         ]
         .into_iter()
         .map(|(ip, hostname)| EndpointAddress {
@@ -1499,7 +1675,7 @@ mod tests {
             }
         }
         let mut expected = Vec::new();
-        for name in ["node", "other", "Node"] {
+        for name in ["node", "other", "Node", "node", "nod\\.e"] {
             for port in [80, 81] {
                 for _ in 0..2 {
                     expected.push((port, format!("{name}.web.hidden.example.com.")));
