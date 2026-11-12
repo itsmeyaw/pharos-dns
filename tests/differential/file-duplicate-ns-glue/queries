@@ -1,0 +1,4 @@
+name.child.example.org. A IN udp +bufsize=1232
+name.child.example.org. A IN udp +dnssec +bufsize=1232
+example.org. NS IN udp +bufsize=1232
+example.org. NS IN udp +dnssec +bufsize=1232
