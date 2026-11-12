@@ -14,8 +14,8 @@ String slices must end at UTF-8 boundaries; capture slices cannot expose capacit
 caller-provided storage for larger intermediates. Pipelines accept at most
 1,024 arguments. Overflowing either limit is an error.
 `js` uses Rust regex Unicode character categories, which may differ from Go's Unicode version.
-`printf` supports string precision and fixed-float precision; `%g` with width,
-flags, or precision is rejected, and the full Go `fmt` formatting language is
+`printf` supports string, integer, and fixed-float precision; `%g` precision
+is rejected, and the full Go `fmt` formatting language is
 not yet implemented.
 When `Data.message` is supplied, `.Message` exposes the header fields (`Id`,
 `Opcode`, `Rcode`, and flag booleans), `.Message.Question` supports indexing,

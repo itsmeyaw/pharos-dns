@@ -713,6 +713,20 @@ fn nil_is_an_argument_but_not_a_standalone_command() {
 }
 
 #[test]
+fn printf_applies_width_and_integer_precision_to_common_verbs() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile(
+        r#"{{ printf "%5t|%5c|%5q|%5T|%5v|%08g|%.3d" true 65 "x" 1 "x" -3.5 7 }}"#,
+    )
+    .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, " true|    A|  \"x\"|  int|    x|-00003.5|007");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

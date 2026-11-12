@@ -750,21 +750,23 @@ fn format_values(
                     }
                 }
                 'd' | 'x' | 'X' | 'o' | 'b' => {
-                    if precision.is_some() {
-                        return Err(fmt::Error);
-                    }
                     let (negative, number) = match value {
                         ResultValue::Scalar(Some(Value::Int(v))) => (v < 0, v.unsigned_abs()),
                         ResultValue::Uint(v) => (false, v),
                         _ => return Err(fmt::Error),
                     };
                     let bits = (64 - number.leading_zeros()) as usize;
-                    let digits = match verb {
-                        'x' | 'X' => bits.div_ceil(4).max(1),
-                        'o' => bits.div_ceil(3).max(1),
-                        'b' => bits.max(1),
-                        _ => number.checked_ilog10().map_or(1, |n| n as usize + 1),
+                    let digits = if number == 0 && precision == Some(0) {
+                        0
+                    } else {
+                        match verb {
+                            'x' | 'X' => bits.div_ceil(4).max(1),
+                            'o' => bits.div_ceil(3).max(1),
+                            'b' => bits.max(1),
+                            _ => number.checked_ilog10().map_or(1, |n| n as usize + 1),
+                        }
                     };
+                    let leading = precision.unwrap_or(0).saturating_sub(digits);
                     let prefix = if alternate {
                         match verb {
                             'x' => "0x",
@@ -777,8 +779,9 @@ fn format_values(
                         ""
                     };
                     let signed = negative || plus;
-                    let padding = width.saturating_sub(digits + usize::from(signed) + prefix.len());
-                    if !zero && !left {
+                    let padding =
+                        width.saturating_sub(digits + leading + usize::from(signed) + prefix.len());
+                    if (!zero || precision.is_some()) && !left {
                         for _ in 0..padding {
                             scratch.write_char(' ')?;
                         }
@@ -789,17 +792,22 @@ fn format_values(
                         scratch.write_char('+')?;
                     }
                     scratch.write_str(prefix)?;
-                    if zero && !left {
+                    if zero && !left && precision.is_none() {
                         for _ in 0..padding {
                             scratch.write_char('0')?;
                         }
                     }
-                    match verb {
-                        'x' => write!(scratch, "{number:x}")?,
-                        'X' => write!(scratch, "{number:X}")?,
-                        'o' => write!(scratch, "{number:o}")?,
-                        'b' => write!(scratch, "{number:b}")?,
-                        _ => write!(scratch, "{number}")?,
+                    for _ in 0..leading {
+                        scratch.write_char('0')?;
+                    }
+                    if digits != 0 {
+                        match verb {
+                            'x' => write!(scratch, "{number:x}")?,
+                            'X' => write!(scratch, "{number:X}")?,
+                            'o' => write!(scratch, "{number:o}")?,
+                            'b' => write!(scratch, "{number:b}")?,
+                            _ => write!(scratch, "{number}")?,
+                        }
                     }
                     if left {
                         for _ in 0..padding {
@@ -823,24 +831,47 @@ fn format_values(
                 },
                 'g' => match value {
                     ResultValue::Scalar(Some(Value::Float(v))) => {
-                        if width != 0 || precision.is_some() || plus || left || zero || alternate {
+                        if precision.is_some() || alternate {
                             return Err(fmt::Error);
                         }
+                        let start = scratch.len;
+                        if plus && v.is_sign_positive() && v.is_finite() {
+                            scratch.write_char('+')?;
+                        }
                         super::float::write_float(scratch, v)?;
+                        pad_segment(scratch, start, width, left, zero)?;
                     }
                     _ => return Err(fmt::Error),
                 },
                 't' => match value {
-                    ResultValue::Scalar(Some(Value::Bool(v))) => write!(scratch, "{v}")?,
+                    ResultValue::Scalar(Some(Value::Bool(v))) => {
+                        let start = scratch.len;
+                        write!(scratch, "{v}")?;
+                        pad_segment(scratch, start, width, left, zero)?;
+                    }
                     _ => return Err(fmt::Error),
                 },
-                'q' if value.is_string() => quote_value(value, scratch)?,
+                'q' if value.is_string() => {
+                    let start = scratch.len;
+                    quote_value(value, scratch)?;
+                    pad_segment(scratch, start, width, left, zero)?;
+                }
                 'c' => {
+                    let start = scratch.len;
                     let scalar = u32::try_from(value.integer()?).unwrap_or(u32::MAX);
                     scratch.write_char(char::from_u32(scalar).unwrap_or('\u{fffd}'))?;
+                    pad_segment(scratch, start, width, left, zero)?;
                 }
-                'T' => scratch.write_str(value.type_name())?,
-                'v' => scratch.append(value)?,
+                'T' => {
+                    let start = scratch.len;
+                    scratch.write_str(value.type_name())?;
+                    pad_segment(scratch, start, width, left, zero)?;
+                }
+                'v' => {
+                    let start = scratch.len;
+                    scratch.append(value)?;
+                    pad_segment(scratch, start, width, left, zero)?;
+                }
                 _ => return Err(fmt::Error),
             }
         }
@@ -872,6 +903,37 @@ fn format_values(
     if matches!(function, Function::Println) {
         scratch.write_char('\n')?;
     }
+    Ok(())
+}
+
+fn pad_segment(
+    scratch: &mut Scratch<'_>,
+    start: usize,
+    width: usize,
+    left: bool,
+    zero: bool,
+) -> fmt::Result {
+    let text = std::str::from_utf8(&scratch.bytes[start..scratch.len]).map_err(|_| fmt::Error)?;
+    let count = width.saturating_sub(text.chars().count());
+    if count == 0 {
+        return Ok(());
+    }
+    if left {
+        for _ in 0..count {
+            scratch.write_char(' ')?;
+        }
+        return Ok(());
+    }
+    let end = scratch.len;
+    let new_end = end
+        .checked_add(count)
+        .filter(|end| *end <= scratch.bytes.len())
+        .ok_or(fmt::Error)?;
+    let sign = zero && matches!(scratch.bytes.get(start), Some(b'-' | b'+'));
+    let begin = start + usize::from(sign);
+    scratch.bytes.copy_within(begin..end, begin + count);
+    scratch.bytes[begin..begin + count].fill(if zero { b'0' } else { b' ' });
+    scratch.len = new_end;
     Ok(())
 }
 
