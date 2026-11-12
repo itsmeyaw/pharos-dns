@@ -19,12 +19,17 @@ pub(super) struct CacheEntry {
     wire: Vec<u8>,
     max_size: usize,
     expires: u64,
+    inception: u32,
     sets: usize,
 }
 
 impl CacheEntry {
     fn valid(&self, now: u64, max_size: usize) -> bool {
-        self.max_size == max_size && self.expires > now
+        // RFC 4034 §3.1.5: compare signature times using 32-bit serial arithmetic.
+        let horizon = (now as u32).wrapping_add(2 * 86400);
+        self.max_size == max_size
+            && self.expires > now
+            && horizon.wrapping_sub(self.inception) <= i32::MAX as u32
     }
 }
 
@@ -254,6 +259,7 @@ impl Dnssec {
                     wire: cx.response.clone(),
                     max_size: cx.max_response_size,
                     expires: now.saturating_add(6 * 86400),
+                    inception: now.saturating_sub(3 * 3600) as u32,
                     sets: signed_sets,
                 },
             );
@@ -420,10 +426,40 @@ mod tests {
             wire: Vec::new(),
             max_size: 512,
             expires: 6 * 86400,
+            inception: 0,
             sets: 1,
         };
         assert!(entry.valid(6 * 86400 - 1, 512));
         assert!(!entry.valid(6 * 86400, 512));
         assert!(!entry.valid(1, 1232));
+    }
+
+    // CoreDNS plugin/dnssec/cache_test.go TestCacheNotValidYet: validate at now plus two days.
+    #[test]
+    fn cache_rejects_signatures_not_valid_at_refresh_horizon() {
+        let entry = CacheEntry {
+            wire: Vec::new(),
+            max_size: 512,
+            expires: 15 * 86400,
+            inception: 9 * 86400 - 3 * 3600,
+            sets: 1,
+        };
+        assert!(!entry.valid(0, 512));
+        assert!(entry.valid(7 * 86400, 512));
+    }
+
+    #[test]
+    fn cache_inception_comparison_wraps_at_u32_boundary() {
+        let signed = u32::MAX as u64 - 86400;
+        let entry = CacheEntry {
+            wire: Vec::new(),
+            max_size: 512,
+            expires: signed + 6 * 86400,
+            inception: (signed - 3 * 3600) as u32,
+            sets: 1,
+        };
+        assert!(!entry.valid(signed - 9 * 86400, 512));
+        assert!(entry.valid(signed, 512));
+        assert!(entry.valid(signed + 2 * 86400, 512));
     }
 }
