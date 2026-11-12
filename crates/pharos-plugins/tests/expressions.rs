@@ -594,3 +594,27 @@ fn excessively_deep_or_large_expressions_fail_at_setup() {
     let long = format!("{}true", "true || ".repeat(600));
     assert!(Expression::compile(&long).is_err());
 }
+
+#[test]
+fn disabled_metadata_is_not_exposed_to_expressions() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [None];
+    let mut metadata = Metadata::new(&mut slots);
+    assert!(metadata.insert("test/region", "eu"));
+    metadata.set_enabled(false);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    let expression = Expression::compile("metadata('test/region') == ''").unwrap();
+    assert_eq!(
+        expression
+            .evaluate(&query, &metadata, &mut scratch)
+            .unwrap(),
+        Value::Bool(true)
+    );
+}

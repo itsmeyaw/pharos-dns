@@ -506,6 +506,9 @@ fn call<'a>(
     }
     if name == "metadata" {
         let label = args[0].eval(query, metadata, scratch, current)?;
+        if !metadata.enabled() {
+            return Ok(Temporary::Borrowed(""));
+        }
         return Ok(Temporary::Borrowed(
             metadata.get(label.text(scratch)?).unwrap_or(""),
         ));
