@@ -657,6 +657,58 @@ async fn coredns_empty_nonterminal_and_closest_encloser_proofs() {
     }
 }
 
+// Adapted from CoreDNS closest_test.go TestClosestEncloser through signed wire proofs.
+#[tokio::test]
+async fn coredns_closest_encloser_cases_through_signed_denial() {
+    let zone = zone(
+        "miek.nl.",
+        include_str!("../fixtures/file/coredns-miek-signed.zone"),
+    )
+    .unwrap();
+    for (name, kind) in [("miek.nl.", Type::A), ("www.miek.nl.", Type::CNAME)] {
+        let (outcome, wire) = query(&zone, name, kind, true, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(
+            Message::parse(&wire)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .name
+                .to_string(),
+            name
+        );
+    }
+    for (name, encloser) in [
+        ("blaat.miek.nl.", "miek.nl."),
+        ("blaat.www.miek.nl.", "www.miek.nl."),
+        ("www.blaat.miek.nl.", "miek.nl."),
+        ("blaat.a.miek.nl.", "a.miek.nl."),
+        ("blaat.z.a.miek.nl.", "a.miek.nl."),
+    ] {
+        let (outcome, wire) = query(&zone, name, Type::A, true, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+        assert!(
+            response
+                .authorities()
+                .any(|rr| rr.rtype == Type::NSEC && rr.name.to_string() == encloser),
+            "{name} {encloser}"
+        );
+    }
+}
+
+// Derived from CoreDNS apex_test.go TestLookupApex.
+#[tokio::test]
+async fn coredns_apex_only_zone_returns_nxdomain_for_missing_type() {
+    let input = "$ORIGIN example.com.\n@ 60 IN SOA ns1.example.com. admin.example.com. 2005011437 1200 144 1814400 7200\n@ 60 IN NS ns1.example.com.\n";
+    let zone = zone("example.com.", input).unwrap();
+    let (outcome, wire) = query(&zone, "example.com.", Type::A, false, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::NXDOMAIN);
+}
+
 // Derived from CoreDNS delegation_test.go TestLookupDelegation and ds_test.go TestLookupDS.
 #[tokio::test]
 async fn coredns_unsigned_delegation_and_ds_queries() {
