@@ -64,6 +64,37 @@ fn template_renders_concurrently_on_multiple_threads() {
 }
 
 #[tokio::test]
+async fn template_variables_share_one_expression_scratch() {
+    for (length, expected) in [
+        (32_000, Outcome::Response),
+        (33_000, Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL)),
+    ] {
+        let value = "a".repeat(length);
+        let text = format!(
+            ".:53 {{\n template IN A {{\n var alpha '{value}' + 'b'\n var beta '{value}' + 'c'\n expr alpha != beta\n rcode NXDOMAIN\n }}\n}}"
+        );
+        let configured =
+            configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+        let root: Name = ".".parse().unwrap();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut context = Context {
+            query: Message::parse(wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(configured[0].config.serve(&mut context).await, expected);
+    }
+}
+
+#[tokio::test]
 async fn template_expression_scratch_accepts_large_values_and_rejects_exhaustion() {
     for (length, expected) in [
         (5000, Outcome::Response),

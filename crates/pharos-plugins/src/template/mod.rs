@@ -453,15 +453,13 @@ fn evaluate<'a>(
     metrics: Option<&RuleMetrics>,
 ) -> Result<Option<Vec<(Section, ZoneRecord)>>, EvaluationError> {
     if let Some(variable) = rule.variables.get(index) {
-        let (current, rest) = scratch.split_at_mut(EXPRESSION_SCRATCH);
         let mut query = expression::Query::new(&cx.query, cx.client, cx.local, cx.protocol);
         query.groups = data.groups;
         query.matches = data.matches;
         query.variables = variables;
-        let mut buf = expression::Scratch::new(current);
-        let value = variable
+        let (value, rest) = variable
             .expression
-            .evaluate(&query, &cx.metadata, &mut buf)
+            .evaluate_split(&query, &cx.metadata, scratch)
             .map_err(|_| EvaluationError::Expression)?;
         let mut next = [("", Value::Nil); 32];
         next[..variables.len()].copy_from_slice(variables);

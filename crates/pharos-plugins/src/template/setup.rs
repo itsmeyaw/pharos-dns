@@ -136,14 +136,6 @@ pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
             rule.regex
                 .push(super::Matcher::new(".*").map_err(|e| cursor.error(e))?);
         }
-        for matcher in &rule.regex {
-            matcher
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .scratch
-                .resize((rule.variables.len() + 1) * super::EXPRESSION_SCRATCH, 0);
-        }
         rules.push(rule);
     }
     block.config.template = Some(Template::new(rules));
