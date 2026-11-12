@@ -225,9 +225,6 @@ impl Snapshot<'_> {
         base_srv: bool,
     ) -> Result<(), Error> {
         for port in ports {
-            if port.port == -1 {
-                continue;
-            }
             if base_srv {
                 self.srv(base, target, port.port, weight)?;
             }
@@ -785,8 +782,9 @@ mod tests {
         ));
     }
 
+    // CoreDNS's Kubernetes controller represents a Service with no ports by port -1.
     #[test]
-    fn service_without_ports_does_not_transfer_sentinel_srv() {
+    fn service_without_ports_transfers_coredns_sentinel_srv() {
         let zone: Name = "cluster.local.".parse().unwrap();
         let mut snapshot = snapshot(&zone);
         snapshot
@@ -805,7 +803,7 @@ mod tests {
             .unwrap();
         let bytes = snapshot.bytes.unwrap();
         let messages = messages(&bytes);
-        assert_eq!(messages.len(), 1);
+        assert_eq!(messages.len(), 2);
         assert_eq!(
             Message::parse(messages[0])
                 .unwrap()
@@ -815,6 +813,16 @@ mod tests {
                 .rtype,
             Type::A
         );
+        assert!(matches!(
+            Message::parse(messages[1])
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .data()
+                .unwrap(),
+            Rdata::Srv { port: 65535, .. }
+        ));
     }
 
     #[test]
