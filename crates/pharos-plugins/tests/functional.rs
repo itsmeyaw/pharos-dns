@@ -87,6 +87,8 @@ mod dns64 {
 mod dnssec {
     #[path = "dnssec.rs"]
     mod cases;
+    #[path = "dnssec_extra.rs"]
+    mod extra;
     #[path = "dnssec_metrics.rs"]
     mod metrics;
     #[path = "dnssec_setup.rs"]
