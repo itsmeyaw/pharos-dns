@@ -47,13 +47,10 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
         (SocketAddr::V6(client), None) => client.scope_id() == 0,
         (SocketAddr::V6(client), Some(scope)) => {
             // RFC 4007 §11: a scoped IPv6 address identifies an interface zone.
-            // shortcut: numeric and named scopes compare equal; use text when remote scope names are available.
-            let scope_id = scope.parse().ok().or_else(|| {
-                (scope.len() < nix::libc::IF_NAMESIZE)
-                    .then(|| nix::net::if_::if_nametoindex(scope).ok())
-                    .flatten()
-            });
-            scope_id == Some(client.scope_id())
+            // CoreDNS compares the zone text Go renders: the interface name.
+            client.scope_id() != 0
+                && nix::net::if_::if_indextoname(client.scope_id())
+                    .is_ok_and(|name| name.as_bytes() == scope.as_bytes())
         }
         (SocketAddr::V4(_), Some(_)) => false,
     }

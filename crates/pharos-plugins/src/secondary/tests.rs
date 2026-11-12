@@ -63,9 +63,17 @@ fn coredns_notify_checks_ip_spelling_and_scope() {
     let loopback = "[::1]:1234".parse().unwrap();
     assert!(update::primary_matches("[::1]:53", loopback));
     assert!(!update::primary_matches("[0:0:0:0:0:0:0:1]:53", loopback));
-    let scoped = "[fe80::1%3]:1234".parse().unwrap();
-    assert!(update::primary_matches("[fe80::1%3]:53", scoped));
+    // Index 1 names the first interface (lo0 or lo) on the supported hosts.
+    let name = nix::net::if_::if_indextoname(1).unwrap();
+    let name = name.to_str().unwrap();
+    let scoped = std::net::SocketAddrV6::new("fe80::1".parse().unwrap(), 1234, 0, 1).into();
+    assert!(update::primary_matches(
+        &format!("[fe80::1%{name}]:53"),
+        scoped
+    ));
+    assert!(!update::primary_matches("[fe80::1%1]:53", scoped));
     assert!(!update::primary_matches("[fe80::1%2]:53", scoped));
+    assert!(!update::primary_matches("[fe80::1]:53", scoped));
 }
 
 #[tokio::test]
