@@ -1,0 +1,7 @@
+mx.example.org. MX IN udp
+srv.example.org. SRV IN udp
+mixed.example.org. SRV IN udp
+two.example.org. MX IN udp
+cname-srv.example.org. SRV IN udp
+foo.wild.example.org. SRV IN udp
+srv.dname.example.org. SRV IN udp
