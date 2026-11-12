@@ -423,6 +423,7 @@ impl<C: Chain> Server<C> {
             }
             Admission::Drop => return Action::Drop,
         };
+        // shortcut: no-View Queries read a routing flag; specialize Listener dispatch to remove this cost.
         let has_views = self.has_views.load(Ordering::Relaxed);
         let mut view_slots;
         let mut view_metadata = if has_views {
