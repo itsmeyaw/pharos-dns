@@ -62,6 +62,16 @@ fn random_id() -> u16 {
     u16::from_ne_bytes(bytes)
 }
 
+#[cfg(not(test))]
+fn random_delay(bound: u16) -> u16 {
+    random_id() % bound
+}
+
+#[cfg(test)]
+fn random_delay(_: u16) -> u16 {
+    0
+}
+
 pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::Result<()> {
     let mut error = io::Error::other("no Primary Server");
     for primary in &zone.config.from {
@@ -319,7 +329,7 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                 }
             };
             if jitter > 0 {
-                tokio::time::sleep(Duration::from_millis(u64::from(random_id() % jitter))).await;
+                tokio::time::sleep(Duration::from_millis(u64::from(random_delay(jitter)))).await;
             }
             match should_transfer(&zone).await {
                 Ok(true) => {

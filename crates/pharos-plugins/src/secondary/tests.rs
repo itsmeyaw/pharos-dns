@@ -368,18 +368,16 @@ async fn failed_refresh_expires_the_zone() {
     while zone.current.load().is_none() {
         tokio::task::yield_now().await;
     }
-    tokio::time::pause();
-    for _ in 0..30 {
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        if zone.expired.load(Ordering::Relaxed) {
-            break;
-        }
+    // Jitter is pinned to zero in tests, so the 1 s refresh, retry, and expire timers fire on their own.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !zone.expired.load(Ordering::Relaxed) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "zone did not expire after a failed refresh"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert!(zone.current.load().is_some());
-    assert!(zone.expired.load(Ordering::Relaxed));
     task.abort();
     let _ = task.await;
 }
