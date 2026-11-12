@@ -82,7 +82,7 @@ mod regex_match;
 pub mod rewrite;
 #[cfg(feature = "plugin-siit")]
 pub mod siit;
-#[cfg(feature = "plugin-file")]
+#[cfg(any(feature = "plugin-file", feature = "plugin-secondary"))]
 pub mod zone;
 
 #[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]

@@ -311,7 +311,9 @@ impl Zone {
         dname
     }
 
-    pub(crate) fn serial(&self) -> Option<u32> {
+    /// Return the SOA serial of this Zone.
+    #[must_use]
+    pub fn serial(&self) -> Option<u32> {
         let soa = self.records.iter().find(|rr| rr.rtype == Type::SOA)?;
         soa_serial(soa)
     }
