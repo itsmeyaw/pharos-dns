@@ -1,6 +1,10 @@
 //! Zone Transfer client helpers.
 
-use std::{io, net::SocketAddr, time::Duration};
+use std::{
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    time::Duration,
+};
 
 use pharos_proto::{
     Class, Message, MessageBuilder, Name, NameRef, Rcode, TsigKey, TsigRecord, TsigStream, Type,
@@ -22,6 +26,17 @@ pub async fn notify(
     id: u16,
     deadline: Duration,
 ) -> io::Result<()> {
+    notify_from(address, None, zone, id, deadline).await
+}
+
+/// Send a NOTIFY from an optional local address.
+pub async fn notify_from(
+    address: SocketAddr,
+    source: Option<IpAddr>,
+    zone: &Name,
+    id: u16,
+    deadline: Duration,
+) -> io::Result<()> {
     // shortcut: one Query buffer allocation per NOTIFY; reuse it when callers batch Zones.
     let mut query = Vec::with_capacity(512);
     // RFC 1996 §3.7: NOTIFY has opcode 4, AA set, and an SOA Question.
@@ -34,11 +49,16 @@ pub async fn notify(
         )
         .map_err(io::Error::other)?;
     let _ = builder.finish();
-    let bind = if address.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
+    let bind = SocketAddr::new(
+        source.unwrap_or_else(|| {
+            if address.is_ipv4() {
+                Ipv4Addr::UNSPECIFIED.into()
+            } else {
+                Ipv6Addr::UNSPECIFIED.into()
+            }
+        }),
+        0,
+    );
     let socket = UdpSocket::bind(bind).await?;
     socket.connect(address).await?;
     let mut wire = [0; 65535];
