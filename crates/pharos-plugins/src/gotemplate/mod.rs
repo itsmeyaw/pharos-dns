@@ -38,6 +38,9 @@ impl<'a, 'm> Data<'a, 'm> {
 
 enum Field {
     Literal(String),
+    Dot,
+    Root(Box<Field>),
+    Matches,
     Name,
     Zone,
     Class,
@@ -55,6 +58,7 @@ enum Part {
     Field(Field),
     ParseInt(Field, u32, u32),
     If(Field, Vec<Part>, Vec<Part>),
+    Range(Field, Vec<Part>, Vec<Part>),
 }
 
 /// A template parsed at setup time.
@@ -72,42 +76,94 @@ impl Template {
 
     /// Append the rendered template to a caller-provided buffer.
     pub fn render(&self, data: &Data<'_, '_>, output: &mut String) -> fmt::Result {
-        render_parts(&self.0, data, output)
+        render_parts(&self.0, data, Dot::Root, output)
     }
 }
 
-fn render_parts(parts: &[Part], data: &Data<'_, '_>, output: &mut String) -> fmt::Result {
+#[derive(Clone, Copy)]
+enum Dot<'a> {
+    Root,
+    Value(Value<'a>),
+}
+
+fn render_parts(
+    parts: &[Part],
+    data: &Data<'_, '_>,
+    dot: Dot<'_>,
+    output: &mut String,
+) -> fmt::Result {
     for part in parts {
         match part {
             Part::Text(text) => output.write_str(text)?,
-            Part::Field(Field::Variable(name)) => match data
-                .variables
-                .iter()
-                .find_map(|(key, value)| (*key == name).then_some(value))
-            {
-                Some(Value::Nil) | None => output.write_str("<no value>")?,
-                Some(Value::Bool(value)) => write!(output, "{value}")?,
-                Some(Value::Int(value)) => write!(output, "{value}")?,
-                Some(Value::Float(value)) => write!(output, "{value}")?,
-                Some(Value::String(value)) => output.write_str(value)?,
-            },
-            Part::Field(field) => output.write_str(field.value(data)?)?,
+            Part::Field(field) => write_field(field, data, dot, output)?,
             Part::ParseInt(field, base, bits) => {
                 if (*base != 0 && !(2..=36).contains(base)) || *bits > 64 {
                     return Err(fmt::Error);
                 }
-                let value = parse_uint(field.value(data)?, *base)?;
+                let value = parse_uint(field.value(data, dot)?, *base)?;
                 if *bits != 0 && *bits < 64 && value >= (1u64 << bits) {
                     return Err(fmt::Error);
                 }
                 write!(output, "{value}")?;
             }
-            Part::If(condition, yes, no) => {
-                render_parts(if condition.truthy(data)? { yes } else { no }, data, output)?
+            Part::If(condition, yes, no) => render_parts(
+                if condition.truthy(data, dot)? {
+                    yes
+                } else {
+                    no
+                },
+                data,
+                dot,
+                output,
+            )?,
+            Part::Range(field, body, otherwise) => {
+                let is_matches = matches!(field, Field::Matches) && matches!(dot, Dot::Root)
+                    || matches!(field, Field::Root(inner) if matches!(inner.as_ref(), Field::Matches));
+                if !is_matches {
+                    return Err(fmt::Error);
+                }
+                if data.matches.is_empty() {
+                    render_parts(otherwise, data, dot, output)?;
+                }
+                for value in data.matches {
+                    render_parts(body, data, Dot::Value(Value::String(value)), output)?;
+                }
             }
         }
     }
     Ok(())
+}
+
+fn write_value(value: Option<Value<'_>>, output: &mut String) -> fmt::Result {
+    match value {
+        Some(Value::Nil) | None => output.write_str("<no value>"),
+        Some(Value::Bool(value)) => write!(output, "{value}"),
+        Some(Value::Int(value)) => write!(output, "{value}"),
+        Some(Value::Float(value)) => write!(output, "{value}"),
+        Some(Value::String(value)) => output.write_str(value),
+    }
+}
+
+fn write_field(
+    field: &Field,
+    data: &Data<'_, '_>,
+    dot: Dot<'_>,
+    output: &mut String,
+) -> fmt::Result {
+    match field {
+        Field::Root(field) => write_field(field, data, Dot::Root, output),
+        Field::Dot => match dot {
+            Dot::Value(value) => write_value(Some(value), output),
+            Dot::Root => Err(fmt::Error),
+        },
+        Field::Variable(name) if matches!(dot, Dot::Root) => write_value(
+            data.variables
+                .iter()
+                .find_map(|(key, value)| (*key == name).then_some(*value)),
+            output,
+        ),
+        _ => output.write_str(field.value(data, dot)?),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -156,7 +212,11 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             "end" => return Ok((parts, Some(Marker::End))),
             _ => {}
         }
-        let part = if let Some(condition) = action.strip_prefix("if ") {
+        let range = action.starts_with("range ");
+        let part = if let Some(condition) = action
+            .strip_prefix("if ")
+            .or_else(|| action.strip_prefix("range "))
+        {
             let condition = parse_field(condition.trim())?;
             let (yes, marker) = parse_parts(source, depth + 1)?;
             let no = if marker == Some(Marker::Else) {
@@ -170,7 +230,11 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             } else {
                 return Err("if is missing end".into());
             };
-            Part::If(condition, yes, no)
+            if range {
+                Part::Range(condition, yes, no)
+            } else {
+                Part::If(condition, yes, no)
+            }
         } else if let Some(args) = action.strip_prefix("parseInt ") {
             let mut args = args.split_whitespace();
             let field = parse_field(args.next().ok_or("parseInt needs three arguments")?)?;
@@ -203,7 +267,12 @@ fn is_space(byte: u8) -> bool {
 }
 
 fn parse_field(action: &str) -> Result<Field, String> {
+    if let Some(field) = action.strip_prefix("$.") {
+        return Ok(Field::Root(Box::new(parse_field(&format!(".{field}"))?)));
+    }
     match action {
+        "." => Ok(Field::Dot),
+        ".Match" => Ok(Field::Matches),
         ".Name" => Ok(Field::Name),
         ".Zone" => Ok(Field::Zone),
         ".Class" => Ok(Field::Class),
@@ -248,8 +317,20 @@ fn parse_field(action: &str) -> Result<Field, String> {
 }
 
 impl Field {
-    fn truthy(&self, data: &Data<'_, '_>) -> Result<bool, fmt::Error> {
+    fn truthy(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<bool, fmt::Error> {
         match self {
+            Self::Root(field) => field.truthy(data, Dot::Root),
+            Self::Dot => Ok(match dot {
+                Dot::Root => true,
+                Dot::Value(Value::Nil) => false,
+                Dot::Value(Value::Bool(value)) => value,
+                Dot::Value(Value::Int(value)) => value != 0,
+                Dot::Value(Value::Float(value)) => value != 0.0,
+                Dot::Value(Value::String(value)) => !value.is_empty(),
+            }),
+            Self::Matches if matches!(dot, Dot::Root) => Ok(!data.matches.is_empty()),
+            Self::Literal(_) => Ok(!self.value(data, dot)?.is_empty()),
+            _ if !matches!(dot, Dot::Root) => Err(fmt::Error),
             Self::Variable(name) => Ok(
                 match data
                     .variables
@@ -268,12 +349,19 @@ impl Field {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then_some(!value.is_empty()))
                 .unwrap_or(false)),
-            _ => Ok(!self.value(data)?.is_empty()),
+            _ => Ok(!self.value(data, dot)?.is_empty()),
         }
     }
-    fn value<'a>(&'a self, data: &'a Data<'_, '_>) -> Result<&'a str, fmt::Error> {
+    fn value<'a>(&'a self, data: &'a Data<'_, '_>, dot: Dot<'a>) -> Result<&'a str, fmt::Error> {
         match self {
+            Self::Root(field) => field.value(data, Dot::Root),
+            Self::Dot => match dot {
+                Dot::Value(Value::String(value)) => Ok(value),
+                _ => Err(fmt::Error),
+            },
             Self::Literal(value) => Ok(value),
+            _ if !matches!(dot, Dot::Root) => Err(fmt::Error),
+            Self::Matches => Err(fmt::Error),
             Self::Name => Ok(data.name),
             Self::Zone => Ok(data.zone),
             Self::Class => Ok(data.class),

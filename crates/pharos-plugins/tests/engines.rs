@@ -128,3 +128,21 @@ fn trim_markers_remove_go_template_whitespace() {
     assert_eq!(output, "prefixexample.suffix yes");
     assert!(Template::compile("{{-.Name}}").is_err());
 }
+
+#[test]
+fn range_visits_matches_and_uses_else_for_empty_input() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let template =
+        Template::compile("{{ range .Match }}[{{ . }}:{{ $.Name }}]{{ else }}empty{{ end }}")
+            .unwrap();
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["whole", "capture"];
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "[whole:example.][capture:example.]");
+    data.matches = &[];
+    output.clear();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "empty");
+}
