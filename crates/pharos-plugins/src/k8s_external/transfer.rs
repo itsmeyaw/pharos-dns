@@ -335,34 +335,79 @@ impl Hash for Label<'_> {
     }
 }
 
-#[derive(Hash, PartialEq, Eq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "transfer keys must not allocate per record"
-)]
-enum Seen<'a> {
-    Address(&'a str),
-    Bare([u8; 255], i32),
-    Named(CaseInsensitive<'a>, CaseInsensitive<'a>, i32, Label<'a>),
-    Count(CaseInsensitive<'a>, CaseInsensitive<'a>),
+#[derive(Clone, Copy)]
+struct Target<'a> {
+    address: &'a EndpointAddress,
+    service: &'a Service,
+    zone: NameRef<'a>,
+    pod_names: bool,
 }
 
-fn target_key(target: NameRef<'_>) -> [u8; 255] {
-    let mut wire = [0; 255];
-    let mut offset = 0;
-    for label in target.labels() {
-        wire[offset] = label.len() as u8;
-        offset += 1;
-        wire[offset..offset + label.len()].copy_from_slice(label);
-        offset += label.len();
+impl Target<'_> {
+    fn name<'a>(&self, wire: &'a mut [u8; 255]) -> Option<NameRef<'a>> {
+        if normalized_ip(&self.address.ip).is_none() {
+            return hostname(&self.address.ip, 0, wire).ok();
+        }
+        let mut base_wire = [0; 255];
+        let base = child(
+            &[
+                self.service.name.as_bytes(),
+                self.service.namespace.as_bytes(),
+            ],
+            self.zone,
+            &mut base_wire,
+        )?;
+        let mut label_wire = [0; 64];
+        endpoint_owner(
+            endpoint_label(self.address, self.pod_names, &mut label_wire),
+            base,
+            wire,
+        )
     }
-    wire
+}
+
+impl PartialEq for Target<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        let mut left = [0; 255];
+        let mut right = [0; 255];
+        // RFC 1035 §2.3.3: DNS names ignore case, but CoreDNS SRV dedup compares target bytes.
+        match (self.name(&mut left), other.name(&mut right)) {
+            (Some(left), Some(right)) => left.labels().eq(right.labels()),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Target<'_> {}
+
+impl Hash for Target<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let mut wire = [0; 255];
+        if let Some(name) = self.name(&mut wire) {
+            true.hash(state);
+            for label in name.labels() {
+                label.hash(state);
+            }
+        } else {
+            false.hash(state);
+        }
+    }
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum Seen<'a> {
+    Address(&'a str),
+    Bare(Target<'a>, i32),
+    Named(CaseInsensitive<'a>, CaseInsensitive<'a>, i32, Label<'a>),
+    Count(CaseInsensitive<'a>, CaseInsensitive<'a>),
 }
 
 fn headless<'a, I>(
     snapshot: &mut Snapshot<'_>,
     entries: impl Fn() -> I,
     base: NameRef<'_>,
+    origin: (&'a Service, NameRef<'a>),
     pod_names: bool,
     seen: &mut HashMap<Seen<'a>, usize>,
 ) -> Result<(), Error>
@@ -399,9 +444,20 @@ where
         } else {
             hostname(&address.ip, 0, &mut host_wire).ok()
         };
-        let duplicate_bare = target.is_some_and(|target| {
-            seen.insert(Seen::Bare(target_key(target), port.port), 0)
-                .is_some()
+        let duplicate_bare = target.is_some_and(|_| {
+            seen.insert(
+                Seen::Bare(
+                    Target {
+                        address,
+                        service: origin.0,
+                        zone: origin.1,
+                        pod_names,
+                    },
+                    port.port,
+                ),
+                0,
+            )
+            .is_some()
         });
         let duplicate_named = seen
             .insert(
@@ -455,7 +511,7 @@ where
 }
 
 fn generate<'a>(
-    snapshot: &mut Snapshot<'_>,
+    snapshot: &mut Snapshot<'a>,
     plugin: &External,
     kubernetes: &Kubernetes,
     index: &'a Index,
@@ -504,10 +560,12 @@ fn generate<'a>(
                 continue;
             };
             if is_headless {
+                let zone = snapshot.request.zone;
                 headless(
                     snapshot,
                     || entries(index, service),
                     base,
+                    (service, zone),
                     kubernetes.endpoint_pod_names(),
                     seen,
                 )?;
@@ -1043,6 +1101,7 @@ mod tests {
         };
         let zone: Name = "example.com.".parse().unwrap();
         let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let service = fixture_service();
         let mut snapshot = fixture_snapshot(&plugin, &zone);
         headless(
             &mut snapshot,
@@ -1053,6 +1112,7 @@ mod tests {
                     .flat_map(|address| endpoints.ports.iter().map(move |port| (address, port)))
             },
             NameRef::parse(base.as_wire(), 0).unwrap(),
+            (&service, NameRef::parse(zone.as_wire(), 0).unwrap()),
             false,
             &mut HashMap::with_capacity(8),
         )
@@ -1096,6 +1156,7 @@ mod tests {
         let plugin = plugin();
         let zone: Name = "example.com.".parse().unwrap();
         let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let service = fixture_service();
         let addresses: Vec<_> = ["a".repeat(64), "node".to_owned()]
             .into_iter()
             .map(|hostname| EndpointAddress {
@@ -1116,6 +1177,7 @@ mod tests {
                 &mut snapshot,
                 || addresses[..count].iter().map(|address| (address, &port)),
                 NameRef::parse(base.as_wire(), 0).unwrap(),
+                (&service, NameRef::parse(zone.as_wire(), 0).unwrap()),
                 false,
                 &mut HashMap::with_capacity(8),
             )
@@ -1142,6 +1204,7 @@ mod tests {
         let plugin = plugin();
         let zone: Name = "example.com.".parse().unwrap();
         let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let service = fixture_service();
         let addresses: Vec<_> = (0..48)
             .map(|i| EndpointAddress {
                 ip: format!("192.0.2.{}", i % 24 + 1),
@@ -1169,6 +1232,7 @@ mod tests {
                     .flat_map(|a| ports.iter().map(move |p| (a, p)))
             },
             NameRef::parse(base.as_wire(), 0).unwrap(),
+            (&service, NameRef::parse(zone.as_wire(), 0).unwrap()),
             false,
             &mut seen,
         )
@@ -1244,14 +1308,21 @@ mod tests {
             protocol: "TCP".into(),
             port: 80,
         };
+        let mut api = fixture_service();
+        api.name = "api".into();
+        let services = [fixture_service(), api];
         let mut snapshot = fixture_snapshot(&plugin, &zone);
         let mut seen = HashMap::with_capacity(12);
-        for name in ["web.hidden.example.com.", "api.hidden.example.com."] {
+        for (name, service) in ["web.hidden.example.com.", "api.hidden.example.com."]
+            .into_iter()
+            .zip(&services)
+        {
             let base: Name = name.parse().unwrap();
             headless(
                 &mut snapshot,
                 || addresses.iter().map(|address| (address, &port)),
                 NameRef::parse(base.as_wire(), 0).unwrap(),
+                (service, NameRef::parse(zone.as_wire(), 0).unwrap()),
                 false,
                 &mut seen,
             )
@@ -1280,6 +1351,7 @@ mod tests {
         let plugin = plugin();
         let zone: Name = "example.com.".parse().unwrap();
         let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let service = fixture_service();
         let addresses: Vec<_> = ["node0", "node1"]
             .into_iter()
             .map(|hostname| EndpointAddress {
@@ -1299,6 +1371,7 @@ mod tests {
             &mut snapshot,
             || addresses.iter().map(|address| (address, &port)),
             NameRef::parse(base.as_wire(), 0).unwrap(),
+            (&service, NameRef::parse(zone.as_wire(), 0).unwrap()),
             false,
             &mut HashMap::with_capacity(8),
         )
@@ -1319,11 +1392,130 @@ mod tests {
     }
 
     #[test]
+    fn headless_bare_keys_remain_compact() {
+        assert!(std::mem::size_of::<Seen<'_>>() <= 96);
+    }
+
+    #[test]
+    fn headless_bare_targets_resolve_hash_collisions_by_full_name() {
+        #[derive(Default)]
+        struct ConstantHasher;
+        impl Hasher for ConstantHasher {
+            fn finish(&self) -> u64 {
+                0
+            }
+            fn write(&mut self, _: &[u8]) {}
+        }
+
+        let service = fixture_service();
+        let zone: Name = "example.com.".parse().unwrap();
+        let addresses: Vec<_> = [
+            ("192.0.2.1", "node"),
+            ("node.web.hidden.example.com.", "alias"),
+            ("other.web.hidden.example.com.", "alias"),
+        ]
+        .into_iter()
+        .map(|(ip, hostname)| EndpointAddress {
+            ip: ip.into(),
+            hostname: hostname.into(),
+            node_name: String::new(),
+            target_ref_name: String::new(),
+        })
+        .collect();
+        let mut seen =
+            HashMap::with_hasher(std::hash::BuildHasherDefault::<ConstantHasher>::default());
+        for (i, address) in addresses.iter().enumerate() {
+            let key = Seen::Bare(
+                Target {
+                    address,
+                    service: &service,
+                    zone: NameRef::parse(zone.as_wire(), 0).unwrap(),
+                    pod_names: false,
+                },
+                80,
+            );
+            assert_eq!(seen.insert(key, i), if i == 1 { Some(0) } else { None });
+        }
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn headless_bare_srv_compares_full_ip_and_hostname_targets() {
+        use pharos_kubernetes::object::{EndpointAddress, Port};
+        let plugin = plugin();
+        let zone: Name = "example.com.".parse().unwrap();
+        let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let service = fixture_service();
+        let addresses: Vec<_> = [
+            ("192.0.2.1", "node"),
+            ("node.web.hidden.example.com", "alias"),
+            ("node.web.hidden.example.com.", "alias2"),
+            ("other.web.hidden.example.com", "alias3"),
+            ("192.0.2.2", "other"),
+            ("Node.web.hidden.example.com", "alias4"),
+            ("no\\100e.web.hidden.example.com", "alias5"),
+        ]
+        .into_iter()
+        .map(|(ip, hostname)| EndpointAddress {
+            ip: ip.into(),
+            hostname: hostname.into(),
+            node_name: String::new(),
+            target_ref_name: String::new(),
+        })
+        .collect();
+        let ports: Vec<_> = [80, 81]
+            .into_iter()
+            .map(|port| Port {
+                name: "http".into(),
+                protocol: "TCP".into(),
+                port,
+            })
+            .collect();
+        let mut snapshot = fixture_snapshot(&plugin, &zone);
+        headless(
+            &mut snapshot,
+            || {
+                addresses
+                    .iter()
+                    .flat_map(|a| ports.iter().map(move |p| (a, p)))
+            },
+            NameRef::parse(base.as_wire(), 0).unwrap(),
+            (&service, NameRef::parse(zone.as_wire(), 0).unwrap()),
+            false,
+            &mut HashMap::with_capacity(addresses.len() * ports.len() * 4),
+        )
+        .unwrap();
+        let mut stream = stream_snapshot(snapshot.bytes.unwrap());
+        let mut wire = Vec::new();
+        let mut actual = Vec::new();
+        while stream.next(&mut wire).unwrap() {
+            for rr in Message::parse(&wire).unwrap().answers() {
+                if rr.rtype == Type::SRV && rr.name.to_string() == base.to_string() {
+                    let Rdata::Srv { port, target, .. } = rr.data().unwrap() else {
+                        panic!("SRV")
+                    };
+                    actual.push((port, target.to_string()));
+                }
+            }
+        }
+        let mut expected = Vec::new();
+        for name in ["node", "other", "Node"] {
+            for port in [80, 81] {
+                for _ in 0..2 {
+                    expected.push((port, format!("{name}.web.hidden.example.com.")));
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn headless_pod_name_with_dots_uses_coredns_domain_labels() {
         use pharos_kubernetes::object::{EndpointAddress, Port};
         let plugin = plugin();
         let zone: Name = "example.com.".parse().unwrap();
         let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let service = fixture_service();
         let address = EndpointAddress {
             ip: "192.0.2.1".into(),
             hostname: String::new(),
@@ -1340,6 +1532,7 @@ mod tests {
             &mut snapshot,
             || std::iter::once((&address, &port)),
             NameRef::parse(base.as_wire(), 0).unwrap(),
+            (&service, NameRef::parse(zone.as_wire(), 0).unwrap()),
             true,
             &mut HashMap::with_capacity(4),
         )
