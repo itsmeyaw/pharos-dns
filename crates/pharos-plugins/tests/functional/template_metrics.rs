@@ -5,16 +5,22 @@ use pharos_plugins::{Chain, directives, servers};
 use pharos_server::{Action, Handler, Protocol};
 
 async fn metric_for(option: &str) -> String {
-    let corefile = format!(".:0 {{\n template IN A {{\n  {option}\n }}\n}}");
+    metric_for_query("IN A", option, 1, 1).await
+}
+
+async fn metric_for_query(header: &str, option: &str, qtype: u8, qclass: u8) -> String {
+    let corefile = format!(".:0 {{\n template {header} {{\n  {option}\n }}\n}}");
     let blocks = parse("Corefile", &corefile).unwrap();
     let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let (_, server) = servers.drain().next().unwrap();
-    let query = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let query = [
+        0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'x', 0, 0, qtype, 0, qclass,
+    ];
     let mut response = Vec::with_capacity(65535);
     assert_eq!(
         server
             .handle(
-                query,
+                &query,
                 "127.0.0.1:1000".parse().unwrap(),
                 Protocol::Udp,
                 &mut response,
@@ -25,6 +31,18 @@ async fn metric_for(option: &str) -> String {
     let mut text = String::new();
     server.metrics().encode(&mut text);
     text
+}
+
+#[tokio::test]
+async fn wildcard_template_metrics_use_question_class_and_type() {
+    let text = metric_for_query("ANY ANY", "rcode NXDOMAIN", 16, 3).await;
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("pharos_template_matches_total{"))
+        .expect(&text);
+    assert!(line.contains("class=\"CH\""), "{line}");
+    assert!(line.contains("type=\"TXT\""), "{line}");
+    assert!(line.ends_with(" 1"), "{line}");
 }
 
 fn counter<'a>(text: &'a str, name: &str) -> &'a str {
