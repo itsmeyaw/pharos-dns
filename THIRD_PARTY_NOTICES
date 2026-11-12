@@ -19,6 +19,7 @@
 - The nsid Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/nsid`.
 - The bufsize Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/bufsize`.
 - The any Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/any`.
+- The template Corefile test follows CoreDNS v1.15.0's `plugin/template/README.md`.
 - The chaos Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/chaos`.
 - The header Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/header`.
 - The minimal Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/minimal`.
