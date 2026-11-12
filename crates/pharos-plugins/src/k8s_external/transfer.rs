@@ -41,7 +41,7 @@ fn hostname<'a>(text: &str, strip: usize, wire: &'a mut [u8; 255]) -> Result<Nam
         return Err(Error::Build(BuildError::InvalidRdata));
     }
     presentation[..bytes.len()].copy_from_slice(bytes);
-    let len = if bytes.last() == Some(&b'.') {
+    let len = if super::is_fqdn(bytes) {
         bytes.len()
     } else {
         presentation[bytes.len()] = b'.';
@@ -368,15 +368,7 @@ impl Target<'_> {
         if normalized_ip(&self.address.ip).is_none() {
             let host = self.address.ip.as_bytes();
             output.append(host)?;
-            let fully_qualified = host.last() == Some(&b'.')
-                && host[..host.len() - 1]
-                    .iter()
-                    .rev()
-                    .take_while(|&&b| b == b'\\')
-                    .count()
-                    % 2
-                    == 0;
-            if !fully_qualified {
+            if !super::is_fqdn(host) {
                 output.append(b".")?;
             }
         } else {
@@ -1182,6 +1174,19 @@ mod tests {
             }
         }
         assert_eq!(cnames, 4);
+    }
+
+    #[test]
+    fn transfer_hostname_fqdn_handles_escaped_final_dot() {
+        let mut wire = [0; 255];
+        assert_eq!(
+            hostname(r"example\.", 0, &mut wire).unwrap().to_string(),
+            r"example\.."
+        );
+        assert_eq!(
+            hostname(r"example\\.", 0, &mut wire).unwrap().to_string(),
+            r"example\\."
+        );
     }
 
     #[test]

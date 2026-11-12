@@ -496,7 +496,7 @@ fn target_key<'a>(
     };
     if address.parse::<std::net::IpAddr>().is_err() {
         append(address.as_bytes())?;
-        if !address.ends_with('.') {
+        if !is_fqdn(address.as_bytes()) {
             append(b".")?;
         }
     } else {
@@ -535,7 +535,7 @@ fn service_target<'a>(
             return None;
         }
         text[..endpoint.len()].copy_from_slice(endpoint);
-        let length = if endpoint.last() == Some(&b'.') {
+        let length = if is_fqdn(endpoint) {
             endpoint.len()
         } else {
             text[endpoint.len()] = b'.';
@@ -573,7 +573,7 @@ fn hostname<'a>(address: &str, wire: &'a mut [u8; 255]) -> Option<NameRef<'a>> {
         return None;
     }
     text[..bytes.len()].copy_from_slice(bytes);
-    let length = if bytes.last() == Some(&b'.') {
+    let length = if is_fqdn(bytes) {
         bytes.len()
     } else {
         text[bytes.len()] = b'.';
@@ -582,6 +582,20 @@ fn hostname<'a>(address: &str, wire: &'a mut [u8; 255]) -> Option<NameRef<'a>> {
     let result =
         Name::parse_absolute_into(std::str::from_utf8(&text[..length]).ok()?, wire).ok()?;
     NameRef::parse(result, 0).ok()
+}
+
+fn is_fqdn(bytes: &[u8]) -> bool {
+    let Some((&b'.', prefix)) = bytes.split_last() else {
+        return false;
+    };
+    // RFC 1035 §5.1: a terminal dot is literal when preceded by an odd number of escapes.
+    prefix
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count()
+        % 2
+        == 0
 }
 
 fn child_name<'a>(
@@ -981,6 +995,19 @@ mod tests {
         async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
             Outcome::Unanswered(Rcode::REFUSED)
         }
+    }
+
+    #[test]
+    fn hostname_fqdn_handles_escaped_final_dot() {
+        let mut wire = [0; 255];
+        assert_eq!(
+            hostname(r"example\.", &mut wire).unwrap().to_string(),
+            r"example\.."
+        );
+        assert_eq!(
+            hostname(r"example\\.", &mut wire).unwrap().to_string(),
+            r"example\\."
+        );
     }
 
     #[tokio::test]
