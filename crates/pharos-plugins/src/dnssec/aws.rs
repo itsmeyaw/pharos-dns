@@ -21,6 +21,7 @@ impl<'de> Deserialize<'de> for Secret {
             fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Secret, M::Error> {
                 let mut secret = Secret::default();
                 while let Some(field) = map.next_key::<String>()? {
+                    // Go JSON accepts Unicode case folds, including the Kelvin sign.
                     let target =
                         if field.eq_ignore_ascii_case("key") || field.to_lowercase() == "key" {
                             Some(&mut secret.key)
