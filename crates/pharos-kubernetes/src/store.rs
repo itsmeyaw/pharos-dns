@@ -163,6 +163,23 @@ mod tests {
     }
 
     #[test]
+    fn external_transfer_visits_services_and_endpoints_in_hidden_namespaces() {
+        let store = Store::new(&["prod".into()], false);
+        let mut hidden = service("10.0.0.2");
+        hidden.namespace = "hidden".into();
+        store.apply_service(hidden);
+        let mut ep = slice("one", "10.0.1.2");
+        ep.namespace = "hidden".into();
+        store.apply_endpoints(ep);
+        store.with_read(|index| {
+            assert_eq!(index.services_unfiltered().count(), 1);
+            assert_eq!(index.endpoints_unfiltered("hidden", "web").count(), 1);
+            assert!(index.services().is_empty());
+            assert_eq!(index.endpoints("hidden", "web").count(), 0);
+        });
+    }
+
+    #[test]
     fn transfer_lists_services_in_name_order() {
         let store = Store::default();
         for name in ["web", "api", "db"] {
@@ -721,6 +738,13 @@ impl Index {
         services
     }
 
+    /// Visit all Services without namespace filtering, as external transfers do.
+    pub fn services_unfiltered(&self) -> impl Iterator<Item = &Service> {
+        self.services
+            .values()
+            .flat_map(|services| services.values().map(Arc::as_ref))
+    }
+
     /// ServiceImports visible to DNS readers, in CoreDNS Zone Transfer order (by name).
     pub fn service_imports(&self) -> Vec<&ServiceImport> {
         let mut imports: Vec<_> = self
@@ -771,13 +795,21 @@ impl Index {
             .filter(|service| self.namespace_allowed(&service.namespace))
     }
     pub fn endpoints(&self, namespace: &str, service: &str) -> impl Iterator<Item = &Endpoints> {
+        self.endpoints_unfiltered(namespace, service)
+            .filter(|slice| self.namespace_allowed(&slice.namespace))
+    }
+    /// Visit EndpointSlices without namespace filtering, as external transfers do.
+    pub fn endpoints_unfiltered(
+        &self,
+        namespace: &str,
+        service: &str,
+    ) -> impl Iterator<Item = &Endpoints> {
         self.endpoints
             .get(namespace)
             .and_then(|services| services.get(service))
             .into_iter()
             .flatten()
             .map(Arc::as_ref)
-            .filter(|slice| self.namespace_allowed(&slice.namespace))
     }
     pub fn endpoints_by_ip(&self, ip: &str) -> impl Iterator<Item = &Endpoints> {
         self.endpoints_by_ip_unfiltered(ip)
