@@ -8,6 +8,8 @@ use pharos_server::{Context, Metadata, Next, Outcome, Protocol, Stream, Transpor
 
 struct Provider;
 impl Transferer for Provider {
+    fn bind_transfer(&self, _: Option<&pharos_plugins::transfer::Transfer>) {}
+
     fn transfer(
         &self,
         _: Name,
@@ -198,6 +200,8 @@ async fn notify_reports_each_secondary_failure() {
 async fn ixfr_passes_requested_serial_and_rejects_missing_soa() {
     struct SerialProvider(std::sync::atomic::AtomicU32);
     impl Transferer for SerialProvider {
+        fn bind_transfer(&self, _: Option<&pharos_plugins::transfer::Transfer>) {}
+
         fn transfer(
             &self,
             _: Name,

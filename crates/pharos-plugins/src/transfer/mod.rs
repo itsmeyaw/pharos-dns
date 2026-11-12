@@ -9,6 +9,9 @@ use std::{fmt::Write, net::IpAddr};
 
 /// Supplies an authoritative Zone's records to the transfer Plugin.
 pub trait Transferer {
+    /// Bind the notifier used when this Plugin's authoritative data changes.
+    fn bind_transfer(&self, transfer: Option<&Transfer>);
+
     /// Return None if this Plugin is not authoritative for the requested Zone.
     fn transfer(
         &self,
@@ -287,6 +290,8 @@ impl Plugin for Transfer {
 
 struct NoTransferer;
 impl Transferer for NoTransferer {
+    fn bind_transfer(&self, _: Option<&Transfer>) {}
+
     fn transfer(
         &self,
         _: Name,
