@@ -6,7 +6,7 @@ use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type}
 use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 
 fn verify_signatures(records: &[pharos_proto::Record<'_>]) {
-    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, ED25519, UnparsedPublicKey};
     use pharos_dnssec::canonical::{CanonicalRecord, signed_data};
     use pharos_proto::Rdata;
 
@@ -17,19 +17,32 @@ fn verify_signatures(records: &[pharos_proto::Record<'_>]) {
     let mut point = vec![4];
     point.extend_from_slice(&key.public_key);
     let verifier = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point);
+    let ed_key =
+        pharos_dnssec::keys::parse_dnskey(include_str!("../fixtures/dnssec/miek-ed25519-ksk.key"))
+            .unwrap();
+    let ed_verifier = UnparsedPublicKey::new(&ED25519, ed_key.public_key);
     let mut checked = 0;
     for rr in records.iter().filter(|rr| rr.rtype == Type::RRSIG) {
         let sig = rr.data().unwrap();
         let Rdata::Rrsig {
             type_covered,
             algorithm,
+            inception,
+            expiration,
             signature,
             ..
         } = sig
         else {
             unreachable!()
         };
-        assert_eq!(algorithm, 13);
+        // RFC 4034 §3.1.5: a signature must be valid at the current time.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+        assert!(pharos_dnssec::digest::signature_valid_at(
+            inception, expiration, now
+        ));
         let set: Vec<_> = records
             .iter()
             .filter(|r| r.name == rr.name && r.rtype == type_covered && r.class == rr.class)
@@ -40,9 +53,17 @@ fn verify_signatures(records: &[pharos_proto::Record<'_>]) {
             })
             .collect();
         let mut data = signed_data(&sig, &set).unwrap();
-        verifier.verify(&data, signature).unwrap();
+        match algorithm {
+            13 => verifier.verify(&data, signature).unwrap(),
+            15 => ed_verifier.verify(&data, signature).unwrap(),
+            _ => panic!("unexpected signature algorithm {algorithm}"),
+        }
         data[0] ^= 1;
-        assert!(verifier.verify(&data, signature).is_err());
+        assert!(match algorithm {
+            13 => verifier.verify(&data, signature).is_err(),
+            15 => ed_verifier.verify(&data, signature).is_err(),
+            _ => unreachable!(),
+        });
         checked += 1;
     }
     assert!(checked > 0);
@@ -245,6 +266,10 @@ async fn negative_nsec_returns_last_two_records_for_any_key_count() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
     );
+    let other = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/miek-ed25519-ksk"
+    );
     let domain: Name = "miek.nl.".parse().unwrap();
     let name: Name = "missing.miek.nl.".parse().unwrap();
     let mut wire = Vec::with_capacity(1232);
@@ -270,7 +295,7 @@ async fn negative_nsec_returns_last_two_records_for_any_key_count() {
     for keys in [
         String::new(),
         format!("key file {base}"),
-        format!("key file {base} {base}"),
+        format!("key file {base} {other}"),
     ] {
         let text = format!("miek.nl {{\n dnssec {{\n {keys}\n }}\n}}");
         let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
@@ -311,6 +336,13 @@ async fn negative_nsec_returns_last_two_records_for_any_key_count() {
         );
         if !keys.is_empty() {
             verify_signatures(&reply.answers().collect::<Vec<_>>());
+            if keys.contains(other) {
+                let signature = reply.answers().find(|rr| rr.rtype == Type::RRSIG).unwrap();
+                assert!(matches!(
+                    signature.data().unwrap(),
+                    pharos_proto::Rdata::Rrsig { algorithm: 15, .. }
+                ));
+            }
         }
     }
 }
@@ -333,6 +365,76 @@ impl Next for Referral {
         let _ = b.finish();
         Outcome::Response
     }
+}
+
+struct Unsupported;
+impl Next for Unsupported {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder =
+            MessageBuilder::new(cx.response, cx.max_response_size, cx.query.id(), 0x8400).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        builder
+            .record(Section::Answer, q.name, Type(38), Class::IN, 60, &[0; 17])
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+// CoreDNS plugin/dnssec ignores signing errors; Pharos returns a plugin error.
+#[tokio::test]
+async fn unsupported_rrset_signing_returns_error() {
+    let base = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+    );
+    let text = format!("miek.nl {{\n dnssec {{\n key file {base}\n }}\n}}");
+    let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let domain: Name = "miek.nl.".parse().unwrap();
+    let mut wire = Vec::with_capacity(1232);
+    let mut builder = MessageBuilder::new(&mut wire, 1232, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(domain.as_wire(), 0).unwrap(),
+            Type(38),
+            Class::IN,
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(1232),
+            0x8000,
+            &[],
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(1232);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 1232,
+    };
+    assert_eq!(
+        chain[0]
+            .config
+            .dnssec
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, Unsupported)
+            .await,
+        Outcome::Error(pharos_server::Error::InvalidQuery)
+    );
 }
 
 #[tokio::test]
@@ -396,6 +498,17 @@ async fn referral_signs_nsec_but_not_ns() {
                 .count(),
             usize::from(!has_ds)
         );
+        if !has_ds {
+            let rr = reply
+                .authorities()
+                .find(|rr| rr.rtype == Type::NSEC)
+                .unwrap();
+            let pharos_proto::Rdata::Nsec { next, .. } = rr.data().unwrap() else {
+                unreachable!()
+            };
+            let expected: Name = "child\\000.miek.nl.".parse().unwrap();
+            assert_eq!(next, NameRef::parse(expected.as_wire(), 0).unwrap());
+        }
         let covered: Vec<_> = reply
             .authorities()
             .filter_map(|rr| match rr.data().unwrap() {

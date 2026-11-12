@@ -90,6 +90,7 @@ impl Dnssec {
         let special_nsec = denial && question.qtype == Type::NSEC;
         let mut lie_wire = Vec::new();
         if make_lie {
+            // shortcut: CoreDNS-style spans are not checked against zone inventory; validate when authoritative names are available.
             let lie = black_lie(
                 &question.name.to_name(),
                 zone,
