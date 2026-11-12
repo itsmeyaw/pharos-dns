@@ -61,7 +61,7 @@ pub(crate) fn spawn<H: Handler>(
     })
 }
 
-/// Writes one length-prefixed DNS Message.
+/// Writes one length-prefixed DNS Message. `wire` must not exceed 65,535 octets.
 pub async fn write_tcp_frame(
     stream: &mut (impl AsyncWrite + Unpin),
     wire: &[u8],
@@ -99,7 +99,8 @@ async fn serve<H: Handler>(
     mut shutdown: watch::Receiver<bool>,
     options: TcpOptions,
 ) {
-    // RFC 7766 §6.2.1.1: return each Response as soon as it is available; Nagle (RFC 9293 §3.7.4) holds it for an ACK.
+    // RFC 7766 §7: send each Response as soon as it is available.
+    // RFC 9293 §3.7.4: Nagle would hold it until the previous segment is ACKed.
     let _ = stream.set_nodelay(true);
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(Some(writer)));
