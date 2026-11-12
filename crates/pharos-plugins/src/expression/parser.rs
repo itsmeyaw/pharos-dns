@@ -28,6 +28,9 @@ pub(super) fn parse(source: &str, variables: &[(&str, ValueType)]) -> Result<Nod
     if parser.token != Token::End {
         return Err(format!("unexpected token {:?}", parser.token));
     }
+    if node.kind() == Kind::List {
+        return Err("list results are not supported".into());
+    }
     Ok(node)
 }
 

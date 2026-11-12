@@ -585,6 +585,16 @@ impl Expression {
         parser::parse(source, variables).map(Self)
     }
 
+    /// Type of this expression, for compiling subsequent variables.
+    pub fn value_type(&self) -> ValueType {
+        match self.0.kind() {
+            Kind::Bool => ValueType::Bool,
+            Kind::Int => ValueType::Int,
+            Kind::String => ValueType::String,
+            Kind::List => unreachable!("list results are rejected at compile time"),
+        }
+    }
+
     pub fn evaluate<'a>(
         &'a self,
         query: &'a Query<'_>,

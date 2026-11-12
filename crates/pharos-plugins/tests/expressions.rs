@@ -364,3 +364,38 @@ fn replace_optional_count_matches_expr_builtin() {
         );
     }
 }
+
+#[test]
+fn chained_variables_keep_borrowed_string_results_in_separate_scratch() {
+    let message = Message::parse(WIRE).unwrap();
+    let mut query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    query.groups = &[("ip", "192-168-1-2")];
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut first = [0; 2048];
+    let mut first_scratch = Scratch::new(&mut first);
+    let ip = Expression::compile("replace(group('ip'), '-', '.')").unwrap();
+    assert_eq!(ip.value_type(), ValueType::String);
+    let value = ip.evaluate(&query, &metadata, &mut first_scratch).unwrap();
+    let variables = [("ip", value)];
+    let mut next = Query::new(&message, query.client, query.local, query.protocol);
+    next.variables = &variables;
+    let expression = Expression::compile_with_variables(
+        "incidr(ip, '192.168.0.0/16')",
+        &[("ip", ip.value_type())],
+    )
+    .unwrap();
+    let mut second = [0; 2048];
+    let mut second_scratch = Scratch::new(&mut second);
+    assert_eq!(
+        expression
+            .evaluate(&next, &metadata, &mut second_scratch)
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
