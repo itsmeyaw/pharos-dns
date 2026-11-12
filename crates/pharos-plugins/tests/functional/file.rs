@@ -202,3 +202,35 @@ fn axfr_and_current_ixfr_have_soa_framing() {
         );
     }
 }
+
+#[tokio::test]
+async fn dnssec_ok_serves_rrsigs_and_nsec_denial() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/signed.zone");
+    let corefile = format!("example.org:53 {{\n file {path}\n}}");
+    let blocks = parse("Corefile", &corefile).unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let name: Name = "www.example.org.".parse().unwrap();
+    for (kind, expected_answer, expected_authority) in [
+        (Type::A, vec![Type::A, Type::RRSIG], vec![Type::NS, Type::RRSIG]),
+        (Type::AAAA, vec![], vec![Type::SOA, Type::RRSIG, Type::NSEC, Type::RRSIG]),
+    ] {
+        let mut wire = Vec::with_capacity(1232);
+        let mut builder = MessageBuilder::new(&mut wire, 1232, 1, 0x0100).unwrap();
+        builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN).unwrap();
+        builder.record(pharos_proto::Section::Additional, NameRef::parse(&[0], 0).unwrap(), Type::OPT, Class(1232), 0x8000, &[]).unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(1232);
+        let mut slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns, protocol: Protocol::Udp, domain: &name,
+            metadata: Metadata::new(&mut slots), response: &mut response, max_response_size: 1232,
+        };
+        assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.answers().map(|rr| rr.rtype).collect::<Vec<_>>(), expected_answer);
+        assert_eq!(response.authorities().map(|rr| rr.rtype).collect::<Vec<_>>(), expected_authority);
+    }
+}
