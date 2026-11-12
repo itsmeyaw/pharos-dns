@@ -4,7 +4,7 @@ mod support;
 
 use std::{
     fs,
-    net::UdpSocket,
+    net::{TcpListener, UdpSocket},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -37,6 +37,55 @@ fn missing_kubernetes_exits_one_with_coredns_error() {
     assert_eq!(
         String::from_utf8(output.stderr).unwrap().trim(),
         "plugin/k8s_external: kubernetes plugin not loaded"
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn check_validates_kubernetes_without_starting_controllers() {
+    let port = support::free_port();
+    let dir = std::env::temp_dir().join(format!("pharos-k8s-check-{}-{port}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let corefile = dir.join("Corefile");
+    fs::write(
+        &corefile,
+        format!(".:{port} {{\n k8s_external example.org\n}}\n"),
+    )
+    .unwrap();
+    let run = |check: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pharos"));
+        command.current_dir(&dir);
+        if check {
+            command.arg("check");
+        }
+        command.output().unwrap()
+    };
+    let startup = run(false);
+    let check = run(true);
+    assert_eq!(startup.status.code(), Some(1));
+    assert_eq!(check.status.code(), Some(1));
+    assert_eq!(check.stderr, startup.stderr);
+    assert_eq!(
+        String::from_utf8(check.stderr).unwrap().trim(),
+        "plugin/k8s_external: kubernetes plugin not loaded"
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    fs::write(&corefile, format!(".:{port} {{\n k8s_external example.org\n}}\nother:{port} {{\n kubernetes cluster.local {{\n  endpoint http://{}\n }}\n}}\n", listener.local_addr().unwrap())).unwrap();
+    let check = run(true);
+    assert_eq!(check.status.code(), Some(1));
+    assert_eq!(check.stderr, startup.stderr);
+    fs::write(&corefile, format!(".:{port} {{\n k8s_external example.org\n kubernetes cluster.local {{\n  endpoint http://{}\n }}\n}}\n", listener.local_addr().unwrap())).unwrap();
+    let check = run(true);
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
     );
     fs::remove_dir_all(dir).unwrap();
 }

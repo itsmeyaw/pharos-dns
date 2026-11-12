@@ -82,13 +82,14 @@ fn prepare(
     String,
 > {
     let blocks = parse_blocks(options, file, input)?;
-    prepare_blocks(options, blocks, metrics)
+    prepare_blocks(options, blocks, metrics, false)
 }
 
 fn prepare_blocks(
     options: &Options,
     mut blocks: Vec<pharos_corefile::ServerBlock>,
     metrics: &pharos_server::metrics::Registry,
+    check: bool,
 ) -> Result<
     (
         pharos_plugins::Servers,
@@ -105,6 +106,9 @@ fn prepare_blocks(
     }
     let blocks = pharos_corefile::configure(&blocks, pharos_plugins::directives())
         .map_err(|e| e.to_string())?;
+    if check {
+        pharos_plugins::validate_configuration(&blocks).map_err(|e| e.to_string())?;
+    }
     let reload_config = blocks.iter().filter_map(|block| block.config.reload).last();
     let mut domains = Domains::new();
     for block in &blocks {
@@ -140,7 +144,7 @@ pub fn check(options: &Options) -> Result<(), String> {
         .flat_map(|block| block.directives.keys().map(String::as_str))
         .collect();
     let metrics = pharos_server::metrics::Registry::default();
-    prepare_blocks(options, blocks.clone(), &metrics)?;
+    prepare_blocks(options, blocks.clone(), &metrics, true)?;
     println!(
         "Corefile: {file}; Server Blocks: {}; Directives: {}",
         keys.join(", "),

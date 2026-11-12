@@ -198,6 +198,25 @@ pub const fn plugins_listing() -> &'static str {
 /// Configured DNS Servers keyed by Listener.
 pub type Servers = HashMap<ListenerKey, Server<Arc<Chain>>>;
 
+#[cfg(feature = "plugin-k8s-external")]
+fn k8s_external_error(chain: &Chain) -> Option<&'static str> {
+    (chain.k8s_external.is_some() && chain.kubernetes.is_none())
+        .then_some("plugin/k8s_external: kubernetes plugin not loaded")
+}
+
+/// Validate configured blocks without running Startup hooks.
+pub fn validate_configuration(blocks: &[BlockContext<Chain>]) -> io::Result<()> {
+    #[cfg(feature = "plugin-k8s-external")]
+    for block in blocks {
+        if let Some(error) = k8s_external_error(&block.config) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+        }
+    }
+    #[cfg(not(feature = "plugin-k8s-external"))]
+    let _ = blocks;
+    Ok(())
+}
+
 /// Group Server Blocks by Listener and collect their hooks in block order.
 /// The caller runs Startup before serving and Shutdown before Listeners drain.
 pub fn servers(blocks: Vec<BlockContext<Chain>>) -> io::Result<(Servers, Lifecycle)> {
@@ -294,17 +313,16 @@ pub fn servers_with_registry(
             kubernetes.set_metrics(&metrics);
         }
         #[cfg(feature = "plugin-k8s-external")]
-        if let Some(external) = &mut block.config.k8s_external {
-            if let Some(kubernetes) = &block.config.kubernetes {
-                external.bind_kubernetes(kubernetes);
-            } else {
-                lifecycle.register_sync(pharos_server::Phase::Startup, || {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "plugin/k8s_external: kubernetes plugin not loaded",
-                    ))
-                });
-            }
+        if let Some(error) = k8s_external_error(&block.config) {
+            lifecycle.register_sync(pharos_server::Phase::Startup, move || {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, error))
+            });
+        }
+        #[cfg(feature = "plugin-k8s-external")]
+        if let Some(external) = &mut block.config.k8s_external
+            && let Some(kubernetes) = &block.config.kubernetes
+        {
+            external.bind_kubernetes(kubernetes);
         }
         #[cfg(feature = "plugin-transfer")]
         block.config.bind_transferers();
