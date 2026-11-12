@@ -299,6 +299,18 @@ mod tests {
         let mut expired_before_inception = right;
         expired_before_inception[36] = 1;
         assert!(masked(&left, &expired_before_inception, true).is_err());
+        let mut invalid_window = right;
+        invalid_window[36] = 1;
+        let mut same_invalid_window = invalid_window;
+        same_invalid_window[46] ^= 1;
+        assert!(masked(&invalid_window, &same_invalid_window, true).is_err());
+        let mut wrapping = left;
+        wrapping[33..37].copy_from_slice(&3_u32.to_be_bytes());
+        wrapping[37..41].copy_from_slice(&(u32::MAX - 4).to_be_bytes());
+        let mut shifted = wrapping;
+        shifted[33..37].copy_from_slice(&5_u32.to_be_bytes());
+        shifted[37..41].copy_from_slice(&(u32::MAX - 2).to_be_bytes());
+        assert!(masked(&wrapping, &shifted, true).is_ok());
         for offset in [
             3, 13, 16, 18, 22, 25, 26, 27, 28, 29, 30, 31, 32, 41, 42, 44,
         ] {
