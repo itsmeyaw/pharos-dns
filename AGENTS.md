@@ -1,6 +1,8 @@
 ## Development
 
+- Use `caveman` skill, including for subagents.
 - Use `caveman-commit` skill for commit message.
+- Use `rust-*` skills for implementation and test.
 - Commit in small functional changes.
 - Always add one-line comment citation to the standard for a logic. For example: `RFC 1034 §4.3.2: xxxxx`.
 
