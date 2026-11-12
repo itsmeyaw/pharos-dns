@@ -80,6 +80,44 @@ async fn slow_transfer_client_limits_message_production() {
         .unwrap();
 }
 
+struct FaultyTransfer(bool);
+
+impl Handler for FaultyTransfer {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        let panic = self.0;
+        let mut count = 0;
+        Action::Stream(Stream::new(move |wire| {
+            count += 1;
+            if count == 1 {
+                wire.push(1);
+            } else if panic {
+                panic!("broken stream");
+            } else {
+                wire.resize(65_536, 0);
+            }
+            Ok(true)
+        }))
+    }
+}
+
+#[tokio::test]
+async fn broken_transfer_closes_connection_promptly() {
+    for panic in [false, true] {
+        let (listener, mut stream) = connect(FaultyTransfer(panic)).await;
+        send(&mut stream, b"transfer").await;
+        assert_eq!(receive(&mut stream).await, [1]);
+        let mut byte = [0];
+        assert_eq!(
+            timeout(TEST_TIMEOUT, stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        listener.shutdown().await.unwrap();
+    }
+}
+
 struct Echo;
 
 impl Handler for Echo {

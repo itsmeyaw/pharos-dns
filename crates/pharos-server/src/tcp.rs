@@ -165,15 +165,25 @@ async fn serve<H: Handler>(
                 Action::Respond => None,
                 Action::Stream(transfer) => Some(transfer),
             };
-            // RFC 5936 §2.2: each Transfer Message is separately framed on one TCP connection.
-            let mut writer = writer.lock().await;
             loop {
+                // RFC 5936 §4.1.2: a connection can serve concurrent Transfer sessions.
+                let mut writer = writer.lock().await;
+                if writer.is_none() {
+                    break;
+                }
                 if let Some(transfer) = transfer.as_mut() {
                     response.clear();
-                    match transfer.next(&mut response) {
-                        Ok(true) => {}
-                        Ok(false) => break,
-                        Err(_) => {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        transfer.next(&mut response)
+                    })) {
+                        Ok(Ok(true)) => {}
+                        Ok(Ok(false)) => break,
+                        failure => {
+                            crate::logging::log(
+                                "ERROR",
+                                "server",
+                                &format!("Zone Transfer producer failed: {failure:?}"),
+                            );
                             *writer = None;
                             let _ = failed.send(true);
                             break;
@@ -181,8 +191,19 @@ async fn serve<H: Handler>(
                     }
                 }
                 let Ok(length) = u16::try_from(response.len()) else {
+                    if transfer.is_some() {
+                        // RFC 1035 §4.2.2: TCP Message lengths must fit in two octets.
+                        crate::logging::log(
+                            "ERROR",
+                            "server",
+                            "Zone Transfer Message exceeds 65535 octets",
+                        );
+                        *writer = None;
+                        let _ = failed.send(true);
+                    }
                     break;
                 };
+                // RFC 5936 §2.2: every Transfer Message is separately framed on the connection.
                 if let Some(stream) = writer.as_mut() {
                     let result = timeout(options.write, async {
                         stream.write_all(&length.to_be_bytes()).await?;

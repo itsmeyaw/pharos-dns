@@ -93,7 +93,9 @@ pub enum Protocol {
 
 /// Lazily produces complete wire-format Messages into a reusable buffer.
 #[derive(Clone)]
-pub struct Stream(Arc<std::sync::Mutex<dyn FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send>>);
+pub struct Stream(Arc<std::sync::Mutex<StreamProducer>>);
+
+type StreamProducer = dyn FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send;
 
 impl Stream {
     pub fn new(produce: impl FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send + 'static) -> Self {
