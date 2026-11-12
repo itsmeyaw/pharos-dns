@@ -2,6 +2,7 @@ use std::{
     io::{self, IoSlice},
     net::SocketAddr,
     sync::Arc,
+    task::Poll,
     time::Duration,
 };
 
@@ -202,7 +203,7 @@ async fn serve<H: Handler>(
         let failed = failed.clone();
         let mut response = responses.pop().unwrap_or_default();
         response.clear();
-        queries.spawn(async move {
+        let mut task = Box::pin(async move {
             let action =
                 H::handle_shared(&handler, &query, peer, Protocol::Tcp, &mut response).await;
             let mut transfer = match action {
@@ -292,6 +293,13 @@ async fn serve<H: Handler>(
             }
             response
         });
+        // Like CoreDNS and Hickory, answer a ready Query inline; spawn only one that waits.
+        match std::future::poll_fn(|cx| Poll::Ready(task.as_mut().poll(cx))).await {
+            Poll::Ready(response) => responses.push(response),
+            Poll::Pending => {
+                queries.spawn(task);
+            }
+        }
     }
     while queries.join_next().await.is_some() {}
 }
