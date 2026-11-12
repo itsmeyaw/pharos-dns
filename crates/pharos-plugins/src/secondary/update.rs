@@ -159,7 +159,6 @@ pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::
                             );
                         }
                     }
-                    let _ = shared;
                     return Ok(());
                 }
                 Err(err) => error = err,
