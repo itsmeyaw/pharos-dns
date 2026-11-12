@@ -1,0 +1,3 @@
+.:{port} {
+    file db.example.org example.org
+}

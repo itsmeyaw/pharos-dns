@@ -45,6 +45,9 @@ records must fit into one 65,535-octet comparison Message.
 
 The `file` README scenarios omit the example's remote NOTIFY destination so
 the tests do not send traffic outside the local fixture.
+The intentionally invalid root-Server-Block example cannot produce DNS
+Responses because its SOA owner does not match the configured root Zone; the
+`coredns_readme_root_without_zone_is_invalid` test checks startup rejection.
 
 The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS

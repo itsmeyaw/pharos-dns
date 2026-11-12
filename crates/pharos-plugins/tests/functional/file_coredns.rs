@@ -339,6 +339,17 @@ async fn coredns_setup_soa_owner_with_implicit_and_explicit_origin() {
     std::fs::remove_file(path).unwrap();
 }
 
+// CoreDNS file README: the root Server Block without an explicit Zone rejects this SOA.
+#[test]
+fn coredns_readme_root_without_zone_is_invalid() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
+    let config = format!(".:53 {{\n file {path}\n}}");
+    assert!(configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).is_err());
+}
+
 // Derived from CoreDNS setup_test.go TestParseReload and reload_test.go TestZoneReload.
 #[tokio::test(start_paused = true)]
 async fn coredns_default_and_configured_reload_intervals() {
