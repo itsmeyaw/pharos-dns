@@ -197,6 +197,7 @@ impl Dnssec {
                 let Some(zone) = self.zone_for(rr.name) else {
                     continue;
                 };
+                // RFC 2181 §5: an RRset shares its owner, class and type.
                 let group: Vec<_> = records
                     .iter()
                     .copied()
