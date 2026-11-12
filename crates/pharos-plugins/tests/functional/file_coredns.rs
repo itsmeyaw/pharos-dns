@@ -732,11 +732,53 @@ async fn coredns_reload_updates_apex_records() {
             let (outcome, wire) = query_chain(chain, &apex, "miek.nl.", Type::NS).await;
             assert_eq!(outcome, Outcome::Response);
             if Message::parse(&wire).unwrap().answer_count() == 2 {
+                assert_records(
+                    Message::parse(&wire).unwrap().answers(),
+                    &[
+                        "miek.nl. 1627 IN NS ext.ns.whyscream.net.",
+                        "miek.nl. 1627 IN NS omval.tednet.nl.",
+                    ],
+                );
                 break;
             }
             assert!(Instant::now() < deadline, "apex records were not reloaded");
             tokio::task::yield_now().await;
             tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        if mtime {
+            std::fs::write(&path, first).unwrap();
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new().set_modified(old_time + Duration::from_secs(10)),
+                )
+                .unwrap();
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+            let (_, wire) = query_chain(chain, &apex, "miek.nl.", Type::NS).await;
+            assert_eq!(Message::parse(&wire).unwrap().answer_count(), 2);
+            std::fs::File::open(&path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new().set_modified(old_time + Duration::from_secs(20)),
+                )
+                .unwrap();
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let (_, wire) = query_chain(chain, &apex, "miek.nl.", Type::NS).await;
+                if Message::parse(&wire).unwrap().answer_count() == 4 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "newer mtime did not reload the apex"
+                );
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_millis(100)).await;
+            }
         }
         chain
             .lifecycle
