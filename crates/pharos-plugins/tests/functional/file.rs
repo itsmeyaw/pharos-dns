@@ -192,6 +192,7 @@ fn axfr_and_current_ixfr_have_soa_framing() {
         let mut types = Vec::new();
         while stream.next(&mut wire).unwrap() {
             let message = Message::parse(&wire).unwrap();
+            assert_eq!(message.aa(), kind == Type::AXFR);
             types.extend(message.answers().map(|record| record.rtype));
         }
         assert_eq!(types.first(), Some(&Type::SOA));
