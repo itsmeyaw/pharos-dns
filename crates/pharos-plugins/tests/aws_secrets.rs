@@ -49,3 +49,11 @@ fn rejects_invalid_secret_without_exposing_it() {
     assert!(aws::parse_secret(&missing_private).is_err());
     assert!(aws::parse_secret(r#"{"key":5,"private":""}"#).is_err());
 }
+
+#[test]
+fn ignores_lone_surrogates_in_unknown_secret_fields() {
+    let public = serde_json::to_string(PUBLIC).unwrap();
+    let private = serde_json::to_string(PRIVATE).unwrap();
+    let secret = format!(r#"{{"key":{public},"private":{private},"unused":"\ud800"}}"#);
+    assert!(aws::parse_secret(&secret).is_ok());
+}
