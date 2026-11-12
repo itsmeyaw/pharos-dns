@@ -31,6 +31,8 @@ Each scenario is a directory containing:
   that exact pair of flag values on that Query; other fields remain checked.
   `mask soa.serial` ignores only the SOA serial, for scenarios that explicitly
   opt in; Kubernetes SOA serials can depend on each process's startup time.
+  `mask rrsig` ignores only RRSIG signature contents and inception/expiration
+  timestamps; signature lengths, all other fields and record counts are compared.
 - Any other files or subdirectories are copied into separate temporary working
   directories for both processes, preserving relative paths.
 
@@ -48,3 +50,12 @@ comparisons with `cargo xtask coredns` followed by `cargo xtask diff` after the
 Kubernetes Plugin is available. The zonal scenario also requires zonal Plugin
 and store support.
 
+The `dnssec-whoami` and `dnssec-kubernetes` scenarios cover the file-key README
+examples with unsigned and DO-bit Queries, including apex DNSKEY, ordinary
+responses and Kubernetes Negative Responses.
+Their public test keys reuse the Ed25519 fixture in `crates/pharos-dnssec/tests`;
+they must never be used for real zones. The opt-in RRSIG mask accommodates
+independently generated signatures and signing times; it does not verify signatures.
+The AWS Secrets Manager README example is skipped because it requires live AWS
+credentials and a provisioned secret; the default build also disables the AWS
+feature.

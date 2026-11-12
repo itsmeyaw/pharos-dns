@@ -1,0 +1,6 @@
+example.org:{port} {
+    dnssec {
+        key file Kexample.org.+015+21336
+    }
+    whoami
+}
