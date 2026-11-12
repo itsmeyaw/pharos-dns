@@ -15,7 +15,7 @@
 - Unlike CoreDNS's periodic cleanup, expired cache entries remain until the same Response is re-signed or arbitrary eviction removes them.
 - Signing errors return a plugin error, which the Listener turns into SERVFAIL. CoreDNS ignores `d.sign` errors and can return unsigned or partially signed Responses instead.
 - RRsets are grouped by case-insensitive owner, class and type (RFC 2181 §5; RFC 4343 §3). CoreDNS groups by case-sensitive owner and type, so mixed-class or mixed-case Responses can differ.
-- With all Plugin features enabled, the debug `cache::cache_stale::prefer_positive_retains_last_good_answer_after_nonanswer_prefetch` test overflows the default macOS test-thread stack. It passes with `RUST_MIN_STACK=4194304`; production impact has not been established.
+- With all Plugin features enabled, the debug `cache::cache_stale::prefer_positive_retains_last_good_answer_after_nonanswer_prefetch` test overflows the default macOS test-thread stack. It passes with `RUST_MIN_STACK=4194304`, and in the release profile without that setting; production impact has not been established.
 - `key aws_secretsmanager` requires the optional `dnssec-aws` Cargo feature, which is off by default. Without it, Plugin setup fails with a feature diagnostic. The official AWS SDK uses its default credential chain. TLS uses rustls with aws-lc-rs and no ring; the SDK's aws-sigv4 uses RustCrypto hmac/sha2, and aws-config SSO uses RustCrypto sha1 internally.
 - Binary-only AWS secrets cause a setup error instead of CoreDNS's nil `SecretString` panic.
 - AWS secret JSON rejects lone surrogate escapes in `key` or `private`; Go replaces these with U+FFFD, including in otherwise ignored key-file comments. Unknown fields are skipped.
