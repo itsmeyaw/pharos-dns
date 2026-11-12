@@ -214,7 +214,7 @@ mod tests {
             Outcome::Drop,
             Outcome::Unanswered(pharos_proto::Rcode::REFUSED),
             Outcome::Error(Error::NoNextPlugin),
-            Outcome::Stream(pharos_server::Stream),
+            Outcome::Stream(pharos_server::Stream::new(|_| Ok(false))),
         ] {
             let mut response = Vec::with_capacity(512);
             let mut slots = [];
@@ -229,7 +229,10 @@ mod tests {
                 response: &mut response,
                 max_response_size: 512,
             };
-            assert_eq!(plugin.serve(&mut cx, Return(outcome)).await, outcome);
+            assert_eq!(
+                plugin.serve(&mut cx, Return(outcome.clone())).await,
+                outcome
+            );
             assert!(response.is_empty());
         }
     }

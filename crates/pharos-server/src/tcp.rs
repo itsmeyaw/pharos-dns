@@ -158,12 +158,51 @@ async fn serve<H: Handler>(
         let mut response = responses.pop().unwrap_or_default();
         response.clear();
         queries.spawn(async move {
-            if H::handle_shared(&handler, &query, peer, Protocol::Tcp, &mut response).await
-                == Action::Respond
-                && let Ok(length) = u16::try_from(response.len())
-            {
-                // RFC 7766 §5: TCP responses use the same connection as the query.
+            let action =
+                H::handle_shared(&handler, &query, peer, Protocol::Tcp, &mut response).await;
+            let mut transfer = match action {
+                Action::Drop => return response,
+                Action::Respond => None,
+                Action::Stream(transfer) => Some(transfer),
+            };
+            loop {
+                // RFC 5936 §4.1.2: a connection can serve concurrent Transfer sessions.
                 let mut writer = writer.lock().await;
+                if writer.is_none() {
+                    break;
+                }
+                if let Some(transfer) = transfer.as_mut() {
+                    response.clear();
+                    match transfer.next(&mut response) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(failure) => {
+                            // RFC 5936 §2.3: closing the connection terminates the client's AXFR session.
+                            crate::logging::log(
+                                "ERROR",
+                                "server",
+                                &format!("Zone Transfer producer failed: {failure:?}"),
+                            );
+                            *writer = None;
+                            let _ = failed.send(true);
+                            break;
+                        }
+                    }
+                }
+                let Ok(length) = u16::try_from(response.len()) else {
+                    if transfer.is_some() {
+                        // RFC 1035 §4.2.2: TCP Message lengths must fit in two octets.
+                        crate::logging::log(
+                            "ERROR",
+                            "server",
+                            "Zone Transfer Message exceeds 65535 octets",
+                        );
+                        *writer = None;
+                        let _ = failed.send(true);
+                    }
+                    break;
+                };
+                // RFC 5936 §2.2: every Transfer Message is separately framed on the connection.
                 if let Some(stream) = writer.as_mut() {
                     let result = timeout(options.write, async {
                         stream.write_all(&length.to_be_bytes()).await?;
@@ -173,7 +212,13 @@ async fn serve<H: Handler>(
                     if !matches!(result, Ok(Ok(()))) {
                         *writer = None;
                         let _ = failed.send(true);
+                        break;
                     }
+                } else {
+                    break;
+                }
+                if transfer.is_none() {
+                    break;
                 }
             }
             response

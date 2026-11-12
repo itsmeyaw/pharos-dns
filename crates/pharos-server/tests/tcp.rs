@@ -1,8 +1,15 @@
 #![forbid(unsafe_code)]
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
-use pharos_server::{Action, Handler, Listener, Protocol};
+use pharos_server::{Action, Handler, Listener, Protocol, Stream};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -11,6 +18,105 @@ use tokio::{
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+struct Transfer;
+
+impl Handler for Transfer {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        let mut next = 0;
+        Action::Stream(Stream::new(move |response: &mut Vec<u8>| {
+            if next == 3 {
+                return Ok(false);
+            }
+            response.push(next);
+            next += 1;
+            Ok(true)
+        }))
+    }
+}
+
+#[tokio::test]
+async fn tcp_writes_every_transfer_message_on_the_same_connection() {
+    let (listener, mut stream) = connect(Transfer).await;
+    send(&mut stream, b"transfer").await;
+    for message in 0..3 {
+        assert_eq!(receive(&mut stream).await, [message]);
+    }
+    drop(stream);
+    listener.shutdown().await.unwrap();
+}
+
+struct LargeTransfer(Arc<AtomicUsize>);
+
+impl Handler for LargeTransfer {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        let produced = Arc::clone(&self.0);
+        Action::Stream(Stream::new(move |wire| {
+            let index = produced.fetch_add(1, Ordering::SeqCst);
+            if index == 10_000 {
+                return Ok(false);
+            }
+            wire.resize(65_535, 0);
+            Ok(true)
+        }))
+    }
+}
+
+#[tokio::test]
+async fn slow_transfer_client_limits_message_production() {
+    let produced = Arc::new(AtomicUsize::new(0));
+    let (listener, mut stream) = connect(LargeTransfer(Arc::clone(&produced))).await;
+    send(&mut stream, b"transfer").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let count = produced.load(Ordering::SeqCst);
+    assert!(
+        count > 0 && count < 10_000,
+        "produced {count} Messages without a reader"
+    );
+    drop(stream);
+    timeout(Duration::from_secs(7), listener.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+struct FaultyTransfer(bool);
+
+impl Handler for FaultyTransfer {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        let panic = self.0;
+        let mut count = 0;
+        Action::Stream(Stream::new(move |wire| {
+            count += 1;
+            if count == 1 {
+                wire.push(1);
+            } else if panic {
+                panic!("broken stream");
+            } else {
+                wire.resize(65_536, 0);
+            }
+            Ok(true)
+        }))
+    }
+}
+
+#[tokio::test]
+async fn broken_transfer_closes_connection_promptly() {
+    for panic in [false, true] {
+        let (listener, mut stream) = connect(FaultyTransfer(panic)).await;
+        send(&mut stream, b"transfer").await;
+        assert_eq!(receive(&mut stream).await, [1]);
+        let mut byte = [0];
+        assert_eq!(
+            timeout(TEST_TIMEOUT, stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        listener.shutdown().await.unwrap();
+    }
+}
 
 struct Echo;
 

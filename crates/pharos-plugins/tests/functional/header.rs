@@ -148,7 +148,7 @@ async fn rules_are_ordered_and_non_response_outcomes_are_preserved() {
                     &mut cx,
                     Inspect {
                         expected: 0x80,
-                        outcome
+                        outcome: outcome.clone()
                     }
                 )
                 .await,
