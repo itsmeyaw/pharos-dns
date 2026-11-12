@@ -8,6 +8,8 @@ mod name;
 mod reverse;
 mod scratch;
 pub mod setup;
+#[cfg(feature = "plugin-transfer")]
+mod transfer;
 
 use pharos_kubernetes::{
     Controller,
@@ -30,6 +32,8 @@ struct State {
     metrics: Mutex<pharos_server::metrics::Registry>,
     scratch: scratch::Pool,
     empty_store: Store,
+    #[cfg(feature = "plugin-transfer")]
+    notifier: Mutex<transfer::Notifier>,
 }
 
 #[derive(Default)]
@@ -217,9 +221,17 @@ impl Kubernetes {
     pub(crate) fn register_hooks(&self, lifecycle: &mut pharos_server::Lifecycle) {
         let state = self.state.clone();
         let config = self.config.clone();
+        #[cfg(feature = "plugin-transfer")]
+        let zones = self.zones.clone();
+        #[cfg(feature = "plugin-transfer")]
+        let multicluster_zones = self.multicluster_zones.clone();
         let start = move || {
             let state = state.clone();
             let config = config.clone();
+            #[cfg(feature = "plugin-transfer")]
+            let zones = zones.clone();
+            #[cfg(feature = "plugin-transfer")]
+            let multicluster_zones = multicluster_zones.clone();
             async move {
                 let previous = state.controller.lock().unwrap().take();
                 let controller = if let Some(controller) = previous {
@@ -244,6 +256,8 @@ impl Kubernetes {
                     store: Some(store),
                     sync: Some(sync.clone()),
                 };
+                #[cfg(feature = "plugin-transfer")]
+                transfer::start(&state, &zones, &multicluster_zones);
                 Controller::wait_for_sync_status(sync.as_ref(), config.startup_timeout).await;
                 Ok(())
             }
@@ -252,6 +266,8 @@ impl Kubernetes {
         lifecycle.register(Phase::RestartFailed, start);
         let state = self.state.clone();
         let stop = move || {
+            #[cfg(feature = "plugin-transfer")]
+            transfer::stop(&state);
             state.cache.write().unwrap().sync = None;
             let controller = state.controller.lock().unwrap().take();
             let state = state.clone();

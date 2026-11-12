@@ -73,6 +73,8 @@ async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
         }
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    #[cfg(feature = "plugin-transfer")]
+    let transferer = blocks[0].config.kubernetes.as_ref().unwrap().clone();
     let (mut servers, lifecycle) =
         servers_with_registry(blocks, Registry::new("test", "test", "rust")).unwrap();
     lifecycle.run(Phase::Startup).await.unwrap();
@@ -167,6 +169,41 @@ async fn routed_kubernetes_cluster_ip_queries_do_not_allocate() {
     let after = GLOBAL.stats();
     assert_eq!(after.allocations - before.allocations, 0);
     assert_eq!(after.reallocations - before.reallocations, 0);
+
+    #[cfg(feature = "plugin-transfer")]
+    {
+        use pharos_plugins::transfer::{TransferRequest, Transferer};
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let before = GLOBAL.stats();
+        let mut stream = transferer
+            .transfer(TransferRequest {
+                zone: NameRef::parse(zone.as_wire(), 0).unwrap(),
+                serial: 0,
+                id: 1,
+                flags: 0,
+                protocol: Protocol::Tcp,
+                qtype: Type::AXFR,
+                qclass: Class::IN,
+            })
+            .unwrap()
+            .unwrap();
+        let after = GLOBAL.stats();
+        // One snapshot, one sorted Service list per encoding pass, and one shared Stream
+        // handle, independent of record count.
+        assert_eq!(after.allocations - before.allocations, 4);
+        assert_eq!(after.reallocations - before.reallocations, 0);
+        let mut wire = Vec::with_capacity(65535);
+        let before = GLOBAL.stats();
+        assert!(stream.next(&mut wire).unwrap());
+        let first = GLOBAL.stats();
+        assert!(!stream.next(&mut wire).unwrap());
+        let after = GLOBAL.stats();
+        // macOS lazily allocates the Stream's pthread mutex on its first lock.
+        assert!(first.allocations - before.allocations <= 1);
+        assert_eq!(after.allocations - first.allocations, 0);
+        assert_eq!(after.reallocations - before.reallocations, 0);
+        assert!(Message::parse(&wire).unwrap().answer_count() >= 5);
+    }
     lifecycle.run(Phase::Shutdown).await.unwrap();
     task.abort();
 }
