@@ -2,7 +2,7 @@
 
 The engine is under construction. It currently accepts literal text, `.Name`,
 `.Zone`, `.Class`, `.Type`, `.Remote`, `.Regex`, `.Group.name`, `.Var.name`,
-`index .Match N`, `.Meta "label"`, trim markers, `if`/`else`/`end` with a field, `range .Match`/`.Group`/`.Var` (including `.` and `$.Field`), `eq`, `len`, and `parseInt` with a field or a simple
+`index .Match N`, `.Meta "label"`, trim markers, `if`/`else`/`end` with a field, `range .Match`/`.Group`/`.Var` (including `.`, `$.Field`, and scoped index/value variables), `eq`, `len`, and `parseInt` with a field or a simple
 quoted string and literal base and bit size. Missing Metadata renders as an
 empty string; an out-of-range match or invalid `parseInt` fails at render time.
 Pipelines and nested parentheses support `and`, `or`, `not`, `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `index`, `slice`, `len`, `print`, `println`, `printf`, `html`, `js`, `urlquery`, and `parseInt`. `printf` currently supports `%s`, `%d`, `%v`, and `%%`. Go quoted-string escapes and raw strings are supported. Other actions fail compilation; in particular `call` and other range values are not yet supported. Map ranges are ordered but use quadratic scans to avoid allocation.

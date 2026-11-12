@@ -60,6 +60,7 @@ enum Field {
     Regex,
     Group(String),
     Variable(String),
+    Local(String),
     Match(usize),
     Metadata(String),
 }
@@ -77,7 +78,7 @@ enum Part {
     Text(String),
     Field(Field),
     If(Condition, Vec<Part>, Vec<Part>),
-    Range(Field, Vec<Part>, Vec<Part>),
+    Range(Field, Vec<String>, Vec<Part>, Vec<Part>),
     Pipeline(pipeline::Pipeline),
 }
 
@@ -92,7 +93,7 @@ pub struct Template(Vec<Part>);
 impl Template {
     /// Compile the supported template actions.
     pub fn compile(mut source: &str) -> Result<Self, String> {
-        let (parts, marker) = parse_parts(&mut source, 0)?;
+        let (parts, marker) = parse_parts(&mut source, 0, &[])?;
         if marker.is_some() {
             return Err("unexpected template else or end".into());
         }
@@ -108,7 +109,42 @@ impl Template {
 #[derive(Clone, Copy)]
 enum Dot<'a> {
     Root,
-    Value(Value<'a>),
+    Range {
+        value: Value<'a>,
+        key: Value<'a>,
+        names: &'a [String],
+        parent: &'a Dot<'a>,
+    },
+}
+
+impl<'a> Dot<'a> {
+    fn value(self) -> Option<Value<'a>> {
+        match self {
+            Self::Root => None,
+            Self::Range { value, .. } => Some(value),
+        }
+    }
+    fn local(self, name: &str) -> Option<Value<'a>> {
+        match self {
+            Self::Range {
+                value,
+                key,
+                names,
+                parent,
+            } => {
+                if names.len() == 1 && names[0] == name {
+                    Some(value)
+                } else if names.len() == 2 && names[0] == name {
+                    Some(key)
+                } else if names.len() == 2 && names[1] == name {
+                    Some(value)
+                } else {
+                    parent.local(name)
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 fn render_parts(
@@ -131,7 +167,7 @@ fn render_parts(
                 dot,
                 output,
             )?,
-            Part::Range(field, body, otherwise) => {
+            Part::Range(field, names, body, otherwise) => {
                 let field = match field {
                     Field::Root(field) => field.as_ref(),
                     field if matches!(dot, Dot::Root) => field,
@@ -142,14 +178,21 @@ fn render_parts(
                         if data.matches.is_empty() {
                             render_parts(otherwise, data, dot, output)?;
                         }
-                        for value in data.matches {
-                            render_parts(body, data, Dot::Value(Value::String(value)), output)?;
+                        for (index, value) in data.matches.iter().enumerate() {
+                            let nested = Dot::Range {
+                                value: Value::String(value),
+                                key: Value::Int(index as i64),
+                                names,
+                                parent: &dot,
+                            };
+                            render_parts(body, data, nested, output)?;
                         }
                     }
                     Field::Groups => render_map(
                         data.groups
                             .iter()
                             .map(|(key, value)| (*key, Value::String(value))),
+                        names,
                         body,
                         otherwise,
                         data,
@@ -158,6 +201,7 @@ fn render_parts(
                     )?,
                     Field::Variables => render_map(
                         data.variables.iter().map(|(key, value)| (*key, *value)),
+                        names,
                         body,
                         otherwise,
                         data,
@@ -175,6 +219,7 @@ fn render_parts(
 
 fn render_map<'a>(
     entries: impl Iterator<Item = (&'a str, Value<'a>)> + Clone,
+    names: &[String],
     body: &[Part],
     otherwise: &[Part],
     data: &Data<'_, '_>,
@@ -190,7 +235,13 @@ fn render_map<'a>(
         .min_by_key(|(key, _)| *key)
     {
         any = true;
-        render_parts(body, data, Dot::Value(value), output)?;
+        let nested = Dot::Range {
+            value,
+            key: Value::String(key),
+            names,
+            parent: &dot,
+        };
+        render_parts(body, data, nested, output)?;
         last = Some(key);
     }
     if !any {
@@ -238,10 +289,8 @@ fn write_field(
         Field::QueryScalar(field) if matches!(dot, Dot::Root) => {
             write_value(Some(field.value(data)?), output)
         }
-        Field::Dot => match dot {
-            Dot::Value(value) => write_value(Some(value), output),
-            Dot::Root => Err(fmt::Error),
-        },
+        Field::Dot => write_value(dot.value().ok_or(fmt::Error).map(Some)?, output),
+        Field::Local(name) => write_value(dot.local(name), output),
         Field::Variable(name) if matches!(dot, Dot::Root) => write_value(
             data.variables
                 .iter()
@@ -258,7 +307,11 @@ enum Marker {
     End,
 }
 
-fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Marker>), String> {
+fn parse_parts(
+    source: &mut &str,
+    depth: usize,
+    scope: &[String],
+) -> Result<(Vec<Part>, Option<Marker>), String> {
     // shortcut: 256 nested actions bound recursive rendering; use an iterative renderer to lift this limit.
     if depth >= 256 {
         return Err("template nesting exceeds 256 levels".into());
@@ -299,6 +352,7 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             _ => {}
         }
         if let Some(condition) = action.strip_prefix("else if ") {
+            validate_variables(condition, scope)?;
             return Ok((parts, Some(Marker::ElseIf(condition.trim().to_owned()))));
         }
         let range = action.starts_with("range ");
@@ -307,18 +361,48 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             .or_else(|| action.strip_prefix("range "))
         {
             let condition = condition.trim();
-            let field = if range {
-                Some(parse_field(condition)?)
+            let (field, names) = if range {
+                let (names, expression) = match condition.split_once(":=") {
+                    Some((names, expression)) => {
+                        let names = names
+                            .split(',')
+                            .map(str::trim)
+                            .map(|name| {
+                                let name = name
+                                    .strip_prefix('$')
+                                    .filter(|name| {
+                                        !name.is_empty()
+                                            && name
+                                                .chars()
+                                                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                                    })
+                                    .ok_or("invalid range variable")?;
+                                Ok(name.to_owned())
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        if names.is_empty() || names.len() > 2 {
+                            return Err("range needs one or two variables".into());
+                        }
+                        (names, expression.trim())
+                    }
+                    None => (Vec::new(), condition),
+                };
+                validate_variables(expression, scope)?;
+                (Some(parse_field(expression)?), names)
             } else {
-                None
+                validate_variables(condition, scope)?;
+                (None, Vec::new())
             };
-            let (yes, no) = parse_branches(source, depth + 1)?;
+            let mut branch_scope = scope.to_vec();
+            branch_scope.extend(names.iter().cloned());
+            let (yes, no) = parse_branches(source, depth + 1, &branch_scope)?;
             if let Some(field) = field {
-                Part::Range(field, yes, no)
+                Part::Range(field, names, yes, no)
             } else {
                 Part::If(Condition::parse(condition)?, yes, no)
             }
         } else {
+            validate_variables(action, scope)?;
             match parse_field(action) {
                 Ok(field) => Part::Field(field),
                 Err(_) => Part::Pipeline(pipeline::Pipeline::compile(action)?),
@@ -331,12 +415,16 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
     Ok((parts, None))
 }
 
-fn parse_branches(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Vec<Part>), String> {
-    let (yes, marker) = parse_parts(source, depth)?;
+fn parse_branches(
+    source: &mut &str,
+    depth: usize,
+    scope: &[String],
+) -> Result<(Vec<Part>, Vec<Part>), String> {
+    let (yes, marker) = parse_parts(source, depth, scope)?;
     let no = match marker {
         Some(Marker::End) => Vec::new(),
         Some(Marker::Else) => {
-            let (no, marker) = parse_parts(source, depth)?;
+            let (no, marker) = parse_parts(source, depth, scope)?;
             if !matches!(marker, Some(Marker::End)) {
                 return Err("control action is missing end".into());
             }
@@ -344,12 +432,51 @@ fn parse_branches(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Vec<Par
         }
         Some(Marker::ElseIf(condition)) => {
             let condition = Condition::parse(&condition)?;
-            let (inner_yes, inner_no) = parse_branches(source, depth + 1)?;
+            let (inner_yes, inner_no) = parse_branches(source, depth + 1, scope)?;
             vec![Part::If(condition, inner_yes, inner_no)]
         }
         None => return Err("control action is missing end".into()),
     };
     Ok((yes, no))
+}
+
+fn validate_variables(source: &str, scope: &[String]) -> Result<(), String> {
+    let bytes = source.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' && active != b'`' {
+                escaped = true;
+            } else if byte == active {
+                quote = None;
+            }
+        } else if matches!(byte, b'"' | b'\'' | b'`') {
+            quote = Some(byte);
+        } else if byte == b'$' {
+            let start = index + 1;
+            let mut end = start;
+            while bytes
+                .get(end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                end += 1;
+            }
+            if end > start && !scope.iter().any(|name| name == &source[start..end]) {
+                return Err(format!(
+                    "undefined template variable: ${}",
+                    &source[start..end]
+                ));
+            }
+            index = end.saturating_sub(1);
+        }
+        index += 1;
+    }
+    Ok(())
 }
 
 fn is_space(byte: u8) -> bool {
@@ -384,6 +511,14 @@ fn action_end(source: &str) -> Option<usize> {
 fn parse_field(action: &str) -> Result<Field, String> {
     if let Some(field) = action.strip_prefix("$.") {
         return Ok(Field::Root(Box::new(parse_field(&format!(".{field}"))?)));
+    }
+    if let Some(name) = action.strip_prefix('$').filter(|name| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    }) {
+        return Ok(Field::Local(name.to_owned()));
     }
     let header = action
         .strip_prefix(".Message.MsgHdr.")
@@ -462,10 +597,8 @@ impl Field {
         match self {
             Self::Root(field) => field.scalar(data, Dot::Root),
             Self::QueryScalar(field) if matches!(dot, Dot::Root) => Ok(Some(field.value(data)?)),
-            Self::Dot => match dot {
-                Dot::Value(value) => Ok(Some(value)),
-                Dot::Root => Err(fmt::Error),
-            },
+            Self::Dot => dot.value().map(Some).ok_or(fmt::Error),
+            Self::Local(name) => Ok(dot.local(name)),
             Self::Variable(name) if matches!(dot, Dot::Root) => Ok(data
                 .variables
                 .iter()
@@ -481,14 +614,8 @@ impl Field {
     fn truthy(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<bool, fmt::Error> {
         match self {
             Self::Root(field) => field.truthy(data, Dot::Root),
-            Self::Dot => Ok(match dot {
-                Dot::Root => true,
-                Dot::Value(Value::Nil) => false,
-                Dot::Value(Value::Bool(value)) => value,
-                Dot::Value(Value::Int(value)) => value != 0,
-                Dot::Value(Value::Float(value)) => value != 0.0,
-                Dot::Value(Value::String(value)) => !value.is_empty(),
-            }),
+            Self::Dot => Ok(dot.value().is_none_or(truth_value)),
+            Self::Local(name) => Ok(dot.local(name).is_some_and(truth_value)),
             Self::Matches if matches!(dot, Dot::Root) => Ok(!data.matches.is_empty()),
             Self::Groups if matches!(dot, Dot::Root) => Ok(!data.groups.is_empty()),
             Self::Variables if matches!(dot, Dot::Root) => Ok(!data.variables.is_empty()),
@@ -529,8 +656,12 @@ impl Field {
     fn value<'a>(&'a self, data: &'a Data<'_, '_>, dot: Dot<'a>) -> Result<&'a str, fmt::Error> {
         match self {
             Self::Root(field) => field.value(data, Dot::Root),
-            Self::Dot => match dot {
-                Dot::Value(Value::String(value)) => Ok(value),
+            Self::Dot => match dot.value() {
+                Some(Value::String(value)) => Ok(value),
+                _ => Err(fmt::Error),
+            },
+            Self::Local(name) => match dot.local(name) {
+                Some(Value::String(value)) => Ok(value),
                 _ => Err(fmt::Error),
             },
             Self::Literal(value) => Ok(value),
@@ -568,6 +699,16 @@ impl Field {
                 ""
             }),
         }
+    }
+}
+
+fn truth_value(value: Value<'_>) -> bool {
+    match value {
+        Value::Nil => false,
+        Value::Bool(value) => value,
+        Value::Int(value) => value != 0,
+        Value::Float(value) => value != 0.0,
+        Value::String(value) => !value.is_empty(),
     }
 }
 

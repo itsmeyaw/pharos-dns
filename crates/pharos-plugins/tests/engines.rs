@@ -354,3 +354,26 @@ fn template_meta_hides_values_when_metadata_is_disabled() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "example.");
 }
+
+#[test]
+fn range_binds_index_value_and_outer_variables() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["one", "two"];
+    data.groups = &[("z", "last"), ("a", "first")];
+    let template = Template::compile("{{ range $i, $v := .Match }}{{$i}}={{$v}}:{{ range $key, $value := $.Group }}{{$i}}/{{$key}}/{{$value}};{{ end }}{{ end }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "0=one:0/a/first;0/z/last;1=two:1/a/first;1/z/last;");
+}
+
+#[test]
+fn range_variables_are_scoped_and_undefined_names_fail_at_setup() {
+    assert!(Template::compile("{{ $missing }}").is_err());
+    assert!(Template::compile("{{ range $v := .Match }}{{ $v }}{{ end }}{{ $v }}").is_err());
+    assert!(
+        Template::compile("{{ range $v := .Match }}{{ if eq $v \"x\" }}yes{{ end }}{{ end }}")
+            .is_ok()
+    );
+}
