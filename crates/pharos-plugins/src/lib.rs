@@ -103,6 +103,8 @@ pub mod shed;
 pub mod template;
 #[cfg(feature = "plugin-timeouts")]
 pub mod timeouts;
+#[cfg(feature = "plugin-transfer")]
+pub mod transfer;
 #[cfg(feature = "plugin-tsig")]
 pub mod tsig;
 #[cfg(feature = "plugin-view")]
@@ -150,6 +152,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("template", include_str!("template/README.md")),
     ("timeouts", include_str!("timeouts/README.md")),
     ("tsig", include_str!("tsig/README.md")),
+    ("transfer", include_str!("transfer/README.md")),
     ("view", include_str!("view/README.md")),
     ("whoami", include_str!("whoami/README.md")),
 ];
@@ -282,6 +285,8 @@ pub fn servers_with_registry(
         if let Some(kubernetes) = &block.config.kubernetes {
             kubernetes.set_metrics(&metrics);
         }
+        #[cfg(feature = "plugin-transfer")]
+        block.config.bind_transferers();
         #[cfg(feature = "plugin-health")]
         if let Some(health) = &block.config.health
             && !health_addresses

@@ -24,6 +24,11 @@ fn next_plugin(enabled: &[&str], start: usize) -> usize {
         .unwrap_or(enabled.len())
 }
 
+fn transferer(name: &str) -> bool {
+    // Add each implemented Transferer here; enabled retains Plugin Order.
+    matches!(name, "kubernetes")
+}
+
 fn registered_handler(name: &str) -> bool {
     !config_only(name) || name == "view"
 }
@@ -53,6 +58,7 @@ fn main() {
             "dnssec" => "dnssec::Dnssec",
             "siit" => "siit::Siit",
             "tsig" => "tsig::Tsig",
+            "transfer" => "transfer::Transfer",
             "rewrite" => "rewrite::Rewrite",
             "template" => "template::Template",
             "autopath" => "autopath::AutoPath",
@@ -90,6 +96,9 @@ fn main() {
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
     }
     code.push_str("#[cfg(all(test, feature = \"plugin-cache\", feature = \"plugin-hosts\"))] pub self_lookup_test: Option<self_lookup_test::TestPlugin>,\n");
+    if enabled.contains(&"transfer") {
+        code.push_str("#[cfg(test)] pub(crate) transfer_test_first: Option<transfer::tests::TestProvider>,\n#[cfg(test)] pub(crate) transfer_test_second: Option<transfer::tests::TestProvider>,\n");
+    }
     code.push_str("}\npub static DIRECTIVES: &[pharos_corefile::Directive<'static, Chain>] = &[\n");
     for name in &enabled {
         let setup = match *name {
@@ -98,6 +107,7 @@ fn main() {
             "dnssec" => "dnssec::setup::setup",
             "siit" => "siit::setup::setup",
             "tsig" => "tsig::setup::setup",
+            "transfer" => "transfer::setup::setup",
             "rewrite" => "rewrite::setup::setup",
             "template" => "template::setup::setup",
             "autopath" => "autopath::setup::setup",
@@ -165,7 +175,23 @@ fn main() {
     };
     writeln!(code, "pub const PLUGINS_LISTING: &str = {listing:?};").unwrap();
 
+    if enabled.contains(&"transfer") {
+        code.push_str("struct ChainTransferers<'a>(&'a Chain);\nimpl transfer::Transferer for ChainTransferers<'_> {\nfn transfer(&self, request: transfer::TransferRequest<'_>) -> Result<Option<pharos_server::Stream>, pharos_server::Error> {\n");
+        code.push_str("#[cfg(test)] if let Some(plugin) = &self.0.transfer_test_first { match transfer::Transferer::transfer(plugin, request) { Ok(None) => {}, result => return result } }\n");
+        for name in enabled.iter().copied().filter(|name| transferer(name)) {
+            writeln!(code, "if let Some(plugin) = &self.0.r#{name} {{ match transfer::Transferer::transfer(plugin, request) {{ Ok(None) => {{}}, result => return result }} }}").unwrap();
+        }
+        code.push_str("#[cfg(test)] if let Some(plugin) = &self.0.transfer_test_second { match transfer::Transferer::transfer(plugin, request) { Ok(None) => {}, result => return result } }\nlet _ = (self.0, request);\nOk(None)\n}\n}\n");
+    }
+
     code.push_str("impl Chain {\n");
+    if enabled.contains(&"transfer") {
+        code.push_str("fn bind_transferers(&self) {\n");
+        for name in enabled.iter().copied().filter(|name| transferer(name)) {
+            writeln!(code, "if let Some(plugin) = &self.r#{name} {{ transfer::Transferer::bind_transfer(plugin, self.transfer.as_ref()); }}").unwrap();
+        }
+        code.push_str("}\n");
+    }
     if enabled.contains(&"ready") {
         code.push_str(
             "fn collect_readiness(self: &std::sync::Arc<Self>, state: &ready::State) {\nlet _ = state;\n",
@@ -196,7 +222,12 @@ fn main() {
             continue;
         }
         let next = next_plugin(&enabled, i + 1);
-        writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => {{ let outcome = pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await; if outcome == pharos_server::Outcome::Response && cx.metadata.get(pharos_server::metrics::WRITER_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::metrics::WRITER_METADATA, {name:?}); }} else if matches!(outcome, pharos_server::Outcome::Error(_)) && cx.metadata.get(pharos_server::logging::PLUGIN_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::logging::PLUGIN_METADATA, {name:?}); }} outcome }}, None => self.serve_{next}(cx).await, }} }}").unwrap();
+        let call = if *name == "transfer" {
+            format!("plugin.serve_with(cx, Next{i}(self), Some(&ChainTransferers(self))).await")
+        } else {
+            format!("pharos_server::Plugin::serve(plugin, cx, Next{i}(self)).await")
+        };
+        writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => {{ let outcome = {call}; if outcome == pharos_server::Outcome::Response && cx.metadata.get(pharos_server::metrics::WRITER_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::metrics::WRITER_METADATA, {name:?}); }} else if matches!(outcome, pharos_server::Outcome::Error(_)) && cx.metadata.get(pharos_server::logging::PLUGIN_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::logging::PLUGIN_METADATA, {name:?}); }} outcome }}, None => self.serve_{next}(cx).await, }} }}").unwrap();
     }
     writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
     code.push_str("}\n");

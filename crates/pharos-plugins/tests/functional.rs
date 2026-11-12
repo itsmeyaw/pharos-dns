@@ -42,6 +42,14 @@ mod any {
 }
 
 #[path = "functional"]
+mod transfer {
+    #[path = "transfer.rs"]
+    mod cases;
+    #[path = "transfer_setup.rs"]
+    mod setup;
+}
+
+#[path = "functional"]
 mod view {
     #[path = "view.rs"]
     mod cases;

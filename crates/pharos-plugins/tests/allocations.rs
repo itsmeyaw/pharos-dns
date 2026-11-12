@@ -75,6 +75,12 @@ mod any {
 }
 
 #[path = "allocations"]
+mod transfer {
+    #[path = "transfer_allocations.rs"]
+    mod cases;
+}
+
+#[path = "allocations"]
 mod tsig {
     #[path = "tsig_allocations.rs"]
     mod cases;

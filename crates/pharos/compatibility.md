@@ -128,6 +128,10 @@
 
 - [tsig Plugin notes](../crates/pharos-plugins/src/tsig/README.md)
 
+## transfer
+
+- [transfer Plugin notes](../crates/pharos-plugins/src/transfer/README.md)
+
 ## root
 
 - [root Plugin notes](../crates/pharos-plugins/src/root/README.md)
