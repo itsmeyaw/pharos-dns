@@ -40,7 +40,7 @@ impl Plugin for Dnssec {
             next.run(cx).await
         };
         if do_bit && outcome == Outcome::Response {
-            return match self.sign_response(cx, intercepted) {
+            return match self.sign_response(cx) {
                 Ok(()) => Outcome::Response,
                 Err(error) => Outcome::Error(error),
             };

@@ -39,11 +39,7 @@ impl CacheEntry {
 }
 
 impl Dnssec {
-    pub(super) fn sign_response(
-        &self,
-        cx: &mut Context<'_, '_>,
-        intercepted: bool,
-    ) -> Result<(), Error> {
+    pub(super) fn sign_response(&self, cx: &mut Context<'_, '_>) -> Result<(), Error> {
         let max_size = cx.max_response_size.max(512);
         if cx.response.capacity() < max_size {
             if cx.protocol == Protocol::Tcp {
@@ -208,19 +204,13 @@ impl Dnssec {
                     .copied()
                     .filter(|r| r.name == rr.name && r.rtype == rr.rtype && r.class == rr.class)
                     .collect();
-                // CoreDNS plugin/dnssec/dnskey.go: intercepted DNSKEY signatures use TTL 3600.
-                let ttl = if intercepted && section == Section::Answer && rr.rtype == Type::DNSKEY {
-                    3600
-                } else {
-                    rr.ttl
-                };
                 signed_sets += usize::from(self.sign_set(
                     &mut builder,
                     section,
                     &group,
                     zone,
                     now,
-                    SignMode::All(ttl),
+                    SignMode::All(rr.ttl),
                 )?);
                 attempted_sets += 1;
             }
@@ -339,7 +329,8 @@ impl Dnssec {
                 type_covered: first.rtype,
                 algorithm: key.public.algorithm,
                 labels: labels as u8,
-                original_ttl: 3600,
+                // RFC 4034 §3.1.4: Original TTL is the covered RRset's TTL.
+                original_ttl: ttl,
                 expiration: now.wrapping_add(8 * 86400) as u32,
                 inception: now.saturating_sub(3 * 3600) as u32,
                 key_tag: key_tag(public).ok_or(Error::InvalidQuery)?,
@@ -431,7 +422,7 @@ mod tests {
                     .unwrap();
             }
             let _ = builder.finish();
-            dnssec.sign_response(&mut cx, false).unwrap();
+            dnssec.sign_response(&mut cx).unwrap();
         }
         let cache = dnssec.cache.lock().unwrap();
         assert_eq!(cache.len(), 1);

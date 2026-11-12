@@ -122,9 +122,9 @@ async fn apex_dnskey_without_do_is_authoritative() {
     assert_eq!(reply.answers().next().unwrap().ttl, 3600);
 }
 
-// CoreDNS plugin/dnssec/dnskey.go: the intercepted DNSKEY signature uses TTL 3600.
+// RFC 4034 §3.1.4: the Original TTL is the covered DNSKEY RRset's TTL.
 #[tokio::test]
-async fn apex_dnskey_signature_ttl_is_independent_of_key_ttl() {
+async fn apex_dnskey_signature_uses_key_rrset_ttl() {
     let base = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/dnssec/miek-ttl7200"
@@ -177,8 +177,12 @@ async fn apex_dnskey_signature_ttl_is_independent_of_key_ttl() {
             .find(|rr| rr.rtype == Type::RRSIG)
             .unwrap()
             .ttl,
-        3600
+        7200
     );
+    assert!(matches!(
+        records.iter().find(|rr| rr.rtype == Type::RRSIG).unwrap().data().unwrap(),
+        pharos_proto::Rdata::Rrsig { original_ttl: 7200, .. }
+    ));
     verify_signatures(&records);
 }
 
