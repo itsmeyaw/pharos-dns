@@ -790,6 +790,30 @@ impl Expression {
         self.value_type
     }
 
+    /// Evaluate while retaining the used portion of the caller's buffer.
+    pub fn evaluate_split<'a>(
+        &'a self,
+        query: &'a Query<'_>,
+        metadata: &'a Metadata<'_>,
+        buffer: &'a mut [u8],
+    ) -> Result<(Value<'a>, &'a mut [u8]), &'static str> {
+        let mut scratch = Scratch::new(buffer);
+        let value = self.root.eval(query, metadata, &mut scratch, None)?;
+        let (used, remaining) = scratch.buffer.split_at_mut(scratch.len);
+        let value = match value {
+            Temporary::Nil => Value::Nil,
+            Temporary::Bool(value) => Value::Bool(value),
+            Temporary::Int(value) => Value::Int(value),
+            Temporary::Float(value) => Value::Float(value),
+            Temporary::Function(value) => Value::Function(value),
+            Temporary::Borrowed(value) => Value::String(value),
+            Temporary::Stored(start, end) => {
+                Value::String(std::str::from_utf8(&used[start..end]).map_err(|_| "invalid UTF-8")?)
+            }
+        };
+        Ok((value, remaining))
+    }
+
     pub fn evaluate<'a>(
         &'a self,
         query: &'a Query<'_>,

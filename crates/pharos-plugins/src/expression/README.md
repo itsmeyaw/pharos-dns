@@ -1,8 +1,9 @@
 # Expression subset
 
 Compiled expressions evaluate against a borrowed Query and Metadata using a
-caller-provided scratch buffer. A result may borrow that buffer; use separate
-buffers to retain string-valued variables across evaluations. `value_type`
+caller-provided scratch buffer. A result may borrow that buffer; `evaluate_split`
+retains used bytes and returns the remaining buffer for subsequent evaluations.
+`value_type`
 provides the type to pass to `compile_with_variables` for subsequent variables.
 
 ## Supported
