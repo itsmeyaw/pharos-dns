@@ -5,6 +5,10 @@
 #[path = "functional/file.rs"]
 mod file;
 
+#[cfg(feature = "plugin-file")]
+#[path = "functional/file_coredns.rs"]
+mod file_coredns;
+
 #[cfg(feature = "plugin-template")]
 #[path = "functional/template.rs"]
 mod template;
