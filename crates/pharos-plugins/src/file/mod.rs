@@ -295,6 +295,8 @@ pub struct File {
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     #[cfg(feature = "plugin-transfer")]
     notifier: Arc<Mutex<Option<crate::transfer::Transfer>>>,
+    #[cfg(feature = "plugin-transfer")]
+    notify_names: Vec<Name>,
 }
 
 impl File {
@@ -308,6 +310,8 @@ impl File {
         let mut reload = Duration::from_secs(60);
         let mut by_mtime = false;
         let mut open_error = None;
+        #[cfg(feature = "plugin-transfer")]
+        let mut notify_names = Vec::new();
         while cursor.next() {
             let args = cursor.remaining_args();
             let path = args.first().ok_or_else(|| cursor.arg_err())?;
@@ -353,6 +357,8 @@ impl File {
                 .and_then(|metadata| metadata.modified().ok());
             for origin in origins {
                 let apex: Name = origin.parse().map_err(|_| cursor.error("invalid Zone"))?;
+                #[cfg(feature = "plugin-transfer")]
+                notify_names.push(apex.clone());
                 let current = match opened.as_mut().filter(|_| open_error.is_none()) {
                     Some(file) => {
                         file.seek(SeekFrom::Start(0))
@@ -386,6 +392,8 @@ impl File {
             tasks: Arc::new(Mutex::new(Vec::new())),
             #[cfg(feature = "plugin-transfer")]
             notifier: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "plugin-transfer")]
+            notify_names,
         })
     }
 
@@ -394,28 +402,30 @@ impl File {
         let tasks = Arc::clone(&self.tasks);
         #[cfg(feature = "plugin-transfer")]
         let notifier = Arc::clone(&self.notifier);
+        #[cfg(feature = "plugin-transfer")]
+        let notify_names = self.notify_names.clone();
         let start = move || {
             let zones = zones.clone();
             let tasks = Arc::clone(&tasks);
             #[cfg(feature = "plugin-transfer")]
             let notifier = Arc::clone(&notifier);
+            #[cfg(feature = "plugin-transfer")]
+            let notify_names = notify_names.clone();
             async move {
                 let mut tasks = tasks.lock().unwrap();
                 for task in tasks.drain(..) {
                     task.abort();
                 }
-                for zone in zones {
-                    #[cfg(feature = "plugin-transfer")]
-                    {
-                        let transfer = notifier.lock().unwrap().clone();
-                        let apex = zone.apex.clone();
-                        if let Some(transfer) = transfer {
-                            // RFC 1996 §4.1: notify Secondary Servers on startup.
-                            tasks.push(tokio::spawn(async move {
-                                let _ = transfer.notify(&apex).await;
-                            }));
+                #[cfg(feature = "plugin-transfer")]
+                if let Some(transfer) = notifier.lock().unwrap().clone() {
+                    // RFC 1996 §4.1: notify Secondary Servers on startup.
+                    tasks.push(tokio::spawn(async move {
+                        for apex in notify_names {
+                            let _ = transfer.notify(&apex).await;
                         }
-                    }
+                    }));
+                }
+                for zone in zones {
                     if zone.interval.is_zero() {
                         continue;
                     }
