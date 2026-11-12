@@ -18,6 +18,8 @@ fn coredns_setup_without_keys() {
         "dnssec example.org",
         "dnssec 10.0.0.0/8",
         "dnssec {\n cache_capacity 500\n}",
+        "dnssec {\n cache_capacity -1\n}",
+        "dnssec {\n cache_capacity 0\n}",
     ] {
         assert!(accepts(directive), "rejected {directive}");
     }

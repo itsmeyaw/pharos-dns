@@ -25,7 +25,7 @@ pub(crate) fn setup(
         .map(|domain| Name::parse(domain, &root).map_err(|_| cursor.error("invalid dnssec domain")))
         .collect::<Result<_, _>>()?;
     let mut keys = Vec::new();
-    let mut capacity = 10_000;
+    let mut capacity: isize = 10_000;
     while cursor.next_block() {
         match cursor.val() {
             "cache_capacity" => {
@@ -97,7 +97,8 @@ pub(crate) fn setup(
         zones,
         keys,
         public,
-        capacity,
+        // CoreDNS plugin/pkg/cache: 256 shards each have at least four entries.
+        capacity: ((capacity / 256).max(4) as usize) * 256,
         cache: Default::default(),
         metrics: Vec::new(),
     });
@@ -110,4 +111,31 @@ fn load_file(base: &Path) -> Result<KeyPair, String> {
     let mut private = base.as_os_str().to_os_string();
     private.push(".private");
     KeyPair::from_files(public, private).map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use pharos_corefile::{configure, parse};
+
+    #[test]
+    fn cache_capacity_matches_coredns_effective_shard_capacity() {
+        for (input, expected) in [
+            ("-9223372036854775808", 1024),
+            ("-1", 1024),
+            ("0", 1024),
+            ("500", 1024),
+            ("1024", 1024),
+            ("1279", 1024),
+            ("1280", 1280),
+        ] {
+            let text = format!("example.org {{\n dnssec {{\n cache_capacity {input}\n }}\n}}");
+            let blocks = parse("Corefile", &text).unwrap();
+            let chain = configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+            assert_eq!(
+                chain[0].config.dnssec.as_ref().unwrap().capacity,
+                expected,
+                "{input}"
+            );
+        }
+    }
 }
