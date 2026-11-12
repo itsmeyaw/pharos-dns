@@ -57,7 +57,8 @@ struct RuleMetrics {
     zone: String,
     server: String,
     registry: pharos_server::metrics::Registry,
-    bindings: Mutex<Vec<Arc<MetricBinding>>>,
+    bindings: arc_swap::ArcSwap<Vec<Arc<MetricBinding>>>,
+    binding_lock: Mutex<()>,
 }
 struct MetricBinding {
     class: String,
@@ -236,7 +237,8 @@ impl Template {
                         zone: zone.clone(),
                         server: server.clone(),
                         registry: registry.clone(),
-                        bindings: Mutex::new(Vec::new()),
+                        bindings: arc_swap::ArcSwap::from_pointee(Vec::new()),
+                        binding_lock: Mutex::new(()),
                     };
                     if rule.class != Class::ANY && rule.qtype != Type::ANY {
                         metrics.binding(
@@ -395,10 +397,19 @@ impl Template {
 
 impl RuleMetrics {
     fn binding(&self, class: &str, qtype: &str, records: &[TemplateRecord]) -> Arc<MetricBinding> {
-        let mut bindings = self
-            .bindings
+        let bindings = self.bindings.load();
+        if let Some(binding) = bindings
+            .iter()
+            .find(|binding| binding.class == class && binding.qtype == qtype)
+        {
+            return Arc::clone(binding);
+        }
+        drop(bindings);
+        let _guard = self
+            .binding_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bindings = self.bindings.load();
         if let Some(binding) = bindings
             .iter()
             .find(|binding| binding.class == class && binding.qtype == qtype)
@@ -425,7 +436,9 @@ impl RuleMetrics {
             matched,
             failures,
         });
-        bindings.push(Arc::clone(&binding));
+        let mut updated = (**bindings).clone();
+        updated.push(Arc::clone(&binding));
+        self.bindings.store(Arc::new(updated));
         binding
     }
 }
@@ -692,6 +705,42 @@ mod tests {
     fn zone_matching_respects_escaped_dots() {
         assert!(!in_zone(r"foo\.example.", "example."));
         assert!(in_zone(r"foo\\.example.", "example."));
+    }
+    #[test]
+    fn wildcard_metric_bindings_handle_concurrent_first_use() {
+        let registry = pharos_server::metrics::Registry::default();
+        let metrics = RuleMetrics {
+            address: "127.0.0.1:53".parse().unwrap(),
+            zone: ".".into(),
+            server: "dns://127.0.0.1:53".into(),
+            registry: registry.clone(),
+            bindings: arc_swap::ArcSwap::from_pointee(Vec::new()),
+            binding_lock: Mutex::new(()),
+        };
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let metrics = &metrics;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    let qtype = if i % 2 == 0 { "A" } else { "AAAA" };
+                    for _ in 0..20 {
+                        metrics.binding("IN", qtype, &[]).matched.matched();
+                    }
+                });
+            }
+        });
+        let mut output = String::new();
+        registry.encode(&mut output);
+        let lines: Vec<_> = output
+            .lines()
+            .filter(|line| line.starts_with("pharos_template_matches_total{"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.ends_with(" 80")), "{output}");
+        let _guard = metrics.binding_lock.lock().unwrap();
+        assert_eq!(metrics.binding("IN", "A", &[]).class, "IN");
     }
     #[tokio::test]
     async fn wildcard_metrics_use_actual_question_labels() {
