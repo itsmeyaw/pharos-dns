@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[cfg(feature = "plugin-template")]
+#[path = "functional/template.rs"]
+mod template;
+
 #[cfg(feature = "plugin-kubernetes")]
 #[path = "../../pharos/tests/support/mod.rs"]
 mod support;
