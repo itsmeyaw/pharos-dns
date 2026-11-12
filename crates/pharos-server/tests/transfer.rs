@@ -2,7 +2,7 @@
 
 use pharos_proto::{Message, Rcode, Type};
 use pharos_server::{
-    Chain, Context, Listener, ListenerKey, Outcome, Router, Server, Stream, Transport,
+    Chain, Context, Listener, ListenerKey, Next, Outcome, Plugin, Router, Server, Stream, Transport,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -16,7 +16,7 @@ struct BadClosingSoa;
 
 impl Chain for BadClosingSoa {
     async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
-        let Outcome::Stream(mut source) = Transfer.serve(cx).await else {
+        let Outcome::Stream(mut source) = Chain::serve(&Transfer, cx).await else {
             unreachable!()
         };
         let mut count = 0;
@@ -35,8 +35,15 @@ impl Chain for BadClosingSoa {
     }
 }
 
-impl Chain for Transfer {
-    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+struct End;
+impl Next for End {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+        Outcome::Drop
+    }
+}
+
+impl Plugin for Transfer {
+    async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, _: N) -> Outcome {
         let id = cx.query.id().to_be_bytes();
         let qtype = cx.query.questions().next().unwrap().qtype.0.to_be_bytes();
         let mut count = 0;
@@ -74,7 +81,12 @@ impl Chain for Transfer {
             Ok(true)
         }))
     }
+}
 
+impl Chain for Transfer {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        Plugin::serve(self, cx, End).await
+    }
     fn is_empty(&self) -> bool {
         false
     }
@@ -332,4 +344,77 @@ async fn axfr_client_interoperates_with_coredns_file_and_transfer() {
     assert_eq!(types.first(), Some(&Type::SOA));
     assert_eq!(types.last(), Some(&Type::SOA));
     assert!(types.contains(&Type::A));
+}
+
+#[tokio::test]
+async fn coredns_secondary_receives_plugin_axfr_stream() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let binary = root.join("coredns/v1.15.0/coredns");
+    if !binary.exists() {
+        return;
+    }
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(Transfer), vec![]);
+    let primary = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+        .await
+        .unwrap();
+    let dir = root.join(format!("transfer-secondary-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = dir.join("Corefile");
+    std::fs::write(
+        &config,
+        format!(
+            "a.:{port} {{\n bind 127.0.0.1\n secondary {{\n  transfer from {}\n }}\n}}\n",
+            primary.local_addr()
+        ),
+    )
+    .unwrap();
+    struct Child(std::process::Child, std::path::PathBuf);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+    let _child = Child(
+        std::process::Command::new(binary)
+            .args(["-conf", config.to_str().unwrap()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+        dir,
+    );
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let query = [0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1];
+    let address = format!("127.0.0.1:{port}");
+    timeout(Duration::from_secs(5), async {
+        let mut wire = [0; 512];
+        loop {
+            socket.send_to(&query, &address).await.unwrap();
+            if let Ok(Ok((len, _))) =
+                timeout(Duration::from_millis(100), socket.recv_from(&mut wire)).await
+                && let Ok(message) = Message::parse(&wire[..len])
+                && message
+                    .answers()
+                    .any(|record| record.rtype == Type::A && record.rdata == [127, 0, 0, 1])
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    primary.shutdown().await.unwrap();
 }
