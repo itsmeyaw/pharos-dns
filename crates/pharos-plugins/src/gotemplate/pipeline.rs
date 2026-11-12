@@ -159,6 +159,7 @@ impl Pipeline {
         let mut value = None;
         for command in &self.0 {
             value = Some(match command {
+                Command::Atom(Atom::Nil) => return Err(fmt::Error),
                 Command::Atom(atom) => atom.value(data, dot, scratch)?,
                 Command::Call(function, args) => {
                     let count = args.len() + usize::from(value.is_some());

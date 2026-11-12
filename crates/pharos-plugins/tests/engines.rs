@@ -696,6 +696,23 @@ fn template_logical_builtins_short_circuit_nested_errors() {
 }
 
 #[test]
+fn nil_is_an_argument_but_not_a_standalone_command() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    assert!(
+        Template::compile("{{ nil }}")
+            .unwrap()
+            .render(&data, &mut String::new())
+            .is_err()
+    );
+    let template = Template::compile("{{ printf \"%v\" nil }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "<nil>");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];
