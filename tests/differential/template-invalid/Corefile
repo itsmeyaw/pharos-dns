@@ -1,0 +1,14 @@
+.:{port} {
+    forward . 127.0.0.1:{port2}
+    template ANY ANY invalid {
+        rcode NXDOMAIN
+        authority "invalid. 60 {{ .Class }} SOA ns.invalid. hostmaster.invalid. (1 60 60 60 60)"
+        ederror 21 "Blocked according to RFC2606"
+    }
+}
+.:{port2} {
+    hosts empty.hosts {
+        192.0.2.1 outside.example
+        reload 0
+    }
+}

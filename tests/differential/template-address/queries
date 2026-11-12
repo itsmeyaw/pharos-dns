@@ -1,0 +1,5 @@
+ip-192-0-2-42.example. A IN udp
+www.ip-192-0-2-42.example. A IN tcp
+42.2.0.192.in-addr.arpa. PTR IN udp
+other.example. A IN udp
+invalid.in-addr.arpa. PTR IN tcp

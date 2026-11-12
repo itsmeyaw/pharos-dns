@@ -1,6 +1,26 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[cfg(feature = "plugin-template")]
+#[path = "functional/template.rs"]
+mod template;
+
+#[cfg(feature = "plugin-template")]
+#[path = "functional/template_behavior.rs"]
+mod template_behavior;
+
+#[cfg(feature = "plugin-template")]
+#[path = "functional/template_coredns.rs"]
+mod template_coredns;
+
+#[cfg(feature = "plugin-template")]
+#[path = "functional/template_cname.rs"]
+mod template_cname;
+
+#[cfg(feature = "plugin-template")]
+#[path = "functional/template_metrics.rs"]
+mod template_metrics;
+
 #[cfg(feature = "plugin-kubernetes")]
 #[path = "../../pharos/tests/support/mod.rs"]
 mod support;

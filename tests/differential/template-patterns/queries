@@ -1,0 +1,3 @@
+ip-10-1-2-3.dc.example. A IN udp
+192.0.2.7.ext.example. A IN tcp
+other.example. A IN udp

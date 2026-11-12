@@ -1,0 +1,15 @@
+.:{port} {
+    forward . 127.0.0.1:{port2}
+    template IN A example {
+        match "^ip-(?P<a>10)-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]dc[.]example[.]$"
+        match "^(?P<a>[0-9]*)[.](?P<b>[0-9]*)[.](?P<c>[0-9]*)[.](?P<d>[0-9]*)[.]ext[.]example[.]$"
+        answer "{{ .Name }} 60 IN A {{ .Group.a}}.{{ .Group.b }}.{{ .Group.c }}.{{ .Group.d }}"
+        fallthrough
+    }
+}
+.:{port2} {
+    hosts empty.hosts {
+        192.0.2.1 other.example
+        reload 0
+    }
+}
