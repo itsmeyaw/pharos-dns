@@ -866,6 +866,7 @@ fn unescape(value: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// RFC 1035 §3.3: character-strings have a one-octet length prefix.
 fn length_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), String> {
     out.push(u8::try_from(bytes.len()).map_err(|_| "character-string exceeds 255 octets")?);
     out.extend(bytes);
@@ -875,6 +876,7 @@ fn character_string(out: &mut Vec<u8>, value: &str) -> Result<(), String> {
     length_bytes(out, &unescape(value)?)
 }
 
+// RFC 4034 §5.3: DS digest fields use hexadecimal presentation.
 fn hex(value: &str) -> Result<Vec<u8>, String> {
     let b = value.as_bytes();
     if !b.len().is_multiple_of(2) {
@@ -965,6 +967,7 @@ fn type_code(value: &str) -> Result<u16, String> {
         .ok_or_else(|| format!("unknown type {value}"))
 }
 
+// RFC 4034 §4.1.2: type bitmaps are encoded as ordered window blocks.
 fn bitmap(out: &mut Vec<u8>, fields: &[&str]) -> Result<(), String> {
     let mut types = fields
         .iter()
