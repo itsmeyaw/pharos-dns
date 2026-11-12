@@ -3,6 +3,7 @@ use std::fmt::{self, Write};
 
 enum Atom {
     Field(Field),
+    Nested(Box<Pipeline>),
     Int(i64),
     Bool(bool),
     Nil,
@@ -19,6 +20,7 @@ enum Function {
     Len,
     Not,
     ParseInt,
+    Index,
 }
 enum Command {
     Atom(Atom),
@@ -31,7 +33,9 @@ pub(super) struct Pipeline(Vec<Command>);
 enum ResultValue<'a> {
     Scalar(Option<Value<'a>>),
     Uint(u64),
-    Collection(usize),
+    Matches(&'a [&'a str]),
+    Groups(&'a [(&'a str, &'a str)]),
+    Variables(&'a [(&'a str, Value<'a>)]),
 }
 
 impl Pipeline {
@@ -52,6 +56,7 @@ impl Pipeline {
                 "len" => Some(Function::Len),
                 "not" => Some(Function::Not),
                 "parseInt" => Some(Function::ParseInt),
+                "index" => Some(Function::Index),
                 _ => None,
             };
             let command = if let Some(function) = function {
@@ -99,6 +104,7 @@ impl Pipeline {
                         | Function::Ge => count == 2,
                         Function::Len | Function::Not => count == 1,
                         Function::ParseInt => count == 3,
+                        Function::Index => count >= 2,
                     };
                     if !valid {
                         return Err(fmt::Error);
@@ -159,6 +165,13 @@ impl Pipeline {
                             }
                             ResultValue::Uint(parsed)
                         }
+                        Function::Index => {
+                            let mut indexed = get(0)?;
+                            for index in 1..count {
+                                indexed = indexed.index(get(index)?)?;
+                            }
+                            indexed
+                        }
                     }
                 }
             });
@@ -175,7 +188,9 @@ impl Pipeline {
         match self.evaluate(data, dot)? {
             ResultValue::Scalar(value) => super::write_value(value, output),
             ResultValue::Uint(value) => write!(output, "{value}"),
-            ResultValue::Collection(_) => Err(fmt::Error),
+            ResultValue::Matches(_) | ResultValue::Groups(_) | ResultValue::Variables(_) => {
+                Err(fmt::Error)
+            }
         }
     }
 
@@ -194,8 +209,15 @@ impl Atom {
             Self::Int(value) => Ok(ResultValue::Scalar(Some(Value::Int(*value)))),
             Self::Bool(value) => Ok(ResultValue::Scalar(Some(Value::Bool(*value)))),
             Self::Nil => Ok(ResultValue::Scalar(Some(Value::Nil))),
-            Self::Field(field @ (Field::Matches | Field::Groups | Field::Variables)) => {
-                Ok(ResultValue::Collection(field.length(data, dot)?))
+            Self::Nested(pipeline) => pipeline.evaluate(data, dot),
+            Self::Field(Field::Matches) if matches!(dot, Dot::Root) => {
+                Ok(ResultValue::Matches(data.matches))
+            }
+            Self::Field(Field::Groups) if matches!(dot, Dot::Root) => {
+                Ok(ResultValue::Groups(data.groups))
+            }
+            Self::Field(Field::Variables) if matches!(dot, Dot::Root) => {
+                Ok(ResultValue::Variables(data.variables))
             }
             Self::Field(Field::Root(field))
                 if matches!(
@@ -203,7 +225,12 @@ impl Atom {
                     Field::Matches | Field::Groups | Field::Variables
                 ) =>
             {
-                Ok(ResultValue::Collection(field.length(data, Dot::Root)?))
+                match field.as_ref() {
+                    Field::Matches => Ok(ResultValue::Matches(data.matches)),
+                    Field::Groups => Ok(ResultValue::Groups(data.groups)),
+                    Field::Variables => Ok(ResultValue::Variables(data.variables)),
+                    _ => unreachable!(),
+                }
             }
             Self::Field(field) => Ok(ResultValue::Scalar(field.scalar(data, dot)?)),
         }
@@ -219,7 +246,9 @@ impl<'a> ResultValue<'a> {
             Self::Scalar(Some(Value::Float(value))) => value != 0.0,
             Self::Scalar(Some(Value::String(value))) => !value.is_empty(),
             Self::Uint(value) => value != 0,
-            Self::Collection(value) => value != 0,
+            Self::Matches(value) => !value.is_empty(),
+            Self::Groups(value) => !value.is_empty(),
+            Self::Variables(value) => !value.is_empty(),
         }
     }
     fn integer(self) -> Result<i64, fmt::Error> {
@@ -238,7 +267,37 @@ impl<'a> ResultValue<'a> {
     fn length(self) -> Result<usize, fmt::Error> {
         match self {
             Self::Scalar(Some(Value::String(value))) => Ok(value.len()),
-            Self::Collection(value) => Ok(value),
+            Self::Matches(value) => Ok(value.len()),
+            Self::Groups(value) => Ok(value.len()),
+            Self::Variables(value) => Ok(value.len()),
+            _ => Err(fmt::Error),
+        }
+    }
+    fn index(self, key: Self) -> Result<Self, fmt::Error> {
+        match self {
+            Self::Matches(values) => Ok(Self::Scalar(Some(Value::String(
+                values
+                    .get(usize::try_from(key.integer()?).map_err(|_| fmt::Error)?)
+                    .copied()
+                    .ok_or(fmt::Error)?,
+            )))),
+            Self::Groups(values) => Ok(Self::Scalar(Some(Value::String(
+                values
+                    .iter()
+                    .find_map(|(name, value)| (*name == key.text().ok()?).then_some(*value))
+                    .unwrap_or(""),
+            )))),
+            Self::Variables(values) => {
+                Ok(Self::Scalar(values.iter().find_map(|(name, value)| {
+                    (*name == key.text().ok()?).then_some(*value)
+                })))
+            }
+            Self::Scalar(Some(Value::String(value))) => Ok(Self::Uint(u64::from(
+                *value
+                    .as_bytes()
+                    .get(usize::try_from(key.integer()?).map_err(|_| fmt::Error)?)
+                    .ok_or(fmt::Error)?,
+            ))),
             _ => Err(fmt::Error),
         }
     }
@@ -281,6 +340,12 @@ impl<'a> ResultValue<'a> {
 }
 
 fn atom(word: &str) -> Result<Atom, String> {
+    if let Some(inner) = word
+        .strip_prefix('(')
+        .and_then(|word| word.strip_suffix(')'))
+    {
+        return Ok(Atom::Nested(Box::new(Pipeline::compile(inner)?)));
+    }
     match word {
         "true" => Ok(Atom::Bool(true)),
         "false" => Ok(Atom::Bool(false)),
@@ -300,6 +365,7 @@ fn split(source: &str, separator: char) -> Result<Vec<&str>, String> {
     let mut quote = false;
     let mut escape = false;
     let mut start = 0;
+    let mut depth = 0usize;
     for (index, ch) in source.char_indices() {
         if escape {
             escape = false;
@@ -313,13 +379,26 @@ fn split(source: &str, separator: char) -> Result<Vec<&str>, String> {
             quote = !quote;
             continue;
         }
-        if !quote && ch == separator {
+        // shortcut: cap nested pipelines at 255 levels; use iterative parsing to lift the stack limit.
+        if !quote && ch == '(' {
+            depth += 1;
+            if depth >= 256 {
+                return Err("pipeline nesting exceeds 255 levels".into());
+            }
+        }
+        if !quote && ch == ')' {
+            depth = depth.checked_sub(1).ok_or("unmatched parenthesis")?;
+        }
+        if !quote && depth == 0 && ch == separator {
             result.push(source[start..index].trim());
             start = index + ch.len_utf8();
         }
     }
     if quote {
         return Err("unterminated quoted string".into());
+    }
+    if depth != 0 {
+        return Err("unclosed parenthesis".into());
     }
     result.push(source[start..].trim());
     Ok(result)
@@ -330,6 +409,7 @@ fn split_words(source: &str) -> Result<Vec<&str>, String> {
     let mut quote = false;
     let mut escape = false;
     let mut start = None;
+    let mut depth = 0usize;
     for (index, ch) in source.char_indices() {
         if escape {
             escape = false;
@@ -342,7 +422,13 @@ fn split_words(source: &str) -> Result<Vec<&str>, String> {
         if ch == '"' {
             quote = !quote;
         }
-        if !quote && ch.is_ascii_whitespace() {
+        if !quote && ch == '(' {
+            depth += 1;
+        }
+        if !quote && ch == ')' {
+            depth = depth.checked_sub(1).ok_or("unmatched parenthesis")?;
+        }
+        if !quote && depth == 0 && ch.is_ascii_whitespace() {
             if let Some(begin) = start.take() {
                 result.push(&source[begin..index]);
             }
@@ -352,6 +438,9 @@ fn split_words(source: &str) -> Result<Vec<&str>, String> {
     }
     if quote {
         return Err("unterminated quoted string".into());
+    }
+    if depth != 0 {
+        return Err("unclosed parenthesis".into());
     }
     if let Some(begin) = start {
         result.push(&source[begin..]);

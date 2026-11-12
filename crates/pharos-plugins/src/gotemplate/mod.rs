@@ -348,18 +348,6 @@ impl Field {
         }
     }
 
-    fn length(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<usize, fmt::Error> {
-        match self {
-            Self::Root(field) => field.length(data, Dot::Root),
-            Self::Matches if matches!(dot, Dot::Root) => Ok(data.matches.len()),
-            Self::Groups if matches!(dot, Dot::Root) => Ok(data.groups.len()),
-            Self::Variables if matches!(dot, Dot::Root) => Ok(data.variables.len()),
-            _ => match self.scalar(data, dot)? {
-                Some(Value::String(value)) => Ok(value.len()),
-                _ => Err(fmt::Error),
-            },
-        }
-    }
     fn truthy(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<bool, fmt::Error> {
         match self {
             Self::Root(field) => field.truthy(data, Dot::Root),

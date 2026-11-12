@@ -201,3 +201,22 @@ fn coredns_accepts_known_functions_with_wrong_arity_until_rendering() {
     assert!(template.render(&data, &mut String::new()).is_err());
     assert!(Template::compile("{{ notAFunction }}").is_err());
 }
+
+#[test]
+fn nested_pipelines_index_borrowed_captures_and_maps() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["whole", "east region"];
+    data.groups = &[("zone", "east")];
+    let template = Template::compile("{{ if eq (index .Match 1) \"east region\" }}yes{{ end }}|{{ index .Match 1 | len }}|{{ index .Group \"absent\" | eq \"\" }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "yes|11|true");
+}
+
+#[test]
+fn excessive_pipeline_nesting_is_rejected_at_compile_time() {
+    let source = format!("{{{{ {}.Name{} }}}}", "(".repeat(300), ")".repeat(300));
+    assert!(Template::compile(&source).is_err());
+}
