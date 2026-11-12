@@ -850,14 +850,18 @@ fn format_values(
                 },
                 'g' => match value {
                     ResultValue::Scalar(Some(Value::Float(v))) => {
-                        if precision.is_some() || alternate {
+                        if alternate {
                             return Err(fmt::Error);
                         }
                         let start = scratch.len;
                         if plus && v.is_sign_positive() && v.is_finite() {
                             scratch.write_char('+')?;
                         }
-                        super::float::write_float(scratch, v)?;
+                        if let Some(precision) = precision {
+                            super::float::write_g(scratch, v, precision)?;
+                        } else {
+                            super::float::write_float(scratch, v)?;
+                        }
                         pad_segment(scratch, start, width, left, zero)?;
                     }
                     _ => return Err(fmt::Error),

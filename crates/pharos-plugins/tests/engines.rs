@@ -757,6 +757,20 @@ fn question_pointer_renders_like_miekg_and_supports_printf() {
 }
 
 #[test]
+fn printf_g_precision_uses_go_significant_digit_rules() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile(
+        r#"{{ printf "%.3g|%.3g|%.2g|%.2g|%.0g" 12345.6 12.3456 0.00012345 0.000012345 3.5 }}"#,
+    )
+    .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "1.23e+04|12.3|0.00012|1.2e-05|4");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

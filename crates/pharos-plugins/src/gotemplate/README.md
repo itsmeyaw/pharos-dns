@@ -30,7 +30,7 @@ Templates are compiled at setup and rendered into a caller-provided `String`.
 - Other Message sections and the complete Message string representation are
   not implemented. Go function values not produced by the expression engine
   cannot be supplied to `call`.
-- `printf` is a subset of Go's `fmt`: `%g` precision, other verbs, and some
+- `printf` is a subset of Go's `fmt`: `%#g`, other verbs, and some
   formatting flags are unsupported or produce format diagnostics. Floating
   point formatting follows Go's common exponent notation, but edge-case
   rounding or Unicode behavior may differ.

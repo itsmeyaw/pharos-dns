@@ -203,13 +203,14 @@ fn floating_point_formatting_does_not_allocate() {
     let metadata = Metadata::new(&mut slots);
     let mut data = Data::new("example.", &metadata);
     data.variables = &[("v", pharos_plugins::expression::Value::Float(1_000_000.0))];
-    let template = Template::compile("{{ .Var.v }} {{ printf \"%g\" .Var.v }}").unwrap();
+    let template =
+        Template::compile("{{ .Var.v }} {{ printf \"%g %.3g\" .Var.v .Var.v }}").unwrap();
     let mut output = String::with_capacity(128);
     let region = Region::new(&INSTRUMENTED_SYSTEM);
     template.render(&data, &mut output).unwrap();
     let stats = region.change();
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
-    assert_eq!(output, "1e+06 1e+06");
+    assert_eq!(output, "1e+06 1e+06 1e+06");
 }
 
 #[test]
