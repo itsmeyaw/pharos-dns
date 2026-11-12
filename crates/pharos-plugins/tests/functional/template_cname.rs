@@ -17,6 +17,7 @@ impl pharos_server::Chain for Route {
             Self::Template(chain) => chain.serve(cx).await,
             Self::TruncatedTarget => {
                 let question = cx.query.questions().next().unwrap();
+                // RFC 1035 §4.1.1: TC marks a Response truncated on this channel.
                 let mut reply =
                     MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8200).unwrap();
                 reply
