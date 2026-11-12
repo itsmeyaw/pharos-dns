@@ -888,6 +888,7 @@ impl Zone {
         if dname.is_some() {
             cut = zone.cut(target, question.qtype);
         }
+        // DNAME NS targets without a Referral use Self Lookup instead of local alias walking.
         if cut.is_none()
             && question.qtype != Type::CNAME
             && !(dname.is_some() && question.qtype == Type::NS)
@@ -927,7 +928,7 @@ impl Zone {
                 Err(_) => return Outcome::Unanswered(Rcode::SERVFAIL),
             };
             // RFC 1034 §3.6.2 and RFC 6672 §3.2: restart at CNAME or DNAME targets.
-            // shortcut: CNAME and DNAME Self Lookup allocates; remove when #86 makes it allocation-free.
+            // shortcut: CNAME/DNAME Self Lookup allocates for missing tree names, NS, and apex SOA; see #86.
             match cx.self_lookup(&target, question.qtype).await {
                 Ok(wire) => Some(wire),
                 Err(_) => {

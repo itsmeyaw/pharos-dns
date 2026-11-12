@@ -136,6 +136,75 @@ async fn dname_self_lookup() {
     assert!(response.answers().any(|record| matches!(record.data(), Ok(Rdata::A(address)) if address == std::net::Ipv4Addr::new(192, 0, 2, 88))));
 }
 
+#[test]
+fn in_zone_cname_ns_and_apex_soa_self_lookups_allocate() {
+    if crate::run_isolated("file_allocations::in_zone_cname_ns_and_apex_soa_self_lookups_allocate")
+    {
+        return;
+    }
+    // Debug Plugin Chain futures exceed 2 MiB; see #90.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(in_zone_cname_self_lookups());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn in_zone_cname_self_lookups() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/in-zone-self-lookup.zone"
+    );
+    let config = format!("example.org:0 {{\n file {path} {{\n reload 0\n }}\n}}");
+    let blocks = parse("Corefile", &config).unwrap();
+    let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (_, server) = servers.drain().next().unwrap();
+    let client = "127.0.0.1:1001".parse().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    for (name, kind) in [
+        ("alias-ns.example.org.", Type::NS),
+        ("alias-soa.example.org.", Type::SOA),
+    ] {
+        let name: Name = name.parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+        builder
+            .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
+            .unwrap();
+        let _ = builder.finish();
+        assert_eq!(
+            server
+                .handle(&wire, client, Protocol::Udp, &mut response)
+                .await,
+            Action::Respond
+        );
+        let before = INSTRUMENTED_SYSTEM.stats();
+        assert_eq!(
+            server
+                .handle(&wire, client, Protocol::Udp, &mut response)
+                .await,
+            Action::Respond
+        );
+        let after = INSTRUMENTED_SYSTEM.stats();
+        assert!(after.allocations > before.allocations, "{name} {kind:?}");
+        let message = Message::parse(&response).unwrap();
+        assert_eq!(message.rcode(), pharos_proto::Rcode::NOERROR);
+        assert_eq!(message.answers().next().unwrap().rtype, Type::CNAME);
+        if kind == Type::NS {
+            assert_eq!(message.authorities().next().unwrap().rtype, Type::SOA);
+        } else {
+            assert_eq!(message.answers().nth(1).unwrap().rtype, Type::SOA);
+        }
+    }
+}
+
 #[cfg(feature = "plugin-metadata")]
 #[test]
 fn signed_wildcard_and_denial_queries_do_not_allocate() {
