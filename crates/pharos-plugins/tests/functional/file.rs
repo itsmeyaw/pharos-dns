@@ -680,3 +680,26 @@ async fn wildcard_publishes_metadata() {
         Some("*.wild.example.org.")
     );
 }
+
+#[tokio::test]
+async fn signed_referral_includes_ds_and_in_bailiwick_signed_glue() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/signed.zone");
+    let corefile = format!("example.org:53 {{\n file {path}\n}}");
+    let configured = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let name: Name = "www.child.example.org.".parse().unwrap();
+    let mut query = Vec::with_capacity(1232);
+    let mut builder = MessageBuilder::new(&mut query, 1232, 1, 0x0100).unwrap();
+    builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN).unwrap();
+    builder.record(pharos_proto::Section::Additional, NameRef::parse(&[0], 0).unwrap(), Type::OPT, Class(1232), 0x8000, &[]).unwrap();
+    let _ = builder.finish();
+    let mut wire = Vec::with_capacity(1232);
+    let mut slots = [None; 8];
+    let mut cx = Context { query: Message::parse(&query).unwrap(), client: "127.0.0.1:1234".parse().unwrap(), local: "127.0.0.1:53".parse().unwrap(), transport: Transport::Dns, protocol: Protocol::Udp, domain: &name, metadata: Metadata::new(&mut slots), response: &mut wire, max_response_size: 1232 };
+    assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(!response.aa());
+    assert_eq!(response.authorities().map(|rr| rr.rtype).collect::<Vec<_>>(), vec![Type::NS, Type::NS, Type::DS, Type::RRSIG]);
+    let extra = response.additionals().collect::<Vec<_>>();
+    assert_eq!(extra.iter().map(|rr| rr.rtype).collect::<Vec<_>>(), vec![Type::A, Type::RRSIG]);
+    assert!(extra.iter().all(|rr| rr.name.to_string() == "ns.child.example.org."));
+}
