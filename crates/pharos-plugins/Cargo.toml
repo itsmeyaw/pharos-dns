@@ -69,6 +69,7 @@ default = [
     "plugin-ready",
     "plugin-reload",
     "plugin-rewrite",
+    "plugin-secondary",
     "plugin-template",
     "plugin-view",
     "plugin-whoami",

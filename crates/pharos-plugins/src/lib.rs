@@ -80,6 +80,8 @@ pub mod proxy;
 mod regex_match;
 #[cfg(feature = "plugin-rewrite")]
 pub mod rewrite;
+#[cfg(feature = "plugin-secondary")]
+pub mod secondary;
 #[cfg(feature = "plugin-siit")]
 pub mod siit;
 #[cfg(any(feature = "plugin-file", feature = "plugin-secondary"))]
@@ -140,6 +142,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("errors", include_str!("errors/README.md")),
     ("erratic", include_str!("erratic/README.md")),
     ("file", include_str!("file/README.md")),
+    ("secondary", include_str!("secondary/README.md")),
     ("forward", include_str!("forward/README.md")),
     ("header", include_str!("header/README.md")),
     ("health", include_str!("health/README.md")),

@@ -13,6 +13,7 @@
 - The acl Plugin setup and tests follow CoreDNS v1.15.0's `plugin/acl`.
 - The transfer Plugin setup and tests follow CoreDNS v1.15.0's `plugin/transfer`.
 - The file Plugin and tests follow CoreDNS v1.15.0's `plugin/file`.
+- The secondary Plugin and tests follow CoreDNS v1.15.0's `plugin/secondary`, `plugin/file/secondary.go`, and `plugin/pkg/catalog`.
 - The dns64 Plugin, tests and differential scenarios follow CoreDNS v1.15.0's `plugin/dns64`.
 - The siit Plugin, tests and differential scenario follow CoreDNS v1.15.0's `plugin/siit`.
 - The rewrite Plugin and tests follow CoreDNS v1.15.0's `plugin/rewrite`.

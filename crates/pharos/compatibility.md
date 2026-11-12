@@ -56,6 +56,10 @@
 
 - [file Plugin notes](../crates/pharos-plugins/src/file/README.md)
 
+## secondary
+
+- [secondary Plugin notes](../crates/pharos-plugins/src/secondary/README.md)
+
 ## forward
 
 - [forward Plugin notes](../crates/pharos-plugins/src/forward/README.md)
