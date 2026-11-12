@@ -21,6 +21,7 @@ pub struct Dnssec {
     metrics: Vec<(std::net::SocketAddr, pharos_server::metrics::DnssecMetrics)>,
 }
 
+// shortcut: all-feature debug chains can overflow 2 MiB stacks; flatten dispatch to remove this limit.
 impl Plugin for Dnssec {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let matching = cx.query.questions().next().and_then(|question| {
