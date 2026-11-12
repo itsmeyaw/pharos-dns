@@ -94,7 +94,10 @@ pub enum Protocol {
 /// Lazily produces complete wire-format Messages into a reusable buffer.
 /// Producers must not block the runtime; clones share the same cursor.
 #[derive(Clone)]
-pub struct Stream(Arc<std::sync::Mutex<StreamProducer>>, Option<StreamSigning>);
+pub struct Stream {
+    producer: Arc<std::sync::Mutex<StreamProducer>>,
+    signing: Option<StreamSigning>,
+}
 
 #[derive(Clone)]
 struct StreamSigning {
@@ -107,11 +110,14 @@ type StreamProducer = dyn FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send;
 impl Stream {
     pub fn new(produce: impl FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send + 'static) -> Self {
         // shortcut: one allocation per Zone Transfer; remove when a concrete stream type exists.
-        Self(Arc::new(std::sync::Mutex::new(produce)), None)
+        Self {
+            producer: Arc::new(std::sync::Mutex::new(produce)),
+            signing: None,
+        }
     }
 
     pub fn next(&mut self, response: &mut Vec<u8>) -> Result<bool, Error> {
-        let mut producer = self.0.lock().map_err(|_| Error::PluginPanic)?;
+        let mut producer = self.producer.lock().map_err(|_| Error::PluginPanic)?;
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| producer(response)))
             .unwrap_or(Err(Error::PluginPanic))
     }
@@ -125,7 +131,7 @@ impl fmt::Debug for Stream {
 
 impl PartialEq for Stream {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.producer, &other.producer)
     }
 }
 

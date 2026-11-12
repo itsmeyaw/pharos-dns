@@ -57,7 +57,7 @@ pub fn finish_outcome_signed(
             if protocol == Protocol::Tcp {
                 match signing {
                     Some(TsigSigning::Signed { key, fudge, .. }) => {
-                        stream.1 = Some(crate::StreamSigning { key, fudge });
+                        stream.signing = Some(crate::StreamSigning { key, fudge });
                     }
                     Some(TsigSigning::Error { .. }) => return Action::Drop,
                     None => {}

@@ -165,7 +165,7 @@ async fn serve<H: Handler>(
                 Action::Respond => None,
                 Action::Stream(transfer) => Some(transfer),
             };
-            let signing = transfer.as_ref().and_then(|stream| stream.1.clone());
+            let signing = transfer.as_ref().and_then(|stream| stream.signing.clone());
             let mut signer = match signing.as_ref() {
                 Some(signing) => match pharos_proto::TsigRecord::parse(&query) {
                     Ok(record) => Some(pharos_proto::TsigStream::new(&signing.key, record.mac)),
@@ -211,6 +211,7 @@ async fn serve<H: Handler>(
                             .sign(&mut response, now.unwrap_or_default(), signing.fudge)
                             .is_err()
                     {
+                        crate::logging::log("ERROR", "server", "Zone Transfer TSIG signing failed");
                         *writer = None;
                         let _ = failed.send(true);
                         break;
