@@ -744,7 +744,7 @@ mod tests {
                     barrier.wait();
                     let qtype = if i % 2 == 0 { "A" } else { "AAAA" };
                     for _ in 0..20 {
-                        metrics.binding("IN", qtype, &[]).matched.matched();
+                        metrics.binding("", "IN", qtype, &[]).matched.matched();
                     }
                 });
             }
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|line| line.ends_with(" 80")), "{output}");
         let _guard = metrics.binding_lock.lock().unwrap();
-        assert_eq!(metrics.binding("IN", "A", &[]).class, "IN");
+        assert_eq!(metrics.binding("", "IN", "A", &[]).class, "IN");
     }
     #[tokio::test]
     async fn wildcard_metrics_use_actual_question_labels() {
