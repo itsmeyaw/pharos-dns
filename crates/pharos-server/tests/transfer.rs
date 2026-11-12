@@ -100,6 +100,28 @@ async fn axfr_client_reads_stream_and_checks_closing_soa() {
 }
 
 #[tokio::test]
+async fn notify_sender_retries_refused_responses() {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let responder = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        for attempt in 0..2 {
+            let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+            let message = Message::parse(&wire[..len]).unwrap();
+            assert_eq!(message.opcode(), pharos_proto::Opcode::NOTIFY);
+            assert_eq!(message.questions().next().unwrap().qtype, Type::SOA);
+            wire[2] |= 0x80;
+            wire[3] = if attempt == 0 { 5 } else { 0 };
+            socket.send_to(&wire[..len], peer).await.unwrap();
+        }
+    });
+    pharos_server::transfer::notify(address, &"a.".parse().unwrap(), 42, Duration::from_secs(1))
+        .await
+        .unwrap();
+    responder.await.unwrap();
+}
+
+#[tokio::test]
 async fn plugin_stream_reaches_tcp_listener_as_multiple_messages() {
     let key = ListenerKey {
         transport: Transport::Dns,

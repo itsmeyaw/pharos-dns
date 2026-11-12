@@ -5,12 +5,66 @@ use std::{io, net::SocketAddr, time::Duration};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpStream, UdpSocket},
     time::timeout,
 };
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+/// Send an unsigned NOTIFY, retrying up to three times as CoreDNS does.
+pub async fn notify(
+    address: SocketAddr,
+    zone: &Name,
+    id: u16,
+    deadline: Duration,
+) -> io::Result<()> {
+    // shortcut: one Query buffer allocation per NOTIFY; reuse it when callers batch Zones.
+    let mut query = Vec::with_capacity(512);
+    // RFC 1996 §3.7: NOTIFY has opcode 4, AA set, and an SOA Question.
+    let mut builder = MessageBuilder::new(&mut query, 512, id, 0x2400).map_err(io::Error::other)?;
+    builder
+        .question(
+            NameRef::parse(zone.as_wire(), 0).map_err(io::Error::other)?,
+            Type::SOA,
+            Class::IN,
+        )
+        .map_err(io::Error::other)?;
+    let _ = builder.finish();
+    let bind = if address.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind).await?;
+    socket.connect(address).await?;
+    let mut wire = [0; 65535];
+    let mut last_error = invalid("NOTIFY was not accepted");
+    for _ in 0..3 {
+        let result = timeout(deadline, async {
+            socket.send(&query).await?;
+            let len = socket.recv(&mut wire).await?;
+            let response =
+                Message::parse(&wire[..len]).map_err(|_| invalid("invalid NOTIFY Response"))?;
+            // RFC 1996 §3.8: NOTIFY Responses acknowledge the original Message.
+            if response.id() != id
+                || response.flags() & 0x8000 == 0
+                || response.opcode() != pharos_proto::Opcode::NOTIFY
+                || response.rcode() != Rcode::NOERROR
+            {
+                return Err(invalid("NOTIFY was not accepted"));
+            }
+            Ok(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => last_error = error,
+            Err(error) => last_error = io::Error::new(io::ErrorKind::TimedOut, error),
+        }
+    }
+    Err(last_error)
 }
 
 /// Receive an AXFR incrementally. The callback must discard partial data on error.
