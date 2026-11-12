@@ -132,6 +132,7 @@ impl Dnssec {
                 .map_err(Error::Build)?;
         }
         let mut signed_sets = 0;
+        let mut attempted_sets = 0;
         for (section, records) in [
             (Section::Answer, message.answers()),
             (Section::Authority, message.authorities()),
@@ -171,8 +172,9 @@ impl Dnssec {
                     .copied()
                     .filter(|r| r.name == rr.name && r.rtype == rr.rtype && r.class == rr.class)
                     .collect();
-                self.sign_set(&mut builder, section, &group, zone, now)?;
-                signed_sets += 1;
+                signed_sets +=
+                    usize::from(self.sign_set(&mut builder, section, &group, zone, now)?);
+                attempted_sets += 1;
             }
             if let Some(lie) = &lie
                 && section
@@ -183,8 +185,9 @@ impl Dnssec {
                     }
             {
                 let rr = lie.answers().next().ok_or(Error::InvalidQuery)?;
-                self.sign_set(&mut builder, section, &[rr], zone, now)?;
-                signed_sets += 1;
+                signed_sets +=
+                    usize::from(self.sign_set(&mut builder, section, &[rr], zone, now)?);
+                attempted_sets += 1;
                 let data = rr.data().map_err(|_| Error::InvalidQuery)?;
                 builder
                     .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
@@ -195,9 +198,10 @@ impl Dnssec {
         }
         let _ = builder.finish();
         if let Some(metrics) = metrics {
-            metrics.miss(signed_sets);
+            metrics.miss(attempted_sets);
         }
-        if self.capacity > 0 {
+        // CoreDNS plugin/dnssec: cache only RRsets that produced signatures.
+        if signed_sets > 0 {
             let mut cache = self.cache.lock().map_err(|_| Error::InvalidQuery)?;
             if cache.len() >= self.capacity
                 && !cache.contains_key(&original[2..])
@@ -228,7 +232,7 @@ impl Dnssec {
         records: &[Record<'_>],
         zone: &pharos_proto::Name,
         now: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let first = records.first().ok_or(Error::InvalidQuery)?;
         let signer = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
         let has_ksk = self.keys.iter().any(|k| k.public.flags & 257 == 257);
@@ -243,6 +247,7 @@ impl Dnssec {
                 })
             })
             .collect::<Result<_, Error>>()?;
+        let mut signed = false;
         for (key, public) in self.keys.iter().zip(&self.public) {
             if has_ksk
                 && has_zsk
@@ -293,14 +298,74 @@ impl Dnssec {
                     |writer| sig.write(writer),
                 )
                 .map_err(Error::Build)?;
+            signed = true;
         }
-        Ok(())
+        Ok(signed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::CacheEntry;
+
+    #[test]
+    fn empty_response_does_not_evict_a_signed_response() {
+        use pharos_corefile::{configure, parse};
+        use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
+        use pharos_server::{Context, Metadata, Protocol, Transport};
+
+        let base = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+        );
+        let text = format!("miek.nl {{\n dnssec {{\n key file {base}\n }}\n}}");
+        let mut chain =
+            configure::<crate::Chain>(&parse("Corefile", &text).unwrap(), crate::directives())
+                .unwrap();
+        let dnssec = chain[0].config.dnssec.as_mut().unwrap();
+        dnssec.capacity = 1;
+        let domain: Name = "miek.nl.".parse().unwrap();
+        let name = NameRef::parse(domain.as_wire(), 0).unwrap();
+        let mut query = Vec::new();
+        let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x100).unwrap();
+        builder.question(name, Type::A, Class::IN).unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:1".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        for answer in [true, false] {
+            let mut builder = MessageBuilder::new(cx.response, 512, 1, 0x8400).unwrap();
+            builder.question(name, Type::A, Class::IN).unwrap();
+            if answer {
+                builder
+                    .record(
+                        Section::Answer,
+                        name,
+                        Type::A,
+                        Class::IN,
+                        60,
+                        &[127, 0, 0, 1],
+                    )
+                    .unwrap();
+            }
+            let _ = builder.finish();
+            dnssec.sign_response(&mut cx).unwrap();
+        }
+        let cache = dnssec.cache.lock().unwrap();
+        assert_eq!(cache.len(), 1);
+        let cached = Message::parse(&cache.values().next().unwrap().wire).unwrap();
+        assert!(cached.answers().any(|rr| rr.rtype == Type::RRSIG));
+    }
 
     #[test]
     fn cache_expires_after_six_days_and_checks_buffer_limit() {
