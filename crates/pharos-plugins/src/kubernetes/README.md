@@ -33,6 +33,7 @@
 - Shared with CoreDNS v1.15.0: the SOA serial uses the last change's Unix time in seconds. A Secondary Server can miss a second change within the same second, even after NOTIFY.
 - Shared with CoreDNS v1.15.0: a multicluster Zone Transfer uses the internal SOA serial, which can differ from a multicluster SOA Query.
 - Shared with CoreDNS v1.15.0: some DNS-visible changes, including Service IP and endpoint Pod-name changes, do not change the SOA serial; a Secondary Server may skip an update even after NOTIFY.
+- Kubernetes sends NOTIFY after the initial sync and on data changes (RFC 1996 §§3.1, 4.1); CoreDNS's Kubernetes Plugin does not send NOTIFY.
 - Zone Transfers encode the entire Zone synchronously under the store's read lock before sending. Memory and worker time therefore grow with Zone size; CoreDNS streams the transfer in batches.
 - Zone Transfers allocate one encoded snapshot and one shared Stream producer, not per record. macOS also allocates the producer's mutex on first use.
 - Kubernetes NOTIFY coalesces changes received while an earlier NOTIFY is being sent, then sends again for the latest state.

@@ -15,7 +15,10 @@ pub(super) struct Notifier {
 impl Kubernetes {
     /// Bind the transfer Plugin before Startup, or replace it while running.
     pub fn bind_transfer(&self, transfer: Option<&crate::transfer::Transfer>) {
-        let store = self.state.cache.read().unwrap().store.clone();
+        let cache = self.state.cache.read().unwrap();
+        let store = cache.store.clone();
+        let sync = cache.sync.clone();
+        drop(cache);
         let mut notifier = self.state.notifier.lock().unwrap();
         notifier.transfer = transfer.cloned();
         if let Some(task) = notifier.task.take() {
@@ -25,6 +28,7 @@ impl Kubernetes {
             spawn_watcher(
                 &mut notifier,
                 store.as_ref(),
+                sync.as_ref(),
                 &self.zones,
                 &self.multicluster_zones,
             );
@@ -32,9 +36,15 @@ impl Kubernetes {
     }
 }
 
-fn spawn_watcher(notifier: &mut Notifier, store: Option<&Store>, zones: &[Name], multi: &[Name]) {
-    let (Some(transfer), Some(store), Some(runtime)) =
-        (&notifier.transfer, store, &notifier.runtime)
+fn spawn_watcher(
+    notifier: &mut Notifier,
+    store: Option<&Store>,
+    sync: Option<&Arc<dyn pharos_server::Readiness>>,
+    zones: &[Name],
+    multi: &[Name],
+) {
+    let (Some(transfer), Some(store), Some(sync), Some(runtime)) =
+        (&notifier.transfer, store, sync, &notifier.runtime)
     else {
         return;
     };
@@ -44,18 +54,22 @@ fn spawn_watcher(notifier: &mut Notifier, store: Option<&Store>, zones: &[Name],
         transfer.clone(),
         zones.to_vec(),
         multi.to_vec(),
+        sync.clone(),
     )));
 }
 
 pub(super) fn start(state: &State, zones: &[Name], multi: &[Name]) {
-    let store = state.cache.read().unwrap().store.clone();
+    let cache = state.cache.read().unwrap();
+    let store = cache.store.clone();
+    let sync = cache.sync.clone();
+    drop(cache);
     let mut notifier = state.notifier.lock().unwrap();
     if let Some(task) = notifier.task.take() {
         task.abort();
     }
     notifier.active = true;
     notifier.runtime = Some(tokio::runtime::Handle::current());
-    spawn_watcher(&mut notifier, store.as_ref(), zones, multi);
+    spawn_watcher(&mut notifier, store.as_ref(), sync.as_ref(), zones, multi);
 }
 
 pub(super) fn stop(state: &State) {
@@ -72,9 +86,20 @@ async fn watch_changes(
     transfer: crate::transfer::Transfer,
     zones: Vec<Name>,
     multi: Vec<Name>,
+    sync: Arc<dyn pharos_server::Readiness>,
 ) {
-    let mut previous = pharos_kubernetes::store::Changes::default();
+    while !sync.ready() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let mut previous = *changes.borrow_and_update();
+    // RFC 1996 §4.1: send an initial SOA NOTIFY after startup.
+    for zone in &zones {
+        notify(&transfer, zone).await;
+    }
     loop {
+        if changes.changed().await.is_err() {
+            break;
+        }
         let current = *changes.borrow_and_update();
         let internal_changed = current.internal != previous.internal;
         let multi_changed = current.multicluster != previous.multicluster;
@@ -86,19 +111,16 @@ async fn watch_changes(
             if internal_changed
                 || multi_changed && multi.iter().any(|parent| contains(zone_ref, parent))
             {
-                // RFC 1996 §2.3: notify Secondary Servers when authoritative Zone data changes.
-                if let Err(error) = transfer.notify(zone).await {
-                    pharos_server::logging::log(
-                        "ERROR",
-                        "kubernetes",
-                        &format!("NOTIFY {zone}: {error}"),
-                    );
-                }
+                // RFC 1996 §3.1: notify Secondary Servers when authoritative Zone data changes.
+                notify(&transfer, zone).await;
             }
         }
-        if changes.changed().await.is_err() {
-            break;
-        }
+    }
+}
+
+async fn notify(transfer: &crate::transfer::Transfer, zone: &Name) {
+    if let Err(error) = transfer.notify(zone).await {
+        pharos_server::logging::log("ERROR", "kubernetes", &format!("NOTIFY {zone}: {error}"));
     }
 }
 
@@ -591,6 +613,13 @@ mod tests {
     use pharos_kubernetes::object::{EndpointAddress, Endpoints, Port};
     use pharos_proto::Rdata;
 
+    struct Ready;
+    impl pharos_server::Readiness for Ready {
+        fn ready(&self) -> bool {
+            true
+        }
+    }
+
     fn plugin() -> Kubernetes {
         let blocks =
             pharos_corefile::parse("Corefile", ".:53 {\n kubernetes cluster.local\n}").unwrap();
@@ -934,6 +963,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_notify_waits_for_first_sync_even_for_empty_zone() {
+        use crate::transfer::{Destination, Transfer, TransferZone};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Sync(AtomicBool);
+        impl pharos_server::Readiness for Sync {
+            fn ready(&self) -> bool {
+                self.0.load(Ordering::Acquire)
+            }
+        }
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let transfer = Transfer {
+            zones: vec![TransferZone {
+                domains: vec![".".parse().unwrap()],
+                destinations: vec![Destination::Address {
+                    host: "127.0.0.1".into(),
+                    port: socket.local_addr().unwrap().port().to_string(),
+                }],
+                source: None,
+            }],
+        };
+        let sync = Arc::new(Sync(AtomicBool::new(false)));
+        let (send, receive) =
+            tokio::sync::watch::channel(pharos_kubernetes::store::Changes::default());
+        let task = tokio::spawn(watch_changes(
+            receive,
+            transfer,
+            vec!["cluster.local.".parse().unwrap()],
+            vec![],
+            sync.clone(),
+        ));
+        send.send_modify(|value| value.internal += 1);
+        let mut wire = [0; 512];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(80),
+                socket.recv_from(&mut wire)
+            )
+            .await
+            .is_err()
+        );
+        sync.0.store(true, Ordering::Release);
+        let (len, from) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.recv_from(&mut wire),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            Message::parse(&wire[..len])
+                .unwrap()
+                .questions()
+                .next()
+                .unwrap()
+                .name
+                .to_string(),
+            "cluster.local."
+        );
+        wire[2] |= 0x80;
+        socket.send_to(&wire[..len], from).await.unwrap();
+        drop(send);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn change_watcher_notifies_affected_zones_and_stops() {
         use crate::transfer::{Destination, Transfer, TransferZone};
         use pharos_kubernetes::store::Changes;
@@ -953,9 +1047,36 @@ mod tests {
             .into();
         let multi = vec![zones[1].clone()];
         let (send, receive) = tokio::sync::watch::channel(Changes::default());
-        let task = tokio::spawn(watch_changes(receive, transfer, zones, multi));
-        send.send_modify(|v| v.multicluster += 1);
+        let task = tokio::spawn(watch_changes(
+            receive,
+            transfer,
+            zones,
+            multi,
+            Arc::new(Ready),
+        ));
         let mut wire = [0; 512];
+        for expected in ["cluster.local.", "clusterset.local."] {
+            let (len, from) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                socket.recv_from(&mut wire),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                Message::parse(&wire[..len])
+                    .unwrap()
+                    .questions()
+                    .next()
+                    .unwrap()
+                    .name
+                    .to_string(),
+                expected
+            );
+            wire[2] |= 0x80;
+            socket.send_to(&wire[..len], from).await.unwrap();
+        }
+        send.send_modify(|v| v.multicluster += 1);
         let (len, from) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             socket.recv_from(&mut wire),
@@ -1015,7 +1136,11 @@ mod tests {
         let plugin = plugin();
         let transfer = crate::transfer::Transfer { zones: Vec::new() };
         Transferer::bind_transfer(&plugin, Some(&transfer));
-        plugin.state.cache.write().unwrap().store = Some(Store::default());
+        {
+            let mut cache = plugin.state.cache.write().unwrap();
+            cache.store = Some(Store::default());
+            cache.sync = Some(Arc::new(Ready));
+        }
         start(&plugin.state, &plugin.zones, &plugin.multicluster_zones);
         assert!(plugin.state.notifier.lock().unwrap().task.is_some());
         Transferer::bind_transfer(&plugin, None);
