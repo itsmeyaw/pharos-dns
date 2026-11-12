@@ -43,6 +43,10 @@ Unsigned TCP AXFR comparisons collect the complete stream through its closing
 SOA before comparing records, independent of Message boundaries. The combined
 records must fit into one 65,535-octet comparison Message.
 
+The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
+the Listener intentionally strips unsolicited OPT records from non-EDNS
+Responses, and the harness cannot mask that difference.
+
 The `tsig` transfer README example is skipped until the `file` Plugin is
 available. Signed scenarios authenticate each Response before comparing its
 other fields; TSIG timestamps and MAC bytes are not compared between servers.

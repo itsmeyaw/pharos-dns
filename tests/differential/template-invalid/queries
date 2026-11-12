@@ -1,0 +1,4 @@
+invalid. A IN udp +bufsize=1232
+sub.invalid. AAAA IN tcp +bufsize=1232
+invalid. A CH udp +bufsize=1232
+outside.example. A IN udp

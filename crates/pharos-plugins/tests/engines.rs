@@ -487,6 +487,83 @@ fn integer_range_accepts_65535_iterations() {
 }
 
 #[test]
+fn nested_query_ranges_share_render_iteration_budget() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.groups = &[("count", "256")];
+    let template = Template::compile("{{ range parseInt .Group.count 10 64 }}{{ range parseInt $.Group.count 10 64 }}x{{ end }}{{ end }}").unwrap();
+    let mut output = String::with_capacity(65536);
+    assert!(template.render(&data, &mut output).is_err());
+    assert_eq!(output.len(), 65280);
+}
+
+#[test]
+fn collection_ranges_count_toward_budget_and_reset_per_render() {
+    let wire = b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x01a\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["match"];
+    data.groups = &[("group", "value")];
+    data.variables = &[("variable", pharos_plugins::expression::Value::Int(1))];
+    data.message = Some(&message);
+    let mut output = String::new();
+    let mut scratch = [0; 128];
+    for collection in [".Match", ".Group", ".Var", ".Message.Question"] {
+        let source =
+            format!("{{{{ range 65535 }}}}{{{{ end }}}}{{{{ range {collection} }}}}x{{{{ end }}}}");
+        let template = Template::compile(&source).unwrap();
+        assert!(
+            template
+                .render_with_scratch(&data, &mut output, &mut scratch)
+                .is_err(),
+            "{collection}"
+        );
+        assert!(output.is_empty(), "{collection}");
+    }
+    let template = Template::compile("{{ range 65535 }}x{{ end }}").unwrap();
+    for _ in 0..2 {
+        output.clear();
+        template
+            .render_with_scratch(&data, &mut output, &mut scratch)
+            .unwrap();
+        assert_eq!(output.len(), 65535);
+    }
+}
+
+#[test]
+fn small_nested_ranges_render_normally() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("example.", &metadata);
+    data.matches = &["a", "b"];
+    let template =
+        Template::compile("{{ range .Match }}{{ . }}{{ range 2 }}{{ . }}{{ end }};{{ end }}")
+            .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "a01;b01;");
+}
+
+#[test]
+fn empty_ranges_do_not_consume_budget_but_else_ranges_do() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template =
+        Template::compile("{{ range 65535 }}{{ end }}{{ range 0 }}bad{{ else }}empty{{ end }}")
+            .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "empty");
+
+    let template = Template::compile("{{ range 0 }}bad{{ else }}{{ if $.Name }}{{ range 65535 }}{{ end }}{{ range 1 }}bad{{ end }}{{ end }}{{ end }}").unwrap();
+    assert!(template.render(&data, &mut String::new()).is_err());
+}
+
+#[test]
 fn printf_supports_go_numeric_string_and_type_formats() {
     let mut slots = [];
     let metadata = Metadata::new(&mut slots);

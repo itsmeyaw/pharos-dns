@@ -1,0 +1,15 @@
+.:{port} {
+    forward . 127.0.0.1:{port2}
+    template IN ANY example.com {
+        match "example\.com\.(dc1\.example\.com\.)$"
+        rcode NXDOMAIN
+        authority "{{ index .Match 1 }} 60 IN SOA ns.{{ index .Match 1 }} hostmaster.{{ index .Match 1 }} (1 60 60 60 60)"
+        fallthrough
+    }
+}
+.:{port2} {
+    hosts empty.hosts {
+        192.0.2.1 www.example.com
+        reload 0
+    }
+}

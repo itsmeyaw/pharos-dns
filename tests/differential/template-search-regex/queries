@@ -1,0 +1,3 @@
+something.example.com.dc1.example.com. A IN udp
+example.com.dc1.example.com. MX IN tcp
+www.example.com. A IN udp

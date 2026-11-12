@@ -1,0 +1,3 @@
+ip-10-1-2-3.example. A IN udp
+ip-10-1-2-3.example. MX IN tcp
+other.example. A IN udp

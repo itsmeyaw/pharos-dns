@@ -66,6 +66,7 @@ default = [
     "plugin-ready",
     "plugin-reload",
     "plugin-rewrite",
+    "plugin-template",
     "plugin-whoami",
 ]
 plugin-root = []
@@ -109,7 +110,7 @@ plugin-dnssec = ["dep:pharos-dnssec"]
 dnssec-aws = ["plugin-dnssec", "dep:aws-config", "dep:aws-sdk-secretsmanager", "dep:serde", "dep:serde_json"]
 plugin-tls = []
 plugin-minimal = []
-plugin-template = []
+plugin-template = ["dep:regex"]
 plugin-transfer = []
 plugin-dynupdate = []
 plugin-hosts = []

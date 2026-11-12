@@ -10,7 +10,9 @@ use std::{
 };
 
 mod kubernetes;
+mod template;
 pub use kubernetes::{KubernetesMetrics, KubernetesRequestMetrics};
+pub use template::{TemplateFailureMetrics, TemplateMetrics};
 
 // IANA DNS Parameters §Resource Record (RR) TYPEs: these values identify DNS query types.
 const TYPES: &[(u16, &str)] = &[
@@ -79,6 +81,7 @@ struct RegistryInner {
     reload_failures: AtomicU64,
     reload_hash: Mutex<Option<String>>,
     kubernetes: KubernetesMetrics,
+    template: template::TemplateRegistry,
 }
 
 #[derive(Default)]
@@ -400,6 +403,7 @@ impl Registry {
             reload_failures: AtomicU64::new(0),
             reload_hash: Mutex::new(None),
             kubernetes: KubernetesMetrics::default(),
+            template: template::TemplateRegistry::default(),
         }))
     }
 
@@ -515,6 +519,18 @@ impl Registry {
         self.0.kubernetes.clone()
     }
 
+    /// Resolve a template match series before processing Queries.
+    pub fn template(
+        &self,
+        server: &str,
+        zone: &str,
+        view: &str,
+        class: &str,
+        typ: &str,
+    ) -> TemplateMetrics {
+        self.0.template.resolve(server, zone, view, class, typ)
+    }
+
     /// Resolve metrics for a proxy and Upstream address before recording events.
     pub fn proxy(&self, proxy_name: &str, to: &str) -> ProxyMetrics {
         let mut proxies = self.0.proxies.lock().unwrap();
@@ -592,6 +608,7 @@ impl Registry {
     /// Append text to `out`; callers can append process metrics to the same buffer.
     pub fn encode(&self, out: &mut String) {
         self.0.kubernetes.encode(out);
+        self.0.template.encode(out);
         let shed = self.0.shed.lock().unwrap();
         if !shed.is_empty() {
             header(
@@ -1615,6 +1632,75 @@ fn rcode(code: u16) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn template_metrics_export_only_used_series_with_coredns_labels_and_help() {
+        let registry = super::Registry::new("test", "test", "test");
+        let metrics = registry.template("dns://:53", "example.", "", "IN", "A");
+        let same = registry.template("dns://:53", "example.", "", "IN", "A");
+        let other = registry.template("dns://:53", "other.", "", "IN", "AAAA");
+        let failure = metrics.failure("answer", "{{\"x\"}}\n\\");
+        let unused = other.failure("authority", "unused");
+        let mut out = String::new();
+        registry.encode(&mut out);
+        assert!(!out.contains("pharos_template_"));
+
+        metrics.matched();
+        same.matched();
+        other.matched();
+        failure.render_failure();
+        failure.rr_failure();
+        let _ = unused;
+        out.clear();
+        registry.encode(&mut out);
+        for expected in [
+            "# HELP pharos_template_matches_total Counter of template regex matches.",
+            "# TYPE pharos_template_matches_total counter",
+            "# HELP pharos_template_template_failures_total Counter of go template failures.",
+            "# TYPE pharos_template_template_failures_total counter",
+            "# HELP pharos_template_rr_failures_total Counter of mis-templated RRs.",
+            "# TYPE pharos_template_rr_failures_total counter",
+            "pharos_template_matches_total{class=\"IN\",server=\"dns://:53\",type=\"A\",view=\"\",zone=\"example.\"} 2",
+            "pharos_template_matches_total{class=\"IN\",server=\"dns://:53\",type=\"AAAA\",view=\"\",zone=\"other.\"} 1",
+            "pharos_template_template_failures_total{class=\"IN\",section=\"answer\",server=\"dns://:53\",template=\"{{\\\"x\\\"}}\\n\\\\\",type=\"A\",view=\"\",zone=\"example.\"} 1",
+            "pharos_template_rr_failures_total{class=\"IN\",section=\"answer\",server=\"dns://:53\",template=\"{{\\\"x\\\"}}\\n\\\\\",type=\"A\",view=\"\",zone=\"example.\"} 1",
+        ] {
+            assert!(
+                out.lines().any(|line| line == expected),
+                "missing {expected}\n{out}"
+            );
+        }
+        assert!(!out.contains("section=\"authority\""));
+    }
+
+    #[test]
+    fn template_failure_series_are_shared_and_independent() {
+        let registry = super::Registry::new("test", "test", "test");
+        let first = registry.template("s", ".", "", "IN", "A");
+        let second = registry.template("s", ".", "", "IN", "A");
+        let first_failure = first.failure("answer", "record");
+        let shared_failure = second.failure("answer", "record");
+        let other_failure = second.failure("additional", "record");
+
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let failure = first_failure.clone();
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        failure.render_failure();
+                    }
+                });
+            }
+        });
+        shared_failure.render_failure();
+        other_failure.rr_failure();
+        let mut out = String::new();
+        registry.encode(&mut out);
+        assert!(out.contains("pharos_template_template_failures_total{class=\"IN\",section=\"answer\",server=\"s\",template=\"record\",type=\"A\",view=\"\",zone=\".\"} 401\n"));
+        assert!(out.contains("pharos_template_rr_failures_total{class=\"IN\",section=\"additional\",server=\"s\",template=\"record\",type=\"A\",view=\"\",zone=\".\"} 1\n"));
+        assert!(!out.contains("pharos_template_matches_total"));
+        assert!(!out.contains("pharos_template_rr_failures_total{class=\"IN\",section=\"answer\""));
+    }
+
     #[test]
     fn kubernetes_metrics_export_coredns_labels_and_buckets() {
         let registry = super::Registry::new("test", "test", "test");
