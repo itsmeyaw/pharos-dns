@@ -180,8 +180,16 @@ async fn apex_dnskey_signature_uses_key_rrset_ttl() {
         7200
     );
     assert!(matches!(
-        records.iter().find(|rr| rr.rtype == Type::RRSIG).unwrap().data().unwrap(),
-        pharos_proto::Rdata::Rrsig { original_ttl: 7200, .. }
+        records
+            .iter()
+            .find(|rr| rr.rtype == Type::RRSIG)
+            .unwrap()
+            .data()
+            .unwrap(),
+        pharos_proto::Rdata::Rrsig {
+            original_ttl: 7200,
+            ..
+        }
     ));
     verify_signatures(&records);
 }
