@@ -396,7 +396,7 @@ impl Node {
                             Contains => a.contains(b),
                             StartsWith => a.starts_with(b),
                             EndsWith => a.ends_with(b),
-                            _ => unreachable!(),
+                            _ => return Err("invalid string operator"),
                         }))
                     }
                     (Eq, a, b) => Ok(Temporary::Bool(equal(a, b, scratch)?)),
@@ -420,7 +420,7 @@ impl Node {
                             Le => ordering.is_some_and(|value| value.is_le()),
                             Gt => ordering.is_some_and(|value| value.is_gt()),
                             Ge => ordering.is_some_and(|value| value.is_ge()),
-                            _ => unreachable!(),
+                            _ => return Err("invalid comparison operator"),
                         }))
                     }
                     _ => Err("incompatible operands"),
@@ -757,7 +757,10 @@ fn incidr(ip: &str, cidr: &str) -> Result<bool, &'static str> {
 }
 
 /// An expression parsed once at setup.
-pub struct Expression(Node);
+pub struct Expression {
+    root: Node,
+    value_type: ValueType,
+}
 
 impl Expression {
     pub fn compile(source: &str) -> Result<Self, String> {
@@ -769,21 +772,22 @@ impl Expression {
         source: &str,
         variables: &[(&str, ValueType)],
     ) -> Result<Self, String> {
-        parser::parse(source, variables).map(Self)
-    }
-
-    /// Type of this expression, for compiling subsequent variables.
-    pub fn value_type(&self) -> ValueType {
-        match self.0.kind() {
+        let root = parser::parse(source, variables)?;
+        let value_type = match root.kind() {
             Kind::Nil => ValueType::Nil,
             Kind::Bool => ValueType::Bool,
             Kind::Int => ValueType::Int,
             Kind::Float => ValueType::Float,
             Kind::String => ValueType::String,
             Kind::Function => ValueType::Function,
-            Kind::List => unreachable!("list results are rejected at compile time"),
-            Kind::Dynamic => unreachable!("dynamic predicate values are not expression results"),
-        }
+            Kind::List | Kind::Dynamic => return Err("unsupported expression result type".into()),
+        };
+        Ok(Self { root, value_type })
+    }
+
+    /// Type of this expression, for compiling subsequent variables.
+    pub fn value_type(&self) -> ValueType {
+        self.value_type
     }
 
     pub fn evaluate<'a>(
@@ -793,7 +797,7 @@ impl Expression {
         scratch: &'a mut Scratch<'_>,
     ) -> Result<Value<'a>, &'static str> {
         scratch.len = 0;
-        let value = self.0.eval(query, metadata, scratch, None)?;
+        let value = self.root.eval(query, metadata, scratch, None)?;
         match value {
             Temporary::Nil => Ok(Value::Nil),
             Temporary::Bool(value) => Ok(Value::Bool(value)),

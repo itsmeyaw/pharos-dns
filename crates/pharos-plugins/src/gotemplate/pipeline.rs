@@ -261,7 +261,7 @@ impl Pipeline {
                                 Function::Le => ordering.is_some_and(|v| v.is_le()),
                                 Function::Gt => ordering.is_some_and(|v| v.is_gt()),
                                 Function::Ge => ordering.is_some_and(|v| v.is_ge()),
-                                _ => unreachable!(),
+                                _ => return Err(fmt::Error),
                             };
                             ResultValue::Scalar(Some(Value::Bool(result)))
                         }
@@ -638,7 +638,7 @@ impl Atom {
             }
             Self::Field(Field::Dot) if matches!(dot.base(), Dot::Question { .. }) => {
                 let Dot::Question { value, .. } = dot.base() else {
-                    unreachable!()
+                    return Err(fmt::Error);
                 };
                 Ok(ResultValue::Question(value))
             }
@@ -658,7 +658,7 @@ impl Atom {
             ),
             Self::Field(Field::Name) if matches!(dot.base(), Dot::Question { .. }) => {
                 let Dot::Question { value, .. } = dot.base() else {
-                    unreachable!()
+                    return Err(fmt::Error);
                 };
                 let start = scratch.len;
                 write!(scratch, "{}", value.name)?;
@@ -705,7 +705,7 @@ impl Atom {
                     Field::Questions => Ok(ResultValue::Questions(QuestionSlice::new(
                         data.message.ok_or(fmt::Error)?,
                     ))),
-                    _ => unreachable!(),
+                    _ => Err(fmt::Error),
                 }
             }
             Self::Field(field) => Ok(ResultValue::Scalar(field.scalar(data, dot)?)),
@@ -779,7 +779,7 @@ fn format_values(
                     '-' => left = true,
                     '+' => plus = true,
                     '#' => alternate = true,
-                    _ => unreachable!(),
+                    _ => return Err(fmt::Error),
                 }
                 verb = format.text(scratch)?[cursor..]
                     .chars()

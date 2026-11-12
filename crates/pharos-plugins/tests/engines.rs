@@ -906,6 +906,29 @@ fn nested_pipeline_argument_slots_are_bounded_at_setup() {
 }
 
 #[test]
+fn malformed_template_fragments_never_panic() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let fragments = [
+        "{{", "}}", "\"", "'", "`", "$", "🦀", "(", ")", "-", "|", "\\", "0", ".", " ",
+    ];
+    let mut state = 0x3d7b_8a91_u32;
+    for _ in 0..1024 {
+        let mut source = String::new();
+        for _ in 0..12 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            source.push_str(fragments[state as usize % fragments.len()]);
+        }
+        if let Ok(template) = Template::compile(&source) {
+            let _ = template.render_with_scratch(&data, &mut String::new(), &mut [0; 256]);
+        }
+    }
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];

@@ -561,7 +561,7 @@ fn write_field(
         }
         Field::Name if matches!(dot.base(), Dot::Question { .. }) => {
             let Dot::Question { value, .. } = dot.base() else {
-                unreachable!()
+                return Err(fmt::Error);
             };
             write!(output, "{}", value.name)
         }
@@ -995,13 +995,13 @@ impl Field {
             }
             Self::CurrentQtype if matches!(dot.base(), Dot::Question { .. }) => {
                 let Dot::Question { value, .. } = dot.base() else {
-                    unreachable!()
+                    return Err(fmt::Error);
                 };
                 Ok(Some(Value::Int(i64::from(value.qtype.0))))
             }
             Self::CurrentQclass if matches!(dot.base(), Dot::Question { .. }) => {
                 let Dot::Question { value, .. } = dot.base() else {
-                    unreachable!()
+                    return Err(fmt::Error);
                 };
                 Ok(Some(Value::Int(i64::from(value.qclass.0))))
             }

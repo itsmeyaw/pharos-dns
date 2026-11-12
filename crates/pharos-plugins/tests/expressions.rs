@@ -378,6 +378,57 @@ fn deeply_nested_expressions_fit_a_small_worker_stack() {
 }
 
 #[test]
+fn malformed_expression_fragments_never_panic() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut bytes = [0; 256];
+    let mut scratch = Scratch::new(&mut bytes);
+    let fragments = [
+        "(", ")", "[", "]", "\"", "'", "🦀", "#", "+", "=", "\\", "0", ".", " ",
+    ];
+    let mut state = 0x76c1_b34d_u32;
+    for _ in 0..1024 {
+        let mut source = String::new();
+        for _ in 0..12 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            source.push_str(fragments[state as usize % fragments.len()]);
+        }
+        if let Ok(expression) = Expression::compile(&source) {
+            let _ = expression.evaluate(&query, &metadata, &mut scratch);
+        }
+    }
+}
+
+#[test]
+fn compiled_expression_exposes_only_valid_result_types() {
+    for (source, expected) in [
+        ("nil", ValueType::Nil),
+        ("true", ValueType::Bool),
+        ("1", ValueType::Int),
+        ("0.5", ValueType::Float),
+        ("'x'", ValueType::String),
+        ("name", ValueType::Function),
+    ] {
+        assert_eq!(
+            Expression::compile(source).unwrap().value_type(),
+            expected,
+            "{source}"
+        );
+    }
+    assert!(Expression::compile("[1]").is_err());
+    assert!(Expression::compile("#").is_err());
+}
+
+#[test]
 fn template_capture_groups_variables_and_int_conversion() {
     let message = Message::parse(WIRE).unwrap();
     let mut query = Query::new(

@@ -42,7 +42,8 @@ Templates are compiled at setup and rendered into a caller-provided `String`.
   storage and permits parallel rendering and larger intermediates. At most 64
   argument values may be live across nested pipelines, and the combined action
   and parenthesis nesting limit is eight; deeper or larger templates fail at
-  setup to bound worker stack use.
+  setup to bound worker stack use. Nested pipelines share one value workspace;
+  malformed actions and exhausted workspaces return errors.
 - Map ranges and printing use quadratic scans for Go's sorted key order without
   allocation. `js` and `printf %q` use Rust regex Unicode categories, which may differ from
   the Unicode version used by Go.

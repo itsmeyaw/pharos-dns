@@ -47,7 +47,7 @@ impl Regex {
         let _ = warmer.is_match(&mut cache, "");
         cache.reset(&vm);
         let cache = Mutex::new(cache);
-        drop(cache.lock().expect("new regex cache"));
+        drop(cache.lock().map_err(|_| "regex cache lock poisoned")?);
         Ok(Self { vm, cache })
     }
 
