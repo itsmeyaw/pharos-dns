@@ -1,6 +1,7 @@
 use std::{
     io::{self, IoSlice},
     net::SocketAddr,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::Arc,
     task::Poll,
     time::Duration,
@@ -103,7 +104,7 @@ async fn serve<H: Handler>(
     stream: TcpStream,
     peer: SocketAddr,
     handler: Arc<H>,
-    (failed, mut stopped): (watch::Sender<bool>, watch::Receiver<bool>),
+    (stop, mut stopped): (watch::Sender<bool>, watch::Receiver<bool>),
     options: TcpOptions,
 ) {
     // RFC 7766 §7: send each Response as soon as it is available.
@@ -200,7 +201,7 @@ async fn serve<H: Handler>(
         // RFC 7766 §6.2.1.1: servers should process pipelined TCP queries concurrently.
         let handler = Arc::clone(&handler);
         let writer = Arc::clone(&writer);
-        let failed = failed.clone();
+        let stop = stop.clone();
         let mut response = responses.pop().unwrap_or_default();
         response.clear();
         let mut task = Box::pin(async move {
@@ -217,7 +218,7 @@ async fn serve<H: Handler>(
                     Ok(record) => Some(pharos_proto::TsigStream::new(&signing.key, record.mac)),
                     Err(_) => {
                         *writer.lock().await = None;
-                        let _ = failed.send(true);
+                        let _ = stop.send(true);
                         return response;
                     }
                 },
@@ -242,7 +243,7 @@ async fn serve<H: Handler>(
                                 &format!("Zone Transfer producer failed: {failure:?}"),
                             );
                             *writer = None;
-                            let _ = failed.send(true);
+                            let _ = stop.send(true);
                             break;
                         }
                     }
@@ -259,7 +260,7 @@ async fn serve<H: Handler>(
                     if signing_failed {
                         crate::logging::log("ERROR", "server", "Zone Transfer TSIG signing failed");
                         *writer = None;
-                        let _ = failed.send(true);
+                        let _ = stop.send(true);
                         break;
                     }
                 }
@@ -272,7 +273,7 @@ async fn serve<H: Handler>(
                             "Zone Transfer Message exceeds 65535 octets",
                         );
                         *writer = None;
-                        let _ = failed.send(true);
+                        let _ = stop.send(true);
                     }
                     break;
                 }
@@ -281,7 +282,7 @@ async fn serve<H: Handler>(
                     let result = timeout(options.write, write_tcp_frame(stream, &response)).await;
                     if !matches!(result, Ok(Ok(()))) {
                         *writer = None;
-                        let _ = failed.send(true);
+                        let _ = stop.send(true);
                         break;
                     }
                 } else {
@@ -294,11 +295,16 @@ async fn serve<H: Handler>(
             response
         });
         // Like CoreDNS and Hickory, answer a ready Query inline; spawn only one that waits.
-        match std::future::poll_fn(|cx| Poll::Ready(task.as_mut().poll(cx))).await {
-            Poll::Ready(response) => responses.push(response),
-            Poll::Pending => {
+        // A panic loses only this Query, as it would in a spawned task.
+        let poll = std::future::poll_fn(|cx| {
+            Poll::Ready(catch_unwind(AssertUnwindSafe(|| task.as_mut().poll(cx))))
+        });
+        match poll.await {
+            Ok(Poll::Ready(response)) => responses.push(response),
+            Ok(Poll::Pending) => {
                 queries.spawn(task);
             }
+            Err(_) => {}
         }
     }
     while queries.join_next().await.is_some() {}

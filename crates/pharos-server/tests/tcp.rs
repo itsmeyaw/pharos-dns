@@ -100,6 +100,25 @@ impl Handler for FaultyTransfer {
     }
 }
 
+struct PanicOn;
+
+impl Handler for PanicOn {
+    async fn handle(&self, query: &[u8], _: SocketAddr, _: Protocol, out: &mut Vec<u8>) -> Action {
+        assert_ne!(query, b"panic");
+        out.extend_from_slice(query);
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn handler_panic_keeps_connection_open() {
+    let (listener, mut stream) = connect(PanicOn).await;
+    send(&mut stream, b"panic").await;
+    send(&mut stream, b"next").await;
+    assert_eq!(receive(&mut stream).await, b"next");
+    listener.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn broken_transfer_closes_connection_promptly() {
     for panic in [false, true] {
