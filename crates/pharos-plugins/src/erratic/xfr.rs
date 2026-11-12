@@ -29,8 +29,9 @@ pub(super) fn stream(context: &Context<'_, '_>, truncated: bool) -> Result<Strea
             return Ok(false);
         }
         done = true;
-        if len + 2 > wire.len() {
-            return Err(Error::InvalidQuery);
+        // CoreDNS cannot encode its generated a./b. names for these apexes.
+        if len == 1 || len + 2 > wire.len() {
+            return Ok(false);
         }
         if response.capacity() < 65535 {
             response.reserve(65535 - response.len());

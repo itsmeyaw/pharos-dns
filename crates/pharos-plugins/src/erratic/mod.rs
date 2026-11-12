@@ -35,12 +35,13 @@ impl Plugin for Erratic {
     async fn serve<N: Next + Send>(&self, context: &mut Context<'_, '_>, _next: N) -> Outcome {
         let number = self.query.load(Ordering::SeqCst);
         self.query.fetch_add(1, Ordering::SeqCst);
-        if self.drop > 0 && number % self.drop == 0 {
+        if self.drop > 0 && number.is_multiple_of(self.drop) {
             return Outcome::Drop;
         }
-        if self.delay > 0 && number % self.delay == 0 {
+        if self.delay > 0 && number.is_multiple_of(self.delay) && !self.duration.is_zero() {
             tokio::time::sleep(self.duration).await;
         }
+        // CoreDNS uses a bitmask here, not the modulo used for drop and delay.
         let truncated = self.truncate > 0 && number & self.truncate == 0;
         let Some(question) = context.query.questions().next() else {
             return Outcome::Unanswered(Rcode::SERVFAIL);
@@ -51,6 +52,7 @@ impl Plugin for Erratic {
                 Err(error) => Outcome::Error(error),
             };
         }
+        // RFC 5737 §3 and RFC 3849 §2: use documentation-only addresses.
         let data: &[u8] = match question.qtype {
             Type::A => &[192, 0, 2, 53],
             Type::AAAA => &[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53],
@@ -112,7 +114,6 @@ fn response(
     builder
         .question(question.name, question.qtype, question.qclass)
         .map_err(Error::Build)?;
-    // RFC 5737 §3 and RFC 3849 §2: use documentation-only addresses.
     for _ in 0..if large { 30 } else { 1 } {
         if !builder
             .record(

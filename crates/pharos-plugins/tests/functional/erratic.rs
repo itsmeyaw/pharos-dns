@@ -29,6 +29,8 @@ fn coredns_setup_cases() {
         ("erratic {\n delay 3 bla\n}", false),
         ("erratic {\n truncate 15.a\n}", false),
         ("erratic {\n something-else\n}", false),
+        ("erratic {\n large extra\n}", false),
+        ("erratic {\n large drop 0\n}", true),
     ] {
         let blocks = parse("Corefile", &format!(".:53 {{\n {directive}\n}}")).unwrap();
         assert_eq!(
@@ -135,6 +137,31 @@ async fn coredns_axfr_complete_and_truncated() {
         }
         assert!(!stream.next(&mut response).unwrap());
     }
+}
+
+#[tokio::test]
+async fn coredns_root_axfr_writes_no_message() {
+    let blocks = parse("Corefile", ". {\n erratic {\n drop 0\n }\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let wire = [0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 252, 0, 1];
+    let name: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    let mut slots = [];
+    let mut context = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &name,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 65535,
+    };
+    let Outcome::Stream(mut stream) = configured[0].config.serve(&mut context).await else {
+        panic!("expected stream")
+    };
+    assert!(!stream.next(&mut response).unwrap());
 }
 
 #[tokio::test]

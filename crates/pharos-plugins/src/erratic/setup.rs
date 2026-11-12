@@ -10,7 +10,11 @@ pub(crate) fn setup(
     cursor.next();
     while cursor.next_block() {
         let option = cursor.val().to_owned();
-        let args = cursor.remaining_args();
+        let args = if option == "large" {
+            Vec::new()
+        } else {
+            cursor.remaining_args()
+        };
         match option.as_str() {
             "drop" => {
                 if args.len() > 1 {
