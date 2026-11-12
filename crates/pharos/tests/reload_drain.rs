@@ -141,6 +141,7 @@ impl Fixture {
                     if stream.read_exact(&mut response).is_ok()
                         && response.len() >= 12
                         && response[2] & 0x80 != 0
+                        && response.windows(4).any(|window| window == b"_tcp")
                     {
                         return;
                     }
@@ -164,7 +165,8 @@ fn reload_logs_undrained_replaced_and_removed_listeners_after_five_seconds() {
         let started = Instant::now();
         fixture.reload(new_port);
         fixture.wait_for_new_answer(new_port);
-        while started.elapsed() < Duration::from_secs(1) {
+        let switched = Instant::now();
+        while switched.elapsed() < Duration::from_secs(1) {
             std::thread::sleep(Duration::from_millis(10));
         }
         fixture.continue_to_second_upstream();
@@ -179,7 +181,10 @@ fn reload_logs_undrained_replaced_and_removed_listeners_after_five_seconds() {
                 assert_eq!(text.matches(&expected).count(), 1);
                 break;
             }
-            assert!(Instant::now() < deadline, "missing timeout log: {text}");
+            assert!(
+                Instant::now() < deadline,
+                "missing timeout log (removed={removed}): {text}"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(started.elapsed() >= Duration::from_millis(4500));
