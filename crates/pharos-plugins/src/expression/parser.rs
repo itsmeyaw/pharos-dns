@@ -1,4 +1,4 @@
-use super::{Binary, Kind, Node, Unary};
+use super::{Binary, Kind, Node, Unary, ValueType};
 
 #[derive(Debug, PartialEq)]
 enum Token {
@@ -14,9 +14,10 @@ enum Token {
     End,
 }
 
-pub(super) fn parse(source: &str) -> Result<Node, String> {
+pub(super) fn parse(source: &str, variables: &[(&str, ValueType)]) -> Result<Node, String> {
     let mut parser = Parser {
         source,
+        variables,
         offset: 0,
         token: Token::End,
     };
@@ -28,13 +29,14 @@ pub(super) fn parse(source: &str) -> Result<Node, String> {
     Ok(node)
 }
 
-struct Parser<'a> {
+struct Parser<'a, 'v> {
     source: &'a str,
+    variables: &'v [(&'v str, ValueType)],
     offset: usize,
     token: Token,
 }
 
-impl Parser<'_> {
+impl Parser<'_, '_> {
     fn advance(&mut self) -> Result<(), String> {
         let rest = &self.source[self.offset..];
         self.offset += rest.len() - rest.trim_start().len();
@@ -103,7 +105,7 @@ impl Parser<'_> {
     }
 
     fn expression(&mut self, minimum: u8) -> Result<Node, String> {
-        let mut left = match std::mem::replace(&mut self.token, Token::End) {
+        let left = match std::mem::replace(&mut self.token, Token::End) {
             Token::Integer(value) => {
                 self.advance()?;
                 Node::Int(value)
@@ -123,7 +125,12 @@ impl Parser<'_> {
             Token::Ident(name) => {
                 self.advance()?;
                 if self.token != Token::Left {
-                    return Err(format!("unknown identifier: {name}"));
+                    let kind = self
+                        .variables
+                        .iter()
+                        .find_map(|(key, kind)| (*key == name).then_some(Kind::from(*kind)))
+                        .ok_or_else(|| format!("unknown identifier: {name}"))?;
+                    return self.binary_tail(Node::Variable(name, kind), minimum);
                 }
                 self.advance()?;
                 let mut args = Vec::new();
@@ -146,6 +153,18 @@ impl Parser<'_> {
                         if args.len() == 2 && args.iter().all(|arg| arg.kind() == Kind::String) =>
                     {
                         Kind::Bool
+                    }
+                    "group"
+                        if args.len() == 1
+                            && matches!(args[0].kind(), Kind::String | Kind::Int) =>
+                    {
+                        Kind::String
+                    }
+                    "int"
+                        if args.len() == 1
+                            && matches!(args[0].kind(), Kind::String | Kind::Int) =>
+                    {
+                        Kind::Int
                     }
                     "type" | "name" | "class" | "proto" | "client_ip" | "port" | "server_ip"
                     | "server_port"
@@ -195,6 +214,10 @@ impl Parser<'_> {
             }
             other => return Err(format!("unsupported expression: {other:?}")),
         };
+        self.binary_tail(left, minimum)
+    }
+
+    fn binary_tail(&mut self, mut left: Node, minimum: u8) -> Result<Node, String> {
         while let Some((op, precedence)) = self.binary() {
             if precedence < minimum {
                 break;
@@ -221,6 +244,9 @@ impl Parser<'_> {
                     if left.kind() == Kind::Int && right.kind() == Kind::Int =>
                 {
                     Kind::Int
+                }
+                Binary::Add if left.kind() == Kind::String && right.kind() == Kind::String => {
+                    Kind::String
                 }
                 Binary::In if matches!(&right, Node::List(values) if values.iter().all(|value| value.kind() == left.kind())) => {
                     Kind::Bool

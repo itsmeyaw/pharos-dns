@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use pharos_plugins::expression::{Expression, Query, Scratch, Value};
+use pharos_plugins::expression::{Expression, Query, Scratch, Value, ValueType};
 use pharos_proto::Message;
 use pharos_server::{Metadata, Protocol};
 
@@ -228,4 +228,46 @@ fn incidr_handles_ipv4_ipv6_and_reports_invalid_arguments() {
         );
     }
     assert!(Expression::compile("incidr(1, '10.0.0.0/8')").is_err());
+}
+
+#[test]
+fn template_capture_groups_variables_and_int_conversion() {
+    let message = Message::parse(WIRE).unwrap();
+    let mut query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    query.matches = &["2.example.", "2"];
+    query.groups = &[("n", "2")];
+    query.variables = &[("num", Value::Int(2))];
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "group('n') == '2' && group(0) == '2.example.'",
+        "group('1') == '2' && group('01') == ''",
+        "int(group('n')) == num && num > 1",
+        "group('missing') + group(9) == ''",
+        "'x' + group('n') == 'x2'",
+    ] {
+        let expression =
+            Expression::compile_with_variables(source, &[("num", ValueType::Int)]).unwrap();
+        assert_eq!(
+            expression
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+    assert!(Expression::compile("num > 1").is_err());
+    assert!(
+        Expression::compile("int('invalid')")
+            .unwrap()
+            .evaluate(&query, &metadata, &mut scratch)
+            .is_err()
+    );
 }

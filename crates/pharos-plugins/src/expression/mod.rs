@@ -15,6 +15,9 @@ pub struct Query<'a> {
     pub client: SocketAddr,
     pub local: SocketAddr,
     pub protocol: Protocol,
+    pub groups: &'a [(&'a str, &'a str)],
+    pub matches: &'a [&'a str],
+    pub variables: &'a [(&'a str, Value<'a>)],
 }
 
 impl<'a> Query<'a> {
@@ -29,6 +32,9 @@ impl<'a> Query<'a> {
             client,
             local,
             protocol,
+            groups: &[],
+            matches: &[],
+            variables: &[],
         }
     }
 }
@@ -56,11 +62,19 @@ impl Write for Scratch<'_> {
 }
 
 /// A result produced by an expression.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value<'a> {
     Bool(bool),
     Int(i64),
     String(&'a str),
+}
+
+/// Types of variables declared before this expression.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueType {
+    Bool,
+    Int,
+    String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,6 +83,16 @@ enum Kind {
     Int,
     String,
     List,
+}
+
+impl From<ValueType> for Kind {
+    fn from(value: ValueType) -> Self {
+        match value {
+            ValueType::Bool => Self::Bool,
+            ValueType::Int => Self::Int,
+            ValueType::String => Self::String,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +127,7 @@ enum Node {
     Bool(bool),
     Int(i64),
     String(String),
+    Variable(String, Kind),
     List(Vec<Node>),
     Call(String, Vec<Node>, Kind),
     Matches(Box<Node>, crate::regex_match::Regex),
@@ -116,6 +141,7 @@ impl Node {
             Self::Bool(_) | Self::Unary(Unary::Not, _) => Kind::Bool,
             Self::Int(_) | Self::Unary(Unary::Neg, _) => Kind::Int,
             Self::String(_) => Kind::String,
+            Self::Variable(_, kind) => *kind,
             Self::List(_) => Kind::List,
             Self::Call(_, _, kind) => *kind,
             Self::Matches(..) => Kind::Bool,
@@ -133,6 +159,19 @@ impl Node {
             Self::Bool(value) => Ok(Temporary::Bool(*value)),
             Self::Int(value) => Ok(Temporary::Int(*value)),
             Self::String(value) => Ok(Temporary::Borrowed(value)),
+            Self::Variable(name, kind) => {
+                let value = query
+                    .variables
+                    .iter()
+                    .find_map(|(key, value)| (*key == name).then_some(*value))
+                    .ok_or("missing expression variable")?;
+                match (kind, value) {
+                    (Kind::Bool, Value::Bool(value)) => Ok(Temporary::Bool(value)),
+                    (Kind::Int, Value::Int(value)) => Ok(Temporary::Int(value)),
+                    (Kind::String, Value::String(value)) => Ok(Temporary::Borrowed(value)),
+                    _ => Err("expression variable has wrong type"),
+                }
+            }
             Self::List(_) => Err("list cannot be evaluated alone"),
             Self::Call(name, args, _) => call(name, args, query, metadata, scratch),
             Self::Matches(value, regex) => {
@@ -174,6 +213,12 @@ impl Node {
                     (Or, Temporary::Bool(a), Temporary::Bool(b)) => Ok(Temporary::Bool(a || b)),
                     (Add, Temporary::Int(a), Temporary::Int(b)) => {
                         Ok(Temporary::Int(a.wrapping_add(b)))
+                    }
+                    (Add, a, b) => {
+                        let start = scratch.len;
+                        scratch.append(a)?;
+                        scratch.append(b)?;
+                        Ok(Temporary::Stored(start, scratch.len))
                     }
                     (Sub, Temporary::Int(a), Temporary::Int(b)) => {
                         Ok(Temporary::Int(a.wrapping_sub(b)))
@@ -249,6 +294,27 @@ impl<'a> Temporary<'a> {
     }
 }
 
+impl Scratch<'_> {
+    fn append(&mut self, value: Temporary<'_>) -> Result<(), &'static str> {
+        match value {
+            Temporary::Borrowed(value) => self
+                .write_str(value)
+                .map_err(|_| "expression scratch buffer is too small"),
+            Temporary::Stored(start, end) => {
+                let new_end = self
+                    .len
+                    .checked_add(end - start)
+                    .filter(|end| *end <= self.buffer.len())
+                    .ok_or("expression scratch buffer is too small")?;
+                self.buffer.copy_within(start..end, self.len);
+                self.len = new_end;
+                Ok(())
+            }
+            _ => Err("expected string"),
+        }
+    }
+}
+
 fn call<'a>(
     name: &str,
     args: &'a [Node],
@@ -256,6 +322,45 @@ fn call<'a>(
     metadata: &'a Metadata<'_>,
     scratch: &mut Scratch<'_>,
 ) -> Result<Temporary<'a>, &'static str> {
+    if name == "group" {
+        let value = args[0].eval(query, metadata, scratch)?;
+        let group = match value {
+            Temporary::Int(index) => usize::try_from(index)
+                .ok()
+                .and_then(|index| query.matches.get(index).copied())
+                .unwrap_or(""),
+            value => {
+                let key = value.text(scratch)?;
+                query
+                    .groups
+                    .iter()
+                    .find_map(|(name, group)| (*name == key).then_some(*group))
+                    .or_else(|| {
+                        if !key.bytes().all(|byte| byte.is_ascii_digit())
+                            || (key.len() > 1 && key.starts_with('0'))
+                        {
+                            return None;
+                        }
+                        key.parse::<usize>()
+                            .ok()
+                            .and_then(|index| query.matches.get(index).copied())
+                    })
+                    .unwrap_or("")
+            }
+        };
+        return Ok(Temporary::Borrowed(group));
+    }
+    if name == "int" {
+        let value = args[0].eval(query, metadata, scratch)?;
+        return match value {
+            Temporary::Int(value) => Ok(Temporary::Int(value)),
+            value => value
+                .text(scratch)?
+                .parse::<i64>()
+                .map(Temporary::Int)
+                .map_err(|_| "invalid integer"),
+        };
+    }
     if name == "incidr" {
         let ip = args[0].eval(query, metadata, scratch)?;
         let cidr = args[1].eval(query, metadata, scratch)?;
@@ -371,7 +476,15 @@ pub struct Expression(Node);
 
 impl Expression {
     pub fn compile(source: &str) -> Result<Self, String> {
-        parser::parse(source).map(Self)
+        Self::compile_with_variables(source, &[])
+    }
+
+    /// Compile with names and types of previously declared variables.
+    pub fn compile_with_variables(
+        source: &str,
+        variables: &[(&str, ValueType)],
+    ) -> Result<Self, String> {
+        parser::parse(source, variables).map(Self)
     }
 
     pub fn evaluate<'a>(
