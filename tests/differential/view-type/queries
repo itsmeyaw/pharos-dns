@@ -1,0 +1,3 @@
+example.com. A IN udp
+example.com. AAAA IN tcp
+example.com. TXT IN udp

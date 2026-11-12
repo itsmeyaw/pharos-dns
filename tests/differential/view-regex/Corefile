@@ -1,0 +1,23 @@
+.:{port} {
+    view example {
+        expr name() matches '^abc\\..*\\.example\\.com\\.$'
+    }
+    forward . 127.0.0.1:{port2}
+}
+.:{port} {
+    forward . [::1]:{port2}
+}
+.:{port2} {
+    bind 127.0.0.1
+    hosts empty.hosts {
+        192.0.2.1 abc.x.example.com other.example.com
+        reload 0
+    }
+}
+.:{port2} {
+    bind ::1
+    hosts empty.hosts {
+        192.0.2.2 abc.x.example.com other.example.com
+        reload 0
+    }
+}
