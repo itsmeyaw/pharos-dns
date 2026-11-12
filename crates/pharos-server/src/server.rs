@@ -135,8 +135,9 @@ impl<C: Chain> Server<C> {
         protocol: Protocol,
         response: &mut Vec<u8>,
         metadata: &mut Metadata<'m>,
-    ) -> Option<&'s crate::ServerBlock<C>> {
-        self.router.route_with(&self.key, query, |block| {
+    ) -> (Option<&'s crate::ServerBlock<C>>, &'s str) {
+        let mut view = "";
+        let block = self.router.route_with::<true>(&self.key, query, |block| {
             let Some(chain) = block.chain() else {
                 return false;
             };
@@ -157,9 +158,14 @@ impl<C: Chain> Server<C> {
             }
             let matches =
                 block.matches_filters(&query, peer, protocol) && chain.matches_view(&context);
+            if matches && !chain.view_name().is_empty() {
+                // CoreDNS core/dnsserver/server.go: empty ViewName does not replace the prior match.
+                view = chain.view_name();
+            }
             *metadata = context.metadata;
             matches
-        })
+        });
+        (block, view)
     }
 
     fn route_for_dispatch(
@@ -175,6 +181,7 @@ impl<C: Chain> Server<C> {
         let mut metadata = Metadata::new(&mut slots);
         metadata.set_enabled(false);
         self.route_view(query, peer, protocol, &mut Vec::new(), &mut metadata)
+            .0
     }
 
     pub fn new(router: Router<C>, key: ListenerKey) -> Self {
@@ -428,11 +435,11 @@ impl<C: Chain> Server<C> {
             autopath: lookup.2,
         });
         let has_views = self.has_views.load(Ordering::Relaxed);
-        let block = if has_views {
+        let (block, view) = if has_views {
             metadata.set_enabled(false);
             self.route_view(query, peer, protocol, response, &mut metadata)
         } else {
-            self.router.route(&self.key, query, peer, protocol)
+            (self.router.route(&self.key, query, peer, protocol), "")
         };
         let chain_start = Instant::now();
         let mut producer = None;
@@ -473,7 +480,7 @@ impl<C: Chain> Server<C> {
                 producer = context
                     .metadata
                     .get(crate::metrics::WRITER_METADATA)
-                    .and_then(|name| block.plugin_metrics(name));
+                    .and_then(|name| block.plugin_metrics(name, view));
                 error_plugin = context
                     .metadata
                     .get(crate::logging::PLUGIN_METADATA)
@@ -547,7 +554,7 @@ impl<C: Chain> Server<C> {
             let metrics = if plugin_panic {
                 self.dropped.as_ref()
             } else {
-                block.map_or(self.dropped.as_ref(), |block| block.metrics())
+                block.map_or(self.dropped.as_ref(), |block| block.metrics(view))
             };
             if let Some(metrics) = metrics {
                 metrics.record(
