@@ -743,3 +743,121 @@ async fn coredns_secure_delegation_and_ds_at_cut() {
         2
     );
 }
+
+// Derived from CoreDNS wildcard_test.go TestLookupApexWildcard and TestLookupMultiWildcard.
+#[tokio::test]
+async fn coredns_apex_and_nested_wildcards() {
+    for (fixture, cases) in [
+        (
+            include_str!("../fixtures/file/coredns-apex-wildcard.zone"),
+            vec![
+                ("foo.example.org.", [127, 0, 0, 54]),
+                ("bar.example.org.", [127, 0, 0, 53]),
+            ],
+        ),
+        (
+            include_str!("../fixtures/file/coredns-multi-wildcard.zone"),
+            vec![
+                ("foo.example.org.", [127, 0, 0, 54]),
+                ("bar.example.org.", [127, 0, 0, 53]),
+                ("bar.intern.example.org.", [127, 0, 1, 52]),
+            ],
+        ),
+    ] {
+        let zone = zone("example.org.", fixture).unwrap();
+        for (name, expected) in cases {
+            let (outcome, wire) = query(&zone, name, Type::A, false, &[]).await;
+            assert_eq!(outcome, Outcome::Response);
+            let response = Message::parse(&wire).unwrap();
+            let rr = response.answers().next().unwrap();
+            assert_eq!(rr.name.to_string(), name);
+            assert_eq!(rr.rdata, expected);
+            assert_eq!(response.authorities().next().unwrap().rtype, Type::NS);
+        }
+    }
+}
+
+// Derived from CoreDNS svcb_test.go TestSVCBTargetNormalization.
+#[tokio::test]
+async fn coredns_svcb_target_is_normalized_and_has_glue() {
+    let input = "$TTL 30M\n$ORIGIN example.com.\n@ IN SOA ns.example.com. admin.example.com. 2024010100 14400 3600 604800 14400\n@ IN NS ns.example.com.\nns IN A 192.0.2.1\nsvc IN A 192.0.2.10\n_foo IN SVCB 1 SVC.Example.COM. alpn=h2\n";
+    let zone = zone("example.com.", input).unwrap();
+    let (outcome, wire) = query(&zone, "_foo.example.com.", Type::SVCB, false, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(
+        matches!(response.answers().next().unwrap().data(), Ok(Rdata::Svcb { target, .. }) if target.to_string() == "svc.example.com.")
+    );
+    let glue = response.additionals().next().unwrap();
+    assert_eq!(glue.name.to_string(), "svc.example.com.");
+    assert_eq!(glue.rdata, [192, 0, 2, 10]);
+}
+
+// Derived from CoreDNS lookup_test.go TestLookUpNoDataResult and TestLookupFallthrough.
+#[tokio::test]
+async fn coredns_nodata_and_scoped_fallthrough() {
+    let zone = zone(
+        "miek.nl.",
+        include_str!("../fixtures/file/coredns-miek.zone"),
+    )
+    .unwrap();
+    for name in ["a.miek.nl.", "wildcard.nodata.miek.nl."] {
+        let (outcome, wire) = query(&zone, name, Type::MX, false, &[]).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), Rcode::NOERROR);
+        assert_eq!(response.answer_count(), 0);
+        assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
+    }
+    for (fall, name, expected) in [
+        (
+            ".",
+            "doesnotexist.miek.nl.",
+            Outcome::Unanswered(Rcode::SERVFAIL),
+        ),
+        (".", "x.miek.nl.", Outcome::Unanswered(Rcode::SERVFAIL)),
+        ("a.miek.nl.", "a.miek.nl.", Outcome::Response),
+        ("a.miek.nl.", "doesnotexist.miek.nl.", Outcome::Response),
+        (
+            "a.miek.nl.",
+            "passthrough.a.miek.nl.",
+            Outcome::Unanswered(Rcode::SERVFAIL),
+        ),
+        (
+            "x.miek.nl.",
+            "x.miek.nl.",
+            Outcome::Unanswered(Rcode::SERVFAIL),
+        ),
+        ("x.miek.nl.", "wildcard.x.miek.nl.", Outcome::Response),
+    ] {
+        let (outcome, wire) = query(&zone, name, Type::A, false, &[fall.parse().unwrap()]).await;
+        assert_eq!(outcome, expected, "{fall} {name}");
+        if name == "doesnotexist.miek.nl." && fall == "a.miek.nl." {
+            assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::NXDOMAIN);
+        }
+    }
+}
+
+// Derived from CoreDNS lookup_test.go TestLookupNil.
+#[tokio::test]
+async fn coredns_missing_zone_is_servfail() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/file-p75-nil-{}.zone",
+        std::process::id()
+    ));
+    assert!(!path.exists());
+    let config = format!("miek.nl:53 {{\n file {}\n}}", path.display());
+    let configured =
+        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap();
+    assert_eq!(
+        query_chain(
+            &configured[0].config,
+            &"miek.nl.".parse().unwrap(),
+            "www.miek.nl.",
+            Type::A
+        )
+        .await
+        .0,
+        Outcome::Unanswered(Rcode::SERVFAIL)
+    );
+}
