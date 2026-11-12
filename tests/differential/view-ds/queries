@@ -1,0 +1,2 @@
+child.example.org. DS IN udp
+child.example.org. A IN tcp

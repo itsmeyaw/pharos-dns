@@ -11,6 +11,7 @@ use std::net::{IpAddr, SocketAddr};
 pub struct Acl {
     rules: Vec<Rule>,
     metrics: Vec<(SocketAddr, pharos_server::metrics::AclMetrics)>,
+    view_metrics: Vec<(SocketAddr, String, pharos_server::metrics::AclMetrics)>,
 }
 
 #[derive(Debug)]
@@ -18,6 +19,7 @@ struct Rule {
     domains: Vec<Name>,
     policies: Vec<Policy>,
     metrics: Vec<(SocketAddr, Vec<pharos_server::metrics::AclMetrics>)>,
+    view_metrics: Vec<(SocketAddr, String, Vec<pharos_server::metrics::AclMetrics>)>,
 }
 
 #[derive(Debug)]
@@ -136,11 +138,13 @@ impl Acl {
                 domains,
                 policies,
                 metrics: Vec::new(),
+                view_metrics: Vec::new(),
             });
         }
         Ok(Self {
             rules,
             metrics: Vec::new(),
+            view_metrics: Vec::new(),
         })
     }
 
@@ -148,6 +152,7 @@ impl Acl {
         &mut self,
         registry: &pharos_server::metrics::Registry,
         listeners: &[pharos_server::ListenerKey],
+        views: &[String],
     ) {
         for listener in listeners {
             let address = listener.address;
@@ -164,6 +169,18 @@ impl Acl {
                     .map(|domain| registry.acl(&server, &domain.canonical(), ""))
                     .collect();
                 rule.metrics.push((address, metrics));
+            }
+            for view in views {
+                self.view_metrics
+                    .push((address, view.clone(), registry.acl(&server, "", view)));
+                for rule in &mut self.rules {
+                    let metrics = rule
+                        .domains
+                        .iter()
+                        .map(|domain| registry.acl(&server, &domain.canonical(), view))
+                        .collect();
+                    rule.view_metrics.push((address, view.clone(), metrics));
+                }
             }
         }
     }
@@ -200,9 +217,18 @@ impl Plugin for Acl {
             let Some(domain_index) = matched_domain else {
                 continue;
             };
-            let metrics = rule.metrics.iter().find_map(|(address, metrics)| {
-                (*address == cx.local).then(|| &metrics[domain_index])
-            });
+            let metrics = if rule.view_metrics.is_empty() || cx.metadata.metric_view().is_empty() {
+                rule.metrics.iter().find_map(|(address, metrics)| {
+                    (*address == cx.local).then(|| &metrics[domain_index])
+                })
+            } else {
+                rule.view_metrics
+                    .iter()
+                    .find_map(|(address, view, metrics)| {
+                        (*address == cx.local && view == cx.metadata.metric_view())
+                            .then(|| &metrics[domain_index])
+                    })
+            };
             let action = rule
                 .policies
                 .iter()
@@ -271,11 +297,18 @@ impl Plugin for Acl {
                 None => {}
             }
         }
-        if let Some(metrics) = self
-            .metrics
-            .iter()
-            .find_map(|(address, metrics)| (*address == cx.local).then_some(metrics))
-        {
+        let metrics = if self.view_metrics.is_empty() || cx.metadata.metric_view().is_empty() {
+            self.metrics
+                .iter()
+                .find_map(|(address, metrics)| (*address == cx.local).then_some(metrics))
+        } else {
+            self.view_metrics
+                .iter()
+                .find_map(|(address, view, metrics)| {
+                    (*address == cx.local && view == cx.metadata.metric_view()).then_some(metrics)
+                })
+        };
+        if let Some(metrics) = metrics {
             metrics.increment(0);
         }
         next.run(cx).await

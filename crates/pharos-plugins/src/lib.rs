@@ -105,6 +105,8 @@ pub mod template;
 pub mod timeouts;
 #[cfg(feature = "plugin-tsig")]
 pub mod tsig;
+#[cfg(feature = "plugin-view")]
+pub mod view;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -148,6 +150,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("template", include_str!("template/README.md")),
     ("timeouts", include_str!("timeouts/README.md")),
     ("tsig", include_str!("tsig/README.md")),
+    ("view", include_str!("view/README.md")),
     ("whoami", include_str!("whoami/README.md")),
 ];
 
@@ -237,6 +240,18 @@ pub fn servers_with_registry(
     }
     #[cfg(feature = "plugin-tsig")]
     let mut tsig_keyrings = tsig::KeyRings::default();
+    #[cfg(any(feature = "plugin-acl", feature = "plugin-template"))]
+    let view_names = {
+        let mut names = blocks
+            .iter()
+            .map(|block| pharos_server::Chain::view_name(&block.config))
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        names
+    };
     for block in blocks {
         #[cfg(any(
             feature = "plugin-forward",
@@ -354,14 +369,17 @@ pub fn servers_with_registry(
             tsig.register(routes.iter().map(|(key, _)| *key), &mut tsig_keyrings);
         }
         #[cfg(feature = "plugin-cache")]
-        if let Some(cache) = &mut block.config.cache {
+        if block.config.cache.is_some() {
+            let view_name = pharos_server::Chain::view_name(&block.config).to_owned();
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
-            cache.set_metrics(&metrics, &listeners);
+            if let Some(cache) = &mut block.config.cache {
+                cache.set_metrics(&metrics, &listeners, &view_name);
+            }
         }
         #[cfg(feature = "plugin-acl")]
         if let Some(acl) = &mut block.config.acl {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
-            acl.set_metrics(&metrics, &listeners);
+            acl.set_metrics(&metrics, &listeners, &view_names);
         }
         #[cfg(feature = "plugin-dns64")]
         if let Some(dns64) = &mut block.config.dns64 {
@@ -371,7 +389,7 @@ pub fn servers_with_registry(
         #[cfg(feature = "plugin-template")]
         if let Some(template) = &mut block.config.template {
             let listeners = routes.iter().map(|(key, _)| *key).collect::<Vec<_>>();
-            template.set_metrics(&metrics, &listeners);
+            template.set_metrics(&metrics, &listeners, &view_names);
         }
         #[cfg(feature = "plugin-dnssec")]
         if let Some(dnssec) = &mut block.config.dnssec {

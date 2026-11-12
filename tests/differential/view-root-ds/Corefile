@@ -1,0 +1,15 @@
+.:{port} {
+    view first {
+        expr true
+    }
+    whoami
+}
+.:{port} {
+    view second {
+        expr true
+    }
+    header {
+        response set ra
+    }
+    whoami
+}

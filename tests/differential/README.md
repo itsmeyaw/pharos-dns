@@ -73,3 +73,7 @@ It does not verify signatures.
 The AWS Secrets Manager README example is skipped because it requires live AWS
 credentials and a provisioned secret; the default build also disables the AWS
 feature.
+
+The `view` README scenarios use loopback clients, so the non-loopback CIDR
+branches require Rust tests. The forwarding examples replace the documented
+external Upstreams with separate local IPv4 and IPv6 fixtures.

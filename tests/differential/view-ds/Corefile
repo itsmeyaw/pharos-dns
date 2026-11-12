@@ -1,0 +1,15 @@
+child.example.org:{port} {
+    view child {
+        expr true
+    }
+    whoami
+}
+example.org:{port} {
+    view parent {
+        expr true
+    }
+    header {
+        response set ra
+    }
+    whoami
+}

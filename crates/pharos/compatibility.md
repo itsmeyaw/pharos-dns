@@ -144,6 +144,10 @@
 
 - [template Plugin notes](../crates/pharos-plugins/src/template/README.md)
 
+## view
+
+- [view Plugin notes](../crates/pharos-plugins/src/view/README.md)
+
 ## whoami
 
 - [whoami Plugin notes](../crates/pharos-plugins/src/whoami/README.md)
@@ -152,11 +156,10 @@
 
 - The shared [expression engine](../crates/pharos-plugins/src/expression/README.md) supports only the documented subset; unsupported expressions fail compilation. Expressions are limited to 1,024 tokens and 16 parse/evaluation levels.
 - The shared [template engine](../crates/pharos-plugins/src/gotemplate/README.md) supports only the documented subset. Templates are limited to eight combined action/parenthesis levels and 64 live argument values. All `range` iterations share a 65,535-iteration budget per render, exceeding which returns a render error, unlike CoreDNS; some invalid fields or function arguments fail at render time. Default rendering serializes concurrent renders of the same template; caller-owned scratch permits parallel rendering.
-- The `view` Plugin is not implemented yet; its routing is not provided by these engines.
 
 ## General
 
-- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `siit`, `template`, `tsig` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
+- Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `errors`, `forward`, `header`, `health`, `hosts`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `siit`, `template`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - A first Zone record with an omitted owner is rejected: miekg/dns accepts it with an empty owner, which cannot be encoded as a valid DNS name without inventing one.
 - Zone records whose parsed data cannot be encoded on the wire are rejected. miekg/dns can accept such records during parsing, including invalid base64, duplicate SVCB keys and RDATA over 65,535 octets, but then fails to pack them.
@@ -193,6 +196,7 @@
 
 ## Server
 
+- View-aware routing and metrics perform per-Query dispatch checks and initialize Metadata before routing even when no View is configured; no View filters run in that case.
 - The Rust `Server` API stores its Router in an `Arc`; callers adding blocks after construction must obtain unique access with `Arc::get_mut`.
 - The Rust Plugin API's `Context` has separate Query and Metadata lifetimes to support allocation-free internal Query rewrites.
 - Without `multisocket`, Pharos uses the CPU-quota-aware worker count for UDP; CoreDNS uses one socket.
