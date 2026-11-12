@@ -68,6 +68,7 @@ enum Kind {
     Bool,
     Int,
     String,
+    List,
 }
 
 #[derive(Clone, Copy)]
@@ -91,12 +92,17 @@ enum Binary {
     Mul,
     Div,
     Rem,
+    In,
+    Contains,
+    StartsWith,
+    EndsWith,
 }
 
 enum Node {
     Bool(bool),
     Int(i64),
     String(String),
+    List(Vec<Node>),
     Call(String, Vec<Node>, Kind),
     Unary(Unary, Box<Node>),
     Binary(Binary, Box<Node>, Box<Node>, Kind),
@@ -108,6 +114,7 @@ impl Node {
             Self::Bool(_) | Self::Unary(Unary::Not, _) => Kind::Bool,
             Self::Int(_) | Self::Unary(Unary::Neg, _) => Kind::Int,
             Self::String(_) => Kind::String,
+            Self::List(_) => Kind::List,
             Self::Call(_, _, kind) => *kind,
             Self::Binary(_, _, _, kind) => *kind,
         }
@@ -123,6 +130,7 @@ impl Node {
             Self::Bool(value) => Ok(Temporary::Bool(*value)),
             Self::Int(value) => Ok(Temporary::Int(*value)),
             Self::String(value) => Ok(Temporary::Borrowed(value)),
+            Self::List(_) => Err("list cannot be evaluated alone"),
             Self::Call(name, args, _) => call(name, args, query, metadata, scratch),
             Self::Unary(Unary::Not, node) => match node.eval(query, metadata, scratch)? {
                 Temporary::Bool(value) => Ok(Temporary::Bool(!value)),
@@ -139,6 +147,18 @@ impl Node {
                     (Binary::And, Temporary::Bool(false)) | (Binary::Or, Temporary::Bool(true))
                 ) {
                     return Ok(left);
+                }
+                if matches!(op, Binary::In) {
+                    let Self::List(items) = &**right else {
+                        return Err("expected list");
+                    };
+                    for item in items {
+                        let value = item.eval(query, metadata, scratch)?;
+                        if equal(left, value, scratch)? {
+                            return Ok(Temporary::Bool(true));
+                        }
+                    }
+                    return Ok(Temporary::Bool(false));
                 }
                 let right = right.eval(query, metadata, scratch)?;
                 use Binary::*;
@@ -162,6 +182,15 @@ impl Node {
                         .checked_rem(b)
                         .map(Temporary::Int)
                         .ok_or("integer division error"),
+                    (op @ (Contains | StartsWith | EndsWith), a, b) => {
+                        let (a, b) = (a.text(scratch)?, b.text(scratch)?);
+                        Ok(Temporary::Bool(match op {
+                            Contains => a.contains(b),
+                            StartsWith => a.starts_with(b),
+                            EndsWith => a.ends_with(b),
+                            _ => unreachable!(),
+                        }))
+                    }
                     (op @ (Eq | Ne | Lt | Le | Gt | Ge), a, b) => {
                         let ordering = match (a, b) {
                             (Temporary::Bool(a), Temporary::Bool(b)) => a.cmp(&b),
@@ -182,6 +211,14 @@ impl Node {
                 }
             }
         }
+    }
+}
+
+fn equal(a: Temporary<'_>, b: Temporary<'_>, scratch: &Scratch<'_>) -> Result<bool, &'static str> {
+    match (a, b) {
+        (Temporary::Bool(a), Temporary::Bool(b)) => Ok(a == b),
+        (Temporary::Int(a), Temporary::Int(b)) => Ok(a == b),
+        (a, b) => Ok(a.text(scratch)? == b.text(scratch)?),
     }
 }
 

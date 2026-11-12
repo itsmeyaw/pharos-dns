@@ -127,3 +127,38 @@ fn query_size_expands_compressed_names_like_coredns() {
         Value::Int(46)
     );
 }
+
+#[test]
+fn list_membership_and_string_operators_follow_expr() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "type() in ['A', 'AAAA']",
+        "name() contains 'ample'",
+        "name() startsWith 'example'",
+        "name() endsWith '.org.'",
+        "2 in [1, 2, 3]",
+        "not (3 in [])",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+    for source in ["1 in '123'", "1 contains 'x'", "'a' in [1]"] {
+        assert!(Expression::compile(source).is_err(), "{source}");
+    }
+}

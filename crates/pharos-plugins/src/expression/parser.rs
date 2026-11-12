@@ -9,6 +9,8 @@ enum Token {
     Left,
     Right,
     Comma,
+    ListStart,
+    ListEnd,
     End,
 }
 
@@ -78,11 +80,13 @@ impl Parser<'_> {
             }
             self.offset += end.ok_or("unterminated string")?;
             self.token = Token::String(value);
-        } else if first == '(' || first == ')' || first == ',' {
+        } else if first == '(' || first == ')' || first == ',' || first == '[' || first == ']' {
             self.offset += 1;
             self.token = match first {
                 '(' => Token::Left,
                 ')' => Token::Right,
+                '[' => Token::ListStart,
+                ']' => Token::ListEnd,
                 _ => Token::Comma,
             };
         } else {
@@ -163,6 +167,27 @@ impl Parser<'_> {
                 self.advance()?;
                 node
             }
+            Token::ListStart => {
+                self.advance()?;
+                let mut values = Vec::new();
+                if self.token != Token::ListEnd {
+                    loop {
+                        values.push(self.expression(0)?);
+                        if self.token != Token::Comma {
+                            break;
+                        }
+                        self.advance()?;
+                        if self.token == Token::ListEnd {
+                            break;
+                        }
+                    }
+                }
+                if self.token != Token::ListEnd {
+                    return Err("missing closing bracket".into());
+                }
+                self.advance()?;
+                Node::List(values)
+            }
             other => return Err(format!("unsupported expression: {other:?}")),
         };
         while let Some((op, precedence)) = self.binary() {
@@ -182,8 +207,16 @@ impl Parser<'_> {
                 {
                     Kind::Int
                 }
+                Binary::In if matches!(&right, Node::List(values) if values.iter().all(|value| value.kind() == left.kind())) => {
+                    Kind::Bool
+                }
+                Binary::Contains | Binary::StartsWith | Binary::EndsWith
+                    if left.kind() == Kind::String && right.kind() == Kind::String =>
+                {
+                    Kind::Bool
+                }
                 Binary::Eq | Binary::Ne | Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge
-                    if left.kind() == right.kind() =>
+                    if left.kind() == right.kind() && left.kind() != Kind::List =>
                 {
                     Kind::Bool
                 }
@@ -221,6 +254,10 @@ impl Parser<'_> {
             "<=" => (Binary::Le, 3),
             ">" => (Binary::Gt, 3),
             ">=" => (Binary::Ge, 3),
+            "in" => (Binary::In, 3),
+            "contains" => (Binary::Contains, 3),
+            "startsWith" => (Binary::StartsWith, 3),
+            "endsWith" => (Binary::EndsWith, 3),
             "+" => (Binary::Add, 4),
             "-" => (Binary::Sub, 4),
             "*" => (Binary::Mul, 5),
