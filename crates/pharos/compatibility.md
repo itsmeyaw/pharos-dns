@@ -143,7 +143,7 @@
 ## Expressions and templates
 
 - The shared [expression engine](../crates/pharos-plugins/src/expression/README.md) supports only the documented subset; unsupported expressions fail compilation. Expressions are limited to 1,024 tokens and 16 parse/evaluation levels.
-- The shared [template engine](../crates/pharos-plugins/src/gotemplate/README.md) supports only the documented subset. Templates are limited to eight combined action/parenthesis levels and 64 live argument values; some invalid fields or function arguments fail at render time. Default rendering serializes concurrent renders of the same template; caller-owned scratch permits parallel rendering.
+- The shared [template engine](../crates/pharos-plugins/src/gotemplate/README.md) supports only the documented subset. Templates are limited to eight combined action/parenthesis levels and 64 live argument values. Integer `range` stops at 65,535 iterations with a render error, unlike CoreDNS; some invalid fields or function arguments fail at render time. Default rendering serializes concurrent renders of the same template; caller-owned scratch permits parallel rendering.
 - The `view` and `template` Plugins are not implemented yet; their routing, fallthrough and DNS record handling are not provided by these engines.
 
 ## General
