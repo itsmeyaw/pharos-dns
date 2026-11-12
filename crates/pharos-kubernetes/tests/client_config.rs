@@ -2,6 +2,49 @@ use pharos_kubernetes::{ClientConfig, TlsConfig};
 use std::fs;
 
 #[tokio::test]
+async fn client_config_errors_are_typed_and_keep_their_messages() {
+    use pharos_kubernetes::ClientConfigError;
+    let registry = pharos_server::metrics::Registry::default();
+    let config = ClientConfig {
+        api_qps: f32::NAN,
+        ..Default::default()
+    };
+    let error = config.client(&registry).await.err().unwrap();
+    assert!(matches!(error, ClientConfigError::InvalidQps));
+    assert_eq!(error.to_string(), "API QPS must be finite and nonnegative");
+    let config = ClientConfig {
+        api_max_inflight: usize::MAX,
+        ..Default::default()
+    };
+    let error = config.client(&registry).await.err().unwrap();
+    assert!(matches!(error, ClientConfigError::InvalidInflight));
+    assert_eq!(
+        error.to_string(),
+        "API maximum inflight exceeds semaphore limit"
+    );
+    let config = ClientConfig {
+        endpoint: Some("https://bad host".into()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        config.resolve().await.unwrap_err(),
+        ClientConfigError::InvalidEndpoint(_)
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing-kubeconfig");
+    let expected = kube::config::Kubeconfig::read_from(&path)
+        .unwrap_err()
+        .to_string();
+    let config = ClientConfig {
+        kubeconfig: Some((path, None)),
+        ..Default::default()
+    };
+    let error = config.resolve().await.unwrap_err();
+    assert!(matches!(error, ClientConfigError::Kubeconfig(_)));
+    assert_eq!(error.to_string(), expected);
+}
+
+#[tokio::test]
 async fn kubeconfig_context_takes_precedence_over_endpoint() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config");
@@ -119,6 +162,10 @@ users:
 async fn in_cluster_reads_service_environment() {
     if std::env::var_os("PHAROS_TEST_CLUSTER_CHILD").is_some() {
         let error = ClientConfig::default().resolve().await.unwrap_err();
+        assert!(matches!(
+            error,
+            pharos_kubernetes::ClientConfigError::EmptyHost
+        ));
         assert_eq!(error.to_string(), "KUBERNETES_SERVICE_HOST is empty");
         return;
     }

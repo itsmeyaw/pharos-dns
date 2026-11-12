@@ -48,6 +48,28 @@ pub struct Kubernetes {
     state: Arc<State>,
 }
 
+/// Invalid Kubernetes Plugin configuration.
+#[derive(Debug)]
+pub enum KubernetesError {
+    InvalidName(pharos_proto::NameError),
+}
+
+impl std::fmt::Display for KubernetesError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidName(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for KubernetesError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidName(error) => Some(error),
+        }
+    }
+}
+
 impl std::fmt::Debug for Kubernetes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Kubernetes")
@@ -154,29 +176,29 @@ impl Kubernetes {
         }
     }
 
-    pub fn new(config: setup::Config) -> Result<Self, String> {
+    pub fn new(config: setup::Config) -> Result<Self, KubernetesError> {
         Self::with_listen_addresses(config, &[])
     }
 
     pub(crate) fn with_listen_addresses(
         config: setup::Config,
         listen_addresses: &[String],
-    ) -> Result<Self, String> {
+    ) -> Result<Self, KubernetesError> {
         let zones = config
             .zones
             .iter()
-            .map(|z| z.parse::<Name>().map_err(|e| e.to_string()))
+            .map(|z| z.parse::<Name>().map_err(KubernetesError::InvalidName))
             .collect::<Result<_, _>>()?;
         let fallthrough = config
             .fallthrough
             .domains
             .iter()
-            .map(|z| z.parse::<Name>().map_err(|e| e.to_string()))
+            .map(|z| z.parse::<Name>().map_err(KubernetesError::InvalidName))
             .collect::<Result<_, _>>()?;
         let multicluster_zones = config
             .multicluster_zones
             .iter()
-            .map(|z| z.parse::<Name>().map_err(|e| e.to_string()))
+            .map(|z| z.parse::<Name>().map_err(KubernetesError::InvalidName))
             .collect::<Result<_, _>>()?;
         Ok(Self {
             config: Arc::new(config),
