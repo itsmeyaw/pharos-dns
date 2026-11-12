@@ -233,8 +233,12 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                         let zone = Arc::clone(&notify_zone);
                         // RFC 1996 §3: process each NOTIFY outside the Query path.
                         checks.spawn(async move {
-                            if matches!(should_transfer(&zone).await, Ok(true)) {
-                                let _ = transfer(&shared, &zone).await;
+                            match should_transfer(&zone).await {
+                                Ok(true) => if let Err(error) = transfer(&shared, &zone).await {
+                                    pharos_server::logging::log("WARN", "secondary", &format!("NOTIFY transfer {}: {error}", zone.config.apex));
+                                },
+                                Ok(false) => {},
+                                Err(error) => pharos_server::logging::log("WARN", "secondary", &format!("NOTIFY check {}: {error}", zone.config.apex)),
                             }
                         });
                     }
@@ -244,7 +248,15 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
         }
     }));
     let mut delay = Duration::from_millis(250);
-    while transfer(&shared, &zone).await.is_err() {
+    while let Err(error) = transfer(&shared, &zone).await {
+        pharos_server::logging::log(
+            "WARN",
+            "secondary",
+            &format!(
+                "Transfer {} failed; retrying in {delay:?}: {error}",
+                zone.config.apex
+            ),
+        );
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_secs(10));
     }
@@ -268,13 +280,23 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
             }
             match should_transfer(&zone).await {
                 Ok(true) => {
-                    if transfer(&shared, &zone).await.is_err() {
+                    if let Err(error) = transfer(&shared, &zone).await {
+                        pharos_server::logging::log(
+                            "WARN",
+                            "secondary",
+                            &format!("Transfer {}: {error}", zone.config.apex),
+                        );
                         retry_active = true;
                         continue;
                     }
                 }
                 Ok(false) => {}
-                Err(_) => {
+                Err(error) => {
+                    pharos_server::logging::log(
+                        "WARN",
+                        "secondary",
+                        &format!("SOA check {}: {error}", zone.config.apex),
+                    );
                     retry_active = true;
                     continue;
                 }

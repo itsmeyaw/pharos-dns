@@ -53,6 +53,10 @@ The intentionally invalid root-Server-Block example cannot produce DNS
 Responses because its SOA owner does not match the configured root Zone; the
 `coredns_readme_root_without_zone_is_invalid` test checks startup rejection.
 
+The `secondary` README scenarios replace the documented remote Primaries with
+local `file` and `transfer` fixtures. `wait-zone` waits for the asynchronous
+transfer, including the catalog member transfer, before comparing Responses.
+
 The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS
 Responses, and the harness cannot mask that difference.

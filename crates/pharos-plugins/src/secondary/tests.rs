@@ -608,3 +608,85 @@ async fn secondary_shutdown_cancels_initial_transfer_retry() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn invalid_catalog_transfer_retains_zone_but_regular_zone_accepts_it() {
+    use pharos_proto::{Message, MessageBuilder, Section};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for catalog in [true, false] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let primary = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let len = socket.read_u16().await.unwrap();
+            let mut input = vec![0; usize::from(len)];
+            socket.read_exact(&mut input).await.unwrap();
+            let query = Message::parse(&input).unwrap();
+            let question = query.questions().next().unwrap();
+            let mut wire = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut wire, 512, query.id(), 0x8400).unwrap();
+            builder
+                .question(question.name, question.qtype, question.qclass)
+                .unwrap();
+            let mut soa = vec![0, 0];
+            for value in [2u32, 10, 10, 100, 60] {
+                soa.extend_from_slice(&value.to_be_bytes());
+            }
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::SOA,
+                    Class::IN,
+                    60,
+                    &soa,
+                )
+                .unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::NS,
+                    Class::IN,
+                    60,
+                    &[0],
+                )
+                .unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::SOA,
+                    Class::IN,
+                    60,
+                    &soa,
+                )
+                .unwrap();
+            let _ = builder.finish();
+            socket.write_u16(wire.len() as u16).await.unwrap();
+            socket.write_all(&wire).await.unwrap();
+        });
+        let (shared, _, _) = catalog_shared();
+        let zone = SecondaryZone::new(ZoneConfig {
+            apex: "catalog.example.".parse().unwrap(),
+            from: vec![address.to_string()],
+            catalog: catalog.then(Vec::new),
+        });
+        let records = ZoneParser::new(
+            "@ 60 IN SOA ns. hostmaster. 1 10 10 100 60\n".as_bytes(),
+            zone.config.apex.clone(),
+            "original",
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        zone.current.store(Some(Arc::new(
+            crate::zone::Zone::from_records(zone.config.apex.clone(), records).unwrap(),
+        )));
+        assert_eq!(update::transfer(&shared, &zone).await.is_err(), catalog);
+        assert_eq!(
+            zone.current.load_full().unwrap().serial(),
+            Some(if catalog { 1 } else { 2 })
+        );
+        primary.await.unwrap();
+    }
+}
