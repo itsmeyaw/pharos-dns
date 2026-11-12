@@ -15,7 +15,7 @@ use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
 use std::{
     collections::BTreeMap,
     fmt::Write,
-    io::BufReader,
+    io::{BufRead, BufReader, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
@@ -58,8 +58,15 @@ impl Zone {
     /// Load a Zone from a master file.
     pub fn load(apex: Name, path: &Path) -> Result<Self, String> {
         let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-        let mut parser =
-            ZoneParser::new(BufReader::new(file), apex.clone(), path.to_string_lossy());
+        Self::load_opened(apex, path, file)
+    }
+
+    fn load_opened(apex: Name, path: &Path, file: std::fs::File) -> Result<Self, String> {
+        Self::load_reader(apex, path, BufReader::new(file))
+    }
+
+    fn load_reader(apex: Name, path: &Path, reader: impl BufRead) -> Result<Self, String> {
+        let mut parser = ZoneParser::new(reader, apex.clone(), path.to_string_lossy());
         parser.set_include_allowed(true);
         let records = parser
             .collect::<Result<Vec<_>, _>>()
@@ -242,10 +249,11 @@ struct Loaded {
 
 impl Loaded {
     fn reload(&self) -> bool {
+        let Ok(file) = std::fs::File::open(&self.path) else {
+            return false;
+        };
         let modified = if self.by_mtime {
-            let Ok(modified) =
-                std::fs::metadata(&self.path).and_then(|metadata| metadata.modified())
-            else {
+            let Ok(modified) = file.metadata().and_then(|metadata| metadata.modified()) else {
                 return false;
             };
             if self
@@ -260,7 +268,7 @@ impl Loaded {
         } else {
             None
         };
-        let Ok(next) = Zone::load(self.apex.clone(), &self.path) else {
+        let Ok(next) = Zone::load_opened(self.apex.clone(), &self.path, file) else {
             return false;
         };
         if !self.by_mtime
@@ -299,6 +307,7 @@ impl File {
         let mut fallthrough = Vec::new();
         let mut reload = Duration::from_secs(60);
         let mut by_mtime = false;
+        let mut open_error = None;
         while cursor.next() {
             let args = cursor.remaining_args();
             let path = args.first().ok_or_else(|| cursor.arg_err())?;
@@ -310,6 +319,7 @@ impl File {
                 let args = cursor.remaining_args();
                 match option.as_str() {
                     "fallthrough" => {
+                        fallthrough.clear();
                         if args.is_empty() {
                             fallthrough.push(".".parse().map_err(|_| cursor.arg_err())?);
                         } else {
@@ -330,21 +340,31 @@ impl File {
                     _ => return Err(cursor.arg_err()),
                 }
             }
+            let mut opened = match std::fs::File::open(&path) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    open_error = Some(error.to_string());
+                    None
+                }
+            };
+            let modified = opened
+                .as_ref()
+                .and_then(|file| file.metadata().ok())
+                .and_then(|metadata| metadata.modified().ok());
             for origin in origins {
                 let apex: Name = origin.parse().map_err(|_| cursor.error("invalid Zone"))?;
-                let opened = std::fs::File::open(&path);
-                let modified = opened
-                    .as_ref()
-                    .ok()
-                    .and_then(|file| file.metadata().ok())
-                    .and_then(|metadata| metadata.modified().ok());
-                let current = match opened {
-                    Ok(_) => Some(Arc::new(
-                        Zone::load(apex.clone(), &path).map_err(|error| cursor.error(error))?,
-                    )),
-                    Err(error) if reload.is_zero() => return Err(cursor.error(error.to_string())),
-                    Err(_) => None,
+                let current = match opened.as_mut().filter(|_| open_error.is_none()) {
+                    Some(file) => {
+                        file.seek(SeekFrom::Start(0))
+                            .map_err(|error| cursor.error(error.to_string()))?;
+                        Some(Arc::new(
+                            Zone::load_reader(apex.clone(), &path, BufReader::new(file))
+                                .map_err(|error| cursor.error(error))?,
+                        ))
+                    }
+                    None => None,
                 };
+                zones.retain(|zone: &Arc<Loaded>| zone.apex != apex);
                 zones.push(Arc::new(Loaded {
                     apex,
                     path: path.clone(),
@@ -354,6 +374,11 @@ impl File {
                     modified: Mutex::new(modified),
                 }));
             }
+        }
+        if reload.is_zero()
+            && let Some(error) = open_error
+        {
+            return Err(cursor.error(error));
         }
         Ok(Self {
             zones,
@@ -369,13 +394,16 @@ impl File {
         let tasks = Arc::clone(&self.tasks);
         #[cfg(feature = "plugin-transfer")]
         let notifier = Arc::clone(&self.notifier);
-        lifecycle.register(pharos_server::Phase::Startup, move || {
+        let start = move || {
             let zones = zones.clone();
             let tasks = Arc::clone(&tasks);
             #[cfg(feature = "plugin-transfer")]
             let notifier = Arc::clone(&notifier);
             async move {
                 let mut tasks = tasks.lock().unwrap();
+                for task in tasks.drain(..) {
+                    task.abort();
+                }
                 for zone in zones {
                     #[cfg(feature = "plugin-transfer")]
                     {
@@ -414,7 +442,9 @@ impl File {
                 }
                 Ok(())
             }
-        });
+        };
+        lifecycle.register(pharos_server::Phase::Startup, start.clone());
+        lifecycle.register(pharos_server::Phase::RestartFailed, start);
         let tasks = Arc::clone(&self.tasks);
         let stop = move || {
             let tasks = std::mem::take(&mut *tasks.lock().unwrap());
