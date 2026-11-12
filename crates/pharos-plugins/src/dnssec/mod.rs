@@ -81,17 +81,25 @@ impl Dnssec {
             })
             .max_by_key(|zone| zone.label_count())
     }
-    fn dnskey(&self, cx: &mut Context<'_, '_>) -> Result<(), Error> {
-        let question = cx.query.questions().next().ok_or(Error::InvalidQuery)?;
-        let max_size = cx.max_response_size.max(512);
-        if cx.response.capacity() < max_size {
-            if cx.protocol == Protocol::Tcp {
-                cx.response
-                    .reserve(max_size.saturating_sub(cx.response.len()));
+    fn ensure_response_capacity(
+        response: &mut Vec<u8>,
+        protocol: Protocol,
+        limit: usize,
+    ) -> Result<usize, Error> {
+        let max_size = limit.max(512);
+        if response.capacity() < max_size {
+            if protocol == Protocol::Tcp {
+                response.reserve(max_size.saturating_sub(response.len()));
             } else {
                 return Err(Error::ResponseBufferTooSmall);
             }
         }
+        Ok(max_size)
+    }
+    fn dnskey(&self, cx: &mut Context<'_, '_>) -> Result<(), Error> {
+        let question = cx.query.questions().next().ok_or(Error::InvalidQuery)?;
+        let max_size =
+            Self::ensure_response_capacity(cx.response, cx.protocol, cx.max_response_size)?;
         // RFC 4035 §2.1: the zone apex DNSKEY RRset carries the zone's public keys.
         // RFC 1035 §4.1.1: keep the Query's opcode and RD; RFC 4035 §3.1.6: copy CD.
         let flags = 0x8400 | (cx.query.flags() & 0x7910);

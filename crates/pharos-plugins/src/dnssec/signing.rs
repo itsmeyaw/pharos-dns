@@ -10,7 +10,7 @@ use pharos_proto::{
     Class, Message, MessageBuilder, NameRef, Rdata, Record, ResponseType, Section, Type,
     typify_response,
 };
-use pharos_server::{Context, Error, Protocol};
+use pharos_server::{Context, Error};
 
 use super::Dnssec;
 
@@ -52,15 +52,8 @@ fn rrset_ttl(message: &Message<'_>, rr: &Record<'_>) -> u32 {
 
 impl Dnssec {
     pub(super) fn sign_response(&self, cx: &mut Context<'_, '_>) -> Result<(), Error> {
-        let max_size = cx.max_response_size.max(512);
-        if cx.response.capacity() < max_size {
-            if cx.protocol == Protocol::Tcp {
-                cx.response
-                    .reserve(max_size.saturating_sub(cx.response.len()));
-            } else {
-                return Err(Error::ResponseBufferTooSmall);
-            }
-        }
+        let max_size =
+            Self::ensure_response_capacity(cx.response, cx.protocol, cx.max_response_size)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -147,13 +140,8 @@ impl Dnssec {
         } else {
             message.flags()
         };
-        let mut builder = MessageBuilder::new(
-            cx.response,
-            cx.max_response_size.max(512),
-            message.id(),
-            flags,
-        )
-        .map_err(Error::Build)?;
+        let mut builder = MessageBuilder::new(cx.response, max_size, message.id(), flags)
+            .map_err(Error::Build)?;
         for question in message.questions() {
             builder
                 .question(question.name, question.qtype, question.qclass)
