@@ -4,15 +4,33 @@ use pharos_proto::{
     MessageBuilder, Name, NameRef, Opcode, Rcode, TsigError, TsigKey, TsigRecord, Type,
 };
 use pharos_server::{Context, Error, Next, Outcome, Plugin};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 #[derive(Debug)]
 pub struct Tsig {
     zones: Vec<Name>,
-    secrets: Vec<Secret>,
+    secrets: Vec<Arc<Secret>>,
+    listeners: Vec<(pharos_server::ListenerKey, SharedKeys)>,
     types: Vec<Type>,
     opcodes: Vec<Opcode>,
     all_types: bool,
     all_opcodes: bool,
+}
+
+type SharedKeys = Arc<OnceLock<Vec<Arc<Secret>>>>;
+
+#[derive(Default)]
+pub(crate) struct KeyRings(HashMap<pharos_server::ListenerKey, (SharedKeys, Vec<Arc<Secret>>)>);
+
+impl KeyRings {
+    pub(crate) fn finish(self) {
+        for (_, (ring, keys)) in self.0 {
+            let _ = ring.set(keys);
+        }
+    }
 }
 
 struct Secret {
@@ -78,16 +96,46 @@ impl Plugin for Tsig {
 }
 
 impl Tsig {
+    pub(crate) fn register(
+        &mut self,
+        listeners: impl Iterator<Item = pharos_server::ListenerKey>,
+        rings: &mut KeyRings,
+    ) {
+        for listener in listeners {
+            if self.listeners.iter().any(|(key, _)| *key == listener) {
+                continue;
+            }
+            let (ring, keys) = rings.0.entry(listener).or_default();
+            for secret in &self.secrets {
+                if let Some(previous) = keys
+                    .iter_mut()
+                    .find(|previous| previous.name == secret.name)
+                {
+                    *previous = Arc::clone(secret);
+                } else {
+                    keys.push(Arc::clone(secret));
+                }
+            }
+            self.listeners.push((listener, Arc::clone(ring)));
+        }
+    }
+
     async fn signed<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let wire = cx.query.as_wire();
         let Ok(record) = TsigRecord::parse(wire) else {
             return Outcome::Unanswered(Rcode::FORMERR);
         };
-        let Some(secret) = self
-            .secrets
+        let listener = pharos_server::ListenerKey {
+            transport: cx.transport,
+            address: cx.local,
+        };
+        let secrets = self
+            .listeners
             .iter()
-            .find(|secret| record.owner == secret.name)
-        else {
+            .find(|(key, _)| *key == listener)
+            .and_then(|(_, ring)| ring.get())
+            .unwrap_or(&self.secrets);
+        let Some(secret) = secrets.iter().find(|secret| record.owner == secret.name) else {
             return tsig_error(cx, &record, 17, None, 0);
         };
         let Some(keys) = &secret.keys else {

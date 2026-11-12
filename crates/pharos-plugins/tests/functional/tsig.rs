@@ -6,6 +6,40 @@ use pharos_proto::{Message, Name, Rcode, TsigAlgorithm, TsigKey};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 #[tokio::test]
+async fn keys_are_shared_by_server_blocks_on_the_same_listener() {
+    use pharos_server::{Action, Handler};
+    let blocks = parse("Corefile", "one.test:53 {\n tsig {\n secret key. c2VjcmV0\n }\n whoami\n}\ntwo.test:53 {\n tsig\n whoami\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let (servers, _) = pharos_plugins::servers(configured).unwrap();
+    let server = servers.values().next().unwrap();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut wire = Vec::with_capacity(512);
+    wire.extend_from_slice(&[
+        0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3, b't', b'w', b'o', 4, b't', b'e', b's', b't', 0, 0,
+        1, 0, 1,
+    ]);
+    key.sign(&mut wire, now, 300, None).unwrap();
+    let mac = key.verify(&wire, now, None, 0).unwrap().mac;
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+        Action::Respond
+    );
+    key.verify(&response, now, Some(mac), 0).unwrap();
+}
+
+#[tokio::test]
 async fn nonfinal_tsig_is_formerr_even_outside_domain() {
     let blocks = parse("Corefile", ". {\n tsig example.com\n whoami\n}").unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();

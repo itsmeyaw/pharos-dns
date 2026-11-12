@@ -25,6 +25,7 @@ pub(crate) fn setup(
     let mut plugin = Tsig {
         zones,
         secrets: Vec::new(),
+        listeners: Vec::new(),
         types: Vec::new(),
         opcodes: Vec::new(),
         all_types: false,
@@ -105,6 +106,8 @@ fn add_secret(
         ]
         .map(|algorithm| TsigKey::new(name.clone(), algorithm, &secret))
     });
-    plugin.secrets.push(Secret { name, keys });
+    plugin
+        .secrets
+        .push(std::sync::Arc::new(Secret { name, keys }));
     Ok(())
 }
