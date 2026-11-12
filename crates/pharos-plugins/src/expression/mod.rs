@@ -1,7 +1,7 @@
 //! Compiled expressions over borrowed Queries and Metadata.
 
 use pharos_proto::Message;
-use pharos_server::{Metadata, Protocol};
+use pharos_server::{Metadata, MetadataSource, Protocol};
 use std::{
     fmt::{self, Write},
     net::SocketAddr,
@@ -77,6 +77,7 @@ pub enum Value<'a> {
 pub struct Callable<'a> {
     name: &'a str,
     query: &'a Query<'a>,
+    metadata: &'a dyn MetadataSource,
 }
 
 impl fmt::Debug for Callable<'_> {
@@ -87,7 +88,9 @@ impl fmt::Debug for Callable<'_> {
 
 impl PartialEq for Callable<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && std::ptr::eq(self.query, other.query)
+        self.name == other.name
+            && std::ptr::eq(self.query, other.query)
+            && std::ptr::eq(self.metadata, other.metadata)
     }
 }
 
@@ -96,10 +99,38 @@ impl Callable<'_> {
         match self.name {
             "do" => "func() bool",
             "size" | "id" | "opcode" | "bufsize" => "func() int",
+            "metadata" => "func(string) string",
+            "incidr" => "func(string, string) (bool, error)",
+            "group" => "func(interface {}) string",
             _ => "func() string",
         }
     }
-    pub(crate) fn invoke<'a>(&self, buffer: &'a mut [u8]) -> Result<Value<'a>, &'static str> {
+    pub(crate) fn invoke<'a>(
+        &'a self,
+        args: &[Value<'_>],
+        buffer: &'a mut [u8],
+    ) -> Result<Value<'a>, &'static str> {
+        match (self.name, args) {
+            ("metadata", [Value::String(label)]) => {
+                return Ok(Value::String(self.metadata.get(label).unwrap_or("")));
+            }
+            ("incidr", [Value::String(ip), Value::String(cidr)]) => {
+                return Ok(Value::Bool(incidr(ip, cidr)?));
+            }
+            ("group", [value]) => {
+                return Ok(Value::String(match value {
+                    Value::Int(index) => usize::try_from(*index)
+                        .ok()
+                        .and_then(|index| self.query.matches.get(index).copied())
+                        .unwrap_or(""),
+                    Value::String(name) => group_name(self.query, name),
+                    _ => "",
+                }));
+            }
+            ("metadata" | "incidr" | "group", _) => return Err("invalid function arguments"),
+            (_, []) => {}
+            _ => return Err("invalid function arguments"),
+        }
         let mut slots = [];
         let metadata = Metadata::new(&mut slots);
         let mut scratch = Scratch::new(buffer);
@@ -250,7 +281,11 @@ impl Node {
             Self::Int(value) => Ok(Temporary::Int(*value)),
             Self::Float(value) => Ok(Temporary::Float(*value)),
             Self::String(value) => Ok(Temporary::Borrowed(value)),
-            Self::Function(name) => Ok(Temporary::Function(Callable { name, query })),
+            Self::Function(name) => Ok(Temporary::Function(Callable {
+                name,
+                query,
+                metadata,
+            })),
             Self::Variable(name, kind) => {
                 let value = query
                     .variables
@@ -554,21 +589,7 @@ fn call<'a>(
                 .unwrap_or(""),
             value => {
                 let key = value.text(scratch)?;
-                query
-                    .groups
-                    .iter()
-                    .find_map(|(name, group)| (*name == key).then_some(*group))
-                    .or_else(|| {
-                        if !key.bytes().all(|byte| byte.is_ascii_digit())
-                            || (key.len() > 1 && key.starts_with('0'))
-                        {
-                            return None;
-                        }
-                        key.parse::<usize>()
-                            .ok()
-                            .and_then(|index| query.matches.get(index).copied())
-                    })
-                    .unwrap_or("")
+                group_name(query, key)
             }
         };
         return Ok(Temporary::Borrowed(group));
@@ -665,6 +686,24 @@ fn call<'a>(
         scratch.buffer[start..scratch.len].make_ascii_lowercase();
     }
     Ok(Temporary::Stored(start, scratch.len))
+}
+
+fn group_name<'a>(query: &'a Query<'_>, key: &str) -> &'a str {
+    query
+        .groups
+        .iter()
+        .find_map(|(name, group)| (*name == key).then_some(*group))
+        .or_else(|| {
+            if !key.bytes().all(|byte| byte.is_ascii_digit())
+                || (key.len() > 1 && key.starts_with('0'))
+            {
+                return None;
+            }
+            key.parse::<usize>()
+                .ok()
+                .and_then(|index| query.matches.get(index).copied())
+        })
+        .unwrap_or("")
 }
 
 fn write_ip(output: &mut Scratch<'_>, address: SocketAddr) -> fmt::Result {

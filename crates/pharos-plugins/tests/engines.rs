@@ -473,3 +473,45 @@ fn call_invokes_a_query_function_stored_in_expression_variables() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "example.org.");
 }
+
+#[test]
+fn call_invokes_bound_metadata_group_and_cidr_functions_with_arguments() {
+    let wire =
+        b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let mut query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    query.groups = &[("region", "eu")];
+    let mut slots = [None];
+    let mut metadata = Metadata::new(&mut slots);
+    assert!(metadata.insert("region", "west"));
+    let metadata_fn = Expression::compile("metadata").unwrap();
+    let cidr_fn = Expression::compile("incidr").unwrap();
+    let group_fn = Expression::compile("group").unwrap();
+    let mut b1 = [0; 128];
+    let mut s1 = Scratch::new(&mut b1);
+    let mut b2 = [0; 128];
+    let mut s2 = Scratch::new(&mut b2);
+    let mut b3 = [0; 128];
+    let mut s3 = Scratch::new(&mut b3);
+    let variables = [
+        (
+            "m",
+            metadata_fn.evaluate(&query, &metadata, &mut s1).unwrap(),
+        ),
+        ("c", cidr_fn.evaluate(&query, &metadata, &mut s2).unwrap()),
+        ("g", group_fn.evaluate(&query, &metadata, &mut s3).unwrap()),
+    ];
+    let mut other_slots = [];
+    let other_metadata = Metadata::new(&mut other_slots);
+    let mut data = Data::new("example.org.", &other_metadata);
+    data.variables = &variables;
+    let template = Template::compile("{{ call .Var.m (print \"reg\" \"ion\") }}|{{ call .Var.c \"10.0.0.1\" \"10.0.0.0/8\" }}|{{ call .Var.g \"region\" }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "west|true|eu");
+}

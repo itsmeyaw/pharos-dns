@@ -312,6 +312,12 @@ pub trait MetadataSource: Send + Sync {
     fn get(&self, label: &str) -> Option<&str>;
 }
 
+impl MetadataSource for Metadata<'_> {
+    fn get(&self, label: &str) -> Option<&str> {
+        self.enabled().then(|| Metadata::get(self, label)).flatten()
+    }
+}
+
 /// Borrowed Query state and reusable, preallocated Response buffer.
 pub struct Context<'q, 'a> {
     pub query: Message<'q>,

@@ -269,6 +269,9 @@ impl Parser<'_, '_> {
                             | "bufsize"
                             | "server_ip"
                             | "server_port"
+                            | "metadata"
+                            | "incidr"
+                            | "group"
                     ) {
                         return self.binary_tail(Node::Function(name), minimum);
                     }

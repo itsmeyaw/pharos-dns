@@ -18,8 +18,8 @@ provides the type to pass to `compile_with_variables` for subsequent variables.
   `group`, `int`, `replace`, and `any` with a literal list and `#` predicate.
   `replace` accepts its optional replacement count. `any` accepts empty and
   mixed-type lists; operations on a mixed list's `#` are checked at runtime.
-- A bare zero-argument Query function is a borrowed function value; it may be
-  passed to the Go template `call` function.
+- A bare Query function, `metadata`, `incidr`, or `group` is a borrowed
+  function value; it may be passed to the Go template `call` function.
 
 ## Errors and differences
 

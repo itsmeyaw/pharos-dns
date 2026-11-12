@@ -260,11 +260,29 @@ impl Pipeline {
                             else {
                                 return Err(fmt::Error);
                             };
-                            if count != 1 {
+                            if count > 3 {
                                 return Err(fmt::Error);
                             }
+                            let mut resolved = [None; 2];
+                            for (index, slot) in resolved[..count - 1].iter_mut().enumerate() {
+                                *slot = Some(argument(args, index + 1, value, data, dot, scratch)?);
+                            }
+                            let mut parameters = [Value::Nil; 2];
+                            for (index, argument) in resolved[..count - 1].iter().enumerate() {
+                                let argument = argument.as_ref().ok_or(fmt::Error)?;
+                                parameters[index] = match *argument {
+                                    ResultValue::Scalar(Some(value)) => value,
+                                    value if value.is_string() => {
+                                        Value::String(argument.text(scratch)?)
+                                    }
+                                    _ => Value::Nil,
+                                };
+                            }
                             let mut buffer = [0; 2048];
-                            match function.invoke(&mut buffer).map_err(|_| fmt::Error)? {
+                            match function
+                                .invoke(&parameters[..count - 1], &mut buffer)
+                                .map_err(|_| fmt::Error)?
+                            {
                                 Value::String(value) => {
                                     let start = scratch.len;
                                     scratch.write_str(value)?;
