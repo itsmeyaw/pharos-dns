@@ -287,7 +287,23 @@ impl<C: Chain> Server<C> {
         lookup_server: &dyn crate::SelfLookupServer,
     ) -> Action {
         let start = Instant::now();
-        let mut query = match admit(wire, self.allow_non_in, response) {
+        // RFC 8945 §5.2: TSIG policy must run before an UPDATE is rejected downstream.
+        let allow_update = wire.get(2).is_some_and(|flags| flags & 0x78 == 0x28)
+            && pharos_proto::Message::parse(wire)
+                .ok()
+                .and_then(|query| self.router.route(&self.key, query, peer, protocol))
+                .and_then(|block| block.chain())
+                .is_some_and(|chain| {
+                    let mut enabled = false;
+                    chain.visit_enabled(&mut |name| enabled |= name == "tsig");
+                    enabled
+                });
+        let mut query = match crate::admission::admit_with_update(
+            wire,
+            self.allow_non_in,
+            allow_update,
+            response,
+        ) {
             Admission::Query(query) => query,
             Admission::Respond => {
                 if let Ok(query) = pharos_proto::Message::parse(wire) {
