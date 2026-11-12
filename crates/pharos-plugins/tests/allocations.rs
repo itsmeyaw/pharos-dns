@@ -52,7 +52,10 @@ fn run_isolated(name: &str) -> bool {
     all(feature = "plugin-cache", feature = "plugin-whoami"),
     feature = "plugin-kubernetes",
     all(feature = "plugin-hosts", feature = "plugin-loadbalance"),
-    all(feature = "plugin-view", feature = "plugin-hosts")
+    all(feature = "plugin-view", feature = "plugin-hosts"),
+    feature = "plugin-hosts",
+    feature = "plugin-file",
+    all(feature = "plugin-dnssec", feature = "plugin-whoami")
 ))]
 fn on_allocation_stack<F: std::future::Future<Output = ()>>(
     test: impl FnOnce() -> F + Send + 'static,

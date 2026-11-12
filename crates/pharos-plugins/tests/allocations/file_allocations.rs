@@ -6,11 +6,15 @@ use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rdata, Type};
 use pharos_server::{Action, Handler, Protocol};
 use stats_alloc::INSTRUMENTED_SYSTEM;
 
-#[tokio::test(flavor = "current_thread")]
-async fn file_queries_do_not_allocate() {
+#[test]
+fn file_queries_do_not_allocate() {
     if crate::run_isolated("file_allocations::file_queries_do_not_allocate") {
         return;
     }
+    crate::on_allocation_stack(file_queries_do_not_allocate_body);
+}
+
+async fn file_queries_do_not_allocate_body() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/file/example.zone"
