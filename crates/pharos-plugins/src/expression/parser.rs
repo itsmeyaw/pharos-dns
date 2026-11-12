@@ -56,15 +56,42 @@ impl Parser<'_, '_> {
             || (first == '.' && rest.as_bytes().get(1).is_some_and(u8::is_ascii_digit))
         {
             let bytes = rest.as_bytes();
+            let radix = match (bytes.first(), bytes.get(1)) {
+                (Some(b'0'), Some(b'x' | b'X')) => Some(16),
+                (Some(b'0'), Some(b'b' | b'B')) => Some(2),
+                (Some(b'0'), Some(b'o' | b'O')) => Some(8),
+                _ => None,
+            };
+            if let Some(radix) = radix {
+                let mut len = 2;
+                while bytes
+                    .get(len)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    len += 1;
+                }
+                let digits = rest[2..len].replace('_', "");
+                self.token = Token::Integer(
+                    i64::from_str_radix(&digits, radix).map_err(|_| "invalid integer literal")?,
+                );
+                self.offset += len;
+                return Ok(());
+            }
             let mut len = 0;
-            while bytes.get(len).is_some_and(u8::is_ascii_digit) {
+            while bytes
+                .get(len)
+                .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+            {
                 len += 1;
             }
             let mut float = false;
             if bytes.get(len) == Some(&b'.') && bytes.get(len + 1) != Some(&b'.') {
                 float = true;
                 len += 1;
-                while bytes.get(len).is_some_and(u8::is_ascii_digit) {
+                while bytes
+                    .get(len)
+                    .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+                {
                     len += 1;
                 }
             }
@@ -74,14 +101,18 @@ impl Parser<'_, '_> {
                 if matches!(bytes.get(len), Some(b'+' | b'-')) {
                     len += 1;
                 }
-                while bytes.get(len).is_some_and(u8::is_ascii_digit) {
+                while bytes
+                    .get(len)
+                    .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+                {
                     len += 1;
                 }
             }
+            let number = rest[..len].replace('_', "");
             self.token = if float {
-                Token::Float(rest[..len].parse().map_err(|_| "invalid float")?)
+                Token::Float(number.parse().map_err(|_| "invalid float")?)
             } else {
-                Token::Integer(rest[..len].parse().map_err(|_| "invalid integer")?)
+                Token::Integer(number.parse().map_err(|_| "invalid integer")?)
             };
             self.offset += len;
         } else if first.is_ascii_alphabetic() || first == '_' {

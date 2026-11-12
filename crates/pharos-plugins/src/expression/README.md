@@ -1,6 +1,7 @@
 # Expression subset
 
-The expression engine accepts boolean, decimal integer, floating-point and quoted
+The expression engine accepts boolean, decimal and `0x`/`0o`/`0b` integer,
+floating-point and quoted
 string literals; parentheses; `!`, `not`, unary `-`, numeric arithmetic,
 comparisons, `&&`, `and`, `||`, `or`, `in` with a literal list,
 string concatenation, `contains`, `startsWith`, `endsWith` and `matches` with a literal pattern. Declared typed variables, `group`, `int`, `replace`, and `any` with a homogeneous literal list and a `#` predicate are supported. The Query functions

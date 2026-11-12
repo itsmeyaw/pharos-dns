@@ -500,3 +500,29 @@ fn numeric_literals_and_division_match_expr_float_semantics() {
         );
     }
 }
+
+#[test]
+fn numeric_literal_bases_and_separators_match_expr() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    let expression = Expression::compile(
+        "0xff == 255 && 0b10 == 2 && 0o10 == 8 && 1_000 == 1000 && 01 == 1 && 1_2.5 == 12.5",
+    )
+    .unwrap();
+    assert_eq!(
+        expression
+            .evaluate(&query, &metadata, &mut scratch)
+            .unwrap(),
+        Value::Bool(true)
+    );
+    assert!(Expression::compile("0b22").is_err());
+}
