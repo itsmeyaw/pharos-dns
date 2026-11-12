@@ -416,3 +416,50 @@ async fn apex_ns_mx_and_srv_include_addresses() {
         assert_eq!(response.additionals().next().unwrap().rtype, Type::A);
     }
 }
+
+#[cfg(feature = "plugin-transfer")]
+#[tokio::test]
+async fn notifies_on_startup_and_reload() {
+    use pharos_plugins::servers;
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-notify-test.zone");
+    let original = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    ))
+    .unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let config = format!(
+        "example.org:0 {{\n file {} {{\n reload 10ms\n }}\n transfer {{\n to {address}\n }}\n}}",
+        path.display()
+    );
+    let (_, lifecycle) =
+        servers(configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap())
+            .unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    for stage in 0..2 {
+        if stage == 1 {
+            std::fs::write(&path, original.replace(" 1 7200", " 2 7200")).unwrap();
+        }
+        let mut wire = [0; 512];
+        let (len, peer) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.recv_from(&mut wire),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let notify = Message::parse(&wire[..len]).unwrap();
+        assert_eq!(notify.opcode(), pharos_proto::Opcode::NOTIFY);
+        assert_eq!(
+            notify.questions().next().unwrap().name.to_string(),
+            "example.org."
+        );
+        wire[2] |= 0x80;
+        socket.send_to(&wire[..len], peer).await.unwrap();
+    }
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    std::fs::remove_file(path).unwrap();
+}
