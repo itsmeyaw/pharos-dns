@@ -21,8 +21,13 @@ pub fn finish_outcome(
 ) -> Action {
     match outcome {
         Outcome::Drop => return Action::Drop,
-        // shortcut: Zone Transfer streams need a streaming Listener.
-        Outcome::Stream(_) => return Action::Drop,
+        Outcome::Stream(stream) => {
+            return if protocol == Protocol::Tcp {
+                Action::Stream(stream)
+            } else {
+                Action::Drop
+            };
+        }
         Outcome::Unanswered(code) => {
             if !matches!(
                 code,
