@@ -6,7 +6,7 @@ mod transfer;
 
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{
-    MessageBuilder, Name, NameRef, Rcode, Section, Type,
+    Message, MessageBuilder, Name, NameRef, Rcode, Section, Type,
     zone::{ZoneParser, ZoneRecord},
 };
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
@@ -400,6 +400,28 @@ impl Plugin for File {
                 target = &alias.rdata;
             }
         }
+        let lookup = if count > 0
+            && (!zone
+                .records
+                .iter()
+                .any(|rr| rr.owner.as_wire().eq_ignore_ascii_case(target))
+                || target.eq_ignore_ascii_case(zone.apex.as_wire())
+                    && matches!(question.qtype, Type::NS | Type::SOA))
+        {
+            let target = match NameRef::parse(target, 0) {
+                Ok(target) => target.to_name(),
+                Err(_) => return Outcome::Unanswered(Rcode::SERVFAIL),
+            };
+            // RFC 1034 §3.6.2: restart a lookup when the CNAME target is not in the Zone.
+            // shortcut: Self Lookup allocates; remove when #86 makes it allocation-free.
+            match cx.self_lookup(&target, question.qtype).await {
+                Ok(wire) => Some(wire),
+                Err(_) => return Outcome::Unanswered(Rcode::SERVFAIL),
+            }
+        } else {
+            None
+        };
+        let external = lookup.as_ref().and_then(|wire| Message::parse(wire).ok());
         let found = count > 0 || zone.records_at(target, question.qtype).next().is_some();
         let dnssec = cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
         if !exists
@@ -409,7 +431,13 @@ impl Plugin for File {
         {
             return next.run(cx).await;
         }
-        let rcode = if exists || synthesized || cut.is_some() {
+        let rcode = if let Some(response) = external {
+            match response.rcode() {
+                Rcode::SERVFAIL => Rcode::SERVFAIL,
+                Rcode::NXDOMAIN => Rcode::NXDOMAIN,
+                _ => Rcode::NOERROR,
+            }
+        } else if exists || synthesized || cut.is_some() {
             Rcode::NOERROR
         } else {
             Rcode::NXDOMAIN
@@ -431,6 +459,11 @@ impl Plugin for File {
                 0x8000
                     | if cut.is_none() { 0x0400 } else { 0 }
                     | (cx.query.flags() & 0x7910)
+                    | if external.is_some_and(|response| response.tc()) {
+                        0x0200
+                    } else {
+                        0
+                    }
                     | rcode.0,
             )
             .map_err(pharos_server::Error::Build)?;
@@ -470,8 +503,28 @@ impl Plugin for File {
                     dnssec,
                 )?;
             }
+            if let Some(response) = external {
+                for rr in response.answers() {
+                    let data = rr.data().map_err(|_| pharos_server::Error::InvalidQuery)?;
+                    builder
+                        .record_with(
+                            Section::Answer,
+                            rr.name,
+                            rr.rtype,
+                            rr.class,
+                            rr.ttl,
+                            |writer| data.write(writer),
+                        )
+                        .map_err(pharos_server::Error::Build)?;
+                }
+            }
             // RFC 2308 §3: negative Responses include the Zone SOA.
-            let authority_type = if found || cut.is_some() {
+            let authority_type = if rcode == Rcode::NXDOMAIN
+                || external.is_some_and(|response| {
+                    response.rcode() == Rcode::NOERROR && response.answer_count() == 0
+                }) {
+                Type::SOA
+            } else if found || cut.is_some() {
                 Type::NS
             } else {
                 Type::SOA
