@@ -202,15 +202,15 @@ async fn serve<H: Handler>(
                     }
                 }
                 if let (Some(signer), Some(signing)) = (signer.as_mut(), signing.as_ref()) {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|duration| duration.as_secs());
                     // RFC 8945 §5.3.1: sign every stream Message with the preceding MAC.
-                    if now.is_err()
-                        || signer
-                            .sign(&mut response, now.unwrap_or_default(), signing.fudge)
-                            .is_err()
-                    {
+                    let signing_failed =
+                        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                            Ok(now) => signer
+                                .sign(&mut response, now.as_secs(), signing.fudge)
+                                .is_err(),
+                            Err(_) => true,
+                        };
+                    if signing_failed {
                         crate::logging::log("ERROR", "server", "Zone Transfer TSIG signing failed");
                         *writer = None;
                         let _ = failed.send(true);

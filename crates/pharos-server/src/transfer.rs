@@ -81,7 +81,8 @@ pub async fn axfr(
     axfr_inner(address, zone, id, deadline, None, on_message).await
 }
 
-/// Receive an authenticated AXFR incrementally. Discard partial data on error.
+/// Receive an authenticated AXFR incrementally. Discard partial data on error;
+/// unsigned intermediate Messages are not authenticated until the next TSIG.
 pub async fn axfr_signed(
     address: SocketAddr,
     zone: &Name,
@@ -177,8 +178,12 @@ async fn axfr_inner(
         if first_message {
             opening = Some(wire.clone());
         }
-        let original = Message::parse(opening.as_ref().unwrap())
-            .map_err(|_| invalid("invalid opening AXFR Message"))?;
+        let original = Message::parse(
+            opening
+                .as_deref()
+                .ok_or_else(|| invalid("missing opening AXFR Message"))?,
+        )
+        .map_err(|_| invalid("invalid opening AXFR Message"))?;
         let first = original
             .answers()
             .next()
