@@ -313,7 +313,13 @@ mod tests {
             .unwrap();
         wire[2] |= 0x80;
         socket.send_to(&wire[..len], peer).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !plugin.state.disabled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert!(plugin.state.disabled.load(Ordering::Acquire));
         assert!(plugin.state.complete.load(Ordering::Acquire));
         lifecycle.run(Phase::Shutdown).await.unwrap();
