@@ -14,7 +14,7 @@ const SERVICES: &str = r#"[
  {"metadata":{"name":"svc6","namespace":"testns"},"spec":{"type":"ClusterIP","clusterIP":"10.0.0.3","externalIPs":["1:2::5"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"svc11","namespace":"testns"},"spec":{"type":"LoadBalancer","clusterIP":"10.0.0.3","externalIPs":["2.3.4.5"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"svc12","namespace":"testns"},"spec":{"type":"LoadBalancer","clusterIP":"10.0.0.3","externalIPs":["dummy.hostname"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
- {"metadata":{"name":"mixed","namespace":"testns"},"spec":{"clusterIP":"10.0.0.4","externalIPs":["192.0.2.1","one.target.test","2001:db8::1","192.0.2.2","2001:0db8:0:0:0:0:0:1","two.target.test","2001:db8::2","192.0.2.1"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}},
+ {"metadata":{"name":"mixed","namespace":"testns"},"spec":{"type":"LoadBalancer","clusterIP":"10.0.0.4","externalIPs":["192.0.2.1"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]},"status":{"loadBalancer":{"ingress":[{"hostname":"one.target.test"},{"ip":"2001:db8::1"},{"ip":"192.0.2.2"},{"ip":"2001:0db8:0:0:0:0:0:1"},{"hostname":"two.target.test"},{"ip":"2001:db8::2"},{"ip":"192.0.2.1"}]}}},
  {"metadata":{"name":"svc-headless","namespace":"testns"},"spec":{"type":"ClusterIP","clusterIP":"None","ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"dns-service","namespace":"kube-system"},"spec":{"clusterIP":"10.0.0.111","externalIPs":["127.0.0.1"]}}
 ]"#;
