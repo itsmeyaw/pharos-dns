@@ -1233,14 +1233,15 @@ impl Zone {
                         let Some(address) = rdata_target(rr, offset) else {
                             continue;
                         };
+                        // CoreDNS repeats apex NS glue but deduplicates other answer targets.
                         if !contains(address, &zone.apex)
-                            || zone
-                                .records_at(target, question.qtype)
-                                .take(index)
-                                .any(|earlier| {
-                                    rdata_target(earlier, offset)
-                                        .is_some_and(|name| name.eq_ignore_ascii_case(address))
-                                })
+                            || question.qtype != Type::NS
+                                && zone.records_at(target, question.qtype).take(index).any(
+                                    |earlier| {
+                                        rdata_target(earlier, offset)
+                                            .is_some_and(|name| name.eq_ignore_ascii_case(address))
+                                    },
+                                )
                         {
                             continue;
                         }
