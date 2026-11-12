@@ -409,6 +409,46 @@ fn reload_uses_path_mtime_sampled_before_open() {
 }
 
 #[test]
+fn mtime_reload_keeps_previous_zone_and_timestamp_on_errors() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-mtime-errors.zone");
+    let original = include_str!("../../tests/fixtures/file/example.zone");
+    let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let changed_time = old_time + Duration::from_secs(10);
+    std::fs::write(&path, original).unwrap();
+    let apex: Name = "example.org.".parse().unwrap();
+    let loaded = Loaded {
+        apex: apex.clone(),
+        path: path.clone(),
+        current: arc_swap::ArcSwapOption::from(Some(Arc::new(Zone::load(apex, &path).unwrap()))),
+        interval: Duration::from_secs(1),
+        negative_interval: false,
+        by_mtime: true,
+        modified: Mutex::new(Some(old_time)),
+        reload_gate: Mutex::new(()),
+    };
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old_time))
+        .unwrap();
+    assert!(!loaded.reload_with_open(|_| panic!("unchanged mtime must not open the file")));
+    std::fs::write(&path, "invalid zone").unwrap();
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(changed_time))
+        .unwrap();
+    assert!(!loaded.reload());
+    assert_eq!(*loaded.modified.lock().unwrap(), Some(old_time));
+    assert_eq!(loaded.current.load().as_ref().unwrap().serial(), Some(1));
+    assert!(
+        !loaded
+            .reload_with_open(|_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)))
+    );
+    assert_eq!(*loaded.modified.lock().unwrap(), Some(old_time));
+    assert_eq!(loaded.current.load().as_ref().unwrap().serial(), Some(1));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn reload_gate_prevents_overlapping_blocking_reload_generations() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-concurrent-reload.zone");
