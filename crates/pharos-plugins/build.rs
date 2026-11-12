@@ -26,7 +26,7 @@ fn next_plugin(enabled: &[&str], start: usize) -> usize {
 
 fn transferer(name: &str) -> bool {
     // Add each implemented Transferer here; enabled retains Plugin Order.
-    matches!(name, "kubernetes")
+    matches!(name, "kubernetes" | "file")
 }
 
 fn registered_handler(name: &str) -> bool {

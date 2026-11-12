@@ -1,6 +1,8 @@
 //! Authoritative Zones loaded from master files.
 
 pub(crate) mod setup;
+#[cfg(feature = "plugin-transfer")]
+mod transfer;
 
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{
@@ -130,6 +132,8 @@ pub struct File {
     zones: Vec<Arc<Loaded>>,
     fallthrough: Vec<Name>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    #[cfg(feature = "plugin-transfer")]
+    notifier: Arc<Mutex<Option<crate::transfer::Transfer>>>,
 }
 
 impl File {
@@ -202,26 +206,56 @@ impl File {
             zones,
             fallthrough,
             tasks: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(feature = "plugin-transfer")]
+            notifier: Arc::new(Mutex::new(None)),
         })
     }
 
     fn register_hooks(&self, lifecycle: &mut pharos_server::Lifecycle) {
         let zones = self.zones.clone();
         let tasks = Arc::clone(&self.tasks);
+        #[cfg(feature = "plugin-transfer")]
+        let notifier = Arc::clone(&self.notifier);
         lifecycle.register(pharos_server::Phase::Startup, move || {
             let zones = zones.clone();
             let tasks = Arc::clone(&tasks);
+            #[cfg(feature = "plugin-transfer")]
+            let notifier = Arc::clone(&notifier);
             async move {
                 let mut tasks = tasks.lock().unwrap();
                 for zone in zones {
+                    #[cfg(feature = "plugin-transfer")]
+                    {
+                        let transfer = notifier.lock().unwrap().clone();
+                        let apex = zone.apex.clone();
+                        if let Some(transfer) = transfer {
+                            // RFC 1996 §4.1: notify Secondary Servers on startup.
+                            tasks.push(tokio::spawn(async move {
+                                let _ = transfer.notify(&apex).await;
+                            }));
+                        }
+                    }
                     if zone.interval.is_zero() {
                         continue;
                     }
+                    #[cfg(feature = "plugin-transfer")]
+                    let notifier = Arc::clone(&notifier);
                     tasks.push(tokio::spawn(async move {
                         loop {
                             tokio::time::sleep(zone.interval).await;
-                            let zone = Arc::clone(&zone);
-                            let _ = tokio::task::spawn_blocking(move || zone.reload()).await;
+                            let reload = Arc::clone(&zone);
+                            if tokio::task::spawn_blocking(move || reload.reload())
+                                .await
+                                .unwrap_or(false)
+                            {
+                                #[cfg(feature = "plugin-transfer")]
+                                let transfer = { notifier.lock().unwrap().clone() };
+                                #[cfg(feature = "plugin-transfer")]
+                                if let Some(transfer) = transfer {
+                                    // RFC 1996 §3.1: notify Secondary Servers after Zone changes.
+                                    let _ = transfer.notify(&zone.apex).await;
+                                }
+                            }
                         }
                     }));
                 }
