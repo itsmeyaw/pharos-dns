@@ -468,3 +468,35 @@ fn query_functions_handle_ipv6_tcp_edns_and_small_scratch() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn numeric_literals_and_division_match_expr_float_semantics() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "1 / 2 == 0.5",
+        "1 + .5 == 1.5",
+        "2 * 1.5 == 3",
+        "int(2.9) == 2",
+        "1e2 / 4 == 25",
+        "1 / 0 > 10",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+}

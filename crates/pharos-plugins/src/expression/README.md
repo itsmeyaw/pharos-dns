@@ -1,8 +1,8 @@
 # Expression subset
 
-The expression engine is under construction. It currently accepts boolean,
-integer and quoted string literals; parentheses; `!`, `not`, unary `-`, integer
-arithmetic, comparisons, `&&`, `and`, `||`, `or`, `in` with a literal list,
+The expression engine accepts boolean, decimal integer, floating-point and quoted
+string literals; parentheses; `!`, `not`, unary `-`, numeric arithmetic,
+comparisons, `&&`, `and`, `||`, `or`, `in` with a literal list,
 string concatenation, `contains`, `startsWith`, `endsWith` and `matches` with a literal pattern. Declared typed variables, `group`, `int`, `replace`, and `any` with a homogeneous literal list and a `#` predicate are supported. The Query functions
 `type`, `name`, `class`, `proto`, `size`, `client_ip`, `port`, `id`, `opcode`,
 `do`, `bufsize`, `server_ip`, `server_port`, `metadata` and `incidr` are supported.

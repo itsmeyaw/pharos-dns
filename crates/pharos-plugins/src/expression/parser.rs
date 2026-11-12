@@ -3,6 +3,7 @@ use super::{Binary, Kind, Node, Unary, ValueType};
 #[derive(Debug, PartialEq)]
 enum Token {
     Integer(i64),
+    Float(f64),
     String(String),
     Ident(String),
     Op(String),
@@ -51,9 +52,37 @@ impl Parser<'_, '_> {
             self.token = Token::End;
             return Ok(());
         };
-        if first.is_ascii_digit() {
-            let len = rest.bytes().take_while(u8::is_ascii_digit).count();
-            self.token = Token::Integer(rest[..len].parse().map_err(|_| "invalid integer")?);
+        if first.is_ascii_digit()
+            || (first == '.' && rest.as_bytes().get(1).is_some_and(u8::is_ascii_digit))
+        {
+            let bytes = rest.as_bytes();
+            let mut len = 0;
+            while bytes.get(len).is_some_and(u8::is_ascii_digit) {
+                len += 1;
+            }
+            let mut float = false;
+            if bytes.get(len) == Some(&b'.') && bytes.get(len + 1) != Some(&b'.') {
+                float = true;
+                len += 1;
+                while bytes.get(len).is_some_and(u8::is_ascii_digit) {
+                    len += 1;
+                }
+            }
+            if matches!(bytes.get(len), Some(b'e' | b'E')) {
+                float = true;
+                len += 1;
+                if matches!(bytes.get(len), Some(b'+' | b'-')) {
+                    len += 1;
+                }
+                while bytes.get(len).is_some_and(u8::is_ascii_digit) {
+                    len += 1;
+                }
+            }
+            self.token = if float {
+                Token::Float(rest[..len].parse().map_err(|_| "invalid float")?)
+            } else {
+                Token::Integer(rest[..len].parse().map_err(|_| "invalid integer")?)
+            };
             self.offset += len;
         } else if first.is_ascii_alphabetic() || first == '_' {
             let len = rest
@@ -122,6 +151,10 @@ impl Parser<'_, '_> {
             Token::Integer(value) => {
                 self.advance()?;
                 Node::Int(value)
+            }
+            Token::Float(value) => {
+                self.advance()?;
+                Node::Float(value)
             }
             Token::String(value) => {
                 self.advance()?;
@@ -204,7 +237,7 @@ impl Parser<'_, '_> {
                     }
                     "int"
                         if args.len() == 1
-                            && matches!(args[0].kind(), Kind::String | Kind::Int) =>
+                            && matches!(args[0].kind(), Kind::String | Kind::Int | Kind::Float) =>
                     {
                         Kind::Int
                     }
@@ -327,15 +360,20 @@ impl Parser<'_, '_> {
                 {
                     Kind::Bool
                 }
-                Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Rem
+                Binary::Add | Binary::Sub | Binary::Mul | Binary::Rem
                     if left.kind() == Kind::Int && right.kind() == Kind::Int =>
                 {
                     Kind::Int
                 }
+                Binary::Add | Binary::Sub | Binary::Mul | Binary::Div
+                    if left.kind().numeric() && right.kind().numeric() =>
+                {
+                    Kind::Float
+                }
                 Binary::Add if left.kind() == Kind::String && right.kind() == Kind::String => {
                     Kind::String
                 }
-                Binary::In if matches!(&right, Node::List(values) if values.iter().all(|value| value.kind() == left.kind())) => {
+                Binary::In if matches!(&right, Node::List(values) if values.iter().all(|value| value.kind() == left.kind() || (value.kind().numeric() && left.kind().numeric()))) => {
                     Kind::Bool
                 }
                 Binary::Contains | Binary::StartsWith | Binary::EndsWith
@@ -344,7 +382,8 @@ impl Parser<'_, '_> {
                     Kind::Bool
                 }
                 Binary::Eq | Binary::Ne | Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge
-                    if left.kind() == right.kind() && left.kind() != Kind::List =>
+                    if (left.kind() == right.kind() && left.kind() != Kind::List)
+                        || (left.kind().numeric() && right.kind().numeric()) =>
                 {
                     Kind::Bool
                 }
@@ -360,12 +399,10 @@ impl Parser<'_, '_> {
 
     fn unary(&mut self, op: Unary) -> Result<Node, String> {
         let node = self.expression(6)?;
-        if node.kind()
-            != match op {
-                Unary::Not => Kind::Bool,
-                Unary::Neg => Kind::Int,
-            }
-        {
+        if !match op {
+            Unary::Not => node.kind() == Kind::Bool,
+            Unary::Neg => node.kind().numeric(),
+        } {
             return Err("incompatible unary operand".into());
         }
         Ok(Node::Unary(op, Box::new(node)))

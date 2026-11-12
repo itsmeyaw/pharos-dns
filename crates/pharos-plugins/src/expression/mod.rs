@@ -66,6 +66,7 @@ impl Write for Scratch<'_> {
 pub enum Value<'a> {
     Bool(bool),
     Int(i64),
+    Float(f64),
     String(&'a str),
 }
 
@@ -74,6 +75,7 @@ pub enum Value<'a> {
 pub enum ValueType {
     Bool,
     Int,
+    Float,
     String,
 }
 
@@ -81,6 +83,7 @@ pub enum ValueType {
 enum Kind {
     Bool,
     Int,
+    Float,
     String,
     List,
 }
@@ -90,8 +93,15 @@ impl From<ValueType> for Kind {
         match value {
             ValueType::Bool => Self::Bool,
             ValueType::Int => Self::Int,
+            ValueType::Float => Self::Float,
             ValueType::String => Self::String,
         }
+    }
+}
+
+impl Kind {
+    fn numeric(self) -> bool {
+        matches!(self, Self::Int | Self::Float)
     }
 }
 
@@ -126,6 +136,7 @@ enum Binary {
 enum Node {
     Bool(bool),
     Int(i64),
+    Float(f64),
     String(String),
     Variable(String, Kind),
     List(Vec<Node>),
@@ -141,7 +152,9 @@ impl Node {
     fn kind(&self) -> Kind {
         match self {
             Self::Bool(_) | Self::Unary(Unary::Not, _) => Kind::Bool,
-            Self::Int(_) | Self::Unary(Unary::Neg, _) => Kind::Int,
+            Self::Int(_) => Kind::Int,
+            Self::Float(_) => Kind::Float,
+            Self::Unary(Unary::Neg, node) => node.kind(),
             Self::String(_) => Kind::String,
             Self::Variable(_, kind) => *kind,
             Self::List(_) => Kind::List,
@@ -163,6 +176,7 @@ impl Node {
         match self {
             Self::Bool(value) => Ok(Temporary::Bool(*value)),
             Self::Int(value) => Ok(Temporary::Int(*value)),
+            Self::Float(value) => Ok(Temporary::Float(*value)),
             Self::String(value) => Ok(Temporary::Borrowed(value)),
             Self::Variable(name, kind) => {
                 let value = query
@@ -173,6 +187,7 @@ impl Node {
                 match (kind, value) {
                     (Kind::Bool, Value::Bool(value)) => Ok(Temporary::Bool(value)),
                     (Kind::Int, Value::Int(value)) => Ok(Temporary::Int(value)),
+                    (Kind::Float, Value::Float(value)) => Ok(Temporary::Float(value)),
                     (Kind::String, Value::String(value)) => Ok(Temporary::Borrowed(value)),
                     _ => Err("expression variable has wrong type"),
                 }
@@ -205,6 +220,7 @@ impl Node {
             },
             Self::Unary(Unary::Neg, node) => match node.eval(query, metadata, scratch, current)? {
                 Temporary::Int(value) => Ok(Temporary::Int(value.wrapping_neg())),
+                Temporary::Float(value) => Ok(Temporary::Float(-value)),
                 _ => Err("expected integer"),
             },
             Self::Binary(op, left, right, _) => {
@@ -235,6 +251,11 @@ impl Node {
                     (Add, Temporary::Int(a), Temporary::Int(b)) => {
                         Ok(Temporary::Int(a.wrapping_add(b)))
                     }
+                    (
+                        Add,
+                        a @ (Temporary::Float(_) | Temporary::Int(_)),
+                        b @ (Temporary::Float(_) | Temporary::Int(_)),
+                    ) => Ok(Temporary::Float(a.number()? + b.number()?)),
                     (Add, a, b) => {
                         let start = scratch.len;
                         scratch.append(a)?;
@@ -247,10 +268,9 @@ impl Node {
                     (Mul, Temporary::Int(a), Temporary::Int(b)) => {
                         Ok(Temporary::Int(a.wrapping_mul(b)))
                     }
-                    (Div, Temporary::Int(a), Temporary::Int(b)) => a
-                        .checked_div(b)
-                        .map(Temporary::Int)
-                        .ok_or("integer division error"),
+                    (Sub, a, b) => Ok(Temporary::Float(a.number()? - b.number()?)),
+                    (Mul, a, b) => Ok(Temporary::Float(a.number()? * b.number()?)),
+                    (Div, a, b) => Ok(Temporary::Float(a.number()? / b.number()?)),
                     (Rem, Temporary::Int(a), Temporary::Int(b)) => a
                         .checked_rem(b)
                         .map(Temporary::Int)
@@ -266,17 +286,21 @@ impl Node {
                     }
                     (op @ (Eq | Ne | Lt | Le | Gt | Ge), a, b) => {
                         let ordering = match (a, b) {
-                            (Temporary::Bool(a), Temporary::Bool(b)) => a.cmp(&b),
-                            (Temporary::Int(a), Temporary::Int(b)) => a.cmp(&b),
-                            (a, b) => a.text(scratch)?.cmp(b.text(scratch)?),
+                            (Temporary::Bool(a), Temporary::Bool(b)) => Some(a.cmp(&b)),
+                            (Temporary::Int(a), Temporary::Int(b)) => Some(a.cmp(&b)),
+                            (
+                                a @ (Temporary::Int(_) | Temporary::Float(_)),
+                                b @ (Temporary::Int(_) | Temporary::Float(_)),
+                            ) => a.number()?.partial_cmp(&b.number()?),
+                            (a, b) => Some(a.text(scratch)?.cmp(b.text(scratch)?)),
                         };
                         Ok(Temporary::Bool(match op {
-                            Eq => ordering.is_eq(),
-                            Ne => !ordering.is_eq(),
-                            Lt => ordering.is_lt(),
-                            Le => ordering.is_le(),
-                            Gt => ordering.is_gt(),
-                            Ge => ordering.is_ge(),
+                            Eq => ordering.is_some_and(|value| value.is_eq()),
+                            Ne => !ordering.is_some_and(|value| value.is_eq()),
+                            Lt => ordering.is_some_and(|value| value.is_lt()),
+                            Le => ordering.is_some_and(|value| value.is_le()),
+                            Gt => ordering.is_some_and(|value| value.is_gt()),
+                            Ge => ordering.is_some_and(|value| value.is_ge()),
                             _ => unreachable!(),
                         }))
                     }
@@ -291,6 +315,10 @@ fn equal(a: Temporary<'_>, b: Temporary<'_>, scratch: &Scratch<'_>) -> Result<bo
     match (a, b) {
         (Temporary::Bool(a), Temporary::Bool(b)) => Ok(a == b),
         (Temporary::Int(a), Temporary::Int(b)) => Ok(a == b),
+        (
+            a @ (Temporary::Int(_) | Temporary::Float(_)),
+            b @ (Temporary::Int(_) | Temporary::Float(_)),
+        ) => Ok(a.number()? == b.number()?),
         (a, b) => Ok(a.text(scratch)? == b.text(scratch)?),
     }
 }
@@ -299,11 +327,19 @@ fn equal(a: Temporary<'_>, b: Temporary<'_>, scratch: &Scratch<'_>) -> Result<bo
 enum Temporary<'a> {
     Bool(bool),
     Int(i64),
+    Float(f64),
     Borrowed(&'a str),
     Stored(usize, usize),
 }
 
 impl<'a> Temporary<'a> {
+    fn number(self) -> Result<f64, &'static str> {
+        match self {
+            Self::Int(value) => Ok(value as f64),
+            Self::Float(value) => Ok(value),
+            _ => Err("expected number"),
+        }
+    }
     fn text<'s>(&'s self, scratch: &'s Scratch<'_>) -> Result<&'s str, &'static str> {
         match self {
             Self::Borrowed(value) => Ok(value),
@@ -452,6 +488,7 @@ fn call<'a>(
         let value = args[0].eval(query, metadata, scratch, current)?;
         return match value {
             Temporary::Int(value) => Ok(Temporary::Int(value)),
+            Temporary::Float(value) => Ok(Temporary::Int(value as i64)),
             value => value
                 .text(scratch)?
                 .parse::<i64>()
@@ -590,6 +627,7 @@ impl Expression {
         match self.0.kind() {
             Kind::Bool => ValueType::Bool,
             Kind::Int => ValueType::Int,
+            Kind::Float => ValueType::Float,
             Kind::String => ValueType::String,
             Kind::List => unreachable!("list results are rejected at compile time"),
         }
@@ -606,6 +644,7 @@ impl Expression {
         match value {
             Temporary::Bool(value) => Ok(Value::Bool(value)),
             Temporary::Int(value) => Ok(Value::Int(value)),
+            Temporary::Float(value) => Ok(Value::Float(value)),
             Temporary::Borrowed(value) => Ok(Value::String(value)),
             Temporary::Stored(start, end) => Ok(Value::String(
                 std::str::from_utf8(&scratch.buffer[start..end]).map_err(|_| "invalid UTF-8")?,
