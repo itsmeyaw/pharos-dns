@@ -635,10 +635,10 @@ fn format_values(
                 scratch.write_char(ch)?;
                 continue;
             }
-            let mut verb = format.text(scratch)?[cursor..]
-                .chars()
-                .next()
-                .ok_or(fmt::Error)?;
+            let Some(mut verb) = format.text(scratch)?[cursor..].chars().next() else {
+                scratch.write_str("%!(NOVERB)")?;
+                break;
+            };
             cursor += verb.len_utf8();
             if verb == '%' {
                 scratch.write_char('%')?;
@@ -698,8 +698,28 @@ fn format_values(
                 }
                 precision = Some(digits);
             }
-            let value = values.get(argument).copied().flatten().ok_or(fmt::Error)?;
+            let Some(value) = values.get(argument).copied().flatten() else {
+                write!(scratch, "%!{verb}(MISSING)")?;
+                continue;
+            };
             argument += 1;
+            let compatible = match verb {
+                's' | 'q' => value.is_string(),
+                'd' | 'x' | 'X' | 'o' | 'b' | 'c' => matches!(
+                    value,
+                    ResultValue::Scalar(Some(Value::Int(_))) | ResultValue::Uint(_)
+                ),
+                'f' | 'g' => matches!(value, ResultValue::Scalar(Some(Value::Float(_)))),
+                't' => matches!(value, ResultValue::Scalar(Some(Value::Bool(_)))),
+                'T' | 'v' => true,
+                _ => false,
+            };
+            if !compatible {
+                write!(scratch, "%!{verb}({}=", value.type_name())?;
+                scratch.append(value)?;
+                scratch.write_char(')')?;
+                continue;
+            }
             match verb {
                 's' if value.is_string() => {
                     let text = value.text(scratch)?;
@@ -814,6 +834,18 @@ fn format_values(
                 'v' => scratch.append(value)?,
                 _ => return Err(fmt::Error),
             }
+        }
+        if argument < values.len() {
+            scratch.write_str("%!(EXTRA ")?;
+            for (index, value) in values[argument..].iter().enumerate() {
+                let value = value.ok_or(fmt::Error)?;
+                if index != 0 {
+                    scratch.write_str(", ")?;
+                }
+                write!(scratch, "{}=", value.type_name())?;
+                scratch.append(value)?;
+            }
+            scratch.write_char(')')?;
         }
         return Ok(());
     }

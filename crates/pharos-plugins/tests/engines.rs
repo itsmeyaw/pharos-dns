@@ -603,6 +603,20 @@ fn slicing_message_questions_uses_borrowed_question_views() {
 }
 
 #[test]
+fn printf_emits_go_diagnostics_for_bad_or_missing_arguments() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template = Template::compile(r#"{{ printf "%d" "x" }}|{{ printf "%d" }}|{{ printf "%z" 1 }}|{{ printf "%s" "x" 1 "y" }}"#).unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(
+        output,
+        "%!d(string=x)|%!d(MISSING)|%!z(int=1)|x%!(EXTRA int=1, string=y)"
+    );
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];
