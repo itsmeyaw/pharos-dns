@@ -70,7 +70,7 @@ impl Dnssec {
             .find(|(address, _)| *address == cx.local)
             .map(|(_, metrics)| metrics);
         {
-            let cache = self.cache.lock().map_err(|_| Error::InvalidQuery)?;
+            let cache = self.cache.lock().map_err(|_| Error::PluginPanic)?;
             // RFC 4034 §3.1.4: the unsigned Response key includes the covered RRset TTLs.
             if let Some(entry) = cache.get(cx.response.get(2..).ok_or(Error::InvalidQuery)?)
                 && entry.valid(now, cx.max_response_size)
@@ -268,7 +268,7 @@ impl Dnssec {
         }
         // CoreDNS plugin/dnssec: cache only RRsets that produced signatures.
         if signed_sets > 0 {
-            let mut cache = self.cache.lock().map_err(|_| Error::InvalidQuery)?;
+            let mut cache = self.cache.lock().map_err(|_| Error::PluginPanic)?;
             if cache.len() >= self.capacity
                 && !cache.contains_key(&original[2..])
                 && let Some(key) = cache.keys().next().cloned()
@@ -389,6 +389,44 @@ impl Dnssec {
 #[cfg(test)]
 mod tests {
     use super::CacheEntry;
+
+    #[test]
+    fn poisoned_signature_cache_reports_plugin_panic() {
+        use pharos_corefile::{configure, parse};
+        use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
+        use pharos_server::{Context, Error, Metadata, Protocol, Transport};
+
+        let mut chain = configure::<crate::Chain>(
+            &parse("Corefile", "miek.nl {\n dnssec\n}").unwrap(),
+            crate::directives(),
+        )
+        .unwrap();
+        let dnssec = chain[0].config.dnssec.as_mut().unwrap();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = dnssec.cache.lock().unwrap();
+            panic!("poison cache");
+        });
+        let domain: Name = "miek.nl.".parse().unwrap();
+        let name = NameRef::parse(domain.as_wire(), 0).unwrap();
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder.question(name, Type::A, Class::IN).unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(dnssec.sign_response(&mut cx), Err(Error::PluginPanic));
+    }
 
     #[test]
     fn signature_cache_separates_original_ttls() {
