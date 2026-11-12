@@ -58,6 +58,8 @@ pub mod health;
 #[cfg(feature = "plugin-hosts")]
 pub mod hosts;
 mod ipnet;
+#[cfg(feature = "plugin-k8s-external")]
+pub mod k8s_external;
 #[cfg(feature = "plugin-kubernetes")]
 pub mod kubernetes;
 #[cfg(feature = "plugin-loadbalance")]
@@ -136,6 +138,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("header", include_str!("header/README.md")),
     ("health", include_str!("health/README.md")),
     ("hosts", include_str!("hosts/README.md")),
+    ("k8s_external", include_str!("k8s_external/README.md")),
     ("kubernetes", include_str!("kubernetes/README.md")),
     ("loadbalance", include_str!("loadbalance/README.md")),
     ("local", include_str!("local/README.md")),
@@ -194,6 +197,25 @@ pub const fn plugins_listing() -> &'static str {
 
 /// Configured DNS Servers keyed by Listener.
 pub type Servers = HashMap<ListenerKey, Server<Arc<Chain>>>;
+
+#[cfg(feature = "plugin-k8s-external")]
+fn k8s_external_error(chain: &Chain) -> Option<&'static str> {
+    (chain.k8s_external.is_some() && chain.kubernetes.is_none())
+        .then_some("plugin/k8s_external: kubernetes plugin not loaded")
+}
+
+/// Validate configured blocks without running Startup hooks.
+pub fn validate_configuration(blocks: &[BlockContext<Chain>]) -> io::Result<()> {
+    #[cfg(feature = "plugin-k8s-external")]
+    for block in blocks {
+        if let Some(error) = k8s_external_error(&block.config) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+        }
+    }
+    #[cfg(not(feature = "plugin-k8s-external"))]
+    let _ = blocks;
+    Ok(())
+}
 
 /// Group Server Blocks by Listener and collect their hooks in block order.
 /// The caller runs Startup before serving and Shutdown before Listeners drain.
@@ -267,6 +289,7 @@ pub fn servers_with_registry(
             feature = "plugin-acl",
             feature = "plugin-dns64",
             feature = "plugin-dnssec",
+            feature = "plugin-k8s-external",
             feature = "plugin-siit",
             feature = "plugin-autopath",
             feature = "plugin-template",
@@ -288,6 +311,18 @@ pub fn servers_with_registry(
         #[cfg(feature = "plugin-kubernetes")]
         if let Some(kubernetes) = &block.config.kubernetes {
             kubernetes.set_metrics(&metrics);
+        }
+        #[cfg(feature = "plugin-k8s-external")]
+        if let Some(error) = k8s_external_error(&block.config) {
+            lifecycle.register_sync(pharos_server::Phase::Startup, move || {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, error))
+            });
+        }
+        #[cfg(feature = "plugin-k8s-external")]
+        if let Some(external) = &mut block.config.k8s_external
+            && let Some(kubernetes) = &block.config.kubernetes
+        {
+            external.bind_kubernetes(kubernetes);
         }
         #[cfg(feature = "plugin-transfer")]
         block.config.bind_transferers();

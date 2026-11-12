@@ -26,7 +26,7 @@ fn next_plugin(enabled: &[&str], start: usize) -> usize {
 
 fn transferer(name: &str) -> bool {
     // Add each implemented Transferer here; enabled retains Plugin Order.
-    matches!(name, "kubernetes")
+    matches!(name, "k8s_external" | "kubernetes")
 }
 
 fn registered_handler(name: &str) -> bool {
@@ -85,6 +85,7 @@ fn main() {
             "forward" => "forward::Forward",
             "health" => "health::Health",
             "hosts" => "hosts::Hosts",
+            "k8s_external" => "k8s_external::External",
             "kubernetes" => "kubernetes::Kubernetes",
             "loadbalance" => "loadbalance::LoadBalance",
             "local" => "local::Local",
@@ -135,6 +136,7 @@ fn main() {
             "forward" => "forward::setup::setup",
             "health" => "health::setup::setup",
             "hosts" => "hosts::setup::setup",
+            "k8s_external" => "k8s_external::setup::setup",
             "loadbalance" => "loadbalance::setup::setup",
             "local" => "local::setup::setup",
             "nsid" => "nsid::setup::setup",

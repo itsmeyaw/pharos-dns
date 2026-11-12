@@ -1,0 +1,5 @@
+example.org. SOA IN udp
+default.example.org. A IN udp
+web.default.example.org. A IN udp
+missing.default.example.org. A IN udp
+missing.default.example.org. AAAA IN tcp

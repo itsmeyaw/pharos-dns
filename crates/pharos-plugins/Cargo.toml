@@ -54,6 +54,7 @@ default = [
     "plugin-header",
     "plugin-health",
     "plugin-hosts",
+    "plugin-k8s-external",
     "plugin-kubernetes",
     "plugin-loadbalance",
     "plugin-local",
@@ -119,7 +120,7 @@ plugin-hosts = []
 plugin-route53 = []
 plugin-azure = []
 plugin-clouddns = []
-plugin-k8s-external = []
+plugin-k8s-external = ["plugin-kubernetes"]
 plugin-kubernetes = ["dep:pharos-kubernetes"]
 plugin-file = []
 plugin-auto = []

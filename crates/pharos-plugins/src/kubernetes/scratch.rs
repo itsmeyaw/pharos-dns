@@ -84,13 +84,13 @@ impl Drop for Lease<'_> {
     }
 }
 
-pub(super) struct IpText {
+pub(crate) struct IpText {
     bytes: [u8; 45],
     len: usize,
 }
 
 impl IpText {
-    pub(super) fn new(ip: IpAddr) -> Self {
+    pub(crate) fn new(ip: IpAddr) -> Self {
         use fmt::Write;
         let mut text = Self {
             bytes: [0; 45],
@@ -100,7 +100,7 @@ impl IpText {
         text
     }
 
-    pub(super) fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         std::str::from_utf8(&self.bytes[..self.len]).unwrap()
     }
 }

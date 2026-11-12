@@ -62,6 +62,10 @@ other fields; TSIG timestamps and MAC bytes are not compared between servers.
 The `tsig-forward` README example replaces its unreachable external Upstream
 with a local deterministic fixture.
 
+The literal `k8s_external` fallthrough example forwards to 8.8.8.8 and is
+skipped because the differential suite must not depend on an external network.
+`k8s-external-fallthrough` uses `whoami` as a deterministic Next instead.
+
 The `kubernetes-*` scenarios exercise the small, read-only API fixture in
 `crates/pharos-kubernetes/examples/differential.rs`, sharing the HTTP server
 with the memory example. It serves static Services, EndpointSlices, Pods and

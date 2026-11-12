@@ -1,0 +1,4 @@
+alias.default.example.org. A IN udp
+alias.default.example.org. AAAA IN tcp
+alias.default.example.org. SRV IN udp
+alias.default.example.org. TXT IN udp
