@@ -1,5 +1,6 @@
 example.org. SOA IN udp
 example.org. NS IN udp
+example.org. A IN udp
 www.example.org. A IN udp
 www.example.org. AAAA IN udp
 www.example.org. MX IN udp
