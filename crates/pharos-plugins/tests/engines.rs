@@ -163,3 +163,20 @@ fn coredns_variable_examples_use_eq_and_len_builtins() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "a.example. 60 IN TXT \"empty=true,count=1\"");
 }
+
+#[test]
+fn pipelines_pass_the_previous_value_as_last_argument() {
+    use pharos_plugins::expression::Value;
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("a.example.", &metadata);
+    let vars = [
+        ("region", Value::String("eu")),
+        ("local", Value::Bool(false)),
+    ];
+    data.variables = &vars;
+    let template = Template::compile("{{ .Var.region | eq \"eu\" }} {{ 8 | parseInt \"ff\" 16 }} {{ if .Var.local | not }}remote{{ else }}local{{ end }}").unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "true 255 remote");
+}

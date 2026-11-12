@@ -4,6 +4,8 @@ use crate::expression::Value;
 use pharos_server::Metadata;
 use std::fmt::{self, Write};
 
+mod pipeline;
+
 /// Borrowed template values for a Query.
 pub struct Data<'a, 'm> {
     pub name: &'a str,
@@ -59,10 +61,16 @@ enum Part {
     Text(String),
     Field(Field),
     ParseInt(Field, u32, u32),
-    If(Field, Vec<Part>, Vec<Part>),
+    If(Condition, Vec<Part>, Vec<Part>),
     Range(Field, Vec<Part>, Vec<Part>),
     Len(Field),
     Eq(Vec<Field>),
+    Pipeline(pipeline::Pipeline),
+}
+
+enum Condition {
+    Field(Field),
+    Pipeline(pipeline::Pipeline),
 }
 
 /// A template parsed at setup time.
@@ -142,9 +150,25 @@ fn render_parts(
                 }
                 write!(output, "{equal}")?;
             }
+            Part::Pipeline(pipeline) => pipeline.write(data, dot, output)?,
         }
     }
     Ok(())
+}
+
+impl Condition {
+    fn parse(source: &str) -> Result<Self, String> {
+        match parse_field(source) {
+            Ok(field) => Ok(Self::Field(field)),
+            Err(_) => Ok(Self::Pipeline(pipeline::Pipeline::compile(source)?)),
+        }
+    }
+    fn truthy(&self, data: &Data<'_, '_>, dot: Dot<'_>) -> Result<bool, fmt::Error> {
+        match self {
+            Self::Field(field) => field.truthy(data, dot),
+            Self::Pipeline(pipeline) => pipeline.truthy(data, dot),
+        }
+    }
 }
 
 fn write_value(value: Option<Value<'_>>, output: &mut String) -> fmt::Result {
@@ -230,7 +254,12 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             .strip_prefix("if ")
             .or_else(|| action.strip_prefix("range "))
         {
-            let condition = parse_field(condition.trim())?;
+            let condition = condition.trim();
+            let field = if range {
+                Some(parse_field(condition)?)
+            } else {
+                None
+            };
             let (yes, marker) = parse_parts(source, depth + 1)?;
             let no = if marker == Some(Marker::Else) {
                 let (no, marker) = parse_parts(source, depth + 1)?;
@@ -243,11 +272,13 @@ fn parse_parts(source: &mut &str, depth: usize) -> Result<(Vec<Part>, Option<Mar
             } else {
                 return Err("if is missing end".into());
             };
-            if range {
-                Part::Range(condition, yes, no)
+            if let Some(field) = field {
+                Part::Range(field, yes, no)
             } else {
-                Part::If(condition, yes, no)
+                Part::If(Condition::parse(condition)?, yes, no)
             }
+        } else if action.contains('|') {
+            Part::Pipeline(pipeline::Pipeline::compile(action)?)
         } else if let Some(args) = action.strip_prefix("len ") {
             Part::Len(parse_field(args.trim())?)
         } else if let Some(args) = action.strip_prefix("eq ") {

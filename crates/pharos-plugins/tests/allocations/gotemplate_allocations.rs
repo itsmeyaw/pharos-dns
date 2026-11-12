@@ -28,3 +28,26 @@ fn renders_fields_and_numbers_without_allocating() {
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
     assert_eq!(output, "example. eu 123 example.");
 }
+
+#[test]
+fn rendering_pipelines_and_conditionals_does_not_allocate() {
+    if crate::run_isolated(
+        "gotemplate::gotemplate_allocations::rendering_pipelines_and_conditionals_does_not_allocate",
+    ) {
+        return;
+    }
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let vars = [("local", pharos_plugins::expression::Value::Bool(false))];
+    let mut data = Data::new("example.", &metadata);
+    data.variables = &vars;
+    let template =
+        Template::compile("{{ 8 | parseInt \"ff\" 16 }} {{ if .Var.local | not }}remote{{ end }}")
+            .unwrap();
+    let mut output = String::with_capacity(64);
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    template.render(&data, &mut output).unwrap();
+    let stats = region.change();
+    assert_eq!((stats.allocations, stats.reallocations), (0, 0));
+    assert_eq!(output, "255 remote");
+}
