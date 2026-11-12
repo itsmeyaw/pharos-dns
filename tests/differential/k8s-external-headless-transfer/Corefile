@@ -1,0 +1,12 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    transfer example.org {
+        to *
+    }
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+    }
+    k8s_external example.org {
+        headless
+    }
+}

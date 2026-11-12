@@ -1,0 +1,11 @@
+.:{port} {
+    ready 127.0.0.1:{metrics_port}
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+    }
+    k8s_external example.org
+    hosts /nonexistent destination.test {
+        192.0.2.41 destination.test
+        2001:db8::41 destination.test
+    }
+}
