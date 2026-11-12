@@ -177,6 +177,95 @@ fn template_readme_hexadecimal_address_example() {
 }
 
 #[test]
+fn coredns_captured_variable_expression_and_answer_are_connected() {
+    // CoreDNS v1.15.0 plugin/template/expr_test.go, UsesVars and UsesGroup.
+    let wire =
+        b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x012\x07example\x00\x00\x01\x00\x01";
+    let message = Message::parse(wire).unwrap();
+    let mut query = Query::new(
+        &message,
+        "10.240.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    query.matches = &["2.example.", "2"];
+    query.groups = &[("n", "2")];
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut bytes = [0; 1024];
+    let mut scratch = Scratch::new(&mut bytes);
+    let Value::Int(value) = Expression::compile("int(group('n'))")
+        .unwrap()
+        .evaluate(&query, &metadata, &mut scratch)
+        .unwrap()
+    else {
+        panic!("expected integer capture");
+    };
+    let variables = [("num", Value::Int(value))];
+    query.variables = &variables;
+    for source in ["num > 1", "group('n') == '2' && group(0) == '2.example.'"] {
+        let expression =
+            Expression::compile_with_variables(source, &[("num", ValueType::Int)]).unwrap();
+        assert_eq!(
+            expression
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    let mut data = Data::new("2.example.", &metadata);
+    data.variables = &variables;
+    data.groups = query.groups;
+    for source in [
+        "{{ .Name }} 60 IN A 10.0.0.{{ .Var.num }}",
+        "{{ .Name }} 60 IN A 10.0.0.{{ .Group.n }}",
+    ] {
+        let mut output = String::new();
+        Template::compile(source)
+            .unwrap()
+            .render(&data, &mut output)
+            .unwrap();
+        assert_eq!(output, "2.example. 60 IN A 10.0.0.2");
+    }
+}
+
+#[test]
+fn coredns_setup_template_variants_and_bad_field() {
+    // CoreDNS v1.15.0 plugin/template/setup_test.go, template setup cases.
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut data = Data::new("ip.example.", &metadata);
+    data.matches = &["whole", "example."];
+    data.groups = &[("a", "10"), ("b", "7b"), ("c", "7b"), ("d", "7b")];
+    for (source, expected) in [
+        (
+            "{{ index .Match 1 }} 60 IN SOA ns.{{ index .Match 1 }} hostmaster.example.com (1 60 60 60 60)",
+            "example. 60 IN SOA ns.example. hostmaster.example.com (1 60 60 60 60)",
+        ),
+        (
+            "{{ .Name }} 3600 IN A 10.{{ parseInt .Group.b 16 8 }}.{{ parseInt .Group.c 16 8 }}.{{ parseInt .Group.d 16 8 }}",
+            "ip.example. 3600 IN A 10.123.123.123",
+        ),
+        (
+            "{{ .Name }} 60 CH TXT \"test\"",
+            "ip.example. 60 CH TXT \"test\"",
+        ),
+    ] {
+        let mut output = String::new();
+        Template::compile(source)
+            .unwrap()
+            .render(&data, &mut output)
+            .unwrap();
+        assert_eq!(output, expected, "{source}");
+    }
+    let bad = Template::compile(
+        "{{ .Name }} A {{ .Group.a }}.{{ .Group.b }}.{{ .Group.c }}.{{ .Grup.d }}.",
+    )
+    .unwrap();
+    assert!(bad.render(&data, &mut String::new()).is_err());
+}
+
+#[test]
 fn coredns_expression_tests_cover_query_metadata_group_and_errors() {
     // CoreDNS v1.15.0 plugin/template/{expr,var,setup}_test.go and plugin/view/*_test.go.
     let wire =
