@@ -441,6 +441,19 @@ fn kubernetes_corefile(corefile: &str, config: &Path) -> String {
     corefile.replace("{kubeconfig}", &config.to_string_lossy())
 }
 
+fn verify_self_test(
+    baseline: Result<(), String>,
+    injected: Result<(), String>,
+    expected: &str,
+) -> Result<(), String> {
+    baseline.map_err(|error| format!("self-test baseline mismatch: {error}"))?;
+    match injected {
+        Err(error) if error.contains(expected) => Ok(()),
+        Err(error) => Err(format!("self-test detected an unrelated failure: {error}")),
+        Ok(()) => Err("self-test did not detect the injected header mismatch".into()),
+    }
+}
+
 fn scenario(
     path: &Path,
     pharos: &Path,
@@ -545,9 +558,6 @@ fn scenario(
         if pwire.len() < 4 || cwire.len() < 4 {
             return Err(format!("{line}: truncated Response header"));
         }
-        if self_test {
-            pwire[2] ^= 4;
-        }
         apply_deviation(&expect, line, &mut pwire, &cwire)?;
         let pm = Message::parse(&pwire).map_err(|e| format!("Pharos {line}: {e}"))?;
         let cm = Message::parse(&cwire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
@@ -575,6 +585,32 @@ fn scenario(
             expect.mask_soa_serial,
             expect.dedupe_additional,
         );
+        if self_test {
+            let mut corrupted = pwire.clone();
+            corrupted[2] ^= 4;
+            let bad = Message::parse(&corrupted).map_err(|e| format!("Pharos {line}: {e}"))?;
+            let bad = if p_signed {
+                bad.without_final_tsig().ok_or("missing Pharos TSIG")?
+            } else {
+                bad
+            };
+            let expected = format!(
+                ";; HEADER flags:\n- 0x{:04x}\n+ 0x{:04x}",
+                bad.flags(),
+                cm.flags()
+            );
+            let injected = compare::compare_with_soa_serial(
+                &bad,
+                &cm,
+                expect.ttl,
+                expect.mask_srv_port,
+                expect.mask_soa_serial,
+                expect.dedupe_additional,
+            );
+            verify_self_test(result, injected, &expected).map_err(|e| format!("{line}: {e}"))?;
+            println!("self-test detected injected header mismatch: {line}");
+            return Ok(count + 1);
+        }
         result.map_err(|e| format!("{line}:\n{e}"))?;
         count += 1;
     }
@@ -658,6 +694,24 @@ mod tests {
         TempDir, apply_deviation, copy_fixtures, kubernetes_corefile, kubernetes_ready,
         parse_expect, reserve_port, start,
     };
+
+    #[test]
+    fn self_test_accepts_only_the_injected_header_mismatch() {
+        let expected = ";; HEADER flags:\n- 0x8500\n+ 0x8100";
+        assert!(
+            super::verify_self_test(Ok(()), Err(format!("details\n{expected}")), expected).is_ok()
+        );
+        assert!(super::verify_self_test(Ok(()), Ok(()), expected).is_err());
+        assert!(super::verify_self_test(Ok(()), Err("startup failure".into()), expected).is_err());
+        assert!(
+            super::verify_self_test(
+                Err("unrelated mismatch".into()),
+                Err(expected.into()),
+                expected
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn kubernetes_http_readiness_requires_ok() {
