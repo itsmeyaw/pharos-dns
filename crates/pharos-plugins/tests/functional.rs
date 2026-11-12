@@ -25,6 +25,10 @@ mod any {
 mod view {
     #[path = "view.rs"]
     mod cases;
+    #[path = "view_filter.rs"]
+    mod filter;
+    #[path = "view_routing.rs"]
+    mod routing;
 }
 
 #[path = "functional"]
