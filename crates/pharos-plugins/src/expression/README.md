@@ -1,4 +1,6 @@
 # Expression subset
 
-The expression engine is under construction. It currently accepts only the
-boolean literals `true` and `false`; all other expressions fail compilation.
+The expression engine is under construction. It currently accepts boolean,
+integer and quoted string literals; parentheses; `!`, `not`, unary `-`, integer
+arithmetic, comparisons, `&&`, `and`, `||` and `or`. Other constructs fail
+compilation.
