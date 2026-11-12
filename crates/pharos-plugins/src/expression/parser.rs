@@ -122,6 +122,25 @@ impl Parser<'_, '_> {
                 .count();
             self.token = Token::Ident(rest[..len].to_owned());
             self.offset += len;
+        } else if first == '`' {
+            let mut value = String::new();
+            let mut chars = rest[1..].char_indices();
+            let mut end = None;
+            while let Some((pos, ch)) = chars.next() {
+                if ch == '`' {
+                    if chars.clone().next().is_some_and(|(_, next)| next == '`') {
+                        chars.next();
+                        value.push('`');
+                    } else {
+                        end = Some(pos + 2);
+                        break;
+                    }
+                } else {
+                    value.push(ch);
+                }
+            }
+            self.offset += end.ok_or("unterminated raw string")?;
+            self.token = Token::String(value);
         } else if first == '\'' || first == '"' {
             let mut value = String::new();
             let mut chars = rest[first.len_utf8()..].char_indices();
@@ -134,15 +153,25 @@ impl Parser<'_, '_> {
                 if ch == '\\' {
                     let (_, escaped) = chars.next().ok_or("unterminated string escape")?;
                     value.push(match escaped {
+                        'a' => '\u{7}',
+                        'b' => '\u{8}',
+                        'f' => '\u{c}',
                         'n' => '\n',
                         'r' => '\r',
                         't' => '\t',
+                        'v' => '\u{b}',
                         '\\' => '\\',
                         '\'' => '\'',
                         '"' => '"',
+                        '`' => '`',
+                        '?' => '?',
+                        'x' | 'X' | 'u' | 'U' | '0'..='3' => escape(escaped, &mut chars)?,
                         _ => return Err(format!("unsupported string escape: \\{escaped}")),
                     });
                 } else {
+                    if ch == '\n' {
+                        return Err("unterminated string".into());
+                    }
                     value.push(ch);
                 }
             }
@@ -466,4 +495,51 @@ impl Parser<'_, '_> {
             _ => return None,
         })
     }
+}
+
+fn escape(first: char, chars: &mut std::str::CharIndices<'_>) -> Result<char, String> {
+    let octal = matches!(first, '0'..='3');
+    let mut value = if octal {
+        first.to_digit(8).unwrap_or_default()
+    } else {
+        0
+    };
+    let mut length = match first {
+        'x' | 'X' => 2,
+        'u' => 4,
+        'U' => 8,
+        _ => 2,
+    };
+    let braced = first == 'u' && chars.clone().next().is_some_and(|(_, ch)| ch == '{');
+    if braced {
+        chars.next();
+        length = 0;
+    }
+    if braced {
+        for (_, ch) in chars.by_ref() {
+            if ch == '}' {
+                if length == 0 {
+                    return Err("empty Unicode escape".into());
+                }
+                return char::from_u32(value)
+                    .or_else(|| (value <= 0x10ffff).then_some('\u{fffd}'))
+                    .ok_or_else(|| "invalid Unicode escape".into());
+            }
+            if length == 6 {
+                return Err("Unicode escape too long".into());
+            }
+            value = value * 16 + ch.to_digit(16).ok_or("invalid Unicode escape")?;
+            length += 1;
+        }
+        return Err("unterminated Unicode escape".into());
+    }
+    for _ in 0..length {
+        let (_, ch) = chars.next().ok_or("incomplete string escape")?;
+        value = value * if octal { 8 } else { 16 }
+            + ch.to_digit(if octal { 8 } else { 16 })
+                .ok_or("invalid string escape")?;
+    }
+    char::from_u32(value)
+        .or_else(|| (value <= 0x10ffff).then_some('\u{fffd}'))
+        .ok_or_else(|| "invalid Unicode escape".into())
 }
