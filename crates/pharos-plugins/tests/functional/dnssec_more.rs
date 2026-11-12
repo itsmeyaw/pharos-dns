@@ -50,6 +50,8 @@ enum Reply {
     Positive(Type),
     MixedCase,
     MixedTtl,
+    CrossSectionTtl,
+    ExistingSignatures,
     Large,
 }
 
@@ -141,6 +143,63 @@ impl Next for Reply {
                     b"\x04test",
                 )
                 .unwrap();
+            }
+            Self::CrossSectionTtl => {
+                for (section, ttl, last) in [
+                    (Section::Answer, 300, 1),
+                    (Section::Authority, 60, 2),
+                    (Section::Additional, 30, 3),
+                ] {
+                    b.record(section, q.name, Type::A, Class::IN, ttl, &[192, 0, 2, last])
+                        .unwrap();
+                }
+            }
+            Self::ExistingSignatures => {
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::A,
+                    Class::IN,
+                    120,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::TXT,
+                    Class::IN,
+                    300,
+                    b"\x04test",
+                )
+                .unwrap();
+                let signer = NameRef::parse(cx.domain.as_wire(), 0).unwrap();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as u32;
+                for (covered, ttl) in [(Type::A, 300), (Type::A, 120), (Type::TXT, 300)] {
+                    let sig = Rdata::Rrsig {
+                        type_covered: covered,
+                        algorithm: 13,
+                        labels: 3,
+                        original_ttl: ttl,
+                        expiration: now.wrapping_add(86400),
+                        inception: now.wrapping_sub(3600),
+                        key_tag: 59725,
+                        signer,
+                        signature: &[1],
+                    };
+                    b.record_with(
+                        Section::Answer,
+                        q.name,
+                        Type::RRSIG,
+                        Class::IN,
+                        ttl,
+                        |writer| sig.write(writer),
+                    )
+                    .unwrap();
+                }
             }
             Self::Large => {
                 for i in 0..27 {
@@ -258,6 +317,68 @@ async fn signed_rrsets_use_the_lowest_ttl_for_records_and_signatures() {
         checked += 1;
     }
     assert_eq!(checked, 2);
+}
+
+// RFC 2181 §5.2: one RRset has one TTL across the entire Response.
+#[tokio::test]
+async fn rrset_ttl_is_normalized_across_response_sections() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(
+        &dnssec,
+        &q,
+        Reply::CrossSectionTtl,
+        Protocol::Udp,
+        4096,
+        4096,
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    for records in [msg.answers(), msg.authorities(), msg.additionals()] {
+        let records: Vec<_> = records.collect();
+        let rr = records.iter().find(|rr| rr.rtype == Type::A).unwrap();
+        assert_eq!(rr.ttl, 30);
+        let sig = records.iter().find(|rr| rr.rtype == Type::RRSIG).unwrap();
+        assert_eq!(sig.ttl, 30);
+        assert!(matches!(
+            sig.data().unwrap(),
+            Rdata::Rrsig {
+                original_ttl: 30,
+                ..
+            }
+        ));
+    }
+}
+
+// RFC 4034 §3: RRSIGs covering different RRsets can have different TTLs.
+#[tokio::test]
+async fn existing_rrsig_ttls_are_grouped_by_covered_type() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(
+        &dnssec,
+        &q,
+        Reply::ExistingSignatures,
+        Protocol::Udp,
+        4096,
+        4096,
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    let mut existing = Vec::new();
+    for rr in msg.answers().filter(|rr| rr.rtype == Type::RRSIG) {
+        if let Rdata::Rrsig {
+            type_covered,
+            signature: [1],
+            ..
+        } = rr.data().unwrap()
+        {
+            existing.push((type_covered, rr.ttl));
+        }
+    }
+    assert_eq!(existing, [(Type::A, 120), (Type::A, 120), (Type::TXT, 300)]);
 }
 
 // RFC 2181 §5.2: DNSKEYs at the same Apex share their lowest TTL, even without DO.

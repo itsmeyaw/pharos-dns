@@ -38,13 +38,24 @@ impl CacheEntry {
     }
 }
 
-fn rrset_ttl(message: &Message<'_>, rr: &Record<'_>) -> u32 {
+fn same_rrset(left: &Record<'_>, right: &Record<'_>) -> bool {
+    // RFC 2181 §5: an RRset shares its owner, class and type.
+    left.name == right.name && left.rtype == right.rtype && left.class == right.class
+}
+
+fn rrset_ttl(message: &Message<'_>, rr: &Record<'_>, covered: Option<Type>) -> u32 {
     // RFC 2181 §5.2: records in one RRset use the lowest received TTL.
+    // shortcut: scans the Message for each RR on a cache miss; index RRsets if miss cost becomes significant.
     message
         .answers()
         .chain(message.authorities())
         .chain(message.additionals())
-        .filter(|other| other.name == rr.name && other.rtype == rr.rtype && other.class == rr.class)
+        .filter(|other| {
+            same_rrset(other, rr)
+                && covered.is_none_or(|covered| {
+                    matches!(other.data(), Ok(Rdata::Rrsig { type_covered, .. }) if type_covered == covered)
+                })
+        })
         .map(|other| other.ttl)
         .min()
         .unwrap_or(rr.ttl)
@@ -64,7 +75,7 @@ impl Dnssec {
             .map(|(_, metrics)| metrics);
         {
             let cache = self.cache.lock().map_err(|_| Error::PluginPanic)?;
-            // RFC 4034 §3.1.4: the unsigned Response key includes the covered RRset TTLs.
+            // RFC 4034 §3.1.4: a signature's Original TTL belongs to its covered RRset.
             if let Some(entry) = cache.get(cx.response.get(2..).ok_or(Error::InvalidQuery)?)
                 && entry.valid(now, cx.max_response_size)
             {
@@ -175,10 +186,13 @@ impl Dnssec {
                     continue;
                 }
                 let data = rr.data().map_err(|_| Error::InvalidQuery)?;
-                let ttl = if matches!(rr.rtype, Type::RRSIG | Type::OPT | Type::TSIG) {
-                    rr.ttl
-                } else {
-                    rrset_ttl(&message, rr)
+                // RFC 4034 §3: RRSIG TTLs may differ when they cover different RRsets.
+                let ttl = match data {
+                    Rdata::Rrsig { type_covered, .. } => {
+                        rrset_ttl(&message, rr, Some(type_covered))
+                    }
+                    _ if matches!(rr.rtype, Type::OPT | Type::TSIG) => rr.ttl,
+                    _ => rrset_ttl(&message, rr, None),
                 };
                 builder
                     .record_with(section, rr.name, rr.rtype, rr.class, ttl, |writer| {
@@ -195,20 +209,17 @@ impl Dnssec {
                 }
                 // RFC 4035 §2.2: an RRSIG RR is never signed; OPT and TSIG are not zone data.
                 if matches!(rr.rtype, Type::RRSIG | Type::OPT | Type::TSIG)
-                    || records[..i]
-                        .iter()
-                        .any(|r| r.name == rr.name && r.rtype == rr.rtype && r.class == rr.class)
+                    || records[..i].iter().any(|r| same_rrset(r, rr))
                 {
                     continue;
                 }
                 let Some(zone) = self.zone_for(rr.name) else {
                     continue;
                 };
-                // RFC 2181 §5: an RRset shares its owner, class and type.
                 let group: Vec<_> = records
                     .iter()
                     .copied()
-                    .filter(|r| r.name == rr.name && r.rtype == rr.rtype && r.class == rr.class)
+                    .filter(|r| same_rrset(r, rr))
                     .collect();
                 signed_sets += usize::from(self.sign_set(
                     &mut builder,
@@ -216,7 +227,7 @@ impl Dnssec {
                     &group,
                     zone,
                     now,
-                    SignMode::All(rrset_ttl(&message, rr)),
+                    SignMode::All(rrset_ttl(&message, rr, None)),
                 )?);
                 attempted_sets += 1;
             }
