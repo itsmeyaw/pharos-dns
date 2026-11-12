@@ -78,13 +78,19 @@ async fn health_shutdown_follows_server_block_order() {
     let blocks = parse("Corefile", &input).unwrap();
     let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     lifecycle.run(Phase::Startup).await.unwrap();
-    let shutdown = tokio::spawn(async move { lifecycle.run(Phase::Shutdown).await });
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let shutdown = tokio::spawn(async move {
+        let _ = started.send(());
+        lifecycle.run(Phase::Shutdown).await
+    });
+    starting.await.unwrap();
+    assert!(!shutdown.is_finished());
     assert!(
         request(second, "GET", "/health")
             .await
             .starts_with("HTTP/1.1 200")
     );
+    assert!(!shutdown.is_finished());
     shutdown.await.unwrap().unwrap();
 }
 
@@ -102,8 +108,26 @@ async fn health_self_probes_export_unlabelled_histogram_and_failures() {
     let blocks = parse("Corefile", &input).unwrap();
     let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     lifecycle.run(Phase::Startup).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let response = request(metrics, "GET", "/metrics").await;
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let response = request(metrics, "GET", "/metrics").await;
+            let value = |name: &str| {
+                response
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                    .unwrap_or(0)
+            };
+            if value("pharos_health_request_duration_seconds_count ") >= 2
+                && value("pharos_health_request_failures_total ") >= 1
+            {
+                break response;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("health probes did not update metrics");
     for bucket in ["0.00025", "0.0025", "0.025", "0.25", "2.5", "+Inf"] {
         assert!(
             response.contains(&format!(

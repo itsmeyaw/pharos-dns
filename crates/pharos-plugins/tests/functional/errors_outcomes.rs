@@ -4,6 +4,7 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Message, Name};
 use pharos_server::{Context, Error, Metadata, Next, Outcome, Phase, Plugin, Protocol, Transport};
+use std::io::{BufRead, Write};
 
 struct Answer(Outcome);
 impl Next for Answer {
@@ -68,17 +69,60 @@ fn errors_are_logged_and_consolidated() {
             "errors like",
         ),
     ] {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
             .args([
                 "--exact",
                 "errors::errors_outcomes::errors_probe",
                 "--nocapture",
             ])
-            .env("PHAROS_ERRORS_TEST", case)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        let stdout = String::from_utf8(output.stdout).unwrap();
+            .env("PHAROS_ERRORS_TEST", case);
+        let (status, stdout) = if case == "timer" {
+            let mut child = command
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (sent, received) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                let mut output = String::new();
+                for line in std::io::BufReader::new(stdout).lines() {
+                    let line = line.unwrap();
+                    if line
+                        .contains(" ERROR errors: 3 errors like '^no next' occurred in last 20ms")
+                    {
+                        let _ = sent.send(());
+                    }
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+                output
+            });
+            if received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_err()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "timer did not flush before shutdown: {}",
+                    reader.join().unwrap()
+                );
+            }
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"continue\n")
+                .unwrap();
+            let status = child.wait().unwrap();
+            (status, reader.join().unwrap())
+        } else {
+            let output = command.output().unwrap();
+            (output.status, String::from_utf8(output.stdout).unwrap())
+        };
+        assert!(status.success(), "{case}: {status}");
         assert!(stdout.contains(expected), "{case}: {stdout}");
         assert!(!stdout.contains(absent), "{case}: {stdout}");
     }
@@ -154,7 +198,13 @@ async fn errors_probe() {
         );
     }
     if case == "timer" {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).unwrap();
+            assert_eq!(line, "continue\n");
+        })
+        .await
+        .unwrap();
     }
     configured[0]
         .config

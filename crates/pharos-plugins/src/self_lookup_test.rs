@@ -114,8 +114,17 @@ async fn stale_refresh_self_lookup_caches_chased_cname() {
     assert_eq!(message.rcode(), Rcode::NOERROR);
     assert_eq!(message.answer_count(), 2);
     assert_eq!(message.answers().last().unwrap().rdata, [192, 0, 2, 42]);
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    let refreshed = request(address).await;
+    let refreshed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let response = request(address).await;
+            if calls.load(Ordering::SeqCst) == 2 {
+                break response;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cached answer did not expire");
     let message = Message::parse(&refreshed).unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(message.rcode(), Rcode::NOERROR);
@@ -142,8 +151,9 @@ async fn detached_prefetch_keeps_its_listener_state_during_reload() {
     let done = Arc::new(Notify::new());
     let result = Arc::new(AtomicUsize::new(0));
     let make_servers = |address: u8, plugin: TestPlugin| {
+        // CoreDNS cache prefetch: the 50% threshold prevents polling from refreshing before TTL 1.
         let text = format!(
-            "example.:0 {{\n cache {{\n success 1024 2 0\n prefetch 1 1m 90%\n }}\n whoami\n}}\nother.:0 {{\n hosts /nonexistent other. {{\n 192.0.2.{address} b.other.\n }}\n}}"
+            "example.:0 {{\n cache {{\n success 1024 2 0\n prefetch 1 1m 50%\n }}\n whoami\n}}\nother.:0 {{\n hosts /nonexistent other. {{\n 192.0.2.{address} b.other.\n }}\n}}"
         );
         let parsed = parse("Corefile", &text).unwrap();
         let mut blocks = configure::<crate::Chain>(&parsed, crate::directives()).unwrap();
@@ -177,16 +187,19 @@ async fn detached_prefetch_keeps_its_listener_state_during_reload() {
         [192, 0, 2, 42]
     );
     done.notified().await;
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    assert_eq!(
-        Message::parse(&request(address).await)
-            .unwrap()
-            .answers()
-            .last()
-            .unwrap()
-            .rdata,
-        [192, 0, 2, 42]
-    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let response = request(address).await;
+            let message = Message::parse(&response).unwrap();
+            assert_eq!(message.answers().last().unwrap().rdata, [192, 0, 2, 42]);
+            if message.answers().next().unwrap().ttl == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cached answer did not age");
     tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
         .await
         .unwrap();
