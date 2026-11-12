@@ -66,6 +66,7 @@ pub mod multisocket;
 #[cfg(feature = "plugin-nsid")]
 pub mod nsid;
 pub mod proxy;
+mod regex_match;
 #[cfg(feature = "plugin-rewrite")]
 pub mod rewrite;
 #[cfg(feature = "plugin-siit")]

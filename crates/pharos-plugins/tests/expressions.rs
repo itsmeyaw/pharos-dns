@@ -162,3 +162,27 @@ fn list_membership_and_string_operators_follow_expr() {
         assert!(Expression::compile(source).is_err(), "{source}");
     }
 }
+
+#[test]
+fn coredns_name_regex_is_compiled_at_setup() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    let expression = Expression::compile(r"name() matches '^example\\.org\\.$'").unwrap();
+    assert_eq!(
+        expression
+            .evaluate(&query, &metadata, &mut scratch)
+            .unwrap(),
+        Value::Bool(true)
+    );
+    assert!(Expression::compile("name() matches '['").is_err());
+    assert!(Expression::compile("name() matches metadata('pattern')").is_err());
+}

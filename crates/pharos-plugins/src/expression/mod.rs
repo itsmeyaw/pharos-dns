@@ -96,6 +96,7 @@ enum Binary {
     Contains,
     StartsWith,
     EndsWith,
+    Matches,
 }
 
 enum Node {
@@ -104,6 +105,7 @@ enum Node {
     String(String),
     List(Vec<Node>),
     Call(String, Vec<Node>, Kind),
+    Matches(Box<Node>, crate::regex_match::Regex),
     Unary(Unary, Box<Node>),
     Binary(Binary, Box<Node>, Box<Node>, Kind),
 }
@@ -116,6 +118,7 @@ impl Node {
             Self::String(_) => Kind::String,
             Self::List(_) => Kind::List,
             Self::Call(_, _, kind) => *kind,
+            Self::Matches(..) => Kind::Bool,
             Self::Binary(_, _, _, kind) => *kind,
         }
     }
@@ -132,6 +135,10 @@ impl Node {
             Self::String(value) => Ok(Temporary::Borrowed(value)),
             Self::List(_) => Err("list cannot be evaluated alone"),
             Self::Call(name, args, _) => call(name, args, query, metadata, scratch),
+            Self::Matches(value, regex) => {
+                let value = value.eval(query, metadata, scratch)?;
+                Ok(Temporary::Bool(regex.is_match(value.text(scratch)?)))
+            }
             Self::Unary(Unary::Not, node) => match node.eval(query, metadata, scratch)? {
                 Temporary::Bool(value) => Ok(Temporary::Bool(!value)),
                 _ => Err("expected bool"),

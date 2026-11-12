@@ -196,6 +196,16 @@ impl Parser<'_> {
             }
             self.advance()?;
             let right = self.expression(precedence + 1)?;
+            if matches!(op, Binary::Matches) {
+                if left.kind() != Kind::String {
+                    return Err("matches requires a string".into());
+                }
+                let Node::String(pattern) = right else {
+                    return Err("matches requires a literal pattern".into());
+                };
+                left = Node::Matches(Box::new(left), crate::regex_match::Regex::new(&pattern)?);
+                continue;
+            }
             let kind = match op {
                 Binary::And | Binary::Or
                     if left.kind() == Kind::Bool && right.kind() == Kind::Bool =>
@@ -258,6 +268,7 @@ impl Parser<'_> {
             "contains" => (Binary::Contains, 3),
             "startsWith" => (Binary::StartsWith, 3),
             "endsWith" => (Binary::EndsWith, 3),
+            "matches" => (Binary::Matches, 3),
             "+" => (Binary::Add, 4),
             "-" => (Binary::Sub, 4),
             "*" => (Binary::Mul, 5),

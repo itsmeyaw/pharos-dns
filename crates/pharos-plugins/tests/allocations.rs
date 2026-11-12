@@ -151,6 +151,12 @@ mod gotemplate {
 }
 
 #[path = "allocations"]
+mod expression {
+    #[path = "expression_allocations.rs"]
+    mod expression_allocations;
+}
+
+#[path = "allocations"]
 mod minimal {
     #[path = "minimal_allocations.rs"]
     mod minimal_allocations;
