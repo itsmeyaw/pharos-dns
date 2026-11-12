@@ -271,3 +271,66 @@ fn template_capture_groups_variables_and_int_conversion() {
             .is_err()
     );
 }
+
+#[test]
+fn documented_template_replace_and_any_expression() {
+    let message = Message::parse(WIRE).unwrap();
+    let mut query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    query.groups = &[("ip", "192-168-1-2")];
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    let ip = Expression::compile("replace(group('ip'), '-', '.')").unwrap();
+    assert_eq!(
+        ip.evaluate(&query, &metadata, &mut scratch).unwrap(),
+        Value::String("192.168.1.2")
+    );
+    query.variables = &[("ip", Value::String("192.168.1.2"))];
+    let expr = Expression::compile_with_variables(
+        "any(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'], incidr(ip, #))",
+        &[("ip", ValueType::String)],
+    )
+    .unwrap();
+    assert_eq!(
+        expr.evaluate(&query, &metadata, &mut scratch).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(Expression::compile("#").is_err());
+    assert!(Expression::compile("any([1], #)").is_err());
+}
+
+#[test]
+fn replace_and_any_handle_unicode_empty_lists_and_nested_predicates() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "replace('áx', '', '-') == '-á-x-'",
+        "replace('aaa', 'aa', 'b') == 'ba'",
+        "not any([], true)",
+        "any([1, 2], # == 2 && any([3], # == 3))",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+}

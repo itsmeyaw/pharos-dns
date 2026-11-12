@@ -129,6 +129,8 @@ enum Node {
     String(String),
     Variable(String, Kind),
     List(Vec<Node>),
+    Current(Kind),
+    Any(Vec<Node>, Box<Node>),
     Call(String, Vec<Node>, Kind),
     Matches(Box<Node>, crate::regex_match::Regex),
     Unary(Unary, Box<Node>),
@@ -143,6 +145,8 @@ impl Node {
             Self::String(_) => Kind::String,
             Self::Variable(_, kind) => *kind,
             Self::List(_) => Kind::List,
+            Self::Current(kind) => *kind,
+            Self::Any(..) => Kind::Bool,
             Self::Call(_, _, kind) => *kind,
             Self::Matches(..) => Kind::Bool,
             Self::Binary(_, _, _, kind) => *kind,
@@ -154,6 +158,7 @@ impl Node {
         query: &'a Query<'_>,
         metadata: &'a Metadata<'_>,
         scratch: &mut Scratch<'_>,
+        current: Option<Temporary<'a>>,
     ) -> Result<Temporary<'a>, &'static str> {
         match self {
             Self::Bool(value) => Ok(Temporary::Bool(*value)),
@@ -173,21 +178,37 @@ impl Node {
                 }
             }
             Self::List(_) => Err("list cannot be evaluated alone"),
-            Self::Call(name, args, _) => call(name, args, query, metadata, scratch),
+            Self::Current(_) => current.ok_or("missing any predicate value"),
+            Self::Any(items, predicate) => {
+                for item in items {
+                    let saved = scratch.len;
+                    let value = item.eval(query, metadata, scratch, current)?;
+                    let matched = predicate.eval(query, metadata, scratch, Some(value))?;
+                    let Temporary::Bool(matched) = matched else {
+                        return Err("any predicate must be boolean");
+                    };
+                    scratch.len = saved;
+                    if matched {
+                        return Ok(Temporary::Bool(true));
+                    }
+                }
+                Ok(Temporary::Bool(false))
+            }
+            Self::Call(name, args, _) => call(name, args, query, metadata, scratch, current),
             Self::Matches(value, regex) => {
-                let value = value.eval(query, metadata, scratch)?;
+                let value = value.eval(query, metadata, scratch, current)?;
                 Ok(Temporary::Bool(regex.is_match(value.text(scratch)?)))
             }
-            Self::Unary(Unary::Not, node) => match node.eval(query, metadata, scratch)? {
+            Self::Unary(Unary::Not, node) => match node.eval(query, metadata, scratch, current)? {
                 Temporary::Bool(value) => Ok(Temporary::Bool(!value)),
                 _ => Err("expected bool"),
             },
-            Self::Unary(Unary::Neg, node) => match node.eval(query, metadata, scratch)? {
+            Self::Unary(Unary::Neg, node) => match node.eval(query, metadata, scratch, current)? {
                 Temporary::Int(value) => Ok(Temporary::Int(value.wrapping_neg())),
                 _ => Err("expected integer"),
             },
             Self::Binary(op, left, right, _) => {
-                let left = left.eval(query, metadata, scratch)?;
+                let left = left.eval(query, metadata, scratch, current)?;
                 if matches!(
                     (op, &left),
                     (Binary::And, Temporary::Bool(false)) | (Binary::Or, Temporary::Bool(true))
@@ -199,14 +220,14 @@ impl Node {
                         return Err("expected list");
                     };
                     for item in items {
-                        let value = item.eval(query, metadata, scratch)?;
+                        let value = item.eval(query, metadata, scratch, current)?;
                         if equal(left, value, scratch)? {
                             return Ok(Temporary::Bool(true));
                         }
                     }
                     return Ok(Temporary::Bool(false));
                 }
-                let right = right.eval(query, metadata, scratch)?;
+                let right = right.eval(query, metadata, scratch, current)?;
                 use Binary::*;
                 match (op, left, right) {
                     (And, Temporary::Bool(a), Temporary::Bool(b)) => Ok(Temporary::Bool(a && b)),
@@ -292,6 +313,18 @@ impl<'a> Temporary<'a> {
             _ => Err("expected string"),
         }
     }
+
+    fn slice(self, start: usize, end: usize) -> Result<Self, &'static str> {
+        match self {
+            Self::Borrowed(value) => Ok(Self::Borrowed(
+                value.get(start..end).ok_or("invalid string slice")?,
+            )),
+            Self::Stored(offset, limit) if offset + end <= limit && start <= end => {
+                Ok(Self::Stored(offset + start, offset + end))
+            }
+            _ => Err("invalid string slice"),
+        }
+    }
 }
 
 impl Scratch<'_> {
@@ -315,15 +348,59 @@ impl Scratch<'_> {
     }
 }
 
+fn replace<'a>(
+    input: Temporary<'a>,
+    from: Temporary<'a>,
+    to: Temporary<'a>,
+    scratch: &mut Scratch<'_>,
+) -> Result<Temporary<'a>, &'static str> {
+    let output = scratch.len;
+    let len = input.text(scratch)?.len();
+    let from_len = from.text(scratch)?.len();
+    let mut pos = 0;
+    if from_len == 0 {
+        loop {
+            scratch.append(to)?;
+            if pos == len {
+                break;
+            }
+            let next = pos
+                + input.text(scratch)?[pos..]
+                    .chars()
+                    .next()
+                    .ok_or("invalid string")?
+                    .len_utf8();
+            scratch.append(input.slice(pos, next)?)?;
+            pos = next;
+        }
+    } else {
+        while let Some(relative) = input.text(scratch)?[pos..].find(from.text(scratch)?) {
+            let found = pos + relative;
+            scratch.append(input.slice(pos, found)?)?;
+            scratch.append(to)?;
+            pos = found + from_len;
+        }
+        scratch.append(input.slice(pos, len)?)?;
+    }
+    Ok(Temporary::Stored(output, scratch.len))
+}
+
 fn call<'a>(
     name: &str,
     args: &'a [Node],
     query: &'a Query<'_>,
     metadata: &'a Metadata<'_>,
     scratch: &mut Scratch<'_>,
+    current: Option<Temporary<'a>>,
 ) -> Result<Temporary<'a>, &'static str> {
+    if name == "replace" {
+        let input = args[0].eval(query, metadata, scratch, current)?;
+        let from = args[1].eval(query, metadata, scratch, current)?;
+        let to = args[2].eval(query, metadata, scratch, current)?;
+        return replace(input, from, to, scratch);
+    }
     if name == "group" {
-        let value = args[0].eval(query, metadata, scratch)?;
+        let value = args[0].eval(query, metadata, scratch, current)?;
         let group = match value {
             Temporary::Int(index) => usize::try_from(index)
                 .ok()
@@ -351,7 +428,7 @@ fn call<'a>(
         return Ok(Temporary::Borrowed(group));
     }
     if name == "int" {
-        let value = args[0].eval(query, metadata, scratch)?;
+        let value = args[0].eval(query, metadata, scratch, current)?;
         return match value {
             Temporary::Int(value) => Ok(Temporary::Int(value)),
             value => value
@@ -362,15 +439,15 @@ fn call<'a>(
         };
     }
     if name == "incidr" {
-        let ip = args[0].eval(query, metadata, scratch)?;
-        let cidr = args[1].eval(query, metadata, scratch)?;
+        let ip = args[0].eval(query, metadata, scratch, current)?;
+        let cidr = args[1].eval(query, metadata, scratch, current)?;
         return Ok(Temporary::Bool(incidr(
             ip.text(scratch)?,
             cidr.text(scratch)?,
         )?));
     }
     if name == "metadata" {
-        let label = args[0].eval(query, metadata, scratch)?;
+        let label = args[0].eval(query, metadata, scratch, current)?;
         return Ok(Temporary::Borrowed(
             metadata.get(label.text(scratch)?).unwrap_or(""),
         ));
@@ -494,7 +571,7 @@ impl Expression {
         scratch: &'a mut Scratch<'_>,
     ) -> Result<Value<'a>, &'static str> {
         scratch.len = 0;
-        let value = self.0.eval(query, metadata, scratch)?;
+        let value = self.0.eval(query, metadata, scratch, None)?;
         match value {
             Temporary::Bool(value) => Ok(Value::Bool(value)),
             Temporary::Int(value) => Ok(Value::Int(value)),

@@ -11,6 +11,7 @@ enum Token {
     Comma,
     ListStart,
     ListEnd,
+    Current,
     End,
 }
 
@@ -18,6 +19,7 @@ pub(super) fn parse(source: &str, variables: &[(&str, ValueType)]) -> Result<Nod
     let mut parser = Parser {
         source,
         variables,
+        current: None,
         offset: 0,
         token: Token::End,
     };
@@ -32,6 +34,7 @@ pub(super) fn parse(source: &str, variables: &[(&str, ValueType)]) -> Result<Nod
 struct Parser<'a, 'v> {
     source: &'a str,
     variables: &'v [(&'v str, ValueType)],
+    current: Option<Kind>,
     offset: usize,
     token: Token,
 }
@@ -82,13 +85,20 @@ impl Parser<'_, '_> {
             }
             self.offset += end.ok_or("unterminated string")?;
             self.token = Token::String(value);
-        } else if first == '(' || first == ')' || first == ',' || first == '[' || first == ']' {
+        } else if first == '('
+            || first == ')'
+            || first == ','
+            || first == '['
+            || first == ']'
+            || first == '#'
+        {
             self.offset += 1;
             self.token = match first {
                 '(' => Token::Left,
                 ')' => Token::Right,
                 '[' => Token::ListStart,
                 ']' => Token::ListEnd,
+                '#' => Token::Current,
                 _ => Token::Comma,
             };
         } else {
@@ -133,6 +143,35 @@ impl Parser<'_, '_> {
                     return self.binary_tail(Node::Variable(name, kind), minimum);
                 }
                 self.advance()?;
+                if name == "any" {
+                    let list = self.expression(0)?;
+                    let Node::List(items) = list else {
+                        return Err("any requires a literal list".into());
+                    };
+                    if items.iter().any(|item| {
+                        items
+                            .first()
+                            .is_some_and(|first| first.kind() != item.kind())
+                    }) {
+                        return Err("any requires a uniform list".into());
+                    }
+                    if self.token != Token::Comma {
+                        return Err("any requires a predicate".into());
+                    }
+                    self.advance()?;
+                    let previous = self.current;
+                    self.current = items.first().map(Node::kind);
+                    let predicate = self.expression(0)?;
+                    self.current = previous;
+                    if predicate.kind() != Kind::Bool {
+                        return Err("any predicate must be boolean".into());
+                    }
+                    if self.token != Token::Right {
+                        return Err("missing closing parenthesis in any".into());
+                    }
+                    self.advance()?;
+                    return self.binary_tail(Node::Any(items, Box::new(predicate)), minimum);
+                }
                 let mut args = Vec::new();
                 if self.token != Token::Right {
                     loop {
@@ -165,6 +204,11 @@ impl Parser<'_, '_> {
                             && matches!(args[0].kind(), Kind::String | Kind::Int) =>
                     {
                         Kind::Int
+                    }
+                    "replace"
+                        if args.len() == 3 && args.iter().all(|arg| arg.kind() == Kind::String) =>
+                    {
+                        Kind::String
                     }
                     "type" | "name" | "class" | "proto" | "client_ip" | "port" | "server_ip"
                     | "server_port"
@@ -211,6 +255,13 @@ impl Parser<'_, '_> {
                 }
                 self.advance()?;
                 Node::List(values)
+            }
+            Token::Current => {
+                let kind = self
+                    .current
+                    .ok_or("# is only valid in an any predicate with a typed list")?;
+                self.advance()?;
+                Node::Current(kind)
             }
             other => return Err(format!("unsupported expression: {other:?}")),
         };
