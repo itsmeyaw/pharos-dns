@@ -35,7 +35,7 @@ impl KeyRings {
 
 struct Secret {
     name: Name,
-    keys: Option<[TsigKey; 5]>,
+    keys: Option<[Arc<TsigKey>; 5]>,
 }
 
 /// Return the normalized TSIG key name authenticated for this Query.
@@ -164,55 +164,18 @@ impl Tsig {
             Err(_) => return tsig_error(cx, &record, 16, None, 0),
         }
         cx.metadata.set_validated_tsig(&secret.name);
-        let query = cx.query.without_final_tsig().expect("verified TSIG");
-        let outcome = cx.run_with_message(query, next).await;
-        let error_code = match outcome {
-            Outcome::Response => None,
-            Outcome::Unanswered(code) => Some(code),
-            Outcome::Error(error) => {
-                pharos_server::logging::log_error("tsig", format_args!("{error}"));
-                Some(Rcode::SERVFAIL)
-            }
-            other => return other,
-        };
-        if let Some(code) = error_code {
-            let flags = 0x8000 | (cx.query.flags() & 0x7910) | (code.0 & 15);
-            let Ok(mut builder) = MessageBuilder::new(
-                cx.response,
-                cx.max_response_size.max(512),
-                cx.query.id(),
-                flags,
-            ) else {
-                return Outcome::Error(Error::ResponseBufferTooSmall);
-            };
-            if let Some(q) = cx.query.questions().next()
-                && builder.question(q.name, q.qtype, q.qclass).is_err()
-            {
-                return Outcome::Error(Error::ResponseBufferTooSmall);
-            }
-            let _ = builder.finish();
-        }
         let index = algorithm.expect("checked above");
         let size =
             secret.name.as_wire().len() + 26 + names[index].len() + [20, 28, 32, 48, 64][index];
-        if let Err(error) =
-            pharos_server::prepare_signed_response(cx.query, cx.protocol, size, cx.response)
-        {
-            return Outcome::Error(error);
-        }
-        let needed = cx.response.len() + size;
-        if needed > cx.response.capacity() {
-            if cx.protocol == pharos_server::Protocol::Tcp {
-                cx.response.reserve(needed - cx.response.len());
-            } else {
-                return Outcome::Error(Error::ResponseBufferTooSmall);
-            }
-        }
-        // RFC 8945 §4.3.1: the Response MAC includes the authenticated Query MAC.
-        match key.sign(cx.response, now, record.fudge, Some(record.mac)) {
-            Ok(()) => Outcome::Response,
-            Err(_) => Outcome::Error(Error::InvalidQuery),
-        }
+        cx.metadata
+            .set_tsig_signing(pharos_server::TsigSigning::Signed {
+                key: Arc::clone(key),
+                time: now,
+                fudge: record.fudge,
+                reserved: size,
+            });
+        let query = cx.query.without_final_tsig().expect("verified TSIG");
+        cx.run_with_message(query, next).await
     }
 }
 
@@ -220,7 +183,7 @@ fn tsig_error(
     cx: &mut Context<'_, '_>,
     record: &TsigRecord<'_>,
     code: u16,
-    key: Option<&TsigKey>,
+    key: Option<&Arc<TsigKey>>,
     now: u64,
 ) -> Outcome {
     let owner_len = record.owner.labels().map(|l| l.len() + 1).sum::<usize>() + 1;
@@ -246,47 +209,12 @@ fn tsig_error(
         return Outcome::Error(Error::ResponseBufferTooSmall);
     }
     let _ = builder.finish();
-    if let Err(error) =
-        pharos_server::prepare_signed_response(cx.query, cx.protocol, size, cx.response)
-    {
-        return Outcome::Error(error);
-    }
-    let required = cx.response.len() + size;
-    if cx.response.capacity() < required {
-        if cx.protocol == pharos_server::Protocol::Tcp {
-            cx.response.reserve(required - cx.response.len());
-        } else {
-            return Outcome::Error(Error::ResponseBufferTooSmall);
-        }
-    }
-    if let Some(key) = key {
-        return match key.sign_error_response(cx.response, cx.query.as_wire(), now, 0) {
-            Ok(Some(_)) => Outcome::Response,
-            _ => Outcome::Error(Error::InvalidQuery),
-        };
-    }
-    // RFC 8945 §5.3.2: BADKEY and BADSIG carry an empty MAC.
-    for label in record.owner.labels() {
-        cx.response.push(label.len() as u8);
-        cx.response.extend_from_slice(label);
-    }
-    cx.response.push(0);
-    cx.response.extend_from_slice(&[0, 250, 0, 255, 0, 0, 0, 0]);
-    cx.response
-        .extend_from_slice(&((algorithm_len + 16) as u16).to_be_bytes());
-    for label in record.algorithm.labels() {
-        cx.response.push(label.len() as u8);
-        cx.response.extend_from_slice(label);
-    }
-    cx.response.push(0);
-    cx.response.extend_from_slice(&[0; 6]);
-    cx.response.extend_from_slice(&record.fudge.to_be_bytes());
-    cx.response.extend_from_slice(&[0; 2]);
-    cx.response
-        .extend_from_slice(&record.original_id.to_be_bytes());
-    cx.response.extend_from_slice(&code.to_be_bytes());
-    cx.response.extend_from_slice(&[0; 2]);
-    let count = u16::from_be_bytes([cx.response[10], cx.response[11]]) + 1;
-    cx.response[10..12].copy_from_slice(&count.to_be_bytes());
+    cx.metadata
+        .set_tsig_signing(pharos_server::TsigSigning::Error {
+            key: key.cloned(),
+            time: now,
+            code,
+            reserved: size,
+        });
     Outcome::Response
 }

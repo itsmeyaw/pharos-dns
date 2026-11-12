@@ -2,7 +2,7 @@ use std::{future::Future, net::SocketAddr, sync::Arc, time::Instant};
 
 use crate::{
     Action, Admission, Context, Error, Handler, ListenerKey, Metadata, Outcome, Protocol, Router,
-    admit, finish_outcome,
+    admit, finish_outcome_signed,
     metrics::{BlockMetrics, Registry},
     response_limit,
 };
@@ -317,6 +317,7 @@ impl<C: Chain> Server<C> {
         let mut producer = None;
         let mut error_plugin = None;
         let mut error_logged = false;
+        let mut tsig_signing = None;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
                 let mut slots = [None; 18];
@@ -360,6 +361,7 @@ impl<C: Chain> Server<C> {
                     .and_then(|name| block.plugin_name(name));
                 error_logged =
                     context.metadata.get(crate::logging::ERROR_LOGGED_METADATA) == Some("true");
+                tsig_signing = context.metadata.take_tsig_signing();
                 outcome
             } else {
                 Outcome::Unanswered(Rcode::REFUSED)
@@ -383,20 +385,21 @@ impl<C: Chain> Server<C> {
         let duration = chain_start.elapsed().as_secs_f64();
         let default_logger = std::ptr::fn_addr_eq(self.logger, log_error as fn(Error));
         let mut first_error = true;
-        let action = finish_outcome(query, protocol, outcome, response, |error| {
-            let suppress = first_error
-                && (error_logged || default_logger)
-                && matches!(outcome, Outcome::Error(e) if e != Error::PluginPanic);
-            first_error = false;
-            if suppress {
-                return;
-            }
-            if let Some(plugin) = error_plugin.filter(|_| default_logger) {
-                log_plugin_error(plugin, error);
-            } else {
-                (self.logger)(error);
-            }
-        });
+        let action =
+            finish_outcome_signed(query, protocol, outcome, response, tsig_signing, |error| {
+                let suppress = first_error
+                    && (error_logged || default_logger)
+                    && matches!(outcome, Outcome::Error(e) if e != Error::PluginPanic);
+                first_error = false;
+                if suppress {
+                    return;
+                }
+                if let Some(plugin) = error_plugin.filter(|_| default_logger) {
+                    log_plugin_error(plugin, error);
+                } else {
+                    (self.logger)(error);
+                }
+            });
         let code = if (block.is_none() || outcome == Outcome::Error(Error::PluginPanic))
             && action == Action::Respond
         {

@@ -6,7 +6,6 @@ use pharos_proto::{Message, Name, Rcode, TsigAlgorithm, TsigKey};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 #[tokio::test]
-#[ignore = "TSIG signing must follow earlier Response-modifying Plugins"]
 async fn upstream_nsid_must_not_invalidate_tsig() {
     let blocks = parse(
         "Corefile",
@@ -43,9 +42,15 @@ async fn upstream_nsid_must_not_invalidate_tsig() {
     };
     let outcome = configured[0].config.serve(&mut cx).await;
     assert_eq!(outcome, Outcome::Response);
-    pharos_server::finish_outcome(query, Protocol::Udp, outcome, &mut response, |e| {
-        panic!("{e}")
-    });
+    let signing = cx.metadata.take_tsig_signing();
+    pharos_server::finish_outcome_signed(
+        query,
+        Protocol::Udp,
+        outcome,
+        &mut response,
+        signing,
+        |e| panic!("{e}"),
+    );
     key.verify(&response, now, Some(mac), 0).unwrap();
 }
 
@@ -160,7 +165,7 @@ async fn validated_key_is_visible_to_next_without_tsig_record() {
     assert_eq!(
         pharos_server::Plugin::serve(configured[0].config.tsig.as_ref().unwrap(), &mut cx, Next)
             .await,
-        Outcome::Response
+        Outcome::Unanswered(Rcode::REFUSED)
     );
 }
 
@@ -191,7 +196,16 @@ async fn signed_unanswered_query_gets_signed_servfail() {
         response: &mut response,
         max_response_size: 512,
     };
-    assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+    let outcome = configured[0].config.serve(&mut cx).await;
+    let signing = cx.metadata.take_tsig_signing();
+    pharos_server::finish_outcome_signed(
+        Message::parse(&wire).unwrap(),
+        Protocol::Udp,
+        outcome,
+        &mut response,
+        signing,
+        |_| {},
+    );
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::SERVFAIL);
     key.verify(&response, now, Some(mac), 0).unwrap();
 }
@@ -232,9 +246,15 @@ async fn signed_edns_response_survives_listener_finalization() {
         max_response_size: 1232,
     };
     let outcome = configured[0].config.serve(&mut cx).await;
-    pharos_server::finish_outcome(query, Protocol::Udp, outcome, &mut response, |e| {
-        panic!("{e}")
-    });
+    let signing = cx.metadata.take_tsig_signing();
+    pharos_server::finish_outcome_signed(
+        query,
+        Protocol::Udp,
+        outcome,
+        &mut response,
+        signing,
+        |e| panic!("{e}"),
+    );
     key.verify(&response, now, Some(mac), 0).unwrap();
     assert!(Message::parse(&response).unwrap().opt().is_some());
 }
@@ -270,7 +290,16 @@ async fn unknown_key_and_bad_mac_return_tsig_errors() {
             response: &mut response,
             max_response_size: 512,
         };
-        assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+        let outcome = configured[0].config.serve(&mut cx).await;
+        let signing = cx.metadata.take_tsig_signing();
+        pharos_server::finish_outcome_signed(
+            Message::parse(&wire).unwrap(),
+            Protocol::Udp,
+            outcome,
+            &mut response,
+            signing,
+            |e| panic!("{e}"),
+        );
         assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTAUTH);
         let tsig = pharos_proto::TsigRecord::parse(&response).unwrap();
         assert_eq!(tsig.error, code);
@@ -313,9 +342,15 @@ async fn badkey_edns_response_keeps_opt_before_tsig() {
         max_response_size: 1232,
     };
     let outcome = configured[0].config.serve(&mut cx).await;
-    pharos_server::finish_outcome(query, Protocol::Udp, outcome, &mut response, |e| {
-        panic!("{e}")
-    });
+    let signing = cx.metadata.take_tsig_signing();
+    pharos_server::finish_outcome_signed(
+        query,
+        Protocol::Udp,
+        outcome,
+        &mut response,
+        signing,
+        |e| panic!("{e}"),
+    );
     let message = Message::parse(&response).unwrap();
     assert!(message.opt().is_some());
     assert_eq!(
@@ -356,6 +391,15 @@ async fn valid_signed_query_produces_signed_response() {
         max_response_size: 512,
     };
     assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+    let signing = cx.metadata.take_tsig_signing();
+    pharos_server::finish_outcome_signed(
+        Message::parse(&wire).unwrap(),
+        Protocol::Udp,
+        Outcome::Response,
+        &mut response,
+        signing,
+        |e| panic!("{e}"),
+    );
     key.verify(&response, now, Some(mac), 0).unwrap();
 }
 

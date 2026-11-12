@@ -1,6 +1,25 @@
-use pharos_proto::{EdnsOptions, Message, Opt, Rcode, Type, normalized_udp_size};
+use pharos_proto::{
+    EdnsOptions, Message, Opt, Rcode, TsigKey, TsigRecord, Type, normalized_udp_size,
+};
+use std::sync::Arc;
 
 use crate::{Action, Error, Outcome, Protocol, admission::write_error};
+
+/// Per-Query TSIG request; keys are shared with the Listener's configuration.
+pub enum TsigSigning {
+    Signed {
+        key: Arc<TsigKey>,
+        time: u64,
+        fudge: u16,
+        reserved: usize,
+    },
+    Error {
+        key: Option<Arc<TsigKey>>,
+        time: u64,
+        code: u16,
+        reserved: usize,
+    },
+}
 
 /// Maximum Response size requested by the client for this protocol.
 pub fn response_limit(query: Message<'_>, protocol: Protocol) -> usize {
@@ -17,6 +36,18 @@ pub fn finish_outcome(
     protocol: Protocol,
     outcome: Outcome,
     response: &mut Vec<u8>,
+    log: impl FnMut(Error),
+) -> Action {
+    finish_outcome_signed(query, protocol, outcome, response, None, log)
+}
+
+/// Finish the Response and append any requested TSIG as the last operation.
+pub fn finish_outcome_signed(
+    query: Message<'_>,
+    protocol: Protocol,
+    outcome: Outcome,
+    response: &mut Vec<u8>,
+    signing: Option<TsigSigning>,
     mut log: impl FnMut(Error),
 ) -> Action {
     match outcome {
@@ -38,7 +69,19 @@ pub fn finish_outcome(
         }
         Outcome::Response => {}
     }
-    if let Err(error) = scrub(query, response_limit(query, protocol), protocol, response) {
+    // RFC 8945 §5.3: the complete TSIG must fit within the advertised UDP size.
+    let reserved = signing.as_ref().map_or(0, |request| match request {
+        TsigSigning::Signed { reserved, .. } | TsigSigning::Error { reserved, .. } => *reserved,
+    });
+    let result = response_limit(query, protocol)
+        .checked_sub(reserved)
+        .ok_or(Error::ResponseBufferTooSmall)
+        .and_then(|limit| scrub(query, limit, protocol, response))
+        .and_then(|()| match signing {
+            Some(request) => append_tsig(query, protocol, response, request),
+            None => Ok(()),
+        });
+    if let Err(error) = result {
         log(error);
         write_error(query, response, Rcode::SERVFAIL);
     }
@@ -52,15 +95,6 @@ fn scrub(
     wire: &mut Vec<u8>,
 ) -> Result<(), Error> {
     let message = Message::parse(wire).map_err(|_| Error::InvalidQuery)?;
-    // RFC 8945 §5.3.2: a TSIG covers the complete Message and cannot be modified afterward.
-    if wire.len() <= limit
-        && message
-            .additionals()
-            .last()
-            .is_some_and(|rr| rr.rtype == Type::TSIG)
-    {
-        return Ok(());
-    }
     if query.opt().is_none() && message.opt().is_none() && wire.len() <= limit {
         return Ok(());
     }
@@ -156,15 +190,71 @@ fn scrub(
     Ok(())
 }
 
-/// Finalize a Response with space reserved for a TSIG appended afterward.
-pub fn prepare_signed_response(
+fn append_tsig(
     query: Message<'_>,
     protocol: Protocol,
-    reserved: usize,
     wire: &mut Vec<u8>,
+    request: TsigSigning,
 ) -> Result<(), Error> {
-    let limit = response_limit(query, protocol)
-        .checked_sub(reserved)
-        .ok_or(Error::ResponseBufferTooSmall)?;
-    scrub(query, limit, protocol, wire)
+    let record = TsigRecord::parse(query.as_wire()).map_err(|_| Error::InvalidQuery)?;
+    let reserved = match &request {
+        TsigSigning::Signed { reserved, .. } | TsigSigning::Error { reserved, .. } => *reserved,
+    };
+    if wire.capacity() < wire.len() + reserved {
+        if protocol == Protocol::Udp {
+            return Err(Error::ResponseBufferTooSmall);
+        }
+        wire.reserve(reserved);
+    }
+    match request {
+        TsigSigning::Signed {
+            key, time, fudge, ..
+        } => {
+            // RFC 8945 §4.3.1: the Response MAC includes the authenticated Query MAC.
+            key.sign(wire, time, fudge, Some(record.mac))
+                .map_err(|_| Error::InvalidQuery)
+        }
+        TsigSigning::Error {
+            key: Some(key),
+            time,
+            ..
+        } => {
+            key.sign_error_response(wire, query.as_wire(), time, 0)
+                .map_err(|_| Error::InvalidQuery)?
+                .ok_or(Error::InvalidQuery)?;
+            Ok(())
+        }
+        TsigSigning::Error {
+            key: None, code, ..
+        } => {
+            let algorithm_len = record
+                .algorithm
+                .labels()
+                .map(|l| l.len() + 1)
+                .sum::<usize>()
+                + 1;
+            // RFC 8945 §5.3.2: BADKEY and BADSIG carry an empty MAC.
+            for label in record.owner.labels() {
+                wire.push(label.len() as u8);
+                wire.extend_from_slice(label);
+            }
+            wire.push(0);
+            wire.extend_from_slice(&[0, 250, 0, 255, 0, 0, 0, 0]);
+            wire.extend_from_slice(&((algorithm_len + 16) as u16).to_be_bytes());
+            for label in record.algorithm.labels() {
+                wire.push(label.len() as u8);
+                wire.extend_from_slice(label);
+            }
+            wire.push(0);
+            wire.extend_from_slice(&[0; 6]);
+            wire.extend_from_slice(&record.fudge.to_be_bytes());
+            wire.extend_from_slice(&[0; 2]);
+            wire.extend_from_slice(&record.original_id.to_be_bytes());
+            wire.extend_from_slice(&code.to_be_bytes());
+            wire.extend_from_slice(&[0; 2]);
+            let count = u16::from_be_bytes([wire[10], wire[11]]) + 1;
+            wire[10..12].copy_from_slice(&count.to_be_bytes());
+            Ok(())
+        }
+    }
 }

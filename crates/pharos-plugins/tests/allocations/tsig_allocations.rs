@@ -44,11 +44,23 @@ fn tsig_verification_and_signing_do_not_allocate() {
         max_response_size: 512,
     };
     let region = Region::new(&INSTRUMENTED_SYSTEM);
-    let mut future = std::pin::pin!(configured[0].config.serve(&mut cx));
-    let result = future
-        .as_mut()
-        .poll(&mut TaskContext::from_waker(Waker::noop()));
+    let result = {
+        let mut future = std::pin::pin!(configured[0].config.serve(&mut cx));
+        future
+            .as_mut()
+            .poll(&mut TaskContext::from_waker(Waker::noop()))
+    };
+    let signing = cx.metadata.take_tsig_signing();
+    let action = pharos_server::finish_outcome_signed(
+        Message::parse(&wire).unwrap(),
+        Protocol::Udp,
+        Outcome::Response,
+        &mut response,
+        signing,
+        |_| panic!("finalization failed"),
+    );
     let stats = region.change();
     assert_eq!(result, Poll::Ready(Outcome::Response));
+    assert_eq!(action, pharos_server::Action::Respond);
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
 }

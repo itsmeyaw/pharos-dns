@@ -34,7 +34,7 @@ mod process_metrics;
 mod quota;
 pub use admission::{Admission, admit};
 pub use lifecycle::{Lifecycle, Phase};
-pub use outcome::{finish_outcome, prepare_signed_response, response_limit};
+pub use outcome::{TsigSigning, finish_outcome, finish_outcome_signed, response_limit};
 pub use panic::{contain_panic, panics_total};
 mod router;
 mod server;
@@ -148,6 +148,7 @@ pub struct Metadata<'a> {
     copied_len: usize,
     validated_tsig: [u8; 255],
     validated_tsig_len: usize,
+    tsig_signing: Option<TsigSigning>,
     source: Option<Arc<dyn MetadataSource>>,
     enabled: bool,
     self_lookup: Option<SelfLookupState<'a>>,
@@ -165,6 +166,7 @@ impl<'a> Metadata<'a> {
             copied_len: 0,
             validated_tsig: [0; 255],
             validated_tsig_len: 0,
+            tsig_signing: None,
             source: None,
             enabled: true,
             self_lookup: None,
@@ -186,6 +188,16 @@ impl<'a> Metadata<'a> {
         let wire = name.as_wire();
         self.validated_tsig[..wire.len()].copy_from_slice(wire);
         self.validated_tsig_len = wire.len();
+    }
+
+    /// Defer authentication until the Listener has finalized the Response.
+    pub fn set_tsig_signing(&mut self, signing: TsigSigning) {
+        self.tsig_signing = Some(signing);
+    }
+
+    /// Take the pending Response authentication request.
+    pub fn take_tsig_signing(&mut self) -> Option<TsigSigning> {
+        self.tsig_signing.take()
     }
 
     /// Return the authenticated TSIG key name, if the Query was verified.

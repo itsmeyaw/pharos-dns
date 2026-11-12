@@ -104,7 +104,7 @@ fn add_secret(
             TsigAlgorithm::Sha384,
             TsigAlgorithm::Sha512,
         ]
-        .map(|algorithm| TsigKey::new(name.clone(), algorithm, &secret))
+        .map(|algorithm| std::sync::Arc::new(TsigKey::new(name.clone(), algorithm, &secret)))
     });
     plugin
         .secrets
