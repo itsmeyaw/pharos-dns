@@ -163,7 +163,8 @@ async fn services_scenario() {
         response: &mut prestart_response,
         max_response_size: 512,
     };
-    assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    // Keep the multi-phase fixture's non-measured Chain futures out of its stack frame.
+    assert_eq!(Box::pin(chain.serve(&mut cx)).await, Outcome::Response);
     let before = GLOBAL.stats();
     for _ in 0..50 {
         assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
@@ -623,7 +624,11 @@ async fn services_scenario() {
             response: &mut response,
             max_response_size: 4096,
         };
-        assert_eq!(chain.serve(&mut cx).await, Outcome::Response, "{name}");
+        assert_eq!(
+            Box::pin(chain.serve(&mut cx)).await,
+            Outcome::Response,
+            "{name}"
+        );
         let message = Message::parse(&response).unwrap();
         assert_eq!(
             (
@@ -856,7 +861,7 @@ async fn services_scenario() {
         response: &mut response,
         max_response_size: 512,
     };
-    assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    assert_eq!(Box::pin(chain.serve(&mut cx)).await, Outcome::Response);
     let wildcard = Message::parse(&response).unwrap();
     for record in wildcard.additionals() {
         match record.data().unwrap() {
@@ -893,7 +898,7 @@ async fn services_scenario() {
         response: &mut response,
         max_response_size: 512,
     };
-    assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    assert_eq!(Box::pin(chain.serve(&mut cx)).await, Outcome::Response);
     assert_eq!(
         response, wildcard_response,
         "NS addresses must not depend on the Query's Listener address"
@@ -1107,7 +1112,7 @@ async fn services_scenario() {
             response: &mut response,
             max_response_size: 512,
         };
-        assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+        assert_eq!(Box::pin(chain.serve(&mut cx)).await, Outcome::Response);
         assert_eq!(
             Message::parse(&response).unwrap().rcode(),
             expected,
@@ -1152,7 +1157,7 @@ async fn services_scenario() {
                 response: &mut response,
                 max_response_size: 512,
             };
-            assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+            assert_eq!(Box::pin(chain.serve(&mut cx)).await, Outcome::Response);
             let message = Message::parse(&response).unwrap();
             assert_eq!(
                 (message.rcode(), message.additional_count()),
@@ -1162,7 +1167,7 @@ async fn services_scenario() {
         chain.lifecycle.run(Phase::Shutdown).await.unwrap();
     }
     task.abort();
-    missing_name_is_servfail_before_cache_sync().await;
+    Box::pin(missing_name_is_servfail_before_cache_sync()).await;
 }
 
 async fn missing_name_is_servfail_before_cache_sync() {
