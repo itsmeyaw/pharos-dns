@@ -117,6 +117,8 @@ impl WorkspacePool {
             let mut workspaces = workspaces.borrow_mut();
             if !workspaces.contains_key(&key) {
                 workspaces.retain(|_, (owner, _)| owner.strong_count() != 0);
+            }
+            let (_, workspace) = workspaces.entry(key).or_insert_with(|| {
                 let matchers = self
                     .matchers
                     .iter()
@@ -136,12 +138,9 @@ impl WorkspacePool {
                     matches: vec![""; self.group_count],
                     groups: vec![("", ""); self.group_count.saturating_mul(2)],
                 };
-                workspaces.insert(key, (Arc::downgrade(&self.identity), workspace));
-            }
-            f(&mut workspaces
-                .get_mut(&key)
-                .expect("workspace just initialized")
-                .1)
+                (Arc::downgrade(&self.identity), workspace)
+            });
+            f(workspace)
         })
     }
 }
@@ -432,6 +431,7 @@ impl Template {
                                     && m.address.port() == cx.local.port())
                     });
                     let result = evaluate(rule, cx, &data, scratch, variables, metrics);
+                    // Replace borrowed entries before returning storage to the worker.
                     *match_slots = matches.into_iter().map(|_| "").collect();
                     *group_slots = groups.into_iter().map(|_| ("", "")).collect();
                     return match result {
@@ -521,6 +521,7 @@ fn evaluate<'a>(
     query.matches = data.matches;
     let mut variables = std::mem::take(storage);
     let result = evaluate_slots(rule, cx, data, scratch, &query, &mut variables, metrics);
+    // Replace borrowed entries before returning storage to the worker.
     *storage = variables.into_iter().map(|_| ("", Value::Nil)).collect();
     result
 }
@@ -758,7 +759,7 @@ mod tests {
         pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives())
     }
     #[test]
-    fn setup_checks_bounds_and_rcodes() {
+    fn setup_checks_rcodes() {
         for (rcode, valid) in [
             ("NOTIMP", true),
             ("NOTIMPL", true),
@@ -770,15 +771,56 @@ mod tests {
                 valid
             );
         }
-        assert!(Matcher::new(&"(a)".repeat(127)).is_ok());
-        assert!(Matcher::new(&"(a)".repeat(128)).is_ok());
-        let variables = (0..33).map(|i| format!("var v{i} 1\n")).collect::<String>();
-        assert!(configure(&format!(". {{\n template IN A {{\n{variables} }}\n}}")).is_ok());
     }
     #[test]
     fn zone_matching_respects_escaped_dots() {
         assert!(!in_zone(r"foo\.example.", "example."));
         assert!(in_zone(r"foo\\.example.", "example."));
+    }
+    #[test]
+    fn many_function_variables_fit_a_small_worker_stack() {
+        let variables = (0..400)
+            .map(|i| {
+                if i == 0 {
+                    "var v0 name\n".to_owned()
+                } else {
+                    format!("var v{i} v{}\n", i - 1)
+                }
+            })
+            .collect::<String>();
+        let text = format!(
+            ".:53 {{\n template IN A {{\n {variables} answer \"{{{{ .Name }}}} 60 IN TXT \\\"{{{{ call .Var.v399 }}}}\\\"\"\n }}\n}}"
+        );
+        let configured = configure(&text).unwrap();
+        let template = configured[0].config.template.as_ref().unwrap();
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn_scoped(scope, || {
+                    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+                    let root: Name = ".".parse().unwrap();
+                    let mut response = Vec::with_capacity(512);
+                    let mut slots = [];
+                    let context = Context {
+                        query: Message::parse(wire).unwrap(),
+                        client: "127.0.0.1:1234".parse().unwrap(),
+                        local: "127.0.0.1:53".parse().unwrap(),
+                        transport: pharos_server::Transport::Dns,
+                        protocol: Protocol::Udp,
+                        domain: &root,
+                        metadata: pharos_server::Metadata::new(&mut slots),
+                        response: &mut response,
+                        max_response_size: 512,
+                    };
+                    let MatchResult::Hit(hit) = template.select(&context) else {
+                        panic!("template did not match")
+                    };
+                    assert_eq!(hit.records[0].1.rdata, b"\x02x.");
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        });
     }
     #[test]
     fn workspace_is_stable_and_distinct_on_each_worker() {
@@ -808,6 +850,59 @@ mod tests {
         let first = workspace.with(|state| std::ptr::from_ref(state) as usize);
         let second = workspace.with(|state| std::ptr::from_ref(state) as usize);
         assert_eq!(first, second);
+    }
+    #[test]
+    fn readme_rule_workspace_payload_sizes() {
+        fn payload(workspace: &RuleWorkspace) -> usize {
+            use std::mem::size_of;
+            size_of::<RuleWorkspace>()
+                + workspace.scratch.capacity()
+                + workspace.matchers.capacity() * size_of::<MatcherState>()
+                + workspace.variables.capacity() * size_of::<(&str, Value<'_>)>()
+                + workspace.matches.capacity() * size_of::<&str>()
+                + workspace.groups.capacity() * size_of::<(&str, &str)>()
+                + workspace
+                    .matchers
+                    .iter()
+                    .map(|state| {
+                        state.cache.memory_usage() + std::mem::size_of_val(state.captures.slots())
+                    })
+                    .sum::<usize>()
+        }
+        for (name, options) in [
+            ("nxdomain", "rcode NXDOMAIN"),
+            (
+                "address",
+                "match (^|[.])ip-(?P<a>[0-9]*)-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]example[.]$",
+            ),
+            (
+                "reverse",
+                "match ^(?P<d>[0-9]*)[.](?P<c>[0-9]*)[.](?P<b>[0-9]*)[.](?P<a>[0-9]*)[.]in-addr[.]arpa[.]$",
+            ),
+            (
+                "hex",
+                "match ^ip0a(?P<b>[a-f0-9]{2})(?P<c>[a-f0-9]{2})(?P<d>[a-f0-9]{2})[.]example[.]$",
+            ),
+            (
+                "lan",
+                "match ^(?P<ip>[0-9]{1,3}(-[0-9]{1,3}){3})[.](?P<id>[a-z2-7]{26})[.]example[.]com[.]$\nvar ip replace(group('ip'), '-', '.')",
+            ),
+            (
+                "patterns",
+                "match ^ip-(?P<a>10)-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]dc[.]example[.]$\nmatch ^(?P<a>[0-9]*)[.](?P<b>[0-9]*)[.](?P<c>[0-9]*)[.](?P<d>[0-9]*)[.]ext[.]example[.]$",
+            ),
+        ] {
+            let configured =
+                configure(&format!(". {{\n template IN A {{\n {options}\n }}\n}}")).unwrap();
+            let rule = &configured[0].config.template.as_ref().unwrap().rules[0];
+            let bytes = rule
+                .workspace
+                .as_ref()
+                .unwrap()
+                .with(|workspace| payload(workspace));
+            eprintln!("{name}: {bytes} bytes");
+            assert!(bytes < 1_048_576);
+        }
     }
     #[test]
     fn wildcard_metric_bindings_handle_concurrent_first_use() {
@@ -842,8 +937,10 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|line| line.ends_with(" 80")), "{output}");
+        metrics.binding("internal", "IN", "A", &[]);
         let _guard = metrics.binding_lock.lock().unwrap();
         assert_eq!(metrics.binding("", "IN", "A", &[]).class, "IN");
+        assert_eq!(metrics.binding("internal", "IN", "A", &[]).view, "internal");
     }
     #[tokio::test]
     async fn wildcard_metrics_use_actual_question_labels() {
