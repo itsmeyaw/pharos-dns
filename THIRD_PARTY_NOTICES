@@ -46,6 +46,7 @@
 - The metadata Plugin and tests follow CoreDNS v1.15.0's `plugin/metadata` and `plugin/kubernetes/metadata_test.go`.
 - The template engine tests follow CoreDNS v1.15.0's `plugin/template`.
 - The expression engine and tests follow CoreDNS v1.15.0's `plugin/pkg/expression`, `plugin/view` and `plugin/template`.
+- The view Plugin and tests follow CoreDNS v1.15.0's `plugin/view`.
 - The prometheus Plugin and tests follow CoreDNS v1.15.0's `plugin/metrics`.
 - The ready Plugin and tests follow CoreDNS v1.15.0's `plugin/ready`.
 - The health Plugin and tests follow CoreDNS v1.15.0's `plugin/health`.

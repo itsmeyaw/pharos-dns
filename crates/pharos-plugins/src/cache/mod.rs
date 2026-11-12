@@ -106,6 +106,7 @@ impl Cache {
         &mut self,
         registry: &pharos_server::metrics::Registry,
         listeners: &[pharos_server::ListenerKey],
+        view: &str,
     ) {
         let zones = self
             .config
@@ -122,7 +123,7 @@ impl Cache {
                 format!("dns://{address}")
             };
             self.metrics
-                .push((address, registry.cache(&server, &zones, "")));
+                .push((address, registry.cache(&server, &zones, view)));
         }
     }
 }

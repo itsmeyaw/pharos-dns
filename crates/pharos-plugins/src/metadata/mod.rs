@@ -4,7 +4,7 @@ pub(crate) mod setup;
 
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::Name;
-#[cfg(feature = "plugin-kubernetes")]
+#[cfg(any(feature = "plugin-kubernetes", feature = "plugin-view"))]
 use pharos_proto::NameRef;
 use pharos_server::{Context, Next, Outcome, Plugin};
 
@@ -22,7 +22,7 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    #[cfg(feature = "plugin-kubernetes")]
+    #[cfg(any(feature = "plugin-kubernetes", feature = "plugin-view"))]
     pub(crate) fn matches(&self, cx: &Context<'_, '_>) -> bool {
         let Some(question) = cx.query.questions().next() else {
             return false;
