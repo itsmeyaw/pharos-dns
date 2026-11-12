@@ -120,6 +120,52 @@ async fn unknown_key_and_bad_mac_return_tsig_errors() {
 }
 
 #[tokio::test]
+async fn badkey_edns_response_keeps_opt_before_tsig() {
+    let blocks = parse("Corefile", ". {\n tsig\n whoami\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let key = TsigKey::new(
+        "missing.".parse().unwrap(),
+        TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut wire = Vec::with_capacity(512);
+    wire.extend_from_slice(&[
+        0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, b'a', 0, 0, 1, 0, 1, 0, 0, 41, 0x04, 0xd0, 0, 0,
+        0x80, 0, 0, 0,
+    ]);
+    key.sign(&mut wire, now, 300, None).unwrap();
+    let query = Message::parse(&wire).unwrap();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(1232);
+    let mut slots = [];
+    let mut cx = Context {
+        query,
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 1232,
+    };
+    let outcome = configured[0].config.serve(&mut cx).await;
+    pharos_server::finish_outcome(query, Protocol::Udp, outcome, &mut response, |e| {
+        panic!("{e}")
+    });
+    let message = Message::parse(&response).unwrap();
+    assert!(message.opt().is_some());
+    assert_eq!(
+        pharos_proto::TsigRecord::parse(&response).unwrap().error,
+        17
+    );
+}
+
+#[tokio::test]
 async fn valid_signed_query_produces_signed_response() {
     let blocks = parse(
         "Corefile",

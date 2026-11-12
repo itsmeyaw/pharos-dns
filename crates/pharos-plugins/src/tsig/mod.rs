@@ -161,11 +161,14 @@ fn tsig_error(
     key: Option<&TsigKey>,
     now: u64,
 ) -> Outcome {
-    let required = 12 + 260 + 2 * 255 + 26 + 64;
-    if cx.response.capacity() < required && cx.protocol == pharos_server::Protocol::Tcp {
-        cx.response
-            .reserve(required.saturating_sub(cx.response.len()));
-    }
+    let owner_len = record.owner.labels().map(|l| l.len() + 1).sum::<usize>() + 1;
+    let algorithm_len = record
+        .algorithm
+        .labels()
+        .map(|l| l.len() + 1)
+        .sum::<usize>()
+        + 1;
+    let size = owner_len + algorithm_len + 26 + if key.is_some() { 70 } else { 0 };
     let flags = 0x8000 | (cx.query.flags() & 0x7910) | Rcode::NOTAUTH.0;
     let Ok(mut builder) = MessageBuilder::new(
         cx.response,
@@ -181,21 +184,24 @@ fn tsig_error(
         return Outcome::Error(Error::ResponseBufferTooSmall);
     }
     let _ = builder.finish();
+    if let Err(error) =
+        pharos_server::prepare_signed_response(cx.query, cx.protocol, size, cx.response)
+    {
+        return Outcome::Error(error);
+    }
+    let required = cx.response.len() + size;
+    if cx.response.capacity() < required {
+        if cx.protocol == pharos_server::Protocol::Tcp {
+            cx.response.reserve(required - cx.response.len());
+        } else {
+            return Outcome::Error(Error::ResponseBufferTooSmall);
+        }
+    }
     if let Some(key) = key {
         return match key.sign_error_response(cx.response, cx.query.as_wire(), now, 0) {
             Ok(Some(_)) => Outcome::Response,
             _ => Outcome::Error(Error::InvalidQuery),
         };
-    }
-    let owner_len = record.owner.labels().map(|l| l.len() + 1).sum::<usize>() + 1;
-    let algorithm_len = record
-        .algorithm
-        .labels()
-        .map(|l| l.len() + 1)
-        .sum::<usize>()
-        + 1;
-    if cx.response.len() + owner_len + algorithm_len + 26 > cx.response.capacity() {
-        return Outcome::Error(Error::ResponseBufferTooSmall);
     }
     // RFC 8945 §5.3.2: BADKEY and BADSIG carry an empty MAC.
     for label in record.owner.labels() {
@@ -218,6 +224,7 @@ fn tsig_error(
         .extend_from_slice(&record.original_id.to_be_bytes());
     cx.response.extend_from_slice(&code.to_be_bytes());
     cx.response.extend_from_slice(&[0; 2]);
-    cx.response[10..12].copy_from_slice(&1u16.to_be_bytes());
+    let count = u16::from_be_bytes([cx.response[10], cx.response[11]]) + 1;
+    cx.response[10..12].copy_from_slice(&count.to_be_bytes());
     Outcome::Response
 }
