@@ -14,6 +14,10 @@ mod template_behavior;
 mod template_coredns;
 
 #[cfg(feature = "plugin-template")]
+#[path = "functional/template_cname.rs"]
+mod template_cname;
+
+#[cfg(feature = "plugin-template")]
 #[path = "functional/template_metrics.rs"]
 mod template_metrics;
 
