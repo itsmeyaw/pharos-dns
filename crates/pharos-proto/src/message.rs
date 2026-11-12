@@ -352,6 +352,7 @@ impl<'a> Message<'a> {
         output.clear();
         output.extend_from_slice(self.wire);
         output[2..4].copy_from_slice(&self.flags.to_be_bytes());
+        output[10..12].copy_from_slice(&self.counts[3].to_be_bytes());
         if let Some(limit) = self.udp_payload_limit
             && let Some(rr) = self.additionals().find(|rr| rr.rtype == Type::OPT)
         {
@@ -366,6 +367,7 @@ impl<'a> Message<'a> {
     #[must_use]
     pub fn wire_changed(&self) -> bool {
         self.flags != u16::from_be_bytes([self.wire[2], self.wire[3]])
+            || self.counts[3] != u16::from_be_bytes([self.wire[10], self.wire[11]])
             || self.question_name_len != 0
             || (self.counts[0] > 0
                 && question(self.wire, self.starts[0]).is_ok_and(|(question, _)| {
@@ -487,6 +489,18 @@ impl<'a> Message<'a> {
     #[must_use]
     pub const fn additional_count(&self) -> u16 {
         self.counts[3]
+    }
+
+    /// Return a view with its final TSIG removed, retaining the borrowed wire bytes.
+    pub fn without_final_tsig(mut self) -> Option<Self> {
+        let last = self.additionals().last()?;
+        if last.rtype != Type::TSIG {
+            return None;
+        }
+        // RFC 8945 §4.3.2: the Message excludes the last TSIG and decrements ARCOUNT.
+        self.wire = &self.wire[..last.name.offset()];
+        self.counts[3] -= 1;
+        Some(self)
     }
     #[must_use]
     pub fn questions(&self) -> Questions<'_> {

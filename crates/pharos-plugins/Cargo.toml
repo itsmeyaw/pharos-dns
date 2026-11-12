@@ -39,6 +39,7 @@ default = [
     "plugin-chaos",
     "plugin-dns64",
     "plugin-siit",
+    "plugin-tsig",
     "plugin-errors",
     "plugin-forward",
     "plugin-header",

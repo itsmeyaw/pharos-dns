@@ -34,7 +34,7 @@ mod process_metrics;
 mod quota;
 pub use admission::{Admission, admit};
 pub use lifecycle::{Lifecycle, Phase};
-pub use outcome::{finish_outcome, response_limit};
+pub use outcome::{TsigSigning, finish_outcome, finish_outcome_signed, response_limit};
 pub use panic::{contain_panic, panics_total};
 mod router;
 mod server;
@@ -93,19 +93,32 @@ pub enum Protocol {
 
 /// Lazily produces complete wire-format Messages into a reusable buffer.
 /// Producers must not block the runtime; clones share the same cursor.
+/// Signed transfers must leave space for TSIG within the TCP Message limit.
 #[derive(Clone)]
-pub struct Stream(Arc<std::sync::Mutex<StreamProducer>>);
+pub struct Stream {
+    producer: Arc<std::sync::Mutex<StreamProducer>>,
+    signing: Option<StreamSigning>,
+}
+
+#[derive(Clone)]
+struct StreamSigning {
+    key: Arc<pharos_proto::TsigKey>,
+    fudge: u16,
+}
 
 type StreamProducer = dyn FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send;
 
 impl Stream {
     pub fn new(produce: impl FnMut(&mut Vec<u8>) -> Result<bool, Error> + Send + 'static) -> Self {
         // shortcut: one allocation per Zone Transfer; remove when a concrete stream type exists.
-        Self(Arc::new(std::sync::Mutex::new(produce)))
+        Self {
+            producer: Arc::new(std::sync::Mutex::new(produce)),
+            signing: None,
+        }
     }
 
     pub fn next(&mut self, response: &mut Vec<u8>) -> Result<bool, Error> {
-        let mut producer = self.0.lock().map_err(|_| Error::PluginPanic)?;
+        let mut producer = self.producer.lock().map_err(|_| Error::PluginPanic)?;
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| producer(response)))
             .unwrap_or(Err(Error::PluginPanic))
     }
@@ -119,7 +132,7 @@ impl fmt::Debug for Stream {
 
 impl PartialEq for Stream {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.producer, &other.producer)
     }
 }
 
@@ -177,6 +190,9 @@ pub struct Metadata<'a> {
     copied: [Option<(&'static str, usize, usize)>; 12],
     copied_data: [u8; 1024],
     copied_len: usize,
+    validated_tsig: [u8; 255],
+    validated_tsig_len: usize,
+    tsig_signing: Option<TsigSigning>,
     source: Option<Arc<dyn MetadataSource>>,
     enabled: bool,
     self_lookup: Option<SelfLookupState<'a>>,
@@ -192,6 +208,9 @@ impl<'a> Metadata<'a> {
             copied: [None; 12],
             copied_data: [0; 1024],
             copied_len: 0,
+            validated_tsig: [0; 255],
+            validated_tsig_len: 0,
+            tsig_signing: None,
             source: None,
             enabled: true,
             self_lookup: None,
@@ -206,6 +225,32 @@ impl<'a> Metadata<'a> {
     /// Enable public Plugin Metadata for the current Server Block.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+    }
+
+    /// Set the authenticated TSIG key name for downstream Plugins.
+    pub fn set_validated_tsig(&mut self, name: &Name) {
+        let wire = name.as_wire();
+        self.validated_tsig[..wire.len()].copy_from_slice(wire);
+        self.validated_tsig_len = wire.len();
+    }
+
+    /// Defer authentication until the Listener has finalized the Response.
+    pub fn set_tsig_signing(&mut self, signing: TsigSigning) {
+        self.tsig_signing = Some(signing);
+    }
+
+    /// Take the pending Response authentication request.
+    pub fn take_tsig_signing(&mut self) -> Option<TsigSigning> {
+        self.tsig_signing.take()
+    }
+
+    /// Return the authenticated TSIG key name, if the Query was verified.
+    #[must_use]
+    pub fn validated_tsig(&self) -> Option<pharos_proto::NameRef<'_>> {
+        (self.validated_tsig_len != 0).then(|| {
+            pharos_proto::NameRef::parse(&self.validated_tsig[..self.validated_tsig_len], 0)
+                .expect("validated TSIG name")
+        })
     }
 
     #[must_use]
@@ -473,6 +518,15 @@ impl Context<'_, '_> {
         let Ok(query) = Message::parse(wire) else {
             return Outcome::Error(Error::InvalidQuery);
         };
+        self.run_with_message(query, next).await
+    }
+
+    /// Run Next with a modified Query view while preserving Metadata and Response state.
+    pub async fn run_with_message<N: Next + Send>(
+        &mut self,
+        query: Message<'_>,
+        next: N,
+    ) -> Outcome {
         let metadata = std::mem::replace(&mut self.metadata, Metadata::new(&mut []));
         let mut nested = NestedContext {
             parent_query: &mut self.query,

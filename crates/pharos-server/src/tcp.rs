@@ -165,6 +165,18 @@ async fn serve<H: Handler>(
                 Action::Respond => None,
                 Action::Stream(transfer) => Some(transfer),
             };
+            let signing = transfer.as_ref().and_then(|stream| stream.signing.clone());
+            let mut signer = match signing.as_ref() {
+                Some(signing) => match pharos_proto::TsigRecord::parse(&query) {
+                    Ok(record) => Some(pharos_proto::TsigStream::new(&signing.key, record.mac)),
+                    Err(_) => {
+                        *writer.lock().await = None;
+                        let _ = failed.send(true);
+                        return response;
+                    }
+                },
+                None => None,
+            };
             loop {
                 // RFC 5936 §4.1.2: a connection can serve concurrent Transfer sessions.
                 let mut writer = writer.lock().await;
@@ -187,6 +199,22 @@ async fn serve<H: Handler>(
                             let _ = failed.send(true);
                             break;
                         }
+                    }
+                }
+                if let (Some(signer), Some(signing)) = (signer.as_mut(), signing.as_ref()) {
+                    // RFC 8945 §5.3.1: sign every stream Message with the preceding MAC.
+                    let signing_failed =
+                        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                            Ok(now) => signer
+                                .sign(&mut response, now.as_secs(), signing.fudge)
+                                .is_err(),
+                            Err(_) => true,
+                        };
+                    if signing_failed {
+                        crate::logging::log("ERROR", "server", "Zone Transfer TSIG signing failed");
+                        *writer = None;
+                        let _ = failed.send(true);
+                        break;
                     }
                 }
                 let Ok(length) = u16::try_from(response.len()) else {

@@ -12,6 +12,261 @@ use tokio::{
 
 struct Transfer;
 
+struct SignedTransfer;
+
+impl Chain for SignedTransfer {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        let key = std::sync::Arc::new(pharos_proto::TsigKey::new(
+            "key.".parse().unwrap(),
+            pharos_proto::TsigAlgorithm::Sha256,
+            b"secret",
+        ));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let record = match key.verify(cx.query.as_wire(), now, None, 0) {
+            Ok(record) => record,
+            Err(_) => return Outcome::Unanswered(Rcode::REFUSED),
+        };
+        cx.metadata
+            .set_tsig_signing(pharos_server::TsigSigning::Signed {
+                key,
+                time: now,
+                fudge: record.fudge,
+                reserved: 128,
+            });
+        Chain::serve(&Transfer, cx).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn signed_axfr_stream_authenticates_every_message() {
+    let listener_key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        listener_key,
+        ".".parse().unwrap(),
+        Some(SignedTransfer),
+        vec![],
+    );
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Server::new(router, listener_key),
+    )
+    .await
+    .unwrap();
+    let key = pharos_proto::TsigKey::new(
+        "key.".parse().unwrap(),
+        pharos_proto::TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut query = vec![0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 252, 0, 1];
+    key.sign(&mut query, now, 300, None).unwrap();
+    let mac = pharos_proto::TsigRecord::parse(&query).unwrap().mac;
+    let mut verifier = pharos_proto::TsigStream::new(&key, mac);
+    let mut socket = TcpStream::connect(listener.local_addr()).await.unwrap();
+    socket
+        .write_all(&(query.len() as u16).to_be_bytes())
+        .await
+        .unwrap();
+    socket.write_all(&query).await.unwrap();
+    for expected in [Type::SOA, Type::A, Type::SOA] {
+        let length = timeout(Duration::from_secs(3), socket.read_u16())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut wire = vec![0; usize::from(length)];
+        socket.read_exact(&mut wire).await.unwrap();
+        assert!(verifier.verify(&wire, now, 0).unwrap().is_some());
+        assert_eq!(
+            Message::parse(&wire)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .rtype,
+            expected
+        );
+    }
+    verifier.finish().unwrap();
+    drop(socket);
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn signed_axfr_client_authenticates_stream() {
+    let listener_key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        listener_key,
+        ".".parse().unwrap(),
+        Some(SignedTransfer),
+        vec![],
+    );
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Server::new(router, listener_key),
+    )
+    .await
+    .unwrap();
+    let key = pharos_proto::TsigKey::new(
+        "key.".parse().unwrap(),
+        pharos_proto::TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let mut types = Vec::new();
+    pharos_server::transfer::axfr_signed(
+        listener.local_addr(),
+        &"a.".parse().unwrap(),
+        1,
+        Duration::from_secs(3),
+        &key,
+        |message| {
+            types.extend(message.answers().map(|r| r.rtype));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(types, [Type::SOA, Type::A, Type::SOA]);
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn signed_axfr_client_rejects_unsigned_last_and_tampering() {
+    for tamper in [false, true] {
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = socket.accept().await.unwrap();
+            let len = connection.read_u16().await.unwrap();
+            let mut query = vec![0; usize::from(len)];
+            connection.read_exact(&mut query).await.unwrap();
+            let key = pharos_proto::TsigKey::new(
+                "key.".parse().unwrap(),
+                pharos_proto::TsigAlgorithm::Sha256,
+                b"secret",
+            );
+            let mac = pharos_proto::TsigRecord::parse(&query).unwrap().mac;
+            let mut signer = pharos_proto::TsigStream::new(&key, mac);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            for index in 0..2 {
+                let mut response = vec![0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+                response.extend_from_slice(&[
+                    1, b'a', 0, 0, 6, 0, 1, 0, 0, 0, 60, 0, 22, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0,
+                    0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
+                ]);
+                if index == 0 || tamper {
+                    signer.sign(&mut response, now, 300).unwrap();
+                }
+                if index == 1 && tamper {
+                    response[3] ^= 1;
+                }
+                connection
+                    .write_all(&(response.len() as u16).to_be_bytes())
+                    .await
+                    .unwrap();
+                connection.write_all(&response).await.unwrap();
+            }
+        });
+        let key = pharos_proto::TsigKey::new(
+            "key.".parse().unwrap(),
+            pharos_proto::TsigAlgorithm::Sha256,
+            b"secret",
+        );
+        let mut count = 0;
+        let error = pharos_server::transfer::axfr_signed(
+            address,
+            &"a.".parse().unwrap(),
+            1,
+            Duration::from_secs(3),
+            &key,
+            |_| {
+                count += 1;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(count, 1);
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn signed_transfer_failure_closes_without_unsigned_message() {
+    struct Broken;
+    impl Chain for Broken {
+        async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+            if !matches!(Chain::serve(&SignedTransfer, cx).await, Outcome::Stream(_)) {
+                return Outcome::Drop;
+            }
+            Outcome::Stream(Stream::new(|wire| {
+                wire.extend_from_slice(&[0; 13]);
+                Ok(true)
+            }))
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+    }
+    let listener_key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(listener_key, ".".parse().unwrap(), Some(Broken), vec![]);
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Server::new(router, listener_key),
+    )
+    .await
+    .unwrap();
+    let key = pharos_proto::TsigKey::new(
+        "key.".parse().unwrap(),
+        pharos_proto::TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut query = vec![0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 252, 0, 1];
+    key.sign(&mut query, now, 300, None).unwrap();
+    let mut socket = TcpStream::connect(listener.local_addr()).await.unwrap();
+    socket
+        .write_all(&(query.len() as u16).to_be_bytes())
+        .await
+        .unwrap();
+    socket.write_all(&query).await.unwrap();
+    assert!(
+        timeout(Duration::from_secs(3), socket.read_u16())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    drop(socket);
+    listener.shutdown().await.unwrap();
+}
+
 struct BadClosingSoa;
 
 struct PanickingTransfer;
@@ -339,6 +594,55 @@ async fn dig_axfr_and_ixfr_interoperate_with_plugin_stream() {
     listener.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dig_signed_axfr_and_ixfr_interoperate_with_plugin_stream() {
+    if std::process::Command::new("dig")
+        .arg("-v")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(SignedTransfer), vec![]);
+    let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+        .await
+        .unwrap();
+    for qtype in ["AXFR", "IXFR=0"] {
+        let output = std::process::Command::new("dig")
+            .args([
+                "@127.0.0.1",
+                "-p",
+                &listener.local_addr().port().to_string(),
+                "-y",
+                "hmac-sha256:key.:c2VjcmV0",
+                "a.",
+                qtype,
+                "+tcp",
+                "+time=2",
+                "+tries=1",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{text}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            text.contains("XFR size:") || text.contains("Transfer completed"),
+            "{text}"
+        );
+        assert_eq!(text.matches("\tSOA\t").count(), 2, "{text}");
+    }
+    listener.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn axfr_client_interoperates_with_coredns_file_and_transfer() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
@@ -349,7 +653,13 @@ async fn axfr_client_interoperates_with_coredns_file_and_transfer() {
     let dir = root.join(format!("transfer-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let zone = dir.join("db.a");
-    std::fs::write(&zone, "$ORIGIN a.\n$TTL 60\n@ IN SOA ns.a. hostmaster.a. 1 3600 600 604800 60\n@ IN NS ns.a.\nns IN A 127.0.0.1\nwww IN A 192.0.2.1\n").unwrap();
+    let mut contents = String::from(
+        "$ORIGIN a.\n$TTL 60\n@ IN SOA ns.a. hostmaster.a. 1 3600 600 604800 60\n@ IN NS ns.a.\nns IN A 127.0.0.1\nwww IN A 192.0.2.1\n",
+    );
+    for index in 0..4000 {
+        contents.push_str(&format!("host{index} IN A 192.0.2.1\n"));
+    }
+    std::fs::write(&zone, contents).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -359,7 +669,7 @@ async fn axfr_client_interoperates_with_coredns_file_and_transfer() {
     std::fs::write(
         &config,
         format!(
-            "a.:{port} {{\n bind 127.0.0.1\n file {} a.\n transfer {{\n  to *\n }}\n}}\n",
+            "a.:{port} {{\n bind 127.0.0.1\n tsig {{\n  secret key. c2VjcmV0\n }}\n file {} a.\n transfer {{\n  to *\n }}\n}}\n",
             zone.display()
         ),
     )
@@ -405,6 +715,31 @@ async fn axfr_client_interoperates_with_coredns_file_and_transfer() {
     assert_eq!(types.first(), Some(&Type::SOA));
     assert_eq!(types.last(), Some(&Type::SOA));
     assert!(types.contains(&Type::A));
+    let key = pharos_proto::TsigKey::new(
+        "key.".parse().unwrap(),
+        pharos_proto::TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let mut messages = 0;
+    let mut signed_types = Vec::new();
+    pharos_server::transfer::axfr_signed(
+        address,
+        &"a.".parse().unwrap(),
+        2,
+        Duration::from_secs(3),
+        &key,
+        |message| {
+            messages += 1;
+            signed_types.extend(message.answers().map(|record| record.rtype));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert!(messages > 1, "signed CoreDNS transfer must span Messages");
+    assert_eq!(signed_types.first(), Some(&Type::SOA));
+    assert_eq!(signed_types.last(), Some(&Type::SOA));
+    assert!(signed_types.contains(&Type::A));
 }
 
 #[tokio::test]
@@ -414,12 +749,36 @@ async fn coredns_secondary_receives_plugin_axfr_stream() {
     if !binary.exists() {
         return;
     }
+    struct UnsignedProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Chain for UnsignedProbe {
+        async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+            if cx
+                .query
+                .questions()
+                .next()
+                .is_some_and(|q| q.qtype == Type::AXFR)
+            {
+                assert!(cx.query.additionals().all(|r| r.rtype != Type::TSIG));
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Chain::serve(&Transfer, cx).await
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+    }
+    let saw_unsigned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let key = ListenerKey {
         transport: Transport::Dns,
         address: "127.0.0.1:53".parse().unwrap(),
     };
     let mut router = Router::default();
-    router.add(key, ".".parse().unwrap(), Some(Transfer), vec![]);
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(UnsignedProbe(saw_unsigned.clone())),
+        vec![],
+    );
     let primary = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
         .await
         .unwrap();
@@ -434,7 +793,7 @@ async fn coredns_secondary_receives_plugin_axfr_stream() {
     std::fs::write(
         &config,
         format!(
-            "a.:{port} {{\n bind 127.0.0.1\n secondary {{\n  transfer from {}\n }}\n}}\n",
+            "a.:{port} {{\n bind 127.0.0.1\n tsig {{\n  secret key. c2VjcmV0\n }}\n secondary {{\n  transfer from {}\n }}\n}}\n",
             primary.local_addr()
         ),
     )
@@ -477,5 +836,6 @@ async fn coredns_secondary_receives_plugin_axfr_stream() {
     })
     .await
     .unwrap();
+    assert!(saw_unsigned.load(std::sync::atomic::Ordering::SeqCst));
     primary.shutdown().await.unwrap();
 }

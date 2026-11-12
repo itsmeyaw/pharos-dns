@@ -1,8 +1,26 @@
 use pharos_proto::{
-    EdnsOptions, Message, MessageBuilder, Opt, Rcode, Section, Type, normalized_udp_size,
+    EdnsOptions, Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type,
+    normalized_udp_size,
 };
+use std::sync::Arc;
 
 use crate::{Action, Error, Outcome, Protocol, admission::write_error};
+
+/// Per-Query TSIG request; keys are shared with the Listener's configuration.
+pub enum TsigSigning {
+    Signed {
+        key: Arc<TsigKey>,
+        time: u64,
+        fudge: u16,
+        reserved: usize,
+    },
+    Error {
+        key: Option<Arc<TsigKey>>,
+        time: u64,
+        code: u16,
+        reserved: usize,
+    },
+}
 
 /// Maximum Response size requested by the client for this protocol.
 pub fn response_limit(query: Message<'_>, protocol: Protocol) -> usize {
@@ -19,12 +37,31 @@ pub fn finish_outcome(
     protocol: Protocol,
     outcome: Outcome,
     response: &mut Vec<u8>,
+    log: impl FnMut(Error),
+) -> Action {
+    finish_outcome_signed(query, protocol, outcome, response, None, log)
+}
+
+/// Finish the Response and append any requested TSIG as the last operation.
+pub fn finish_outcome_signed(
+    query: Message<'_>,
+    protocol: Protocol,
+    outcome: Outcome,
+    response: &mut Vec<u8>,
+    signing: Option<TsigSigning>,
     mut log: impl FnMut(Error),
 ) -> Action {
     match outcome {
         Outcome::Drop => return Action::Drop,
         Outcome::Stream(mut stream) => {
             if protocol == Protocol::Tcp {
+                match signing {
+                    Some(TsigSigning::Signed { key, fudge, .. }) => {
+                        stream.signing = Some(crate::StreamSigning { key, fudge });
+                    }
+                    Some(TsigSigning::Error { .. }) => return Action::Drop,
+                    None => {}
+                }
                 return Action::Stream(stream);
             }
             let qtype = query.questions().next().map(|q| q.qtype);
@@ -53,8 +90,69 @@ pub fn finish_outcome(
         }
         Outcome::Response => {}
     }
-    if let Err(error) = scrub(query, response_limit(query, protocol), protocol, response) {
+    // RFC 8945 §5.3: the complete TSIG must fit within the advertised UDP size.
+    let reserved = signing.as_ref().map_or(0, |request| match request {
+        TsigSigning::Signed { reserved, .. } | TsigSigning::Error { reserved, .. } => *reserved,
+    });
+    let signed = signing.is_some();
+    let before = signed
+        .then(|| Message::parse(response).ok())
+        .flatten()
+        .map(|message| {
+            message.answer_count() as usize
+                + message.authority_count() as usize
+                + message
+                    .additionals()
+                    .filter(|rr| rr.rtype != Type::OPT)
+                    .count()
+        });
+    let result = response_limit(query, protocol)
+        .checked_sub(reserved)
+        .ok_or(Error::ResponseBufferTooSmall)
+        .and_then(|limit| scrub(query, limit, protocol, response))
+        .and_then(|()| {
+            if !signed {
+                return Ok(());
+            }
+            let message = Message::parse(response).map_err(|_| Error::InvalidQuery)?;
+            let after = message.answer_count() as usize
+                + message.authority_count() as usize
+                + message
+                    .additionals()
+                    .filter(|rr| rr.rtype != Type::OPT)
+                    .count();
+            if before.is_some_and(|count| count > after) {
+                // RFC 8945 §5.3: a TSIG-truncated Response contains only the Question and TSIG.
+                let flags = (message.flags() | 0x0200) & !0x000f;
+                let mut builder = MessageBuilder::new(
+                    response,
+                    response_limit(query, protocol) - reserved,
+                    query.id(),
+                    flags,
+                )
+                .map_err(Error::Build)?;
+                for question in query.questions() {
+                    if !builder
+                        .question(question.name, question.qtype, question.qclass)
+                        .map_err(Error::Build)?
+                    {
+                        return Err(Error::ResponseBufferTooSmall);
+                    }
+                }
+                let _ = builder.finish();
+            }
+            Ok(())
+        })
+        .and_then(|()| match signing {
+            Some(request) => append_tsig(query, protocol, response, request),
+            None => Ok(()),
+        });
+    if let Err(error) = result {
         log(error);
+        // RFC 8945 §5.3: never substitute an unsigned Response to a signed Query.
+        if signed {
+            return Action::Drop;
+        }
         write_error(query, response, Rcode::SERVFAIL);
     }
     Action::Respond
@@ -142,7 +240,6 @@ fn scrub(
     let opt_len = response_opt.map_or(0, |opt| opt.wire_len());
     // RFC 6891 §7: a truncated EDNS response must retain the question and OPT record.
     let budget = limit
-        .max(512)
         .checked_sub(opt_len)
         .ok_or(Error::ResponseBufferTooSmall)?;
     let mut end = 12
@@ -204,4 +301,73 @@ fn scrub(
         wire[4 + 2 * i..6 + 2 * i].copy_from_slice(&count.to_be_bytes());
     }
     Ok(())
+}
+
+fn append_tsig(
+    query: Message<'_>,
+    protocol: Protocol,
+    wire: &mut Vec<u8>,
+    request: TsigSigning,
+) -> Result<(), Error> {
+    let record = TsigRecord::parse(query.as_wire()).map_err(|_| Error::InvalidQuery)?;
+    let reserved = match &request {
+        TsigSigning::Signed { reserved, .. } | TsigSigning::Error { reserved, .. } => *reserved,
+    };
+    if wire.capacity() < wire.len() + reserved {
+        if protocol == Protocol::Udp {
+            return Err(Error::ResponseBufferTooSmall);
+        }
+        wire.reserve(reserved);
+    }
+    match request {
+        TsigSigning::Signed {
+            key, time, fudge, ..
+        } => {
+            // RFC 8945 §4.3.1: the Response MAC includes the authenticated Query MAC.
+            key.sign(wire, time, fudge, Some(record.mac))
+                .map_err(|_| Error::InvalidQuery)
+        }
+        TsigSigning::Error {
+            key: Some(key),
+            time,
+            ..
+        } => {
+            key.sign_error_response(wire, query.as_wire(), time, 0)
+                .map_err(|_| Error::InvalidQuery)?
+                .ok_or(Error::InvalidQuery)?;
+            Ok(())
+        }
+        TsigSigning::Error {
+            key: None, code, ..
+        } => {
+            let algorithm_len = record
+                .algorithm
+                .labels()
+                .map(|l| l.len() + 1)
+                .sum::<usize>()
+                + 1;
+            // RFC 8945 §5.3.2: BADKEY and BADSIG carry an empty MAC.
+            for label in record.owner.labels() {
+                wire.push(label.len() as u8);
+                wire.extend_from_slice(label);
+            }
+            wire.push(0);
+            wire.extend_from_slice(&[0, 250, 0, 255, 0, 0, 0, 0]);
+            wire.extend_from_slice(&((algorithm_len + 16) as u16).to_be_bytes());
+            for label in record.algorithm.labels() {
+                wire.push(label.len() as u8);
+                wire.extend_from_slice(label);
+            }
+            wire.push(0);
+            wire.extend_from_slice(&[0; 6]);
+            wire.extend_from_slice(&record.fudge.to_be_bytes());
+            wire.extend_from_slice(&[0; 2]);
+            wire.extend_from_slice(&record.original_id.to_be_bytes());
+            wire.extend_from_slice(&code.to_be_bytes());
+            wire.extend_from_slice(&[0; 2]);
+            let count = u16::from_be_bytes([wire[10], wire[11]]) + 1;
+            wire[10..12].copy_from_slice(&count.to_be_bytes());
+            Ok(())
+        }
+    }
 }

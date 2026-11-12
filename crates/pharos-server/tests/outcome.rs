@@ -228,3 +228,99 @@ fn unanswered_tcp_response_can_append_edns_to_an_empty_buffer() {
     assert_eq!(message.rcode(), Rcode::REFUSED);
     assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
 }
+
+#[test]
+fn signed_response_reserves_room_before_truncation() {
+    use pharos_proto::{TsigAlgorithm, TsigKey};
+    use pharos_server::{TsigSigning, finish_outcome_signed};
+    use std::sync::Arc;
+    let key = Arc::new(TsigKey::new(
+        "key.".parse().unwrap(),
+        TsigAlgorithm::Sha256,
+        b"secret",
+    ));
+    let mut wire = query(false);
+    key.sign(&mut wire, 1_000, 300, None).unwrap();
+    let mac = key.verify(&wire, 1_000, None, 0).unwrap().mac;
+    let query = Message::parse(&wire).unwrap();
+    let mut response = response(8);
+    let signing = TsigSigning::Signed {
+        key: Arc::clone(&key),
+        time: 1_000,
+        fudge: 300,
+        reserved: 5 + 26 + 13 + 32,
+    };
+    assert_eq!(
+        finish_outcome_signed(
+            query,
+            Protocol::Udp,
+            Outcome::Response,
+            &mut response,
+            Some(signing),
+            |e| panic!("{e}")
+        ),
+        Action::Respond
+    );
+    assert!(response.len() <= 512);
+    assert!(Message::parse(&response).unwrap().tc());
+    assert_eq!(Message::parse(&response).unwrap().answer_count(), 0);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    key.verify(&response, 1_000, Some(mac), 0).unwrap();
+}
+
+#[test]
+fn signing_failure_never_emits_unsigned_response() {
+    use pharos_proto::{TsigAlgorithm, TsigKey};
+    use pharos_server::{TsigSigning, finish_outcome_signed};
+    use std::sync::Arc;
+    let mut wire = query(false);
+    let key = Arc::new(TsigKey::new(
+        "key.".parse().unwrap(),
+        TsigAlgorithm::Sha256,
+        b"secret",
+    ));
+    key.sign(&mut wire, 1_000, 300, None).unwrap();
+    let mut response = response(1);
+    let signing = TsigSigning::Signed {
+        key,
+        time: 1_000,
+        fudge: 300,
+        reserved: 513,
+    };
+    assert_eq!(
+        finish_outcome_signed(
+            Message::parse(&wire).unwrap(),
+            Protocol::Udp,
+            Outcome::Response,
+            &mut response,
+            Some(signing),
+            |_| {}
+        ),
+        Action::Drop
+    );
+}
+
+#[test]
+fn unsigned_finalization_still_removes_tsig_following_opt() {
+    let wire = query(true);
+    let mut response = response(1);
+    response[11] = 1;
+    response.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 0]);
+    let key = pharos_proto::TsigKey::new(
+        "key.".parse().unwrap(),
+        pharos_proto::TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    key.sign(&mut response, 1_000, 300, Some(&[0; 32])).unwrap();
+    finish_outcome(
+        Message::parse(&wire).unwrap(),
+        Protocol::Udp,
+        Outcome::Response,
+        &mut response,
+        |e| panic!("{e}"),
+    );
+    let message = Message::parse(&response).unwrap();
+    assert!(message.tc());
+    assert_eq!(message.additional_count(), 1);
+    assert!(message.opt().is_some());
+}

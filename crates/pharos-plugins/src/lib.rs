@@ -94,6 +94,8 @@ pub mod root;
 pub mod shed;
 #[cfg(feature = "plugin-timeouts")]
 pub mod timeouts;
+#[cfg(feature = "plugin-tsig")]
+pub mod tsig;
 #[cfg(feature = "plugin-whoami")]
 pub mod whoami;
 
@@ -135,6 +137,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("root", include_str!("root/README.md")),
     ("shed", include_str!("shed/README.md")),
     ("timeouts", include_str!("timeouts/README.md")),
+    ("tsig", include_str!("tsig/README.md")),
     ("whoami", include_str!("whoami/README.md")),
 ];
 
@@ -222,6 +225,8 @@ pub fn servers_with_registry(
             Ok(())
         });
     }
+    #[cfg(feature = "plugin-tsig")]
+    let mut tsig_keyrings = tsig::KeyRings::default();
     for block in blocks {
         #[cfg(any(
             feature = "plugin-forward",
@@ -230,7 +235,8 @@ pub fn servers_with_registry(
             feature = "plugin-acl",
             feature = "plugin-dns64",
             feature = "plugin-siit",
-            feature = "plugin-autopath"
+            feature = "plugin-autopath",
+            feature = "plugin-tsig"
         ))]
         let mut block = block;
         #[cfg(feature = "plugin-forward")]
@@ -330,6 +336,10 @@ pub fn servers_with_registry(
             && let Some((listener, _)) = routes.first()
         {
             plugin.register(&mut lifecycle, listener.address);
+        }
+        #[cfg(feature = "plugin-tsig")]
+        if let Some(tsig) = &mut block.config.tsig {
+            tsig.register(routes.iter().map(|(key, _)| *key), &mut tsig_keyrings);
         }
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &mut block.config.cache {
@@ -437,6 +447,8 @@ pub fn servers_with_registry(
             );
         }
     }
+    #[cfg(feature = "plugin-tsig")]
+    tsig_keyrings.finish();
     let servers = groups
         .into_iter()
         .map(|(key, (router, workers, tcp_options, allow_non_in))| {

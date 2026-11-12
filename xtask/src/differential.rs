@@ -551,6 +551,22 @@ fn scenario(
         apply_deviation(&expect, line, &mut pwire, &cwire)?;
         let pm = Message::parse(&pwire).map_err(|e| format!("Pharos {line}: {e}"))?;
         let cm = Message::parse(&cwire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
+        let p_signed = query
+            .check_response_tsig(&wire, &pwire)
+            .map_err(|e| format!("Pharos {line}: {e}"))?;
+        let c_signed = query
+            .check_response_tsig(&wire, &cwire)
+            .map_err(|e| format!("CoreDNS {line}: {e}"))?;
+        let pm = if p_signed {
+            pm.without_final_tsig().ok_or("missing Pharos TSIG")?
+        } else {
+            pm
+        };
+        let cm = if c_signed {
+            cm.without_final_tsig().ok_or("missing CoreDNS TSIG")?
+        } else {
+            cm
+        };
         let result = compare::compare_with_soa_serial(
             &pm,
             &cm,

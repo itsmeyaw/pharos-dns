@@ -22,6 +22,12 @@ mod any {
 }
 
 #[path = "functional"]
+mod tsig {
+    #[path = "tsig.rs"]
+    mod cases;
+}
+
+#[path = "functional"]
 mod autopath {
     #[path = "autopath_setup.rs"]
     mod autopath_setup;
