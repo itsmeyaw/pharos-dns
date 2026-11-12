@@ -431,7 +431,7 @@ fn coredns_readme_root_without_zone_is_invalid() {
 // Derived from CoreDNS setup_test.go TestParseReload and reload_test.go TestZoneReload.
 #[tokio::test(start_paused = true)]
 async fn coredns_default_and_configured_reload_intervals() {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../target/file-p75-interval-{}.zone",
         std::process::id()
@@ -474,37 +474,84 @@ async fn coredns_default_and_configured_reload_intervals() {
             [192, 0, 2, 1]
         );
         tokio::time::advance(Duration::from_secs(1)).await;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let (_, wire) = query_chain(
-                chain,
-                &"example.org.".parse().unwrap(),
-                "foo.example.org.",
-                Type::A,
-            )
-            .await;
-            if Message::parse(&wire)
-                .unwrap()
-                .answers()
-                .next()
-                .unwrap()
-                .rdata
-                == [192, 0, 2, 2]
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "reload did not run after {interval}s"
-            );
-            tokio::task::yield_now().await;
-        }
+        wait_for_address(
+            chain,
+            &"example.org.".parse().unwrap(),
+            "foo.example.org.",
+            [192, 0, 2, 2],
+        )
+        .await;
         chain
             .lifecycle
             .run(pharos_server::Phase::Shutdown)
             .await
             .unwrap();
     }
+    std::fs::remove_file(path).unwrap();
+}
+
+// Derived from CoreDNS reload_test.go TestZoneReloadSOAChange and TestZoneReloadSOAOrigin.
+#[tokio::test(start_paused = true)]
+async fn coredns_serial_reload_retains_zone_until_valid_change() {
+    use std::time::Duration;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/file-p75-serial-{}.zone",
+        std::process::id()
+    ));
+    let original = "@ 500 IN SOA ns.example. hostmaster.example. 3 3600 600 86400 300\n@ 500 IN NS ns.example.\nfoo 500 IN A 192.0.2.1\n";
+    std::fs::write(&path, original).unwrap();
+    let config = format!(
+        "example.org:53 {{\n file {} {{\n reload 5s\n }}\n}}",
+        path.display()
+    );
+    let configured =
+        configure::<Chain>(&parse("Corefile", &config).unwrap(), directives()).unwrap();
+    let chain = &configured[0].config;
+    let apex: Name = "example.org.".parse().unwrap();
+    chain
+        .lifecycle
+        .run(pharos_server::Phase::Startup)
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    for invalid in [
+        original.replace("192.0.2.1", "192.0.2.2"),
+        original
+            .replace("@ 500 IN SOA", "child 500 IN SOA")
+            .replace(" 3 3600", " 4 3600")
+            .replace("192.0.2.1", "192.0.2.2"),
+    ] {
+        std::fs::write(&path, invalid).unwrap();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        let (outcome, wire) = query_chain(chain, &apex, "foo.example.org.", Type::A).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(
+            Message::parse(&wire)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .rdata,
+            [192, 0, 2, 1]
+        );
+    }
+    std::fs::write(
+        &path,
+        original
+            .replace(" 3 3600", " 4 3600")
+            .replace("192.0.2.1", "192.0.2.2"),
+    )
+    .unwrap();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    wait_for_address(chain, &apex, "foo.example.org.", [192, 0, 2, 2]).await;
+    chain
+        .lifecycle
+        .run(pharos_server::Phase::Shutdown)
+        .await
+        .unwrap();
     std::fs::remove_file(path).unwrap();
 }
 
