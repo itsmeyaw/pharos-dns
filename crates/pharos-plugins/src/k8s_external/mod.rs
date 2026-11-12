@@ -1021,7 +1021,7 @@ mod tests {
         use tokio::sync::{Notify, Semaphore, broadcast};
 
         enum TestChain {
-            External(External),
+            External(Box<External>),
             Target {
                 started: Arc<Notify>,
                 resume: Arc<Semaphore>,
@@ -1170,7 +1170,7 @@ mod tests {
         router.add(
             key,
             "example.org.".parse().unwrap(),
-            Some(TestChain::External(external)),
+            Some(TestChain::External(Box::new(external))),
             vec![],
         );
         router.add(
