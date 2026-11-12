@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use pharos_proto::{Message, Rcode};
+use pharos_proto::{Message, Opcode, Rcode, Type};
 use pharos_server::{
     Action, Chain, Context, Error, Handler, ListenerKey, Outcome, Protocol, Router, Server,
     Transport, panics_total,
@@ -27,6 +27,50 @@ impl Chain for LocalProbe {
     }
     fn is_empty(&self) -> bool {
         false
+    }
+}
+
+struct NotifyProbe;
+impl Chain for NotifyProbe {
+    async fn serve(&self, context: &mut Context<'_, '_>) -> Outcome {
+        assert_eq!(context.query.opcode(), Opcode::NOTIFY);
+        assert_eq!(context.query.questions().next().unwrap().qtype, Type::SOA);
+        Outcome::Unanswered(Rcode::REFUSED)
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn notify_reaches_the_plugin_chain_over_udp_and_tcp() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(NotifyProbe), vec![]);
+    let server = Server::new(router, key);
+    // RFC 1996 §3.7: NOTIFY carries opcode 4 and an SOA Question.
+    let query = [
+        0, 1, 0x20, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 6, 0, 1,
+    ];
+    for protocol in [Protocol::Udp, Protocol::Tcp] {
+        let mut response = Vec::with_capacity(512);
+        assert_eq!(
+            server
+                .handle(
+                    &query,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    protocol,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.opcode(), Opcode::NOTIFY);
+        assert_eq!(response.rcode(), Rcode::REFUSED);
     }
 }
 

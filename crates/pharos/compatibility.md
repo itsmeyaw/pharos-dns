@@ -211,7 +211,7 @@
 - If an OPT precedes other Additional records, Pharos drops the following records and sets TC rather than shifting their compression pointers.
 - Pharos removes OPT from a Response to a non-EDNS Query, as RFC 6891 requires; CoreDNS may preserve a Plugin-supplied OPT in that case.
 - Pharos answers Plugin errors with SERVFAIL. CoreDNS ignores returned errors and bases the Response on the separately returned RCODE; without `errors` it does not log ordinary chain errors. Pharos likewise logs those errors only when `errors` is configured, while logging recovered panics at the Listener.
-- Zone Transfer streams are not yet served by the Listener.
+- A UDP IXFR that reaches a Zone Transfer stream returns the current SOA only, following RFC 1995 §2; CoreDNS's `transfer` returns REFUSED instead.
 - Pharos also rejects Client Subnet address lengths that do not match the prefix and non-zero host bits, which miekg/dns accepts. It validates the supported typed options and framing; other option codes are passed through without the additional type-specific validation miekg/dns applies to some of them.
 - Invalid UTF-8 in Extended DNS Error text is rendered with replacement characters.
 - The requested record-data families are complete: the typed RDATA parser supports A, AAAA, NS, CNAME, PTR, MX, SOA, TXT, HINFO, CAA, URI, SRV, NAPTR, DS, CDS, DNSKEY, CDNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, SVCB, HTTPS, TLSA, SSHFP, ZONEMD and TSIG.

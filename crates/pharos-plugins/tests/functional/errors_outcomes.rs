@@ -148,7 +148,7 @@ async fn errors_probe() {
                 .errors
                 .as_ref()
                 .unwrap()
-                .serve(&mut cx, Answer(outcome))
+                .serve(&mut cx, Answer(outcome.clone()))
                 .await,
             outcome
         );

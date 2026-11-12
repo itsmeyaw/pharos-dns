@@ -262,7 +262,7 @@ async fn coredns_clamps_only_larger_opt_and_preserves_outcome() {
                     Inspect {
                         expected,
                         max_response_size,
-                        outcome
+                        outcome: outcome.clone()
                     }
                 )
                 .await,

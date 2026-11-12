@@ -97,7 +97,7 @@ async fn class_filter_probe() {
             .log
             .as_ref()
             .unwrap()
-            .serve(&mut cx, Answer(outcome, wire),)
+            .serve(&mut cx, Answer(outcome.clone(), wire),)
             .await,
         outcome
     );
@@ -148,6 +148,12 @@ async fn matching_rule_classifies_next_outcome_without_changing_it() {
     for (outcome, wire, kind, class) in [
         (Outcome::Drop, &b""[..], "OTHERERROR", "error"),
         (
+            Outcome::Stream(pharos_server::Stream::new(|_| Ok(false))),
+            &b""[..],
+            "META",
+            "error",
+        ),
+        (
             Outcome::Unanswered(Rcode::SERVFAIL),
             &b""[..],
             "SERVERERROR",
@@ -179,7 +185,10 @@ async fn matching_rule_classifies_next_outcome_without_changing_it() {
             response: &mut response,
             max_response_size: 512,
         };
-        assert_eq!(log.serve(&mut cx, Answer(outcome, wire)).await, outcome);
+        assert_eq!(
+            log.serve(&mut cx, Answer(outcome.clone(), wire)).await,
+            outcome
+        );
         assert_eq!(cx.metadata.get("log/type"), Some(kind));
         assert_eq!(cx.metadata.get("log/class"), Some(class));
         assert_eq!(cx.response, wire);
