@@ -529,3 +529,15 @@ fn empty_range_else_keeps_outer_dot_and_binds_pipeline_value() {
     template.render(&data, &mut output).unwrap();
     assert_eq!(output, "example.:0:0");
 }
+
+#[test]
+fn printf_supports_common_flags_precision_and_radices() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template =
+        Template::compile(r#"{{ printf "%-8s|%+.2f|%#x|%o|%b|%c" "go" 3.5 255 8 5 65 }}"#).unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "go      |+3.50|0xff|10|101|A");
+}

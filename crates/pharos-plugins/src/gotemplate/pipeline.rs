@@ -625,7 +625,21 @@ fn format_values(
                 scratch.write_char('%')?;
                 continue;
             }
-            let zero = verb == '0';
+            let (mut zero, mut left, mut plus, mut alternate) = (false, false, false, false);
+            while matches!(verb, '0' | '-' | '+' | '#') {
+                match verb {
+                    '0' => zero = true,
+                    '-' => left = true,
+                    '+' => plus = true,
+                    '#' => alternate = true,
+                    _ => unreachable!(),
+                }
+                verb = format.text(scratch)?[cursor..]
+                    .chars()
+                    .next()
+                    .ok_or(fmt::Error)?;
+                cursor += verb.len_utf8();
+            }
             let mut width = 0usize;
             while verb.is_ascii_digit() {
                 width = width
@@ -641,55 +655,119 @@ fn format_values(
                     .ok_or(fmt::Error)?;
                 cursor += verb.len_utf8();
             }
+            let mut precision = None;
+            if verb == '.' {
+                let mut digits = 0usize;
+                verb = format.text(scratch)?[cursor..]
+                    .chars()
+                    .next()
+                    .ok_or(fmt::Error)?;
+                cursor += verb.len_utf8();
+                while verb.is_ascii_digit() {
+                    digits = digits
+                        .checked_mul(10)
+                        .and_then(|n| n.checked_add(verb.to_digit(10)? as usize))
+                        .ok_or(fmt::Error)?;
+                    if digits > 65535 {
+                        return Err(fmt::Error);
+                    }
+                    verb = format.text(scratch)?[cursor..]
+                        .chars()
+                        .next()
+                        .ok_or(fmt::Error)?;
+                    cursor += verb.len_utf8();
+                }
+                precision = Some(digits);
+            }
             let value = values.get(argument).copied().flatten().ok_or(fmt::Error)?;
             argument += 1;
             match verb {
                 's' if value.is_string() => {
-                    for _ in value.text(scratch)?.chars().count()..width {
-                        scratch.write_char(' ')?;
+                    let chars = value.text(scratch)?.chars().count();
+                    if precision.is_some() {
+                        return Err(fmt::Error);
+                    }
+                    if !left {
+                        for _ in chars..width {
+                            scratch.write_char(' ')?;
+                        }
                     }
                     scratch.append(value)?;
-                }
-                'd' => match value {
-                    ResultValue::Scalar(Some(Value::Int(v))) if zero => {
-                        write!(scratch, "{v:0width$}")?
+                    if left {
+                        for _ in chars..width {
+                            scratch.write_char(' ')?;
+                        }
                     }
-                    ResultValue::Scalar(Some(Value::Int(v))) => write!(scratch, "{v:width$}")?,
-                    ResultValue::Uint(v) if zero => write!(scratch, "{v:0width$}")?,
-                    ResultValue::Uint(v) => write!(scratch, "{v:width$}")?,
-                    _ => return Err(fmt::Error),
-                },
-                'x' | 'X' => {
+                }
+                'd' | 'x' | 'X' | 'o' | 'b' => {
+                    if precision.is_some() {
+                        return Err(fmt::Error);
+                    }
                     let (negative, number) = match value {
                         ResultValue::Scalar(Some(Value::Int(v))) => (v < 0, v.unsigned_abs()),
                         ResultValue::Uint(v) => (false, v),
                         _ => return Err(fmt::Error),
                     };
-                    let digits = if number == 0 {
-                        1
-                    } else {
-                        ((64 - number.leading_zeros()) as usize).div_ceil(4)
+                    let bits = (64 - number.leading_zeros()) as usize;
+                    let digits = match verb {
+                        'x' | 'X' => bits.div_ceil(4).max(1),
+                        'o' => bits.div_ceil(3).max(1),
+                        'b' => bits.max(1),
+                        _ => number.checked_ilog10().map_or(1, |n| n as usize + 1),
                     };
-                    let padding = width.saturating_sub(digits + usize::from(negative));
-                    if !zero {
+                    let prefix = if alternate {
+                        match verb {
+                            'x' => "0x",
+                            'X' => "0X",
+                            'b' => "0b",
+                            'o' if number != 0 => "0",
+                            _ => "",
+                        }
+                    } else {
+                        ""
+                    };
+                    let signed = negative || plus;
+                    let padding = width.saturating_sub(digits + usize::from(signed) + prefix.len());
+                    if !zero && !left {
                         for _ in 0..padding {
                             scratch.write_char(' ')?;
                         }
                     }
                     if negative {
                         scratch.write_char('-')?;
+                    } else if plus {
+                        scratch.write_char('+')?;
                     }
-                    if zero {
+                    scratch.write_str(prefix)?;
+                    if zero && !left {
                         for _ in 0..padding {
                             scratch.write_char('0')?;
                         }
                     }
-                    if verb == 'x' {
-                        write!(scratch, "{number:x}")?;
-                    } else {
-                        write!(scratch, "{number:X}")?;
+                    match verb {
+                        'x' => write!(scratch, "{number:x}")?,
+                        'X' => write!(scratch, "{number:X}")?,
+                        'o' => write!(scratch, "{number:o}")?,
+                        'b' => write!(scratch, "{number:b}")?,
+                        _ => write!(scratch, "{number}")?,
+                    }
+                    if left {
+                        for _ in 0..padding {
+                            scratch.write_char(' ')?;
+                        }
                     }
                 }
+                'f' => match value {
+                    ResultValue::Scalar(Some(Value::Float(v))) => {
+                        let precision = precision.unwrap_or(6);
+                        if plus {
+                            write!(scratch, "{v:+width$.precision$}")?;
+                        } else {
+                            write!(scratch, "{v:width$.precision$}")?;
+                        }
+                    }
+                    _ => return Err(fmt::Error),
+                },
                 'g' => match value {
                     ResultValue::Scalar(Some(Value::Float(v))) => write!(scratch, "{v}")?,
                     _ => return Err(fmt::Error),
@@ -699,6 +777,10 @@ fn format_values(
                     _ => return Err(fmt::Error),
                 },
                 'q' if value.is_string() => quote_value(value, scratch)?,
+                'c' => {
+                    let scalar = u32::try_from(value.integer()?).unwrap_or(u32::MAX);
+                    scratch.write_char(char::from_u32(scalar).unwrap_or('\u{fffd}'))?;
+                }
                 'T' => scratch.write_str(value.type_name())?,
                 'v' => scratch.append(value)?,
                 _ => return Err(fmt::Error),
