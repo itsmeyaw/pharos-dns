@@ -6,6 +6,50 @@ use pharos_proto::{Message, Name, Rcode, TsigAlgorithm, TsigKey};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 #[tokio::test]
+#[ignore = "TSIG signing must follow earlier Response-modifying Plugins"]
+async fn upstream_nsid_must_not_invalidate_tsig() {
+    let blocks = parse(
+        "Corefile",
+        ". {\n nsid server1\n tsig {\n secret key. c2VjcmV0\n }\n whoami\n}",
+    )
+    .unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut wire = Vec::with_capacity(512);
+    wire.extend_from_slice(&[
+        0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, b'a', 0, 0, 1, 0, 1, 0, 0, 41, 0x04, 0xd0, 0, 0,
+        0x80, 0, 0, 4, 0, 3, 0, 0,
+    ]);
+    key.sign(&mut wire, now, 300, None).unwrap();
+    let mac = key.verify(&wire, now, None, 0).unwrap().mac;
+    let query = Message::parse(&wire).unwrap();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(1232);
+    let mut slots = [];
+    let mut cx = Context {
+        query,
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 1232,
+    };
+    let outcome = configured[0].config.serve(&mut cx).await;
+    assert_eq!(outcome, Outcome::Response);
+    pharos_server::finish_outcome(query, Protocol::Udp, outcome, &mut response, |e| {
+        panic!("{e}")
+    });
+    key.verify(&response, now, Some(mac), 0).unwrap();
+}
+
+#[tokio::test]
 async fn keys_are_shared_by_server_blocks_on_the_same_listener() {
     use pharos_server::{Action, Handler};
     let blocks = parse("Corefile", "one.test:53 {\n tsig {\n secret key. c2VjcmV0\n }\n whoami\n}\ntwo.test:53 {\n tsig\n whoami\n}").unwrap();
