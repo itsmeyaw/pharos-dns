@@ -74,9 +74,6 @@ pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
                     }
                 }
                 "var" if args.len() >= 2 => {
-                    if rule.variables.len() == 32 {
-                        return Err(cursor.error("too many template variables (maximum 32)"));
-                    }
                     let name = &args[0];
                     if !valid_variable(name)
                         || rule.variables.iter().any(|variable| variable.name == *name)

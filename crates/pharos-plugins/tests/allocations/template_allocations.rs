@@ -105,9 +105,21 @@ fn warmed_rule_workspace_on_worker_does_not_allocate() {
     if crate::run_isolated("template::cases::warmed_rule_workspace_on_worker_does_not_allocate") {
         return;
     }
-    let corefile = ". {\n template IN A example {\n match ^(?P<host>[a-z]+)[.]example[.]$\n var host group('host')\n expr host == 'no'\n fallthrough\n }\n whoami\n}";
+    let vars = (0..40)
+        .map(|i| {
+            if i == 0 {
+                "var v0 group('host')\n".to_owned()
+            } else {
+                format!("var v{i} v{}\n", i - 1)
+            }
+        })
+        .collect::<String>();
+    let pattern = format!("^{}(?P<host>[a-z]+)[.]example[.]$", "()".repeat(128));
+    let corefile = format!(
+        ". {{\n template IN A example {{\n match {pattern}\n {vars} expr v39 == 'no'\n fallthrough\n }}\n whoami\n}}"
+    );
     let configured =
-        configure::<Chain>(&parse("Corefile", corefile).unwrap(), directives()).unwrap();
+        configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
     std::thread::scope(|scope| {
         scope
             .spawn(|| {

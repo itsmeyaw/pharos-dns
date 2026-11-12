@@ -3,6 +3,98 @@ use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
+#[tokio::test]
+async fn template_evaluates_many_chained_variables() {
+    let variables = (0..40)
+        .map(|i| {
+            if i == 0 {
+                "var v0 1\n".to_owned()
+            } else {
+                format!("var v{i} v{} + 1\n", i - 1)
+            }
+        })
+        .collect::<String>();
+    let text = format!(
+        ".:53 {{\n template IN A {{\n {variables} expr v39 == 40\n answer \"{{{{ .Name }}}} 60 IN A 192.0.2.{{{{ .Var.v39 }}}}\"\n }}\n}}"
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let root: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut context = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        configured[0].config.serve(&mut context).await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        &[192, 0, 2, 40]
+    );
+}
+
+#[tokio::test]
+async fn template_evaluates_many_variables_and_capture_groups() {
+    let pattern = format!("^{}(?P<last>x)[.]$", "()".repeat(128));
+    let variables = (0..40)
+        .map(|i| {
+            if i == 0 {
+                "var v0 group('last')\n".to_owned()
+            } else {
+                format!("var v{i} v{} + 'a'\n", i - 1)
+            }
+        })
+        .collect::<String>();
+    let text = format!(
+        ".:53 {{\n template IN A {{\n match {pattern}\n {variables} expr group(129) == 'x' && v39 == 'x{}'\n answer \"{{{{ .Name }}}} 60 IN TXT \\\"{{{{ index .Match 129 }}}}:{{{{ .Group.last }}}}:{{{{ .Group.129 }}}}\\\"\"\n }}\n}}",
+        "a".repeat(39)
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let root: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut context = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        configured[0].config.serve(&mut context).await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        b"\x05x:x:x"
+    );
+}
+
 #[test]
 fn template_renders_concurrently_on_multiple_threads() {
     let text = ".:53 {\n template IN A {\n match ^(?P<host>[0-9]+)[.]example[.]$\n var host group('host')\n expr host matches '^[0-9]+$'\n answer \"{{ .Name }} 60 IN A 192.0.2.{{ .Var.host }}\"\n }\n}";

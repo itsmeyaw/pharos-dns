@@ -82,6 +82,7 @@ struct Matcher {
     source: String,
     vm: PikeVM,
     names: Vec<Option<String>>,
+    numbers: Vec<String>,
     warmer: PikeVM,
 }
 struct MatcherState {
@@ -91,6 +92,9 @@ struct MatcherState {
 struct RuleWorkspace {
     matchers: Vec<MatcherState>,
     scratch: Vec<u8>,
+    variables: Vec<(&'static str, Value<'static>)>,
+    matches: Vec<&'static str>,
+    groups: Vec<(&'static str, &'static str)>,
 }
 
 impl Matcher {
@@ -102,9 +106,9 @@ impl Matcher {
             .pattern_names(PatternID::ZERO)
             .map(|s| s.map(str::to_owned))
             .collect();
-        if vm.get_nfa().group_info().group_len(PatternID::ZERO) > 128 {
-            return Err("regex exceeds 127 capture groups".into());
-        }
+        let numbers = (0..vm.get_nfa().group_info().group_len(PatternID::ZERO))
+            .map(|index| index.to_string())
+            .collect();
         let bound = 1 + vm
             .get_nfa()
             .states()
@@ -130,6 +134,7 @@ impl Matcher {
             source: pattern.to_owned(),
             vm,
             names,
+            numbers,
             warmer,
         })
     }
@@ -137,6 +142,13 @@ impl Matcher {
 
 impl Rule {
     fn initialize_workspace(&mut self) {
+        let variable_count = self.variables.len();
+        let group_count = self
+            .regex
+            .iter()
+            .map(|m| m.numbers.len())
+            .max()
+            .unwrap_or(0);
         let matchers: Vec<_> = self
             .regex
             .iter()
@@ -157,6 +169,9 @@ impl Rule {
             RuleWorkspace {
                 matchers,
                 scratch: vec![0; EXPRESSION_SCRATCH],
+                variables: vec![("", Value::Nil); variable_count],
+                matches: vec![""; group_count],
+                groups: vec![("", ""); group_count.saturating_mul(2)],
             }
         }) as Box<dyn Fn() -> RuleWorkspace + Send + Sync>);
         drop(workspace.get());
@@ -311,7 +326,13 @@ impl Template {
                 return MatchResult::Failed;
             };
             let mut workspace = pool.get();
-            let RuleWorkspace { matchers, scratch } = &mut *workspace;
+            let RuleWorkspace {
+                matchers,
+                scratch,
+                variables,
+                matches: match_slots,
+                groups: group_slots,
+            } = &mut *workspace;
             for (matcher, state) in rule.regex.iter().zip(matchers) {
                 let MatcherState { cache, captures } = state;
                 matcher.vm.captures(cache, name, captures);
@@ -319,38 +340,15 @@ impl Template {
                     continue;
                 }
                 matched = true;
-                let mut matches = [""; 128];
-                let mut numbers = [[0_u8; 3]; 128];
-                for (i, number) in numbers.iter_mut().enumerate() {
-                    if i >= 100 {
-                        number[0] = b'0' + (i / 100) as u8;
-                        number[1] = b'0' + ((i / 10) % 10) as u8;
-                        number[2] = b'0' + (i % 10) as u8;
-                    } else if i >= 10 {
-                        number[0] = b'0' + (i / 10) as u8;
-                        number[1] = b'0' + (i % 10) as u8;
-                    } else {
-                        number[0] = b'0' + i as u8;
-                    }
-                }
-                let mut groups = [("", ""); 256];
+                let mut matches = std::mem::take(match_slots);
+                let mut groups = std::mem::take(group_slots);
                 let mut group_count = 0;
                 for (i, slot) in matches.iter_mut().enumerate().take(captures.group_len()) {
                     *slot = captures
                         .get_group(i)
                         .and_then(|s| name.get(s.start..s.end))
                         .unwrap_or("");
-                    let length = if i >= 100 {
-                        3
-                    } else if i >= 10 {
-                        2
-                    } else {
-                        1
-                    };
-                    groups[group_count] = (
-                        std::str::from_utf8(&numbers[i][..length]).unwrap_or(""),
-                        *slot,
-                    );
+                    groups[group_count] = (&matcher.numbers[i], *slot);
                     group_count += 1;
                     if let Some(Some(group)) = matcher.names.get(i) {
                         groups[group_count] = (group, *slot);
@@ -398,7 +396,9 @@ impl Template {
                             || m.address.ip().is_unspecified()
                                 && m.address.port() == cx.local.port())
                 });
-                let result = evaluate(rule, cx, &data, scratch, &[], 0, metrics);
+                let result = evaluate(rule, cx, &data, scratch, variables, metrics);
+                *match_slots = matches.into_iter().map(|_| "").collect();
+                *group_slots = groups.into_iter().map(|_| ("", "")).collect();
                 return match result {
                     Ok(Some(records)) => MatchResult::Hit(Hit { rule, records }),
                     Ok(None) if rule.fallthrough.through(name) => break,
@@ -471,41 +471,42 @@ fn evaluate<'a>(
     rule: &'a Rule,
     cx: &'a Context<'_, '_>,
     data: &'a gotemplate::Data<'a, '_>,
-    scratch: &'a mut [u8],
-    variables: &'a [(&'a str, Value<'a>)],
-    index: usize,
+    scratch: &mut [u8],
+    storage: &mut Vec<(&'static str, Value<'static>)>,
     metrics: Option<&RuleMetrics>,
 ) -> Result<Option<Vec<(Section, ZoneRecord)>>, EvaluationError> {
-    if let Some(variable) = rule.variables.get(index) {
-        let mut query = expression::Query::new(&cx.query, cx.client, cx.local, cx.protocol);
-        query.groups = data.groups;
-        query.matches = data.matches;
-        query.variables = variables;
-        let (value, rest) = variable
-            .expression
-            .evaluate_split(&query, &cx.metadata, scratch)
-            .map_err(|_| EvaluationError::Expression)?;
-        let mut next = [("", Value::Nil); 32];
-        next[..variables.len()].copy_from_slice(variables);
-        next[variables.len()] = (&variable.name, value);
-        return evaluate(
-            rule,
-            cx,
-            data,
-            rest,
-            &next[..variables.len() + 1],
-            index + 1,
-            metrics,
-        );
-    }
     let mut query = expression::Query::new(&cx.query, cx.client, cx.local, cx.protocol);
     query.groups = data.groups;
     query.matches = data.matches;
-    query.variables = variables;
+    let mut variables = std::mem::take(storage);
+    let result = evaluate_slots(rule, cx, data, scratch, &query, &mut variables, metrics);
+    *storage = variables.into_iter().map(|_| ("", Value::Nil)).collect();
+    result
+}
+
+fn evaluate_slots<'a>(
+    rule: &'a Rule,
+    cx: &'a Context<'_, '_>,
+    data: &'a gotemplate::Data<'a, '_>,
+    mut scratch: &'a mut [u8],
+    query: &'a expression::Query<'a>,
+    variables: &mut [(&'a str, Value<'a>)],
+    metrics: Option<&RuleMetrics>,
+) -> Result<Option<Vec<(Section, ZoneRecord)>>, EvaluationError> {
+    for (index, variable) in rule.variables.iter().enumerate() {
+        let scoped = expression::ScopedQuery::new(query, &variables[..index]);
+        let (value, rest) = variable
+            .expression
+            .evaluate_scoped_split(&scoped, &cx.metadata, scratch)
+            .map_err(|_| EvaluationError::Expression)?;
+        variables[index] = (&variable.name, value);
+        scratch = rest;
+    }
+    let scoped = expression::ScopedQuery::new(query, variables);
     for expr in &rule.expressions {
         let mut buf = expression::Scratch::new(scratch);
         if expr
-            .evaluate(&query, &cx.metadata, &mut buf)
+            .evaluate_scoped(&scoped, &cx.metadata, &mut buf)
             .map_err(|_| EvaluationError::Expression)?
             != Value::Bool(true)
         {
@@ -729,9 +730,9 @@ mod tests {
             );
         }
         assert!(Matcher::new(&"(a)".repeat(127)).is_ok());
-        assert!(Matcher::new(&"(a)".repeat(128)).is_err());
+        assert!(Matcher::new(&"(a)".repeat(128)).is_ok());
         let variables = (0..33).map(|i| format!("var v{i} 1\n")).collect::<String>();
-        assert!(configure(&format!(". {{\n template IN A {{\n{variables} }}\n}}")).is_err());
+        assert!(configure(&format!(". {{\n template IN A {{\n{variables} }}\n}}")).is_ok());
     }
     #[test]
     fn zone_matching_respects_escaped_dots() {
