@@ -1244,3 +1244,187 @@ async fn coredns_reload_and_lookup_keep_one_zone_generation() {
         .unwrap();
     std::fs::remove_file(path).unwrap();
 }
+
+// Derived from CoreDNS dnssec_test.go TestLookupDNSSEC.
+#[tokio::test]
+async fn coredns_signed_lookup_and_denial_cases() {
+    let zone = zone(
+        "miek.nl.",
+        include_str!("../fixtures/file/coredns-miek-signed.zone"),
+    )
+    .unwrap();
+    let cases: &[(&str, Type, Rcode, &[Type], &[Type], &[&str])] = &[
+        (
+            "miek.nl.",
+            Type::SOA,
+            Rcode::NOERROR,
+            &[Type::SOA, Type::RRSIG],
+            &[Type::NS, Type::NS, Type::NS, Type::NS, Type::RRSIG],
+            &[],
+        ),
+        (
+            "miek.nl.",
+            Type::AAAA,
+            Rcode::NOERROR,
+            &[Type::AAAA, Type::RRSIG],
+            &[Type::NS, Type::NS, Type::NS, Type::NS, Type::RRSIG],
+            &[],
+        ),
+        (
+            "miek.nl.",
+            Type::NS,
+            Rcode::NOERROR,
+            &[Type::NS, Type::NS, Type::NS, Type::NS, Type::RRSIG],
+            &[],
+            &[],
+        ),
+        (
+            "miek.nl.",
+            Type::MX,
+            Rcode::NOERROR,
+            &[
+                Type::MX,
+                Type::MX,
+                Type::MX,
+                Type::MX,
+                Type::MX,
+                Type::RRSIG,
+            ],
+            &[Type::NS, Type::NS, Type::NS, Type::NS, Type::RRSIG],
+            &[],
+        ),
+        (
+            "www.miek.nl.",
+            Type::A,
+            Rcode::NOERROR,
+            &[Type::CNAME, Type::RRSIG, Type::A, Type::RRSIG],
+            &[Type::NS, Type::NS, Type::NS, Type::NS, Type::RRSIG],
+            &[],
+        ),
+        (
+            "a.miek.nl.",
+            Type::SRV,
+            Rcode::NOERROR,
+            &[],
+            &[Type::SOA, Type::RRSIG, Type::NSEC, Type::RRSIG],
+            &["a.miek.nl."],
+        ),
+        (
+            "b.miek.nl.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            &[],
+            &[
+                Type::SOA,
+                Type::RRSIG,
+                Type::NSEC,
+                Type::RRSIG,
+                Type::NSEC,
+                Type::RRSIG,
+            ],
+            &["archive.miek.nl.", "miek.nl."],
+        ),
+        (
+            "b.blaat.miek.nl.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            &[],
+            &[
+                Type::SOA,
+                Type::RRSIG,
+                Type::NSEC,
+                Type::RRSIG,
+                Type::NSEC,
+                Type::RRSIG,
+            ],
+            &["archive.miek.nl.", "miek.nl."],
+        ),
+        (
+            "b.a.miek.nl.",
+            Type::A,
+            Rcode::NXDOMAIN,
+            &[],
+            &[Type::SOA, Type::RRSIG, Type::NSEC, Type::RRSIG],
+            &["a.miek.nl."],
+        ),
+    ];
+    for (name, kind, rcode, answer, authority, nsec_names) in cases {
+        let (outcome, wire) = query(&zone, name, *kind, true, &[]).await;
+        assert_eq!(outcome, Outcome::Response, "{name}");
+        let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.rcode(), *rcode, "{name}");
+        assert_eq!(
+            response.answers().map(|rr| rr.rtype).collect::<Vec<_>>(),
+            *answer,
+            "{name}"
+        );
+        assert_eq!(
+            response
+                .authorities()
+                .map(|rr| rr.rtype)
+                .collect::<Vec<_>>(),
+            *authority,
+            "{name}"
+        );
+        assert_eq!(
+            response
+                .authorities()
+                .filter(|rr| rr.rtype == Type::NSEC)
+                .map(|rr| rr.name.to_string())
+                .collect::<Vec<_>>(),
+            *nsec_names,
+            "{name}"
+        );
+        assert!(
+            response
+                .answers()
+                .chain(response.authorities())
+                .filter(|rr| rr.rtype == Type::RRSIG)
+                .all(|rr| matches!(
+                    rr.data(),
+                    Ok(Rdata::Rrsig {
+                        algorithm: 8,
+                        key_tag: 12051,
+                        ..
+                    })
+                ))
+        );
+    }
+}
+
+// Derived from CoreDNS glue_test.go TestLookupGlue.
+#[tokio::test]
+async fn coredns_apex_ns_includes_signed_glue() {
+    let zone = zone(
+        "atoom.net.",
+        include_str!("../fixtures/file/coredns-atoom-signed.zone"),
+    )
+    .unwrap();
+    let (outcome, wire) = query(&zone, "atoom.net.", Type::NS, true, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(
+        response.answers().filter(|rr| rr.rtype == Type::NS).count(),
+        3
+    );
+    assert!(response.answers().any(|rr| matches!(
+        rr.data(),
+        Ok(Rdata::Rrsig {
+            type_covered: Type::NS,
+            key_tag: 53289,
+            ..
+        })
+    )));
+    let extra = response.additionals().collect::<Vec<_>>();
+    assert_eq!(
+        extra.iter().map(|rr| rr.rtype).collect::<Vec<_>>(),
+        [Type::A, Type::RRSIG, Type::AAAA, Type::RRSIG]
+    );
+    assert!(
+        extra
+            .iter()
+            .all(|rr| rr.name.to_string() == "linode.atoom.net.")
+    );
+    assert!(extra.iter().any(|rr| matches!(rr.data(), Ok(Rdata::A(address)) if address == std::net::Ipv4Addr::new(176, 58, 119, 54))));
+    assert!(extra.iter().any(|rr| matches!(rr.data(), Ok(Rdata::Aaaa(address)) if address == "2a01:7e00::f03c:91ff:fe79:234c".parse::<std::net::Ipv6Addr>().unwrap())));
+}
