@@ -1,15 +1,62 @@
 use super::*;
 use pharos_proto::{Message, MessageBuilder, NameRef, Section, Type, zone::ZoneRecord};
-use std::{io, net::IpAddr, time::Duration};
+use std::{fmt::Write, io, net::SocketAddr, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub(super) fn primary_ip(address: &str) -> Option<IpAddr> {
+pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
     let host = if let Some(value) = address.strip_prefix('[') {
-        value.split_once(']')?.0
+        match value.split_once(']') {
+            Some((host, _)) => host,
+            None => return false,
+        }
     } else {
-        address.rsplit_once(':')?.0
+        match address.rsplit_once(':') {
+            Some((host, _)) => host,
+            None => return false,
+        }
     };
-    host.split('%').next()?.parse().ok()
+    let (host, scope) = host
+        .split_once('%')
+        .map_or((host, None), |(host, scope)| (host, Some(scope)));
+    struct Text {
+        bytes: [u8; 64],
+        len: usize,
+    }
+    impl std::fmt::Write for Text {
+        fn write_str(&mut self, value: &str) -> std::fmt::Result {
+            let end = self.len.checked_add(value.len()).ok_or(std::fmt::Error)?;
+            self.bytes
+                .get_mut(self.len..end)
+                .ok_or(std::fmt::Error)?
+                .copy_from_slice(value.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+    let mut rendered = Text {
+        bytes: [0; 64],
+        len: 0,
+    };
+    if write!(rendered, "{}", client.ip()).is_err()
+        || rendered.bytes[..rendered.len] != *host.as_bytes()
+    {
+        return false;
+    }
+    match (client, scope) {
+        (SocketAddr::V4(_), None) => true,
+        (SocketAddr::V6(client), None) => client.scope_id() == 0,
+        (SocketAddr::V6(client), Some(scope)) => {
+            // RFC 4007 §11: a scoped IPv6 address identifies an interface zone.
+            // shortcut: numeric and named scopes compare equal; use text when remote scope names are available.
+            let scope_id = scope.parse().ok().or_else(|| {
+                (scope.len() < nix::libc::IF_NAMESIZE)
+                    .then(|| nix::net::if_::if_nametoindex(scope).ok())
+                    .flatten()
+            });
+            scope_id == Some(client.scope_id())
+        }
+        (SocketAddr::V4(_), Some(_)) => false,
+    }
 }
 
 fn random_id() -> u16 {

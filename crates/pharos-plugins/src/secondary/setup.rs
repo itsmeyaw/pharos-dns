@@ -105,7 +105,10 @@ pub(super) fn parse(
 
 fn normalize_address(value: &str) -> Option<String> {
     if let Ok(ip) = value.parse::<std::net::IpAddr>() {
-        return Some(std::net::SocketAddr::new(ip, 53).to_string());
+        return Some(match ip {
+            std::net::IpAddr::V4(_) => format!("{value}:53"),
+            std::net::IpAddr::V6(_) => format!("[{value}]:53"),
+        });
     }
     if let Some((host, _)) = value.rsplit_once('%')
         && host.parse::<std::net::Ipv6Addr>().is_ok()

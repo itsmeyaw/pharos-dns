@@ -58,6 +58,16 @@ fn coredns_serial_comparison_wraps() {
     assert!(update::serial_less(7, 9));
 }
 
+#[test]
+fn coredns_notify_checks_ip_spelling_and_scope() {
+    let loopback = "[::1]:1234".parse().unwrap();
+    assert!(update::primary_matches("[::1]:53", loopback));
+    assert!(!update::primary_matches("[0:0:0:0:0:0:0:1]:53", loopback));
+    let scoped = "[fe80::1%3]:1234".parse().unwrap();
+    assert!(update::primary_matches("[fe80::1%3]:53", scoped));
+    assert!(!update::primary_matches("[fe80::1%2]:53", scoped));
+}
+
 #[tokio::test]
 async fn coredns_failed_primary_does_not_merge_partial_records() {
     use pharos_proto::{Class, Message, MessageBuilder, Section};

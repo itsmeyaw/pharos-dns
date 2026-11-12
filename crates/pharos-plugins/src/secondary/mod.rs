@@ -165,7 +165,7 @@ impl Secondary {
                 .config
                 .from
                 .iter()
-                .any(|address| update::primary_ip(address) == Some(cx.client.ip()))
+                .any(|address| update::primary_matches(address, cx.client))
             {
                 return Outcome::Drop;
             }
