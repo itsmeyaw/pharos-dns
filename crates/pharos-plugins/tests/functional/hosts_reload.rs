@@ -7,9 +7,9 @@ use pharos_proto::Message;
 use pharos_server::{Action, Handler, Phase, Protocol};
 use std::time::Duration;
 
-#[test]
-fn updates_changed_file_and_zero_disables_reload() {
-    crate::on_plugin_stack(changed_file_and_zero_reload);
+#[tokio::test]
+async fn updates_changed_file_and_zero_disables_reload() {
+    changed_file_and_zero_reload().await;
 }
 
 async fn changed_file_and_zero_reload() {
@@ -106,9 +106,9 @@ async fn reports_hosts_entries_and_reload_timestamp() {
     std::fs::remove_file(path).unwrap();
 }
 
-#[test]
-fn restart_stops_watcher_and_failed_restart_resumes_it() {
-    crate::on_plugin_stack(restart_stops_watcher_and_failed_restart_resumes_it_body);
+#[tokio::test]
+async fn restart_stops_watcher_and_failed_restart_resumes_it() {
+    restart_stops_watcher_and_failed_restart_resumes_it_body().await;
 }
 
 async fn restart_stops_watcher_and_failed_restart_resumes_it_body() {

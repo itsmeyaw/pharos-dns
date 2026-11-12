@@ -100,9 +100,9 @@ async fn api(
 }
 
 #[cfg(feature = "plugin-autopath")]
-#[test]
-fn autopath_uses_verified_client_pod_namespace() {
-    crate::on_plugin_stack(autopath_verified_client_pod_namespace);
+#[tokio::test]
+async fn autopath_uses_verified_client_pod_namespace() {
+    autopath_verified_client_pod_namespace().await;
 }
 
 #[cfg(feature = "plugin-autopath")]
@@ -325,7 +325,7 @@ fn record(record: Record<'_>, expected_serial: Option<u32>) -> String {
 
 async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
     let options = options.to_owned();
-    crate::on_plugin_stack(move || run_group_on_stack(options, cases, synced));
+    run_group_on_stack(options, cases, synced).await;
 }
 
 async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
@@ -1026,9 +1026,9 @@ impl pharos_server::Chain for TruncatedRoute {
 }
 
 // handler_test.go dnsTestCases row 10: the synthetic upstream returns a truncated A response.
-#[test]
-fn handler_external_truncated_upstream() {
-    crate::on_plugin_stack(external_truncated_upstream);
+#[tokio::test]
+async fn handler_external_truncated_upstream() {
+    external_truncated_upstream().await;
 }
 
 async fn external_truncated_upstream() {

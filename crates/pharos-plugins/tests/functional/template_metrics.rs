@@ -16,7 +16,7 @@ async fn metric_for_query(header: &str, option: &str, qtype: u8, qclass: u8) -> 
 
 async fn metric_for_corefile(corefile: &str, qtype: u8, qclass: u8) -> String {
     let corefile = corefile.to_owned();
-    crate::on_plugin_stack(move || metric_for_corefile_on_stack(corefile, qtype, qclass))
+    metric_for_corefile_on_stack(corefile, qtype, qclass).await
 }
 
 async fn metric_for_corefile_on_stack(corefile: String, qtype: u8, qclass: u8) -> String {

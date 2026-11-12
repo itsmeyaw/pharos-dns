@@ -21,7 +21,7 @@ fn query(name: &str, kind: Type) -> Vec<u8> {
 async fn metrics(corefile: &str, name: &str, kind: Type) -> String {
     let corefile = corefile.to_owned();
     let name = name.to_owned();
-    crate::on_plugin_stack(move || metrics_on_stack(corefile, name, kind))
+    metrics_on_stack(corefile, name, kind).await
 }
 
 async fn metrics_on_stack(corefile: String, name: String, kind: Type) -> String {

@@ -302,9 +302,9 @@ async fn max_concurrent_rejects_without_leaking_a_slot() {
     server.await.unwrap();
 }
 
-#[test]
-fn shutdown_stops_upstream_proxy() {
-    crate::on_plugin_stack(shutdown_stops_upstream_proxy_body);
+#[tokio::test]
+async fn shutdown_stops_upstream_proxy() {
+    shutdown_stops_upstream_proxy_body().await;
 }
 
 async fn shutdown_stops_upstream_proxy_body() {

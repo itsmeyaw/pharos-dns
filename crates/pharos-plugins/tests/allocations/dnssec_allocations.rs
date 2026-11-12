@@ -4,12 +4,12 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
 use pharos_server::{Action, Handler, Protocol};
 
-#[test]
-fn no_do_and_warmed_signature_hits_do_not_allocate() {
+#[tokio::test]
+async fn no_do_and_warmed_signature_hits_do_not_allocate() {
     if crate::run_isolated("dnssec::cases::no_do_and_warmed_signature_hits_do_not_allocate") {
         return;
     }
-    crate::on_allocation_stack(no_do_and_warmed_signature_hits);
+    no_do_and_warmed_signature_hits().await;
 }
 
 async fn no_do_and_warmed_signature_hits() {

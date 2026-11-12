@@ -11,12 +11,12 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[test]
-fn warmed_routed_cache_hit_has_no_allocations() {
+#[tokio::test]
+async fn warmed_routed_cache_hit_has_no_allocations() {
     if crate::run_isolated("cache::cache_allocations::warmed_routed_cache_hit_has_no_allocations") {
         return;
     }
-    crate::on_allocation_stack(warmed_routed_cache_hit);
+    warmed_routed_cache_hit().await;
 }
 
 async fn warmed_routed_cache_hit() {

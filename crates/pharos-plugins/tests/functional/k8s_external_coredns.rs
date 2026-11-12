@@ -194,21 +194,9 @@ macro_rules! case {
 }
 
 // CoreDNS v1.15.0 external_test.go TestExternal and apex_test.go TestApex.
-#[test]
-fn coredns_external_and_apex_responses() {
-    // Debug Plugin Chain futures exceed the test-thread stack; see #90.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(coredns_scenario())
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+#[tokio::test]
+async fn coredns_external_and_apex_responses() {
+    coredns_scenario().await;
 }
 
 async fn coredns_scenario() {
@@ -458,22 +446,10 @@ async fn coredns_scenario() {
     task.abort();
 }
 
-#[test]
+#[tokio::test]
 #[cfg(feature = "plugin-hosts")]
-fn mixed_external_addresses_preserve_coredns_answer_order() {
-    // Debug Plugin Chain futures exceed the test-thread stack; see #90.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(mixed_order_scenario());
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+async fn mixed_external_addresses_preserve_coredns_answer_order() {
+    mixed_order_scenario().await;
 }
 
 #[cfg(feature = "plugin-hosts")]

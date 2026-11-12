@@ -11,26 +11,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[test]
-fn many_headless_endpoints_and_ports_are_deduplicated_without_warm_allocations() {
+#[tokio::test]
+async fn many_headless_endpoints_and_ports_are_deduplicated_without_warm_allocations() {
     if crate::run_isolated(
         "k8s_external::headless::many_headless_endpoints_and_ports_are_deduplicated_without_warm_allocations",
     ) {
         return;
     }
-    // Debug Plugin Chain futures exceed the test-thread stack; see #90.
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(scenario());
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    scenario().await;
 }
 
 async fn scenario() {
