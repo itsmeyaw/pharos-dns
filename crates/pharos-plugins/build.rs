@@ -91,6 +91,7 @@ fn main() {
             "nsid" => "nsid::Nsid",
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",
+            "file" => "file::File",
             _ => "Unimplemented",
         };
         writeln!(code, "pub r#{name}: Option<{ty}>,").unwrap();
@@ -139,6 +140,7 @@ fn main() {
             "nsid" => "nsid::setup::setup",
             "reload" => "reload::setup::setup",
             "errors" => "errors::setup::setup",
+            "file" => "file::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",
         };

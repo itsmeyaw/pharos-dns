@@ -38,6 +38,8 @@ pub mod dnssec;
 #[cfg(feature = "plugin-errors")]
 pub mod errors;
 pub mod expression;
+#[cfg(feature = "plugin-file")]
+pub mod file;
 pub mod gotemplate;
 #[cfg(feature = "plugin-header")]
 pub mod header;
@@ -46,6 +48,7 @@ pub mod header;
     feature = "plugin-errors",
     feature = "plugin-reload",
     feature = "plugin-hosts",
+    feature = "plugin-file",
     feature = "plugin-loadbalance",
     feature = "plugin-kubernetes",
     feature = "plugin-cancel",
@@ -128,6 +131,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("dns64", include_str!("dns64/README.md")),
     ("dnssec", include_str!("dnssec/README.md")),
     ("errors", include_str!("errors/README.md")),
+    ("file", include_str!("file/README.md")),
     ("forward", include_str!("forward/README.md")),
     ("header", include_str!("header/README.md")),
     ("health", include_str!("health/README.md")),

@@ -7,7 +7,10 @@ use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 #[tokio::test]
 async fn serves_zone_and_negative_answers() {
-    let zonefile = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone");
+    let zonefile = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
     let corefile = format!("example.org:53 {{\n file {zonefile}\n}}");
     let blocks = parse("Corefile", &corefile).unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
@@ -20,7 +23,9 @@ async fn serves_zone_and_negative_answers() {
         let name: Name = name.parse().unwrap();
         let mut wire = Vec::with_capacity(512);
         let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
-        builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN).unwrap();
+        builder
+            .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
+            .unwrap();
         let _ = builder.finish();
         let mut response = Vec::with_capacity(512);
         let mut slots = [None; 8];
