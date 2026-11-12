@@ -11,11 +11,29 @@ use pharos_proto::{
 };
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
 use std::{
+    fmt::Write,
     io::BufReader,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
+
+struct NameText {
+    bytes: [u8; 1024],
+    len: usize,
+}
+
+impl std::fmt::Write for NameText {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(std::fmt::Error)?;
+        self.bytes
+            .get_mut(self.len..end)
+            .ok_or(std::fmt::Error)?
+            .copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
 
 /// Immutable authoritative Zone data, reusable by Zone-serving Plugins.
 #[derive(Debug)]
@@ -458,6 +476,24 @@ impl Plugin for File {
             }
         }
         let synthesized = dname.is_none() && !std::ptr::eq(source.as_ptr(), name.as_ptr());
+        if synthesized
+            && cx.metadata.enabled()
+            && zone
+                .records
+                .iter()
+                .any(|rr| rr.owner.as_wire().eq_ignore_ascii_case(source))
+        {
+            let mut text = NameText {
+                bytes: [0; 1024],
+                len: 0,
+            };
+            if let Ok(owner) = NameRef::parse(source, 0)
+                && write!(text, "{owner}").is_ok()
+                && let Ok(text) = std::str::from_utf8(&text.bytes[..text.len])
+            {
+                cx.metadata.insert_copied("zone/wildcard", text);
+            }
+        }
         let mut chain = [None; 10];
         let mut count = 0;
         let mut target = source;
