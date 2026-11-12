@@ -212,19 +212,27 @@ async fn dnssec_ok_serves_rrsigs_and_nsec_denial() {
     let corefile = format!("example.org:53 {{\n file {path}\n}}");
     let blocks = parse("Corefile", &corefile).unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
-    let name: Name = "www.example.org.".parse().unwrap();
-    for (kind, expected_answer, expected_authority) in [
+    for (name, kind, expected_answer, expected_authority) in [
         (
+            "www.example.org.",
             Type::A,
             vec![Type::A, Type::RRSIG],
             vec![Type::NS, Type::RRSIG],
         ),
         (
+            "www.example.org.",
             Type::AAAA,
             vec![],
             vec![Type::SOA, Type::RRSIG, Type::NSEC, Type::RRSIG],
         ),
+        (
+            "missing.example.org.",
+            Type::A,
+            vec![],
+            vec![Type::SOA, Type::RRSIG, Type::NSEC, Type::RRSIG],
+        ),
     ] {
+        let name: Name = name.parse().unwrap();
         let mut wire = Vec::with_capacity(1232);
         let mut builder = MessageBuilder::new(&mut wire, 1232, 1, 0x0100).unwrap();
         builder
