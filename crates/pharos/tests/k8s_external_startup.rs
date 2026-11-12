@@ -42,6 +42,51 @@ fn missing_kubernetes_exits_one_with_coredns_error() {
 }
 
 #[test]
+fn missing_kubernetes_wins_over_occupied_dns_port() {
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tcp.local_addr().unwrap().port();
+    let _udp = UdpSocket::bind(("127.0.0.1", port)).unwrap();
+    let dir =
+        std::env::temp_dir().join(format!("pharos-k8s-occupied-{}-{port}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("Corefile"),
+        format!(".:{port} {{\n bind 127.0.0.1\n k8s_external example.org\n}}\n"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pharos"))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "plugin/k8s_external: kubernetes plugin not loaded"
+    );
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    api.set_nonblocking(true).unwrap();
+    fs::write(
+        dir.join("Corefile"),
+        format!(".:{port} {{\n bind 127.0.0.1\n kubernetes cluster.local {{\n  endpoint http://{}\n }}\n}}\n", api.local_addr().unwrap()),
+    ).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pharos"))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains(&format!("127.0.0.1:{port}:"))
+    );
+    assert_eq!(
+        api.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn check_validates_kubernetes_without_starting_controllers() {
     let port = support::free_port();
     let dir = std::env::temp_dir().join(format!("pharos-k8s-check-{}-{port}", std::process::id()));
