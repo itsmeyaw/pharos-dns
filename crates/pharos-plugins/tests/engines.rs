@@ -683,6 +683,19 @@ fn index_rejects_map_keys_with_the_wrong_type() {
 }
 
 #[test]
+fn template_logical_builtins_short_circuit_nested_errors() {
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let data = Data::new("example.", &metadata);
+    let template =
+        Template::compile("{{ or true (index .Match 99) }}|{{ and false (index .Match 99) }}")
+            .unwrap();
+    let mut output = String::new();
+    template.render(&data, &mut output).unwrap();
+    assert_eq!(output, "true|false");
+}
+
+#[test]
 fn printf_and_variable_floats_follow_go_width_and_exponents() {
     use pharos_plugins::expression::Value;
     let mut slots = [];
