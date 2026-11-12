@@ -24,6 +24,16 @@ fn accepts_case_insensitive_and_repeated_secret_fields() {
 }
 
 #[test]
+fn rejects_sha1_keys_in_secrets() {
+    for algorithm in [5, 7] {
+        let public = PUBLIC.replace("257 3 13", &format!("257 3 {algorithm}"));
+        let secret = serde_json::json!({ "key": public, "private": PRIVATE }).to_string();
+        let error = aws::parse_secret(&secret).unwrap_err();
+        assert!(error.contains("SHA-1"));
+    }
+}
+
+#[test]
 fn rejects_invalid_secret_without_exposing_it() {
     for secret in [
         "not json",
