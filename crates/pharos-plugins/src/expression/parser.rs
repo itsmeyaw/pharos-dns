@@ -267,22 +267,23 @@ impl Parser<'_, '_> {
                     let Node::List(items) = list else {
                         return Err("any requires a literal list".into());
                     };
-                    if items.iter().any(|item| {
-                        items
-                            .first()
-                            .is_some_and(|first| first.kind() != item.kind())
-                    }) {
-                        return Err("any requires a uniform list".into());
+                    if items.iter().any(|item| item.kind() == Kind::List) {
+                        return Err("nested lists are unsupported".into());
                     }
                     if self.token != Token::Comma {
                         return Err("any requires a predicate".into());
                     }
                     self.advance()?;
                     let previous = self.current;
-                    self.current = items.first().map(Node::kind);
+                    self.current = Some(match items.first() {
+                        Some(first) if items.iter().all(|item| item.kind() == first.kind()) => {
+                            first.kind()
+                        }
+                        _ => Kind::Dynamic,
+                    });
                     let predicate = self.expression(0)?;
                     self.current = previous;
-                    if predicate.kind() != Kind::Bool {
+                    if !predicate.kind().accepts(Kind::Bool) {
                         return Err("any predicate must be boolean".into());
                     }
                     if self.token != Token::Right {
@@ -306,28 +307,37 @@ impl Parser<'_, '_> {
                 }
                 self.advance()?;
                 let kind = match name.as_str() {
-                    "metadata" if args.len() == 1 && args[0].kind() == Kind::String => Kind::String,
+                    "metadata" if args.len() == 1 && args[0].kind().accepts(Kind::String) => {
+                        Kind::String
+                    }
                     "incidr"
-                        if args.len() == 2 && args.iter().all(|arg| arg.kind() == Kind::String) =>
+                        if args.len() == 2
+                            && args.iter().all(|arg| arg.kind().accepts(Kind::String)) =>
                     {
                         Kind::Bool
                     }
                     "group"
                         if args.len() == 1
-                            && matches!(args[0].kind(), Kind::String | Kind::Int) =>
+                            && matches!(
+                                args[0].kind(),
+                                Kind::String | Kind::Int | Kind::Dynamic
+                            ) =>
                     {
                         Kind::String
                     }
                     "int"
                         if args.len() == 1
-                            && matches!(args[0].kind(), Kind::String | Kind::Int | Kind::Float) =>
+                            && matches!(
+                                args[0].kind(),
+                                Kind::String | Kind::Int | Kind::Float | Kind::Dynamic
+                            ) =>
                     {
                         Kind::Int
                     }
                     "replace"
                         if (args.len() == 3 || args.len() == 4)
-                            && args[..3].iter().all(|arg| arg.kind() == Kind::String)
-                            && (args.len() == 3 || args[3].kind() == Kind::Int) =>
+                            && args[..3].iter().all(|arg| arg.kind().accepts(Kind::String))
+                            && (args.len() == 3 || args[3].kind().accepts(Kind::Int)) =>
                     {
                         Kind::String
                     }
@@ -378,9 +388,7 @@ impl Parser<'_, '_> {
                 Node::List(values)
             }
             Token::Current => {
-                let kind = self
-                    .current
-                    .ok_or("# is only valid in an any predicate with a typed list")?;
+                let kind = self.current.ok_or("# is only valid in an any predicate")?;
                 self.advance()?;
                 Node::Current(kind)
             }
@@ -422,7 +430,7 @@ impl Parser<'_, '_> {
             self.advance()?;
             let right = self.expression(precedence + 1)?;
             if matches!(op, Binary::Matches) {
-                if left.kind() != Kind::String {
+                if !left.kind().accepts(Kind::String) {
                     return Err("matches requires a string".into());
                 }
                 let Node::String(pattern) = right else {
@@ -439,7 +447,7 @@ impl Parser<'_, '_> {
             }
             let kind = match op {
                 Binary::And | Binary::Or
-                    if left.kind() == Kind::Bool && right.kind() == Kind::Bool =>
+                    if left.kind().accepts(Kind::Bool) && right.kind().accepts(Kind::Bool) =>
                 {
                     Kind::Bool
                 }
@@ -456,11 +464,22 @@ impl Parser<'_, '_> {
                 Binary::Add if left.kind() == Kind::String && right.kind() == Kind::String => {
                     Kind::String
                 }
-                Binary::In if matches!(&right, Node::List(values) if values.is_empty() || values.iter().any(|value| value.kind() != values[0].kind()) || values[0].kind() == left.kind() || values[0].kind() == Kind::Nil || left.kind() == Kind::Nil || (values[0].kind().numeric() && left.kind().numeric())) => {
+                Binary::Add | Binary::Sub | Binary::Mul
+                    if left.kind() == Kind::Dynamic || right.kind() == Kind::Dynamic =>
+                {
+                    Kind::Dynamic
+                }
+                Binary::Div if left.kind() == Kind::Dynamic || right.kind() == Kind::Dynamic => {
+                    Kind::Float
+                }
+                Binary::Rem if left.kind() == Kind::Dynamic || right.kind() == Kind::Dynamic => {
+                    Kind::Int
+                }
+                Binary::In if matches!(&right, Node::List(values) if values.is_empty() || values.iter().any(|value| value.kind() != values[0].kind()) || values[0].kind() == left.kind() || values[0].kind() == Kind::Dynamic || left.kind() == Kind::Dynamic || values[0].kind() == Kind::Nil || left.kind() == Kind::Nil || (values[0].kind().numeric() && left.kind().numeric())) => {
                     Kind::Bool
                 }
                 Binary::Contains | Binary::StartsWith | Binary::EndsWith
-                    if left.kind() == Kind::String && right.kind() == Kind::String =>
+                    if left.kind().accepts(Kind::String) && right.kind().accepts(Kind::String) =>
                 {
                     Kind::Bool
                 }
@@ -470,13 +489,17 @@ impl Parser<'_, '_> {
                         && (left.kind() == right.kind()
                             || left.kind() == Kind::Nil
                             || right.kind() == Kind::Nil
+                            || left.kind() == Kind::Dynamic
+                            || right.kind() == Kind::Dynamic
                             || (left.kind().numeric() && right.kind().numeric())) =>
                 {
                     Kind::Bool
                 }
                 Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge
                     if (left.kind() == Kind::String && right.kind() == Kind::String)
-                        || (left.kind().numeric() && right.kind().numeric()) =>
+                        || (left.kind().numeric() && right.kind().numeric())
+                        || left.kind() == Kind::Dynamic
+                        || right.kind() == Kind::Dynamic =>
                 {
                     Kind::Bool
                 }
@@ -493,8 +516,8 @@ impl Parser<'_, '_> {
     fn unary(&mut self, op: Unary) -> Result<Node, String> {
         let node = self.expression(6)?;
         if !match op {
-            Unary::Not => node.kind() == Kind::Bool,
-            Unary::Neg => node.kind().numeric(),
+            Unary::Not => node.kind().accepts(Kind::Bool),
+            Unary::Neg => node.kind().numeric() || node.kind() == Kind::Dynamic,
         } {
             return Err("incompatible unary operand".into());
         }

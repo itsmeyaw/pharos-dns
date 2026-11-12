@@ -773,3 +773,33 @@ fn coredns_chained_integer_variables_evaluate_in_order() {
         Value::Int(20)
     );
 }
+
+#[test]
+fn any_supports_mixed_and_empty_lists_with_current_value() {
+    let message = Message::parse(WIRE).unwrap();
+    let query = Query::new(
+        &message,
+        "10.0.0.1:1234".parse().unwrap(),
+        "127.0.0.1:53".parse().unwrap(),
+        Protocol::Udp,
+    );
+    let mut slots = [];
+    let metadata = Metadata::new(&mut slots);
+    let mut buffer = [0; 2048];
+    let mut scratch = Scratch::new(&mut buffer);
+    for source in [
+        "any([1, 'x'], # == 'x')",
+        "not any([], #)",
+        "any([1, 2.0], # > 1)",
+        "any([true, false], #)",
+    ] {
+        assert_eq!(
+            Expression::compile(source)
+                .unwrap()
+                .evaluate(&query, &metadata, &mut scratch)
+                .unwrap(),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+}

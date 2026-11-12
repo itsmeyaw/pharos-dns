@@ -16,15 +16,15 @@ provides the type to pass to `compile_with_variables` for subsequent variables.
 - `type`, `name`, `class`, `proto`, `size`, `client_ip`, `port`, `id`,
   `opcode`, `do`, `bufsize`, `server_ip`, `server_port`, `metadata`, `incidr`,
   `group`, `int`, `replace`, and `any` with a literal list and `#` predicate.
-  `replace` accepts its optional replacement count. `#` requires a nonempty
-  homogeneous list so its type is known at setup; `any([], true)` is accepted.
+  `replace` accepts its optional replacement count. `any` accepts empty and
+  mixed-type lists; operations on a mixed list's `#` are checked at runtime.
 
 ## Errors and differences
 
 - Unknown names, wrong argument types or counts, malformed literals, invalid
   regexes and unsupported constructs fail at setup. Unsupported constructs
   include maps, indexing, list-valued results or variables, nonliteral `in`
-  and `any` lists, mixed-type `any` lists, ternaries, ranges, exponentiation,
+  and `any` lists, nested lists, ternaries, ranges, exponentiation,
   pipelines, closures and other expr-lang built-ins.
 - `matches` compiles literal patterns at setup using Rust regex syntax and
   Unicode rules rather than Go RE2. Unlike expr-lang, dynamic patterns are

@@ -83,6 +83,7 @@ pub enum ValueType {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
+    Dynamic,
     Nil,
     Bool,
     Int,
@@ -106,6 +107,10 @@ impl From<ValueType> for Kind {
 impl Kind {
     fn numeric(self) -> bool {
         matches!(self, Self::Int | Self::Float)
+    }
+
+    fn accepts(self, expected: Self) -> bool {
+        self == expected || self == Self::Dynamic
     }
 }
 
@@ -295,7 +300,9 @@ impl Node {
                             _ => unreachable!(),
                         }))
                     }
-                    (op @ (Eq | Ne | Lt | Le | Gt | Ge), a, b) => {
+                    (Eq, a, b) => Ok(Temporary::Bool(equal(a, b, scratch)?)),
+                    (Ne, a, b) => Ok(Temporary::Bool(!equal(a, b, scratch)?)),
+                    (op @ (Lt | Le | Gt | Ge), a, b) => {
                         let ordering = match (a, b) {
                             (Temporary::Nil, Temporary::Nil) => Some(std::cmp::Ordering::Equal),
                             (Temporary::Nil, _) | (_, Temporary::Nil) => {
@@ -310,8 +317,6 @@ impl Node {
                             (a, b) => Some(a.text(scratch)?.cmp(b.text(scratch)?)),
                         };
                         Ok(Temporary::Bool(match op {
-                            Eq => ordering.is_some_and(|value| value.is_eq()),
-                            Ne => !ordering.is_some_and(|value| value.is_eq()),
                             Lt => ordering.is_some_and(|value| value.is_lt()),
                             Le => ordering.is_some_and(|value| value.is_le()),
                             Gt => ordering.is_some_and(|value| value.is_gt()),
@@ -670,6 +675,7 @@ impl Expression {
             Kind::Float => ValueType::Float,
             Kind::String => ValueType::String,
             Kind::List => unreachable!("list results are rejected at compile time"),
+            Kind::Dynamic => unreachable!("dynamic predicate values are not expression results"),
         }
     }
 
