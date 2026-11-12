@@ -196,3 +196,30 @@ fn mtime_reload_accepts_unchanged_serial() {
     assert!(!loaded.reload());
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn parse_opened_file_keeps_its_version_after_path_replacement() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-opened-version.zone");
+    let replacement = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-opened-replacement.zone");
+    let original = include_str!("../../tests/fixtures/file/example.zone");
+    std::fs::write(&path, original).unwrap();
+    let opened = std::fs::File::open(&path).unwrap();
+    std::fs::write(&replacement, original.replace(" 1 7200", " 2 7200")).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    let zone = Zone::load_opened("example.org.".parse().unwrap(), &path, opened).unwrap();
+    assert_eq!(zone.serial(), Some(1));
+    assert_eq!(Zone::load("example.org.".parse().unwrap(), &path).unwrap().serial(), Some(2));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn repeated_file_options_replace_fallthrough_and_duplicate_zones() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone");
+    let config = format!(".:53 {{\n file {path} example.org {{\n fallthrough example.org\n reload 5s\n }}\n file {path} example.org {{\n fallthrough example.net\n }}\n}}");
+    let blocks = pharos_corefile::parse("Corefile", &config).unwrap();
+    let configured = pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+    let file = configured[0].config.file.as_ref().unwrap();
+    assert_eq!(file.zones.len(), 1);
+    assert_eq!(file.zones[0].interval, Duration::from_secs(5));
+    assert_eq!(file.fallthrough, vec!["example.net.".parse::<Name>().unwrap()]);
+}
