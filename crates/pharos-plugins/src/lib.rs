@@ -295,13 +295,16 @@ pub fn servers_with_registry(
         }
         #[cfg(feature = "plugin-k8s-external")]
         if let Some(external) = &mut block.config.k8s_external {
-            let kubernetes = block.config.kubernetes.as_ref().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "k8s_external: kubernetes plugin not loaded",
-                )
-            })?;
-            external.bind_kubernetes(kubernetes);
+            if let Some(kubernetes) = &block.config.kubernetes {
+                external.bind_kubernetes(kubernetes);
+            } else {
+                lifecycle.register_sync(pharos_server::Phase::Startup, || {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "plugin/k8s_external: kubernetes plugin not loaded",
+                    ))
+                });
+            }
         }
         #[cfg(feature = "plugin-transfer")]
         block.config.bind_transferers();

@@ -4,7 +4,6 @@
 
 ## k8s_external
 
-- A missing Kubernetes Plugin is rejected while preparing Servers; CoreDNS rejects it during Startup.
 - LoadBalancer hostname Self Lookups allocate per Query until #86 pools their buffers and futures.
 - Duplicate suppression scans matching records repeatedly, so Query and headless transfer CPU time can grow quadratically with Service size.
 - Zone Transfers encode the entire Zone under the Kubernetes store read lock before sending. Memory and worker time grow with Zone size; CoreDNS streams batches.

@@ -49,12 +49,12 @@ fn coredns_setup_rejects_bad_options() {
     );
 }
 
-#[test]
-fn setup_requires_kubernetes_in_same_server_block() {
+#[tokio::test]
+async fn startup_requires_kubernetes_in_same_server_block() {
     for (text, valid) in [
         (".:53 {\n k8s_external example.org\n}", false),
         (
-            ".:53 {\n k8s_external example.org\n kubernetes cluster.local\n}",
+            ".:53 {\n k8s_external example.org\n kubernetes cluster.local {\n  endpoint http://127.0.0.1:1\n  startup_timeout 0s\n }\n}",
             true,
         ),
         (
@@ -63,6 +63,20 @@ fn setup_requires_kubernetes_in_same_server_block() {
         ),
     ] {
         let blocks = configure::<Chain>(&parse("Corefile", text).unwrap(), directives()).unwrap();
-        assert_eq!(pharos_plugins::servers(blocks).is_ok(), valid, "{text}");
+        let (_, lifecycle) = pharos_plugins::servers(blocks).unwrap();
+        if valid {
+            lifecycle.run(pharos_server::Phase::Startup).await.unwrap();
+            lifecycle.run(pharos_server::Phase::Shutdown).await.unwrap();
+        } else {
+            let error = lifecycle
+                .run(pharos_server::Phase::Startup)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "plugin/k8s_external: kubernetes plugin not loaded",
+                "{text}"
+            );
+        }
     }
 }
