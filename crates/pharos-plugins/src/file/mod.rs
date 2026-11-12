@@ -940,6 +940,9 @@ impl Zone {
             // RFC 1034 §4.3.2: Referrals include available address glue.
             if let Some(cut) = cut {
                 for ns in zone.records_at(cut.owner.as_wire(), Type::NS) {
+                    if !contains_wire(&ns.rdata, ns.owner.as_wire()) {
+                        continue;
+                    }
                     if let Ok(owner) = NameRef::parse(&ns.rdata, 0) {
                         for kind in [Type::A, Type::AAAA] {
                             write_set(
