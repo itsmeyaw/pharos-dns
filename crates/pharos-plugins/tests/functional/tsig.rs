@@ -522,3 +522,74 @@ async fn badtime_response_is_signed_and_contains_server_time() {
         pharos_proto::TsigError::BadTime
     );
 }
+
+#[tokio::test]
+async fn accepts_all_coredns_hmac_algorithms_and_rejects_md5() {
+    use pharos_server::{Action, Handler};
+    let blocks = parse(
+        "Corefile",
+        ".:53 {\n tsig {\n secret testkey. c2VjcmV0\n }\n whoami\n}",
+    )
+    .unwrap();
+    let (servers, _) =
+        pharos_plugins::servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let server = servers.values().next().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for algorithm in [
+        TsigAlgorithm::Sha1,
+        TsigAlgorithm::Sha224,
+        TsigAlgorithm::Sha256,
+        TsigAlgorithm::Sha384,
+        TsigAlgorithm::Sha512,
+    ] {
+        let key = TsigKey::new("testkey.".parse().unwrap(), algorithm, b"secret");
+        let mut wire = Vec::with_capacity(512);
+        wire.extend_from_slice(&[0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1]);
+        key.sign(&mut wire, now, 300, None).unwrap();
+        let mac = pharos_proto::TsigRecord::parse(&wire).unwrap().mac;
+        let mut response = Vec::with_capacity(512);
+        assert_eq!(
+            server
+                .handle(
+                    &wire,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+        key.verify(&response, now, Some(mac), 0).unwrap();
+    }
+    // CoreDNS v1.15.0 returns unsigned BADSIG for a known HMAC-MD5 key.
+    let fixture = concat!(
+        "c60001000001000000000001076578616d706c6503636f6d0000060001",
+        "07746573746b65790000fa00ff00000000003a08686d61632d6d6435",
+        "077369672d616c670372656703696e740000005f0f9043012c0010",
+        "6fcce0af04e944c869df97e77a608e3dc60000000000"
+    );
+    let wire: Vec<u8> = fixture
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTAUTH);
+    let tsig = pharos_proto::TsigRecord::parse(&response).unwrap();
+    assert_eq!(tsig.error, 16);
+    assert!(tsig.mac.is_empty());
+}
