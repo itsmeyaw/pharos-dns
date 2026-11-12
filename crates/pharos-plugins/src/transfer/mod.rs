@@ -1,6 +1,8 @@
 //! Outgoing Zone Transfers.
 
 pub(crate) mod setup;
+#[cfg(test)]
+pub(crate) mod tests;
 
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{Class, Name, NameRef, Rcode, Rdata, Type};
@@ -10,7 +12,7 @@ use std::{fmt::Write, net::IpAddr};
 /// Supplies an authoritative Zone's records to the transfer Plugin.
 pub trait Transferer {
     /// Bind the notifier used when this Plugin's authoritative data changes.
-    fn bind_transfer(&self, transfer: Option<&Transfer>);
+    fn bind_transfer(&self, _transfer: Option<&Transfer>) {}
 
     /// Return None if this Plugin is not authoritative for the requested Zone.
     fn transfer(
@@ -20,6 +22,7 @@ pub trait Transferer {
 }
 
 /// Query metadata needed to generate a transfer stream.
+#[derive(Clone, Copy)]
 pub struct TransferRequest<'a> {
     pub zone: NameRef<'a>,
     pub serial: u32,
@@ -308,8 +311,6 @@ impl Plugin for Transfer {
 
 struct NoTransferer;
 impl Transferer for NoTransferer {
-    fn bind_transfer(&self, _: Option<&Transfer>) {}
-
     fn transfer(
         &self,
         _: TransferRequest<'_>,

@@ -270,10 +270,8 @@ pub fn servers_with_registry(
         if let Some(kubernetes) = &block.config.kubernetes {
             kubernetes.set_metrics(&metrics);
         }
-        #[cfg(all(feature = "plugin-kubernetes", feature = "plugin-transfer"))]
-        if let Some(kubernetes) = &block.config.kubernetes {
-            transfer::Transferer::bind_transfer(kubernetes, block.config.transfer.as_ref());
-        }
+        #[cfg(feature = "plugin-transfer")]
+        block.config.bind_transferers();
         #[cfg(feature = "plugin-health")]
         if let Some(health) = &block.config.health
             && !health_addresses
