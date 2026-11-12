@@ -7,8 +7,8 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
 - Go templates and expressions use the supported subsets documented in the
   [template engine](../gotemplate/README.md) and [expression engine](../expression/README.md).
 - Match expressions use Rust regex syntax and Unicode rules rather than Go RE2.
-- Variables and expressions of one rule share 65,535 bytes of scratch;
-  exhausting it returns SERVFAIL.
+- Variables and expressions of one rule share 65,535 bytes of scratch; template
+  rendering uses the remaining space. Exhausting it returns SERVFAIL.
 - Each worker keeps a workspace per rule; first use may allocate. Memory grows
   with the regexes and their capture groups. Workspaces for removed rules are
   reclaimed on that worker's next workspace initialization or thread exit.
