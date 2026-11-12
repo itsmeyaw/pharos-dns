@@ -466,19 +466,42 @@ async fn notifies_on_startup_and_reload() {
 
 #[tokio::test]
 async fn dname_synthesizes_alias_and_follows_target() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/file/example.zone");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
     let corefile = format!("example.org:53 {{\n file {path}\n}}");
-    let configured = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let configured =
+        configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
     let name: Name = "foo.old.example.org.".parse().unwrap();
     let mut query = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x0100).unwrap();
-    builder.question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
     let _ = builder.finish();
     let mut wire = Vec::with_capacity(512);
     let mut slots = [None; 8];
-    let mut cx = Context { query: Message::parse(&query).unwrap(), client: "127.0.0.1:1234".parse().unwrap(), local: "127.0.0.1:53".parse().unwrap(), transport: Transport::Dns, protocol: Protocol::Udp, domain: &name, metadata: Metadata::new(&mut slots), response: &mut wire, max_response_size: 512 };
+    let mut cx = Context {
+        query: Message::parse(&query).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &name,
+        metadata: Metadata::new(&mut slots),
+        response: &mut wire,
+        max_response_size: 512,
+    };
     assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
     let response = Message::parse(&wire).unwrap();
     assert_eq!(response.rcode(), Rcode::NOERROR);
-    assert_eq!(response.answers().map(|rr| rr.rtype).collect::<Vec<_>>(), vec![Type::DNAME, Type::CNAME, Type::A]);
+    assert_eq!(
+        response.answers().map(|rr| rr.rtype).collect::<Vec<_>>(),
+        vec![Type::DNAME, Type::CNAME, Type::A]
+    );
 }

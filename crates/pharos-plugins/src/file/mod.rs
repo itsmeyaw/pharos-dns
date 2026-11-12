@@ -6,7 +6,7 @@ mod transfer;
 
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{
-    Message, MessageBuilder, Name, NameRef, Rcode, Section, Type,
+    Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type,
     zone::{ZoneParser, ZoneRecord},
 };
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
@@ -404,10 +404,35 @@ impl Plugin for File {
                         && rr.owner.as_wire().eq_ignore_ascii_case(name))
             })
             .min_by_key(|rr| rr.owner.label_count());
+        // RFC 6672 §3.2: DNAME applies to strict descendants of its owner.
+        let dname = zone
+            .records
+            .iter()
+            .filter(|rr| {
+                rr.rtype == Type::DNAME
+                    && !rr.owner.as_wire().eq_ignore_ascii_case(name)
+                    && contains_wire(name, rr.owner.as_wire())
+            })
+            .min_by_key(|rr| rr.owner.label_count())
+            .filter(|rr| cut.is_none_or(|cut| rr.owner.label_count() <= cut.owner.label_count()));
+        let cut = cut.filter(|_| dname.is_none());
         let mut wildcard = [0u8; 255];
+        let mut dname_target = [0u8; 255];
         let mut source = name;
         let exists = zone.exists(name);
-        if !exists && cut.is_none() {
+        if let Some(rr) = dname {
+            let prefix = name.len() - rr.owner.as_wire().len();
+            let len = prefix + rr.rdata.len();
+            if len > dname_target.len() {
+                return Outcome::Unanswered(Rcode::SERVFAIL);
+            }
+            dname_target[..prefix].copy_from_slice(&name[..prefix]);
+            dname_target[prefix..len].copy_from_slice(&rr.rdata);
+            source = &dname_target[..len];
+            if source.eq_ignore_ascii_case(name) {
+                return Outcome::Unanswered(Rcode::SERVFAIL);
+            }
+        } else if !exists && cut.is_none() {
             // RFC 4592 §3.3.1: the closest encloser determines wildcard synthesis.
             let mut parent = name;
             while parent[0] != 0 && !zone.exists(parent) {
@@ -423,7 +448,7 @@ impl Plugin for File {
                 }
             }
         }
-        let synthesized = !std::ptr::eq(source.as_ptr(), name.as_ptr());
+        let synthesized = dname.is_none() && !std::ptr::eq(source.as_ptr(), name.as_ptr());
         let mut chain = [None; 10];
         let mut count = 0;
         let mut target = source;
@@ -438,7 +463,7 @@ impl Plugin for File {
                 target = &alias.rdata;
             }
         }
-        let lookup = if count > 0
+        let lookup = if (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
             && (!zone
                 .records
                 .iter()
@@ -460,11 +485,14 @@ impl Plugin for File {
             None
         };
         let external = lookup.as_ref().and_then(|wire| Message::parse(wire).ok());
-        let found = count > 0 || zone.records_at(target, question.qtype).next().is_some();
+        let found = dname.is_some()
+            || count > 0
+            || zone.records_at(target, question.qtype).next().is_some();
         let dnssec = cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
         if !exists
             && !synthesized
             && cut.is_none()
+            && dname.is_none()
             && self.fallthrough.iter().any(|apex| contains(name, apex))
         {
             return next.run(cx).await;
@@ -475,7 +503,7 @@ impl Plugin for File {
                 Rcode::NXDOMAIN => Rcode::NXDOMAIN,
                 _ => Rcode::NOERROR,
             }
-        } else if exists || synthesized || cut.is_some() {
+        } else if exists || synthesized || cut.is_some() || dname.is_some() {
             Rcode::NOERROR
         } else {
             Rcode::NXDOMAIN
@@ -508,6 +536,29 @@ impl Plugin for File {
             builder
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(pharos_server::Error::Build)?;
+            if let Some(rr) = dname {
+                let owner = NameRef::parse(rr.owner.as_wire(), 0)
+                    .map_err(|_| pharos_server::Error::InvalidQuery)?;
+                write_set(
+                    &mut builder,
+                    zone,
+                    rr.owner.as_wire(),
+                    owner,
+                    Type::DNAME,
+                    Section::Answer,
+                    dnssec,
+                )?;
+                builder
+                    .record(
+                        Section::Answer,
+                        question.name,
+                        Type::CNAME,
+                        Class::IN,
+                        rr.ttl,
+                        source,
+                    )
+                    .map_err(pharos_server::Error::Build)?;
+            }
             for (index, rr) in chain[..count].iter().flatten().enumerate() {
                 let owner = if index == 0 && synthesized {
                     question.name
@@ -525,7 +576,7 @@ impl Plugin for File {
                     dnssec,
                 )?;
             }
-            if cut.is_none() {
+            if cut.is_none() && !(dname.is_some() && question.qtype == Type::CNAME) {
                 let owner = if count == 0 && synthesized {
                     question.name
                 } else {
@@ -599,7 +650,7 @@ impl Plugin for File {
                 )?;
             }
             // RFC 4035 §3.1.3.2: prove the missing name and wildcard for NXDOMAIN.
-            if dnssec && cut.is_none() && !exists && !synthesized {
+            if dnssec && cut.is_none() && !exists && !synthesized && dname.is_none() {
                 let first = zone.previous_nsec(name);
                 if let Some(rr) = first {
                     let owner = NameRef::parse(rr.owner.as_wire(), 0)
