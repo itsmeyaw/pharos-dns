@@ -146,6 +146,15 @@ pub(super) fn known(kind: Type) -> bool {
     )
 }
 
+// CoreDNS plugin/normalize.go:65: allow names may omit the trailing dot.
+fn fully_qualified(value: &str) -> String {
+    if value.ends_with('.') {
+        value.to_owned()
+    } else {
+        format!("{value}.")
+    }
+}
+
 fn policy_type(raw: &str) -> Option<Type> {
     let kind = Type::from_mnemonic(raw).or_else(|| {
         raw.to_ascii_uppercase()
@@ -246,11 +255,17 @@ pub(super) fn parse(
                 if args.len() < 3 || args[0].is_empty() || matches!(args[0].as_str(), "*" | "@") {
                     return Err(cursor.arg_err());
                 }
-                let key: Name = args[0].parse().map_err(|_| cursor.arg_err())?;
+                let key: Name = fully_qualified(&args[0])
+                    .parse()
+                    .map_err(|_| cursor.arg_err())?;
                 let owner = match args[1].as_str() {
                     "*" => None,
                     "@" => Some(origin.clone()),
-                    value => Some(value.parse::<Name>().map_err(|_| cursor.arg_err())?),
+                    value => Some(
+                        fully_qualified(value)
+                            .parse::<Name>()
+                            .map_err(|_| cursor.arg_err())?,
+                    ),
                 };
                 if owner
                     .as_ref()
@@ -345,6 +360,18 @@ mod tests {
             ),
             (50, 6000, 10)
         );
+    }
+
+    #[test]
+    fn accepts_relative_allow_names_like_coredns() {
+        let parsed = config(
+            "dynupdate {\nfile seed.zone\nallow key.example.org host.example.org A\n}",
+            &["example.org"],
+        )
+        .unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let owner: Name = "host.example.org.".parse().unwrap();
+        assert!(parsed.allows(&key, &owner, Type::A));
     }
 
     #[test]
