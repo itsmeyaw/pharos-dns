@@ -278,6 +278,9 @@ impl Store {
                 for index in 0..entries {
                     let element = HEADER + index * 16;
                     let (position, key_len, value_len) = if flags == LEAF {
+                        if u32_at(&descriptors, element)? & !BUCKET != 0 {
+                            return Err(invalid());
+                        }
                         (
                             u32_at(&descriptors, element + 4)?,
                             u32_at(&descriptors, element + 8)?,
@@ -290,14 +293,20 @@ impl Store {
                             0,
                         )
                     };
+                    let key_offset = element.checked_add(position as usize).ok_or_else(invalid)?;
+                    // bbolt v1.5.0 bucket.go:13-14: valid keys are nonempty and at most 32 KiB.
+                    if key_len == 0 || key_len > 32768 || key_offset < table {
+                        return Err(invalid());
+                    }
                     let end_of_entry = element
                         .checked_add(position as usize)
                         .and_then(|n| n.checked_add(key_len as usize))
                         .and_then(|n| n.checked_add(value_len as usize))
                         .ok_or_else(invalid)?;
+                    if end_of_entry > extent {
+                        return Err(invalid());
+                    }
                     if zone && flags == LEAF && key_len == 7 {
-                        let key_offset =
-                            element.checked_add(position as usize).ok_or_else(invalid)?;
                         if key_offset.checked_add(7).is_none_or(|end| end > extent) {
                             return Err(invalid());
                         }
@@ -1749,6 +1758,48 @@ mod tests {
             assert!(result.is_ok(), "corrupt database panicked");
             assert!(result.unwrap().is_err(), "corrupt database was accepted");
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn forged_oversized_key_is_rejected_before_page_allocation() {
+        use std::os::unix::fs::FileExt;
+        let path = path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::create(file).unwrap();
+        store.commit(b"example.org.", b"record data").unwrap();
+        let root = store
+            .tree(store.meta.root, &mut std::collections::BTreeSet::new())
+            .unwrap();
+        let id = super::u64_at(&root.get(b"dynupdate-v1".as_slice()).unwrap().1, 0).unwrap();
+        let page = store.page(id).unwrap();
+        let start = super::HEADER + super::u32_at(&page, super::HEADER + 4).unwrap() as usize;
+        let value = super::u32_at(&page, super::HEADER + 12).unwrap() as usize;
+        let pages = (start + (32 << 20) + value).div_ceil(store.meta.page_size);
+        store.meta.high = store.meta.high.max(id + pages as u64);
+        store
+            .file
+            .set_len(store.meta.high * store.meta.page_size as u64)
+            .unwrap();
+        let offset = id * store.meta.page_size as u64;
+        store
+            .file
+            .write_all_at(&((pages - 1) as u32).to_ne_bytes(), offset + 12)
+            .unwrap();
+        store
+            .file
+            .write_all_at(
+                &(32u32 << 20).to_ne_bytes(),
+                offset + super::HEADER as u64 + 8,
+            )
+            .unwrap();
+        assert!(store.page_inner(id, true).is_err());
+        drop(store);
         std::fs::remove_file(path).unwrap();
     }
 }
