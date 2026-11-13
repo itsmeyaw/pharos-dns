@@ -225,8 +225,9 @@
 ## Server
 
 - Each UDP worker handles up to 256 waiting Queries concurrently and retains at
-  most 16 completed coroutine slots for reuse. In-flight Response buffers reserve
-  65,535 bytes because forwarded Responses may exceed the client's UDP limit.
+  most 16 completed coroutine slots for reuse. Each plain slot reserves 65,535
+  bytes each for its Query and Response, plus coroutine storage; shed Responses
+  use the shared stack. Forwarded Responses may exceed the client's UDP limit.
   At capacity one ordinary Query waits; further ordinary datagrams are dropped,
   with a shed counter only for shed-eligible Queries when the stack is full.
   Forwarding-loop probes remain serviceable.
