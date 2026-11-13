@@ -356,6 +356,41 @@ mod tests {
     }
 
     #[test]
+    fn coredns_rejects_every_unsupported_metadata_type() {
+        let original = zone();
+        for kind in [
+            Type::SIG,
+            Type::KEY,
+            Type::NXT,
+            Type::DS,
+            Type::RRSIG,
+            Type::NSEC,
+            Type::DNSKEY,
+            Type::NSEC3,
+            Type::NSEC3PARAM,
+            Type::TALINK,
+            Type::CDS,
+            Type::CDNSKEY,
+            Type::ZONEMD,
+            Type::TA,
+            Type::DLV,
+        ] {
+            let record = rr("record.example.org.", kind, Class::IN, &[]);
+            assert_eq!(
+                validate_updates(&original, std::slice::from_ref(&record)),
+                Rcode::NOTIMP,
+                "{kind}"
+            );
+            let mut records = original.records().to_vec();
+            records.push(record);
+            assert!(
+                build_zone(original.apex().clone(), records, 100, 10000).is_err(),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
     fn zone_mutator_supports_every_coredns_policy_type() {
         let original = zone();
         let mut tested = 0;
