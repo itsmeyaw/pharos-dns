@@ -1,16 +1,85 @@
 use super::Zone;
-use pharos_proto::{Class, Rdata, Type, zone::ZoneRecord};
+use pharos_proto::{Class, NameRef, Rdata, Type, zone::ZoneRecord};
+
+// RFC 1035 §4.1.4 and RFC 3597 §4: expand embedded names before moving RDATA.
+pub(crate) fn legacy_name_rdata(
+    kind: Type,
+    wire: &[u8],
+    offset: usize,
+    len: usize,
+    canonical: bool,
+) -> Result<Option<Vec<u8>>, ()> {
+    let end = offset.checked_add(len).ok_or(())?;
+    let bytes = wire.get(offset..end).ok_or(())?;
+    let (prefix, count, exact) = match kind {
+        Type::MD | Type::MF | Type::MB | Type::MG | Type::MR | Type::NSAP_PTR => (0, Some(1), true),
+        Type::MINFO | Type::RP => (0, Some(2), true),
+        Type::AFSDB | Type::RT | Type::KX | Type::LP => (2, Some(1), true),
+        Type::PX => (2, Some(2), true),
+        Type::IPSECKEY if bytes.get(1) == Some(&3) => (3, Some(1), false),
+        Type::AMTRELAY if bytes.get(1).is_some_and(|value| value & 0x7f == 3) => (2, Some(1), true),
+        Type::IPSECKEY | Type::AMTRELAY => return Ok(Some(bytes.to_vec())),
+        Type::HIP => {
+            let header = bytes.get(..4).ok_or(())?;
+            let prefix = 4usize
+                .checked_add(usize::from(header[0]))
+                .and_then(|n| {
+                    n.checked_add(usize::from(u16::from_be_bytes([header[2], header[3]])))
+                })
+                .ok_or(())?;
+            (prefix, None, true)
+        }
+        _ => return Ok(None),
+    };
+    let mut result = bytes.get(..prefix).ok_or(())?.to_vec();
+    let mut cursor = prefix;
+    let mut remaining = count;
+    while remaining.is_none_or(|n| n > 0) && (remaining.is_some() || cursor < len) {
+        if cursor >= len {
+            return Err(());
+        }
+        let name = NameRef::parse(wire, offset.checked_add(cursor).ok_or(())?).map_err(|_| ())?;
+        cursor = cursor.checked_add(name.wire_len()).ok_or(())?;
+        if cursor > len {
+            return Err(());
+        }
+        for label in name.labels() {
+            result.push(label.len() as u8);
+            if canonical {
+                result.extend(label.iter().map(u8::to_ascii_lowercase));
+            } else {
+                result.extend_from_slice(label);
+            }
+        }
+        result.push(0);
+        if let Some(count) = &mut remaining {
+            *count -= 1;
+        }
+    }
+    if exact && cursor != len {
+        return Err(());
+    }
+    result.extend_from_slice(bytes.get(cursor..).ok_or(())?);
+    Ok(Some(result))
+}
 
 // RFC 2136 §1.1.1: RR comparison ignores TTL and compares domain names case-insensitively.
 pub(crate) fn same_record(left: &ZoneRecord, right: &ZoneRecord) -> bool {
     left.owner == right.owner
         && left.rtype == right.rtype
-        && match (
-            Rdata::parse(left.rtype, &left.rdata),
-            Rdata::parse(right.rtype, &right.rdata),
+        && if let (Ok(Some(a)), Ok(Some(b))) = (
+            legacy_name_rdata(left.rtype, &left.rdata, 0, left.rdata.len(), true),
+            legacy_name_rdata(right.rtype, &right.rdata, 0, right.rdata.len(), true),
         ) {
-            (Ok(left), Ok(right)) => left == right,
-            _ => left.rdata == right.rdata,
+            a == b
+        } else {
+            match (
+                Rdata::parse(left.rtype, &left.rdata),
+                Rdata::parse(right.rtype, &right.rdata),
+            ) {
+                (Ok(left), Ok(right)) => left == right,
+                _ => left.rdata == right.rdata,
+            }
         }
 }
 

@@ -51,6 +51,41 @@ fn update_delete_matches_case_insensitive_domain_rdata() {
 }
 
 #[test]
+fn update_matches_legacy_name_bearing_record_data() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n";
+    let mut records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let owner: Name = "mailbox.example.org.".parse().unwrap();
+    let lower: Name = "target.example.org.".parse().unwrap();
+    let upper: Name = "TARGET.EXAMPLE.ORG.".parse().unwrap();
+    records.push(pharos_proto::zone::ZoneRecord {
+        owner: owner.clone(),
+        rtype: Type::MB,
+        class: Class::IN,
+        ttl: 60,
+        rdata: lower.as_wire().to_vec(),
+    });
+    let zone = Zone::from_records(apex, records).unwrap();
+    let remove = pharos_proto::zone::ZoneRecord {
+        owner: owner.clone(),
+        rtype: Type::MB,
+        class: Class::NONE,
+        ttl: 0,
+        rdata: upper.as_wire().to_vec(),
+    };
+    let (updated, changed) = zone.apply_updates(&[remove]).unwrap();
+    assert!(changed);
+    assert_eq!(
+        updated
+            .rrset(NameRef::parse(owner.as_wire(), 0).unwrap(), Type::MB)
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn update_protects_apex_and_applies_ordered_cname_changes() {
     let apex: Name = "example.org.".parse().unwrap();
     let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 4294967295 2 3 4 5\n@ 60 IN NS ns.example.org.\nwww 60 IN A 192.0.2.1\n";
