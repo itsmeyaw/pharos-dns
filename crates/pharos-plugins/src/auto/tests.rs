@@ -1,5 +1,32 @@
 use super::*;
 
+#[test]
+fn coredns_walk_rejects_wrong_soa_then_loads_corrected_zone() {
+    let root = std::env::temp_dir().join(format!("pharos-auto-soa-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("db.example.org");
+    std::fs::write(&path, "example.net. 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
+    let auto = Auto::new(
+        vec![".".parse().unwrap()],
+        root.clone(),
+        regex::Regex::new(r"^db\.(.*)$").unwrap(),
+        "${1}".into(),
+        Duration::ZERO,
+    );
+    auto.shared.scan();
+    assert!(auto.shared.zones.load().origins.is_empty());
+    std::fs::write(&path, "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
+    auto.shared.scan();
+    assert!(
+        auto.shared
+            .zones
+            .load()
+            .origins
+            .contains_key("example.org.")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn watcher_started_after_shutdown_exits() {
     let root = std::env::temp_dir().join(format!("pharos-auto-stopped-{}", std::process::id()));
