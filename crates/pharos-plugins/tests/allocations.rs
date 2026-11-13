@@ -47,6 +47,14 @@ fn run_isolated(name: &str) -> bool {
     true
 }
 
+#[cfg(all(
+    feature = "plugin-dynupdate",
+    feature = "plugin-file",
+    feature = "plugin-cache"
+))]
+#[path = "allocations/dynupdate_allocations.rs"]
+mod dynupdate_allocations;
+
 #[cfg(feature = "plugin-file")]
 #[path = "allocations/file_allocations.rs"]
 mod file_allocations;

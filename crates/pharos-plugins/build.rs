@@ -29,7 +29,7 @@ fn transferer(name: &str) -> bool {
     // Add each implemented Transferer here; enabled retains Plugin Order.
     matches!(
         name,
-        "k8s_external" | "kubernetes" | "file" | "auto" | "secondary"
+        "k8s_external" | "kubernetes" | "file" | "auto" | "secondary" | "dynupdate"
     )
 }
 
@@ -60,6 +60,7 @@ fn main() {
             "acl" => "acl::Acl",
             "dns64" => "dns64::Dns64",
             "dnssec" => "dnssec::Dnssec",
+            "dynupdate" => "dynupdate::DynUpdate",
             "siit" => "siit::Siit",
             "tsig" => "tsig::Tsig",
             "transfer" => "transfer::Transfer",
@@ -115,6 +116,7 @@ fn main() {
             "acl" => "acl::setup::setup",
             "dns64" => "dns64::setup::setup",
             "dnssec" => "dnssec::setup::setup",
+            "dynupdate" => "dynupdate::setup::setup",
             "siit" => "siit::setup::setup",
             "tsig" => "tsig::setup::setup",
             "transfer" => "transfer::setup::setup",
@@ -161,6 +163,7 @@ fn main() {
         let once = matches!(
             *name,
             "cache"
+                | "dynupdate"
                 | "dnssec"
                 | "tsig"
                 | "shed"
@@ -278,6 +281,9 @@ fn main() {
         }
     }
     code.push_str("}\n");
+    if enabled.contains(&"dynupdate") {
+        code.push_str("fn accepts_update(&self) -> bool { self.dynupdate.is_some() }\n");
+    }
     if enabled.contains(&"view") {
         code.push_str("fn has_view(&self) -> bool { self.view.is_some() }\nfn view_name(&self) -> &str { self.view.as_ref().map_or(\"\", |view| view.name.as_ref()) }\nfn matches_view(&self, cx: &pharos_server::Context<'_>) -> bool { self.view.as_ref().is_none_or(|view| view.matches(cx)) }\n");
     }

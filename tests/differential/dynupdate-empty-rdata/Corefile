@@ -1,0 +1,10 @@
+example.org:{port} {
+    tsig {
+        secret key.example.org. c2VjcmV0
+        require_opcode UPDATE
+    }
+    dynupdate {
+        file example.org.zone
+        allow key.example.org. * *
+    }
+}

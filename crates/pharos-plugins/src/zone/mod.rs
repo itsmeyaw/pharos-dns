@@ -2,6 +2,7 @@
 
 #[cfg(feature = "plugin-transfer")]
 mod transfer;
+pub(crate) mod update;
 
 use pharos_proto::{
     Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type,
@@ -120,7 +121,22 @@ impl Zone {
     }
 
     /// Build an immutable Zone from owned, uncompressed master-file records.
-    pub fn from_records(apex: Name, mut records: Vec<ZoneRecord>) -> Result<Self, String> {
+    pub fn from_records(apex: Name, records: Vec<ZoneRecord>) -> Result<Self, String> {
+        Self::from_records_inner(apex, records, false)
+    }
+
+    pub(crate) fn from_dynamic_records(
+        apex: Name,
+        records: Vec<ZoneRecord>,
+    ) -> Result<Self, String> {
+        Self::from_records_inner(apex, records, true)
+    }
+
+    fn from_records_inner(
+        apex: Name,
+        mut records: Vec<ZoneRecord>,
+        allow_empty: bool,
+    ) -> Result<Self, String> {
         let apex: Name = apex
             .canonical()
             .parse()
@@ -142,6 +158,10 @@ impl Zone {
             }
             if record.rtype == Type::NSEC3 || record.rtype == Type::NSEC3PARAM {
                 return Err("NSEC3 zone is not supported".into());
+            }
+            // miekg/dns msg.go:636-638 accepts empty dynamic-update RDATA before type decoding.
+            if allow_empty && record.rdata.is_empty() && record.rtype != Type::SOA {
+                continue;
             }
             let offset = match record.rtype {
                 Type::NS | Type::CNAME | Type::SOA => Some((0, true)),
@@ -379,6 +399,9 @@ pub(crate) fn contains(name: &[u8], apex: &Name) -> bool {
 }
 
 fn contains_wire(name: &[u8], apex: &[u8]) -> bool {
+    if name.is_empty() {
+        return false;
+    }
     let mut suffix = name;
     loop {
         if suffix.eq_ignore_ascii_case(apex) {
@@ -520,13 +543,19 @@ impl Zone {
             || name.eq_ignore_ascii_case(zone.apex.as_wire())
                 && matches!(question.qtype, Type::SOA | Type::NS);
         if let Some(rr) = dname {
+            // CoreDNS treats an empty DNAME target as the root during substitution.
+            let target = if rr.rdata.is_empty() {
+                &[0][..]
+            } else {
+                &rr.rdata
+            };
             let prefix = name.len() - rr.owner.as_wire().len();
-            let len = prefix + rr.rdata.len();
+            let len = prefix + target.len();
             if len > dname_target.len() {
                 return Outcome::Unanswered(Rcode::SERVFAIL);
             }
             dname_target[..prefix].copy_from_slice(&name[..prefix]);
-            dname_target[prefix..len].copy_from_slice(&rr.rdata);
+            dname_target[prefix..len].copy_from_slice(target);
             source = &dname_target[..len];
             if source.eq_ignore_ascii_case(name) {
                 return Outcome::Unanswered(Rcode::SERVFAIL);
@@ -570,6 +599,7 @@ impl Zone {
         let mut chain = [None; 10];
         let mut count = 0;
         let mut chain_limited = false;
+        let mut empty_alias = false;
         let mut target = source;
         if dname.is_some() {
             cut = zone.cut(target, question.qtype);
@@ -590,6 +620,10 @@ impl Zone {
                 }
                 chain[count] = Some(alias);
                 count += 1;
+                if alias.rdata.is_empty() {
+                    empty_alias = true;
+                    break;
+                }
                 target = &alias.rdata;
                 cut = zone.cut(target, question.qtype);
                 if cut.is_some()
@@ -604,6 +638,7 @@ impl Zone {
         let mut lookup_failed = false;
         let lookup = if cut.is_none()
             && !chain_limited
+            && !empty_alias
             && (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
             && (!zone.exact(target)
                 || question.qtype == Type::NS

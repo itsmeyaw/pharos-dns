@@ -47,7 +47,8 @@ async fn query(
         response: &mut response,
         max_response_size: 4096,
     };
-    let outcome = chain.serve(&mut cx).await;
+    // Keep the unmeasured Chain future out of the template fixture's stack.
+    let outcome = Box::pin(chain.serve(&mut cx)).await;
     (outcome, response)
 }
 

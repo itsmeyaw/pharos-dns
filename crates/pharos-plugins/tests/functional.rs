@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[cfg(feature = "plugin-dynupdate")]
+#[path = "functional/dynupdate.rs"]
+mod dynupdate;
+
 #[cfg(feature = "plugin-sign")]
 #[path = "functional/sign.rs"]
 mod sign;

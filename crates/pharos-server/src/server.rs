@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     Action, Admission, Context, Error, Handler, ListenerKey, Metadata, Outcome, Protocol, Router,
-    admit, finish_outcome_signed,
+    admit_with_update, finish_outcome_signed,
     metrics::{BlockMetrics, Registry},
     response_limit,
 };
@@ -20,6 +20,10 @@ use pharos_proto::Rcode;
 pub trait Chain: Send + Sync + 'static {
     fn serve(&self, context: &mut Context<'_, '_>) -> impl Future<Output = Outcome> + Send;
     fn is_empty(&self) -> bool;
+    /// Whether this Server Block accepts RFC 2136 UPDATE messages.
+    fn accepts_update(&self) -> bool {
+        false
+    }
     /// Whether this Chain resets and collects Metadata before its filters.
     fn has_metadata_collector(&self) -> bool {
         false
@@ -75,6 +79,9 @@ impl<C: Chain> Chain for Arc<C> {
     }
     fn is_empty(&self) -> bool {
         self.as_ref().is_empty()
+    }
+    fn accepts_update(&self) -> bool {
+        self.as_ref().accepts_update()
     }
     fn has_metadata_collector(&self) -> bool {
         self.as_ref().has_metadata_collector()
@@ -255,7 +262,11 @@ impl<C: Chain> Handler for Server<C> {
     fn shed_query(&self, wire: &[u8], peer: SocketAddr) -> bool {
         // shortcut: admit writes its discarded error Response here, so a malformed, non-IN, or BADVERS Query allocates while the stack is full; pass a reused buffer if overload floods of such Queries matter.
         let mut response = Vec::new();
-        let Admission::Query(query) = admit(wire, self.allow_non_in, &mut response) else {
+        let allow_update = wire.get(2).is_some_and(|flags| flags & 0x78 == 0x28)
+            && self.router.accepts_update(&self.key);
+        let Admission::Query(query) =
+            admit_with_update(wire, self.allow_non_in, allow_update, &mut response)
+        else {
             return false;
         };
         self.route_for_dispatch(query, peer, Protocol::Udp)
@@ -410,7 +421,9 @@ impl<C: Chain> Server<C> {
         lookup_server: &dyn crate::SelfLookupServer,
     ) -> Action {
         let start = Instant::now();
-        let mut query = match admit(wire, self.allow_non_in, response) {
+        let allow_update = wire.get(2).is_some_and(|flags| flags & 0x78 == 0x28)
+            && self.router.accepts_update(&self.key);
+        let mut query = match admit_with_update(wire, self.allow_non_in, allow_update, response) {
             Admission::Query(query) => query,
             Admission::Respond => {
                 if let Ok(query) = pharos_proto::Message::parse(wire) {
@@ -483,40 +496,44 @@ impl<C: Chain> Server<C> {
         let mut tsig_signing = None;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
-                if has_views {
-                    context.metadata.set_metric_view(view);
-                }
-                context.domain = block.domain();
-                let outcome = {
-                    let future = std::pin::pin!(chain.serve_routed(&mut context, has_views));
-                    crate::panic::contain_panic_with_stacktrace(
-                        future,
-                        self.debug,
-                        chain.stacktrace(),
-                    )
-                    .await
-                };
-                if let Some(opt) = context.query.opt() {
-                    query = query.with_udp_payload_limit(opt.udp_payload_size());
-                }
-                producer = context
-                    .metadata
-                    .get(crate::metrics::WRITER_METADATA)
-                    .and_then(|name| block.plugin_metrics(name, view));
-                if dynamic_metrics.is_some() {
-                    metric_producer = context
+                if query.opcode() == pharos_proto::Opcode::UPDATE && !chain.accepts_update() {
+                    Outcome::Unanswered(Rcode::NOTIMP)
+                } else {
+                    if has_views {
+                        context.metadata.set_metric_view(view);
+                    }
+                    context.domain = block.domain();
+                    let outcome = {
+                        let future = std::pin::pin!(chain.serve_routed(&mut context, has_views));
+                        crate::panic::contain_panic_with_stacktrace(
+                            future,
+                            self.debug,
+                            chain.stacktrace(),
+                        )
+                        .await
+                    };
+                    if let Some(opt) = context.query.opt() {
+                        query = query.with_udp_payload_limit(opt.udp_payload_size());
+                    }
+                    producer = context
                         .metadata
                         .get(crate::metrics::WRITER_METADATA)
+                        .and_then(|name| block.plugin_metrics(name, view));
+                    if dynamic_metrics.is_some() {
+                        metric_producer = context
+                            .metadata
+                            .get(crate::metrics::WRITER_METADATA)
+                            .and_then(|name| block.plugin_name(name));
+                    }
+                    error_plugin = context
+                        .metadata
+                        .get(crate::logging::PLUGIN_METADATA)
                         .and_then(|name| block.plugin_name(name));
+                    error_logged =
+                        context.metadata.get(crate::logging::ERROR_LOGGED_METADATA) == Some("true");
+                    tsig_signing = context.metadata.take_tsig_signing();
+                    outcome
                 }
-                error_plugin = context
-                    .metadata
-                    .get(crate::logging::PLUGIN_METADATA)
-                    .and_then(|name| block.plugin_name(name));
-                error_logged =
-                    context.metadata.get(crate::logging::ERROR_LOGGED_METADATA) == Some("true");
-                tsig_signing = context.metadata.take_tsig_signing();
-                outcome
             } else {
                 Outcome::Unanswered(Rcode::REFUSED)
             }

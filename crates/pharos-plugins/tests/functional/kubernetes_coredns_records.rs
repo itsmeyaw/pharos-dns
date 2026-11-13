@@ -139,8 +139,9 @@ async fn query(chain: &Chain, name: &str, kind: Type, local: &str) -> Vec<u8> {
 #[tokio::test]
 async fn coredns_endpoint_hostname_rows() {
     let (endpoint, server) = api().await;
-    let standard = chain(&endpoint, "").await;
-    let pod_names = chain(&endpoint, "endpoint_pod_names").await;
+    // Keep both configured Chains out of the default-size test future.
+    let standard = Box::new(chain(&endpoint, "").await);
+    let pod_names = Box::new(chain(&endpoint, "endpoint_pod_names").await);
     let mut failures = Vec::new();
     for (i, expected) in [
         "10-11-12-13",
@@ -265,8 +266,9 @@ async fn coredns_services_rows() {
 #[tokio::test]
 async fn coredns_parse_request_dns_visible_rows() {
     let (endpoint, server) = api().await;
-    let zonal = chain(&endpoint, "zonal").await;
-    let ordinary = chain(&endpoint, "").await;
+    // Keep both configured Chains out of the default-size test future.
+    let zonal = Box::new(chain(&endpoint, "zonal").await);
+    let ordinary = Box::new(chain(&endpoint, "").await);
     let mut failures = Vec::new();
     for (id, chain, name, kind, expected_code, expected_ips) in [
         (

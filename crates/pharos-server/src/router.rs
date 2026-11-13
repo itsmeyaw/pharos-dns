@@ -214,6 +214,14 @@ impl<C> Router<C> {
 }
 
 impl<C: Chain> Router<C> {
+    pub(crate) fn accepts_update(&self, key: &ListenerKey) -> bool {
+        self.listeners.get(key).is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block.chain.as_ref().is_some_and(Chain::accepts_update))
+        })
+    }
+
     pub(crate) fn shed_enabled(&self, key: &ListenerKey) -> bool {
         self.listeners.get(key).is_some_and(|blocks| {
             blocks

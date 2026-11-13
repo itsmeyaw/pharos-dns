@@ -37,6 +37,8 @@ pub mod debug;
 pub mod dns64;
 #[cfg(feature = "plugin-dnssec")]
 pub mod dnssec;
+#[cfg(any(test, feature = "plugin-dynupdate"))]
+pub mod dynupdate;
 #[cfg(feature = "plugin-erratic")]
 pub mod erratic;
 #[cfg(feature = "plugin-errors")]
@@ -93,7 +95,8 @@ pub mod siit;
     feature = "plugin-file",
     feature = "plugin-secondary",
     feature = "plugin-auto",
-    feature = "plugin-sign"
+    feature = "plugin-sign",
+    feature = "plugin-dynupdate"
 ))]
 pub mod zone;
 
@@ -149,6 +152,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("debug", include_str!("debug/README.md")),
     ("dns64", include_str!("dns64/README.md")),
     ("dnssec", include_str!("dnssec/README.md")),
+    ("dynupdate", include_str!("dynupdate/README.md")),
     ("errors", include_str!("errors/README.md")),
     ("erratic", include_str!("erratic/README.md")),
     ("file", include_str!("file/README.md")),
@@ -737,6 +741,7 @@ impl pharos_server::Plugin for Unimplemented {
 }
 
 #[cfg(any(
+    feature = "plugin-dynupdate",
     feature = "plugin-hosts",
     feature = "plugin-file",
     feature = "plugin-auto",
@@ -757,6 +762,8 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
 }
 
 #[cfg(any(
+    test,
+    feature = "plugin-dynupdate",
     feature = "plugin-hosts",
     feature = "plugin-file",
     feature = "plugin-auto",

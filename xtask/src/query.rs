@@ -35,6 +35,7 @@ pub(crate) struct Query {
     edns_version: u8,
     tsig: Option<(Name, Vec<u8>, TsigCase)>,
     ixfr_serial: Option<u32>,
+    additions: Vec<(Name, Type, u32, Vec<u8>)>,
 }
 
 impl fmt::Display for Query {
@@ -110,6 +111,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         edns_version: 0,
         tsig: None,
         ixfr_serial: None,
+        additions: Vec::new(),
     };
     for flag in parts {
         let lower = flag.to_ascii_lowercase();
@@ -123,6 +125,40 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
                 query.edns = true;
             }
             "+norec" => query.recursion = false,
+            _ if lower.starts_with("+add=") => {
+                let mut values = flag[5..].split(':');
+                let (Some(owner), Some(kind), Some(ttl), Some(hex), None) = (
+                    values.next(),
+                    values.next(),
+                    values.next(),
+                    values.next(),
+                    values.next(),
+                ) else {
+                    return Err(format!("invalid flag: {flag}"));
+                };
+                let owner =
+                    Name::parse(owner, &root).map_err(|_| format!("invalid flag: {flag}"))?;
+                let kind = record_type(&kind.to_ascii_uppercase())
+                    .ok_or_else(|| format!("invalid flag: {flag}"))?;
+                let ttl = decimal(ttl).ok_or_else(|| format!("invalid flag: {flag}"))?;
+                let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+                if !remainder.is_empty() {
+                    return Err(format!("invalid flag: {flag}"));
+                }
+                let data = pairs
+                    .iter()
+                    .map(|pair| {
+                        std::str::from_utf8(pair)
+                            .ok()
+                            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                            .ok_or_else(|| format!("invalid flag: {flag}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if data.len() > usize::from(u16::MAX) {
+                    return Err(format!("invalid flag: {flag}"));
+                }
+                query.additions.push((owner, kind, ttl, data));
+            }
             _ if lower.starts_with("+ixfr=") => {
                 if query.qtype != Type::IXFR || query.ixfr_serial.is_some() {
                     return Err(format!("invalid flag: {flag}"));
@@ -196,6 +232,9 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
             }
             _ => return Err(format!("invalid flag: {flag}")),
         }
+    }
+    if !query.additions.is_empty() && query.opcode != 5 {
+        return Err("+add requires UPDATE".into());
     }
     Ok(query)
 }
@@ -285,6 +324,16 @@ impl Query {
                 return Err("query exceeds DNS message size".into());
             }
         }
+        // RFC 2136 §2.5: additions appear in the Update section using the Zone class.
+        for (owner, kind, ttl, data) in &self.additions {
+            let owner = NameRef::parse(owner.as_wire(), 0).map_err(|error| error.to_string())?;
+            if !builder
+                .record(Section::Authority, owner, *kind, self.class, *ttl, data)
+                .map_err(|error| error.to_string())?
+            {
+                return Err("query exceeds DNS message size".into());
+            }
+        }
         if self.edns {
             // RFC 5001 §2.2: a Query requests NSID with an empty option payload.
             let mut raw_options = Vec::new();
@@ -351,6 +400,25 @@ impl Query {
 mod tests {
     use super::{Transport, parse};
     use pharos_proto::{Class, Message, Opcode, Type};
+
+    #[test]
+    fn builds_signed_update_with_authority_record() {
+        let query = parse("example.org. SOA IN udp +opcode=UPDATE +add=host.example.org.:A:60:c000020a +tsig=key.:c2VjcmV0").unwrap();
+        let wire = query.wire().unwrap();
+        let message = Message::parse(&wire).unwrap();
+        assert_eq!(message.opcode(), Opcode::UPDATE);
+        let record = message.authorities().next().unwrap();
+        assert_eq!(record.name.to_string(), "host.example.org.");
+        assert_eq!(
+            (record.rtype, record.class, record.ttl, record.rdata),
+            (Type::A, Class::IN, 60, [192, 0, 2, 10].as_slice())
+        );
+        assert_eq!(message.additionals().last().unwrap().rtype, Type::TSIG);
+        assert!(
+            parse("example.org. SOA IN udp +opcode=UPDATE +add=host.example.org.:A:bad:c000020a")
+                .is_err()
+        );
+    }
 
     #[test]
     fn ixfr_serial_adds_a_signed_authority_soa() {

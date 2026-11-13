@@ -22,6 +22,7 @@ Each scenario is a directory containing:
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
   `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, `+opcode=NAME` or a number,
   `+ixfr=SERIAL` for an IXFR SOA in Authority,
+  `+add=OWNER:TYPE:TTL:HEX` for an UPDATE-section addition with wire-format RDATA,
   and `+tsig=NAME:BASE64[:badkey|badsig|badtime]` (HMAC-SHA256).
 - `expect` (optional): one setting per line. `ttl N` permits a TTL difference
   of N seconds for ordinary records; default is zero. `mask
@@ -45,6 +46,10 @@ IDs and RR order within each section are ignored; all other fields are compared.
 Unsigned TCP AXFR comparisons collect the complete stream through its closing
 SOA before comparing records, independent of Message boundaries. The combined
 records must fit into one 65,535-octet comparison Message.
+
+The two `dynupdate` README examples use the documented seed and public test key.
+They compare a signed UPDATE followed by a Query; the in-memory case also
+exercises cache bypass after a Negative Response.
 
 The `file` README scenarios omit the example's remote NOTIFY destination so
 the tests do not send traffic outside the local fixture.
