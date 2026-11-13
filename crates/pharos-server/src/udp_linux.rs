@@ -9,7 +9,7 @@ use std::{
 use nix::sys::socket::{MsgFlags, MultiHeaders, SockaddrStorage, recvmmsg, sendmmsg};
 use tokio::{io::Interest, net::UdpSocket, sync::watch, task::JoinHandle};
 
-use crate::{Action, Handler, Protocol};
+use crate::Handler;
 
 const BATCH: usize = 16;
 const MAX_MESSAGE: usize = 65535;
@@ -54,7 +54,7 @@ fn receive(
     })
 }
 
-fn send(socket: &UdpSocket, response: &[u8], peer: SocketAddr) -> io::Result<()> {
+pub(crate) fn send(socket: &UdpSocket, response: &[u8], peer: SocketAddr) -> io::Result<()> {
     let slices = [[IoSlice::new(response)]];
     let peers = [Some(SockaddrStorage::from(peer))];
     SEND.with_borrow_mut(|headers| {
@@ -82,8 +82,14 @@ pub(crate) fn spawn<H: Handler>(
         // Zeroed on the first readable event, not at startup: 64 workers' buffers took ~30 ms to fault in.
         let mut buffers: Option<[Vec<u8>; BATCH]> = None;
         let mut peers = [None; BATCH];
-        let mut response = Vec::with_capacity(MAX_MESSAGE);
+        let mut response = Some(Vec::with_capacity(MAX_MESSAGE));
+        let mut query = Vec::with_capacity(MAX_MESSAGE);
+        let mut slot = None;
+        let mut pending = tokio::task::JoinSet::new();
         loop {
+            if !crate::udp::capacity(&mut pending, &mut shutdown).await {
+                return Ok(());
+            }
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => return Ok(()),
@@ -117,6 +123,9 @@ pub(crate) fn spawn<H: Handler>(
             };
             for index in 0..count {
                 if let Some((length, peer)) = peers[index] {
+                    if !crate::udp::capacity(&mut pending, &mut shutdown).await {
+                        return Ok(());
+                    }
                     let client = crate::canonical_peer(peer);
                     if let Some(cancelled) =
                         handler.parallel_query(&buffers[index][..length], client)
@@ -132,25 +141,24 @@ pub(crate) fn spawn<H: Handler>(
                         );
                         continue;
                     }
-                    response.clear();
-                    if H::handle_shared(
-                        &handler,
-                        &buffers[index][..length],
-                        client,
-                        Protocol::Udp,
-                        &mut response,
+                    query.clear();
+                    query.extend_from_slice(&buffers[index][..length]);
+                    if let Some((reused, data)) = crate::udp::dispatch(
+                        crate::udp::answer(
+                            Arc::clone(&handler),
+                            Arc::clone(&socket),
+                            std::mem::take(&mut query),
+                            peer,
+                            response.take(),
+                            None,
+                        ),
+                        &mut slot,
+                        &mut pending,
                     )
                     .await
-                        == Action::Respond
-                        && let Err(error) = socket
-                            .async_io(Interest::WRITABLE, || send(&socket, &response, peer))
-                            .await
                     {
-                        crate::logging::log(
-                            "ERROR",
-                            "server",
-                            &format!("UDP Response to {peer} failed: {error}"),
-                        );
+                        query = reused;
+                        response = data;
                     }
                 }
             }
@@ -161,6 +169,7 @@ pub(crate) fn spawn<H: Handler>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Action, Protocol};
     use std::time::Duration;
 
     struct Echo;

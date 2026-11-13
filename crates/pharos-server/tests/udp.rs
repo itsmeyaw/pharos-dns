@@ -11,6 +11,224 @@ struct Echo;
 
 struct AsyncEcho;
 
+struct SlowEcho {
+    started: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Handler for SlowEcho {
+    fn udp_workers(&self) -> usize {
+        1
+    }
+
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        // RFC 1035 §4.2.1: independent UDP Queries must not wait for each other.
+        if query == b"slow" {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        response.extend_from_slice(query);
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn slow_query_does_not_delay_fast_query_on_same_socket() {
+    let started = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        SlowEcho {
+            started: started.clone(),
+            release: release.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(listener.local_addr()).await.unwrap();
+    socket.send(b"slow").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .unwrap();
+    socket.send(b"fast").await.unwrap();
+    let mut response = [0; 16];
+    let length = tokio::time::timeout(Duration::from_millis(300), socket.recv(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&response[..length], b"fast");
+    release.notify_one();
+    listener.shutdown().await.unwrap();
+}
+
+struct PendingQueries {
+    started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+    shed: Option<pharos_server::metrics::ShedMetrics>,
+}
+
+struct PendingGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Handler for PendingQueries {
+    fn udp_workers(&self) -> usize {
+        1
+    }
+    fn shed_metrics(&self) -> Option<pharos_server::metrics::ShedMetrics> {
+        self.shed.clone()
+    }
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        // RFC 1035 §4.2.1: each accepted Query may wait independently.
+        let _guard = PendingGuard(self.dropped.clone());
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.permits.acquire().await.unwrap().forget();
+        response.extend_from_slice(query);
+        Action::Respond
+    }
+}
+
+async fn wait_for_count(count: &std::sync::atomic::AtomicUsize, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while count.load(std::sync::atomic::Ordering::SeqCst) < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn udp_pending_limit_resumes_after_completion() {
+    for shed in [false, true] {
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            PendingQueries {
+                started: started.clone(),
+                dropped: dropped.clone(),
+                permits: permits.clone(),
+                shed: shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53")),
+            },
+        )
+        .await
+        .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(listener.local_addr()).await.unwrap();
+        for count in 1..=256 {
+            socket.send(b"slow").await.unwrap();
+            wait_for_count(&started, count).await;
+        }
+        socket.send(b"queued").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), wait_for_count(&started, 257))
+                .await
+                .is_err()
+        );
+        permits.add_permits(1);
+        wait_for_count(&started, 257).await;
+        listener.shutdown().await.unwrap();
+        wait_for_count(&dropped, 257).await;
+    }
+}
+
+#[tokio::test]
+async fn udp_shutdown_cancels_pending_queries() {
+    for shed in [false, true] {
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            PendingQueries {
+                started: started.clone(),
+                dropped: dropped.clone(),
+                permits: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+                shed: shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53")),
+            },
+        )
+        .await
+        .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket
+            .send_to(b"slow", listener.local_addr())
+            .await
+            .unwrap();
+        wait_for_count(&started, 1).await;
+        tokio::time::timeout(Duration::from_secs(2), listener.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_count(&dropped, 1).await;
+    }
+}
+
+struct PanickingEcho(Option<pharos_server::metrics::ShedMetrics>);
+impl Handler for PanickingEcho {
+    fn udp_workers(&self) -> usize {
+        1
+    }
+    fn shed_metrics(&self) -> Option<pharos_server::metrics::ShedMetrics> {
+        self.0.clone()
+    }
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        // RFC 1035 §4.2.1: failure of one Query must not stop independent Queries.
+        if query == b"pending panic" {
+            tokio::task::yield_now().await;
+        }
+        assert!(query != b"panic" && query != b"pending panic", "test panic");
+        response.extend_from_slice(query);
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn udp_handler_panics_do_not_stop_worker() {
+    for shed in [false, true] {
+        let metrics = shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53"));
+        let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), PanickingEcho(metrics))
+            .await
+            .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(listener.local_addr()).await.unwrap();
+        for query in [b"panic".as_slice(), b"pending panic", b"ok"] {
+            socket.send(query).await.unwrap();
+        }
+        let mut response = [0; 16];
+        let length = tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&response[..length], b"ok");
+        listener.shutdown().await.unwrap();
+    }
+}
+
 struct ClientEcho(tokio::sync::watch::Sender<bool>);
 
 impl Handler for ClientEcho {
