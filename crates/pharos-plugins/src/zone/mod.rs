@@ -455,7 +455,7 @@ impl Zone {
         next: N,
         fallthrough: &[Name],
     ) -> Outcome {
-        self.lookup_inner(cx, next, fallthrough, true).await
+        self.lookup_inner(cx, next, fallthrough, true, false).await
     }
 
     #[cfg(feature = "plugin-auto")]
@@ -463,8 +463,9 @@ impl Zone {
         &self,
         cx: &mut Context<'_, '_>,
         next: N,
+        case_mismatch: bool,
     ) -> Outcome {
-        self.lookup_inner(cx, next, &[], false).await
+        self.lookup_inner(cx, next, &[], false, case_mismatch).await
     }
 
     async fn lookup_inner<N: Next + Send>(
@@ -473,6 +474,7 @@ impl Zone {
         next: N,
         fallthrough: &[Name],
         drop_notify: bool,
+        case_mismatch: bool,
     ) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
@@ -498,7 +500,13 @@ impl Zone {
             return Outcome::Drop;
         }
         // RFC 1034 §4.3.2: return the first Zone Cut between the apex and QNAME.
-        let cut = zone.cut(name, question.qtype);
+        let cut = if case_mismatch
+            && !(question.qtype == Type::DS && name.eq_ignore_ascii_case(zone.apex.as_wire()))
+        {
+            zone.records_at(zone.apex.as_wire(), Type::NS).next()
+        } else {
+            zone.cut(name, question.qtype)
+        };
         // RFC 6672 §3.2: DNAME applies to strict descendants of its owner.
         let dname = zone
             .dname(name)
@@ -653,6 +661,7 @@ impl Zone {
         }
         let result = (|| -> Result<(), pharos_server::Error> {
             // RFC 1035 §4.1.1: authoritative Responses preserve Query flags and ID.
+            // RFC 1035 §4.1.1: OPCODE identifies the operation; RD is a Query flag.
             let mut builder = MessageBuilder::new(
                 cx.response,
                 max,

@@ -19,7 +19,26 @@ impl Auto {
         // RFC 4343 §3: incoming DNS names compare case-insensitively.
         let zone =
             pharos_proto::NameRef::parse(&wire[..len + 1], 0).map_err(|_| Error::InvalidQuery)?;
-        self.transfer(TransferRequest { zone, ..request })
+        self.transfer_for(zone, request)
+    }
+
+    fn transfer_for(
+        &self,
+        name: pharos_proto::NameRef<'_>,
+        request: TransferRequest<'_>,
+    ) -> Result<Option<Stream>, Error> {
+        let zones = self.shared.zones.load();
+        let mut text = NameText {
+            bytes: [0; 1024],
+            len: 0,
+        };
+        write!(&mut text, "{name}").map_err(|_| Error::InvalidQuery)?;
+        let name = std::str::from_utf8(&text.bytes[..text.len]).map_err(|_| Error::InvalidQuery)?;
+        let Some(entry) = zones.origins.get(name) else {
+            return Ok(None);
+        };
+        let zone = entry.current.load_full().ok_or(Error::InvalidQuery)?;
+        Ok(Some(zone.transfer_with_question(request, true)?))
     }
 }
 
@@ -29,17 +48,6 @@ impl Transferer for Auto {
     }
 
     fn transfer(&self, request: TransferRequest<'_>) -> Result<Option<Stream>, Error> {
-        let zones = self.shared.zones.load();
-        let mut text = NameText {
-            bytes: [0; 1024],
-            len: 0,
-        };
-        write!(&mut text, "{}", request.zone).map_err(|_| Error::InvalidQuery)?;
-        let name = std::str::from_utf8(&text.bytes[..text.len]).map_err(|_| Error::InvalidQuery)?;
-        let Some(entry) = zones.get(name) else {
-            return Ok(None);
-        };
-        let zone = entry.current.load_full().ok_or(Error::InvalidQuery)?;
-        Ok(Some(zone.transfer(request)?))
+        self.transfer_for(request.zone, request)
     }
 }

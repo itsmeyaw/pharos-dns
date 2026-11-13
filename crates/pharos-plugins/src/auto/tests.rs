@@ -1,5 +1,33 @@
 use super::*;
 
+#[tokio::test]
+async fn watcher_started_after_shutdown_exits() {
+    let root = std::env::temp_dir().join(format!("pharos-auto-stopped-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("db.example.org"),
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+    )
+    .unwrap();
+    let auto = Auto::new(
+        vec![".".parse().unwrap()],
+        root.clone(),
+        regex::Regex::new(r"db\.(.*)").unwrap(),
+        "${1}".into(),
+        Duration::from_secs(60),
+    );
+    auto.shared.scan();
+    auto.shared.shutdown.send_replace(true);
+    auto.shared.start_watchers(Duration::from_secs(60));
+    let entry = Arc::clone(auto.shared.zones.load().origins.values().next().unwrap());
+    let task = entry.task.lock().unwrap().take().unwrap();
+    tokio::time::timeout(Duration::from_millis(100), task)
+        .await
+        .unwrap()
+        .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn coredns_walk_adds_removes_and_reload_checks_serial() {
     let root = std::env::temp_dir().join(format!("pharos-auto-{}", std::process::id()));
@@ -16,8 +44,8 @@ fn coredns_walk_adds_removes_and_reload_checks_serial() {
         Duration::from_secs(1),
     );
     auto.shared.scan();
-    assert_eq!(auto.shared.zones.load().len(), 1);
-    let entry = Arc::clone(auto.shared.zones.load().values().next().unwrap());
+    assert_eq!(auto.shared.zones.load().origins.len(), 1);
+    let entry = Arc::clone(auto.shared.zones.load().origins.values().next().unwrap());
     assert_eq!(entry.current.load().as_ref().unwrap().serial(), Some(1));
     std::fs::write(&path, text.replace("192.0.2.1", "192.0.2.2")).unwrap();
     assert!(!entry.reload());
@@ -29,7 +57,7 @@ fn coredns_walk_adds_removes_and_reload_checks_serial() {
     assert_eq!(entry.current.load().as_ref().unwrap().serial(), Some(2));
     std::fs::remove_file(path).unwrap();
     auto.shared.scan();
-    assert!(auto.shared.zones.load().is_empty());
+    assert!(auto.shared.zones.load().origins.is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -53,7 +81,7 @@ fn coredns_walk_keeps_first_path_and_follows_root_symlink() {
         Duration::ZERO,
     );
     auto.shared.scan();
-    let entry = Arc::clone(auto.shared.zones.load().values().next().unwrap());
+    let entry = Arc::clone(auto.shared.zones.load().origins.values().next().unwrap());
     assert_eq!(entry.current.load().as_ref().unwrap().serial(), Some(1));
     assert_eq!(
         *entry.path.lock().unwrap(),
@@ -129,7 +157,7 @@ async fn coredns_watcher_adds_reloads_and_removes_zones() {
     let path = root.join("db.example.org");
     std::fs::write(&path, "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
-        while auto.shared.zones.load().is_empty() {
+        while auto.shared.zones.load().origins.is_empty() {
             tokio::task::yield_now().await;
         }
     })
@@ -141,6 +169,7 @@ async fn coredns_watcher_adds_reloads_and_removes_zones() {
             .shared
             .zones
             .load()
+            .origins
             .values()
             .next()
             .unwrap()
@@ -157,7 +186,7 @@ async fn coredns_watcher_adds_reloads_and_removes_zones() {
     .unwrap();
     std::fs::remove_file(&path).unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
-        while !auto.shared.zones.load().is_empty() {
+        while !auto.shared.zones.load().origins.is_empty() {
             tokio::task::yield_now().await;
         }
     })
@@ -172,7 +201,11 @@ fn coredns_most_specific_zone_and_template_captures() {
     let root = std::env::temp_dir().join(format!("pharos-auto-mapping-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    for file in ["www.db.example.org", "www.db.child.example.org"] {
+    for file in [
+        "www.db.example.org",
+        "www.db.child.example.org",
+        "www.db.UPPER.org",
+    ] {
         std::fs::write(root.join(file), "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
     }
     let auto = Auto::new(
@@ -186,6 +219,7 @@ fn coredns_most_specific_zone_and_template_captures() {
     for (query, expected) in [
         ("www.example.org.", Some("example.org.")),
         ("www.child.example.org.", Some("child.example.org.")),
+        ("www.upper.org.", Some("UPPER.org.")),
         ("www.other.org.", None),
     ] {
         let name: Name = query.parse().unwrap();
@@ -240,7 +274,7 @@ async fn changed_serial_sends_notify_without_directory_scan() {
     );
     wire[2] |= 0x80;
     socket.send_to(&wire[..len], peer).await.unwrap();
-    for entry in auto.shared.zones.load().values() {
+    for entry in auto.shared.zones.load().origins.values() {
         if let Some(task) = entry.task.lock().unwrap().take() {
             task.abort();
         }

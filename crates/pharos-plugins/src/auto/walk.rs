@@ -38,7 +38,7 @@ impl Shared {
             let Ok(apex) = origin.parse::<Name>() else {
                 return;
             };
-            if let Some(entry) = old.get(&origin) {
+            if let Some(entry) = old.origins.get(&origin) {
                 *entry.path.lock().unwrap() = path.to_owned();
                 zones.insert(origin, Arc::clone(entry));
             } else {
@@ -79,6 +79,7 @@ impl Shared {
             }
         });
         for entry in old
+            .origins
             .values()
             .filter(|entry| !zones.contains_key(&entry.origin))
         {
@@ -87,7 +88,18 @@ impl Shared {
                 task.abort();
             }
         }
-        self.zones.store(Arc::new(zones));
+        let mut canonical = HashMap::new();
+        let mut entries: Vec<_> = zones.values().collect();
+        entries.sort_by(|a, b| a.path.lock().unwrap().cmp(&b.path.lock().unwrap()));
+        for entry in entries {
+            canonical
+                .entry(entry.apex.canonical())
+                .or_insert_with(|| Arc::clone(entry));
+        }
+        self.zones.store(Arc::new(Zones {
+            origins: zones,
+            canonical,
+        }));
     }
 }
 

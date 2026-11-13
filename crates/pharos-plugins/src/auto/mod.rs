@@ -32,11 +32,18 @@ struct Shared {
     directory: PathBuf,
     regex: regex::Regex,
     template: String,
-    zones: arc_swap::ArcSwap<HashMap<String, Arc<Entry>>>,
+    zones: arc_swap::ArcSwap<Zones>,
     scan_gate: Mutex<()>,
+    shutdown: tokio::sync::watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     #[cfg(feature = "plugin-transfer")]
     notifier: crate::zone::ZoneNotifier,
+}
+
+#[derive(Debug, Default)]
+struct Zones {
+    origins: HashMap<String, Arc<Entry>>,
+    canonical: HashMap<String, Arc<Entry>>,
 }
 
 /// Directory-backed authoritative Zones.
@@ -62,8 +69,9 @@ impl Auto {
                 directory,
                 regex,
                 template,
-                zones: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+                zones: arc_swap::ArcSwap::from_pointee(Zones::default()),
                 scan_gate: Mutex::new(()),
+                shutdown: tokio::sync::watch::channel(false).0,
                 tasks: Mutex::new(Vec::new()),
                 #[cfg(feature = "plugin-transfer")]
                 notifier: crate::zone::ZoneNotifier::default(),
@@ -77,6 +85,7 @@ impl Auto {
         let start = move || {
             let shared = Arc::clone(&shared);
             async move {
+                shared.shutdown.send_replace(false);
                 let worker = Arc::clone(&shared);
                 tokio::task::spawn_blocking(move || worker.scan())
                     .await
@@ -86,11 +95,21 @@ impl Auto {
                 notify_all(&shared).await;
                 if !interval.is_zero() {
                     let scan = Arc::clone(&shared);
+                    let mut shutdown = shared.shutdown.subscribe();
                     let scan_task = tokio::spawn(async move {
                         loop {
-                            tokio::time::sleep(interval).await;
+                            if *shutdown.borrow() {
+                                break;
+                            }
+                            tokio::select! {
+                                _ = tokio::time::sleep(interval) => {},
+                                _ = shutdown.changed() => break,
+                            }
                             let worker = Arc::clone(&scan);
                             let _ = tokio::task::spawn_blocking(move || worker.scan()).await;
+                            if *shutdown.borrow() {
+                                break;
+                            }
                             scan.start_watchers(interval);
                             #[cfg(feature = "plugin-transfer")]
                             notify_all(&scan).await;
@@ -105,18 +124,17 @@ impl Auto {
         lifecycle.register(pharos_server::Phase::RestartFailed, start);
         let shared = Arc::clone(&self.shared);
         let stop = move || {
+            shared.shutdown.send_replace(true);
             let tasks = std::mem::take(&mut *shared.tasks.lock().unwrap());
             let shared = Arc::clone(&shared);
             async move {
                 for task in tasks {
-                    task.abort();
                     let _ = task.await;
                 }
                 let zones = shared.zones.load_full();
-                for entry in zones.values() {
+                for entry in zones.origins.values() {
                     let task = entry.task.lock().unwrap().take();
                     if let Some(task) = task {
-                        task.abort();
                         let _ = task.await;
                     }
                 }
@@ -158,7 +176,10 @@ impl Auto {
         };
         let zone = entry.current.load_full();
         match zone {
-            Some(zone) => zone.lookup_auto(cx, next).await,
+            Some(zone) => {
+                let case_mismatch = entry.origin.bytes().any(|byte| byte.is_ascii_uppercase());
+                zone.lookup_auto(cx, next, case_mismatch).await
+            }
             None => Outcome::Unanswered(Rcode::SERVFAIL),
         }
     }
@@ -193,7 +214,7 @@ impl Shared {
             let suffix = pharos_proto::NameRef::parse(name, 0).ok()?;
             write!(&mut text, "{suffix}").ok()?;
             let key = std::str::from_utf8(&text.bytes[..text.len]).ok()?;
-            if let Some(entry) = zones.get(key) {
+            if let Some(entry) = zones.canonical.get(key) {
                 return Some(Arc::clone(entry));
             }
             if name[0] == 0 {
@@ -207,21 +228,31 @@ impl Shared {
         if interval.is_zero() {
             return;
         }
-        for entry in self.zones.load().values() {
+        for entry in self.zones.load().origins.values() {
             let mut task = entry.task.lock().unwrap();
             if task.is_some() {
                 continue;
             }
             let entry = Arc::clone(entry);
+            let mut shutdown = self.shutdown.subscribe();
             #[cfg(feature = "plugin-transfer")]
             let notifier = self.notifier.clone();
             *task = Some(tokio::spawn(async move {
                 loop {
-                    tokio::time::sleep(interval).await;
+                    if *shutdown.borrow() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {},
+                        _ = shutdown.changed() => break,
+                    }
                     let worker = Arc::clone(&entry);
                     let changed = tokio::task::spawn_blocking(move || worker.reload())
                         .await
                         .unwrap_or(false);
+                    if *shutdown.borrow() {
+                        break;
+                    }
                     #[cfg(feature = "plugin-transfer")]
                     if changed && let Some(transfer) = notifier.get() {
                         // RFC 1996 §3.1: notify Secondary Servers after Zone changes.
@@ -251,7 +282,7 @@ impl Plugin for Auto {
 async fn notify_all(shared: &Shared) {
     if let Some(transfer) = shared.notifier.get() {
         let zones = shared.zones.load_full();
-        for zone in zones.values() {
+        for zone in zones.origins.values() {
             // RFC 1996 §4.1: notify Secondary Servers when a Zone is loaded.
             if let Err(error) = transfer.notify(&zone.apex).await {
                 pharos_server::logging::log(

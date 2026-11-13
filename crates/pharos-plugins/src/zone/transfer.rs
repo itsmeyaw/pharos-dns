@@ -7,6 +7,15 @@ use std::sync::Arc;
 impl Zone {
     /// Stream this Zone in response to a Zone Transfer request.
     pub fn transfer(self: Arc<Self>, request: TransferRequest<'_>) -> Result<Stream, Error> {
+        self.transfer_with_question(request, false)
+    }
+
+    #[cfg_attr(not(feature = "plugin-auto"), allow(dead_code))]
+    pub(crate) fn transfer_with_question(
+        self: Arc<Self>,
+        request: TransferRequest<'_>,
+        preserve_question: bool,
+    ) -> Result<Stream, Error> {
         let zone = self;
         let soa = zone
             .records
@@ -23,6 +32,17 @@ impl Zone {
         let flags = request.flags;
         let qtype = request.qtype;
         let qclass = request.qclass;
+        let mut question = [0u8; 255];
+        let mut question_len = 0;
+        if preserve_question {
+            for label in request.zone.labels() {
+                question[question_len] = label.len() as u8;
+                question_len += 1;
+                question[question_len..question_len + label.len()].copy_from_slice(label);
+                question_len += label.len();
+            }
+            question_len += 1;
+        }
         let mut phase = 0u8;
         let mut index = 0usize;
         // RFC 5936 §2.2: the Zone snapshot is bounded by matching SOA records.
@@ -43,8 +63,13 @@ impl Zone {
                 0x8000 | if authoritative { 0x0400 } else { 0 } | (flags & 0x0110),
             )
             .map_err(Error::Build)?;
+            let qname = if preserve_question {
+                NameRef::parse(&question[..question_len], 0).map_err(|_| Error::InvalidQuery)?
+            } else {
+                apex
+            };
             builder
-                .question(apex, qtype, qclass)
+                .question(qname, qtype, qclass)
                 .map_err(Error::Build)?;
             let mut size = 0usize;
             loop {
