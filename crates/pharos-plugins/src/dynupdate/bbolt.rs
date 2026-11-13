@@ -524,9 +524,8 @@ impl Store {
         contents.insert(b"records".to_vec(), (0, records.to_vec()));
         let (mut free, old_free_overflow) = self.checked_free(&root, &contents, &old_pages)?;
         let mut high = self.meta.high;
-        let needed = leaf_size(&contents)?;
-        let count = needed.div_ceil(self.meta.page_size);
-        let bucket_id = allocate(&mut free, &mut high, count)?;
+        let (bucket_id, bucket_pages) =
+            build_tree(&contents, self.meta.page_size, &mut free, &mut high)?;
         let mut bucket_header = vec![0; 16];
         put64(&mut bucket_header, 0, bucket_id);
         if let Some((_, previous)) = root.get(BUCKET_NAME)
@@ -535,8 +534,7 @@ impl Store {
             bucket_header[8..16].copy_from_slice(&previous[8..16]);
         }
         root.insert(BUCKET_NAME.to_vec(), (BUCKET, bucket_header));
-        let root_count = leaf_size(&root)?.div_ceil(self.meta.page_size);
-        let root_id = allocate(&mut free, &mut high, root_count)?;
+        let (root_id, root_pages) = build_tree(&root, self.meta.page_size, &mut free, &mut high)?;
         // Include old pages and one overflow count when sizing the next freelist.
         let possible_free = free
             .len()
@@ -567,16 +565,16 @@ impl Store {
         for (index, id) in free.into_iter().enumerate() {
             put64(&mut freelist, start + index * 8, id);
         }
-        self.file.write_all_at(
-            &encode_leaf(bucket_id, count, self.meta.page_size, &contents)?,
-            bucket_id * self.meta.page_size as u64,
-        )?;
-        checkpoint(CommitPoint::BucketWritten)?;
-        self.file.write_all_at(
-            &encode_leaf(root_id, root_count, self.meta.page_size, &root)?,
-            root_id * self.meta.page_size as u64,
-        )?;
-        checkpoint(CommitPoint::RootWritten)?;
+        for (id, data) in bucket_pages {
+            self.file
+                .write_all_at(&data, id * self.meta.page_size as u64)?;
+            checkpoint(CommitPoint::BucketWritten)?;
+        }
+        for (id, data) in root_pages {
+            self.file
+                .write_all_at(&data, id * self.meta.page_size as u64)?;
+            checkpoint(CommitPoint::RootWritten)?;
+        }
         self.file
             .write_all_at(&freelist, free_id * self.meta.page_size as u64)?;
         checkpoint(CommitPoint::FreelistWritten)?;
@@ -649,19 +647,90 @@ fn leaf_entries(data: &[u8]) -> io::Result<Entries> {
     Ok(entries)
 }
 
-fn leaf_size(entries: &Entries) -> io::Result<usize> {
-    if entries.len() > usize::from(u16::MAX) {
-        return Err(invalid());
+type LeafEntry<'a> = (&'a [u8], u32, &'a [u8]);
+type PageWrite = (u64, Vec<u8>);
+
+// bbolt v1.5.0 node.go:286-344: split sorted nodes and spill leaves before their branch parents.
+fn build_tree(
+    entries: &Entries,
+    size: usize,
+    free: &mut BTreeSet<u64>,
+    high: &mut u64,
+) -> io::Result<(u64, Vec<PageWrite>)> {
+    const TARGET: usize = 1 << 20;
+    let mut pages = Vec::new();
+    let mut level: Vec<(Vec<u8>, u64)> = Vec::new();
+    let mut items = entries.iter().peekable();
+    while items.peek().is_some() || level.is_empty() {
+        let mut leaf: Vec<LeafEntry<'_>> = Vec::new();
+        let mut bytes = HEADER;
+        while let Some((key, (flags, value))) = items.peek().copied() {
+            // bbolt v1.5.0 bucket.go:13-14: keys are limited to 32 KiB.
+            if key.is_empty() || key.len() > 32768 {
+                return Err(invalid());
+            }
+            let extra = 16usize
+                .checked_add(key.len())
+                .and_then(|n| n.checked_add(value.len()))
+                .ok_or_else(invalid)?;
+            let next = bytes.checked_add(extra).ok_or_else(invalid)?;
+            if !leaf.is_empty() && (leaf.len() == usize::from(u16::MAX) || next > TARGET.max(size))
+            {
+                break;
+            }
+            leaf.push((key, *flags, value));
+            bytes = next;
+            items.next();
+        }
+        let count = bytes.div_ceil(size);
+        let id = allocate(free, high, count)?;
+        let first = leaf.first().map_or_else(Vec::new, |entry| entry.0.to_vec());
+        pages.push((id, encode_leaf(id, count, size, &leaf)?));
+        level.push((first, id));
     }
-    entries
-        .iter()
-        .try_fold(HEADER + entries.len() * 16, |size, (key, (_, value))| {
-            size.checked_add(key.len())?.checked_add(value.len())
-        })
-        .ok_or_else(invalid)
+    while level.len() > 1 {
+        let mut next = Vec::new();
+        let mut offset = 0;
+        while offset < level.len() {
+            let mut end = offset;
+            let mut bytes = HEADER;
+            while end < level.len() {
+                let extra = 16usize
+                    .checked_add(level[end].0.len())
+                    .ok_or_else(invalid)?;
+                let needed = bytes.checked_add(extra).ok_or_else(invalid)?;
+                if end > offset
+                    && (end - offset == usize::from(u16::MAX) || needed > TARGET.max(size))
+                {
+                    break;
+                }
+                bytes = needed;
+                end += 1;
+            }
+            if level.len() - end == 1 && end - offset > 2 {
+                end -= 1;
+                bytes -= 16 + level[end].0.len();
+            }
+            if end - offset == 1 && level.len() > 1 {
+                return Err(invalid());
+            }
+            let count = bytes.div_ceil(size);
+            let id = allocate(free, high, count)?;
+            pages.push((id, encode_branch(id, count, size, &level[offset..end])?));
+            next.push((level[offset].0.clone(), id));
+            offset = end;
+        }
+        level = next;
+    }
+    Ok((level[0].1, pages))
 }
 
-fn encode_leaf(id: u64, count: usize, size: usize, entries: &Entries) -> io::Result<Vec<u8>> {
+fn encode_leaf(
+    id: u64,
+    count: usize,
+    size: usize,
+    entries: &[LeafEntry<'_>],
+) -> io::Result<Vec<u8>> {
     let mut data = vec![0; count.checked_mul(size).ok_or_else(invalid)?];
     put64(&mut data, 0, id);
     put16(&mut data, 8, LEAF);
@@ -676,7 +745,7 @@ fn encode_leaf(id: u64, count: usize, size: usize, entries: &Entries) -> io::Res
         (count - 1).try_into().map_err(|_| invalid())?,
     );
     let mut offset = HEADER + entries.len() * 16;
-    for (index, (key, (flags, value))) in entries.iter().enumerate() {
+    for (index, (key, flags, value)) in entries.iter().enumerate() {
         let element = HEADER + index * 16;
         put32(&mut data, element, *flags);
         put32(
@@ -698,6 +767,46 @@ fn encode_leaf(id: u64, count: usize, size: usize, entries: &Entries) -> io::Res
         offset += key.len();
         data[offset..offset + value.len()].copy_from_slice(value);
         offset += value.len();
+    }
+    Ok(data)
+}
+
+// bbolt v1.5.0 internal/common/page.go:165-190: branch entries store relative key offsets and child page IDs.
+fn encode_branch(
+    id: u64,
+    count: usize,
+    size: usize,
+    entries: &[(Vec<u8>, u64)],
+) -> io::Result<Vec<u8>> {
+    let mut data = vec![0; count.checked_mul(size).ok_or_else(invalid)?];
+    put64(&mut data, 0, id);
+    put16(&mut data, 8, BRANCH);
+    put16(
+        &mut data,
+        10,
+        entries.len().try_into().map_err(|_| invalid())?,
+    );
+    put32(
+        &mut data,
+        12,
+        (count - 1).try_into().map_err(|_| invalid())?,
+    );
+    let mut offset = HEADER + entries.len() * 16;
+    for (index, (key, child)) in entries.iter().enumerate() {
+        let element = HEADER + index * 16;
+        put32(
+            &mut data,
+            element,
+            (offset - element).try_into().map_err(|_| invalid())?,
+        );
+        put32(
+            &mut data,
+            element + 4,
+            key.len().try_into().map_err(|_| invalid())?,
+        );
+        put64(&mut data, element + 8, *child);
+        data[offset..offset + key.len()].copy_from_slice(key);
+        offset += key.len();
     }
     Ok(data)
 }
@@ -1407,5 +1516,53 @@ mod tests {
         }
         drop(child);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn updates_go_bucket_with_more_than_u16_keys() {
+        let path = path();
+        let Some(output) = go("write-many-keys", &path) else {
+            return;
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::open(file).unwrap();
+        assert_eq!(store.read().unwrap().1, b"record data");
+        store.commit(b"example.org.", b"record data").unwrap();
+        drop(store);
+        let output = go("verify-many-keys", &path).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn branch_split_never_leaves_one_child() {
+        let mut entries = super::Entries::new();
+        for index in 0..32u32 {
+            let mut key = vec![0; 32768];
+            key[..4].copy_from_slice(&index.to_be_bytes());
+            entries.insert(key, (0, vec![0; 1 << 20]));
+        }
+        assert!(
+            super::build_tree(
+                &entries,
+                4096,
+                &mut std::collections::BTreeSet::new(),
+                &mut 4
+            )
+            .is_ok()
+        );
     }
 }

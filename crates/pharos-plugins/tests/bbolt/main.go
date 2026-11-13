@@ -56,6 +56,13 @@ func main() {
 					}
 				}
 			}
+			if os.Args[1] == "write-many-keys" {
+				for i := 0; i < 65536; i++ {
+					if err = b.Put([]byte(fmt.Sprintf("key-%05d", i)), []byte("v")); err != nil {
+						return err
+					}
+				}
+			}
 			return b.Put([]byte("records"), []byte("record data"))
 		})
 	} else {
@@ -74,6 +81,18 @@ func main() {
 					other := tx.Bucket([]byte(name))
 					if string(b.Get([]byte(name))) != "kept" || other == nil || string(other.Get([]byte("key"))) != "value" {
 						return fmt.Errorf("missing %s", name)
+					}
+				}
+				for err := range tx.Check() {
+					if err != nil {
+						return err
+					}
+				}
+			}
+			if os.Args[1] == "verify-many-keys" {
+				for i := 0; i < 65536; i++ {
+					if string(b.Get([]byte(fmt.Sprintf("key-%05d", i)))) != "v" {
+						return fmt.Errorf("missing key %d", i)
 					}
 				}
 				for err := range tx.Check() {
