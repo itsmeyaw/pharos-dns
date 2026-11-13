@@ -517,4 +517,45 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn coredns_delete_rrset_and_specific_record() {
+        let original = zone();
+        let mut txt = rr("www.example.org.", Type::TXT, Class::IN, &[1, b'x']);
+        txt.ttl = 60;
+        let (zone, _) = original.apply_updates(&[txt]).unwrap();
+        let exact = rr("www.example.org.", Type::A, Class::NONE, &[192, 0, 2, 1]);
+        let (zone, changed) = zone.apply_updates(&[exact]).unwrap();
+        assert!(changed);
+        assert_eq!(
+            zone.records()
+                .iter()
+                .filter(|rr| rr.owner.to_string() == "www.example.org." && rr.rtype == Type::A)
+                .count(),
+            1
+        );
+        let all_a = rr("www.example.org.", Type::A, Class::ANY, &[]);
+        let (zone, changed) = zone.apply_updates(&[all_a]).unwrap();
+        assert!(changed);
+        assert!(
+            !zone
+                .records()
+                .iter()
+                .any(|rr| rr.owner.to_string() == "www.example.org." && rr.rtype == Type::A)
+        );
+        assert!(
+            zone.records()
+                .iter()
+                .any(|rr| rr.owner.to_string() == "www.example.org." && rr.rtype == Type::TXT)
+        );
+        let all_txt = rr("www.example.org.", Type::TXT, Class::ANY, &[]);
+        let (zone, changed) = zone.apply_updates(&[all_txt]).unwrap();
+        assert!(changed);
+        assert!(
+            !zone
+                .records()
+                .iter()
+                .any(|rr| rr.owner.to_string() == "www.example.org.")
+        );
+    }
 }
