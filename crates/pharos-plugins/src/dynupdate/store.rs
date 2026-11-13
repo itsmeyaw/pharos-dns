@@ -345,6 +345,10 @@ mod tests {
             first.db.lock().unwrap().as_ref().unwrap().read().unwrap().0,
             b"example.org."
         );
+        let before = std::fs::read(dir.join("db")).unwrap();
+        std::fs::remove_file(dir.join("seed")).unwrap();
+        assert_eq!(validate(&config).unwrap().serial(), Some(1));
+        assert_eq!(std::fs::read(dir.join("db")).unwrap(), before);
         std::fs::hard_link(dir.join("db"), dir.join("alias")).unwrap();
         let alias_text = "dynupdate {\nfile seed\ndatabase alias\nallow key.example.org. * A\n}";
         let tokens = lex("Corefile", alias_text);
