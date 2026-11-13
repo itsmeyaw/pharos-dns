@@ -607,6 +607,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ready_queries_keep_the_same_pinned_coroutine() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let handler = Arc::new(Shedding(false));
+        let mut slot = Some(Slot::new(&handler, &socket, None));
+        let mut pending = JoinSet::new();
+        let address = slot.as_ref().unwrap().future.as_ref().get_ref() as *const _ as *const ();
+        let peer = "127.0.0.1:53".parse().unwrap();
+        // Rust Pin: repeated ready Queries must keep the same coroutine allocation.
+        for _ in 0..32 {
+            slot.as_mut().unwrap().prepare(b"query", peer, peer, None);
+            dispatch(&mut slot, &mut pending).await;
+            let current = slot.as_ref().unwrap().future.as_ref().get_ref() as *const _ as *const ();
+            assert_eq!(current, address);
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn shutdown_reaps_panics_and_cancels_pending_queries() {
         let mut pending = JoinSet::new();
         let panic = pending.spawn(async { panic!("test shutdown panic") });
