@@ -1,0 +1,8 @@
+example.org:{port2} {
+    file db.zone {
+        reload 1s
+    }
+    transfer {
+        to * 127.0.0.1:{port}
+    }
+}

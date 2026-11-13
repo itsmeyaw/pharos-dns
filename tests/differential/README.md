@@ -41,6 +41,13 @@ Each scenario is a directory containing:
   directories for both processes, preserving relative paths.
 - `wait-zone` (optional): a Query whose positive answer indicates that an
   asynchronously transferred secondary Zone is ready for comparisons.
+- `PrimaryCorefile` (optional): run each primary in a separate process, then
+  repeat with the Pharos and CoreDNS primaries exchanged. `{port2}` is the
+  primary Listener and `{port}` is its secondary Listener.
+- `next-zone` and `next-wait` (optional): replace each primary's `db.zone`
+  with the new Zone, wait for the given positive Query on both secondaries,
+  and repeat all comparisons. The fixture must use a longer SOA refresh than
+  the test timeout so the new answer demonstrates NOTIFY-driven transfer.
 
 IDs and RR order within each section are ignored; all other fields are compared.
 Unsigned TCP AXFR comparisons collect the complete stream through its closing
@@ -61,6 +68,10 @@ Responses because its SOA owner does not match the configured root Zone; the
 The `secondary` README scenarios replace the documented remote Primaries with
 local `file` and `transfer` fixtures. `wait-zone` waits for the asynchronous
 transfer, including the catalog member transfer, before comparing Responses.
+`transfer-notify-pair` compares both implementations and mixed primary/secondary
+pairs before and after a serial change. CoreDNS secondary AXFR requests and
+transfer NOTIFY messages are unsigned, so these pairs are unsigned for parity.
+`tsig-transfer-readme` separately covers signed and unsigned AXFR clients.
 
 The `sign-readme` scenario uses local test keys and a one-second file reload
 to wait for offline signing. The two README examples using `key directory` are

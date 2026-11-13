@@ -189,6 +189,12 @@ fn copy_fixtures(source: &Path, target: &Path) -> Result<(), String> {
     copy_fixture_dir(source, target, true)
 }
 
+fn replace_zone(source: &Path, name: &str, pharos: &Path, coredns: &Path) -> Result<(), String> {
+    let zone = fs::read(source).map_err(|e| e.to_string())?;
+    fs::write(pharos.join(name), &zone).map_err(|e| e.to_string())?;
+    fs::write(coredns.join(name), &zone).map_err(|e| e.to_string())
+}
+
 fn copy_fixture_dir(source: &Path, target: &Path, scenario_root: bool) -> Result<(), String> {
     fs::create_dir_all(target).map_err(|e| e.to_string())?;
     for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
@@ -564,6 +570,7 @@ fn scenario(
     coredns: &Path,
     docs: &str,
     self_test: bool,
+    mixed: bool,
 ) -> Result<usize, String> {
     let input = fs::read_to_string(path.join("queries")).map_err(|e| e.to_string())?;
     let expect = match fs::read_to_string(path.join("expect")) {
@@ -592,7 +599,13 @@ fn scenario(
     copy_fixtures(path, &pcwd)?;
     copy_fixtures(path, &ccwd)?;
     let (pp, cp) = (reserve_port()?, reserve_port()?);
-    let has_port2 = corefile.as_deref().is_some_and(|s| s.contains("{port2}"));
+    let primary_corefile = match fs::read_to_string(path.join("PrimaryCorefile")) {
+        Ok(input) => Some(input),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    let has_port2 =
+        corefile.as_deref().is_some_and(|s| s.contains("{port2}")) || primary_corefile.is_some();
     let has_metrics = corefile
         .as_deref()
         .is_some_and(|s| s.contains("{metrics_port}"));
@@ -613,7 +626,31 @@ fn scenario(
     let (pp2_num, cp2_num) = (optional_port(&pp2)?, optional_port(&cp2)?);
     let (pm_num, cm_num) = (optional_port(&pm)?, optional_port(&cm)?);
     // shortcut: another process can bind the port before startup; pass bound sockets to servers when supported.
+    let (pprimary, cprimary) = if primary_corefile.is_some() {
+        let (pdir, cdir) = (pcwd.join("primary"), ccwd.join("primary"));
+        copy_fixtures(path, &pdir)?;
+        copy_fixtures(path, &cdir)?;
+        (pdir, cdir)
+    } else {
+        (pcwd.clone(), ccwd.clone())
+    };
     drop((pp, pp2, pm));
+    let mut p_primary = if let Some(conf) = primary_corefile.as_deref() {
+        let binary = if mixed { coredns } else { pharos };
+        let mut server = start(
+            binary,
+            &pprimary,
+            pp_num,
+            pp2_num,
+            pm_num,
+            Some(conf),
+            !mixed,
+        )?;
+        ready(&mut server, &pprimary.with_extension("server.log"), pp2_num)?;
+        Some(server)
+    } else {
+        None
+    };
     let mut p = start(
         pharos,
         &pcwd,
@@ -627,10 +664,26 @@ fn scenario(
     if uses_kubernetes {
         wait_for_kubernetes(&mut p, &pcwd.with_extension("server.log"), pp_num, pm_num)?;
     }
-    if has_port2 {
+    if has_port2 && primary_corefile.is_none() {
         ready(&mut p, &pcwd.with_extension("server.log"), pp2_num)?;
     }
     drop((cp, cp2, cm));
+    let mut c_primary = if let Some(conf) = primary_corefile.as_deref() {
+        let binary = if mixed { pharos } else { coredns };
+        let mut server = start(
+            binary,
+            &cprimary,
+            cp_num,
+            cp2_num,
+            cm_num,
+            Some(conf),
+            mixed,
+        )?;
+        ready(&mut server, &cprimary.with_extension("server.log"), cp2_num)?;
+        Some(server)
+    } else {
+        None
+    };
     let mut c = start(
         coredns,
         &ccwd,
@@ -644,7 +697,7 @@ fn scenario(
     if uses_kubernetes {
         wait_for_kubernetes(&mut c, &ccwd.with_extension("server.log"), cp_num, cm_num)?;
     }
-    if has_port2 {
+    if has_port2 && primary_corefile.is_none() {
         ready(&mut c, &ccwd.with_extension("server.log"), cp2_num)?;
     }
     if let Ok(line) = fs::read_to_string(path.join("wait-zone")) {
@@ -652,64 +705,53 @@ fn scenario(
         wait_for_secondary(cp_num, line.trim())?;
     }
     let mut count = 0;
-    for line in input
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-    {
-        let query = query::parse(line).map_err(|e| format!("{line}: {e}"))?;
-        let wire = query.wire()?;
-        let mut pwire =
-            exchange(pp_num, query.transport, &wire).map_err(|e| format!("Pharos {line}: {e}"))?;
-        let cwire =
-            exchange(cp_num, query.transport, &wire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
-        if pwire.len() < 4 || cwire.len() < 4 {
-            return Err(format!("{line}: truncated Response header"));
+    let phases = if path.join("next-zone").is_file() {
+        2
+    } else {
+        1
+    };
+    for phase in 0..phases {
+        if phase == 1 {
+            replace_zone(&path.join("next-zone"), "db.zone", &pprimary, &cprimary)?;
+            let wait = fs::read_to_string(path.join("next-wait")).map_err(|e| e.to_string())?;
+            wait_for_secondary(pp_num, wait.trim())?;
+            wait_for_secondary(cp_num, wait.trim())?;
         }
-        apply_deviation(&expect, line, &mut pwire, &cwire)?;
-        let pm = Message::parse(&pwire).map_err(|e| format!("Pharos {line}: {e}"))?;
-        let cm = Message::parse(&cwire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
-        let p_signed = query
-            .check_response_tsig(&wire, &pwire)
-            .map_err(|e| format!("Pharos {line}: {e}"))?;
-        let c_signed = query
-            .check_response_tsig(&wire, &cwire)
-            .map_err(|e| format!("CoreDNS {line}: {e}"))?;
-        let pm = if p_signed {
-            pm.without_final_tsig().ok_or("missing Pharos TSIG")?
-        } else {
-            pm
-        };
-        let cm = if c_signed {
-            cm.without_final_tsig().ok_or("missing CoreDNS TSIG")?
-        } else {
-            cm
-        };
-        let result = compare::compare_with_soa_serial(
-            &pm,
-            &cm,
-            expect.ttl,
-            expect.mask_srv_port,
-            expect.mask_soa_serial,
-            expect.dedupe_additional,
-            expect.mask_rrsig,
-        );
-        if self_test {
-            let mut corrupted = pwire.clone();
-            corrupted[2] ^= 4;
-            let bad = Message::parse(&corrupted).map_err(|e| format!("Pharos {line}: {e}"))?;
-            let bad = if p_signed {
-                bad.without_final_tsig().ok_or("missing Pharos TSIG")?
+        for line in input
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let query = query::parse(line).map_err(|e| format!("{line}: {e}"))?;
+            let wire = query.wire()?;
+            let mut pwire = exchange(pp_num, query.transport, &wire)
+                .map_err(|e| format!("Pharos {line}: {e}"))?;
+            let cwire = exchange(cp_num, query.transport, &wire)
+                .map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            if pwire.len() < 4 || cwire.len() < 4 {
+                return Err(format!("{line}: truncated Response header"));
+            }
+            apply_deviation(&expect, line, &mut pwire, &cwire)?;
+            let pm = Message::parse(&pwire).map_err(|e| format!("Pharos {line}: {e}"))?;
+            let cm = Message::parse(&cwire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            let p_signed = query
+                .check_response_tsig(&wire, &pwire)
+                .map_err(|e| format!("Pharos {line}: {e}"))?;
+            let c_signed = query
+                .check_response_tsig(&wire, &cwire)
+                .map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            let pm = if p_signed {
+                pm.without_final_tsig().ok_or("missing Pharos TSIG")?
             } else {
-                bad
+                pm
             };
-            let expected = format!(
-                ";; HEADER flags:\n- 0x{:04x}\n+ 0x{:04x}",
-                bad.flags(),
-                cm.flags()
-            );
-            let injected = compare::compare_with_soa_serial(
-                &bad,
+            let cm = if c_signed {
+                cm.without_final_tsig().ok_or("missing CoreDNS TSIG")?
+            } else {
+                cm
+            };
+            let result = compare::compare_with_soa_serial(
+                &pm,
                 &cm,
                 expect.ttl,
                 expect.mask_srv_port,
@@ -717,16 +759,42 @@ fn scenario(
                 expect.dedupe_additional,
                 expect.mask_rrsig,
             );
-            verify_self_test(result, injected, &expected).map_err(|e| format!("{line}: {e}"))?;
-            println!("self-test detected injected header mismatch: {line}");
-            return Ok(count + 1);
+            if self_test {
+                let mut corrupted = pwire.clone();
+                corrupted[2] ^= 4;
+                let bad = Message::parse(&corrupted).map_err(|e| format!("Pharos {line}: {e}"))?;
+                let bad = if p_signed {
+                    bad.without_final_tsig().ok_or("missing Pharos TSIG")?
+                } else {
+                    bad
+                };
+                let expected = format!(
+                    ";; HEADER flags:\n- 0x{:04x}\n+ 0x{:04x}",
+                    bad.flags(),
+                    cm.flags()
+                );
+                let injected = compare::compare_with_soa_serial(
+                    &bad,
+                    &cm,
+                    expect.ttl,
+                    expect.mask_srv_port,
+                    expect.mask_soa_serial,
+                    expect.dedupe_additional,
+                    expect.mask_rrsig,
+                );
+                verify_self_test(result, injected, &expected)
+                    .map_err(|e| format!("{line}: {e}"))?;
+                println!("self-test detected injected header mismatch: {line}");
+                return Ok(count + 1);
+            }
+            result.map_err(|e| format!("{line}:\n{e}"))?;
+            count += 1;
         }
-        result.map_err(|e| format!("{line}:\n{e}"))?;
-        count += 1;
     }
     if count == 0 {
         return Err("scenario has no Queries".into());
     }
+    drop((p_primary.take(), c_primary.take()));
     Ok(count)
 }
 
@@ -770,13 +838,20 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
     for path in paths {
         let name = path.file_name().unwrap().to_string_lossy();
         // Ports are released before servers start, so another process can take one; retry once with fresh ports.
-        let result = match scenario(&path, &pharos, coredns, &docs, self_test) {
+        let run_scenario = || -> Result<usize, String> {
+            let mut count = scenario(&path, &pharos, coredns, &docs, self_test, false)?;
+            if !self_test && path.join("PrimaryCorefile").is_file() {
+                count += scenario(&path, &pharos, coredns, &docs, false, true)?;
+            }
+            Ok(count)
+        };
+        let result = match run_scenario() {
             Err(error)
                 if error
                     .to_ascii_lowercase()
                     .contains("address already in use") =>
             {
-                scenario(&path, &pharos, coredns, &docs, self_test)
+                run_scenario()
             }
             result => result,
         };
@@ -804,6 +879,26 @@ mod tests {
         TempDir, apply_deviation, copy_fixtures, kubernetes_corefile, kubernetes_ready,
         parse_expect, reserve_port, start,
     };
+
+    #[test]
+    fn replacement_zone_is_copied_to_both_primaries() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.0.join("next-zone");
+        let pharos = temp.0.join("pharos");
+        let coredns = temp.0.join("coredns");
+        std::fs::write(&source, "serial 2").unwrap();
+        std::fs::create_dir(&pharos).unwrap();
+        std::fs::create_dir(&coredns).unwrap();
+        super::replace_zone(&source, "db.zone", &pharos, &coredns).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pharos.join("db.zone")).unwrap(),
+            "serial 2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(coredns.join("db.zone")).unwrap(),
+            "serial 2"
+        );
+    }
 
     #[test]
     fn axfr_comparison_collects_all_messages() {
