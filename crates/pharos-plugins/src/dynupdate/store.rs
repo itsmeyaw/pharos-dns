@@ -430,4 +430,90 @@ mod tests {
         drop(shared);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn failed_durable_commit_does_not_publish_candidate() {
+        use pharos_proto::{Class, Name, Type, zone::ZoneRecord};
+        let dir = std::env::temp_dir().join(format!(
+            "pharos-dynamic-failed-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let original = acquire(&config).unwrap();
+        let snapshot = original.current.load_full();
+        drop(original);
+        let db = super::bbolt::Store::open(std::fs::File::open(dir.join("db")).unwrap()).unwrap();
+        let shared = super::Shared {
+            current: arc_swap::ArcSwap::from(Arc::clone(&snapshot)),
+            db: std::sync::Mutex::new(Some(db)),
+        };
+        let key: Name = "key.example.org.".parse().unwrap();
+        let update = ZoneRecord {
+            owner: "new.example.org.".parse().unwrap(),
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 1],
+        };
+        assert!(shared.transact(&config, &key, &[], &[update]).is_err());
+        assert!(Arc::ptr_eq(&snapshot, &shared.current.load_full()));
+        assert_eq!(shared.current.load().serial(), Some(1));
+        drop(shared);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_and_truncated_database_never_falls_back_to_seed() {
+        let dir = std::env::temp_dir().join(format!(
+            "pharos-dynamic-corrupt-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = acquire(&config).unwrap();
+        drop(shared);
+        let path = dir.join("db");
+        let valid = std::fs::read(&path).unwrap();
+        let mut bad_checksum = valid.clone();
+        bad_checksum[72] ^= 1;
+        bad_checksum[4096 + 72] ^= 1;
+        for damaged in [bad_checksum, valid[..79].to_vec(), Vec::new()] {
+            std::fs::write(&path, &damaged).unwrap();
+            assert!(validate(&config).is_err());
+            assert!(acquire(&config).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), damaged);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
