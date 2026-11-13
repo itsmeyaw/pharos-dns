@@ -8,6 +8,7 @@ worker at that limit, excluding Query copies and Plugin state. When full, the
 worker stops receiving until one completes; the kernel may drop excess datagrams.
 Ready Queries remain inline. In-flight Queries are cancelled on Listener shutdown.
 Linux workers may already have received a batch of up to 16 datagrams.
+Forwarding-loop probes retain their separate concurrent path.
 
 ## acl
 
