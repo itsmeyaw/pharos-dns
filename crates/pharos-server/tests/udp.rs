@@ -11,6 +11,60 @@ struct Echo;
 
 struct AsyncEcho;
 
+struct DropThenEcho(Option<pharos_server::metrics::ShedMetrics>);
+impl Handler for DropThenEcho {
+    fn udp_workers(&self) -> usize {
+        1
+    }
+    fn shed_metrics(&self) -> Option<pharos_server::metrics::ShedMetrics> {
+        self.0.clone()
+    }
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        // RFC 1035 §4.2.1: independent UDP Messages retain their own Responses.
+        if query == b"drop" {
+            return Action::Drop;
+        }
+        if query == b"pending" {
+            tokio::task::yield_now().await;
+        }
+        response.extend_from_slice(query);
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn dropped_query_does_not_leak_into_reused_slot() {
+    for shed in [false, true] {
+        let metrics = shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53"));
+        let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), DropThenEcho(metrics))
+            .await
+            .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(listener.local_addr()).await.unwrap();
+        for query in [b"drop".as_slice(), b"ready", b"pending"] {
+            socket.send(query).await.unwrap();
+        }
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let mut response = [0; 16];
+            let length = tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            seen.push(response[..length].to_vec());
+        }
+        seen.sort();
+        assert_eq!(seen, [b"pending".to_vec(), b"ready".to_vec()]);
+        listener.shutdown().await.unwrap();
+    }
+}
+
 struct RecycledEcho(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
 impl Handler for RecycledEcho {
     fn udp_workers(&self) -> usize {
