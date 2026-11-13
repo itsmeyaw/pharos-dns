@@ -80,7 +80,7 @@ pub(super) fn build_zone(
     if soa_count != 1 {
         return Err("Zone must have exactly one SOA".into());
     }
-    Zone::from_records(origin, records)
+    Zone::from_dynamic_records(origin, records)
 }
 
 // RFC 2136 §3.4.1: prescan the complete Update section before changing the Zone.

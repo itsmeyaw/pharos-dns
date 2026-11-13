@@ -194,6 +194,9 @@ impl Zone {
             // RFC 2136 §7.11: skip zero when incrementing the SOA serial.
             soa.rdata[offset..offset + 4].copy_from_slice(&serial.to_be_bytes());
         }
-        Ok((Self::from_records(self.apex.clone(), records)?, changed))
+        Ok((
+            Self::from_dynamic_records(self.apex.clone(), records)?,
+            changed,
+        ))
     }
 }

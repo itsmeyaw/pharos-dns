@@ -1,0 +1,5 @@
+example.org. SOA IN udp +opcode=UPDATE +add=empty.example.org.:CNAME:60: +tsig=key.example.org.:c2VjcmV0
+empty.example.org. A IN udp
+example.org. SOA IN udp +opcode=UPDATE +add=empty-dname.example.org.:DNAME:60: +tsig=key.example.org.:c2VjcmV0
+child.empty-dname.example.org. A IN udp
+example.org. SOA IN udp

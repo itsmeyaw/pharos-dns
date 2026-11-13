@@ -86,6 +86,32 @@ fn update_matches_legacy_name_bearing_record_data() {
 }
 
 #[test]
+fn update_accepts_empty_name_rdata_without_changing_file_validation() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let original = Zone::load(apex.clone(), Path::new("tests/fixtures/file/example.zone")).unwrap();
+    let record = pharos_proto::zone::ZoneRecord {
+        owner: "empty.example.org.".parse().unwrap(),
+        rtype: Type::CNAME,
+        class: Class::IN,
+        ttl: 60,
+        rdata: Vec::new(),
+    };
+    let (candidate, changed) = original
+        .apply_updates(std::slice::from_ref(&record))
+        .unwrap();
+    assert!(changed);
+    assert!(
+        candidate
+            .records()
+            .iter()
+            .any(|rr| rr.owner == record.owner && rr.rdata.is_empty())
+    );
+    let mut records = original.records().to_vec();
+    records.push(record);
+    assert!(Zone::from_records(apex, records).is_err());
+}
+
+#[test]
 fn update_protects_apex_and_applies_ordered_cname_changes() {
     let apex: Name = "example.org.".parse().unwrap();
     let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 4294967295 2 3 4 5\n@ 60 IN NS ns.example.org.\nwww 60 IN A 192.0.2.1\n";

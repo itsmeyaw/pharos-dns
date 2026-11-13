@@ -1080,4 +1080,54 @@ mod tests {
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn empty_cname_survives_database_restart() {
+        use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-empty-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * CNAME\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = acquire(&config).unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let record = ZoneRecord {
+            owner: "empty.example.org.".parse().unwrap(),
+            rtype: Type::CNAME,
+            class: Class::IN,
+            ttl: 60,
+            rdata: Vec::new(),
+        };
+        assert_eq!(
+            shared.transact(&config, &key, &[], &[record]).unwrap().0,
+            Rcode::NOERROR
+        );
+        drop(shared);
+        std::fs::remove_file(dir.join("seed")).unwrap();
+        let zone = validate(&config).unwrap();
+        assert!(
+            zone.records()
+                .iter()
+                .any(|rr| rr.rtype == Type::CNAME && rr.rdata.is_empty())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
