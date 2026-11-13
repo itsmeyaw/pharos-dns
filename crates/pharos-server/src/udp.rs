@@ -57,7 +57,7 @@ impl Slot {
             peer: None,
             done: false,
         }));
-        // Rust Mutex: initialize any platform lock storage before the ready Query path.
+        // Rust Mutex: initialize macOS pthread storage before the ready Query path.
         drop(data.lock().unwrap());
         let future = Box::pin(serve_slot(
             Arc::clone(&data),
@@ -681,7 +681,10 @@ mod tests {
         assert!(dropped.load(Ordering::SeqCst));
     }
 
-    struct Panicking(bool);
+    struct Panicking {
+        pending: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
     struct ProbePanic {
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
@@ -697,10 +700,13 @@ mod tests {
     impl Handler for Panicking {
         async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
             // Rust Future::poll: a panic can occur before or after a Pending result.
-            if self.0 {
-                tokio::task::yield_now().await;
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                if self.pending {
+                    tokio::task::yield_now().await;
+                }
+                panic!("test panic");
             }
-            panic!("test panic");
+            Action::Drop
         }
     }
 
@@ -713,7 +719,11 @@ mod tests {
             ));
             let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
             let response = stack.checkout().unwrap();
-            let handler = Arc::new(Panicking(pending_panic));
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let handler = Arc::new(Panicking {
+                pending: pending_panic,
+                calls: calls.clone(),
+            });
             let mut slot = Some(Slot::new(&handler, &socket, Some(&stack)));
             let mut pending = JoinSet::new();
             let mut free = Vec::new();
@@ -734,6 +744,21 @@ mod tests {
             if pending_panic {
                 recycle(pending.join_next().await, &mut free);
             }
+            let response = stack.checkout().unwrap();
+            slot.as_mut()
+                .unwrap()
+                .prepare(&[1], peer, peer, Some(response));
+            dispatch(
+                &mut slot,
+                &mut pending,
+                &mut free,
+                &handler,
+                &socket,
+                Some(&stack),
+            )
+            .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert!(pending.is_empty());
             let held = (0..3)
                 .map(|_| stack.checkout().expect("buffer returned after panic"))
                 .collect::<Vec<_>>();

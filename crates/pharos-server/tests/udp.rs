@@ -108,6 +108,7 @@ async fn completed_pending_queries_reuse_response_buffers() {
     {
         let addresses = addresses.lock().unwrap();
         assert_eq!(addresses.len(), 20);
+        // Rust Pin: the active slot and its prefilled replacement are both reused.
         assert!(
             addresses
                 .iter()

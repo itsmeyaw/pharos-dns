@@ -18,6 +18,7 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 struct Mixed {
     started: Arc<AtomicBool>,
+    seen: Arc<AtomicBool>,
     counts: Arc<Mutex<(Option<Stats>, Option<Stats>)>>,
     shed: Option<pharos_server::metrics::ShedMetrics>,
 }
@@ -34,6 +35,7 @@ impl Handler for Mixed {
         query: &[u8],
         _: SocketAddr,
     ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        // Rust GlobalAlloc: bracket dispatch from Query classification to Handler entry.
         if query == b"ready" {
             self.counts.lock().unwrap().0 = Some(GLOBAL.stats());
         }
@@ -54,6 +56,9 @@ impl Handler for Mixed {
             std::future::pending().await
         } else {
             self.counts.lock().unwrap().1 = Some(GLOBAL.stats());
+            if query == b"ready" {
+                self.seen.store(true, Ordering::Release);
+            }
             response.extend_from_slice(query);
             Action::Respond
         }
@@ -64,11 +69,13 @@ impl Handler for Mixed {
 async fn ready_query_after_pending_query_does_not_allocate() {
     for shed in [false, true] {
         let started = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(AtomicBool::new(false));
         let counts = Arc::new(Mutex::new((None, None)));
         let listener = Listener::bind(
             "127.0.0.1:0".parse().unwrap(),
             Mixed {
                 started: started.clone(),
+                seen: seen.clone(),
                 counts: counts.clone(),
                 shed: shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53")),
             },
@@ -89,10 +96,23 @@ async fn ready_query_after_pending_query_does_not_allocate() {
                 assert_eq!(&response[..length], b"warm");
             }
             socket.send_to(b"slow", address).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while !started.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "slow Query did not start"
+                );
                 std::thread::yield_now();
             }
             socket.send_to(b"ready", address).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !seen.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "ready Query did not start"
+                );
+                std::thread::yield_now();
+            }
             let (length, _) = socket.recv_from(&mut response).unwrap();
             assert_eq!(&response[..length], b"ready");
             done.send(()).unwrap();
