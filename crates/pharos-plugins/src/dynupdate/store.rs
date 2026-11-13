@@ -217,6 +217,7 @@ pub(super) fn acquire(config: &Config) -> io::Result<Arc<Shared>> {
         .as_ref()
         .ok_or_else(|| invalid("database required"))?;
     let mut stores = registry().lock().map_err(invalid)?;
+    stores.retain(|_, store| store.strong_count() != 0);
     let existed = match std::fs::metadata(path) {
         Ok(_) => true,
         Err(error) if error.kind() == ErrorKind::NotFound => false,
@@ -781,6 +782,44 @@ mod tests {
             Rcode::NXRRSET
         );
         assert_eq!(shared.current.load().serial(), Some(10));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn closed_store_entries_are_reclaimed_on_next_open() {
+        let dir = std::env::temp_dir().join(format!(
+            "pharos-dynamic-registry-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        let first_text = "dynupdate {\nfile seed\ndatabase first\nallow key.example.org. * A\n}";
+        let tokens = lex("Corefile", first_text);
+        let first_config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let first = acquire(&first_config).unwrap();
+        let identity = super::identity(&std::fs::metadata(dir.join("first")).unwrap());
+        drop(first);
+        let second_text = "dynupdate {\nfile seed\ndatabase second\nallow key.example.org. * A\n}";
+        let tokens = lex("Corefile", second_text);
+        let second_config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let second = acquire(&second_config).unwrap();
+        assert!(!super::registry().lock().unwrap().contains_key(&identity));
+        drop(second);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
