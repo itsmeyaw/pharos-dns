@@ -48,6 +48,10 @@
 
 - [dnssec Plugin notes](../crates/pharos-plugins/src/dnssec/README.md)
 
+## dynupdate
+
+- [dynupdate Plugin notes](../crates/pharos-plugins/src/dynupdate/README.md)
+
 ## errors
 
 - [errors Plugin notes](../crates/pharos-plugins/src/errors/README.md)
