@@ -14,9 +14,9 @@ use tokio::{net::UdpSocket, sync::watch};
 
 use crate::{Action, Handler, Protocol};
 
-// Implementation limit: bound pending work and retained buffer pairs per worker.
+// Implementation limit: bound pending work and retained coroutine slots per worker.
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
-// Implementation limit: retain 16 pairs (about 1 MiB of Responses); larger bursts allocate again.
+// Implementation limit: retain 16 slots; larger bursts allocate again.
 const MAX_REUSABLE_BUFFERS: usize = 16;
 struct ResponseBuffer<'a> {
     data: Option<Vec<u8>>,
