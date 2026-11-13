@@ -375,4 +375,23 @@ mod tests {
         );
         assert!(config("dynupdate example.org. {\nfile seed.zone\nallow key.example.org. host.example.org. ANY\n}", &["example.org", "other.example"]).is_ok());
     }
+
+    #[test]
+    fn coredns_invalid_limit_and_duplicate_options() {
+        for property in ["max_records", "max_bytes", "max_update_records"] {
+            for value in ["0", "-1", "invalid", "999999999999999999999999", "1 2", ""] {
+                let text = format!(
+                    "dynupdate example.org. {{\nfile seed\nallow key.example.org. * A\n{property} {value}\n}}"
+                );
+                assert!(
+                    config(&text, &["example.org"]).is_err(),
+                    "{property} {value}"
+                );
+            }
+            let text = format!(
+                "dynupdate example.org. {{\nfile seed\nallow key.example.org. * A\n{property} 1\n{property} 2\n}}"
+            );
+            assert!(config(&text, &["example.org"]).is_err());
+        }
+    }
 }

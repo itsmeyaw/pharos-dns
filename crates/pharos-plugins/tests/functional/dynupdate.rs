@@ -175,6 +175,33 @@ async fn coredns_update_authentication_and_other_zone_cases() {
     }
 }
 
+#[test]
+fn coredns_rejects_invalid_seed_zones() {
+    let dir = std::env::temp_dir().join(format!(
+        "pharos-dynupdate-invalid-seed-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("seed");
+    for zone in [
+        "@ 60 IN NS ns.example.org.\n",
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN SOA ns.example.org. hostmaster.example.org. 11 60 60 60 60\n",
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 0 60 60 60 60\n",
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\nalias 60 IN CNAME target.example.org.\nalias 60 IN A 192.0.2.20\n",
+    ] {
+        std::fs::write(&path, zone).unwrap();
+        let text = format!(
+            "example.org:53 {{\n dynupdate {{\n file {}\n allow key.example.org. * A\n }}\n}}",
+            path.display()
+        );
+        assert!(
+            configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).is_err(),
+            "{zone}"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[tokio::test]
 async fn authenticated_update_is_visible_to_subsequent_query() {
     let seed = concat!(
