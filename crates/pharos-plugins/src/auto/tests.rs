@@ -86,7 +86,7 @@ fn coredns_walk_missing_directory_leaves_no_zones() {
 }
 
 #[tokio::test]
-async fn coredns_symlink_repoint_is_served_after_scan() {
+async fn coredns_symlink_repoint_is_served_after_reload_tick() {
     use pharos_proto::{Class, Message, MessageBuilder, NameRef, Type};
     use pharos_server::{Metadata, Protocol, Transport};
     use std::os::unix::fs::symlink;
@@ -153,8 +153,44 @@ async fn coredns_symlink_repoint_is_served_after_scan() {
         [192, 0, 2, 1]
     );
     std::fs::remove_file(&link).unwrap();
-    symlink(&new, &link).unwrap();
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let new_link = data.join("db.example.org");
+    symlink(&new, &new_link).unwrap();
     auto.shared.scan();
+    let entry = Arc::clone(
+        auto.shared
+            .zones
+            .load()
+            .origins
+            .get("example.org.")
+            .unwrap(),
+    );
+    assert_eq!(
+        *entry.path.lock().unwrap(),
+        std::fs::canonicalize(&data).unwrap().join("db.example.org")
+    );
+    assert_eq!(
+        auto.serve_with(&mut cx, TestNext, false).await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(cx.response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 1]
+    );
+    auto.shared.start_watchers(Duration::from_millis(20));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while entry.current.load().as_ref().and_then(|zone| zone.serial()) != Some(2) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
         auto.serve_with(&mut cx, TestNext, false).await,
         Outcome::Response
@@ -168,27 +204,19 @@ async fn coredns_symlink_repoint_is_served_after_scan() {
             .rdata,
         [192, 0, 2, 2]
     );
+    auto.shared.shutdown.send_replace(true);
+    let task = entry.task.lock().unwrap().take().unwrap();
+    task.await.unwrap();
     let unchanged = root.join("unchanged");
     std::fs::write(
         &unchanged,
         "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\nwww 60 IN A 192.0.2.99\n",
     )
     .unwrap();
-    std::fs::remove_file(&link).unwrap();
-    symlink(&unchanged, &link).unwrap();
+    std::fs::remove_file(&new_link).unwrap();
+    symlink(&unchanged, &new_link).unwrap();
     auto.shared.scan();
-    let entry = Arc::clone(
-        auto.shared
-            .zones
-            .load()
-            .origins
-            .get("example.org.")
-            .unwrap(),
-    );
-    assert_eq!(
-        *entry.resolved_path.lock().unwrap(),
-        std::fs::canonicalize(&unchanged).unwrap()
-    );
+    assert!(!entry.reload());
     assert_eq!(
         auto.serve_with(&mut cx, TestNext, false).await,
         Outcome::Response
@@ -204,9 +232,10 @@ async fn coredns_symlink_repoint_is_served_after_scan() {
     );
     let broken = root.join("broken");
     std::fs::write(&broken, "invalid zone").unwrap();
-    std::fs::remove_file(&link).unwrap();
-    symlink(&broken, &link).unwrap();
+    std::fs::remove_file(&new_link).unwrap();
+    symlink(&broken, &new_link).unwrap();
     auto.shared.scan();
+    assert!(!entry.reload());
     assert_eq!(
         auto.serve_with(&mut cx, TestNext, false).await,
         Outcome::Response
@@ -226,6 +255,7 @@ async fn coredns_symlink_repoint_is_served_after_scan() {
     )
     .unwrap();
     auto.shared.scan();
+    assert!(entry.reload());
     assert_eq!(
         auto.serve_with(&mut cx, TestNext, false).await,
         Outcome::Response
@@ -495,7 +525,8 @@ fn coredns_walk_keeps_first_path_and_follows_root_symlink() {
         *entry.path.lock().unwrap(),
         std::fs::canonicalize(&second).unwrap()
     );
-    assert!(!entry.reload());
+    assert_eq!(entry.current.load().as_ref().unwrap().serial(), Some(1));
+    assert!(entry.reload());
     assert_eq!(entry.current.load().as_ref().unwrap().serial(), Some(2));
     std::fs::remove_dir_all(root).unwrap();
 }

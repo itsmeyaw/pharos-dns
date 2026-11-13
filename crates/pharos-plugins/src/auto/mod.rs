@@ -23,7 +23,6 @@ struct Entry {
     origin: String,
     apex: Name,
     path: Mutex<PathBuf>,
-    resolved_path: Mutex<PathBuf>,
     current: ZoneHolder,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }

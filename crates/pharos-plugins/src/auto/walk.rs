@@ -38,13 +38,8 @@ impl Shared {
             let Ok(apex) = origin.parse::<Name>() else {
                 return;
             };
-            let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
             if let Some(entry) = old.origins.get(&origin) {
                 *entry.path.lock().unwrap() = path.to_owned();
-                let mut previous = entry.resolved_path.lock().unwrap();
-                if *previous != resolved && entry.reload_checked().is_some() {
-                    *previous = resolved;
-                }
                 zones.insert(origin, Arc::clone(entry));
             } else {
                 let result = std::fs::File::open(path)
@@ -70,7 +65,6 @@ impl Shared {
                                 origin,
                                 apex,
                                 path: Mutex::new(path.to_owned()),
-                                resolved_path: Mutex::new(resolved),
                                 current: ZoneHolder::from(Some(Arc::new(zone))),
                                 task: Mutex::new(None),
                             }),
@@ -111,10 +105,6 @@ impl Shared {
 
 impl Entry {
     pub(super) fn reload(&self) -> bool {
-        self.reload_checked().unwrap_or(false)
-    }
-
-    fn reload_checked(&self) -> Option<bool> {
         let path = self.path.lock().unwrap();
         let file = match std::fs::File::open(&*path) {
             Ok(file) => file,
@@ -124,7 +114,7 @@ impl Entry {
                     "auto",
                     &format!("Cannot open {}: {error}", path.display()),
                 );
-                return None;
+                return false;
             }
         };
         // RFC 1035 §3.3.13: the SOA serial identifies the Zone version.
@@ -133,11 +123,11 @@ impl Entry {
         {
             Ok(zone) => {
                 self.current.store(Some(Arc::new(zone)));
-                Some(true)
+                true
             }
             Err(error) => {
                 if error == "no change in SOA serial" {
-                    return Some(false);
+                    return false;
                 }
                 pharos_server::logging::log(
                     "WARN",
@@ -148,7 +138,7 @@ impl Entry {
                         path.display()
                     ),
                 );
-                None
+                false
             }
         }
     }
