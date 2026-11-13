@@ -168,6 +168,43 @@ async fn coredns_symlink_repoint_is_served_after_scan() {
             .rdata,
         [192, 0, 2, 2]
     );
+    let broken = root.join("broken");
+    std::fs::write(&broken, "invalid zone").unwrap();
+    std::fs::remove_file(&link).unwrap();
+    symlink(&broken, &link).unwrap();
+    auto.shared.scan();
+    assert_eq!(
+        auto.serve_with(&mut cx, TestNext, false).await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(cx.response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 2]
+    );
+    std::fs::write(
+        &broken,
+        "@ 60 IN SOA ns. hostmaster. 3 2 3 4 5\nwww 60 IN A 192.0.2.3\n",
+    )
+    .unwrap();
+    auto.shared.scan();
+    assert_eq!(
+        auto.serve_with(&mut cx, TestNext, false).await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(cx.response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 3]
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -415,7 +452,7 @@ fn coredns_walk_keeps_first_path_and_follows_root_symlink() {
         *entry.path.lock().unwrap(),
         std::fs::canonicalize(&second).unwrap()
     );
-    assert!(entry.reload());
+    assert!(!entry.reload());
     assert_eq!(entry.current.load().as_ref().unwrap().serial(), Some(2));
     std::fs::remove_dir_all(root).unwrap();
 }

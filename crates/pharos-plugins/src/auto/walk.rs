@@ -38,8 +38,13 @@ impl Shared {
             let Ok(apex) = origin.parse::<Name>() else {
                 return;
             };
+            let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
             if let Some(entry) = old.origins.get(&origin) {
                 *entry.path.lock().unwrap() = path.to_owned();
+                let mut previous = entry.resolved_path.lock().unwrap();
+                if *previous != resolved && entry.reload() {
+                    *previous = resolved;
+                }
                 zones.insert(origin, Arc::clone(entry));
             } else {
                 let result = std::fs::File::open(path)
@@ -65,6 +70,7 @@ impl Shared {
                                 origin,
                                 apex,
                                 path: Mutex::new(path.to_owned()),
+                                resolved_path: Mutex::new(resolved),
                                 current: ZoneHolder::from(Some(Arc::new(zone))),
                                 task: Mutex::new(None),
                             }),
