@@ -75,7 +75,8 @@ pub(crate) fn bind(address: SocketAddr) -> io::Result<StdUdpSocket> {
 #[cfg(target_os = "linux")]
 pub fn reserve_descriptors(count: i32) -> io::Result<()> {
     let null = std::fs::File::open("/dev/null")?;
-    let fd = nix::fcntl::fcntl(&null, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(count)).map_err(io::Error::from)?;
+    let fd = nix::fcntl::fcntl(&null, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(count))
+        .map_err(io::Error::from)?;
     nix::unistd::close(fd).map_err(io::Error::from)
 }
 
