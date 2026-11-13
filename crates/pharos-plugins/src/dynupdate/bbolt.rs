@@ -130,6 +130,16 @@ pub(super) struct Store {
 
 type Entries = BTreeMap<Vec<u8>, (u32, Vec<u8>)>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommitPoint {
+    BucketWritten,
+    RootWritten,
+    FreelistWritten,
+    DataSynced,
+    MetaWritten,
+    MetaSynced,
+}
+
 impl Store {
     // bbolt v1.5.0 db.go:646-684: an empty database starts with two metas, an empty freelist and an empty root leaf.
     pub(super) fn create(file: File) -> io::Result<Self> {
@@ -321,6 +331,15 @@ impl Store {
     }
 
     pub(super) fn commit(&mut self, origin: &[u8], records: &[u8]) -> io::Result<()> {
+        self.commit_with(origin, records, |_| Ok(()))
+    }
+
+    fn commit_with(
+        &mut self,
+        origin: &[u8],
+        records: &[u8],
+        mut checkpoint: impl FnMut(CommitPoint) -> io::Result<()>,
+    ) -> io::Result<()> {
         let (mut root, mut contents, old_pages) = match self.contents() {
             Ok(value) => value,
             Err(_) => {
@@ -389,14 +408,18 @@ impl Store {
             &encode_leaf(bucket_id, count, self.meta.page_size, &contents)?,
             bucket_id * self.meta.page_size as u64,
         )?;
+        checkpoint(CommitPoint::BucketWritten)?;
         self.file.write_all_at(
             &encode_leaf(root_id, root_count, self.meta.page_size, &root)?,
             root_id * self.meta.page_size as u64,
         )?;
+        checkpoint(CommitPoint::RootWritten)?;
         self.file
             .write_all_at(&freelist, free_id * self.meta.page_size as u64)?;
+        checkpoint(CommitPoint::FreelistWritten)?;
         // bbolt v1.5.0 tx.go:244-273: flush all new pages before writing and syncing the next meta page.
         self.file.sync_all()?;
+        checkpoint(CommitPoint::DataSynced)?;
         let next = MetaPage {
             root: root_id,
             freelist: free_id,
@@ -406,7 +429,9 @@ impl Store {
         };
         self.file
             .write_all_at(&next.encode(), (next.txid % 2) * next.page_size as u64)?;
+        checkpoint(CommitPoint::MetaWritten)?;
         self.file.sync_all()?;
+        checkpoint(CommitPoint::MetaSynced)?;
         self.meta = next;
         Ok(())
     }
@@ -522,7 +547,7 @@ fn allocate(free: &mut BTreeSet<u64>, high: &mut u64, count: usize) -> io::Resul
 
 #[cfg(test)]
 mod tests {
-    use super::Store;
+    use super::{CommitPoint, Store};
     use std::{
         fs::OpenOptions,
         process::Command,
@@ -751,5 +776,135 @@ mod tests {
         assert_eq!(Store::open(file).unwrap().read().unwrap().1, b"new");
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(alias).unwrap();
+    }
+
+    #[test]
+    fn commits_never_overwrite_pages_reachable_from_current_meta() {
+        use std::os::unix::fs::FileExt;
+        let path = path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::create(file).unwrap();
+        store.commit(b"example.org.", b"old").unwrap();
+        let (_, _, mut pages) = store.contents().unwrap();
+        pages.insert(store.meta.freelist);
+        let old = pages
+            .iter()
+            .map(|id| (*id, store.page(*id).unwrap()))
+            .collect::<Vec<_>>();
+        store.commit(b"example.org.", b"new").unwrap();
+        for (id, bytes) in old {
+            let mut actual = vec![0; bytes.len()];
+            store
+                .file
+                .read_exact_at(&mut actual, id * store.meta.page_size as u64)
+                .unwrap();
+            assert_eq!(actual, bytes, "page {id} changed");
+        }
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn crashes_at_commit_steps_leave_old_or_new_zone() {
+        const ENV: &str = "PHAROS_BBOLT_CRASH_POINT";
+        if let Ok(stage) = std::env::var(ENV) {
+            let path = std::env::var_os("PHAROS_BBOLT_CRASH_FILE").unwrap();
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            let mut store = Store::open(file).unwrap();
+            let _ = store.commit_with(b"example.org.", b"new", |point| {
+                if format!("{point:?}") == stage {
+                    std::process::exit(73);
+                }
+                Ok(())
+            });
+            panic!("requested crash point not reached");
+        }
+        for point in [
+            CommitPoint::BucketWritten,
+            CommitPoint::RootWritten,
+            CommitPoint::FreelistWritten,
+            CommitPoint::DataSynced,
+            CommitPoint::MetaWritten,
+            CommitPoint::MetaSynced,
+        ] {
+            let path = path();
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            let mut store = Store::create(file).unwrap();
+            store.commit(b"example.org.", b"old").unwrap();
+            drop(store);
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "dynupdate::bbolt::tests::crashes_at_commit_steps_leave_old_or_new_zone",
+                ])
+                .env(ENV, format!("{point:?}"))
+                .env("PHAROS_BBOLT_CRASH_FILE", &path)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(73));
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let data = Store::open(file).unwrap().read().unwrap().1;
+            assert!(data == b"old" || data == b"new", "{point:?}");
+            if matches!(
+                point,
+                CommitPoint::BucketWritten
+                    | CommitPoint::RootWritten
+                    | CommitPoint::FreelistWritten
+                    | CommitPoint::DataSynced
+            ) {
+                assert_eq!(data, b"old", "{point:?}");
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn data_is_synced_before_meta_is_written() {
+        let path = path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::create(file).unwrap();
+        let mut stages = Vec::new();
+        store
+            .commit_with(b"example.org.", b"data", |stage| {
+                stages.push(stage);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            stages,
+            [
+                CommitPoint::BucketWritten,
+                CommitPoint::RootWritten,
+                CommitPoint::FreelistWritten,
+                CommitPoint::DataSynced,
+                CommitPoint::MetaWritten,
+                CommitPoint::MetaSynced
+            ]
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 }
