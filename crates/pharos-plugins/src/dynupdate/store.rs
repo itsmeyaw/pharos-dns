@@ -517,4 +517,260 @@ mod tests {
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn large_zone_survives_restart_without_seed() {
+        use pharos_proto::{Class, Name, NameRef, Rcode, Type, zone::ZoneRecord};
+        use std::fmt::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "pharos-dynamic-large-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let mut seed = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n".to_owned();
+        for index in 0..400 {
+            writeln!(seed, "large-{index} 60 IN TXT \"{}\"", "a".repeat(200)).unwrap();
+        }
+        std::fs::write(dir.join("seed"), seed).unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = acquire(&config).unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let owner: Name = "saved.example.org.".parse().unwrap();
+        let update = ZoneRecord {
+            owner: owner.clone(),
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 10],
+        };
+        assert_eq!(
+            shared.transact(&config, &key, &[], &[update]).unwrap().0,
+            Rcode::NOERROR
+        );
+        assert!(
+            shared
+                .db
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .read()
+                .unwrap()
+                .1
+                .len()
+                > 65535
+        );
+        drop(shared);
+        std::fs::remove_file(dir.join("seed")).unwrap();
+        assert_eq!(validate(&config).unwrap().serial(), Some(11));
+        let restarted = acquire(&config).unwrap();
+        let snapshot = restarted.current.load_full();
+        assert_eq!(
+            snapshot
+                .rrset(NameRef::parse(owner.as_wire(), 0).unwrap(), Type::A)
+                .count(),
+            1
+        );
+        assert_eq!(snapshot.records().len(), 403);
+        drop(snapshot);
+        drop(restarted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn overlapping_reloads_serialize_distinct_updates() {
+        use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
+        let dir = std::env::temp_dir().join(format!(
+            "pharos-dynamic-reload-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let old = acquire(&config).unwrap();
+        let new = acquire(&config).unwrap();
+        assert!(Arc::ptr_eq(&old, &new));
+        let key: Name = "key.example.org.".parse().unwrap();
+        std::thread::scope(|scope| {
+            let threads = (0..16)
+                .map(|index| {
+                    let shared = if index % 2 == 0 { &old } else { &new };
+                    let config = &config;
+                    let key = &key;
+                    scope.spawn(move || {
+                        let record = ZoneRecord {
+                            owner: format!("host-{index}.example.org.").parse().unwrap(),
+                            rtype: Type::A,
+                            class: Class::IN,
+                            ttl: 60,
+                            rdata: vec![192, 0, 2, index + 1],
+                        };
+                        assert_eq!(
+                            shared.transact(config, key, &[], &[record]).unwrap().0,
+                            Rcode::NOERROR
+                        );
+                    })
+                })
+                .collect::<Vec<_>>();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        });
+        assert_eq!(new.current.load().serial(), Some(26));
+        assert_eq!(new.current.load().records().len(), 17);
+        drop(old);
+        assert_eq!(new.current.load().serial(), Some(26));
+        drop(new);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn coredns_update_limits_are_atomic_in_both_modes() {
+        use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
+        for durable in [false, true] {
+            for limit in ["records", "bytes", "updates"] {
+                let dir = std::env::temp_dir().join(format!(
+                    "pharos-dynamic-limit-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::write(
+                    dir.join("seed"),
+                    "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+                )
+                .unwrap();
+                let database = if durable { "database db\n" } else { "" };
+                let text =
+                    format!("dynupdate {{\nfile seed\n{database}allow key.example.org. * A\n}}");
+                let tokens = lex("Corefile", &text);
+                let mut config = setup::parse(
+                    &mut Cursor::new("Corefile", &tokens),
+                    &["example.org"],
+                    Some(&dir),
+                )
+                .unwrap();
+                let shared = if durable {
+                    acquire(&config).unwrap()
+                } else {
+                    Arc::new(super::Shared::memory(validate(&config).unwrap()))
+                };
+                let before = shared.current.load_full();
+                match limit {
+                    "records" => config.max_records = before.records().len(),
+                    "bytes" => {
+                        config.max_bytes = super::wire::encode(before.records()).unwrap().len()
+                    }
+                    _ => config.max_update_records = 1,
+                }
+                let key: Name = "key.example.org.".parse().unwrap();
+                let updates =
+                    ["first.example.org.", "second.example.org."].map(|owner| ZoneRecord {
+                        owner: owner.parse().unwrap(),
+                        rtype: Type::A,
+                        class: Class::IN,
+                        ttl: 60,
+                        rdata: vec![192, 0, 2, 1],
+                    });
+                assert_eq!(
+                    shared.transact(&config, &key, &[], &updates).unwrap().0,
+                    Rcode::REFUSED,
+                    "{durable} {limit}"
+                );
+                assert!(Arc::ptr_eq(&before, &shared.current.load_full()));
+                assert_eq!(shared.current.load().serial(), Some(10));
+                drop(before);
+                drop(shared);
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn key_and_prerequisite_checks_precede_update_prescan() {
+        use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
+        let dir = std::env::temp_dir().join(format!(
+            "pharos-dynamic-order-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = super::Shared::memory(validate(&config).unwrap());
+        let missing = ZoneRecord {
+            owner: "missing.example.org.".parse().unwrap(),
+            rtype: Type::A,
+            class: Class::ANY,
+            ttl: 0,
+            rdata: Vec::new(),
+        };
+        let outside = ZoneRecord {
+            owner: "outside.test.".parse().unwrap(),
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 1],
+        };
+        let known: Name = "key.example.org.".parse().unwrap();
+        let unknown: Name = "other.example.org.".parse().unwrap();
+        assert_eq!(
+            shared
+                .transact(
+                    &config,
+                    &unknown,
+                    std::slice::from_ref(&missing),
+                    std::slice::from_ref(&outside)
+                )
+                .unwrap()
+                .0,
+            Rcode::REFUSED
+        );
+        assert_eq!(
+            shared
+                .transact(&config, &known, &[missing], &[outside])
+                .unwrap()
+                .0,
+            Rcode::NXRRSET
+        );
+        assert_eq!(shared.current.load().serial(), Some(10));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
