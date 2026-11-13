@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -12,12 +13,19 @@ func main() {
 	if len(os.Args) != 3 {
 		panic("expected mode and path")
 	}
-	db, err := bolt.Open(os.Args[2], 0600, &bolt.Options{Timeout: time.Second})
+	options := &bolt.Options{Timeout: time.Second}
+	if strings.HasSuffix(os.Args[1], "-4096") {
+		options.PageSize = 4096
+	}
+	if strings.HasSuffix(os.Args[1], "-16384") {
+		options.PageSize = 16384
+	}
+	db, err := bolt.Open(os.Args[2], 0600, options)
 	if err != nil {
 		panic(err)
 	}
 	defer db.Close()
-	if os.Args[1] == "write" || os.Args[1] == "write-complex" {
+	if strings.HasPrefix(os.Args[1], "write") {
 		err = db.Update(func(tx *bolt.Tx) error {
 			b, err := tx.CreateBucketIfNotExists([]byte("dynupdate-v1"))
 			if err != nil {

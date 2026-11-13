@@ -907,4 +907,43 @@ mod tests {
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn opens_databases_across_four_and_sixteen_kib_page_sizes() {
+        for (write, read) in [("write-4096", "read-16384"), ("write-16384", "read-4096")] {
+            let path = path();
+            let Some(output) = go(write, &path) else {
+                return;
+            };
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let mut store = Store::open(file).unwrap();
+            assert_eq!(
+                store.meta.page_size,
+                if write == "write-4096" { 4096 } else { 16384 }
+            );
+            assert_eq!(
+                store.read().unwrap(),
+                (b"example.org.".to_vec(), b"record data".to_vec())
+            );
+            store.commit(b"example.org.", b"record data").unwrap();
+            drop(store);
+            let output = go(read, &path).unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, b"example.org.\nrecord data\n");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 }
