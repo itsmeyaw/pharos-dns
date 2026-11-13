@@ -9,7 +9,7 @@
 
 ## Performance Focus
 
-These are the target performance focus, ranked from top to bottom:
+These are the target performance focus, ranked with 1 highest and 6 lowest:
 
 1. Tail Latency (p99 and p99.9) Under Burst Load and Churn
 2. Memory Footprint and OOM Resilience at High Cluster Scale
