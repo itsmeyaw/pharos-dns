@@ -591,3 +591,59 @@ async fn notify_coalesces_changes_while_one_is_in_flight() {
         .is_err()
     );
 }
+
+#[cfg(feature = "plugin-file")]
+#[tokio::test]
+async fn coredns_external_cname_uses_self_lookup() {
+    use pharos_server::{Action, Handler};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!("pharos-dynamic-cname-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let seed = dir.join("seed");
+    std::fs::write(&seed, "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\nalias 60 IN CNAME leaf.external.test.\n").unwrap();
+    let external = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/external.zone"
+    );
+    let text = format!(
+        ".:0 {{\n dynupdate example.org. {{\n file {}\n allow key.example.org. * A\n }}\n file {external} external.test {{\n reload 0\n }}\n}}",
+        seed.display()
+    );
+    let (mut servers, _) = pharos_plugins::servers(
+        configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap(),
+    )
+    .unwrap();
+    let (_, server) = servers.drain().next().unwrap();
+    let owner: Name = "alias.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(owner.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        Box::pin(server.handle(
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        ))
+        .await,
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.rcode(), Rcode::NOERROR);
+    assert_eq!(
+        message.answers().map(|rr| rr.rtype).collect::<Vec<_>>(),
+        [Type::CNAME, Type::A]
+    );
+    assert_eq!(message.answers().last().unwrap().rdata, [192, 0, 2, 88]);
+    drop(server);
+    std::fs::remove_dir_all(dir).unwrap();
+}
