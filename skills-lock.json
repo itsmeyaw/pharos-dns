@@ -13,6 +13,12 @@
       "skillPath": "skills/caveman-commit/SKILL.md",
       "computedHash": "2c1472fb59eedd3cfba0b6512dc470a00287343ade421db55c21a6fb52afbe86"
     },
+    "code-review": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/code-review/SKILL.md",
+      "computedHash": "ce86b40a3d1648a0018b712f0c70704e6c2316b2a9b9e915ab116916a31273dc"
+    },
     "rust-async-patterns": {
       "source": "wshobson/agents",
       "sourceType": "github",
