@@ -123,7 +123,7 @@ impl MetaPage {
     }
 }
 
-struct Store {
+pub(super) struct Store {
     file: File,
     meta: MetaPage,
 }
@@ -132,7 +132,7 @@ type Entries = BTreeMap<Vec<u8>, (u32, Vec<u8>)>;
 
 impl Store {
     // bbolt v1.5.0 db.go:646-684: an empty database starts with two metas, an empty freelist and an empty root leaf.
-    fn create(file: File) -> io::Result<Self> {
+    pub(super) fn create(file: File) -> io::Result<Self> {
         let mut meta = MetaPage {
             page_size: 4096,
             root: 3,
@@ -157,7 +157,7 @@ impl Store {
     }
 
     // bbolt v1.5.0 db.go:329-414: if the first meta is invalid, find the second at a possible page boundary.
-    fn open(file: File) -> io::Result<Self> {
+    pub(super) fn open(file: File) -> io::Result<Self> {
         let len = file.metadata()?.len();
         let mut buf = [0; META_LEN];
         file.read_exact_at(&mut buf, 0)?;
@@ -277,7 +277,7 @@ impl Store {
         Ok((root, contents, pages))
     }
 
-    fn read(&self) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    pub(super) fn read(&self) -> io::Result<(Vec<u8>, Vec<u8>)> {
         let (_, contents, _) = self.contents()?;
         let get = |key: &[u8]| {
             contents
@@ -320,7 +320,7 @@ impl Store {
         Ok((free, u64::from(u32_at(&data, 12)?)))
     }
 
-    fn commit(&mut self, origin: &[u8], records: &[u8]) -> io::Result<()> {
+    pub(super) fn commit(&mut self, origin: &[u8], records: &[u8]) -> io::Result<()> {
         let (mut root, mut contents, old_pages) = match self.contents() {
             Ok(value) => value,
             Err(_) => {
