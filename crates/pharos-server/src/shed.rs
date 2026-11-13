@@ -286,15 +286,24 @@ mod tests {
         let mut held = (0..3)
             .map(|_| stack.checkout().unwrap())
             .collect::<Vec<_>>();
+        let (first_ready, first_started) = tokio::sync::oneshot::channel();
+        let (second_ready, second_started) = tokio::sync::oneshot::channel();
         let first = tokio::spawn({
             let stack = stack.clone();
-            async move { stack.checkout_wait().await }
+            async move {
+                let _ = first_ready.send(());
+                stack.checkout_wait().await
+            }
         });
         let second = tokio::spawn({
             let stack = stack.clone();
-            async move { stack.checkout_wait().await }
+            async move {
+                let _ = second_ready.send(());
+                stack.checkout_wait().await
+            }
         });
-        tokio::task::yield_now().await;
+        first_started.await.unwrap();
+        second_started.await.unwrap();
         first.abort();
         let _ = first.await;
         stack.release(held.pop().unwrap());
