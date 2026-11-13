@@ -26,6 +26,7 @@ struct Expect {
     dedupe_additional: bool,
     deviations: Vec<(String, u16, u16)>,
     rcodes: Vec<(String, Rcode)>,
+    addresses: Vec<(String, std::net::Ipv4Addr)>,
 }
 
 fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
@@ -61,6 +62,19 @@ fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
                     return Err(format!("invalid rcode expectation: {value}"));
                 }
                 expect.rcodes.push((query.trim().to_owned(), rcode));
+            }
+            "answer" => {
+                let (address, query) = value
+                    .split_once('|')
+                    .ok_or_else(|| format!("invalid answer expectation: {value}"))?;
+                let address = address
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("invalid answer expectation: {value}"))?;
+                if query.trim().is_empty() {
+                    return Err(format!("invalid answer expectation: {value}"));
+                }
+                expect.addresses.push((query.trim().to_owned(), address));
             }
             "deviation" => {
                 let parts: Vec<_> = value.split('|').map(str::trim).collect();
@@ -104,6 +118,18 @@ fn check_rcode(expect: &Expect, query: &str, rcode: Rcode) -> Result<(), String>
         .any(|(line, expected)| line == query && *expected != rcode)
     {
         return Err(format!("unexpected RCODE {rcode} for {query}"));
+    }
+    Ok(())
+}
+
+fn check_answer(expect: &Expect, query: &str, message: &Message<'_>) -> Result<(), String> {
+    for (_, address) in expect.addresses.iter().filter(|(line, _)| line == query) {
+        if !message
+            .answers()
+            .any(|record| matches!(record.data(), Ok(Rdata::A(value)) if value == *address))
+        {
+            return Err(format!("missing A {address} in {query}"));
+        }
     }
     Ok(())
 }
@@ -810,6 +836,8 @@ fn scenario(
             let cm = Message::parse(&cwire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
             check_rcode(&expect, line, pm.rcode()).map_err(|e| format!("Pharos: {e}"))?;
             check_rcode(&expect, line, cm.rcode()).map_err(|e| format!("CoreDNS: {e}"))?;
+            check_answer(&expect, line, &pm).map_err(|e| format!("Pharos: {e}"))?;
+            check_answer(&expect, line, &cm).map_err(|e| format!("CoreDNS: {e}"))?;
             if let Some(key) = &dnssec_key
                 && line.split_whitespace().any(|part| part == "+dnssec")
             {
@@ -1019,6 +1047,30 @@ mod tests {
             super::check_rcode(&expect, "other. AXFR IN tcp", pharos_proto::Rcode::NOERROR).is_ok()
         );
         assert!(parse_expect("rcode BOGUS | example.org. AXFR IN tcp", "").is_err());
+    }
+
+    #[test]
+    fn expected_address_requires_a_matching_answer() {
+        let expect = parse_expect("answer 192.0.2.1 | example.org. A IN udp", "").unwrap();
+        let mut wire = Vec::new();
+        let name: pharos_proto::Name = "example.org.".parse().unwrap();
+        let name = pharos_proto::NameRef::parse(name.as_wire(), 0).unwrap();
+        let mut builder = pharos_proto::MessageBuilder::new(&mut wire, 512, 0, 0x8400).unwrap();
+        builder
+            .record(
+                pharos_proto::Section::Answer,
+                name,
+                pharos_proto::Type::A,
+                pharos_proto::Class::IN,
+                60,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let message = pharos_proto::Message::parse(&wire).unwrap();
+        assert!(super::check_answer(&expect, "example.org. A IN udp", &message).is_ok());
+        let wrong = parse_expect("answer 192.0.2.2 | example.org. A IN udp", "").unwrap();
+        assert!(super::check_answer(&wrong, "example.org. A IN udp", &message).is_err());
     }
 
     #[test]
