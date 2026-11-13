@@ -138,6 +138,7 @@ pub(super) struct Store {
 }
 
 type Entries = BTreeMap<Vec<u8>, (u32, Vec<u8>)>;
+type PendingPage = (u64, Option<Vec<u8>>, Option<Vec<u8>>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommitPoint {
@@ -363,7 +364,7 @@ impl Store {
 
     fn tree_inner(&self, root: u64, pages: &mut BTreeSet<u64>, zone: bool) -> io::Result<Entries> {
         let mut entries = Entries::new();
-        let mut pending: Vec<(u64, Option<Vec<u8>>, Option<Vec<u8>>)> = vec![(root, None, None)];
+        let mut pending: Vec<PendingPage> = vec![(root, None, None)];
         while let Some((id, lower, upper)) = pending.pop() {
             let data = self.page_inner(id, zone)?;
             let overflow = u64::from(u32_at(&data, 12)?);

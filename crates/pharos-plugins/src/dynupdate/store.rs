@@ -249,6 +249,7 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
                             .read(true)
                             .write(true)
                             .create(true)
+                            .truncate(false)
                             .mode(0o600)
                             .open(path)?;
                         (file, initial)
