@@ -972,39 +972,44 @@ async fn services_scenario() {
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     }
     let (_, server) = routed.drain().next().unwrap();
-    let mut targets = vec![("internal.prod.svc.cluster.local.", [10, 0, 0, 1])];
-    if cfg!(feature = "plugin-hosts") {
-        targets.push(("alias.prod.svc.cluster.local.", [192, 0, 2, 42]));
-    }
-    for (name, expected) in targets {
-        let name: Name = name.parse().unwrap();
-        let mut query = Vec::with_capacity(512);
-        let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x100).unwrap();
-        builder
-            .question(
-                NameRef::parse(name.as_wire(), 0).unwrap(),
-                Type::A,
-                Class::IN,
-            )
-            .unwrap();
-        let _ = builder.finish();
-        let mut response = Vec::with_capacity(512);
-        assert_eq!(
-            Box::pin(pharos_server::Handler::handle(
-                &server,
-                &query,
-                "127.0.0.1:1234".parse().unwrap(),
-                Protocol::Udp,
-                &mut response
-            ))
-            .await,
-            pharos_server::Action::Respond
-        );
-        let message = Message::parse(&response).unwrap();
-        assert_eq!(message.answer_count(), 2);
-        assert_eq!(message.answers().next().unwrap().rtype, Type::CNAME);
-        assert_eq!(message.answers().last().unwrap().rdata, expected);
-    }
+    // Isolate the non-measured recursive Listener fixture from the large parent future.
+    tokio::spawn(async move {
+        let mut targets = vec![("internal.prod.svc.cluster.local.", [10, 0, 0, 1])];
+        if cfg!(feature = "plugin-hosts") {
+            targets.push(("alias.prod.svc.cluster.local.", [192, 0, 2, 42]));
+        }
+        for (name, expected) in targets {
+            let name: Name = name.parse().unwrap();
+            let mut query = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x100).unwrap();
+            builder
+                .question(
+                    NameRef::parse(name.as_wire(), 0).unwrap(),
+                    Type::A,
+                    Class::IN,
+                )
+                .unwrap();
+            let _ = builder.finish();
+            let mut response = Vec::with_capacity(512);
+            assert_eq!(
+                Box::pin(pharos_server::Handler::handle(
+                    &server,
+                    &query,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response
+                ))
+                .await,
+                pharos_server::Action::Respond
+            );
+            let message = Message::parse(&response).unwrap();
+            assert_eq!(message.answer_count(), 2);
+            assert_eq!(message.answers().next().unwrap().rtype, Type::CNAME);
+            assert_eq!(message.answers().last().unwrap().rdata, expected);
+        }
+    })
+    .await
+    .unwrap();
     lifecycle.run(Phase::Shutdown).await.unwrap();
     let text =
         format!(".:53 {{\n kubernetes cluster.local {{\n  endpoint http://{address}\n }}\n}}");
