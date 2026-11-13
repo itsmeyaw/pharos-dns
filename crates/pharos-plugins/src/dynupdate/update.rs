@@ -20,6 +20,56 @@ fn known(kind: Type) -> bool {
     kind != Type::NONE && kind != Type::RESERVED && !kind.to_string().starts_with("TYPE")
 }
 
+// RFC 2136 §3.4.1: prescan the complete Update section before changing the Zone.
+fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
+    for record in records {
+        if !record.owner.is_subdomain_of(zone.apex()) {
+            return Rcode::NOTZONE;
+        }
+        if !known(record.rtype) {
+            return Rcode::FORMERR;
+        }
+        match record.class {
+            Class::IN => {
+                if query_metatype(record.rtype) {
+                    return Rcode::FORMERR;
+                }
+                if record.rtype == Type::SOA {
+                    // RFC 2136 §§4.2 and 7.11: require the apex and a nonzero SOA serial.
+                    let serial = record
+                        .rdata
+                        .len()
+                        .checked_sub(20)
+                        .and_then(|offset| record.rdata.get(offset..offset + 4))
+                        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+                        .map(u32::from_be_bytes);
+                    if &record.owner != zone.apex() || serial.is_none_or(|n| n == 0) {
+                        return Rcode::FORMERR;
+                    }
+                }
+            }
+            Class::ANY => {
+                if record.ttl != 0
+                    || !record.rdata.is_empty()
+                    || query_metatype(record.rtype) && record.rtype != Type::ANY
+                {
+                    return Rcode::FORMERR;
+                }
+            }
+            Class::NONE => {
+                if record.ttl != 0 || query_metatype(record.rtype) {
+                    return Rcode::FORMERR;
+                }
+            }
+            _ => return Rcode::FORMERR,
+        }
+        if super::setup::unsupported(record.rtype) {
+            return Rcode::NOTIMP;
+        }
+    }
+    Rcode::NOERROR
+}
+
 // RFC 2136 §3.2: evaluate all prerequisite forms against the transaction's current snapshot.
 fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
     let mut values: BTreeMap<(Name, Type), Vec<&ZoneRecord>> = BTreeMap::new();
@@ -96,7 +146,7 @@ fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
 
 #[cfg(test)]
 mod tests {
-    use super::prerequisites;
+    use super::{prerequisites, validate_updates};
     use crate::zone::Zone;
     use pharos_proto::{
         Class, Name, Rcode, Type,
@@ -175,5 +225,41 @@ mod tests {
             prerequisites(&zone, &[first.clone(), second, first]),
             Rcode::NOERROR
         );
+    }
+
+    #[test]
+    fn coredns_update_prescan_cases() {
+        let zone = zone();
+        let mut bad_ttl = rr("www.example.org.", Type::A, Class::ANY, &[]);
+        bad_ttl.ttl = 1;
+        for (record, expected) in [
+            (
+                rr("www.example.org.", Type::A, Class::IN, &[192, 0, 2, 9]),
+                Rcode::NOERROR,
+            ),
+            (
+                rr("outside.test.", Type::A, Class::IN, &[192, 0, 2, 9]),
+                Rcode::NOTZONE,
+            ),
+            (bad_ttl, Rcode::FORMERR),
+            (
+                rr("www.example.org.", Type::ANY, Class::NONE, &[]),
+                Rcode::FORMERR,
+            ),
+            (
+                rr("www.example.org.", Type::RRSIG, Class::IN, &[]),
+                Rcode::NOTIMP,
+            ),
+            (
+                rr("www.example.org.", Type::SOA, Class::IN, &[0; 20]),
+                Rcode::FORMERR,
+            ),
+            (
+                rr("example.org.", Type::SOA, Class::IN, &[0; 20]),
+                Rcode::FORMERR,
+            ),
+        ] {
+            assert_eq!(validate_updates(&zone, &[record]), expected);
+        }
     }
 }
