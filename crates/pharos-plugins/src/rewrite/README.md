@@ -16,19 +16,18 @@
 ## Differential scenarios
 
 The `rewrite` name, PTR and TTL scenarios use inline hosts records. The CNAME
-scenarios use analogous names from the Kubernetes ExternalName and hosts fixtures;
-the README's literal `my-app.com` example has no matching fixture. The README's
-SERVFAIL-to-NOERROR RCODE examples are tested in Rust: the shared harness has no
-deterministic SERVFAIL backend. `rewrite-rcode` compares a nonmatching NXDOMAIN,
-and `rewrite-rcode-refused` compares a matching REFUSED-to-NOERROR rewrite using ACL.
+scenarios include the README's `my-app.com` chain in a local file Zone.
+The README's textual and numeric SERVFAIL-to-NOERROR RCODE examples use a local
+template backend. `rewrite-rcode` compares a nonmatching NXDOMAIN, and
+`rewrite-rcode-refused` compares a matching REFUSED-to-NOERROR rewrite using ACL.
 The type and EDNS scenarios use whoami and mask its client
 port. The EDNS variable scenario covers QNAME, QTYPE, client IP and protocol.
 The NSID and subnet scenarios compare client Responses; Rust tests also inspect
 the rewritten Query because whoami does not echo those options.
 `rewrite-edns-global` verifies option registration across Server Blocks.
 The `{server_port}` and `{client_port}` examples are covered by Rust tests: the
-processes use different ports. The metadata name example is also covered by Rust
-tests because the Kubernetes fixture has no Pod with the harness's loopback IP.
+processes use different ports. The metadata name example uses the Kubernetes
+fixture's loopback Pod to exercise client namespace substitution.
 The documented imaginary `some-plugin` metadata example cannot run because that
 Plugin does not exist.
 The `rewrite edns0` example without an EDNS Query is not compared: CoreDNS

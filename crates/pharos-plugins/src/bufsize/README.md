@@ -9,7 +9,7 @@
 ## Differential scenarios
 
 The `bufsize` README scenarios use a local `whoami` Upstream instead of the
-example's external resolver, and `hosts` instead of the unimplemented `file`
+example's external resolver. `bufsize-file-readme` uses the documented `file`
 backend. They compare Responses for both UDP and TCP, with and without EDNS.
 
 ## Sources

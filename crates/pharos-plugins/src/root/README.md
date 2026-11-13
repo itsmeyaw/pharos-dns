@@ -4,7 +4,7 @@
 
 ## root
 
-- The README's TLS Listener example remains unavailable because TLS is deferred to M3; the `file` Plugin is not implemented yet.
+- The README's TLS Listener example remains unavailable because TLS is deferred to M3.
 
 ## Sources
 
