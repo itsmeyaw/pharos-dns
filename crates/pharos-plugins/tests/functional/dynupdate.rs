@@ -202,6 +202,25 @@ fn coredns_rejects_invalid_seed_zones() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn duplicate_directive_does_not_create_database() {
+    let dir =
+        std::env::temp_dir().join(format!("pharos-dynupdate-duplicate-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let seed = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
+    let database = dir.join("db");
+    let text = format!(
+        "example.org:53 {{\n dynupdate {{\n file {seed}\n database {}\n allow key.example.org. * A\n }}\n dynupdate {{\n file {seed}\n allow key.example.org. * A\n }}\n}}",
+        database.display()
+    );
+    assert!(configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).is_err());
+    assert!(!database.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[tokio::test]
 async fn authenticated_update_is_visible_to_subsequent_query() {
     let seed = concat!(
