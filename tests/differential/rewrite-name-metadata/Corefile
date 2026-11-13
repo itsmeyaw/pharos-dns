@@ -1,0 +1,9 @@
+.:{port} {
+    metadata
+    ready 127.0.0.1:{metrics_port}
+    rewrite name regex ^([^.]+)\.example\.$ {1}.{kubernetes/client-namespace}.svc.cluster.local. metadata answer auto
+    kubernetes cluster.local {
+        kubeconfig {kubeconfig}
+        pods verified
+    }
+}

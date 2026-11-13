@@ -45,6 +45,7 @@ fn resources(name: &str) -> Option<(&'static str, &'static str, Vec<Value>)> {
             "Pod",
             vec![
                 json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"web-pod","namespace":"default","resourceVersion":"1","uid":"web-pod","labels":{"app":"web"}},"spec":{"containers":[]},"status":{"phase":"Running","podIP":"10.2.0.5","podIPs":[{"ip":"10.2.0.5"}]}}),
+                json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"loopback-pod","namespace":"default","resourceVersion":"1","uid":"loopback-pod"},"spec":{"containers":[]},"status":{"phase":"Running","podIP":"127.0.0.1","podIPs":[{"ip":"127.0.0.1"}]}}),
                 json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"other-pod","namespace":"other","resourceVersion":"1","uid":"other-pod","labels":{"app":"web"}},"spec":{"containers":[]},"status":{"phase":"Running","podIP":"10.2.0.6","podIPs":[{"ip":"10.2.0.6"}]}}),
                 json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"finished","namespace":"default","resourceVersion":"1","uid":"finished","labels":{"app":"web"}},"spec":{"containers":[]},"status":{"phase":"Succeeded","podIP":"10.2.0.7","podIPs":[{"ip":"10.2.0.7"}]}}),
             ],
@@ -472,7 +473,7 @@ mod tests {
             names(&list("/api/v1/namespaces/other/services", None).await),
             ["hidden"]
         );
-        assert_eq!(names(&list("/api/v1/pods", Some("fieldSelector=status.phase%21%3DSucceeded%2Cstatus.phase%21%3DFailed%2Cstatus.phase%21%3DUnknown")).await), ["web-pod", "other-pod"]);
+        assert_eq!(names(&list("/api/v1/pods", Some("fieldSelector=status.phase%21%3DSucceeded%2Cstatus.phase%21%3DFailed%2Cstatus.phase%21%3DUnknown")).await), ["web-pod", "loopback-pod", "other-pod"]);
         assert_eq!(
             names(
                 &list(
