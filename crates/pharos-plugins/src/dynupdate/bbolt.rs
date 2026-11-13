@@ -1109,9 +1109,22 @@ mod tests {
                 .open(path)
                 .unwrap();
             let mut store = Store::open(file).unwrap();
-            let _ = store.commit_with(b"example.org.", b"new", |point| {
+            let requested = std::env::var("PHAROS_BBOLT_CRASH_OCCURRENCE")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            let mut seen = 0;
+            let records = if std::env::var_os("PHAROS_BBOLT_LARGE_CRASH").is_some() {
+                vec![42; 1 << 20]
+            } else {
+                b"new".to_vec()
+            };
+            let _ = store.commit_with(b"example.org.", &records, |point| {
                 if format!("{point:?}") == stage {
-                    std::process::exit(73);
+                    seen += 1;
+                    if seen == requested {
+                        std::process::exit(73);
+                    }
                 }
                 Ok(())
             });
@@ -1161,6 +1174,37 @@ mod tests {
             ) {
                 assert_eq!(data, b"old", "{point:?}");
             }
+            std::fs::remove_file(path).unwrap();
+        }
+        for occurrence in 1..=3 {
+            let path = path();
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            let mut store = Store::create(file).unwrap();
+            store.commit(b"example.org.", b"old").unwrap();
+            drop(store);
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "dynupdate::bbolt::tests::crashes_at_commit_steps_leave_old_or_new_zone",
+                ])
+                .env(ENV, "BucketWritten")
+                .env("PHAROS_BBOLT_CRASH_FILE", &path)
+                .env("PHAROS_BBOLT_CRASH_OCCURRENCE", occurrence.to_string())
+                .env("PHAROS_BBOLT_LARGE_CRASH", "1")
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(73));
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            assert_eq!(Store::open(file).unwrap().read().unwrap().1, b"old");
             std::fs::remove_file(path).unwrap();
         }
     }
