@@ -1270,4 +1270,44 @@ mod tests {
             std::fs::remove_dir_all(dir).unwrap();
         }
     }
+
+    #[test]
+    fn exclusive_bbolt_lock_times_out_and_releases() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-lock-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        drop(acquire(&config).unwrap());
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.join("db"))
+            .unwrap();
+        file.try_lock().unwrap();
+        let start = std::time::Instant::now();
+        assert!(acquire(&config).is_err());
+        assert!(start.elapsed() >= std::time::Duration::from_millis(900));
+        drop(file);
+        assert!(acquire(&config).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
