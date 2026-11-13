@@ -1130,4 +1130,62 @@ mod tests {
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn coredns_explicit_any_permission_only_allows_delete_all() {
+        use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-any-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("seed"), "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\nwww 60 IN A 192.0.2.1\n").unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\nallow key.example.org. www.example.org. ANY\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = super::Shared::memory(validate(&config).unwrap());
+        let key: Name = "key.example.org.".parse().unwrap();
+        let owner: Name = "www.example.org.".parse().unwrap();
+        let delete = ZoneRecord {
+            owner: owner.clone(),
+            rtype: Type::ANY,
+            class: Class::ANY,
+            ttl: 0,
+            rdata: Vec::new(),
+        };
+        assert_eq!(
+            shared.transact(&config, &key, &[], &[delete]).unwrap().0,
+            Rcode::NOERROR
+        );
+        assert!(
+            !shared
+                .current
+                .load()
+                .records()
+                .iter()
+                .any(|rr| rr.owner == owner)
+        );
+        let add = ZoneRecord {
+            owner,
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 20],
+        };
+        assert_eq!(
+            shared.transact(&config, &key, &[], &[add]).unwrap().0,
+            Rcode::REFUSED
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
