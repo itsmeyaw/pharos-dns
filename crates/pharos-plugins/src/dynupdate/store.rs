@@ -1377,4 +1377,68 @@ mod tests {
         drop(shared);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn rejected_update_section_never_partially_changes_zone() {
+        use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-atomic-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\nallow key.example.org. * *\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = super::Shared::memory(validate(&config).unwrap());
+        let before = shared.current.load_full();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let valid = ZoneRecord {
+            owner: "new.example.org.".parse().unwrap(),
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 10],
+        };
+        let outside = ZoneRecord {
+            owner: "outside.test.".parse().unwrap(),
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 11],
+        };
+        let malformed = ZoneRecord {
+            owner: "new.example.org.".parse().unwrap(),
+            rtype: Type::A,
+            class: Class::ANY,
+            ttl: 1,
+            rdata: Vec::new(),
+        };
+        for (invalid, expected) in [(outside, Rcode::NOTZONE), (malformed, Rcode::FORMERR)] {
+            assert_eq!(
+                shared
+                    .transact(&config, &key, &[], &[valid.clone(), invalid])
+                    .unwrap()
+                    .0,
+                expected
+            );
+            assert!(Arc::ptr_eq(&before, &shared.current.load_full()));
+            assert_eq!(shared.current.load().serial(), Some(10));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
