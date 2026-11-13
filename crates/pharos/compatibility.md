@@ -1,15 +1,5 @@
 # CoreDNS compatibility
 
-## UDP listeners
-
-Each UDP worker handles up to 256 waiting Queries concurrently, balancing burst
-capacity against memory use. Response buffers initially reserve about 16 MiB per
-worker at that limit, excluding Query copies and Plugin state. When full, the
-worker stops receiving until one completes; the kernel may drop excess datagrams.
-Ready Queries remain inline. In-flight Queries are cancelled on Listener shutdown.
-Linux workers may already have received a batch of up to 16 datagrams.
-Forwarding-loop probes retain their separate concurrent path.
-
 ## acl
 
 - [acl Plugin notes](../crates/pharos-plugins/src/acl/README.md)
@@ -234,6 +224,13 @@ Forwarding-loop probes retain their separate concurrent path.
 
 ## Server
 
+- Each UDP worker handles up to 256 waiting Queries concurrently, balancing burst
+  capacity against memory use. Response buffers initially reserve about 16 MiB per
+  worker at that limit, excluding Query copies and Plugin state. When full, the
+  worker stops receiving until one completes; the kernel may drop excess datagrams.
+  Ready Queries remain inline. In-flight Queries are cancelled on Listener shutdown.
+  Linux workers may already have received a batch of up to 16 datagrams.
+  Forwarding-loop probes retain their separate concurrent path.
 - View-aware routing and metrics perform per-Query dispatch checks and initialize Metadata before routing even when no View is configured; no View filters run in that case.
 - The Rust `Server` API stores its Router in an `Arc`; callers adding blocks after construction must obtain unique access with `Arc::get_mut`.
 - The Rust Plugin API's `Context` has separate Query and Metadata lifetimes to support allocation-free internal Query rewrites.
