@@ -62,27 +62,42 @@ pub(super) fn write(directory: &Path, target: &Path, records: &[ZoneRecord]) -> 
             .chain(records.iter().filter(|rr| rr.rtype != Type::SOA))
         {
             if matches!(record.rtype, Type::CAA | Type::URI) {
-                let escaped = |bytes: &[u8]| {
+                // RFC 8659 §4 and RFC 7553 §4: these fields contain literal octets.
+                // CoreDNS writes plain octets as-is and reads backslashes as escapes, so only other octets are escaped.
+                let octets = |bytes: &[u8], plain: bool| {
+                    if plain {
+                        return bytes.iter().map(|&b| char::from(b)).collect::<String>();
+                    }
                     let mut text = String::new();
                     for byte in bytes {
                         let _ = write!(text, "\\{byte:03}");
                     }
                     text
                 };
-                // RFC 8659 §4 and RFC 7553 §4: these fields contain literal octets.
+                let plain_text = |bytes: &[u8]| {
+                    bytes
+                        .iter()
+                        .all(|&b| matches!(b, b' '..=b'~') && !matches!(b, b'"' | b'\\' | b';'))
+                };
                 let text = if record.rtype == Type::CAA {
                     let flags = *record.rdata.first().ok_or("truncated CAA")?;
                     let length = usize::from(*record.rdata.get(1).ok_or("truncated CAA")?);
                     let tag = record.rdata.get(2..2 + length).ok_or("truncated CAA tag")?;
                     let value = &record.rdata[2 + length..];
-                    format!("CAA {flags} {} \"{}\"", escaped(tag), escaped(value))
+                    let plain_tag = !tag.is_empty() && tag.iter().all(u8::is_ascii_alphanumeric);
+                    format!(
+                        "CAA {flags} {} \"{}\"",
+                        octets(tag, plain_tag),
+                        octets(value, plain_text(value))
+                    )
                 } else {
                     let prefix = record.rdata.get(..4).ok_or("truncated URI")?;
                     let priority = u16::from_be_bytes([prefix[0], prefix[1]]);
                     let weight = u16::from_be_bytes([prefix[2], prefix[3]]);
+                    let target = &record.rdata[4..];
                     format!(
                         "URI {priority} {weight} \"{}\"",
-                        escaped(&record.rdata[4..])
+                        octets(target, plain_text(target))
                     )
                 };
                 writeln!(
@@ -184,6 +199,36 @@ mod tests {
         .map(Result::unwrap)
         .collect();
         assert_eq!(parsed, records);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn written_plain_caa_and_uri_match_coredns_text() {
+        let dir = std::env::temp_dir().join(format!("pharos-sign-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("zone");
+        let owner: Name = "example.org.".parse().unwrap();
+        let records = [
+            ZoneRecord {
+                owner: owner.clone(),
+                ttl: 60,
+                class: pharos_proto::Class::IN,
+                rtype: Type::CAA,
+                rdata: b"\x00\x05issueletsencrypt.org".to_vec(),
+            },
+            ZoneRecord {
+                owner: owner.clone(),
+                ttl: 60,
+                class: pharos_proto::Class::IN,
+                rtype: Type::URI,
+                rdata: b"\x00\x01\x00\x02https://example.org/".to_vec(),
+            },
+        ];
+        write(&dir, &path, &records).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "example.org. 60 CLASS1 CAA 0 issue \"letsencrypt.org\"\nexample.org. 60 CLASS1 URI 1 2 \"https://example.org/\"\n"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
