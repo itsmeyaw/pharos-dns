@@ -1,13 +1,16 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, io::BufReader, path::Path};
 
 use pharos_dnssec::{
     canonical::{CanonicalRecord, canonical_rdata, signed_data},
-    denial::{ZoneName, nsec_chain},
+    denial::type_bitmap,
     digest::{DigestType, cds_rdata, key_tag},
     keys::KeyPair,
     sign::SigningKey,
 };
-use pharos_proto::{Class, Name, NameRef, Rdata, Type, zone::ZoneRecord};
+use pharos_proto::{
+    Class, Name, NameRef, Rdata, Type,
+    zone::{ZoneParser, ZoneRecord},
+};
 
 use crate::zone::Zone;
 
@@ -19,14 +22,32 @@ pub(super) fn sign(
     inception_jitter: u32,
     expiration_jitter: u32,
 ) -> Result<Vec<ZoneRecord>, String> {
-    let zone = Zone::load(apex.clone(), path)?;
-    let mut records = zone.records().to_vec();
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut parser = ZoneParser::new(BufReader::new(file), apex.clone(), path.to_string_lossy());
+    parser.set_include_allowed(true);
+    let mut records = parser
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     records.retain(|rr| {
         !matches!(
             rr.rtype,
             Type::DNSKEY | Type::RRSIG | Type::CDS | Type::CDNSKEY
         )
     });
+    // CoreDNS retains only the last SOA, even if its owner differs from the configured origin.
+    let last_soa = records
+        .iter()
+        .rposition(|rr| rr.rtype == Type::SOA)
+        .ok_or("Zone has no SOA")?;
+    let soa_owner = records[last_soa].owner.clone();
+    let mut index = 0;
+    records.retain(|rr| {
+        let keep = rr.rtype != Type::SOA || index == last_soa;
+        index += 1;
+        keep
+    });
+    let zone = Zone::from_records(soa_owner, records)?;
+    let mut records = zone.records().to_vec();
 
     let soa = records
         .iter_mut()
@@ -77,31 +98,35 @@ pub(super) fn sign(
     // RFC 4035 §2.3: delegation names are authoritative, but descendants are not.
     let cuts: Vec<_> = records
         .iter()
-        .filter(|rr| rr.rtype == Type::NS && rr.owner != *apex && rr.owner.is_subdomain_of(apex))
+        .filter(|rr| rr.rtype == Type::NS && rr.owner != *apex)
         .map(|rr| rr.owner.clone())
         .collect();
     let authoritative = |name: &Name| {
-        name.is_subdomain_of(apex)
-            && !cuts
-                .iter()
-                .any(|cut| name != cut && name.is_subdomain_of(cut))
+        !cuts
+            .iter()
+            .any(|cut| name != cut && name.is_subdomain_of(cut))
     };
     let mut owners = BTreeMap::<Name, Vec<Type>>::new();
     for rr in &records {
-        if authoritative(&rr.owner) {
+        if authoritative(&rr.owner)
+            && rr.rtype != Type::SOA
+            && !(rr.owner == *apex && rr.rtype == Type::NS)
+        {
             owners.entry(rr.owner.clone()).or_default().push(rr.rtype);
         }
     }
-    let names: Vec<_> = owners
-        .into_iter()
-        .map(|(name, types)| ZoneName { name, types })
-        .collect();
+    let names: Vec<_> = owners.into_iter().collect();
     // RFC 4034 §4.1: NSEC links authoritative names in canonical order and lists their types.
-    for nsec in nsec_chain(apex, &names).map_err(|e| e.to_string())? {
-        let mut rdata = nsec.next.as_wire().to_vec();
-        rdata.extend_from_slice(&nsec.bitmap);
+    for (index, (owner, types)) in names.iter().enumerate() {
+        let mut types = types.clone();
+        types.extend([Type::NSEC, Type::RRSIG]);
+        if owner == apex {
+            types.extend([Type::NS, Type::SOA]);
+        }
+        let mut rdata = names[(index + 1) % names.len()].0.as_wire().to_vec();
+        rdata.extend_from_slice(&type_bitmap(&types).map_err(|e| e.to_string())?);
         records.push(ZoneRecord {
-            owner: nsec.owner,
+            owner: owner.clone(),
             ttl: minimum,
             class: Class::IN,
             rtype: Type::NSEC,
@@ -111,7 +136,7 @@ pub(super) fn sign(
 
     let mut rrsets = BTreeMap::<(Name, u16, u16), Vec<usize>>::new();
     for (index, rr) in records.iter().enumerate() {
-        if authoritative(&rr.owner)
+        if (rr.rtype == Type::SOA || authoritative(&rr.owner))
             && rr.rtype != Type::RRSIG
             && (rr.rtype != Type::NS || rr.owner == *apex)
         {
@@ -177,13 +202,17 @@ pub(super) fn sign(
     }
     records.extend(signatures);
     records.sort_by_key(|rr| {
+        if rr.rtype == Type::SOA {
+            return 0;
+        }
+        if rr.rtype == Type::RRSIG && rr.rdata.starts_with(&Type::SOA.0.to_be_bytes()) {
+            return 1;
+        }
         if rr.owner != *apex {
             return 4;
         }
         match rr.rtype {
-            Type::SOA => 0,
             Type::NS => 2,
-            Type::RRSIG if rr.rdata.starts_with(&Type::SOA.0.to_be_bytes()) => 1,
             Type::RRSIG if rr.rdata.starts_with(&Type::NS.0.to_be_bytes()) => 3,
             _ => 4,
         }
@@ -372,5 +401,101 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn coredns_signs_a_file_whose_soa_owner_differs_from_origin() {
+        let apex: Name = "example.org.".parse().unwrap();
+        let records = sign(
+            &apex,
+            &fixture("file/coredns-miek.zone"),
+            &[key()],
+            1_700_000_000,
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|rr| rr.owner.to_string() == "miek.nl." && rr.rtype == Type::SOA)
+        );
+        assert!(
+            records
+                .iter()
+                .any(|rr| rr.owner == apex && rr.rtype == Type::DNSKEY)
+        );
+    }
+
+    #[test]
+    fn coredns_nsec_chain_includes_delegation_but_not_glue() {
+        let apex: Name = "miek.nl.".parse().unwrap();
+        let records = sign(
+            &apex,
+            &fixture("sign/db.miek.nl_ns"),
+            &[key()],
+            1_700_000_000,
+            0,
+            0,
+        )
+        .unwrap();
+        let child: Name = "child.miek.nl.".parse().unwrap();
+        let nsec = records
+            .iter()
+            .find(|rr| rr.owner == child && rr.rtype == Type::NSEC)
+            .unwrap();
+        let Rdata::Nsec { next, bitmap } = Rdata::parse(Type::NSEC, &nsec.rdata).unwrap() else {
+            panic!("expected NSEC")
+        };
+        assert_eq!(next.to_name().to_string(), "www.miek.nl.");
+        assert_eq!(nsec.ttl, 14400);
+        let nsec = pharos_dnssec::denial::Nsec {
+            owner: child.clone(),
+            next: next.to_name(),
+            bitmap: bitmap.to_vec(),
+        };
+        for kind in [Type::NS, Type::DS, Type::RRSIG, Type::NSEC] {
+            assert!(nsec.bitmap_contains(kind));
+        }
+        assert_eq!(
+            records
+                .iter()
+                .filter(|rr| rr.owner == child && rr.rtype == Type::RRSIG)
+                .count(),
+            2
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|rr| rr.owner.to_string() == "ns.child.miek.nl." && rr.rtype == Type::RRSIG)
+        );
+    }
+
+    #[test]
+    fn coredns_signs_apex_only_and_sets_key_ttl() {
+        let path = std::env::temp_dir().join(format!("pharos-sign-apex-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "$TTL 30M\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n IN NS ns.\n",
+        )
+        .unwrap();
+        let apex: Name = "miek.nl.".parse().unwrap();
+        let records = sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let nsec = records.iter().find(|rr| rr.rtype == Type::NSEC).unwrap();
+        assert!(
+            matches!(Rdata::parse(Type::NSEC, &nsec.rdata).unwrap(), Rdata::Nsec { next, .. } if next.to_name() == apex)
+        );
+        assert_eq!(
+            records
+                .iter()
+                .find(|rr| rr.rtype == Type::DNSKEY)
+                .unwrap()
+                .ttl,
+            1800
+        );
+        assert!(records.iter().any(|rr| rr.rtype == Type::RRSIG
+            && rr.rdata.starts_with(&Type::DNSKEY.0.to_be_bytes())
+            && rr.ttl == 1800));
     }
 }
