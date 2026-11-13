@@ -214,8 +214,8 @@ impl Handler for PanickingEcho {
         }
         if query == b"panic" || query == b"pending panic" {
             self.panicked.notify_one();
-            panic!("test panic");
         }
+        assert!(query != b"panic" && query != b"pending panic", "test panic");
         response.extend_from_slice(query);
         Action::Respond
     }
