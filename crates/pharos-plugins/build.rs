@@ -302,6 +302,9 @@ fn main() {
     } else {
         code.push_str("fn metrics_enabled(&self) -> bool { false }\n");
     }
+    if enabled.contains(&"auto") && enabled.contains(&"prometheus") {
+        code.push_str("fn dynamic_metric_zones(&self) -> Option<&pharos_server::metrics::DynamicZones> { self.auto.as_ref().map(|plugin| plugin.metric_zones()) }\n");
+    }
     if enabled.contains(&"errors") {
         code.push_str("fn stacktrace(&self) -> bool { self.errors.as_ref().is_some_and(|plugin| plugin.stacktrace) }\n");
     }

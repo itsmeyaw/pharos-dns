@@ -11,6 +11,13 @@ pub(crate) fn setup(
         .map(|key| key.domain.as_str())
         .collect::<Vec<_>>();
     let auto = parse(cursor, &domains, crate::root_path(&block.config))?;
+    #[cfg(feature = "plugin-prometheus")]
+    auto.metric_zones().set_static_names(
+        domains
+            .iter()
+            .map(|name| name.parse().map_err(|_| cursor.error("invalid Domain")))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     auto.register_hooks(&mut block.config.lifecycle);
     block.config.auto = Some(auto);
     Ok(())

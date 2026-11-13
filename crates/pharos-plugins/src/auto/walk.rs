@@ -96,6 +96,9 @@ impl Shared {
                 .entry(entry.apex.canonical())
                 .or_insert_with(|| Arc::clone(entry));
         }
+        #[cfg(feature = "plugin-prometheus")]
+        self.metrics
+            .publish(zones.values().map(|entry| entry.apex.clone()).collect());
         self.zones.store(Arc::new(Zones {
             origins: zones,
             canonical,

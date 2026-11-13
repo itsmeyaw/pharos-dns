@@ -61,6 +61,8 @@ The `auto` README scenarios use fixture-relative directories instead of
 `/etc/coredns/zones/org`. `auto-transfer-readme` omits the remote NOTIFY
 destination; `auto-regexp-readme` includes an unmatched file to exercise the
 documented filename pattern.
+The differential harness compares DNS Responses, not scraped metrics; dynamic
+`auto` Zone labels are covered by functional and allocation tests.
 
 The `template-invalid` README scenario uses EDNS Queries when testing `ederror`:
 the Listener intentionally strips unsolicited OPT records from non-EDNS

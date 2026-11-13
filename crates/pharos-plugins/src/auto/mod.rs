@@ -34,6 +34,8 @@ struct Shared {
     template: String,
     zones: arc_swap::ArcSwap<Zones>,
     scan_gate: Mutex<()>,
+    #[cfg(feature = "plugin-prometheus")]
+    metrics: pharos_server::metrics::DynamicZones,
     shutdown: tokio::sync::watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     #[cfg(feature = "plugin-transfer")]
@@ -55,6 +57,11 @@ pub struct Auto {
 }
 
 impl Auto {
+    #[cfg(feature = "plugin-prometheus")]
+    pub(crate) fn metric_zones(&self) -> &pharos_server::metrics::DynamicZones {
+        &self.shared.metrics
+    }
+
     fn new(
         origins: Vec<Name>,
         directory: PathBuf,
@@ -71,6 +78,8 @@ impl Auto {
                 template,
                 zones: arc_swap::ArcSwap::from_pointee(Zones::default()),
                 scan_gate: Mutex::new(()),
+                #[cfg(feature = "plugin-prometheus")]
+                metrics: pharos_server::metrics::DynamicZones::default(),
                 shutdown: tokio::sync::watch::channel(false).0,
                 tasks: Mutex::new(Vec::new()),
                 #[cfg(feature = "plugin-transfer")]

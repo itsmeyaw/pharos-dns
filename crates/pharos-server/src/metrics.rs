@@ -1,10 +1,10 @@
 //! The custom encoder matches Go floats, which `prometheus` 0.14 does not.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fmt::Write,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -229,6 +229,202 @@ impl ForwardMetrics {
 
 #[derive(Clone)]
 pub struct BlockMetrics(Arc<Block>);
+
+/// Discovered Zone names published by an authoritative Plugin.
+#[derive(Default)]
+pub struct DynamicZones {
+    state: Mutex<DynamicZonesState>,
+}
+
+#[derive(Default)]
+struct DynamicZonesState {
+    static_names: Vec<pharos_proto::Name>,
+    names: Vec<pharos_proto::Name>,
+    bindings: Vec<Weak<DynamicBlockMetrics>>,
+}
+
+/// Pre-resolved request and producer series for a routed Server Block.
+pub struct DynamicBlockMetrics {
+    registry: Registry,
+    server: String,
+    view: String,
+    domain: pharos_proto::Name,
+    plugins: Vec<&'static str>,
+    zones: arc_swap::ArcSwap<DynamicMetricSnapshot>,
+}
+
+pub(crate) struct DynamicMetricSnapshot {
+    zones: HashMap<Vec<u8>, DynamicZoneMetrics>,
+}
+
+struct DynamicZoneMetrics {
+    block: BlockMetrics,
+    plugins: Vec<(&'static str, PluginMetrics)>,
+}
+
+impl std::fmt::Debug for DynamicZones {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicZones").finish_non_exhaustive()
+    }
+}
+
+impl DynamicZones {
+    /// Set the Server Block Domains before binding metrics.
+    pub fn set_static_names(&self, names: Vec<pharos_proto::Name>) {
+        self.state.lock().unwrap().static_names = names;
+    }
+
+    /// Replace discovered names and prepare counters outside the Query path.
+    pub fn publish(&self, mut names: Vec<pharos_proto::Name>) {
+        names.sort_unstable_by(|left, right| left.as_wire().cmp(right.as_wire()));
+        names.dedup_by(|left, right| left.as_wire() == right.as_wire());
+        let mut state = self.state.lock().unwrap();
+        if state.names.len() == names.len()
+            && state
+                .names
+                .iter()
+                .zip(&names)
+                .all(|(left, right)| left.as_wire() == right.as_wire())
+        {
+            return;
+        }
+        state.names = names;
+        let mut names = state.static_names.clone();
+        names.extend_from_slice(&state.names);
+        state.bindings.retain(|weak| {
+            if let Some(binding) = weak.upgrade() {
+                binding.update(&names);
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    pub(crate) fn bind(
+        &self,
+        registry: &Registry,
+        server: &str,
+        view: &str,
+        domain: &pharos_proto::Name,
+        plugins: &[&'static str],
+    ) -> Arc<DynamicBlockMetrics> {
+        let binding = Arc::new(DynamicBlockMetrics {
+            registry: registry.clone(),
+            server: server.into(),
+            view: view.into(),
+            domain: domain.clone(),
+            plugins: plugins.to_vec(),
+            zones: arc_swap::ArcSwap::from_pointee(DynamicMetricSnapshot {
+                zones: HashMap::new(),
+            }),
+        });
+        let mut state = self.state.lock().unwrap();
+        state.bindings.retain(|weak| weak.strong_count() != 0);
+        let mut names = state.static_names.clone();
+        names.extend_from_slice(&state.names);
+        binding.update(&names);
+        state.bindings.push(Arc::downgrade(&binding));
+        binding
+    }
+}
+
+impl DynamicBlockMetrics {
+    fn update(&self, names: &[pharos_proto::Name]) {
+        let mut all = vec![self.domain.clone()];
+        all.push(".".parse().expect("root Domain is valid"));
+        all.extend_from_slice(names);
+        all.sort();
+        all.dedup();
+        let zones = all
+            .into_iter()
+            .map(|name| {
+                let block = self
+                    .registry
+                    .block(&self.server, &name.to_string(), &self.view);
+                let plugins = self
+                    .plugins
+                    .iter()
+                    .map(|&plugin| (plugin, block.plugin(plugin)))
+                    .collect();
+                let mut key = name.as_wire().to_vec();
+                key.make_ascii_lowercase();
+                (key, DynamicZoneMetrics { block, plugins })
+            })
+            .collect();
+        self.zones.store(Arc::new(DynamicMetricSnapshot { zones }));
+    }
+
+    pub(crate) fn snapshot(&self) -> Arc<DynamicMetricSnapshot> {
+        self.zones.load_full()
+    }
+}
+
+impl DynamicMetricSnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record(
+        &self,
+        name: Option<pharos_proto::NameRef<'_>>,
+        producer: Option<&str>,
+        qtype: u16,
+        tcp: bool,
+        ipv6: bool,
+        dnssec_ok: bool,
+        request_bytes: usize,
+        response_bytes: usize,
+        rcode: u16,
+        duration: f64,
+    ) {
+        let mut wire = [0u8; 255];
+        let mut len = 0;
+        if let Some(name) = name {
+            for label in name.labels() {
+                wire[len] = label.len() as u8;
+                len += 1;
+                wire[len..len + label.len()].copy_from_slice(label);
+                // RFC 4343 §3: DNS label matching is ASCII case-insensitive.
+                wire[len..len + label.len()].make_ascii_lowercase();
+                len += label.len();
+            }
+        }
+        let mut offset = 0;
+        let zone = loop {
+            if let Some(zone) = self.zones.get(&wire[offset..=len]) {
+                break zone;
+            }
+            assert!(offset < len, "root Domain is always present");
+            offset += usize::from(wire[offset]) + 1;
+        };
+        if let Some(metrics) = producer.and_then(|producer| {
+            zone.plugins
+                .iter()
+                .find(|(name, _)| *name == producer)
+                .map(|(_, metrics)| metrics)
+        }) {
+            metrics.record(
+                qtype,
+                tcp,
+                ipv6,
+                dnssec_ok,
+                request_bytes,
+                response_bytes,
+                rcode,
+                duration,
+            );
+        } else {
+            zone.block.record(
+                qtype,
+                tcp,
+                ipv6,
+                dnssec_ok,
+                request_bytes,
+                response_bytes,
+                rcode,
+                duration,
+            );
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct TransportStatus(Arc<AtomicU64>);
@@ -1632,6 +1828,103 @@ fn rcode(code: u16) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dynamic_zone_labels_include_block_domain_and_root_fallback() {
+        use pharos_proto::{Name, NameRef};
+        let registry = super::Registry::new("test", "test", "test");
+        let names = super::DynamicZones::default();
+        names.set_static_names(vec!["another.org.".parse().unwrap()]);
+        let domain: Name = "example.org.".parse().unwrap();
+        let binding = names.bind(&registry, "dns://:53", "", &domain, &["auto"]);
+        names.publish(vec![
+            "org.".parse().unwrap(),
+            "Sub.Example.ORG.".parse().unwrap(),
+        ]);
+        for name in [
+            "www.example.org.",
+            "WWW.SUB.EXAMPLE.ORG.",
+            "www.another.org.",
+            "other.test.",
+        ] {
+            let name: Name = name.parse().unwrap();
+            binding.snapshot().record(
+                Some(NameRef::parse(name.as_wire(), 0).unwrap()),
+                Some("auto"),
+                1,
+                false,
+                false,
+                false,
+                32,
+                64,
+                0,
+                0.01,
+            );
+        }
+        let mut text = String::new();
+        registry.encode(&mut text);
+        for zone in ["example.org.", "Sub.Example.ORG.", "another.org.", "."] {
+            let expected = format!(
+                "pharos_dns_requests_total{{family=\"1\",proto=\"udp\",server=\"dns://:53\",type=\"A\",view=\"\",zone=\"{zone}\"}} 1"
+            );
+            assert!(text.contains(&expected), "{text}");
+        }
+        assert!(!text.contains("zone=\"org.\"} 1"));
+        let old_snapshot = binding.snapshot();
+        names.publish(vec![
+            "org.".parse().unwrap(),
+            "sub.example.org.".parse().unwrap(),
+        ]);
+        let name: Name = "www.sub.example.org.".parse().unwrap();
+        old_snapshot.record(
+            Some(NameRef::parse(name.as_wire(), 0).unwrap()),
+            Some("auto"),
+            1,
+            false,
+            false,
+            false,
+            32,
+            64,
+            0,
+            0.01,
+        );
+        binding.snapshot().record(
+            Some(NameRef::parse(name.as_wire(), 0).unwrap()),
+            Some("auto"),
+            1,
+            false,
+            false,
+            false,
+            32,
+            64,
+            0,
+            0.01,
+        );
+        text.clear();
+        registry.encode(&mut text);
+        assert!(
+            text.contains("type=\"A\",view=\"\",zone=\"sub.example.org.\"} 1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("type=\"A\",view=\"\",zone=\"Sub.Example.ORG.\"} 2"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn dynamic_zone_bindings_discard_stale_reloads() {
+        let registry = super::Registry::new("test", "test", "test");
+        let names = super::DynamicZones::default();
+        let domain = ".".parse().unwrap();
+        for _ in 0..10 {
+            let binding = names.bind(&registry, "dns://:53", "", &domain, &[]);
+            drop(binding);
+        }
+        let binding = names.bind(&registry, "dns://:53", "", &domain, &[]);
+        assert_eq!(names.state.lock().unwrap().bindings.len(), 1);
+        drop(binding);
+    }
+
     #[test]
     fn template_metrics_export_only_used_series_with_coredns_labels_and_help() {
         let registry = super::Registry::new("test", "test", "test");
