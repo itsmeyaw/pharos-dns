@@ -11,7 +11,7 @@ use pharos_proto::{Message, Name, NameRef, Opcode, Type};
 
 use crate::{
     Chain, ListenerKey, Protocol,
-    metrics::{BlockMetrics, PluginMetrics, Registry},
+    metrics::{BlockMetrics, DynamicBlockMetrics, PluginMetrics, Registry},
 };
 
 /// A View filter receives the Query and client information without allocating.
@@ -23,6 +23,7 @@ pub struct ServerBlock<C> {
     chain: Option<C>,
     filters: Vec<ViewFilter>,
     metrics: Option<BlockMetrics>,
+    dynamic_metrics: Option<Arc<DynamicBlockMetrics>>,
     plugin_metrics: Vec<(&'static str, PluginMetrics)>,
     plugin_names: Vec<&'static str>,
     inherited_metrics: Vec<InheritedMetrics>,
@@ -31,6 +32,7 @@ pub struct ServerBlock<C> {
 struct InheritedMetrics {
     view: String,
     block: BlockMetrics,
+    dynamic: Option<Arc<DynamicBlockMetrics>>,
     plugins: Vec<(&'static str, PluginMetrics)>,
 }
 
@@ -66,6 +68,13 @@ impl<C> ServerBlock<C> {
             .iter()
             .find(|(candidate, _)| *candidate == name)
             .map(|(_, metrics)| metrics)
+    }
+    pub(crate) fn dynamic_metrics(&self, view: &str) -> Option<&DynamicBlockMetrics> {
+        let default = self.dynamic_metrics.as_deref()?;
+        self.inherited_metrics
+            .iter()
+            .find(|metrics| metrics.view == view)
+            .map_or(Some(default), |metrics| metrics.dynamic.as_deref())
     }
     pub(crate) fn plugin_name(&self, name: &str) -> Option<&'static str> {
         self.plugin_names
@@ -111,6 +120,7 @@ impl<C> Router<C> {
             chain,
             filters,
             metrics: None,
+            dynamic_metrics: None,
             plugin_metrics: Vec::new(),
             plugin_names: Vec::new(),
             inherited_metrics: Vec::new(),
@@ -301,6 +311,13 @@ fn prepare_blocks<C: Chain>(blocks: &mut [ServerBlock<C>], registry: &Registry, 
             block.inherited_metrics.push(InheritedMetrics {
                 view: name.to_owned(),
                 block: metrics,
+                dynamic: block
+                    .chain
+                    .as_ref()
+                    .and_then(|chain| chain.dynamic_metric_zones())
+                    .map(|zones| {
+                        zones.bind(registry, server, name, &block.domain, &block.plugin_names)
+                    }),
                 plugins,
             });
         }
@@ -324,6 +341,18 @@ fn prepare_block<C: Chain>(block: &mut ServerBlock<C>, registry: &Registry, serv
                 block.plugin_metrics.push((name, metrics.plugin(name)));
             }
         });
+        block.dynamic_metrics = metrics
+            .as_ref()
+            .and_then(|_| chain.dynamic_metric_zones())
+            .map(|zones| {
+                zones.bind(
+                    registry,
+                    server,
+                    chain.view_name(),
+                    &block.domain,
+                    &block.plugin_names,
+                )
+            });
         block.metrics = metrics;
     }
 }

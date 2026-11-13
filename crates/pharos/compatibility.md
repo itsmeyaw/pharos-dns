@@ -8,6 +8,10 @@
 
 - [any Plugin notes](../crates/pharos-plugins/src/any/README.md)
 
+## auto
+
+- [auto Plugin notes](../crates/pharos-plugins/src/auto/README.md)
+
 ## autopath
 
 - [autopath Plugin notes](../crates/pharos-plugins/src/autopath/README.md)

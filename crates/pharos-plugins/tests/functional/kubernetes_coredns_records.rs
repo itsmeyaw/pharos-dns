@@ -128,7 +128,11 @@ async fn query(chain: &Chain, name: &str, kind: Type, local: &str) -> Vec<u8> {
         response: &mut response,
         max_response_size: 512,
     };
-    assert_eq!(chain.serve(&mut cx).await, Outcome::Response, "{name}");
+    assert_eq!(
+        Box::pin(chain.serve(&mut cx)).await,
+        Outcome::Response,
+        "{name}"
+    );
     response
 }
 

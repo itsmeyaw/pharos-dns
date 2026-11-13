@@ -26,7 +26,10 @@ fn next_plugin(enabled: &[&str], start: usize) -> usize {
 
 fn transferer(name: &str) -> bool {
     // Add each implemented Transferer here; enabled retains Plugin Order.
-    matches!(name, "k8s_external" | "kubernetes" | "file" | "secondary")
+    matches!(
+        name,
+        "k8s_external" | "kubernetes" | "file" | "auto" | "secondary"
+    )
 }
 
 fn registered_handler(name: &str) -> bool {
@@ -93,6 +96,7 @@ fn main() {
             "reload" => "reload::Reload",
             "errors" => "errors::Errors",
             "file" => "file::File",
+            "auto" => "auto::Auto",
             "secondary" => "secondary::Secondary",
             "erratic" => "erratic::Erratic",
             _ => "Unimplemented",
@@ -145,6 +149,7 @@ fn main() {
             "reload" => "reload::setup::setup",
             "errors" => "errors::setup::setup",
             "file" => "file::setup::setup",
+            "auto" => "auto::setup::setup",
             "secondary" => "secondary::setup::setup",
             "erratic" => "erratic::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
@@ -187,7 +192,12 @@ fn main() {
         code.push_str("struct ChainTransferers<'a>(&'a Chain);\nimpl transfer::Transferer for ChainTransferers<'_> {\nfn transfer(&self, request: transfer::TransferRequest<'_>) -> Result<Option<pharos_server::Stream>, pharos_server::Error> {\n");
         code.push_str("#[cfg(test)] if let Some(plugin) = &self.0.transfer_test_first { match transfer::Transferer::transfer(plugin, request) { Ok(None) => {}, result => return result } }\n");
         for name in enabled.iter().copied().filter(|name| transferer(name)) {
-            writeln!(code, "if let Some(plugin) = &self.0.r#{name} {{ match transfer::Transferer::transfer(plugin, request) {{ Ok(None) => {{}}, result => return result }} }}").unwrap();
+            let call = if name == "auto" {
+                "plugin.transfer_query(request)"
+            } else {
+                "transfer::Transferer::transfer(plugin, request)"
+            };
+            writeln!(code, "if let Some(plugin) = &self.0.r#{name} {{ match {call} {{ Ok(None) => {{}}, result => return result }} }}").unwrap();
         }
         code.push_str("#[cfg(test)] if let Some(plugin) = &self.0.transfer_test_second { match transfer::Transferer::transfer(plugin, request) { Ok(None) => {}, result => return result } }\nlet _ = (self.0, request);\nOk(None)\n}\n}\n");
     }
@@ -232,7 +242,7 @@ fn main() {
         let next = next_plugin(&enabled, i + 1);
         let call = if *name == "transfer" {
             format!("plugin.serve_with(cx, Next{i}(self), Some(&ChainTransferers(self))).await")
-        } else if *name == "file" || *name == "secondary" {
+        } else if *name == "file" || *name == "secondary" || *name == "auto" {
             let tail = enabled
                 .iter()
                 .skip(i + 1)
@@ -291,6 +301,9 @@ fn main() {
         code.push_str("fn metrics_enabled(&self) -> bool { self.prometheus.is_some() }\n");
     } else {
         code.push_str("fn metrics_enabled(&self) -> bool { false }\n");
+    }
+    if enabled.contains(&"auto") && enabled.contains(&"prometheus") {
+        code.push_str("fn dynamic_metric_zones(&self) -> Option<&pharos_server::metrics::DynamicZones> { self.auto.as_ref().map(|plugin| plugin.metric_zones()) }\n");
     }
     if enabled.contains(&"errors") {
         code.push_str("fn stacktrace(&self) -> bool { self.errors.as_ref().is_some_and(|plugin| plugin.stacktrace) }\n");
