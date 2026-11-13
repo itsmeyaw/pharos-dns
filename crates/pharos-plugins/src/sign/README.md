@@ -6,7 +6,7 @@
 
 - Only SHA-256 CDS records are created. CoreDNS also creates SHA-1 CDS; RFC 9905 §2 forbids creating SHA-1 DS records.
 - The shared signer has the key and canonical-RDATA restrictions listed under `dnssec`, including rejecting SHA-1 signing algorithms and RSA keys below 2048 bits.
-- CAA and URI output preserves literal backslash octets. CoreDNS's presentation-format writer can interpret them as escapes.
+- CAA and URI output escapes octets that CoreDNS's presentation-format writer would misread, so literal backslashes survive. CoreDNS writes `a\123z` as `a{z`; plain values are written as CoreDNS writes them.
 - Restart and shutdown wait for in-progress signing to finish before returning; CoreDNS does not wait for its signing goroutines. Pharos serializes each signer's checks, while CoreDNS's initial signing can overlap its periodic check.
 
 - CoreDNS checks SOA signature inception and expiration every five hours; it does not check whether the unsigned file changed. The actual expiration window is seven days, despite the upstream README saying 14 days. Like CoreDNS, `key directory` is not implemented.
