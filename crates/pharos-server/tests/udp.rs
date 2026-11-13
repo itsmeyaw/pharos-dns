@@ -156,7 +156,7 @@ impl Handler for Alternating {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn simultaneous_pending_and_ready_queries_keep_their_responses() {
     for shed in [false, true] {
         let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
