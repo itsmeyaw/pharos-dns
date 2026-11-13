@@ -14,8 +14,29 @@ use pharos_proto::{
 
 use crate::zone::Zone;
 
+#[cfg(test)]
 pub(super) fn sign(
     apex: &Name,
+    path: &Path,
+    keys: &[KeyPair],
+    now: u32,
+    inception_jitter: u32,
+    expiration_jitter: u32,
+) -> Result<Vec<ZoneRecord>, String> {
+    sign_with_owner(
+        apex,
+        apex,
+        path,
+        keys,
+        now,
+        inception_jitter,
+        expiration_jitter,
+    )
+}
+
+pub(super) fn sign_with_owner(
+    apex: &Name,
+    key_owner: &Name,
     path: &Path,
     keys: &[KeyPair],
     now: u32,
@@ -73,7 +94,7 @@ pub(super) fn sign(
         dnskey.extend_from_slice(&[key.public.protocol, key.public.algorithm]);
         dnskey.extend_from_slice(&key.public.public_key);
         let tag = key_tag(&dnskey).ok_or("invalid DNSKEY")?;
-        let cds = cds_rdata(apex, &dnskey, DigestType::Sha256).ok_or("invalid DNSKEY")?;
+        let cds = cds_rdata(key_owner, &dnskey, DigestType::Sha256).ok_or("invalid DNSKEY")?;
         // RFC 7344 §§4.1–4.2: CDS and CDNSKEY publish the child key's delegation data.
         for (rtype, rdata) in [
             (Type::DNSKEY, dnskey.clone()),
@@ -81,7 +102,7 @@ pub(super) fn sign(
             (Type::CDS, cds),
         ] {
             records.push(ZoneRecord {
-                owner: apex.clone(),
+                owner: key_owner.clone(),
                 ttl: soa_ttl,
                 class: Class::IN,
                 rtype,

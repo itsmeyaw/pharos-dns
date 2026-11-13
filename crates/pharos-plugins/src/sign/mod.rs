@@ -17,6 +17,7 @@ use std::{
 #[derive(Debug)]
 struct Signer {
     apex: Name,
+    key_owner: Name,
     source: PathBuf,
     directory: PathBuf,
     keys: Arc<Vec<KeyPair>>,
@@ -50,8 +51,9 @@ impl Signer {
         if !output::needs_resign(&target, now) {
             return;
         }
-        let result = signer::sign(
+        let result = signer::sign_with_owner(
             &self.apex,
+            &self.key_owner,
             &self.source,
             &self.keys,
             now,

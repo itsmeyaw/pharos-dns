@@ -143,3 +143,51 @@ async fn sign_lifecycle_can_stop_and_restart() {
     lifecycle.run(Phase::Shutdown).await.unwrap();
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test]
+async fn coredns_multi_origin_reuses_the_last_key_owner() {
+    use pharos_proto::{Type, zone::ZoneParser};
+    use pharos_server::Phase;
+    let directory =
+        std::env::temp_dir().join(format!("pharos-sign-origins-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let key = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+    );
+    let source = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sign/db.miek.nl_ns"
+    );
+    let text = format!(
+        ". {{\n sign {source} miek.nl example.org {{\n key file {key}\n directory {}\n }}\n}}",
+        directory.display()
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let lifecycle = &configured[0].config.lifecycle;
+    lifecycle.run(Phase::Startup).await.unwrap();
+    let path = directory.join("db.miek.nl.signed");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    let records: Vec<_> = ZoneParser::new(
+        std::io::BufReader::new(std::fs::File::open(path).unwrap()),
+        "miek.nl.".parse().unwrap(),
+        "signed",
+    )
+    .map(Result::unwrap)
+    .collect();
+    let owner = records
+        .iter()
+        .find(|rr| rr.rtype == Type::DNSKEY)
+        .unwrap()
+        .owner
+        .to_string();
+    assert_eq!(owner, "example.org.");
+    std::fs::remove_dir_all(directory).unwrap();
+}

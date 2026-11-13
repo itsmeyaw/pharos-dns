@@ -69,11 +69,19 @@ pub(crate) fn setup(
             }
         }
         let keys = Arc::new(keys);
+        // CoreDNS shares key records across origins and leaves their owner set to the last origin.
+        let key_owner = origins
+            .last()
+            .map(|origin| origin.parse().map_err(|_| cursor.error("invalid Zone")))
+            .transpose()?;
         for origin in origins {
             let mut jitter = [0_u8; 8];
             getrandom::getrandom(&mut jitter).map_err(|error| cursor.error(error.to_string()))?;
             signers.push(Signer {
                 apex: origin.parse().map_err(|_| cursor.error("invalid Zone"))?,
+                key_owner: key_owner
+                    .clone()
+                    .ok_or_else(|| cursor.error("missing Zone"))?,
                 source: source.clone(),
                 directory: directory.clone(),
                 keys: Arc::clone(&keys),
