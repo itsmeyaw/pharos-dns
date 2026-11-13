@@ -20,6 +20,69 @@ fn known(kind: Type) -> bool {
     kind != Type::NONE && kind != Type::RESERVED && !kind.to_string().starts_with("TYPE")
 }
 
+fn build_zone(
+    origin: Name,
+    records: Vec<ZoneRecord>,
+    max_records: usize,
+    max_bytes: usize,
+) -> Result<Zone, String> {
+    if records.len() > max_records {
+        return Err("Zone exceeds max_records".into());
+    }
+    let mut remaining = max_bytes;
+    let mut names: BTreeMap<Name, (bool, bool)> = BTreeMap::new();
+    let mut soa_count = 0;
+    for rr in &records {
+        let size = rr
+            .owner
+            .as_wire()
+            .len()
+            .checked_add(10)
+            .and_then(|size| size.checked_add(rr.rdata.len()))
+            .ok_or("Zone exceeds max_bytes")?;
+        remaining = remaining
+            .checked_sub(size)
+            .ok_or("Zone exceeds max_bytes")?;
+        if rr.class != Class::IN
+            || !rr.owner.is_subdomain_of(&origin)
+            || super::setup::unsupported(rr.rtype)
+        {
+            return Err("invalid Zone record".into());
+        }
+        // RFC 1034 §3.6.2: CNAME data cannot coexist with other data at the same owner.
+        let state = names.entry(rr.owner.clone()).or_default();
+        if rr.rtype == Type::CNAME {
+            if state.0 || state.1 {
+                return Err("CNAME conflict".into());
+            }
+            state.0 = true;
+        } else {
+            if state.0 {
+                return Err("CNAME conflict".into());
+            }
+            state.1 = true;
+        }
+        if rr.rtype == Type::SOA {
+            // RFC 2136 §§4.2 and 7.11: Zone SOA serials must be nonzero.
+            let serial = rr
+                .rdata
+                .len()
+                .checked_sub(20)
+                .and_then(|offset| rr.rdata.get(offset..offset + 4))
+                .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+                .map(u32::from_be_bytes);
+            if rr.owner != origin || serial.is_none_or(|serial| serial == 0) {
+                return Err("invalid SOA".into());
+            }
+            soa_count += 1;
+        }
+    }
+    if soa_count != 1 {
+        return Err("Zone must have exactly one SOA".into());
+    }
+    Zone::from_records(origin, records)
+}
+
 // RFC 2136 §3.4.1: prescan the complete Update section before changing the Zone.
 fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
     for record in records {
@@ -146,7 +209,7 @@ fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
 
 #[cfg(test)]
 mod tests {
-    use super::{prerequisites, validate_updates};
+    use super::{build_zone, prerequisites, validate_updates};
     use crate::zone::Zone;
     use pharos_proto::{
         Class, Name, Rcode, Type,
@@ -261,5 +324,34 @@ mod tests {
         ] {
             assert_eq!(validate_updates(&zone, &[record]), expected);
         }
+    }
+
+    #[test]
+    fn coredns_zone_validation_and_limits() {
+        let existing = zone();
+        let origin = existing.apex().clone();
+        let records = existing.records().to_vec();
+        assert!(build_zone(origin.clone(), records.clone(), 100, 10000).is_ok());
+        assert!(build_zone(origin.clone(), records.clone(), 1, 10000).is_err());
+        assert!(build_zone(origin.clone(), records.clone(), 100, 1).is_err());
+        let mut out_of_zone = records.clone();
+        out_of_zone[1].owner = "other.test.".parse().unwrap();
+        assert!(build_zone(origin.clone(), out_of_zone, 100, 10000).is_err());
+        let mut unsupported = records.clone();
+        unsupported[1].rtype = Type::RRSIG;
+        assert!(build_zone(origin.clone(), unsupported, 100, 10000).is_err());
+        let mut duplicate_soa = records.clone();
+        duplicate_soa.push(records[0].clone());
+        assert!(build_zone(origin.clone(), duplicate_soa, 100, 10000).is_err());
+        let mut cname_conflict = records.clone();
+        let mut cname = records[2].clone();
+        cname.rtype = Type::CNAME;
+        cname.rdata = "target.example.org."
+            .parse::<Name>()
+            .unwrap()
+            .as_wire()
+            .to_vec();
+        cname_conflict.push(cname);
+        assert!(build_zone(origin, cname_conflict, 100, 10000).is_err());
     }
 }
