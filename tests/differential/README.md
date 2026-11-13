@@ -39,6 +39,8 @@ Each scenario is a directory containing:
    all other fields and record counts are compared.
    `mask rrsig.random-validity` also permits independent validity durations,
    as required by the randomized offline `sign` Plugin.
+   `rcode REFUSED | exact Query line` or `rcode NOERROR | exact Query line`
+   additionally checks that both servers return the specified RCODE.
 - Any other files or subdirectories are copied into separate temporary working
   directories for both processes, preserving relative paths.
 - `wait-zone` (optional): a Query whose positive answer indicates that an
@@ -55,9 +57,10 @@ Each scenario is a directory containing:
   reject unsigned RRsets or signatures outside their validity interval.
 
 IDs and RR order within each section are ignored; all other fields are compared.
-Unsigned TCP AXFR comparisons collect the complete stream through its closing
-SOA before comparing records, independent of Message boundaries. The combined
-records must fit into one 65,535-octet comparison Message.
+TCP AXFR comparisons collect the complete stream through its closing SOA before
+comparing records, independent of Message boundaries. Signed streams are
+authenticated in full, including the closing Message, before comparison. The
+combined records must fit into one 65,535-octet comparison Message.
 
 The two `dynupdate` README examples use the documented seed and public test key.
 They compare a signed UPDATE followed by a Query; the in-memory case also

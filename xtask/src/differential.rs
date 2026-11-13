@@ -25,6 +25,7 @@ struct Expect {
     mask_rrsig: compare::RrsigMask,
     dedupe_additional: bool,
     deviations: Vec<(String, u16, u16)>,
+    rcodes: Vec<(String, Rcode)>,
 }
 
 fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
@@ -47,6 +48,20 @@ fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
                 expect.mask_rrsig = compare::RrsigMask::RandomValidity;
             }
             "mask" if value == "additional.duplicates" => expect.dedupe_additional = true,
+            "rcode" => {
+                let (rcode, query) = value
+                    .split_once('|')
+                    .ok_or_else(|| format!("invalid rcode expectation: {value}"))?;
+                let rcode = match rcode.trim() {
+                    "NOERROR" => Rcode::NOERROR,
+                    "REFUSED" => Rcode::REFUSED,
+                    _ => return Err(format!("invalid rcode expectation: {value}")),
+                };
+                if query.trim().is_empty() {
+                    return Err(format!("invalid rcode expectation: {value}"));
+                }
+                expect.rcodes.push((query.trim().to_owned(), rcode));
+            }
             "deviation" => {
                 let parts: Vec<_> = value.split('|').map(str::trim).collect();
                 let heading = parts[0];
@@ -80,6 +95,17 @@ fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
         }
     }
     Ok(expect)
+}
+
+fn check_rcode(expect: &Expect, query: &str, rcode: Rcode) -> Result<(), String> {
+    if expect
+        .rcodes
+        .iter()
+        .any(|(line, expected)| line == query && *expected != rcode)
+    {
+        return Err(format!("unexpected RCODE {rcode} for {query}"));
+    }
+    Ok(())
 }
 
 fn apply_deviation(
@@ -310,6 +336,15 @@ pub(crate) fn start_hickory(
 }
 
 fn exchange(port: u16, transport: Transport, wire: &[u8]) -> Result<Vec<u8>, String> {
+    exchange_with_key(port, transport, wire, None)
+}
+
+fn exchange_with_key(
+    port: u16,
+    transport: Transport,
+    wire: &[u8],
+    key: Option<&pharos_proto::TsigKey>,
+) -> Result<Vec<u8>, String> {
     let timeout = Some(Duration::from_secs(2));
     match transport {
         Transport::Udp => {
@@ -348,10 +383,10 @@ fn exchange(port: u16, transport: Transport, wire: &[u8]) -> Result<Vec<u8>, Str
                 .questions()
                 .next()
                 .is_some_and(|q| q.qtype == Type::AXFR)
-                && !query.additionals().any(|rr| rr.rtype == Type::TSIG)
+                && (key.is_some() || !query.additionals().any(|rr| rr.rtype == Type::TSIG))
                 && Message::parse(&data).map_err(|e| e.to_string())?.rcode() == Rcode::NOERROR
             {
-                collect_axfr(&mut stream, data)
+                collect_axfr(&mut stream, data, wire, key)
             } else {
                 Ok(data)
             }
@@ -359,7 +394,19 @@ fn exchange(port: u16, transport: Transport, wire: &[u8]) -> Result<Vec<u8>, Str
     }
 }
 
-fn collect_axfr(stream: &mut TcpStream, first: Vec<u8>) -> Result<Vec<u8>, String> {
+fn collect_axfr(
+    stream: &mut TcpStream,
+    first: Vec<u8>,
+    query: &[u8],
+    key: Option<&pharos_proto::TsigKey>,
+) -> Result<Vec<u8>, String> {
+    let request = key
+        .map(|_| pharos_proto::TsigRecord::parse(query))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let mut authentication = key
+        .zip(request.as_ref())
+        .map(|(key, request)| pharos_proto::TsigStream::new(key, request.mac));
     let mut messages = vec![first];
     let mut soa_count = 0;
     let mut opening_soa = None;
@@ -367,6 +414,16 @@ fn collect_axfr(stream: &mut TcpStream, first: Vec<u8>) -> Result<Vec<u8>, Strin
     loop {
         let current = Message::parse(messages.last().ok_or("missing AXFR Message")?)
             .map_err(|e| e.to_string())?;
+        if let Some(authentication) = &mut authentication {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs();
+            // RFC 8945 §5.3.1: validate the chained MAC on the complete AXFR stream.
+            authentication
+                .verify(messages.last().ok_or("missing AXFR Message")?, now, 0)
+                .map_err(|e| format!("invalid AXFR TSIG: {e}"))?;
+        }
         for record in current.answers() {
             if soa_count >= 2 || (records == 0 && record.rtype != Type::SOA) {
                 return Err("invalid AXFR SOA framing".into());
@@ -395,6 +452,11 @@ fn collect_axfr(stream: &mut TcpStream, first: Vec<u8>) -> Result<Vec<u8>, Strin
         let mut wire = vec![0; usize::from(u16::from_be_bytes(length))];
         stream.read_exact(&mut wire).map_err(|e| e.to_string())?;
         messages.push(wire);
+    }
+    if let Some(authentication) = authentication {
+        authentication
+            .finish()
+            .map_err(|e| format!("invalid AXFR TSIG: {e}"))?;
     }
     let first = Message::parse(&messages[0]).map_err(|e| e.to_string())?;
     let mut wire = Vec::new();
@@ -735,9 +797,10 @@ fn scenario(
         {
             let query = query::parse(line).map_err(|e| format!("{line}: {e}"))?;
             let wire = query.wire()?;
-            let mut pwire = exchange(pp_num, query.transport, &wire)
+            let key = query.axfr_key();
+            let mut pwire = exchange_with_key(pp_num, query.transport, &wire, key.as_ref())
                 .map_err(|e| format!("Pharos {line}: {e}"))?;
-            let cwire = exchange(cp_num, query.transport, &wire)
+            let cwire = exchange_with_key(cp_num, query.transport, &wire, key.as_ref())
                 .map_err(|e| format!("CoreDNS {line}: {e}"))?;
             if pwire.len() < 4 || cwire.len() < 4 {
                 return Err(format!("{line}: truncated Response header"));
@@ -745,6 +808,8 @@ fn scenario(
             apply_deviation(&expect, line, &mut pwire, &cwire)?;
             let pm = Message::parse(&pwire).map_err(|e| format!("Pharos {line}: {e}"))?;
             let cm = Message::parse(&cwire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            check_rcode(&expect, line, pm.rcode()).map_err(|e| format!("Pharos: {e}"))?;
+            check_rcode(&expect, line, cm.rcode()).map_err(|e| format!("CoreDNS: {e}"))?;
             if let Some(key) = &dnssec_key
                 && line.split_whitespace().any(|part| part == "+dnssec")
             {
@@ -757,12 +822,20 @@ fn scenario(
                 dnssec::validate_response(&cm, key, now)
                     .map_err(|e| format!("CoreDNS {line}: {e}"))?;
             }
-            let p_signed = query
-                .check_response_tsig(&wire, &pwire)
-                .map_err(|e| format!("Pharos {line}: {e}"))?;
-            let c_signed = query
-                .check_response_tsig(&wire, &cwire)
-                .map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            let p_signed = if key.is_some() && pm.rcode() == Rcode::NOERROR {
+                false
+            } else {
+                query
+                    .check_response_tsig(&wire, &pwire)
+                    .map_err(|e| format!("Pharos {line}: {e}"))?
+            };
+            let c_signed = if key.is_some() && cm.rcode() == Rcode::NOERROR {
+                false
+            } else {
+                query
+                    .check_response_tsig(&wire, &cwire)
+                    .map_err(|e| format!("CoreDNS {line}: {e}"))?
+            };
             let pm = if p_signed {
                 pm.without_final_tsig().ok_or("missing Pharos TSIG")?
             } else {
@@ -924,6 +997,31 @@ mod tests {
     }
 
     #[test]
+    fn expected_rcode_is_checked_for_exact_query() {
+        let expect = parse_expect("rcode REFUSED | example.org. AXFR IN tcp", "").unwrap();
+        assert!(
+            super::check_rcode(
+                &expect,
+                "example.org. AXFR IN tcp",
+                pharos_proto::Rcode::REFUSED
+            )
+            .is_ok()
+        );
+        assert!(
+            super::check_rcode(
+                &expect,
+                "example.org. AXFR IN tcp",
+                pharos_proto::Rcode::NOERROR
+            )
+            .is_err()
+        );
+        assert!(
+            super::check_rcode(&expect, "other. AXFR IN tcp", pharos_proto::Rcode::NOERROR).is_ok()
+        );
+        assert!(parse_expect("rcode BOGUS | example.org. AXFR IN tcp", "").is_err());
+    }
+
+    #[test]
     fn axfr_comparison_collects_all_messages() {
         use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
         use std::io::{Read, Write};
@@ -977,6 +1075,84 @@ mod tests {
         let wire = super::exchange(port, crate::query::Transport::Tcp, &request).unwrap();
         assert_eq!(Message::parse(&wire).unwrap().answer_count(), 3);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn signed_axfr_collects_and_authenticates_every_message() {
+        use pharos_proto::{
+            Class, Message, MessageBuilder, Name, NameRef, Section, TsigAlgorithm, TsigKey,
+            TsigRecord, TsigStream, Type,
+        };
+        use std::io::{Read, Write};
+        for corrupt in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut length = [0; 2];
+                socket.read_exact(&mut length).unwrap();
+                let mut request = vec![0; usize::from(u16::from_be_bytes(length))];
+                socket.read_exact(&mut request).unwrap();
+                let query_mac = TsigRecord::parse(&request).unwrap().mac;
+                let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+                let mut signer = TsigStream::new(&key, query_mac);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let name: Name = "example.org.".parse().unwrap();
+                let name = NameRef::parse(name.as_wire(), 0).unwrap();
+                for last in [false, true] {
+                    let mut wire = Vec::new();
+                    let mut builder = MessageBuilder::new(&mut wire, 65535, 0, 0x8400).unwrap();
+                    builder.question(name, Type::AXFR, Class::IN).unwrap();
+                    if last {
+                        builder
+                            .record(
+                                Section::Answer,
+                                name,
+                                Type::A,
+                                Class::IN,
+                                60,
+                                &[192, 0, 2, 1],
+                            )
+                            .unwrap();
+                    }
+                    builder
+                        .record_with(Section::Answer, name, Type::SOA, Class::IN, 60, |w| {
+                            w.write_name(name)?;
+                            w.write_name(name)?;
+                            for value in [1_u32, 2, 3, 4, 5] {
+                                w.write_bytes(&value.to_be_bytes())?;
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                    let _ = builder.finish();
+                    signer.sign(&mut wire, now, 300).unwrap();
+                    if last && corrupt {
+                        let byte = wire.len() - 8;
+                        wire[byte] ^= 1;
+                    }
+                    socket
+                        .write_all(&(wire.len() as u16).to_be_bytes())
+                        .unwrap();
+                    socket.write_all(&wire).unwrap();
+                }
+            });
+            let query =
+                crate::query::parse("example.org. AXFR IN tcp +tsig=key.:c2VjcmV0").unwrap();
+            let wire = query.wire().unwrap();
+            let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+            let result =
+                super::exchange_with_key(port, crate::query::Transport::Tcp, &wire, Some(&key));
+            if corrupt {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(Message::parse(&result.unwrap()).unwrap().answer_count(), 3);
+            }
+            server.join().unwrap();
+        }
     }
 
     #[test]

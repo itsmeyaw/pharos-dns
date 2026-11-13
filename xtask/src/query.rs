@@ -240,6 +240,18 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
 }
 
 impl Query {
+    pub(crate) fn axfr_key(&self) -> Option<TsigKey> {
+        if self.qtype != Type::AXFR || self.transport != Transport::Tcp {
+            return None;
+        }
+        match &self.tsig {
+            Some((name, secret, TsigCase::Valid)) => {
+                Some(TsigKey::new(name.clone(), TsigAlgorithm::Sha256, secret))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn check_response_tsig(
         &self,
         query: &[u8],
