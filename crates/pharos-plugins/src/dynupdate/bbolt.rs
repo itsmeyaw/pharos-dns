@@ -349,8 +349,8 @@ impl Store {
 
     fn tree_inner(&self, root: u64, pages: &mut BTreeSet<u64>, zone: bool) -> io::Result<Entries> {
         let mut entries = Entries::new();
-        let mut pending = vec![root];
-        while let Some(id) = pending.pop() {
+        let mut pending: Vec<(u64, Option<Vec<u8>>, Option<Vec<u8>>)> = vec![(root, None, None)];
+        while let Some((id, lower, upper)) = pending.pop() {
             let data = self.page_inner(id, zone)?;
             let overflow = u64::from(u32_at(&data, 12)?);
             for page in id..=id + overflow {
@@ -360,7 +360,15 @@ impl Store {
             }
             match u16_at(&data, 8)? {
                 LEAF => {
-                    for (key, value) in leaf_entries(&data)? {
+                    let leaf = leaf_entries(&data)?;
+                    if lower.as_ref().is_some_and(|bound| {
+                        leaf.first_key_value().is_none_or(|(key, _)| key != bound)
+                    }) || upper.as_ref().is_some_and(|bound| {
+                        leaf.last_key_value().is_some_and(|(key, _)| key >= bound)
+                    }) {
+                        return Err(invalid());
+                    }
+                    for (key, value) in leaf {
                         if entries.insert(key, value).is_some() {
                             return Err(invalid());
                         }
@@ -374,8 +382,46 @@ impl Store {
                     {
                         return Err(invalid());
                     }
+                    if count == 0 {
+                        return Err(invalid());
+                    }
+                    let table_end = HEADER + count * 16;
+                    let mut previous_end = table_end;
+                    let mut children: Vec<(Vec<u8>, u64)> = Vec::with_capacity(count);
                     for index in 0..count {
-                        pending.push(u64_at(&data, HEADER + index * 16 + 8)?);
+                        let element = HEADER + index * 16;
+                        let start = element
+                            .checked_add(u32_at(&data, element)? as usize)
+                            .ok_or_else(invalid)?;
+                        let end = start
+                            .checked_add(u32_at(&data, element + 4)? as usize)
+                            .ok_or_else(invalid)?;
+                        if start < previous_end || start == end {
+                            return Err(invalid());
+                        }
+                        let key = data.get(start..end).ok_or_else(invalid)?.to_vec();
+                        if children
+                            .last()
+                            .is_some_and(|(previous, _)| previous >= &key)
+                        {
+                            return Err(invalid());
+                        }
+                        children.push((key, u64_at(&data, element + 8)?));
+                        previous_end = end;
+                    }
+                    if lower.as_ref().is_some_and(|bound| &children[0].0 != bound)
+                        || upper
+                            .as_ref()
+                            .is_some_and(|bound| &children[count - 1].0 >= bound)
+                    {
+                        return Err(invalid());
+                    }
+                    for index in 0..count {
+                        let high = children
+                            .get(index + 1)
+                            .map(|(key, _)| key.clone())
+                            .or_else(|| upper.clone());
+                        pending.push((children[index].1, Some(children[index].0.clone()), high));
                     }
                 }
                 _ => return Err(invalid()),
@@ -1608,5 +1654,41 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn rejects_corrupt_branch_key_even_when_children_are_valid() {
+        use std::os::unix::fs::FileExt;
+        let path = path();
+        let Some(output) = go("write-many-keys", &path) else {
+            return;
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let store = Store::open(file).unwrap();
+        let root = store
+            .tree(store.meta.root, &mut std::collections::BTreeSet::new())
+            .unwrap();
+        let bucket = super::u64_at(&root.get(b"dynupdate-v1".as_slice()).unwrap().1, 0).unwrap();
+        let page = store.page(bucket).unwrap();
+        assert_eq!(super::u16_at(&page, 8).unwrap(), super::BRANCH);
+        store
+            .file
+            .write_all_at(
+                &0u32.to_ne_bytes(),
+                bucket * store.meta.page_size as u64 + super::HEADER as u64 + 4,
+            )
+            .unwrap();
+        assert!(store.read().is_err());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 }
