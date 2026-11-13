@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
     io::{self, BufReader, ErrorKind},
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     sync::{Arc, Mutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
@@ -230,6 +230,7 @@ pub(super) fn acquire(config: &Config) -> io::Result<Arc<Shared>> {
             .read(true)
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(path)?
     };
     let metadata = file.metadata()?;
@@ -281,6 +282,7 @@ mod tests {
 
     #[test]
     fn validates_without_creating_and_shares_hardlinked_store() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "pharos-dynamic-store-{}-{}",
             std::process::id(),
@@ -299,6 +301,14 @@ mod tests {
         validate(&config).unwrap();
         assert!(!dir.join("db").exists());
         let first = acquire(&config).unwrap();
+        assert_eq!(
+            std::fs::metadata(dir.join("db"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
         assert_eq!(first.current.load().serial(), Some(1));
         assert_eq!(
             first.db.lock().unwrap().as_ref().unwrap().read().unwrap().0,
