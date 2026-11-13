@@ -2,7 +2,7 @@ use super::Zone;
 use pharos_proto::{Class, Rdata, Type, zone::ZoneRecord};
 
 // RFC 2136 §1.1.1: RR comparison ignores TTL and compares domain names case-insensitively.
-fn same_record(left: &ZoneRecord, right: &ZoneRecord) -> bool {
+pub(crate) fn same_record(left: &ZoneRecord, right: &ZoneRecord) -> bool {
     left.owner == right.owner
         && left.rtype == right.rtype
         && match (

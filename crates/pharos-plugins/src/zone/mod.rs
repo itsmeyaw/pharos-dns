@@ -2,7 +2,7 @@
 
 #[cfg(feature = "plugin-transfer")]
 mod transfer;
-mod update;
+pub(crate) mod update;
 
 use pharos_proto::{
     Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type,

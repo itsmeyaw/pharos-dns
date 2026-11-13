@@ -34,7 +34,7 @@ impl Config {
     }
 }
 
-fn unsupported(kind: Type) -> bool {
+pub(super) fn unsupported(kind: Type) -> bool {
     matches!(
         kind,
         Type::SIG
