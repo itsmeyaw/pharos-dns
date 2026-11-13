@@ -5,7 +5,10 @@ use pharos_dnssec::keys::KeyPair;
 
 use super::{Sign, Signer, register_hooks};
 
-pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<crate::Chain>) -> Result<(), Error> {
+pub(crate) fn setup(
+    cursor: &mut Cursor<'_>,
+    block: &mut BlockContext<crate::Chain>,
+) -> Result<(), Error> {
     let domains: Vec<_> = block.keys().iter().map(|key| key.domain.as_str()).collect();
     let mut signers = Vec::new();
     while cursor.next() {
@@ -23,22 +26,38 @@ pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<crate::Cha
             let option = cursor.val().to_owned();
             let args = cursor.remaining_args();
             match option.as_str() {
-                "directory" if args.len() == 1 => directory = crate::resolve_path(PathBuf::from(&args[0]), crate::root_path(&block.config)),
+                "directory" if args.len() == 1 => {
+                    directory = crate::resolve_path(
+                        PathBuf::from(&args[0]),
+                        crate::root_path(&block.config),
+                    )
+                }
                 "directory" => return Err(cursor.arg_err()),
                 "key" => {
                     let kind = args.first().ok_or_else(|| cursor.arg_err())?;
                     match kind.as_str() {
                         "file" => {
-                            if args.len() < 2 { return Err(cursor.arg_err()); }
+                            if args.len() < 2 {
+                                return Err(cursor.arg_err());
+                            }
                             for name in &args[1..] {
-                                let base = name.strip_suffix(".key").or_else(|| name.strip_suffix(".private")).unwrap_or(name);
-                                let base = crate::resolve_path(PathBuf::from(base), crate::root_path(&block.config));
+                                let base = name
+                                    .strip_suffix(".key")
+                                    .or_else(|| name.strip_suffix(".private"))
+                                    .unwrap_or(name);
+                                let base = crate::resolve_path(
+                                    PathBuf::from(base),
+                                    crate::root_path(&block.config),
+                                );
                                 let mut public = base.as_os_str().to_os_string();
                                 public.push(".key");
                                 let mut private = base.as_os_str().to_os_string();
                                 private.push(".private");
-                                let key = KeyPair::from_files(public, private).map_err(|err| cursor.error(err.to_string()))?;
-                                if key.public.flags & 257 != 257 { return Err(cursor.error("DNSKEY is not a KSK")); }
+                                let key = KeyPair::from_files(public, private)
+                                    .map_err(|err| cursor.error(err.to_string()))?;
+                                if key.public.flags & 257 != 257 {
+                                    return Err(cursor.error("DNSKEY is not a KSK"));
+                                }
                                 keys.push(key);
                             }
                         }
@@ -53,7 +72,15 @@ pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<crate::Cha
         for origin in origins {
             let mut jitter = [0_u8; 8];
             getrandom::getrandom(&mut jitter).map_err(|error| cursor.error(error.to_string()))?;
-            signers.push(Signer { apex: origin.parse().map_err(|_| cursor.error("invalid Zone"))?, source: source.clone(), directory: directory.clone(), keys: Arc::clone(&keys), inception_jitter: u32::from_ne_bytes(jitter[..4].try_into().unwrap()) % (18 * 3600), expiration_jitter: u32::from_ne_bytes(jitter[4..].try_into().unwrap()) % (5 * 86400) });
+            signers.push(Signer {
+                apex: origin.parse().map_err(|_| cursor.error("invalid Zone"))?,
+                source: source.clone(),
+                directory: directory.clone(),
+                keys: Arc::clone(&keys),
+                inception_jitter: u32::from_ne_bytes(jitter[..4].try_into().unwrap()) % (18 * 3600),
+                expiration_jitter: u32::from_ne_bytes(jitter[4..].try_into().unwrap())
+                    % (5 * 86400),
+            });
         }
     }
     register_hooks(&mut block.config.lifecycle, signers);
