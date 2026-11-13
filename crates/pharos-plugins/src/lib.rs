@@ -37,6 +37,8 @@ pub mod debug;
 pub mod dns64;
 #[cfg(feature = "plugin-dnssec")]
 pub mod dnssec;
+#[cfg(test)]
+mod dynupdate;
 #[cfg(feature = "plugin-erratic")]
 pub mod erratic;
 #[cfg(feature = "plugin-errors")]
