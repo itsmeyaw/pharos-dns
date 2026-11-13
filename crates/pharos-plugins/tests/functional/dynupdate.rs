@@ -644,6 +644,36 @@ async fn coredns_external_cname_uses_self_lookup() {
         [Type::CNAME, Type::A]
     );
     assert_eq!(message.answers().last().unwrap().rdata, [192, 0, 2, 88]);
+    let outside: Name = "leaf.external.test.".parse().unwrap();
+    wire.clear();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 2, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(outside.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    assert_eq!(
+        Box::pin(server.handle(
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        ))
+        .await,
+        Action::Respond
+    );
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 88]
+    );
     drop(server);
     std::fs::remove_dir_all(dir).unwrap();
 }
