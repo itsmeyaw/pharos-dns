@@ -197,8 +197,8 @@ pub(crate) fn spawn<H: Handler>(
                 }
             }
         }
-        // Tokio JoinSet::shutdown: release pending sockets before the Listener is replaced.
-        pending.shutdown().await;
+        // Tokio JoinSet::abort_all: release pending sockets before the Listener is replaced.
+        crate::udp::shutdown_pending(&mut pending).await;
         Ok(())
     })
 }

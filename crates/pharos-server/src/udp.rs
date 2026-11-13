@@ -223,6 +223,18 @@ pub(crate) fn recycle(
     }
 }
 
+// Tokio JoinSet::abort_all: cancel Queries and report panics completed before shutdown.
+pub(crate) async fn shutdown_pending(pending: &mut JoinSet<Buffers>) {
+    pending.abort_all();
+    while let Some(result) = pending.join_next().await {
+        if let Err(error) = result
+            && error.is_panic()
+        {
+            crate::logging::log("ERROR", "server", "Recovered panic in UDP Query");
+        }
+    }
+}
+
 // Rust Vec::capacity: reuse a completed Query's buffers before allocating replacements.
 pub(crate) fn take_buffers(
     query: &mut Vec<u8>,
@@ -443,7 +455,7 @@ fn spawn_shed<H: Handler>(
                 owned_query = reused;
             }
         }
-        pending.shutdown().await;
+        shutdown_pending(&mut pending).await;
         stack.close();
         (&mut writer.0).await.map_err(io::Error::other)?;
         Ok(())
@@ -519,8 +531,8 @@ fn spawn_plain<H: Handler>(
                 }
             }
         }
-        // Tokio JoinSet::shutdown: release pending sockets before the Listener is replaced.
-        pending.shutdown().await;
+        // Tokio JoinSet::abort_all: release pending sockets before the Listener is replaced.
+        shutdown_pending(&mut pending).await;
         Ok(())
     })
 }
@@ -553,6 +565,40 @@ mod tests {
             recycle(Some(Ok((vec![0], Some(vec![0])))), &mut free);
         }
         assert_eq!(free.len(), MAX_REUSABLE_BUFFERS);
+    }
+
+    #[tokio::test]
+    async fn shutdown_reaps_panics_and_cancels_pending_queries() {
+        let mut pending = JoinSet::new();
+        let panic = pending.spawn(async { panic!("test shutdown panic") });
+        let started = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let handler = Arc::new(Blocking {
+            started: started.clone(),
+            dropped: dropped.clone(),
+        });
+        pending.spawn(async move {
+            let mut response = Vec::new();
+            handler
+                .handle(
+                    &[],
+                    "127.0.0.1:53".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response,
+                )
+                .await;
+            (Vec::new(), Some(response))
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !panic.is_finished() || !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown_pending(&mut pending).await;
+        assert!(pending.is_empty());
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     struct Panicking(bool);
