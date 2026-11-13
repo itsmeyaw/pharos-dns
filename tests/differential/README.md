@@ -34,9 +34,11 @@ Each scenario is a directory containing:
   that exact pair of flag values on that Query; other fields remain checked.
   `mask soa.serial` ignores only the SOA serial, for scenarios that explicitly
   opt in; Kubernetes SOA serials can depend on each process's startup time.
-  `mask rrsig` ignores only the RRSIG Original TTL, signature contents and
-  inception/expiration timestamps; signature validity duration, signature length,
-  all other fields and record counts are compared.
+   `mask rrsig` ignores only the RRSIG Original TTL, signature contents and
+   inception/expiration timestamps; signature validity duration, signature length,
+   all other fields and record counts are compared.
+   `mask rrsig.random-validity` also permits independent validity durations,
+   as required by the randomized offline `sign` Plugin.
 - Any other files or subdirectories are copied into separate temporary working
   directories for both processes, preserving relative paths.
 - `wait-zone` (optional): a Query whose positive answer indicates that an
@@ -48,6 +50,9 @@ Each scenario is a directory containing:
   with the new Zone, wait for the given positive Query on both secondaries,
   and repeat all comparisons. The fixture must use a longer SOA refresh than
   the test timeout so the new answer demonstrates NOTIFY-driven transfer.
+- `verify-dnssec` (optional): name a fixture DNSKEY file. For every `+dnssec`
+  Query, verify each Answer and Authority RRSIG from both implementations and
+  reject unsigned RRsets or signatures outside their validity interval.
 
 IDs and RR order within each section are ignored; all other fields are compared.
 Unsigned TCP AXFR comparisons collect the complete stream through its closing
@@ -74,7 +79,8 @@ transfer NOTIFY messages are unsigned, so these pairs are unsigned for parity.
 `tsig-transfer-readme` separately covers signed and unsigned AXFR clients.
 
 The `sign-readme` scenario uses local test keys and a one-second file reload
-to wait for offline signing. The two README examples using `key directory` are
+to wait for offline signing. It serves the signed Zone through `file` and
+`dnssec`, compares Responses and validates both servers' RRSIGs. The two README examples using `key directory` are
 skipped because CoreDNS itself rejects that unimplemented option. The final
 example documents a configuration pitfall rather than a stable response.
 

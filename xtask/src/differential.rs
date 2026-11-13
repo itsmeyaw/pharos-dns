@@ -13,7 +13,7 @@ use std::{
 use pharos_proto::{Message, MessageBuilder, Rcode, Rdata, Section, Type};
 
 use crate::{
-    compare,
+    compare, dnssec,
     query::{self, Transport},
 };
 
@@ -22,7 +22,7 @@ struct Expect {
     ttl: u32,
     mask_srv_port: bool,
     mask_soa_serial: bool,
-    mask_rrsig: bool,
+    mask_rrsig: compare::RrsigMask,
     dedupe_additional: bool,
     deviations: Vec<(String, u16, u16)>,
 }
@@ -42,7 +42,10 @@ fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
             "ttl" => expect.ttl = value.parse().map_err(|_| format!("invalid TTL: {value}"))?,
             "mask" if value == "additional.srv.port" => expect.mask_srv_port = true,
             "mask" if value == "soa.serial" => expect.mask_soa_serial = true,
-            "mask" if value == "rrsig" => expect.mask_rrsig = true,
+            "mask" if value == "rrsig" => expect.mask_rrsig = compare::RrsigMask::FixedValidity,
+            "mask" if value == "rrsig.random-validity" => {
+                expect.mask_rrsig = compare::RrsigMask::RandomValidity;
+            }
             "mask" if value == "additional.duplicates" => expect.dedupe_additional = true,
             "deviation" => {
                 let parts: Vec<_> = value.split('|').map(str::trim).collect();
@@ -573,6 +576,14 @@ fn scenario(
     mixed: bool,
 ) -> Result<usize, String> {
     let input = fs::read_to_string(path.join("queries")).map_err(|e| e.to_string())?;
+    let dnssec_key = match fs::read_to_string(path.join("verify-dnssec")) {
+        Ok(name) => {
+            let input = fs::read_to_string(path.join(name.trim())).map_err(|e| e.to_string())?;
+            Some(pharos_dnssec::keys::parse_dnskey(&input).map_err(|e| e.to_string())?)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.to_string()),
+    };
     let expect = match fs::read_to_string(path.join("expect")) {
         Ok(input) => parse_expect(&input, docs)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Expect::default(),
@@ -734,6 +745,18 @@ fn scenario(
             apply_deviation(&expect, line, &mut pwire, &cwire)?;
             let pm = Message::parse(&pwire).map_err(|e| format!("Pharos {line}: {e}"))?;
             let cm = Message::parse(&cwire).map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            if let Some(key) = &dnssec_key
+                && line.split_whitespace().any(|part| part == "+dnssec")
+            {
+                let now = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
+                    .as_secs() as u32;
+                dnssec::validate_response(&pm, key, now)
+                    .map_err(|e| format!("Pharos {line}: {e}"))?;
+                dnssec::validate_response(&cm, key, now)
+                    .map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            }
             let p_signed = query
                 .check_response_tsig(&wire, &pwire)
                 .map_err(|e| format!("Pharos {line}: {e}"))?;
@@ -876,7 +899,7 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::{
-        TempDir, apply_deviation, copy_fixtures, kubernetes_corefile, kubernetes_ready,
+        TempDir, apply_deviation, compare, copy_fixtures, kubernetes_corefile, kubernetes_ready,
         parse_expect, reserve_port, start,
     };
 
@@ -1062,8 +1085,14 @@ mod tests {
 
     #[test]
     fn rrsig_mask_is_an_explicit_expectation() {
-        assert!(!parse_expect("", "").unwrap().mask_rrsig);
-        assert!(parse_expect("mask rrsig", "").unwrap().mask_rrsig);
+        assert_eq!(
+            parse_expect("", "").unwrap().mask_rrsig,
+            compare::RrsigMask::None
+        );
+        assert_eq!(
+            parse_expect("mask rrsig", "").unwrap().mask_rrsig,
+            compare::RrsigMask::FixedValidity
+        );
         assert!(parse_expect("mask rrsig.extra", "").is_err());
     }
 

@@ -4,6 +4,7 @@ mod bench;
 mod compare;
 mod coredns;
 mod differential;
+mod dnssec;
 mod e2e;
 mod hickory;
 mod query;
