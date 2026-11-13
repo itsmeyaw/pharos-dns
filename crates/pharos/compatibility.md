@@ -224,8 +224,8 @@
 
 ## Server
 
-- Each UDP worker handles up to 256 waiting Queries concurrently and retains at
-  most 16 completed coroutine slots for reuse. Each plain slot reserves 65,535
+- Each UDP worker handles up to 256 waiting Queries concurrently and retains one
+  active or spare slot plus at most 16 completed slots for reuse. Each plain slot reserves 65,535
   bytes each for its Query and Response, plus coroutine storage; shed Responses
   use the shared stack. Forwarded Responses may exceed the client's UDP limit.
   At capacity one ordinary Query waits; further ordinary datagrams are dropped,
