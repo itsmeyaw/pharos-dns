@@ -20,7 +20,7 @@ fn known(kind: Type) -> bool {
     kind != Type::NONE && kind != Type::RESERVED && !kind.to_string().starts_with("TYPE")
 }
 
-fn build_zone(
+pub(super) fn build_zone(
     origin: Name,
     records: Vec<ZoneRecord>,
     max_records: usize,

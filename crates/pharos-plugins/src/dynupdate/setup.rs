@@ -6,7 +6,7 @@ use std::{
 };
 
 #[derive(Debug)]
-struct Permission {
+pub(super) struct Permission {
     key: Name,
     owner: Option<Name>,
     types: Vec<Type>,
@@ -14,18 +14,18 @@ struct Permission {
 }
 
 #[derive(Debug)]
-struct Config {
-    origin: Name,
-    seed: PathBuf,
-    database: Option<PathBuf>,
-    permissions: Vec<Permission>,
-    max_records: usize,
-    max_bytes: usize,
-    max_update_records: usize,
+pub(super) struct Config {
+    pub(super) origin: Name,
+    pub(super) seed: PathBuf,
+    pub(super) database: Option<PathBuf>,
+    pub(super) permissions: Vec<Permission>,
+    pub(super) max_records: usize,
+    pub(super) max_bytes: usize,
+    pub(super) max_update_records: usize,
 }
 
 impl Config {
-    fn allows(&self, key: &Name, owner: &Name, kind: Type) -> bool {
+    pub(super) fn allows(&self, key: &Name, owner: &Name, kind: Type) -> bool {
         self.permissions.iter().any(|rule| {
             &rule.key == key
                 && rule.owner.as_ref().is_none_or(|name| name == owner)
@@ -83,7 +83,7 @@ fn policy_type(raw: &str) -> Option<Type> {
     Some(kind)
 }
 
-fn parse(
+pub(super) fn parse(
     cursor: &mut Cursor<'_>,
     server_domains: &[&str],
     root: Option<&Path>,

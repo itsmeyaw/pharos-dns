@@ -6,7 +6,7 @@ fn invalid() -> io::Error {
 }
 
 // RFC 1035 §4.1.3: store consecutive uncompressed resource records, not a DNS Message.
-fn encode(records: &[ZoneRecord]) -> io::Result<Vec<u8>> {
+pub(super) fn encode(records: &[ZoneRecord]) -> io::Result<Vec<u8>> {
     let mut result = Vec::new();
     for rr in records {
         let len = u16::try_from(rr.rdata.len()).map_err(|_| invalid())?;
@@ -21,7 +21,11 @@ fn encode(records: &[ZoneRecord]) -> io::Result<Vec<u8>> {
 }
 
 // RFC 1035 §§3.1 and 4.1.3: stored owners and fixed RR fields must fit completely.
-fn decode(data: &[u8], max_records: usize, max_bytes: usize) -> io::Result<Vec<ZoneRecord>> {
+pub(super) fn decode(
+    data: &[u8],
+    max_records: usize,
+    max_bytes: usize,
+) -> io::Result<Vec<ZoneRecord>> {
     if data.is_empty() || data.len() > max_bytes {
         return Err(invalid());
     }
