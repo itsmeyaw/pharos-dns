@@ -1,12 +1,12 @@
 use super::*;
-use std::{collections::HashSet, io::BufReader, path::Path};
+use std::{io::BufReader, path::Path};
 
 impl Shared {
     pub(super) fn scan(&self) {
         let _gate = self.scan_gate.lock().unwrap();
         let old = self.zones.load_full();
         let mut zones = HashMap::new();
-        let mut seen = HashSet::new();
+        let mut seen = HashMap::new();
         let root =
             std::fs::canonicalize(&self.directory).unwrap_or_else(|_| self.directory.clone());
         visit(&root, &mut |path| {
@@ -24,17 +24,17 @@ impl Shared {
             if !origin.ends_with('.') {
                 origin.push('.');
             }
-            if !seen.insert(origin.clone()) {
+            if let Some(previous) = seen.get(&origin) {
                 pharos_server::logging::log(
                     "WARN",
                     "auto",
                     &format!(
-                        "Multiple Zone files match {origin}: ignoring {}",
-                        path.display()
+                        "Multiple zone files match origin {origin:?}: using {previous:?} instead of {path:?}"
                     ),
                 );
                 return;
             }
+            seen.insert(origin.clone(), path.to_owned());
             let Ok(apex) = origin.parse::<Name>() else {
                 return;
             };
