@@ -1,0 +1,8 @@
+.:{port} {
+    rewrite continue {
+        rcode regex (.*)\.coredns\.rocks 2 0
+    }
+    template IN A coredns.rocks {
+        rcode SERVFAIL
+    }
+}

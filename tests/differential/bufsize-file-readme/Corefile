@@ -1,0 +1,5 @@
+.:{port} {
+    bufsize 1220
+    file db.example.org
+    log
+}
