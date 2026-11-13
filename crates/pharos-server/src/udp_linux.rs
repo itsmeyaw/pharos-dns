@@ -86,19 +86,19 @@ pub(crate) fn spawn<H: Handler>(
         let mut query = Vec::with_capacity(MAX_MESSAGE);
         let mut slot = None;
         let mut pending = tokio::task::JoinSet::new();
-        loop {
+        'read: loop {
             if !crate::udp::capacity(&mut pending, &mut shutdown).await {
-                return Ok(());
+                break;
             }
             tokio::select! {
                 biased;
-                _ = shutdown.changed() => return Ok(()),
+                _ = shutdown.changed() => break,
                 ready = socket.readable() => match ready {
                     Ok(()) => {}
                     Err(error) => {
                         crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
                         tokio::select! {
-                            _ = shutdown.changed() => return Ok(()),
+                            _ = shutdown.changed() => break 'read,
                             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
                         }
                         continue;
@@ -115,7 +115,7 @@ pub(crate) fn spawn<H: Handler>(
                 Err(error) => {
                     crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
                     tokio::select! {
-                        _ = shutdown.changed() => return Ok(()),
+                        _ = shutdown.changed() => break 'read,
                         _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
                     }
                     continue;
@@ -124,7 +124,7 @@ pub(crate) fn spawn<H: Handler>(
             for index in 0..count {
                 if let Some((length, peer)) = peers[index] {
                     if !crate::udp::capacity(&mut pending, &mut shutdown).await {
-                        return Ok(());
+                        break 'read;
                     }
                     let client = crate::canonical_peer(peer);
                     if let Some(cancelled) =
@@ -163,6 +163,9 @@ pub(crate) fn spawn<H: Handler>(
                 }
             }
         }
+        // Tokio JoinSet::shutdown: release pending sockets before the Listener is replaced.
+        pending.shutdown().await;
+        Ok(())
     })
 }
 

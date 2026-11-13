@@ -337,20 +337,20 @@ fn spawn_plain<H: Handler>(
         let mut response = Some(Vec::with_capacity(65535));
         let mut slot = None;
         let mut pending = JoinSet::new();
-        loop {
+        'read: loop {
             if !capacity(&mut pending, &mut shutdown).await {
-                return Ok(());
+                break;
             }
             tokio::select! {
                 biased;
-                _ = shutdown.changed() => return Ok(()),
+                _ = shutdown.changed() => break,
                 received = socket.recv_from(&mut query) => {
                     let (length, peer) = match received {
                         Ok(message) => message,
                         Err(error) => {
                             crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
                             tokio::select! {
-                                _ = shutdown.changed() => return Ok(()),
+                                _ = shutdown.changed() => break 'read,
                                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
                             }
                             continue;
@@ -370,6 +370,9 @@ fn spawn_plain<H: Handler>(
                 }
             }
         }
+        // Tokio JoinSet::shutdown: release pending sockets before the Listener is replaced.
+        pending.shutdown().await;
+        Ok(())
     })
 }
 

@@ -156,7 +156,7 @@ async fn udp_pending_limit_resumes_after_completion() {
         permits.add_permits(1);
         wait_for_count(&started, 257).await;
         listener.shutdown().await.unwrap();
-        wait_for_count(&dropped, 257).await;
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 257);
     }
 }
 
@@ -186,7 +186,7 @@ async fn udp_shutdown_cancels_pending_queries() {
             .await
             .unwrap()
             .unwrap();
-        wait_for_count(&dropped, 1).await;
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
 
