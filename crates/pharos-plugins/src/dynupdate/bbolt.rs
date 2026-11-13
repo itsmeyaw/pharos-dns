@@ -704,4 +704,52 @@ mod tests {
         assert!(output.stdout.starts_with(b"example.org.\n"));
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn falls_back_to_prior_meta_when_latest_is_corrupt() {
+        let path = path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::create(file).unwrap();
+        store.commit(b"example.org.", b"old").unwrap();
+        store.commit(b"example.org.", b"new").unwrap();
+        use std::os::unix::fs::FileExt;
+        store.file.write_all_at(&[0; 8], 4096 + 72).unwrap();
+        drop(store);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(Store::open(file).unwrap().read().unwrap().1, b"old");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hard_link_sees_committed_data() {
+        let path = path();
+        let alias = path.with_extension("alias");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::create(file).unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+        store.commit(b"example.org.", b"new").unwrap();
+        drop(store);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&alias)
+            .unwrap();
+        assert_eq!(Store::open(file).unwrap().read().unwrap().1, b"new");
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(alias).unwrap();
+    }
 }
