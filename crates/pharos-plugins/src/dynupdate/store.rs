@@ -20,10 +20,17 @@ static STORES: OnceLock<Registry> = OnceLock::new();
 
 pub(super) struct Shared {
     pub(super) current: ArcSwap<Zone>,
-    pub(super) db: Mutex<bbolt::Store>,
+    pub(super) db: Mutex<Option<bbolt::Store>>,
 }
 
 impl Shared {
+    pub(super) fn memory(zone: Arc<Zone>) -> Self {
+        Self {
+            current: ArcSwap::from(zone),
+            db: Mutex::new(None),
+        }
+    }
+
     // RFC 2136 §3.2: serialize prerequisites with the durable UPDATE they guard.
     pub(super) fn transact(
         &self,
@@ -63,10 +70,12 @@ impl Shared {
         if check_limits(&candidate, config).is_err() {
             return Ok((Rcode::REFUSED, false));
         }
-        db.commit(
-            config.origin.canonical().as_bytes(),
-            &wire::encode(candidate.records())?,
-        )?;
+        if let Some(db) = db.as_mut() {
+            db.commit(
+                config.origin.canonical().as_bytes(),
+                &wire::encode(candidate.records())?,
+            )?;
+        }
         self.current.store(Arc::new(candidate));
         Ok((Rcode::NOERROR, true))
     }
@@ -251,7 +260,7 @@ pub(super) fn acquire(config: &Config) -> io::Result<Arc<Shared>> {
     };
     let shared = Arc::new(Shared {
         current: ArcSwap::from_pointee(zone),
-        db: Mutex::new(db),
+        db: Mutex::new(Some(db)),
     });
     stores.insert(id, Arc::downgrade(&shared));
     Ok(shared)
@@ -290,7 +299,10 @@ mod tests {
         assert!(!dir.join("db").exists());
         let first = acquire(&config).unwrap();
         assert_eq!(first.current.load().serial(), Some(1));
-        assert_eq!(first.db.lock().unwrap().read().unwrap().0, b"example.org.");
+        assert_eq!(
+            first.db.lock().unwrap().as_ref().unwrap().read().unwrap().0,
+            b"example.org."
+        );
         std::fs::hard_link(dir.join("db"), dir.join("alias")).unwrap();
         let alias_text = "dynupdate {\nfile seed\ndatabase alias\nallow key.example.org. * A\n}";
         let tokens = lex("Corefile", alias_text);
@@ -331,6 +343,7 @@ mod tests {
         let shared = acquire(&config).unwrap();
         {
             let mut db = shared.db.lock().unwrap();
+            let db = db.as_mut().unwrap();
             let (_, records) = db.read().unwrap();
             db.commit(b"EXAMPLE.ORG.", &records).unwrap();
         }

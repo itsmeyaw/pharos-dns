@@ -22,6 +22,8 @@ pub struct Cache {
     denial: store::Store,
     metrics: Vec<(SocketAddr, pharos_server::metrics::CacheMetrics)>,
     chain: OnceLock<Weak<crate::Chain>>,
+    #[cfg(feature = "plugin-dynupdate")]
+    bypass: OnceLock<Name>,
     writes: Mutex<()>,
 }
 
@@ -93,6 +95,8 @@ impl Cache {
             denial: store::Store::new(config.denial_capacity),
             metrics: Vec::new(),
             chain: OnceLock::new(),
+            #[cfg(feature = "plugin-dynupdate")]
+            bypass: OnceLock::new(),
             writes: Mutex::new(()),
             config,
         })
@@ -100,6 +104,11 @@ impl Cache {
 
     pub(crate) fn bind(&self, chain: &Arc<crate::Chain>) {
         let _ = self.chain.set(Arc::downgrade(chain));
+        // CoreDNS plugin/cache/setup.go:27-32 and plugin/dynupdate/dynupdate.go:88-91 bypass mutable Zones.
+        #[cfg(feature = "plugin-dynupdate")]
+        if let Some(dynamic) = &chain.dynupdate {
+            let _ = self.bypass.set(dynamic.origin().clone());
+        }
     }
 
     pub(crate) fn set_metrics(
@@ -134,7 +143,15 @@ impl Plugin for Cache {
         let Some(question) = query.questions().next() else {
             return next.run(cx).await;
         };
+        #[cfg(feature = "plugin-dynupdate")]
+        let dynamic = self
+            .bypass
+            .get()
+            .is_some_and(|zone| contains(question.name, zone));
+        #[cfg(not(feature = "plugin-dynupdate"))]
+        let dynamic = false;
         if query.opcode() != Opcode::QUERY
+            || dynamic
             || query.additionals().any(|record| record.rtype == Type::TSIG)
             || question.name.wire_len()
                 != question

@@ -17,7 +17,7 @@ fn query_metatype(kind: Type) -> bool {
 }
 
 fn known(kind: Type) -> bool {
-    kind != Type::NONE && kind != Type::RESERVED && !kind.to_string().starts_with("TYPE")
+    super::setup::known(kind)
 }
 
 pub(super) fn build_zone(

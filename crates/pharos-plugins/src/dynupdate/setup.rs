@@ -59,6 +59,93 @@ pub(super) fn unsupported(kind: Type) -> bool {
     )
 }
 
+// miekg/dns v1.1.73 ztypes.go:11-92: only types with RR constructors are accepted.
+pub(super) fn known(kind: Type) -> bool {
+    matches!(
+        kind,
+        Type::A
+            | Type::AAAA
+            | Type::AFSDB
+            | Type::AMTRELAY
+            | Type::ANY
+            | Type::APL
+            | Type::AVC
+            | Type::CAA
+            | Type::CDNSKEY
+            | Type::CDS
+            | Type::CERT
+            | Type::CNAME
+            | Type::CSYNC
+            | Type::DHCID
+            | Type::DLV
+            | Type::DNAME
+            | Type::DNSKEY
+            | Type::DS
+            | Type::EID
+            | Type::EUI48
+            | Type::EUI64
+            | Type::GID
+            | Type::GPOS
+            | Type::HINFO
+            | Type::HIP
+            | Type::HTTPS
+            | Type::IPSECKEY
+            | Type::ISDN
+            | Type::KEY
+            | Type::KX
+            | Type::L32
+            | Type::L64
+            | Type::LOC
+            | Type::LP
+            | Type::MB
+            | Type::MD
+            | Type::MF
+            | Type::MG
+            | Type::MINFO
+            | Type::MR
+            | Type::MX
+            | Type::NAPTR
+            | Type::NID
+            | Type::NIMLOC
+            | Type::NINFO
+            | Type::NS
+            | Type::NSAP_PTR
+            | Type::NSEC
+            | Type::NSEC3
+            | Type::NSEC3PARAM
+            | Type::NULL
+            | Type::NXNAME
+            | Type::NXT
+            | Type::OPENPGPKEY
+            | Type::OPT
+            | Type::PTR
+            | Type::PX
+            | Type::RESINFO
+            | Type::RKEY
+            | Type::RP
+            | Type::RRSIG
+            | Type::RT
+            | Type::SIG
+            | Type::SMIMEA
+            | Type::SOA
+            | Type::SPF
+            | Type::SRV
+            | Type::SSHFP
+            | Type::SVCB
+            | Type::TA
+            | Type::TALINK
+            | Type::TKEY
+            | Type::TLSA
+            | Type::TSIG
+            | Type::TXT
+            | Type::UID
+            | Type::UINFO
+            | Type::URI
+            | Type::X25
+            | Type::ZONEMD
+    )
+}
+
 fn policy_type(raw: &str) -> Option<Type> {
     let kind = Type::from_mnemonic(raw).or_else(|| {
         raw.to_ascii_uppercase()
@@ -67,7 +154,8 @@ fn policy_type(raw: &str) -> Option<Type> {
             .ok()
             .map(Type)
     })?;
-    if kind == Type::NONE
+    if !known(kind)
+        || kind == Type::NONE
         || unsupported(kind)
         || matches!(
             kind,
@@ -206,6 +294,25 @@ pub(super) fn parse(
     })
 }
 
+#[cfg(feature = "plugin-dynupdate")]
+pub(crate) fn setup(
+    cursor: &mut Cursor<'_>,
+    block: &mut pharos_corefile::BlockContext<crate::Chain>,
+) -> Result<(), Error> {
+    let domains = block
+        .keys()
+        .iter()
+        .map(|key| key.domain.as_str())
+        .collect::<Vec<_>>();
+    let config = parse(cursor, &domains, crate::root_path(&block.config))?;
+    let zone = super::store::validate(&config).map_err(|error| cursor.error(error.to_string()))?;
+    let dynamic = super::DynUpdate::new(config, zone);
+    #[cfg(feature = "plugin-transfer")]
+    dynamic.register_hooks(&mut block.config.lifecycle);
+    block.config.dynupdate = Some(dynamic);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse;
@@ -246,6 +353,8 @@ mod tests {
             "allow key.example.org. * A",
             "file seed.zone",
             "file seed.zone\nallow key.example.org. * TYPE65280",
+            "file seed.zone\nallow key.example.org. * ATMA",
+            "file seed.zone\nallow key.example.org. * UNSPEC",
             "file seed.zone\nallow key.example.org. * * TXT",
             "file seed.zone\nallow * * TXT",
             "file seed.zone\nallow key.example.org. outside.test. TXT",
