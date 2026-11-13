@@ -822,4 +822,79 @@ mod tests {
         drop(second);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn acknowledged_update_survives_abrupt_process_exit() {
+        use pharos_proto::{Class, Name, NameRef, Rcode, Type, zone::ZoneRecord};
+        const ENV: &str = "PHAROS_DYNUPDATE_EXIT_DIRECTORY";
+        if let Some(dir) = std::env::var_os(ENV) {
+            let dir = std::path::PathBuf::from(dir);
+            let tokens = lex(
+                "Corefile",
+                "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+            );
+            let config = setup::parse(
+                &mut Cursor::new("Corefile", &tokens),
+                &["example.org"],
+                Some(&dir),
+            )
+            .unwrap();
+            let shared = acquire(&config).unwrap();
+            let key: Name = "key.example.org.".parse().unwrap();
+            let update = ZoneRecord {
+                owner: "saved.example.org.".parse().unwrap(),
+                rtype: Type::A,
+                class: Class::IN,
+                ttl: 60,
+                rdata: vec![192, 0, 2, 77],
+            };
+            assert_eq!(
+                shared.transact(&config, &key, &[], &[update]).unwrap().0,
+                Rcode::NOERROR
+            );
+            std::process::exit(73);
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "pharos-dynamic-exit-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+        )
+        .unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dynupdate::store::tests::acknowledged_update_survives_abrupt_process_exit",
+            ])
+            .env(ENV, &dir)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(73));
+        std::fs::remove_file(dir.join("seed")).unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let zone = validate(&config).unwrap();
+        let owner: Name = "saved.example.org.".parse().unwrap();
+        assert_eq!(zone.serial(), Some(11));
+        assert_eq!(
+            zone.rrset(NameRef::parse(owner.as_wire(), 0).unwrap(), Type::A)
+                .next()
+                .unwrap()
+                .rdata,
+            [192, 0, 2, 77]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
