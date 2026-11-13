@@ -357,3 +357,110 @@ async fn changed_zone_sends_notify() {
     packet[2] |= 0x80;
     socket.send_to(&packet[..len], peer).await.unwrap();
 }
+
+#[cfg(feature = "plugin-transfer")]
+#[tokio::test]
+async fn notify_coalesces_changes_while_one_is_in_flight() {
+    use pharos_plugins::transfer::Transferer;
+    async fn update(chain: &Chain, index: u8) {
+        let domain: Name = "example.org.".parse().unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let owner: Name = format!("host-{index}.example.org.").parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, u16::from(index), 0x2800).unwrap();
+        builder
+            .question(
+                NameRef::parse(domain.as_wire(), 0).unwrap(),
+                Type::SOA,
+                Class::IN,
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                NameRef::parse(owner.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+                60,
+                &[192, 0, 2, index],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None; 8];
+        let mut metadata = Metadata::new(&mut slots);
+        metadata.set_validated_tsig(&key);
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata,
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(Box::pin(chain.serve(&mut cx)).await, Outcome::Response);
+        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    }
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let destination = socket.local_addr().unwrap();
+    let seed = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
+    let text = format!(
+        "example.org:53 {{\n transfer {{\n to {destination}\n }}\n dynupdate {{\n file {seed}\n allow key.example.org. * A\n }}\n}}"
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let chain = &configured[0].config;
+    chain
+        .dynupdate
+        .as_ref()
+        .unwrap()
+        .bind_transfer(chain.transfer.as_ref());
+    update(chain, 1).await;
+    let mut first = [0; 512];
+    let (len, peer) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        socket.recv_from(&mut first),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    update(chain, 2).await;
+    update(chain, 3).await;
+    let mut next = [0; 512];
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            socket.recv_from(&mut next)
+        )
+        .await
+        .is_err()
+    );
+    first[2] |= 0x80;
+    socket.send_to(&first[..len], peer).await.unwrap();
+    let (len, peer) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        socket.recv_from(&mut next),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        Message::parse(&next[..len]).unwrap().opcode(),
+        pharos_proto::Opcode::NOTIFY
+    );
+    next[2] |= 0x80;
+    socket.send_to(&next[..len], peer).await.unwrap();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            socket.recv_from(&mut next)
+        )
+        .await
+        .is_err()
+    );
+}
