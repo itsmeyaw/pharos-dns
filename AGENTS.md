@@ -8,6 +8,8 @@
 
 ## Performance Focus
 
+These are the target performance focus, ranked from top to bottom:
+
 1. Tail Latency (p99 and p99.9) Under Burst Load and Churn
 2. Memory Footprint and OOM Resilience at High Cluster Scale
 3. Negative Caching and Upstream Forwarding Throughput Under `ndots` Amplification
