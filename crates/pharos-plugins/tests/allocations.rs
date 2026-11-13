@@ -59,6 +59,10 @@ mod auto_allocations;
 #[path = "allocations/secondary_allocations.rs"]
 mod secondary_allocations;
 
+#[cfg(all(feature = "plugin-sign", feature = "plugin-whoami"))]
+#[path = "allocations/sign_allocations.rs"]
+mod sign_allocations;
+
 #[path = "allocations"]
 mod template {
     #[path = "template_allocations.rs"]
