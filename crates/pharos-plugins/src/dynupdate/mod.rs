@@ -227,9 +227,8 @@ impl DynUpdate {
 #[cfg(feature = "plugin-dynupdate")]
 fn expand_record(record: pharos_proto::Record<'_>, message: &[u8]) -> Result<ZoneRecord, ()> {
     // RFC 2136 §3.4: UPDATE records are expanded before becoming Zone data.
-    let rdata = if record.rdata.is_empty()
-        && (record.class != Class::IN || setup::unsupported(record.rtype))
-    {
+    // miekg/dns accepts zero-length RDATA before decoding the RR type.
+    let rdata = if record.rdata.is_empty() {
         Vec::new()
     } else if let Some(data) = crate::zone::update::legacy_name_rdata(
         record.rtype,

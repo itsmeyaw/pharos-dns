@@ -46,7 +46,7 @@ async fn serves_seed_zone() {
 }
 
 #[tokio::test]
-async fn malformed_empty_a_update_is_rejected() {
+async fn empty_a_update_matches_coredns() {
     let seed = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/file/example.zone"
@@ -94,7 +94,7 @@ async fn malformed_empty_a_update_is_rejected() {
         max_response_size: 512,
     };
     assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
-    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::FORMERR);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
 }
 
 #[tokio::test]
