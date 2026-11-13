@@ -67,6 +67,9 @@ impl ShedStack {
     pub(crate) async fn checkout_wait(&self) -> Vec<u8> {
         loop {
             let notified = self.free_notify.notified();
+            tokio::pin!(notified);
+            // Tokio Notified::enable: register before checkout to avoid lost wakeups.
+            notified.as_mut().enable();
             if let Some(data) = self.checkout() {
                 return data;
             }
@@ -77,7 +80,8 @@ impl ShedStack {
     pub(crate) fn release(&self, mut data: Vec<u8>) {
         data.clear();
         self.inner.lock().unwrap().free.push(data);
-        self.free_notify.notify_waiters();
+        // Tokio Notify::notify_one: wake one registered buffer waiter per release.
+        self.free_notify.notify_one();
     }
 
     pub(crate) fn full(&self) -> bool {
@@ -100,7 +104,7 @@ impl ShedStack {
             self.metrics.response_drop();
             evicted.clear();
             inner.free.push(evicted);
-            self.free_notify.notify_waiters();
+            self.free_notify.notify_one();
         } else {
             inner.size += 1;
         }
@@ -274,6 +278,35 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_buffer_waiter_does_not_strand_others() {
+        let stack = Arc::new(ShedStack::new(1, Registry::default().shed("dns://:53")));
+        let mut held = (0..3)
+            .map(|_| stack.checkout().unwrap())
+            .collect::<Vec<_>>();
+        let first = tokio::spawn({
+            let stack = stack.clone();
+            async move { stack.checkout_wait().await }
+        });
+        let second = tokio::spawn({
+            let stack = stack.clone();
+            async move { stack.checkout_wait().await }
+        });
+        tokio::task::yield_now().await;
+        first.abort();
+        let _ = first.await;
+        stack.release(held.pop().unwrap());
+        // Tokio Notify::notified: cancelling a waiter does not strand the next waiter.
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), second)
+            .await
+            .unwrap()
+            .unwrap();
+        held.push(response);
+        for buffer in held {
+            stack.release(buffer);
+        }
     }
 
     #[tokio::test]
