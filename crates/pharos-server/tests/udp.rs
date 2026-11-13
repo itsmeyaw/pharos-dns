@@ -126,6 +126,90 @@ struct SlowEcho {
     shed: Option<pharos_server::metrics::ShedMetrics>,
 }
 
+struct Alternating {
+    started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+    shed: Option<pharos_server::metrics::ShedMetrics>,
+}
+impl Handler for Alternating {
+    fn udp_workers(&self) -> usize {
+        1
+    }
+    fn shed_metrics(&self) -> Option<pharos_server::metrics::ShedMetrics> {
+        self.shed.clone()
+    }
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        // RFC 1035 §4.2.1: each UDP Response belongs to its original Query.
+        if query[0].is_multiple_of(2) {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.permits.acquire().await.unwrap().forget();
+        }
+        response.extend_from_slice(query);
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn simultaneous_pending_and_ready_queries_keep_their_responses() {
+    for shed in [false, true] {
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            Alternating {
+                started: started.clone(),
+                permits: permits.clone(),
+                shed: shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53")),
+            },
+        )
+        .await
+        .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(listener.local_addr()).await.unwrap();
+        for id in 0..32_u8 {
+            socket.send(&[id]).await.unwrap();
+        }
+        wait_for_count(&started, 16).await;
+        let mut seen = [false; 32];
+        for _ in 0..16 {
+            let mut response = [0; 1];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut response))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(response[0] % 2, 1);
+            assert!(!seen[usize::from(response[0])]);
+            seen[usize::from(response[0])] = true;
+        }
+        permits.add_permits(16);
+        for _ in 0..16 {
+            let mut response = [0; 1];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut response))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(response[0] % 2, 0);
+            assert!(!seen[usize::from(response[0])]);
+            seen[usize::from(response[0])] = true;
+        }
+        assert!(seen.into_iter().all(|value| value));
+        listener.shutdown().await.unwrap();
+    }
+}
+
 impl Handler for SlowEcho {
     fn udp_workers(&self) -> usize {
         1
