@@ -284,11 +284,13 @@ mod tests {
     #[test]
     fn validates_without_creating_and_shares_hardlinked_store() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-store-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-store-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("seed"), "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n").unwrap();
         let text = "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}";
@@ -333,11 +335,13 @@ mod tests {
 
     #[test]
     fn rejects_database_with_noncanonical_origin_instead_of_seed_fallback() {
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-origin-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-origin-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
@@ -367,11 +371,13 @@ mod tests {
     #[test]
     fn concurrent_prerequisites_apply_to_the_committed_snapshot() {
         use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-race-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-race-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
@@ -446,11 +452,13 @@ mod tests {
     #[test]
     fn failed_durable_commit_does_not_publish_candidate() {
         use pharos_proto::{Class, Name, Type, zone::ZoneRecord};
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-failed-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-failed-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
@@ -492,11 +500,13 @@ mod tests {
 
     #[test]
     fn corrupt_and_truncated_database_never_falls_back_to_seed() {
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-corrupt-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-corrupt-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
@@ -533,11 +543,13 @@ mod tests {
     fn large_zone_survives_restart_without_seed() {
         use pharos_proto::{Class, Name, NameRef, Rcode, Type, zone::ZoneRecord};
         use std::fmt::Write;
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-large-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-large-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         let mut seed = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n".to_owned();
         for index in 0..400 {
@@ -601,11 +613,13 @@ mod tests {
     #[test]
     fn overlapping_reloads_serialize_distinct_updates() {
         use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-reload-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-reload-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
@@ -664,11 +678,13 @@ mod tests {
         use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
         for durable in [false, true] {
             for limit in ["records", "bytes", "updates"] {
-                let dir = std::env::temp_dir().join(format!(
-                    "pharos-dynamic-limit-{}-{}",
-                    std::process::id(),
-                    NEXT.fetch_add(1, Ordering::Relaxed)
-                ));
+                let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target")
+                    .join(format!(
+                        "pharos-dynamic-limit-{}-{}",
+                        std::process::id(),
+                        NEXT.fetch_add(1, Ordering::Relaxed)
+                    ));
                 std::fs::create_dir(&dir).unwrap();
                 std::fs::write(
                     dir.join("seed"),
@@ -724,11 +740,13 @@ mod tests {
     #[test]
     fn key_and_prerequisite_checks_precede_update_prescan() {
         use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-order-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-order-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
@@ -787,11 +805,13 @@ mod tests {
 
     #[test]
     fn closed_store_entries_are_reclaimed_on_next_open() {
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-registry-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-registry-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
@@ -854,11 +874,13 @@ mod tests {
             );
             std::process::exit(73);
         }
-        let dir = std::env::temp_dir().join(format!(
-            "pharos-dynamic-exit-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-exit-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),

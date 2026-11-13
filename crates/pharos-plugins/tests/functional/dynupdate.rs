@@ -177,10 +177,12 @@ async fn coredns_update_authentication_and_other_zone_cases() {
 
 #[test]
 fn coredns_rejects_invalid_seed_zones() {
-    let dir = std::env::temp_dir().join(format!(
-        "pharos-dynupdate-invalid-seed-{}",
-        std::process::id()
-    ));
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!(
+            "pharos-dynupdate-invalid-seed-{}",
+            std::process::id()
+        ));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("seed");
     for zone in [
@@ -204,8 +206,9 @@ fn coredns_rejects_invalid_seed_zones() {
 
 #[test]
 fn duplicate_directive_does_not_create_database() {
-    let dir =
-        std::env::temp_dir().join(format!("pharos-dynupdate-duplicate-{}", std::process::id()));
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!("pharos-dynupdate-duplicate-{}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     let seed = concat!(
         env!("CARGO_MANIFEST_DIR"),

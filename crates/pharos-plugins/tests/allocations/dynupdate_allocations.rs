@@ -11,7 +11,9 @@ async fn warm_dynamic_and_unrelated_cached_queries_do_not_allocate() {
     ) {
         return;
     }
-    let root = std::env::temp_dir().join(format!("pharos-dynupdate-alloc-{}", std::process::id()));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!("pharos-dynupdate-alloc-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
     let database = root.join("database");
     let seed = concat!(

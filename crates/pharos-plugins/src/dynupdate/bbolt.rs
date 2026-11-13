@@ -735,11 +735,13 @@ mod tests {
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     fn path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "pharos-bbolt-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-bbolt-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ))
     }
 
     fn go(mode: &str, path: &std::path::Path) -> Option<std::process::Output> {
