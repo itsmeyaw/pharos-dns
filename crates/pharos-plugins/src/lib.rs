@@ -17,6 +17,8 @@ use std::{
 pub mod acl;
 #[cfg(feature = "plugin-any")]
 pub mod any;
+#[cfg(feature = "plugin-auto")]
+pub mod auto;
 #[cfg(feature = "plugin-autopath")]
 pub mod autopath;
 #[cfg(feature = "plugin-bind")]
@@ -51,6 +53,7 @@ pub mod header;
     feature = "plugin-reload",
     feature = "plugin-hosts",
     feature = "plugin-file",
+    feature = "plugin-auto",
     feature = "plugin-loadbalance",
     feature = "plugin-kubernetes",
     feature = "plugin-cancel",
@@ -86,7 +89,12 @@ pub mod secondary;
 pub mod sign;
 #[cfg(feature = "plugin-siit")]
 pub mod siit;
-#[cfg(any(feature = "plugin-file", feature = "plugin-secondary", feature = "plugin-sign"))]
+#[cfg(any(
+    feature = "plugin-file",
+    feature = "plugin-secondary",
+    feature = "plugin-auto",
+    feature = "plugin-sign"
+))]
 pub mod zone;
 
 #[cfg(all(test, feature = "plugin-cache", feature = "plugin-hosts"))]
@@ -144,6 +152,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("errors", include_str!("errors/README.md")),
     ("erratic", include_str!("erratic/README.md")),
     ("file", include_str!("file/README.md")),
+    ("auto", include_str!("auto/README.md")),
     ("secondary", include_str!("secondary/README.md")),
     ("forward", include_str!("forward/README.md")),
     ("header", include_str!("header/README.md")),
@@ -730,6 +739,7 @@ impl pharos_server::Plugin for Unimplemented {
 #[cfg(any(
     feature = "plugin-hosts",
     feature = "plugin-file",
+    feature = "plugin-auto",
     feature = "plugin-loadbalance",
     feature = "plugin-dnssec",
     feature = "plugin-sign"
@@ -749,6 +759,7 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
 #[cfg(any(
     feature = "plugin-hosts",
     feature = "plugin-file",
+    feature = "plugin-auto",
     feature = "plugin-loadbalance",
     feature = "plugin-dnssec",
     feature = "plugin-sign"

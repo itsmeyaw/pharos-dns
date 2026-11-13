@@ -71,6 +71,20 @@ pub(crate) fn bind(address: SocketAddr) -> io::Result<StdUdpSocket> {
     Ok(socket.into())
 }
 
+// Growing the descriptor table waits for an RCU grace period once threads exist (~25 ms here).
+#[cfg(target_os = "linux")]
+pub fn reserve_descriptors(count: i32) -> io::Result<()> {
+    let null = std::fs::File::open("/dev/null")?;
+    let fd = nix::fcntl::fcntl(&null, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(count))
+        .map_err(io::Error::from)?;
+    nix::unistd::close(fd).map_err(io::Error::from)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn reserve_descriptors(_count: i32) -> io::Result<()> {
+    Ok(())
+}
+
 pub(crate) fn spawn<H: Handler>(
     socket: UdpSocket,
     handler: Arc<H>,

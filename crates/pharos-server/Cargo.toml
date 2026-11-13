@@ -18,7 +18,7 @@ socket2 = { version = "0.6", features = ["all"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31", features = ["socket", "uio", "net"] }
+nix = { version = "0.31", features = ["fs", "socket", "uio", "net"] }
 
 [dev-dependencies]
 criterion = "0.5"

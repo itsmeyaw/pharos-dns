@@ -1,0 +1,8 @@
+org:{port} {
+    auto {
+        directory zones/org
+    }
+    transfer {
+        to *
+    }
+}

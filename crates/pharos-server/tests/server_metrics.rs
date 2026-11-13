@@ -8,6 +8,60 @@ use std::sync::Arc;
 
 struct Broken;
 
+struct Panicking {
+    zones: pharos_server::metrics::DynamicZones,
+}
+
+impl Chain for Panicking {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
+        panic!("test panic")
+    }
+
+    fn is_empty(&self) -> bool {
+        false
+    }
+
+    fn dynamic_metric_zones(&self) -> Option<&pharos_server::metrics::DynamicZones> {
+        Some(&self.zones)
+    }
+}
+
+#[tokio::test]
+async fn dynamic_zones_keep_panic_in_dropped_metrics() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let zones = pharos_server::metrics::DynamicZones::default();
+    zones.publish(vec!["example.org.".parse().unwrap()]);
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(Panicking { zones }), vec![]);
+    let mut server = Server::new(router, key);
+    server.logger = |_| {};
+    let query = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x03www\x07example\x03org\0\0\x01\0\x01";
+    assert_eq!(
+        server
+            .handle(
+                query,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut Vec::with_capacity(512)
+            )
+            .await,
+        Action::Respond
+    );
+    let mut text = String::new();
+    server.metrics().encode(&mut text);
+    assert!(
+        text.contains("type=\"A\",view=\"\",zone=\"dropped\"} 1"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("type=\"A\",view=\"\",zone=\"example.org.\"} 1"),
+        "{text}"
+    );
+}
+
 impl Chain for Broken {
     async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Error(Error::InvalidQuery)

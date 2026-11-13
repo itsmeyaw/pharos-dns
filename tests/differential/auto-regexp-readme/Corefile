@@ -1,0 +1,6 @@
+org:{port} {
+    auto {
+        directory zones/org www\.db\.(.*) {1}
+        reload 45s
+    }
+}

@@ -47,6 +47,7 @@ mod tcp;
 pub use tcp::write_tcp_frame;
 pub mod transfer;
 mod udp;
+pub use udp::reserve_descriptors;
 #[cfg(target_os = "linux")]
 mod udp_linux;
 

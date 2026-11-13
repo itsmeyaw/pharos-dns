@@ -103,6 +103,8 @@ fn options() -> Result<Options, (u8, String)> {
 }
 
 fn main() -> ExitCode {
+    // Best effort, before the runtime spawns workers: a failure only leaves the first growth past 64 descriptors to wait.
+    let _ = pharos_server::reserve_descriptors(512);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

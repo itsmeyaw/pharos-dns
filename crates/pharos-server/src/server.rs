@@ -56,6 +56,10 @@ pub trait Chain: Send + Sync + 'static {
     fn metrics_enabled(&self) -> bool {
         true
     }
+    /// Return dynamically discovered metric Zone names, when configured.
+    fn dynamic_metric_zones(&self) -> Option<&crate::metrics::DynamicZones> {
+        None
+    }
     fn shed_enabled(&self) -> bool {
         false
     }
@@ -105,6 +109,9 @@ impl<C: Chain> Chain for Arc<C> {
     }
     fn metrics_enabled(&self) -> bool {
         self.as_ref().metrics_enabled()
+    }
+    fn dynamic_metric_zones(&self) -> Option<&crate::metrics::DynamicZones> {
+        self.as_ref().dynamic_metric_zones()
     }
     fn shed_enabled(&self) -> bool {
         self.as_ref().shed_enabled()
@@ -444,8 +451,12 @@ impl<C: Chain> Server<C> {
         } else {
             (self.router.route(&self.key, query, peer, protocol), "")
         };
+        let dynamic_metrics = block
+            .and_then(|block| block.dynamic_metrics(view))
+            .map(|metrics| metrics.snapshot());
         let chain_start = Instant::now();
         let mut producer = None;
+        let mut metric_producer = None;
         let mut error_plugin = None;
         let mut error_logged = false;
         let mut tsig_signing = None;
@@ -481,6 +492,12 @@ impl<C: Chain> Server<C> {
                     .metadata
                     .get(crate::metrics::WRITER_METADATA)
                     .and_then(|name| block.plugin_metrics(name, view));
+                if dynamic_metrics.is_some() {
+                    metric_producer = context
+                        .metadata
+                        .get(crate::metrics::WRITER_METADATA)
+                        .and_then(|name| block.plugin_name(name));
+                }
                 error_plugin = context
                     .metadata
                     .get(crate::logging::PLUGIN_METADATA)
@@ -539,7 +556,20 @@ impl<C: Chain> Server<C> {
         } else {
             recorded_size
         };
-        if let Some(producer) = producer {
+        if let Some(dynamic) = dynamic_metrics.filter(|_| !plugin_panic || producer.is_some()) {
+            dynamic.record(
+                query.questions().next().map(|question| question.name),
+                metric_producer,
+                qtype,
+                protocol == Protocol::Tcp,
+                peer_is_ipv6(peer),
+                dnssec,
+                wire.len(),
+                response_len,
+                code,
+                duration,
+            );
+        } else if let Some(producer) = producer {
             producer.record(
                 qtype,
                 protocol == Protocol::Tcp,

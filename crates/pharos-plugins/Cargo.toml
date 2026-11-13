@@ -39,6 +39,7 @@ default = [
     "plugin-acl",
     "plugin-any",
     "plugin-autopath",
+    "plugin-auto",
     "plugin-bind",
     "plugin-bufsize",
     "plugin-cache",
@@ -76,6 +77,7 @@ default = [
     "plugin-whoami",
 ]
 plugin-root = []
+plugin-auto = ["dep:regex"]
 plugin-metadata = []
 plugin-geoip = []
 plugin-cancel = []
@@ -126,7 +128,6 @@ plugin-clouddns = []
 plugin-k8s-external = ["plugin-kubernetes"]
 plugin-kubernetes = ["dep:pharos-kubernetes"]
 plugin-file = []
-plugin-auto = []
 plugin-secondary = []
 plugin-etcd = []
 plugin-loop = []

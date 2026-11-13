@@ -921,28 +921,42 @@ async fn services_scenario() {
         let _ = builder.finish();
         queries.push(wire);
     }
-    let mut response = Vec::with_capacity(512);
-    let before = GLOBAL.stats();
-    for _ in 0..50 {
-        for wire in &queries {
-            let mut slots = [None; 8];
-            let mut cx = Context {
-                query: Message::parse(wire).unwrap(),
-                client: "127.0.0.1:1234".parse().unwrap(),
-                local: "127.0.0.1:53".parse().unwrap(),
-                transport: Transport::Dns,
-                protocol: Protocol::Udp,
-                domain: &root,
-                metadata: Metadata::new(&mut slots),
-                response: &mut response,
-                max_response_size: 512,
-            };
-            assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
-        }
-    }
-    let after = GLOBAL.stats();
-    assert_eq!(after.allocations - before.allocations, 0);
-    assert_eq!(after.reallocations - before.reallocations, 0);
+    // Keep the measured future off the large fixture's default-size stack.
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    let mut response = Vec::with_capacity(512);
+                    let before = GLOBAL.stats();
+                    for _ in 0..50 {
+                        for wire in &queries {
+                            let mut slots = [None; 8];
+                            let mut cx = Context {
+                                query: Message::parse(wire).unwrap(),
+                                client: "127.0.0.1:1234".parse().unwrap(),
+                                local: "127.0.0.1:53".parse().unwrap(),
+                                transport: Transport::Dns,
+                                protocol: Protocol::Udp,
+                                domain: &root,
+                                metadata: Metadata::new(&mut slots),
+                                response: &mut response,
+                                max_response_size: 512,
+                            };
+                            assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+                        }
+                    }
+                    let after = GLOBAL.stats();
+                    assert_eq!(after.allocations - before.allocations, 0);
+                    assert_eq!(after.reallocations - before.reallocations, 0);
+                });
+            })
+            .join()
+            .unwrap();
+    });
     lifecycle.run(Phase::Shutdown).await.unwrap();
     assert!(!readiness.ready());
     let (mut routed, lifecycle) = pharos_plugins::servers(blocks).unwrap();
@@ -976,13 +990,13 @@ async fn services_scenario() {
         let _ = builder.finish();
         let mut response = Vec::with_capacity(512);
         assert_eq!(
-            pharos_server::Handler::handle(
+            Box::pin(pharos_server::Handler::handle(
                 &server,
                 &query,
                 "127.0.0.1:1234".parse().unwrap(),
                 Protocol::Udp,
                 &mut response
-            )
+            ))
             .await,
             pharos_server::Action::Respond
         );
@@ -1029,13 +1043,13 @@ async fn services_scenario() {
     let _ = builder.finish();
     let mut response = Vec::with_capacity(512);
     assert_eq!(
-        pharos_server::Handler::handle(
+        Box::pin(pharos_server::Handler::handle(
             &server,
             &query,
             "127.0.0.1:1234".parse().unwrap(),
             Protocol::Udp,
             &mut response
-        )
+        ))
         .await,
         pharos_server::Action::Respond
     );

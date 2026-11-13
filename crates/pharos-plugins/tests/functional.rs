@@ -5,6 +5,10 @@
 #[path = "functional/sign.rs"]
 mod sign;
 
+#[cfg(feature = "plugin-auto")]
+#[path = "functional/auto.rs"]
+mod auto;
+
 #[cfg(feature = "plugin-file")]
 #[path = "functional/file.rs"]
 mod file;
