@@ -127,6 +127,7 @@ pub(super) struct Store {
     file: File,
     meta: MetaPage,
     uncertain: bool,
+    max_zone_bytes: usize,
 }
 
 type Entries = BTreeMap<Vec<u8>, (u32, Vec<u8>)>;
@@ -168,6 +169,7 @@ impl Store {
             file,
             meta,
             uncertain: false,
+            max_zone_bytes: usize::MAX,
         })
     }
 
@@ -215,11 +217,26 @@ impl Store {
             file,
             meta,
             uncertain: false,
+            max_zone_bytes: usize::MAX,
         })
+    }
+
+    pub(super) fn open_limited(file: File, max_zone_bytes: usize) -> io::Result<Self> {
+        let mut store = Self::open(file)?;
+        store.max_zone_bytes = max_zone_bytes;
+        Ok(store)
+    }
+
+    pub(super) fn set_limit(&mut self, max_zone_bytes: usize) {
+        self.max_zone_bytes = max_zone_bytes;
     }
 
     // bbolt v1.5.0 internal/common/page.go:31-36: overflow pages immediately follow their header page.
     fn page(&self, id: u64) -> io::Result<Vec<u8>> {
+        self.page_inner(id, false)
+    }
+
+    fn page_inner(&self, id: u64, zone: bool) -> io::Result<Vec<u8>> {
         if id < 2 || id >= self.meta.high {
             return Err(invalid());
         }
@@ -233,22 +250,108 @@ impl Store {
         {
             return Err(invalid());
         }
-        let len = usize::try_from(count)
+        let extent = usize::try_from(count)
             .ok()
             .and_then(|n| n.checked_mul(self.meta.page_size))
             .ok_or_else(invalid)?;
+        let flags = u16_at(&header, 8)?;
+        let entries = usize::from(u16_at(&header, 10)?);
+        // bbolt v1.5.0 internal/common/page.go:193-247: element offsets bound the used part of an overflow page.
+        let mut used = match flags {
+            LEAF | BRANCH => {
+                let table = HEADER
+                    .checked_add(entries.checked_mul(16).ok_or_else(invalid)?)
+                    .ok_or_else(invalid)?;
+                if table > extent {
+                    return Err(invalid());
+                }
+                let mut descriptors = vec![0; table];
+                self.file.read_exact_at(&mut descriptors, offset)?;
+                let mut end = table;
+                for index in 0..entries {
+                    let element = HEADER + index * 16;
+                    let (position, key_len, value_len) = if flags == LEAF {
+                        (
+                            u32_at(&descriptors, element + 4)?,
+                            u32_at(&descriptors, element + 8)?,
+                            u32_at(&descriptors, element + 12)?,
+                        )
+                    } else {
+                        (
+                            u32_at(&descriptors, element)?,
+                            u32_at(&descriptors, element + 4)?,
+                            0,
+                        )
+                    };
+                    let end_of_entry = element
+                        .checked_add(position as usize)
+                        .and_then(|n| n.checked_add(key_len as usize))
+                        .and_then(|n| n.checked_add(value_len as usize))
+                        .ok_or_else(invalid)?;
+                    if zone && flags == LEAF && key_len == 7 {
+                        let key_offset =
+                            element.checked_add(position as usize).ok_or_else(invalid)?;
+                        if key_offset.checked_add(7).is_none_or(|end| end > extent) {
+                            return Err(invalid());
+                        }
+                        let mut key = [0; 7];
+                        self.file.read_exact_at(
+                            &mut key,
+                            offset.checked_add(key_offset as u64).ok_or_else(invalid)?,
+                        )?;
+                        if key == *b"records" && value_len as usize > self.max_zone_bytes {
+                            return Err(invalid());
+                        }
+                    }
+                    end = end.max(end_of_entry);
+                }
+                if count > 1 && end <= extent - self.meta.page_size {
+                    return Err(invalid());
+                }
+                end
+            }
+            FREELIST => {
+                // bbolt v1.5.0 internal/common/page.go:115-130: large freelists carry their count in the first entry.
+                let (prefix, entries) = if entries == usize::from(u16::MAX) {
+                    let mut count_bytes = [0; 8];
+                    self.file
+                        .read_exact_at(&mut count_bytes, offset + HEADER as u64)?;
+                    (
+                        HEADER + 8,
+                        usize::try_from(u64::from_ne_bytes(count_bytes)).map_err(|_| invalid())?,
+                    )
+                } else {
+                    (HEADER, entries)
+                };
+                if entries as u64 > self.meta.high.saturating_sub(2) {
+                    return Err(invalid());
+                }
+                prefix
+                    .checked_add(entries.checked_mul(8).ok_or_else(invalid)?)
+                    .ok_or_else(invalid)?
+            }
+            _ => return Err(invalid()),
+        };
+        used = used.max(HEADER);
+        if used > extent {
+            return Err(invalid());
+        }
         let mut data = Vec::new();
-        data.try_reserve_exact(len).map_err(|_| invalid())?;
-        data.resize(len, 0);
+        data.try_reserve_exact(used).map_err(|_| invalid())?;
+        data.resize(used, 0);
         self.file.read_exact_at(&mut data, offset)?;
         Ok(data)
     }
 
     fn tree(&self, root: u64, pages: &mut BTreeSet<u64>) -> io::Result<Entries> {
+        self.tree_inner(root, pages, false)
+    }
+
+    fn tree_inner(&self, root: u64, pages: &mut BTreeSet<u64>, zone: bool) -> io::Result<Entries> {
         let mut entries = Entries::new();
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
-            let data = self.page(id)?;
+            let data = self.page_inner(id, zone)?;
             let overflow = u64::from(u32_at(&data, 12)?);
             for page in id..=id + overflow {
                 if !pages.insert(page) {
@@ -293,7 +396,7 @@ impl Store {
         let contents = if id == 0 {
             leaf_entries(data.get(16..).ok_or_else(invalid)?)?
         } else {
-            self.tree(id, &mut pages)?
+            self.tree_inner(id, &mut pages, true)?
         };
         Ok((root, contents, pages))
     }
@@ -513,6 +616,8 @@ fn leaf_entries(data: &[u8]) -> io::Result<Entries> {
         return Err(invalid());
     }
     let mut entries = Entries::new();
+    let table_end = HEADER + count * 16;
+    let mut previous_end = table_end;
     for index in 0..count {
         let element = HEADER + index * 16;
         let flags = u32_at(data, element)?;
@@ -525,8 +630,18 @@ fn leaf_entries(data: &[u8]) -> io::Result<Entries> {
         let end = mid
             .checked_add(u32_at(data, element + 12)? as usize)
             .ok_or_else(invalid)?;
+        if flags & !BUCKET != 0 || start < previous_end || start == mid {
+            return Err(invalid());
+        }
         let key = data.get(start..mid).ok_or_else(invalid)?.to_vec();
         let value = data.get(mid..end).ok_or_else(invalid)?.to_vec();
+        if entries
+            .last_key_value()
+            .is_some_and(|(previous, _)| previous >= &key)
+        {
+            return Err(invalid());
+        }
+        previous_end = end;
         if entries.insert(key, (flags, value)).is_some() {
             return Err(invalid());
         }
@@ -1070,6 +1185,112 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(store.read().unwrap().1, b"old");
         assert!(store.commit(b"example.org.", b"later").is_err());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn forged_empty_overflow_page_is_rejected() {
+        use std::os::unix::fs::FileExt;
+        let path = path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::create(file).unwrap();
+        store.meta.high = 16384;
+        store
+            .file
+            .set_len(store.meta.high * store.meta.page_size as u64)
+            .unwrap();
+        store
+            .file
+            .write_all_at(&store.meta.encode(), store.meta.page_size as u64)
+            .unwrap();
+        store
+            .file
+            .write_all_at(
+                &16380u32.to_ne_bytes(),
+                3 * store.meta.page_size as u64 + 12,
+            )
+            .unwrap();
+        assert!(store.page(3).is_err());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_oversized_zone_value_before_loading_it() {
+        let path = path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::create(file).unwrap();
+        store.commit(b"example.org.", &vec![42; 1 << 20]).unwrap();
+        drop(store);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let store = Store::open_limited(file, 100).unwrap();
+        assert!(store.read().is_err());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_corrupt_empty_key_even_when_zone_records_are_intact() {
+        use std::os::unix::fs::FileExt;
+        let path = path();
+        let Some(output) = go("write-complex", &path) else {
+            return;
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let store = Store::open(file).unwrap();
+        let mut corrupted = false;
+        for id in 2..store.meta.high {
+            let Ok(page) = store.page(id) else { continue };
+            if super::u16_at(&page, 8).unwrap() != super::LEAF {
+                continue;
+            }
+            let count = usize::from(super::u16_at(&page, 10).unwrap());
+            for index in 0..count {
+                let element = super::HEADER + index * 16;
+                let start = element + super::u32_at(&page, element + 4).unwrap() as usize;
+                let len = super::u32_at(&page, element + 8).unwrap() as usize;
+                if page.get(start..start + len) == Some(b"extra-0000".as_slice()) {
+                    store
+                        .file
+                        .write_all_at(
+                            &0u32.to_ne_bytes(),
+                            id * store.meta.page_size as u64 + element as u64 + 8,
+                        )
+                        .unwrap();
+                    corrupted = true;
+                    break;
+                }
+            }
+            if corrupted {
+                break;
+            }
+        }
+        assert!(corrupted);
+        assert!(store.read().is_err());
         drop(store);
         std::fs::remove_file(path).unwrap();
     }

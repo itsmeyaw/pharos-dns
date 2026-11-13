@@ -208,7 +208,7 @@ pub(super) fn validate(config: &Config) -> io::Result<Arc<Zone>> {
     }
     let file = File::open(path)?;
     lock(&file, true)?;
-    load(&bbolt::Store::open(file)?, config).map(Arc::new)
+    load(&bbolt::Store::open_limited(file, config.max_bytes)?, config).map(Arc::new)
 }
 
 pub(super) fn acquire(config: &Config) -> io::Result<Arc<Shared>> {
@@ -248,13 +248,14 @@ pub(super) fn acquire(config: &Config) -> io::Result<Arc<Shared>> {
     lock(&file, false)?;
     let (db, zone) = if let Some(zone) = initial {
         let mut db = bbolt::Store::create(file)?;
+        db.set_limit(config.max_bytes);
         db.commit(
             config.origin.canonical().as_bytes(),
             &wire::encode(zone.records())?,
         )?;
         (db, zone)
     } else {
-        let db = bbolt::Store::open(file)?;
+        let db = bbolt::Store::open_limited(file, config.max_bytes)?;
         let zone = load(&db, config)?;
         (db, zone)
     };
