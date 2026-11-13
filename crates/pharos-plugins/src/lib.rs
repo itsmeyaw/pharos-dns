@@ -759,6 +759,7 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
 }
 
 #[cfg(any(
+    test,
     feature = "plugin-hosts",
     feature = "plugin-file",
     feature = "plugin-auto",
