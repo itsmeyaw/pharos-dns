@@ -51,10 +51,16 @@ fn parse(
                         return Err(cursor.arg_err());
                     }
                     directory = crate::resolve_path(args[0].clone().into(), root);
-                    if let Err(error) = std::fs::metadata(&directory)
-                        && error.kind() != std::io::ErrorKind::NotFound
-                    {
-                        return Err(cursor.error(error.to_string()));
+                    match std::fs::metadata(&directory) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(cursor.error(error.to_string()));
+                        }
+                        Err(_) => pharos_server::logging::log(
+                            "WARN",
+                            "auto",
+                            &format!("Directory does not exist: {}", directory.display()),
+                        ),
+                        Ok(_) => {}
                     }
                     if args.len() == 3 {
                         if args[1].len() > 10000 {
