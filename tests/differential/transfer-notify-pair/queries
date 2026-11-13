@@ -1,0 +1,4 @@
+example.org. SOA IN udp
+www.example.org. A IN udp
+new.example.org. A IN udp
+missing.example.org. A IN udp

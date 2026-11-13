@@ -1,5 +1,23 @@
 use pharos_proto::{Message, Rdata, Record, Type};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum RrsigMask {
+    #[default]
+    None,
+    FixedValidity,
+    RandomValidity,
+}
+
+impl From<bool> for RrsigMask {
+    fn from(value: bool) -> Self {
+        if value {
+            Self::FixedValidity
+        } else {
+            Self::None
+        }
+    }
+}
+
 #[cfg(test)]
 fn compare(
     pharos: &Message<'_>,
@@ -25,8 +43,9 @@ pub(crate) fn compare_with_soa_serial(
     mask_srv_port: bool,
     mask_soa_serial: bool,
     dedupe_additional: bool,
-    mask_rrsig: bool,
+    mask_rrsig: impl Into<RrsigMask>,
 ) -> Result<(), String> {
+    let mask_rrsig = mask_rrsig.into();
     let questions = |message: &Message<'_>| {
         message
             .questions()
@@ -192,7 +211,7 @@ fn record_equal(
     tolerance: u32,
     mask: bool,
     mask_soa_serial: bool,
-    mask_rrsig: bool,
+    mask_rrsig: RrsigMask,
 ) -> bool {
     if a.name.to_string() != b.name.to_string()
         || a.rtype != b.rtype
@@ -223,7 +242,7 @@ fn record_equal(
         *b = 0;
     }
     // RFC 4034 §3.1: retain RRSIG metadata and signature length while masking dynamic values.
-    if mask_rrsig
+    if mask_rrsig != RrsigMask::None
         && let (
             Rdata::Rrsig {
                 original_ttl: at,
@@ -243,7 +262,12 @@ fn record_equal(
     {
         // RFC 4034 §3.1.5: signature times use 32-bit serial arithmetic.
         let validity = ae.wrapping_sub(*ai);
-        if asig.len() != bsig.len() || validity >= 0x8000_0000 || validity != be.wrapping_sub(*bi) {
+        let other_validity = be.wrapping_sub(*bi);
+        if asig.len() != bsig.len()
+            || validity >= 0x8000_0000
+            || other_validity >= 0x8000_0000
+            || (mask_rrsig == RrsigMask::FixedValidity && validity != other_validity)
+        {
             return false;
         }
         // RFC 4034 §3.1.4: Original TTL is the signed RRset's TTL; CoreDNS hardcodes 3600.
@@ -273,6 +297,42 @@ mod tests {
         dedupe: bool,
     ) -> Result<(), String> {
         super::compare_with_soa_serial(left, right, ttl, srv, soa, dedupe, false)
+    }
+
+    #[test]
+    fn random_rrsig_validity_is_masked_only_when_opted_in() {
+        let left = [
+            0, 1, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, b'x', 0, 0, 46, 0, 1, 0, 0, 0, 60, 0, 24, 0,
+            1, 15, 1, 0, 0, 0, 60, 0, 0, 0, 10, 0, 0, 0, 2, 0x12, 0x34, 1, b'a', 0, 10, 11, 12,
+        ];
+        let mut right = left;
+        right[36] = 12;
+        let left = Message::parse(&left).unwrap();
+        let right = Message::parse(&right).unwrap();
+        assert!(
+            super::compare_with_soa_serial(
+                &left,
+                &right,
+                0,
+                false,
+                false,
+                false,
+                super::RrsigMask::FixedValidity
+            )
+            .is_err()
+        );
+        assert!(
+            super::compare_with_soa_serial(
+                &left,
+                &right,
+                0,
+                false,
+                false,
+                false,
+                super::RrsigMask::RandomValidity
+            )
+            .is_ok()
+        );
     }
 
     #[test]

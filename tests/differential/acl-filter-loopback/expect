@@ -1,0 +1,3 @@
+mask additional.srv.port
+rcode NOERROR | example.org. A IN udp
+rcode NOERROR | example.org. A IN tcp

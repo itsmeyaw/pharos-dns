@@ -1,0 +1,4 @@
+.:{port} {
+    rewrite cname regex (.*).cdn.example.net. {1}.other.cdn.com.
+    file db.zone
+}

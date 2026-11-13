@@ -1,0 +1,3 @@
+mask soa.serial
+answer 10.96.0.10 | web.example. A IN udp
+answer 10.96.0.10 | web.example. A IN tcp

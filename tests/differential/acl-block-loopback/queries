@@ -1,0 +1,3 @@
+example.org. A IN udp +bufsize=4096
+example.org. A IN tcp +bufsize=4096
+example.org. AAAA IN udp +bufsize=4096

@@ -1,4 +1,7 @@
 miek.nl:{port} {
+    dnssec {
+        key file Kmiek.nl.+013+59725
+    }
     file db.miek.nl.signed {
         reload 1s
     }

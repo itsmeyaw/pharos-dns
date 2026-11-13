@@ -1,0 +1,6 @@
+.:{port} {
+    acl {
+        block type A net 127.0.0.0/8
+    }
+    whoami
+}

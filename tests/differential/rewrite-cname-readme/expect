@@ -1,0 +1,2 @@
+answer 30.3.1.2 | my-app.com. A IN udp
+answer 30.3.1.2 | my-app.com. A IN tcp

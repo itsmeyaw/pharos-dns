@@ -1,0 +1,2 @@
+rcode NOERROR | www.coredns.rocks. A IN udp
+rcode NOERROR | www.coredns.rocks. A IN tcp
