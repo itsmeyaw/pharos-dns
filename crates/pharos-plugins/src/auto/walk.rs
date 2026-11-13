@@ -59,10 +59,12 @@ impl Shared {
                             "auto",
                             &format!("Inserting Zone {origin} from {}", path.display()),
                         );
+                        let case_mismatch = origin.bytes().any(|byte| byte.is_ascii_uppercase());
                         zones.insert(
                             origin.clone(),
                             Arc::new(Entry {
                                 origin,
+                                case_mismatch,
                                 apex,
                                 path: Mutex::new(path.to_owned()),
                                 current: ZoneHolder::from(Some(Arc::new(zone))),
@@ -92,9 +94,9 @@ impl Shared {
         let mut entries: Vec<_> = zones.values().collect();
         entries.sort_by(|a, b| a.path.lock().unwrap().cmp(&b.path.lock().unwrap()));
         for entry in entries {
-            canonical
-                .entry(entry.apex.canonical())
-                .or_insert_with(|| Arc::clone(entry));
+            let mut key = entry.apex.as_wire().to_vec();
+            key.make_ascii_lowercase();
+            canonical.entry(key).or_insert_with(|| Arc::clone(entry));
         }
         #[cfg(feature = "plugin-prometheus")]
         self.metrics

@@ -21,6 +21,7 @@ use std::{
 #[derive(Debug)]
 struct Entry {
     origin: String,
+    case_mismatch: bool,
     apex: Name,
     path: Mutex<PathBuf>,
     current: ZoneHolder,
@@ -45,7 +46,7 @@ struct Shared {
 #[derive(Debug, Default)]
 struct Zones {
     origins: HashMap<String, Arc<Entry>>,
-    canonical: HashMap<String, Arc<Entry>>,
+    canonical: HashMap<Vec<u8>, Arc<Entry>>,
 }
 
 /// Directory-backed authoritative Zones.
@@ -164,10 +165,7 @@ impl Auto {
             Selection::Next => next.run(cx).await,
             Selection::Refused => Outcome::Unanswered(Rcode::REFUSED),
             Selection::Zone(entry) => match entry.current.load_full() {
-                Some(zone) => {
-                    let case_mismatch = entry.origin.bytes().any(|byte| byte.is_ascii_uppercase());
-                    zone.lookup_auto(cx, next, case_mismatch).await
-                }
+                Some(zone) => zone.lookup_auto(cx, next, entry.case_mismatch).await,
                 None => Outcome::Unanswered(Rcode::SERVFAIL),
             },
         }
@@ -229,14 +227,7 @@ impl Shared {
         let zones = self.zones.load();
         // RFC 1034 §4.3.2: choose the closest enclosing authoritative Zone.
         loop {
-            let mut text = NameText {
-                bytes: [0; 1024],
-                len: 0,
-            };
-            let suffix = pharos_proto::NameRef::parse(name, 0).ok()?;
-            write!(&mut text, "{suffix}").ok()?;
-            let key = std::str::from_utf8(&text.bytes[..text.len]).ok()?;
-            if let Some(entry) = zones.canonical.get(key) {
+            if let Some(entry) = zones.canonical.get(name) {
                 return Some(Arc::clone(entry));
             }
             if name[0] == 0 {
