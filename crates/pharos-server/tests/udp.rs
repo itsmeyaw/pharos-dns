@@ -190,13 +190,16 @@ async fn udp_shutdown_cancels_pending_queries() {
     }
 }
 
-struct PanickingEcho(Option<pharos_server::metrics::ShedMetrics>);
+struct PanickingEcho {
+    metrics: Option<pharos_server::metrics::ShedMetrics>,
+    panicked: std::sync::Arc<tokio::sync::Notify>,
+}
 impl Handler for PanickingEcho {
     fn udp_workers(&self) -> usize {
         1
     }
     fn shed_metrics(&self) -> Option<pharos_server::metrics::ShedMetrics> {
-        self.0.clone()
+        self.metrics.clone()
     }
     async fn handle(
         &self,
@@ -209,7 +212,10 @@ impl Handler for PanickingEcho {
         if query == b"pending panic" {
             tokio::task::yield_now().await;
         }
-        assert!(query != b"panic" && query != b"pending panic", "test panic");
+        if query == b"panic" || query == b"pending panic" {
+            self.panicked.notify_one();
+            panic!("test panic");
+        }
         response.extend_from_slice(query);
         Action::Respond
     }
@@ -219,14 +225,25 @@ impl Handler for PanickingEcho {
 async fn udp_handler_panics_do_not_stop_worker() {
     for shed in [false, true] {
         let metrics = shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53"));
-        let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), PanickingEcho(metrics))
-            .await
-            .unwrap();
+        let panicked = std::sync::Arc::new(tokio::sync::Notify::new());
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            PanickingEcho {
+                metrics,
+                panicked: panicked.clone(),
+            },
+        )
+        .await
+        .unwrap();
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         socket.connect(listener.local_addr()).await.unwrap();
-        for query in [b"panic".as_slice(), b"pending panic", b"ok"] {
+        for query in [b"panic".as_slice(), b"pending panic"] {
             socket.send(query).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), panicked.notified())
+                .await
+                .unwrap();
         }
+        socket.send(b"ok").await.unwrap();
         let mut response = [0; 16];
         let length = tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut response))
             .await
