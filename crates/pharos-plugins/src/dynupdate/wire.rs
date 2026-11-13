@@ -5,6 +5,95 @@ fn invalid() -> io::Error {
     io::Error::new(ErrorKind::InvalidData, "invalid stored Zone records")
 }
 
+fn uncompressed_name(data: &[u8], offset: usize) -> io::Result<usize> {
+    let name = NameRef::parse(data, offset).map_err(|_| invalid())?;
+    // RFC 1035 §4.1.4: a stored wire RR cannot retain Message-relative compression pointers.
+    if name.wire_len() != name.labels().map(|label| label.len() + 1).sum::<usize>() + 1 {
+        return Err(invalid());
+    }
+    offset
+        .checked_add(name.wire_len())
+        .filter(|end| *end <= data.len())
+        .ok_or_else(invalid)
+}
+
+fn validate_names(kind: Type, data: &[u8]) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let (mut cursor, count, tail) = match kind {
+        Type::NS
+        | Type::CNAME
+        | Type::DNAME
+        | Type::PTR
+        | Type::MD
+        | Type::MF
+        | Type::MB
+        | Type::MG
+        | Type::MR
+        | Type::NSAP_PTR => (0, 1, Some(0)),
+        Type::MINFO | Type::RP => (0, 2, Some(0)),
+        Type::SOA => (0, 2, Some(20)),
+        Type::MX | Type::AFSDB | Type::RT | Type::KX | Type::LP => (2, 1, Some(0)),
+        Type::PX => (2, 2, Some(0)),
+        Type::SRV => (6, 1, Some(0)),
+        Type::SVCB | Type::HTTPS => (2, 1, None),
+        Type::NAPTR => {
+            let mut offset = 4usize;
+            for _ in 0..3 {
+                let len = usize::from(*data.get(offset).ok_or_else(invalid)?);
+                offset = offset
+                    .checked_add(1 + len)
+                    .filter(|end| *end <= data.len())
+                    .ok_or_else(invalid)?;
+            }
+            (offset, 1, Some(0))
+        }
+        Type::IPSECKEY => {
+            let gateway = *data.get(1).ok_or_else(invalid)?;
+            match gateway {
+                0 if data.len() >= 3 => return Ok(()),
+                1 if data.len() >= 7 => return Ok(()),
+                2 if data.len() >= 19 => return Ok(()),
+                3 => (3, 1, None),
+                _ => return Err(invalid()),
+            }
+        }
+        Type::AMTRELAY => {
+            let relay = *data.get(1).ok_or_else(invalid)? & 0x7f;
+            match relay {
+                0 if data.len() == 2 => return Ok(()),
+                1 if data.len() == 6 => return Ok(()),
+                2 if data.len() == 18 => return Ok(()),
+                3 => (2, 1, Some(0)),
+                _ => return Err(invalid()),
+            }
+        }
+        Type::HIP => {
+            let header = data.get(..4).ok_or_else(invalid)?;
+            let mut offset = 4usize
+                .checked_add(usize::from(header[0]))
+                .and_then(|n| {
+                    n.checked_add(usize::from(u16::from_be_bytes([header[2], header[3]])))
+                })
+                .filter(|end| *end <= data.len())
+                .ok_or_else(invalid)?;
+            while offset < data.len() {
+                offset = uncompressed_name(data, offset)?;
+            }
+            return Ok(());
+        }
+        _ => return Ok(()),
+    };
+    for _ in 0..count {
+        cursor = uncompressed_name(data, cursor)?;
+    }
+    if tail.is_some_and(|tail| cursor.checked_add(tail) != Some(data.len())) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 // RFC 1035 §4.1.3: store consecutive uncompressed resource records, not a DNS Message.
 pub(super) fn encode(records: &[ZoneRecord]) -> io::Result<Vec<u8>> {
     let mut result = Vec::new();
@@ -50,6 +139,7 @@ pub(super) fn decode(
         offset += 10;
         let end = offset.checked_add(len).ok_or_else(invalid)?;
         let rdata = data.get(offset..end).ok_or_else(invalid)?.to_vec();
+        validate_names(kind, &rdata)?;
         records.push(ZoneRecord {
             owner: owner.to_name(),
             ttl,
@@ -118,6 +208,23 @@ mod tests {
             } else {
                 assert!(result.is_ok(), "decoder panicked on {len}");
             }
+        }
+    }
+
+    #[test]
+    fn stored_embedded_names_must_be_uncompressed() {
+        use pharos_proto::{Class, Type, zone::ZoneRecord};
+        let owner: Name = "ptr.example.org.".parse().unwrap();
+        for kind in [Type::PTR, Type::MB, Type::RP] {
+            let rr = ZoneRecord {
+                owner: owner.clone(),
+                rtype: kind,
+                class: Class::IN,
+                ttl: 60,
+                rdata: vec![0xc0, 0],
+            };
+            let data = encode(&[rr]).unwrap();
+            assert!(decode(&data, 10, 4096).is_err(), "{kind}");
         }
     }
 }
