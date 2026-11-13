@@ -1,0 +1,4 @@
+host.example.org. A IN tcp
+example.org. SOA IN tcp +opcode=UPDATE +add=host.example.org.:A:60:c000020a +tsig=update-key.example.org.:i9M+00yrECfVZG2qCjr4mPpaGim/Bq+IWMiNrLjUO4Y=
+host.example.org. A IN tcp
+example.org. SOA IN tcp

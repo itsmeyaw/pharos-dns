@@ -1,0 +1,4 @@
+_acme-challenge.example.org. TXT IN udp
+example.org. SOA IN udp +opcode=UPDATE +add=_acme-challenge.example.org.:TXT:60:0568656c6c6f +tsig=update-key.example.org.:i9M+00yrECfVZG2qCjr4mPpaGim/Bq+IWMiNrLjUO4Y=
+_acme-challenge.example.org. TXT IN udp
+example.org. SOA IN udp

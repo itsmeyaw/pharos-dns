@@ -1,0 +1,12 @@
+example.org:{port} {
+    tsig {
+        secret update-key.example.org. i9M+00yrECfVZG2qCjr4mPpaGim/Bq+IWMiNrLjUO4Y=
+        require_opcode UPDATE
+    }
+    dynupdate {
+        file example.org.zone
+        database example.org.db
+        allow update-key.example.org. host.example.org. A AAAA
+        allow update-key.example.org. _acme-challenge.example.org. TXT
+    }
+}
