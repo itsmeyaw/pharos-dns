@@ -46,6 +46,58 @@ async fn serves_seed_zone() {
 }
 
 #[tokio::test]
+async fn malformed_empty_a_update_is_rejected() {
+    let seed = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
+    let text = format!(
+        "example.org:53 {{\n dynupdate {{\n file {seed}\n allow key.example.org. * A\n }}\n}}"
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let domain: Name = "example.org.".parse().unwrap();
+    let owner: Name = "new.example.org.".parse().unwrap();
+    let key: Name = "key.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
+    builder
+        .question(
+            NameRef::parse(domain.as_wire(), 0).unwrap(),
+            Type::SOA,
+            Class::IN,
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Authority,
+            NameRef::parse(owner.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+            60,
+            &[],
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [None; 8];
+    let mut metadata = Metadata::new(&mut slots);
+    metadata.set_validated_tsig(&key);
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata,
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::FORMERR);
+}
+
+#[tokio::test]
 async fn authenticated_update_is_visible_to_subsequent_query() {
     let seed = concat!(
         env!("CARGO_MANIFEST_DIR"),
