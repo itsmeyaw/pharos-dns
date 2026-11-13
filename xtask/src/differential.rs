@@ -1136,7 +1136,7 @@ mod tests {
             TsigRecord, TsigStream, Type,
         };
         use std::io::{Read, Write};
-        for corrupt in [false, true] {
+        for corrupt in [None, Some(0), Some(1)] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let server = std::thread::spawn(move || {
@@ -1154,7 +1154,7 @@ mod tests {
                     .as_secs();
                 let name: Name = "example.org.".parse().unwrap();
                 let name = NameRef::parse(name.as_wire(), 0).unwrap();
-                for last in [false, true] {
+                for (index, last) in [false, true].into_iter().enumerate() {
                     let mut wire = Vec::new();
                     let mut builder = MessageBuilder::new(&mut wire, 65535, 0, 0x8400).unwrap();
                     builder.question(name, Type::AXFR, Class::IN).unwrap();
@@ -1182,14 +1182,12 @@ mod tests {
                         .unwrap();
                     let _ = builder.finish();
                     signer.sign(&mut wire, now, 300).unwrap();
-                    if last && corrupt {
+                    if corrupt == Some(index) {
                         let byte = wire.len() - 8;
                         wire[byte] ^= 1;
                     }
-                    socket
-                        .write_all(&(wire.len() as u16).to_be_bytes())
-                        .unwrap();
-                    socket.write_all(&wire).unwrap();
+                    let _ = socket.write_all(&(wire.len() as u16).to_be_bytes());
+                    let _ = socket.write_all(&wire);
                 }
             });
             let query =
@@ -1198,8 +1196,8 @@ mod tests {
             let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
             let result =
                 super::exchange_with_key(port, crate::query::Transport::Tcp, &wire, Some(&key));
-            if corrupt {
-                assert!(result.is_err());
+            if corrupt.is_some() {
+                assert!(result.is_err(), "{corrupt:?}");
             } else {
                 assert_eq!(Message::parse(&result.unwrap()).unwrap().answer_count(), 3);
             }
