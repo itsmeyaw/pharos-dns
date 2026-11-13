@@ -354,4 +354,53 @@ mod tests {
         cname_conflict.push(cname);
         assert!(build_zone(origin, cname_conflict, 100, 10000).is_err());
     }
+
+    #[test]
+    fn zone_mutator_supports_every_coredns_policy_type() {
+        let original = zone();
+        let mut tested = 0;
+        for number in (1..=261).chain([32768, 32769]) {
+            let kind = Type(number);
+            if !super::known(kind)
+                || super::query_metatype(kind)
+                || super::super::setup::unsupported(kind)
+            {
+                continue;
+            }
+            let mut rdata = match kind {
+                Type::A => vec![192, 0, 2, 1],
+                Type::AAAA => vec![0; 16],
+                Type::NS | Type::CNAME | Type::DNAME | Type::PTR => vec![0],
+                Type::MX | Type::SVCB | Type::HTTPS => vec![0, 0, 0],
+                Type::SRV => vec![0; 7],
+                Type::SOA => vec![0; 22],
+                _ => vec![0],
+            };
+            if kind == Type::SOA {
+                rdata[5] = 11;
+            }
+            let owner = if kind == Type::SOA {
+                original.apex().clone()
+            } else {
+                "record.example.org.".parse().unwrap()
+            };
+            let record = ZoneRecord {
+                owner,
+                rtype: kind,
+                class: Class::IN,
+                ttl: 60,
+                rdata,
+            };
+            let (changed, was_changed) = original
+                .apply_updates(std::slice::from_ref(&record))
+                .unwrap_or_else(|error| panic!("{kind}: {error}"));
+            assert!(was_changed, "{kind}");
+            let (_, repeated) = changed
+                .apply_updates(std::slice::from_ref(&record))
+                .unwrap();
+            assert!(!repeated, "{kind}");
+            tested += 1;
+        }
+        assert!(tested >= 50, "tested {tested} types");
+    }
 }
