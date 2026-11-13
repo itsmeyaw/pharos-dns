@@ -24,7 +24,7 @@ fn chain_future_fits_stack_budget() {
         max_response_size: 512,
     };
     let future = chain.serve(&mut cx);
-    // Default features measure 17,224 bytes on aarch64; allow headroom up to 20,000.
+    // Default features measure 18,648 bytes on aarch64 with plugin-dynupdate; allow headroom up to 20,000.
     assert!(
         std::mem::size_of_val(&future) <= 20_000,
         "Chain future: {} bytes",
