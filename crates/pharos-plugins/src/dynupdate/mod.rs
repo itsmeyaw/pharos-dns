@@ -393,4 +393,79 @@ mod tests {
             assert_eq!(expand_record(rr, &wire).unwrap().rdata, expected, "{kind}");
         }
     }
+
+    #[test]
+    fn warm_query_does_not_wait_for_update_transaction() {
+        use pharos_corefile::{Cursor, lex};
+        use pharos_proto::Name;
+        use pharos_server::{Metadata, Protocol, Transport};
+        struct DropNext;
+        impl Next for DropNext {
+            async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+                Outcome::Drop
+            }
+        }
+        let seed = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/file/example.zone"
+        );
+        let text = format!("dynupdate {{\nfile {seed}\nallow key.example.org. * A\n}}");
+        let tokens = lex("Corefile", &text);
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            None,
+        )
+        .unwrap();
+        let zone = store::validate(&config).unwrap();
+        let dynamic = Arc::new(DynUpdate::new(config, zone));
+        let shared = dynamic.snapshot().unwrap();
+        let guard = shared.db.lock().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let dynamic = Arc::clone(&dynamic);
+            scope.spawn(move || {
+                let domain: Name = "example.org.".parse().unwrap();
+                let owner: Name = "www.example.org.".parse().unwrap();
+                let mut wire = Vec::with_capacity(512);
+                let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+                builder
+                    .question(
+                        NameRef::parse(owner.as_wire(), 0).unwrap(),
+                        Type::A,
+                        Class::IN,
+                    )
+                    .unwrap();
+                let _ = builder.finish();
+                let mut response = Vec::with_capacity(512);
+                let mut slots = [None; 8];
+                let mut cx = Context {
+                    query: Message::parse(&wire).unwrap(),
+                    client: "127.0.0.1:1234".parse().unwrap(),
+                    local: "127.0.0.1:53".parse().unwrap(),
+                    transport: Transport::Dns,
+                    protocol: Protocol::Udp,
+                    domain: &domain,
+                    metadata: Metadata::new(&mut slots),
+                    response: &mut response,
+                    max_response_size: 512,
+                };
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let outcome = runtime.block_on(dynamic.serve(&mut cx, DropNext));
+                sender
+                    .send((outcome, Message::parse(&response).unwrap().rcode()))
+                    .unwrap();
+            });
+            assert_eq!(
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap(),
+                (Outcome::Response, Rcode::NOERROR)
+            );
+            drop(guard);
+        });
+    }
 }
