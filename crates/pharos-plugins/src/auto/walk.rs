@@ -42,7 +42,7 @@ impl Shared {
             if let Some(entry) = old.origins.get(&origin) {
                 *entry.path.lock().unwrap() = path.to_owned();
                 let mut previous = entry.resolved_path.lock().unwrap();
-                if *previous != resolved && entry.reload() {
+                if *previous != resolved && entry.reload_checked().is_some() {
                     *previous = resolved;
                 }
                 zones.insert(origin, Arc::clone(entry));
@@ -111,6 +111,10 @@ impl Shared {
 
 impl Entry {
     pub(super) fn reload(&self) -> bool {
+        self.reload_checked().unwrap_or(false)
+    }
+
+    fn reload_checked(&self) -> Option<bool> {
         let path = self.path.lock().unwrap();
         let file = match std::fs::File::open(&*path) {
             Ok(file) => file,
@@ -120,29 +124,31 @@ impl Entry {
                     "auto",
                     &format!("Cannot open {}: {error}", path.display()),
                 );
-                return false;
+                return None;
             }
         };
+        // RFC 1035 §3.3.13: the SOA serial identifies the Zone version.
         let serial = self.current.load().as_ref().and_then(|zone| zone.serial());
         match Zone::load_reader_with_serial(self.apex.clone(), &path, BufReader::new(file), serial)
         {
             Ok(zone) => {
                 self.current.store(Some(Arc::new(zone)));
-                true
+                Some(true)
             }
             Err(error) => {
-                if error != "no change in SOA serial" {
-                    pharos_server::logging::log(
-                        "WARN",
-                        "auto",
-                        &format!(
-                            "Cannot reload Zone {} from {}: {error}",
-                            self.apex,
-                            path.display()
-                        ),
-                    );
+                if error == "no change in SOA serial" {
+                    return Some(false);
                 }
-                false
+                pharos_server::logging::log(
+                    "WARN",
+                    "auto",
+                    &format!(
+                        "Cannot reload Zone {} from {}: {error}",
+                        self.apex,
+                        path.display()
+                    ),
+                );
+                None
             }
         }
     }

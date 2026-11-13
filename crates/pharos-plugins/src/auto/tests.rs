@@ -168,6 +168,40 @@ async fn coredns_symlink_repoint_is_served_after_scan() {
             .rdata,
         [192, 0, 2, 2]
     );
+    let unchanged = root.join("unchanged");
+    std::fs::write(
+        &unchanged,
+        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\nwww 60 IN A 192.0.2.99\n",
+    )
+    .unwrap();
+    std::fs::remove_file(&link).unwrap();
+    symlink(&unchanged, &link).unwrap();
+    auto.shared.scan();
+    let entry = Arc::clone(
+        auto.shared
+            .zones
+            .load()
+            .origins
+            .get("example.org.")
+            .unwrap(),
+    );
+    assert_eq!(
+        *entry.resolved_path.lock().unwrap(),
+        std::fs::canonicalize(&unchanged).unwrap()
+    );
+    assert_eq!(
+        auto.serve_with(&mut cx, TestNext, false).await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(cx.response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 2]
+    );
     let broken = root.join("broken");
     std::fs::write(&broken, "invalid zone").unwrap();
     std::fs::remove_file(&link).unwrap();
@@ -243,7 +277,15 @@ async fn restart_during_scan_stops_old_watcher_before_restarting() {
             .unwrap(),
     );
     let old = entry.task.lock().unwrap().as_ref().unwrap().abort_handle();
-    let path_guard = entry.path.lock().unwrap();
+    let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+    let locked_entry = Arc::clone(&entry);
+    let locker = std::thread::spawn(move || {
+        let _guard = locked_entry.path.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    locked_rx.recv().unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         while auto.shared.scan_gate.try_lock().is_ok() {
             tokio::task::yield_now().await;
@@ -261,7 +303,8 @@ async fn restart_during_scan_stops_old_watcher_before_restarting() {
     .await
     .unwrap();
     assert!(!restart.is_finished());
-    drop(path_guard);
+    release_tx.send(()).unwrap();
+    locker.join().unwrap();
     tokio::time::timeout(Duration::from_secs(3), restart)
         .await
         .unwrap()
