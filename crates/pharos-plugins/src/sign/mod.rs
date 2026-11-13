@@ -88,6 +88,10 @@ fn register_hooks(lifecycle: &mut pharos_server::Lifecycle, signers: Vec<Signer>
             for signer in signers {
                 let mut receiver = receiver.clone();
                 handles.push(tokio::spawn(async move {
+                    let period = Duration::from_secs(5 * 3600);
+                    let mut timer =
+                        tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
                         if *receiver.borrow() {
                             break;
@@ -95,7 +99,7 @@ fn register_hooks(lifecycle: &mut pharos_server::Lifecycle, signers: Vec<Signer>
                         let current = Arc::clone(&signer);
                         let _ = tokio::task::spawn_blocking(move || current.refresh()).await;
                         tokio::select! {
-                            () = tokio::time::sleep(Duration::from_secs(5 * 3600)) => {},
+                            _ = timer.tick() => {},
                             _ = receiver.changed() => break,
                         }
                     }

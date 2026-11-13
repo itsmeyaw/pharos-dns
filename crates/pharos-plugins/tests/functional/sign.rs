@@ -191,3 +191,58 @@ async fn coredns_multi_origin_reuses_the_last_key_owner() {
     assert_eq!(owner, "example.org.");
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn coredns_refresh_checks_again_after_five_hours() {
+    use pharos_server::Phase;
+    let directory =
+        std::env::temp_dir().join(format!("pharos-sign-refresh-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let key = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+    );
+    let source = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sign/db.miek.nl_ns"
+    );
+    let text = format!(
+        "miek.nl {{\n sign {source} {{\n key file {key}\n directory {}\n }}\n}}",
+        directory.display()
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let lifecycle = &configured[0].config.lifecycle;
+    lifecycle.run(Phase::Startup).await.unwrap();
+    let path = directory.join("db.miek.nl.signed");
+    let wait = async {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "signer did not write Zone"
+            );
+            tokio::task::yield_now().await;
+        }
+    };
+    wait.await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    std::fs::remove_file(&path).unwrap();
+    tokio::time::advance(std::time::Duration::from_secs(5 * 3600 - 1)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!path.exists());
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "signer did not refresh Zone"
+        );
+        tokio::task::yield_now().await;
+    }
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}

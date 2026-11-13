@@ -129,6 +129,9 @@ mod tests {
         let now = 1_600_000_000_u32;
         for (inception, expiration, expected) in [
             (now - 86400, now + 8 * 86400, false),
+            (now - 6 * 86400, now + 7 * 86400, false),
+            (now - 6 * 86400 - 1, now + 7 * 86400, true),
+            (now - 86400, now + 7 * 86400 - 1, true),
             (now + 1, now + 8 * 86400, true),
             (now - 7 * 86400, now + 8 * 86400, true),
             (now - 86400, now + 6 * 86400, true),
