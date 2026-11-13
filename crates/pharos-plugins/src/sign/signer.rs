@@ -498,4 +498,37 @@ mod tests {
             && rr.rdata.starts_with(&Type::DNSKEY.0.to_be_bytes())
             && rr.ttl == 1800));
     }
+
+    #[test]
+    fn coredns_rejects_bad_and_missing_soa() {
+        let path = std::env::temp_dir().join(format!("pharos-sign-bad-soa-{}", std::process::id()));
+        let apex: Name = "example.org.".parse().unwrap();
+        for text in [
+            "$TTL 1M\n$ORIGIN example.org.\n@ IN SOA ns. admin. foobarbaz 1200 144 1814400 2h\n",
+            "$TTL 1M\n$ORIGIN example.org.\nwww IN A 192.0.2.14\n",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert!(sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).is_err());
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn coredns_without_keys_accepts_apex_only_zone() {
+        let path = std::env::temp_dir().join(format!("pharos-sign-no-keys-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "$TTL 30M\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n IN NS ns.\n",
+        )
+        .unwrap();
+        let apex: Name = "miek.nl.".parse().unwrap();
+        let records = sign(&apex, &path, &[], 1_700_000_000, 0, 0).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(
+            !records
+                .iter()
+                .any(|rr| matches!(rr.rtype, Type::NSEC | Type::RRSIG))
+        );
+    }
 }
