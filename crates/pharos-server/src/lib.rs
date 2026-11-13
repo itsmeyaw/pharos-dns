@@ -812,8 +812,7 @@ impl Default for TcpOptions {
 
 /// Async, statically dispatched Query handling. Clear and reuse the supplied
 /// Response buffer; return `Drop` to suppress a Response.
-/// Handlers must not block the runtime; TCP Queries on a connection may run
-/// concurrently.
+/// Handlers must not block the runtime; TCP and UDP Queries may run concurrently.
 pub trait Handler: Send + Sync + 'static {
     fn shed_metrics(&self) -> Option<metrics::ShedMetrics> {
         None

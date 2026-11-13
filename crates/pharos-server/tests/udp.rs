@@ -14,11 +14,16 @@ struct AsyncEcho;
 struct SlowEcho {
     started: std::sync::Arc<tokio::sync::Notify>,
     release: std::sync::Arc<tokio::sync::Notify>,
+    shed: Option<pharos_server::metrics::ShedMetrics>,
 }
 
 impl Handler for SlowEcho {
     fn udp_workers(&self) -> usize {
         1
+    }
+
+    fn shed_metrics(&self) -> Option<pharos_server::metrics::ShedMetrics> {
+        self.shed.clone()
     }
 
     async fn handle(
@@ -28,7 +33,7 @@ impl Handler for SlowEcho {
         _: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
-        // RFC 1035 §4.2.1: independent UDP Queries must not wait for each other.
+        // RFC 1035 §4.2.1: UDP carries each Query in a separate datagram.
         if query == b"slow" {
             self.started.notify_one();
             self.release.notified().await;
@@ -40,32 +45,35 @@ impl Handler for SlowEcho {
 
 #[tokio::test]
 async fn slow_query_does_not_delay_fast_query_on_same_socket() {
-    let started = std::sync::Arc::new(tokio::sync::Notify::new());
-    let release = std::sync::Arc::new(tokio::sync::Notify::new());
-    let listener = Listener::bind(
-        "127.0.0.1:0".parse().unwrap(),
-        SlowEcho {
-            started: started.clone(),
-            release: release.clone(),
-        },
-    )
-    .await
-    .unwrap();
-    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    socket.connect(listener.local_addr()).await.unwrap();
-    socket.send(b"slow").await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), started.notified())
+    for shed in [false, true] {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            SlowEcho {
+                started: started.clone(),
+                release: release.clone(),
+                shed: shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53")),
+            },
+        )
         .await
         .unwrap();
-    socket.send(b"fast").await.unwrap();
-    let mut response = [0; 16];
-    let length = tokio::time::timeout(Duration::from_millis(300), socket.recv(&mut response))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(&response[..length], b"fast");
-    release.notify_one();
-    listener.shutdown().await.unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(listener.local_addr()).await.unwrap();
+        socket.send(b"slow").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        socket.send(b"fast").await.unwrap();
+        let mut response = [0; 16];
+        let length = tokio::time::timeout(Duration::from_millis(300), socket.recv(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&response[..length], b"fast");
+        release.notify_one();
+        listener.shutdown().await.unwrap();
+    }
 }
 
 struct PendingQueries {
@@ -96,7 +104,7 @@ impl Handler for PendingQueries {
         _: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
-        // RFC 1035 §4.2.1: each accepted Query may wait independently.
+        // RFC 1035 §4.2.1: UDP carries each Query in a separate datagram.
         let _guard = PendingGuard(self.dropped.clone());
         self.started
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -197,7 +205,7 @@ impl Handler for PanickingEcho {
         _: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
-        // RFC 1035 §4.2.1: failure of one Query must not stop independent Queries.
+        // RFC 1035 §4.2.1: UDP carries each Query in a separate datagram.
         if query == b"pending panic" {
             tokio::task::yield_now().await;
         }

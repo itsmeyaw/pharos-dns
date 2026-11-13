@@ -2,7 +2,8 @@
 
 ## UDP listeners
 
-Each UDP worker handles up to 256 waiting Queries concurrently. When full, it
+Each UDP worker handles up to 256 waiting Queries concurrently, balancing burst
+capacity against memory use. When full, it
 stops receiving until one completes; the kernel may drop excess datagrams.
 Ready Queries remain inline. In-flight Queries are cancelled on Listener shutdown.
 Linux workers may already have received a batch of up to 16 datagrams.

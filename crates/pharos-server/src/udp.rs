@@ -14,7 +14,7 @@ use tokio::{net::UdpSocket, sync::watch};
 
 use crate::{Action, Handler, Protocol};
 
-// RFC 1035 §4.2.1: bound concurrent UDP work; excess Queries remain in the kernel queue.
+// RFC 1035 §4.2.1: UDP carries Queries; cap waiting work to bound per-worker memory.
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
 type Buffers = (Vec<u8>, Option<Vec<u8>>);
 
@@ -31,7 +31,7 @@ impl Drop for ResponseBuffer {
     }
 }
 
-// RFC 1035 §4.2.1: each UDP Query owns its Message and Response until completion.
+// RFC 1035 §4.2.1: UDP carries Messages; retain each Query and Response until completion.
 pub(crate) async fn answer<H: Handler>(
     handler: Arc<H>,
     socket: Arc<UdpSocket>,
@@ -91,7 +91,7 @@ pub(crate) async fn answer<H: Handler>(
     (query, data)
 }
 
-// RFC 1035 §4.2.1: isolate each Query while reusing ready futures without allocation.
+// Rust Future::poll: reuse completed futures; spawn pending ones to isolate each Query.
 pub(crate) async fn dispatch<F: Future<Output = Buffers> + Send + 'static>(
     future: F,
     slot: &mut Option<Pin<Box<F>>>,
@@ -121,7 +121,7 @@ pub(crate) async fn dispatch<F: Future<Output = Buffers> + Send + 'static>(
     }
 }
 
-// RFC 1035 §4.2.1: stop receiving when the per-worker concurrency limit is reached.
+// POSIX recvfrom: leave datagrams in the receive queue while the worker is at capacity.
 pub(crate) async fn capacity(
     pending: &mut JoinSet<Buffers>,
     shutdown: &mut watch::Receiver<bool>,
