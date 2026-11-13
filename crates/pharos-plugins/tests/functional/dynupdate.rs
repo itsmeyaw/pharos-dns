@@ -98,6 +98,84 @@ async fn malformed_empty_a_update_is_rejected() {
 }
 
 #[tokio::test]
+async fn coredns_update_authentication_and_other_zone_cases() {
+    let seed = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
+    let text = format!(
+        ".:53 {{\n dynupdate example.org. {{\n file {seed}\n allow key.example.org. allowed.example.org. A\n }}\n}}"
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let domain: Name = ".".parse().unwrap();
+    for (zone, key, owner, expected) in [
+        ("other.test.", None, "allowed.example.org.", Rcode::NOTAUTH),
+        ("example.org.", None, "allowed.example.org.", Rcode::REFUSED),
+        (
+            "example.org.",
+            Some("other.example.org."),
+            "allowed.example.org.",
+            Rcode::REFUSED,
+        ),
+        (
+            "example.org.",
+            Some("key.example.org."),
+            "blocked.example.org.",
+            Rcode::REFUSED,
+        ),
+        (
+            "example.org.",
+            Some("key.example.org."),
+            "allowed.example.org.",
+            Rcode::NOERROR,
+        ),
+    ] {
+        let zone: Name = zone.parse().unwrap();
+        let owner: Name = owner.parse().unwrap();
+        let key: Option<Name> = key.map(|key| key.parse().unwrap());
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
+        builder
+            .question(
+                NameRef::parse(zone.as_wire(), 0).unwrap(),
+                Type::SOA,
+                Class::IN,
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                NameRef::parse(owner.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+                60,
+                &[192, 0, 2, 10],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None; 8];
+        let mut metadata = Metadata::new(&mut slots);
+        if let Some(key) = &key {
+            metadata.set_validated_tsig(key);
+        }
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata,
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+        assert_eq!(Message::parse(&response).unwrap().rcode(), expected);
+    }
+}
+
+#[tokio::test]
 async fn authenticated_update_is_visible_to_subsequent_query() {
     let seed = concat!(
         env!("CARGO_MANIFEST_DIR"),
