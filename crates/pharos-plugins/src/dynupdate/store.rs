@@ -229,7 +229,7 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
     };
     let initial = if existed { None } else { Some(seed(config)?) };
     after_stat();
-    let (file, initial) = if existed {
+    let (file, mut initial) = if existed {
         (OpenOptions::new().read(true).write(true).open(path)?, None)
     } else {
         match OpenOptions::new()
@@ -241,7 +241,20 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
         {
             Ok(file) => (file, initial),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                (OpenOptions::new().read(true).write(true).open(path)?, None)
+                match OpenOptions::new().read(true).write(true).open(path) {
+                    Ok(file) => (file, None),
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        // CoreDNS follows a dangling database symlink when creating its target.
+                        let file = OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .mode(0o600)
+                            .open(path)?;
+                        (file, initial)
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             Err(error) => return Err(error),
         }
@@ -260,6 +273,9 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
         return Ok(shared);
     }
     lock(&file, false)?;
+    if initial.is_some() && file.metadata()?.len() != 0 {
+        initial = None;
+    }
     let (db, zone) = if let Some(zone) = initial {
         let mut db = bbolt::Store::create(file)?;
         db.set_limit(config.max_bytes);
@@ -1439,6 +1455,47 @@ mod tests {
             assert!(Arc::ptr_eq(&before, &shared.current.load_full()));
             assert_eq!(shared.current.load().serial(), Some(10));
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn initializes_missing_database_through_symlink() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-symlink-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("actual", dir.join("alias")).unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase alias\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        assert_eq!(validate(&config).unwrap().serial(), Some(1));
+        assert!(!dir.join("actual").exists());
+        let shared = acquire(&config).unwrap();
+        assert_eq!(shared.current.load().serial(), Some(1));
+        assert!(dir.join("actual").exists());
+        assert!(
+            std::fs::symlink_metadata(dir.join("alias"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        drop(shared);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
