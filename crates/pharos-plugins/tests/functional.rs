@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[cfg(feature = "plugin-sign")]
+#[path = "functional/sign.rs"]
+mod sign;
+
 #[cfg(feature = "plugin-auto")]
 #[path = "functional/auto.rs"]
 mod auto;

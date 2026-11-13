@@ -57,6 +57,11 @@ The `secondary` README scenarios replace the documented remote Primaries with
 local `file` and `transfer` fixtures. `wait-zone` waits for the asynchronous
 transfer, including the catalog member transfer, before comparing Responses.
 
+The `sign-readme` scenario uses local test keys and a one-second file reload
+to wait for offline signing. The two README examples using `key directory` are
+skipped because CoreDNS itself rejects that unimplemented option. The final
+example documents a configuration pitfall rather than a stable response.
+
 The `auto` README scenarios use fixture-relative directories instead of
 `/etc/coredns/zones/org`. `auto-transfer-readme` omits the remote NOTIFY
 destination; `auto-regexp-readme` includes an unmatched file to exercise the

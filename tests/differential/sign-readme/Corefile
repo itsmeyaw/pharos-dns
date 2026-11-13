@@ -1,0 +1,9 @@
+miek.nl:{port} {
+    file db.miek.nl.signed {
+        reload 1s
+    }
+    sign db.miek.nl {
+        key file Kmiek.nl.+013+59725
+        directory .
+    }
+}

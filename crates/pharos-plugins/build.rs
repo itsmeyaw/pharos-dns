@@ -15,6 +15,7 @@ fn config_only(name: &str) -> bool {
             | "health"
             | "reload"
             | "view"
+            | "sign"
     )
 }
 
@@ -98,6 +99,7 @@ fn main() {
             "file" => "file::File",
             "auto" => "auto::Auto",
             "secondary" => "secondary::Secondary",
+            "sign" => "sign::Sign",
             "erratic" => "erratic::Erratic",
             _ => "Unimplemented",
         };
@@ -151,6 +153,7 @@ fn main() {
             "file" => "file::setup::setup",
             "auto" => "auto::setup::setup",
             "secondary" => "secondary::setup::setup",
+            "sign" => "sign::setup::setup",
             "erratic" => "erratic::setup::setup",
             "kubernetes" => "kubernetes::setup::setup",
             _ => "setup_unimplemented",

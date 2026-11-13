@@ -85,12 +85,15 @@ mod regex_match;
 pub mod rewrite;
 #[cfg(feature = "plugin-secondary")]
 pub mod secondary;
+#[cfg(feature = "plugin-sign")]
+pub mod sign;
 #[cfg(feature = "plugin-siit")]
 pub mod siit;
 #[cfg(any(
     feature = "plugin-file",
     feature = "plugin-secondary",
-    feature = "plugin-auto"
+    feature = "plugin-auto",
+    feature = "plugin-sign"
 ))]
 pub mod zone;
 
@@ -738,7 +741,8 @@ impl pharos_server::Plugin for Unimplemented {
     feature = "plugin-file",
     feature = "plugin-auto",
     feature = "plugin-loadbalance",
-    feature = "plugin-dnssec"
+    feature = "plugin-dnssec",
+    feature = "plugin-sign"
 ))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     #[cfg(feature = "plugin-root")]
@@ -757,7 +761,8 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     feature = "plugin-file",
     feature = "plugin-auto",
     feature = "plugin-loadbalance",
-    feature = "plugin-dnssec"
+    feature = "plugin-dnssec",
+    feature = "plugin-sign"
 ))]
 fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std::path::PathBuf {
     use std::path::{Component, PathBuf};
