@@ -125,12 +125,12 @@ impl DynUpdate {
         let prereqs = cx
             .query
             .answers()
-            .map(|record| expand_record(record, cx.query.as_wire()))
+            .map(|record| expand_record(record, cx.query.as_wire(), false))
             .collect::<Result<Vec<_>, _>>();
         let updates = cx
             .query
             .authorities()
-            .map(|record| expand_record(record, cx.query.as_wire()))
+            .map(|record| expand_record(record, cx.query.as_wire(), true))
             .collect::<Result<Vec<_>, _>>();
         let (Ok(prereqs), Ok(updates)) = (prereqs, updates) else {
             return reply(cx, Rcode::FORMERR);
@@ -225,14 +225,27 @@ impl DynUpdate {
 }
 
 #[cfg(feature = "plugin-dynupdate")]
-fn expand_record(record: pharos_proto::Record<'_>, message: &[u8]) -> Result<ZoneRecord, ()> {
+fn expand_record(
+    record: pharos_proto::Record<'_>,
+    message: &[u8],
+    update: bool,
+) -> Result<ZoneRecord, ()> {
     // RFC 2136 §3.4: UPDATE records are expanded before becoming Zone data.
-    // RFC 4398 §2: nonempty CERT RDATA includes type, key tag and algorithm.
-    if record.rtype == Type::CERT && !record.rdata.is_empty() && record.rdata.len() < 5 {
-        return Err(());
-    }
     // miekg/dns accepts zero-length RDATA before decoding the RR type.
-    let rdata = if record.rdata.is_empty() {
+    let rdata = if record.rtype == Type::CERT
+        && record.rdata.len() < 5
+        && (!record.rdata.is_empty()
+            || record.class == Class::IN
+            || update && record.class == Class::NONE)
+    {
+        // miekg/dns accepts complete partial fields and packs omitted fields as zero.
+        if matches!(record.rdata.len(), 1 | 3) {
+            return Err(());
+        }
+        let mut data = record.rdata.to_vec();
+        data.resize(5, 0);
+        data
+    } else if record.rdata.is_empty() {
         Vec::new()
     } else if let Some(data) = crate::zone::update::legacy_name_rdata(
         record.rtype,
@@ -394,23 +407,41 @@ mod tests {
             let _ = builder.finish();
             let message = Message::parse(&wire).unwrap();
             let rr = message.authorities().next().unwrap();
-            assert_eq!(expand_record(rr, &wire).unwrap().rdata, expected, "{kind}");
+            assert_eq!(
+                expand_record(rr, &wire, true).unwrap().rdata,
+                expected,
+                "{kind}"
+            );
         }
     }
 
     #[test]
-    fn rejects_truncated_cert_update_rdata() {
+    fn coredns_cert_partial_fields_are_normalized() {
         let apex: pharos_proto::Name = "example.org.".parse().unwrap();
         let name = NameRef::parse(apex.as_wire(), 0).unwrap();
-        let mut wire = Vec::with_capacity(512);
-        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
-        builder.question(name, Type::SOA, Class::IN).unwrap();
-        builder
-            .record(Section::Authority, name, Type::CERT, Class::IN, 60, &[1])
-            .unwrap();
-        let _ = builder.finish();
-        let message = Message::parse(&wire).unwrap();
-        assert!(expand_record(message.authorities().next().unwrap(), &wire).is_err());
+        for (class, data, update, expected) in [
+            (Class::IN, vec![], true, Some(vec![0, 0, 0, 0, 0])),
+            (Class::IN, vec![0, 1], true, Some(vec![0, 1, 0, 0, 0])),
+            (Class::IN, vec![0, 1, 0, 2], true, Some(vec![0, 1, 0, 2, 0])),
+            (Class::IN, vec![1], true, None),
+            (Class::IN, vec![0, 1, 2], true, None),
+            (Class::ANY, vec![], true, Some(vec![])),
+            (Class::NONE, vec![], false, Some(vec![])),
+            (Class::NONE, vec![], true, Some(vec![0, 0, 0, 0, 0])),
+        ] {
+            let mut wire = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
+            builder.question(name, Type::SOA, Class::IN).unwrap();
+            builder
+                .record(Section::Authority, name, Type::CERT, class, 0, &data)
+                .unwrap();
+            let _ = builder.finish();
+            let message = Message::parse(&wire).unwrap();
+            let result = expand_record(message.authorities().next().unwrap(), &wire, update)
+                .ok()
+                .map(|record| record.rdata);
+            assert_eq!(result, expected, "{class:?} {data:?} {update}");
+        }
     }
 
     #[test]
