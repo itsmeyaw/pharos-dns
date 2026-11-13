@@ -20,6 +20,13 @@ fn invalid() -> io::Error {
     io::Error::new(ErrorKind::InvalidData, "invalid bbolt database")
 }
 
+fn zeroed(len: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).map_err(|_| invalid())?;
+    bytes.resize(len, 0);
+    Ok(bytes)
+}
+
 fn u16_at(data: &[u8], offset: usize) -> io::Result<u16> {
     Ok(u16::from_ne_bytes(
         data.get(offset..offset + 2)
@@ -265,7 +272,7 @@ impl Store {
                 if table > extent {
                     return Err(invalid());
                 }
-                let mut descriptors = vec![0; table];
+                let mut descriptors = zeroed(table)?;
                 self.file.read_exact_at(&mut descriptors, offset)?;
                 let mut end = table;
                 for index in 0..entries {
@@ -336,9 +343,7 @@ impl Store {
         if used > extent {
             return Err(invalid());
         }
-        let mut data = Vec::new();
-        data.try_reserve_exact(used).map_err(|_| invalid())?;
-        data.resize(used, 0);
+        let mut data = zeroed(used)?;
         self.file.read_exact_at(&mut data, offset)?;
         Ok(data)
     }
@@ -596,7 +601,11 @@ impl Store {
         let free_id = allocate(&mut free, &mut high, free_count)?;
         free.extend(old_pages);
         free.extend(self.meta.freelist..=self.meta.freelist + old_free_overflow);
-        let mut freelist = vec![0; free_count * self.meta.page_size];
+        let mut freelist = zeroed(
+            free_count
+                .checked_mul(self.meta.page_size)
+                .ok_or_else(invalid)?,
+        )?;
         put64(&mut freelist, 0, free_id);
         put16(&mut freelist, 8, FREELIST);
         put32(&mut freelist, 12, (free_count - 1) as u32);
@@ -777,7 +786,7 @@ fn encode_leaf(
     size: usize,
     entries: &[LeafEntry<'_>],
 ) -> io::Result<Vec<u8>> {
-    let mut data = vec![0; count.checked_mul(size).ok_or_else(invalid)?];
+    let mut data = zeroed(count.checked_mul(size).ok_or_else(invalid)?)?;
     put64(&mut data, 0, id);
     put16(&mut data, 8, LEAF);
     put16(
@@ -824,7 +833,7 @@ fn encode_branch(
     size: usize,
     entries: &[(Vec<u8>, u64)],
 ) -> io::Result<Vec<u8>> {
-    let mut data = vec![0; count.checked_mul(size).ok_or_else(invalid)?];
+    let mut data = zeroed(count.checked_mul(size).ok_or_else(invalid)?)?;
     put64(&mut data, 0, id);
     put16(&mut data, 8, BRANCH);
     put16(
@@ -926,6 +935,11 @@ mod tests {
             .unwrap();
         assert!(Store::open(file).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn impossible_allocation_is_an_error() {
+        assert!(super::zeroed(usize::MAX).is_err());
     }
 
     #[test]
