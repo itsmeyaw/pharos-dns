@@ -16,7 +16,7 @@ use crate::{Action, Handler, Protocol};
 
 // Implementation limit: bound pending work and retained buffer pairs per worker.
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
-// Implementation limit: retain at most 16 completed buffer pairs per worker.
+// Implementation limit: retain 16 pairs (about 1 MiB of Responses); larger bursts allocate again.
 const MAX_REUSABLE_BUFFERS: usize = 16;
 pub(crate) type Buffers = (Vec<u8>, Option<Vec<u8>>);
 
@@ -172,6 +172,14 @@ async fn receive_probe<H: Handler>(
             cancelled,
             stack.cloned(),
         );
+    } else if let Some(stack) = stack {
+        // CoreDNS shed: count shed-eligible Queries when the deferred stack is full.
+        should_shed(
+            stack,
+            &**handler,
+            &buffer[..length],
+            crate::canonical_peer(peer),
+        );
     }
     Ok(())
 }
@@ -246,7 +254,7 @@ pub(crate) fn spawn_parallel<H: Handler>(
         if *cancelled.borrow() {
             return;
         }
-        let mut response = if let Some(stack) = &stack {
+        let data = if let Some(stack) = &stack {
             tokio::select! {
                 _ = shutdown.changed() => return,
                 _ = cancelled.changed() => return,
@@ -255,22 +263,48 @@ pub(crate) fn spawn_parallel<H: Handler>(
         } else {
             Vec::with_capacity(65535)
         };
-        tokio::select! {
-            _ = shutdown.changed() => {},
-            _ = cancelled.changed() => {},
-            action = handler.handle(&query, crate::canonical_peer(peer), Protocol::Udp, &mut response) => {
-                if action == Action::Respond {
-                    if let Some(stack) = &stack {
-                        stack.push(response, peer);
-                        return;
-                    } else if let Err(error) = socket.send_to(&response, peer).await {
-                        crate::logging::log("ERROR", "server", &format!("UDP Response to {peer} failed: {error}"));
-                    }
+        let mut response = ResponseBuffer {
+            data: Some(data),
+            stack,
+        };
+        let action = {
+            // Rust catch_unwind: isolate probe panics even after the handler yields.
+            let future = async {
+                handler
+                    .handle(
+                        &query,
+                        crate::canonical_peer(peer),
+                        Protocol::Udp,
+                        response.data.as_mut().unwrap(),
+                    )
+                    .await
+            };
+            tokio::pin!(future);
+            tokio::select! {
+                _ = shutdown.changed() => None,
+                _ = cancelled.changed() => None,
+                result = poll_fn(|cx| match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+                    Ok(result) => result.map(Ok),
+                    Err(_) => Poll::Ready(Err(())),
+                }) => Some(result),
+            }
+        };
+        match action {
+            Some(Ok(Action::Respond)) => {
+                if let Some(stack) = &response.stack {
+                    stack.push(response.data.take().unwrap(), peer);
+                } else if let Err(error) =
+                    socket.send_to(response.data.as_ref().unwrap(), peer).await
+                {
+                    crate::logging::log(
+                        "ERROR",
+                        "server",
+                        &format!("UDP Response to {peer} failed: {error}"),
+                    );
                 }
             }
-        }
-        if let Some(stack) = stack {
-            stack.release(response);
+            Some(Err(())) => crate::logging::log("ERROR", "server", "Recovered panic in UDP Query"),
+            _ => {}
         }
     });
 }
@@ -502,6 +536,14 @@ mod tests {
     }
 
     struct Shedding(bool);
+    impl Handler for Shedding {
+        fn shed_query(&self, _: &[u8], _: SocketAddr) -> bool {
+            self.0
+        }
+        async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+            Action::Drop
+        }
+    }
 
     #[test]
     fn completed_buffer_pool_is_bounded() {
@@ -514,6 +556,18 @@ mod tests {
     }
 
     struct Panicking(bool);
+    struct ProbePanic {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl Handler for ProbePanic {
+        async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+            // Rust Future::poll: a probe can panic after yielding.
+            self.entered.notify_one();
+            self.release.notified().await;
+            panic!("test probe panic");
+        }
+    }
     impl Handler for Panicking {
         async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
             // Rust Future::poll: a panic can occur before or after a Pending result.
@@ -559,6 +613,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shed_probe_panic_returns_checked_out_buffer() {
+        let stack = Arc::new(crate::shed::ShedStack::new(
+            1,
+            crate::metrics::Registry::default().shed("dns://:53"),
+        ));
+        let mut held = vec![stack.checkout().unwrap(), stack.checkout().unwrap()];
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (_shutdown, receiver) = watch::channel(false);
+        let (_cancel, cancelled) = watch::channel(false);
+        spawn_parallel(
+            socket,
+            Arc::new(ProbePanic {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+            b"probe",
+            "127.0.0.1:53".parse().unwrap(),
+            receiver,
+            cancelled,
+            Some(stack.clone()),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        assert!(stack.checkout().is_none());
+        release.notify_one();
+        let returned = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(buffer) = stack.checkout() {
+                    break buffer;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        held.push(returned);
+        for buffer in held {
+            stack.release(buffer);
+        }
+    }
+
+    #[tokio::test]
     async fn shed_exhaustion_defers_checkout_until_a_buffer_returns() {
         let stack = Arc::new(crate::shed::ShedStack::new(
             1,
@@ -587,15 +686,35 @@ mod tests {
             stack.release(buffer);
         }
     }
-    impl Handler for Shedding {
-        fn shed_query(&self, _: &[u8], _: SocketAddr) -> bool {
-            self.0
-        }
-        async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
-            Action::Drop
-        }
-    }
 
+    #[tokio::test]
+    async fn overloaded_shed_counts_eligible_queries_if_stack_is_full() {
+        let registry = crate::metrics::Registry::default();
+        let stack = Arc::new(crate::shed::ShedStack::new(1, registry.shed("dns://:53")));
+        let server = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        stack.push(stack.checkout().unwrap(), client.local_addr().unwrap());
+        client
+            .send_to(b"ordinary", server.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (_shutdown, receiver) = watch::channel(false);
+        receive_probe(
+            &server,
+            &Arc::new(Shedding(true)),
+            receiver,
+            Some(&stack),
+            &mut None,
+        )
+        .await
+        .unwrap();
+        let mut output = String::new();
+        registry.encode(&mut output);
+        assert!(
+            output.contains("reason=\"query\",server=\"dns://:53\"} 1"),
+            "{output}"
+        );
+    }
     #[test]
     fn full_stack_only_drops_queries_from_shed_blocks() {
         let registry = crate::metrics::Registry::default();

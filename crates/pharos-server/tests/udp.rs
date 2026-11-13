@@ -298,6 +298,7 @@ async fn udp_shutdown_at_pending_limit_cancels_all_queries() {
 struct PanickingEcho {
     metrics: Option<pharos_server::metrics::ShedMetrics>,
     panicked: std::sync::Arc<tokio::sync::Notify>,
+    cancelled: tokio::sync::watch::Sender<bool>,
 }
 impl Handler for PanickingEcho {
     fn udp_workers(&self) -> usize {
@@ -305,6 +306,13 @@ impl Handler for PanickingEcho {
     }
     fn shed_metrics(&self) -> Option<pharos_server::metrics::ShedMetrics> {
         self.metrics.clone()
+    }
+    fn parallel_query(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        (query == b"parallel panic").then(|| self.cancelled.subscribe())
     }
     async fn handle(
         &self,
@@ -314,13 +322,16 @@ impl Handler for PanickingEcho {
         response: &mut Vec<u8>,
     ) -> Action {
         // RFC 1035 §4.2.1: UDP carries each Query in a separate datagram.
-        if query == b"pending panic" {
+        if query == b"pending panic" || query == b"parallel panic" {
             tokio::task::yield_now().await;
         }
-        if query == b"panic" || query == b"pending panic" {
+        if query == b"panic" || query == b"pending panic" || query == b"parallel panic" {
             self.panicked.notify_one();
         }
-        assert!(query != b"panic" && query != b"pending panic", "test panic");
+        assert!(
+            query != b"panic" && query != b"pending panic" && query != b"parallel panic",
+            "test panic"
+        );
         response.extend_from_slice(query);
         Action::Respond
     }
@@ -336,13 +347,14 @@ async fn udp_handler_panics_do_not_stop_worker() {
             PanickingEcho {
                 metrics,
                 panicked: panicked.clone(),
+                cancelled: tokio::sync::watch::channel(false).0,
             },
         )
         .await
         .unwrap();
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         socket.connect(listener.local_addr()).await.unwrap();
-        for query in [b"panic".as_slice(), b"pending panic"] {
+        for query in [b"panic".as_slice(), b"pending panic", b"parallel panic"] {
             socket.send(query).await.unwrap();
             tokio::time::timeout(Duration::from_secs(2), panicked.notified())
                 .await
@@ -379,7 +391,7 @@ fn udp_handler_panics_are_logged() {
     assert!(
         text.matches("ERROR server: Recovered panic in UDP Query")
             .count()
-            >= 4,
+            >= 6,
         "{text}"
     );
 }

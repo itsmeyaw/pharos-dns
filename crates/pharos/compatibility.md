@@ -227,8 +227,9 @@
 - Each UDP worker handles up to 256 waiting Queries concurrently and retains at
   most 16 completed buffer pairs for reuse. In-flight Response buffers reserve
   65,535 bytes because forwarded Responses may exceed the client's UDP limit.
-  At capacity one ordinary Query waits; further ordinary datagrams are dropped
-  without a shed counter, while forwarding-loop probes remain serviceable.
+  At capacity one ordinary Query waits; further ordinary datagrams are dropped,
+  with a shed counter only for shed-eligible Queries when the stack is full.
+  Forwarding-loop probes remain serviceable.
   Linux may have already received a batch of up to 16 datagrams. Ready Queries
   remain inline; Listener shutdown cancels in-flight Queries.
 - View-aware routing and metrics perform per-Query dispatch checks and initialize Metadata before routing even when no View is configured; no View filters run in that case.
