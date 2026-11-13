@@ -52,7 +52,8 @@ async fn top_counts(chain: &Chain, qtype: Type) -> [usize; 2] {
             response: &mut response,
             max_response_size: 512,
         };
-        assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+        // Keep the non-measured Chain future out of the reload fixture's stack.
+        assert_eq!(Box::pin(chain.serve(&mut cx)).await, Outcome::Response);
         let message = Message::parse(&response).unwrap();
         let last = *message.answers().next().unwrap().rdata.last().unwrap();
         counts[usize::from(last - 1)] += 1;
