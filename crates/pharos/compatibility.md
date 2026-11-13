@@ -250,7 +250,7 @@
 - Pharos removes OPT from a Response to a non-EDNS Query, as RFC 6891 requires; CoreDNS may preserve a Plugin-supplied OPT in that case.
 - Pharos answers Plugin errors with SERVFAIL. CoreDNS ignores returned errors and bases the Response on the separately returned RCODE; without `errors` it does not log ordinary chain errors. Pharos likewise logs those errors only when `errors` is configured, while logging recovered panics at the Listener.
 - A UDP IXFR that reaches a Zone Transfer stream returns the current SOA only, following RFC 1995 §2; CoreDNS's `transfer` returns REFUSED instead.
-- The AXFR client API supports TSIG; CoreDNS v1.15.0's `secondary` does not sign transfer requests, even when a TSIG key is configured. Pharos's `secondary` Plugin is not yet implemented.
+- The AXFR client API supports TSIG; CoreDNS v1.15.0's `secondary` does not sign transfer requests, even when a TSIG key is configured. Pharos's `secondary` Plugin matches this.
 - Signed transfer producers must leave room for TSIG within the 65,535-octet Message limit; otherwise the Listener closes the connection rather than emitting an unsigned Message.
 - Pharos also rejects Client Subnet address lengths that do not match the prefix and non-zero host bits, which miekg/dns accepts. It validates the supported typed options and framing; other option codes are passed through without the additional type-specific validation miekg/dns applies to some of them.
 - Invalid UTF-8 in Extended DNS Error text is rendered with replacement characters.
