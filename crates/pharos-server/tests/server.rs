@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use pharos_proto::{Message, Opcode, Rcode, Type};
+use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Opcode, Rcode, Section, Type};
 use pharos_server::{
     Action, Chain, Context, Error, Handler, ListenerKey, Outcome, Protocol, Router, Server,
     Transport, panics_total,
@@ -39,6 +39,88 @@ impl Chain for NotifyProbe {
     }
     fn is_empty(&self) -> bool {
         false
+    }
+}
+
+struct UpdateProbe(bool);
+impl Chain for UpdateProbe {
+    async fn serve(&self, context: &mut Context<'_, '_>) -> Outcome {
+        assert_eq!(context.query.opcode(), Opcode::UPDATE);
+        assert_eq!(context.query.authority_count(), 2);
+        Outcome::Unanswered(Rcode::REFUSED)
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+    fn accepts_update(&self) -> bool {
+        self.0
+    }
+}
+
+#[tokio::test]
+async fn update_admission_is_listener_and_block_scoped() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        key,
+        "dynamic.example.".parse().unwrap(),
+        Some(UpdateProbe(true)),
+        vec![],
+    );
+    router.add(
+        key,
+        "static.example.".parse().unwrap(),
+        Some(UpdateProbe(false)),
+        vec![],
+    );
+    let server = Server::new(router, key);
+    for (domain, expected) in [
+        ("dynamic.example.", Rcode::REFUSED),
+        ("static.example.", Rcode::NOTIMP),
+        ("other.example.", Rcode::REFUSED),
+    ] {
+        let domain: Name = domain.parse().unwrap();
+        let name = NameRef::parse(domain.as_wire(), 0).unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
+        builder.question(name, Type::SOA, Class::IN).unwrap();
+        builder
+            .record(
+                Section::Authority,
+                name,
+                Type::A,
+                Class::IN,
+                60,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                name,
+                Type::A,
+                Class::IN,
+                60,
+                &[192, 0, 2, 2],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        assert_eq!(
+            server
+                .handle(
+                    &wire,
+                    "127.0.0.1:1234".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response
+                )
+                .await,
+            Action::Respond
+        );
+        assert_eq!(Message::parse(&response).unwrap().rcode(), expected);
     }
 }
 
