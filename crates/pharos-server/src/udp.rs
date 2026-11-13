@@ -75,6 +75,7 @@ impl Slot {
         response: Option<Vec<u8>>,
     ) {
         let mut data = self.data.lock().unwrap();
+        debug_assert!(data.peer.is_none() && !data.done);
         data.query.clear();
         data.query.extend_from_slice(query);
         data.peer = Some((peer, client));
@@ -101,6 +102,7 @@ async fn serve_slot<H: Handler>(
     stack: Option<Arc<crate::shed::ShedStack>>,
 ) {
     loop {
+        // Rust Future::poll: idle slots are polled explicitly after input is installed.
         let (query, response, peer, client) = poll_fn(|_| {
             let mut data = data.lock().unwrap();
             match data.peer.take() {
