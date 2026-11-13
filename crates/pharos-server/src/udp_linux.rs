@@ -140,23 +140,24 @@ pub(crate) fn spawn<H: Handler>(
                     }
                     // recvmmsg(2): inspect already-received probes before waiting for capacity.
                     if pending.len() >= crate::udp::MAX_IN_FLIGHT {
-                        for later in index + 1..count {
-                            if let Some((size, address)) = peers[later]
-                                && let Some(cancelled) = handler.parallel_query(
-                                    &buffers[later][..size],
-                                    crate::canonical_peer(address),
-                                )
+                        for (later, buffer) in peers[index + 1..count]
+                            .iter_mut()
+                            .zip(&buffers[index + 1..count])
+                        {
+                            if let Some((size, address)) = *later
+                                && let Some(cancelled) = handler
+                                    .parallel_query(&buffer[..size], crate::canonical_peer(address))
                             {
                                 crate::udp::spawn_parallel(
                                     Arc::clone(&socket),
                                     Arc::clone(&handler),
-                                    &buffers[later][..size],
+                                    &buffer[..size],
                                     address,
                                     shutdown.clone(),
                                     cancelled,
                                     None,
                                 );
-                                peers[later] = None;
+                                *later = None;
                             }
                         }
                     }
