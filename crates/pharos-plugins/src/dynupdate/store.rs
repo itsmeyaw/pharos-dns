@@ -1,7 +1,10 @@
 use super::{bbolt, setup::Config, update::build_zone, wire};
 use crate::zone::Zone;
 use arc_swap::ArcSwap;
-use pharos_proto::zone::ZoneParser;
+use pharos_proto::{
+    Name, Rcode,
+    zone::{ZoneParser, ZoneRecord},
+};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
@@ -18,6 +21,55 @@ static STORES: OnceLock<Registry> = OnceLock::new();
 pub(super) struct Shared {
     pub(super) current: ArcSwap<Zone>,
     pub(super) db: Mutex<bbolt::Store>,
+}
+
+impl Shared {
+    // RFC 2136 §3.2: serialize prerequisites with the durable UPDATE they guard.
+    pub(super) fn transact(
+        &self,
+        config: &Config,
+        key: &Name,
+        prereqs: &[ZoneRecord],
+        updates: &[ZoneRecord],
+    ) -> io::Result<(Rcode, bool)> {
+        if !config.configured_key(key)
+            || prereqs
+                .len()
+                .checked_add(updates.len())
+                .is_none_or(|count| count > config.max_update_records)
+        {
+            return Ok((Rcode::REFUSED, false));
+        }
+        let mut db = self.db.lock().map_err(invalid)?;
+        let zone = self.current.load_full();
+        let code = super::update::prerequisites(&zone, prereqs);
+        if code != Rcode::NOERROR {
+            return Ok((code, false));
+        }
+        if updates
+            .iter()
+            .any(|rr| !config.allows(key, &rr.owner, rr.rtype))
+        {
+            return Ok((Rcode::REFUSED, false));
+        }
+        let code = super::update::validate_updates(&zone, updates);
+        if code != Rcode::NOERROR {
+            return Ok((code, false));
+        }
+        let (candidate, changed) = zone.apply_updates(updates).map_err(invalid)?;
+        if !changed {
+            return Ok((Rcode::NOERROR, false));
+        }
+        if check_limits(&candidate, config).is_err() {
+            return Ok((Rcode::REFUSED, false));
+        }
+        db.commit(
+            config.origin.canonical().as_bytes(),
+            &wire::encode(candidate.records())?,
+        )?;
+        self.current.store(Arc::new(candidate));
+        Ok((Rcode::NOERROR, true))
+    }
 }
 
 fn registry() -> &'static Registry {
@@ -55,8 +107,13 @@ fn lock(file: &File, shared: bool) -> io::Result<()> {
 }
 
 fn check_limits(zone: &Zone, config: &Config) -> io::Result<()> {
-    if zone.records().len() > config.max_records
-        || wire::encode(zone.records())?.len() > config.max_bytes
+    let bytes = zone.records().iter().try_fold(0usize, |total, rr| {
+        total
+            .checked_add(rr.owner.as_wire().len())?
+            .checked_add(10)?
+            .checked_add(rr.rdata.len())
+    });
+    if zone.records().len() > config.max_records || bytes.is_none_or(|size| size > config.max_bytes)
     {
         return Err(invalid("Zone exceeds configured limits"));
     }
@@ -279,6 +336,85 @@ mod tests {
         }
         drop(shared);
         assert!(validate(&config).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_prerequisites_apply_to_the_committed_snapshot() {
+        use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
+        let dir = std::env::temp_dir().join(format!(
+            "pharos-dynamic-race-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        let text = "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}";
+        let tokens = lex("Corefile", text);
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = acquire(&config).unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let owner: Name = "host.example.org.".parse().unwrap();
+        let prereq = ZoneRecord {
+            owner: owner.clone(),
+            rtype: Type::A,
+            class: Class::NONE,
+            ttl: 0,
+            rdata: Vec::new(),
+        };
+        let update = ZoneRecord {
+            owner,
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 1],
+        };
+        let results = std::thread::scope(|scope| {
+            let threads = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        shared
+                            .transact(
+                                &config,
+                                &key,
+                                std::slice::from_ref(&prereq),
+                                std::slice::from_ref(&update),
+                            )
+                            .unwrap()
+                            .0
+                    })
+                })
+                .collect::<Vec<_>>();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            results
+                .iter()
+                .filter(|rcode| **rcode == Rcode::NOERROR)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|rcode| **rcode == Rcode::YXRRSET)
+                .count(),
+            7
+        );
+        assert_eq!(shared.current.load().serial(), Some(2));
+        drop(shared);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

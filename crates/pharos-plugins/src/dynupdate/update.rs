@@ -84,7 +84,7 @@ pub(super) fn build_zone(
 }
 
 // RFC 2136 §3.4.1: prescan the complete Update section before changing the Zone.
-fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
+pub(super) fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
     for record in records {
         if !record.owner.is_subdomain_of(zone.apex()) {
             return Rcode::NOTZONE;
@@ -134,7 +134,7 @@ fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
 }
 
 // RFC 2136 §3.2: evaluate all prerequisite forms against the transaction's current snapshot.
-fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
+pub(super) fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
     let mut values: BTreeMap<(Name, Type), Vec<&ZoneRecord>> = BTreeMap::new();
     for record in records {
         if record.ttl != 0 {

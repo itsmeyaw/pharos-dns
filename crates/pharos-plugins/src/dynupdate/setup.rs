@@ -25,6 +25,10 @@ pub(super) struct Config {
 }
 
 impl Config {
+    pub(super) fn configured_key(&self, key: &Name) -> bool {
+        self.permissions.iter().any(|rule| &rule.key == key)
+    }
+
     pub(super) fn allows(&self, key: &Name, owner: &Name, kind: Type) -> bool {
         self.permissions.iter().any(|rule| {
             &rule.key == key
