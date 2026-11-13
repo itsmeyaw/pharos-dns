@@ -1004,4 +1004,80 @@ mod tests {
         drop(shared);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn read_only_validation_releases_lock_and_preserves_database() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-validate-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        drop(acquire(&config).unwrap());
+        std::fs::remove_file(dir.join("seed")).unwrap();
+        let before = std::fs::read(dir.join("db")).unwrap();
+        assert_eq!(validate(&config).unwrap().serial(), Some(1));
+        assert_eq!(std::fs::read(dir.join("db")).unwrap(), before);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.join("db"))
+            .unwrap();
+        file.try_lock().unwrap();
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn seed_file_and_hardlink_cannot_be_database() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-seed-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        let seed = dir.join("seed");
+        std::fs::write(
+            &seed,
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        std::fs::hard_link(&seed, dir.join("alias")).unwrap();
+        let before = std::fs::read(&seed).unwrap();
+        for database in ["seed", "alias"] {
+            let text = format!(
+                "dynupdate {{\nfile seed\ndatabase {database}\nallow key.example.org. * A\n}}"
+            );
+            let tokens = lex("Corefile", &text);
+            let config = setup::parse(
+                &mut Cursor::new("Corefile", &tokens),
+                &["example.org"],
+                Some(&dir),
+            )
+            .unwrap();
+            assert!(validate(&config).is_err());
+            assert!(acquire(&config).is_err());
+            assert_eq!(std::fs::read(&seed).unwrap(), before);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
