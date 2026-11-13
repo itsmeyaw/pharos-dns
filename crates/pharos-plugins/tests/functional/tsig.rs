@@ -559,15 +559,15 @@ async fn coredns_hmac_algorithms() {
         key.sign(&mut wire, now, 300, None).unwrap();
         let mac = pharos_proto::TsigRecord::parse(&wire).unwrap().mac;
         let mut response = Vec::with_capacity(512);
+        // Keep the unmeasured Listener future out of the test's stack.
         assert_eq!(
-            server
-                .handle(
-                    &wire,
-                    "127.0.0.1:1234".parse().unwrap(),
-                    Protocol::Udp,
-                    &mut response
-                )
-                .await,
+            Box::pin(server.handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response
+            ))
+            .await,
             Action::Respond
         );
         key.verify(&response, now, Some(mac), 0).unwrap();
@@ -588,14 +588,13 @@ async fn coredns_hmac_algorithms() {
         .collect();
     let mut response = Vec::with_capacity(512);
     assert_eq!(
-        server
-            .handle(
-                &wire,
-                "127.0.0.1:1234".parse().unwrap(),
-                Protocol::Udp,
-                &mut response
-            )
-            .await,
+        Box::pin(server.handle(
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response
+        ))
+        .await,
         Action::Respond
     );
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTAUTH);
