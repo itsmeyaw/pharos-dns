@@ -186,4 +186,18 @@ mod tests {
         assert_eq!(parsed, records);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn coredns_resign_scans_at_most_100_records() {
+        let dir =
+            std::env::temp_dir().join(format!("pharos-sign-resign-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("zone");
+        let row = "example.org. 60 IN A 192.0.2.1\n";
+        std::fs::write(&path, row.repeat(100)).unwrap();
+        assert!(!needs_resign(&path, 1_600_000_000));
+        std::fs::write(&path, row.repeat(101)).unwrap();
+        assert!(needs_resign(&path, 1_600_000_000));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

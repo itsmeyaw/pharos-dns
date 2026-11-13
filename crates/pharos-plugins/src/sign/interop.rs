@@ -63,27 +63,30 @@ fn query(name: &str, kind: Type) -> Vec<u8> {
     wire
 }
 
-fn answer_records(wire: &[u8]) -> Vec<(Name, u16, u16, u32, Vec<u8>)> {
+fn records(wire: &[u8], authority: bool) -> Vec<(Name, u16, u16, u32, Vec<u8>)> {
     let message = Message::parse(wire).unwrap();
-    let mut records: Vec<_> = message
-        .answers()
-        .map(|rr| {
-            (
-                rr.name.to_name(),
-                rr.rtype.0,
-                rr.class.0,
-                rr.ttl,
-                canonical_rdata(&rr.data().unwrap()).unwrap(),
-            )
-        })
-        .collect();
+    let mut records: Vec<_> = (if authority {
+        message.authorities()
+    } else {
+        message.answers()
+    })
+    .map(|rr| {
+        (
+            rr.name.to_name(),
+            rr.rtype.0,
+            rr.class.0,
+            rr.ttl,
+            canonical_rdata(&rr.data().unwrap()).unwrap(),
+        )
+    })
+    .collect();
     records.sort();
     records
 }
 
 fn verify_answers(wire: &[u8], key: &KeyPair) {
     let message = Message::parse(wire).unwrap();
-    let records: Vec<_> = message.answers().collect();
+    let records: Vec<_> = message.answers().chain(message.authorities()).collect();
     let mut checked = 0;
     for rr in &records {
         let Rdata::Rrsig {
@@ -139,6 +142,7 @@ async fn compare_file(binary: &Path, directory: &Path, zone: &Path, key: &KeyPai
         ("miek.nl.", Type::DNSKEY),
         ("caa.miek.nl.", Type::CAA),
         ("uri.miek.nl.", Type::URI),
+        ("missing.miek.nl.", Type::A),
     ] {
         let wire = query(name, kind);
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -165,11 +169,13 @@ async fn compare_file(binary: &Path, directory: &Path, zone: &Path, key: &KeyPai
             max_response_size: 4096,
         };
         assert_eq!(chain[0].config.serve(&mut cx).await, Outcome::Response);
-        assert_eq!(
-            answer_records(&response),
-            answer_records(&received),
-            "{name} {kind}"
-        );
+        for authority in [false, true] {
+            assert_eq!(
+                records(&response, authority),
+                records(&received, authority),
+                "{name} {kind}"
+            );
+        }
         verify_answers(&received, key);
     }
 }
