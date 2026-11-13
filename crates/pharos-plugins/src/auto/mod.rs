@@ -151,8 +151,22 @@ impl Auto {
         next: N,
         has_next: bool,
     ) -> Outcome {
+        match self.select(cx, has_next) {
+            Selection::Next => next.run(cx).await,
+            Selection::Refused => Outcome::Unanswered(Rcode::REFUSED),
+            Selection::Zone(entry) => match entry.current.load_full() {
+                Some(zone) => {
+                    let case_mismatch = entry.origin.bytes().any(|byte| byte.is_ascii_uppercase());
+                    zone.lookup_auto(cx, next, case_mismatch).await
+                }
+                None => Outcome::Unanswered(Rcode::SERVFAIL),
+            },
+        }
+    }
+
+    fn select(&self, cx: &Context<'_, '_>, has_next: bool) -> Selection {
         let Some(question) = cx.query.questions().next() else {
-            return next.run(cx).await;
+            return Selection::Next;
         };
         let mut wire = [0u8; 255];
         let mut len = 0;
@@ -165,24 +179,23 @@ impl Auto {
         }
         let name = &wire[..len + 1];
         if !self.origins.iter().any(|origin| contains(name, origin)) {
-            return next.run(cx).await;
+            return Selection::Next;
         }
         let Some(entry) = self.shared.find(name) else {
             return if has_next {
-                next.run(cx).await
+                Selection::Next
             } else {
-                Outcome::Unanswered(Rcode::REFUSED)
+                Selection::Refused
             };
         };
-        let zone = entry.current.load_full();
-        match zone {
-            Some(zone) => {
-                let case_mismatch = entry.origin.bytes().any(|byte| byte.is_ascii_uppercase());
-                zone.lookup_auto(cx, next, case_mismatch).await
-            }
-            None => Outcome::Unanswered(Rcode::SERVFAIL),
-        }
+        Selection::Zone(entry)
     }
+}
+
+enum Selection {
+    Next,
+    Refused,
+    Zone(Arc<Entry>),
 }
 
 struct NameText {
