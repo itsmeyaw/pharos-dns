@@ -212,6 +212,10 @@ pub(super) fn validate(config: &Config) -> io::Result<Arc<Zone>> {
 }
 
 pub(super) fn acquire(config: &Config) -> io::Result<Arc<Shared>> {
+    acquire_with(config, || {})
+}
+
+fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Shared>> {
     let path = config
         .database
         .as_ref()
@@ -224,15 +228,23 @@ pub(super) fn acquire(config: &Config) -> io::Result<Arc<Shared>> {
         Err(error) => return Err(error),
     };
     let initial = if existed { None } else { Some(seed(config)?) };
-    let file = if existed {
-        OpenOptions::new().read(true).write(true).open(path)?
+    after_stat();
+    let (file, initial) = if existed {
+        (OpenOptions::new().read(true).write(true).open(path)?, None)
     } else {
-        OpenOptions::new()
+        match OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(path)?
+            .open(path)
+        {
+            Ok(file) => (file, initial),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                (OpenOptions::new().read(true).write(true).open(path)?, None)
+            }
+            Err(error) => return Err(error),
+        }
     };
     let metadata = file.metadata()?;
     let id = identity(&metadata);
@@ -1308,6 +1320,61 @@ mod tests {
         assert!(start.elapsed() >= std::time::Duration::from_millis(900));
         drop(file);
         assert!(acquire(&config).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn database_created_between_stat_and_open_is_not_overwritten() {
+        use pharos_proto::{Class, Type, zone::ZoneRecord};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-create-race-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let seed = validate(&config).unwrap();
+        let update = ZoneRecord {
+            owner: "saved.example.org.".parse().unwrap(),
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 10],
+        };
+        let (updated, _) = seed.apply_updates(&[update]).unwrap();
+        let shared = super::acquire_with(&config, || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(dir.join("db"))
+                .unwrap();
+            let mut db = super::bbolt::Store::create(file).unwrap();
+            db.commit(
+                b"example.org.",
+                &super::wire::encode(updated.records()).unwrap(),
+            )
+            .unwrap();
+        })
+        .unwrap();
+        assert_eq!(shared.current.load().serial(), Some(2));
+        drop(shared);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
