@@ -126,6 +126,7 @@ impl MetaPage {
 pub(super) struct Store {
     file: File,
     meta: MetaPage,
+    uncertain: bool,
 }
 
 type Entries = BTreeMap<Vec<u8>, (u32, Vec<u8>)>;
@@ -163,7 +164,11 @@ impl Store {
         put16(&mut root, 8, LEAF);
         file.write_all_at(&root, 12288)?;
         file.sync_all()?;
-        Ok(Self { file, meta })
+        Ok(Self {
+            file,
+            meta,
+            uncertain: false,
+        })
     }
 
     // bbolt v1.5.0 db.go:329-414: if the first meta is invalid, find the second at a possible page boundary.
@@ -206,7 +211,11 @@ impl Store {
         {
             return Err(invalid());
         }
-        Ok(Self { file, meta })
+        Ok(Self {
+            file,
+            meta,
+            uncertain: false,
+        })
     }
 
     // bbolt v1.5.0 internal/common/page.go:31-36: overflow pages immediately follow their header page.
@@ -228,7 +237,9 @@ impl Store {
             .ok()
             .and_then(|n| n.checked_mul(self.meta.page_size))
             .ok_or_else(invalid)?;
-        let mut data = vec![0; len];
+        let mut data = Vec::new();
+        data.try_reserve_exact(len).map_err(|_| invalid())?;
+        data.resize(len, 0);
         self.file.read_exact_at(&mut data, offset)?;
         Ok(data)
     }
@@ -288,7 +299,8 @@ impl Store {
     }
 
     pub(super) fn read(&self) -> io::Result<(Vec<u8>, Vec<u8>)> {
-        let (_, contents, _) = self.contents()?;
+        let (root, contents, pages) = self.contents()?;
+        self.checked_free(&root, &contents, &pages)?;
         let get = |key: &[u8]| {
             contents
                 .get(key)
@@ -330,6 +342,57 @@ impl Store {
         Ok((free, u64::from(u32_at(&data, 12)?)))
     }
 
+    // bbolt v1.5.0 tx_check.go:50-100: reachable pages must not appear on the freelist.
+    fn checked_free(
+        &self,
+        root: &Entries,
+        contents: &Entries,
+        replaced: &BTreeSet<u64>,
+    ) -> io::Result<(BTreeSet<u64>, u64)> {
+        let mut live = replaced.clone();
+        let mut pending = Vec::new();
+        for (key, (flags, value)) in root {
+            if *flags & !BUCKET != 0 {
+                return Err(invalid());
+            }
+            if *flags & BUCKET != 0 && key.as_slice() != BUCKET_NAME {
+                pending.push(value.clone());
+            }
+        }
+        for (flags, value) in contents.values() {
+            if *flags & !BUCKET != 0 {
+                return Err(invalid());
+            }
+            if *flags & BUCKET != 0 {
+                pending.push(value.clone());
+            }
+        }
+        while let Some(bucket) = pending.pop() {
+            let id = u64_at(&bucket, 0)?;
+            let entries = if id == 0 {
+                leaf_entries(bucket.get(16..).ok_or_else(invalid)?)?
+            } else {
+                self.tree(id, &mut live)?
+            };
+            for (flags, value) in entries.into_values() {
+                if flags & !BUCKET != 0 {
+                    return Err(invalid());
+                }
+                if flags & BUCKET != 0 {
+                    pending.push(value);
+                }
+            }
+        }
+        let (free, overflow) = self.free_pages()?;
+        if live.iter().any(|id| free.contains(id))
+            || (self.meta.freelist..=self.meta.freelist + overflow)
+                .any(|id| free.contains(&id) || live.contains(&id))
+        {
+            return Err(invalid());
+        }
+        Ok((free, overflow))
+    }
+
     pub(super) fn commit(&mut self, origin: &[u8], records: &[u8]) -> io::Result<()> {
         self.commit_with(origin, records, |_| Ok(()))
     }
@@ -340,6 +403,9 @@ impl Store {
         records: &[u8],
         mut checkpoint: impl FnMut(CommitPoint) -> io::Result<()>,
     ) -> io::Result<()> {
+        if self.uncertain {
+            return Err(io::Error::other("bbolt commit status is uncertain"));
+        }
         let (mut root, mut contents, old_pages) = match self.contents() {
             Ok(value) => value,
             Err(_) => {
@@ -353,13 +419,7 @@ impl Store {
         };
         contents.insert(b"origin".to_vec(), (0, origin.to_vec()));
         contents.insert(b"records".to_vec(), (0, records.to_vec()));
-        let (mut free, old_free_overflow) = self.free_pages()?;
-        if old_pages.iter().any(|id| free.contains(id))
-            || (self.meta.freelist..=self.meta.freelist + old_free_overflow)
-                .any(|id| free.contains(&id) || old_pages.contains(&id))
-        {
-            return Err(invalid());
-        }
+        let (mut free, old_free_overflow) = self.checked_free(&root, &contents, &old_pages)?;
         let mut high = self.meta.high;
         let needed = leaf_size(&contents)?;
         let count = needed.div_ceil(self.meta.page_size);
@@ -427,12 +487,15 @@ impl Store {
             txid: self.meta.txid.checked_add(1).ok_or_else(invalid)?,
             ..self.meta
         };
+        // bbolt v1.5.0 tx.go:272-284: a failed meta write may already be visible; prevent later writes until reopen.
+        self.uncertain = true;
         self.file
             .write_all_at(&next.encode(), (next.txid % 2) * next.page_size as u64)?;
         checkpoint(CommitPoint::MetaWritten)?;
         self.file.sync_all()?;
         checkpoint(CommitPoint::MetaSynced)?;
         self.meta = next;
+        self.uncertain = false;
         Ok(())
     }
 }
@@ -945,5 +1008,69 @@ mod tests {
             assert_eq!(output.stdout, b"example.org.\nrecord data\n");
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    #[test]
+    fn rejects_freelist_referencing_another_live_bucket() {
+        use std::os::unix::fs::FileExt;
+        let path = path();
+        let Some(output) = go("write-complex", &path) else {
+            return;
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::open(file).unwrap();
+        let root = store
+            .tree(store.meta.root, &mut std::collections::BTreeSet::new())
+            .unwrap();
+        let live = super::u64_at(&root.get(b"preserved".as_slice()).unwrap().1, 0).unwrap();
+        assert_ne!(live, 0);
+        let before = store.page(live).unwrap();
+        let offset = store.meta.freelist * store.meta.page_size as u64;
+        store
+            .file
+            .write_all_at(&1u16.to_ne_bytes(), offset + 10)
+            .unwrap();
+        store
+            .file
+            .write_all_at(&live.to_ne_bytes(), offset + 16)
+            .unwrap();
+        assert!(store.read().is_err());
+        assert!(store.commit(b"example.org.", b"new").is_err());
+        assert_eq!(store.page(live).unwrap(), before);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_meta_sync_does_not_allow_another_commit() {
+        let path = path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::create(file).unwrap();
+        store.commit(b"example.org.", b"old").unwrap();
+        let result = store.commit_with(b"example.org.", b"new", |point| {
+            if point == CommitPoint::MetaWritten {
+                return Err(std::io::Error::other("injected sync failure"));
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(store.read().unwrap().1, b"old");
+        assert!(store.commit(b"example.org.", b"later").is_err());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 }

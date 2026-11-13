@@ -35,6 +35,13 @@ func main() {
 				return err
 			}
 			if os.Args[1] == "write-complex" {
+				preserved, err := tx.CreateBucket([]byte("preserved"))
+				if err != nil {
+					return err
+				}
+				if err = preserved.Put([]byte("large"), make([]byte, 32768)); err != nil {
+					return err
+				}
 				for i := 0; i < 256; i++ {
 					name := fmt.Sprintf("extra-%04d", i)
 					if err = b.Put([]byte(name), []byte("kept")); err != nil {
@@ -58,6 +65,10 @@ func main() {
 				return fmt.Errorf("bucket missing")
 			}
 			if os.Args[1] == "verify-complex" {
+				preserved := tx.Bucket([]byte("preserved"))
+				if preserved == nil || len(preserved.Get([]byte("large"))) != 32768 {
+					return fmt.Errorf("missing preserved bucket")
+				}
 				for i := 0; i < 256; i++ {
 					name := fmt.Sprintf("extra-%04d", i)
 					other := tx.Bucket([]byte(name))
