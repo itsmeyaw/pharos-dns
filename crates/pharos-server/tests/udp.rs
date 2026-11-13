@@ -11,6 +11,57 @@ struct Echo;
 
 struct AsyncEcho;
 
+struct RecycledEcho(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
+impl Handler for RecycledEcho {
+    fn udp_workers(&self) -> usize {
+        1
+    }
+    async fn handle(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        // Rust Future::poll: a pending Query retains its buffer until completion.
+        self.0.lock().unwrap().push(response.as_ptr() as usize);
+        tokio::task::yield_now().await;
+        response.extend_from_slice(query);
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn completed_pending_queries_reuse_response_buffers() {
+    let addresses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        RecycledEcho(addresses.clone()),
+    )
+    .await
+    .unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(listener.local_addr()).await.unwrap();
+    for _ in 0..20 {
+        socket.send(b"query").await.unwrap();
+        let mut response = [0; 16];
+        let length = tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&response[..length], b"query");
+    }
+    {
+        let addresses = addresses.lock().unwrap();
+        assert_eq!(addresses.len(), 20);
+        assert!(
+            addresses.iter().all(|address| *address == addresses[0]),
+            "{addresses:?}"
+        );
+    }
+    listener.shutdown().await.unwrap();
+}
+
 struct SlowEcho {
     started: std::sync::Arc<tokio::sync::Notify>,
     release: std::sync::Arc<tokio::sync::Notify>,
@@ -81,6 +132,7 @@ struct PendingQueries {
     dropped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     permits: std::sync::Arc<tokio::sync::Semaphore>,
     shed: Option<pharos_server::metrics::ShedMetrics>,
+    cancelled: tokio::sync::watch::Sender<bool>,
 }
 
 struct PendingGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -97,6 +149,13 @@ impl Handler for PendingQueries {
     fn shed_metrics(&self) -> Option<pharos_server::metrics::ShedMetrics> {
         self.shed.clone()
     }
+    fn parallel_query(
+        &self,
+        query: &[u8],
+        _: SocketAddr,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        (query == b"probe").then(|| self.cancelled.subscribe())
+    }
     async fn handle(
         &self,
         query: &[u8],
@@ -105,6 +164,10 @@ impl Handler for PendingQueries {
         response: &mut Vec<u8>,
     ) -> Action {
         // RFC 1035 §4.2.1: UDP carries each Query in a separate datagram.
+        if query == b"probe" {
+            response.extend_from_slice(query);
+            return Action::Respond;
+        }
         let _guard = PendingGuard(self.dropped.clone());
         self.started
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -137,6 +200,7 @@ async fn udp_pending_limit_resumes_after_completion() {
                 dropped: dropped.clone(),
                 permits: permits.clone(),
                 shed: shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53")),
+                cancelled: tokio::sync::watch::channel(false).0,
             },
         )
         .await
@@ -153,6 +217,14 @@ async fn udp_pending_limit_resumes_after_completion() {
                 .await
                 .is_err()
         );
+        // RFC 1035 §4.2.1: probes remain separate UDP Messages even under overload.
+        socket.send(b"probe").await.unwrap();
+        let mut probe = [0; 16];
+        let length = tokio::time::timeout(Duration::from_secs(1), socket.recv(&mut probe))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&probe[..length], b"probe");
         permits.add_permits(1);
         wait_for_count(&started, 257).await;
         listener.shutdown().await.unwrap();
@@ -172,6 +244,7 @@ async fn udp_shutdown_cancels_pending_queries() {
                 dropped: dropped.clone(),
                 permits: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
                 shed: shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53")),
+                cancelled: tokio::sync::watch::channel(false).0,
             },
         )
         .await
@@ -187,6 +260,38 @@ async fn udp_shutdown_cancels_pending_queries() {
             .unwrap()
             .unwrap();
         assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn udp_shutdown_at_pending_limit_cancels_all_queries() {
+    for shed in [false, true] {
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            PendingQueries {
+                started: started.clone(),
+                dropped: dropped.clone(),
+                permits: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+                shed: shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53")),
+                cancelled: tokio::sync::watch::channel(false).0,
+            },
+        )
+        .await
+        .unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(listener.local_addr()).await.unwrap();
+        for count in 1..=256 {
+            socket.send(b"slow").await.unwrap();
+            wait_for_count(&started, count).await;
+        }
+        socket.send(b"queued").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), listener.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 256);
     }
 }
 
@@ -252,6 +357,31 @@ async fn udp_handler_panics_do_not_stop_worker() {
         assert_eq!(&response[..length], b"ok");
         listener.shutdown().await.unwrap();
     }
+}
+
+#[test]
+fn udp_handler_panics_are_logged() {
+    // Rust catch_unwind: verify both inline and spawned panics are reported.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "udp_handler_panics_do_not_stop_worker",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.matches("ERROR server: Recovered panic in UDP Query")
+            .count()
+            >= 4,
+        "{text}"
+    );
 }
 
 struct ClientEcho(tokio::sync::watch::Sender<bool>);

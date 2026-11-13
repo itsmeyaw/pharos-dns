@@ -86,13 +86,13 @@ pub(crate) fn spawn<H: Handler>(
         let mut query = Vec::with_capacity(MAX_MESSAGE);
         let mut slot = None;
         let mut pending = tokio::task::JoinSet::new();
+        let mut free = Vec::new();
+        let mut scratch = None;
         'read: loop {
-            if !crate::udp::capacity(&mut pending, &mut shutdown).await {
-                break;
-            }
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => break,
+                result = pending.join_next(), if !pending.is_empty() => { crate::udp::recycle(result, &mut free); continue; },
                 ready = socket.readable() => match ready {
                     Ok(()) => {}
                     Err(error) => {
@@ -123,9 +123,6 @@ pub(crate) fn spawn<H: Handler>(
             };
             for index in 0..count {
                 if let Some((length, peer)) = peers[index] {
-                    if !crate::udp::capacity(&mut pending, &mut shutdown).await {
-                        break 'read;
-                    }
                     let client = crate::canonical_peer(peer);
                     if let Some(cancelled) =
                         handler.parallel_query(&buffers[index][..length], client)
@@ -141,6 +138,42 @@ pub(crate) fn spawn<H: Handler>(
                         );
                         continue;
                     }
+                    // recvmmsg(2): inspect already-received probes before waiting for capacity.
+                    if pending.len() >= crate::udp::MAX_IN_FLIGHT {
+                        for later in index + 1..count {
+                            if let Some((size, address)) = peers[later]
+                                && let Some(cancelled) = handler.parallel_query(
+                                    &buffers[later][..size],
+                                    crate::canonical_peer(address),
+                                )
+                            {
+                                crate::udp::spawn_parallel(
+                                    Arc::clone(&socket),
+                                    Arc::clone(&handler),
+                                    &buffers[later][..size],
+                                    address,
+                                    shutdown.clone(),
+                                    cancelled,
+                                    None,
+                                );
+                                peers[later] = None;
+                            }
+                        }
+                    }
+                    if !crate::udp::capacity(
+                        &mut pending,
+                        &mut free,
+                        &mut shutdown,
+                        &socket,
+                        &handler,
+                        None,
+                        &mut scratch,
+                    )
+                    .await
+                    {
+                        break 'read;
+                    }
+                    crate::udp::take_buffers(&mut query, &mut response, &mut free);
                     query.clear();
                     query.extend_from_slice(&buffers[index][..length]);
                     if let Some((reused, data)) = crate::udp::dispatch(
@@ -173,7 +206,10 @@ pub(crate) fn spawn<H: Handler>(
 mod tests {
     use super::*;
     use crate::{Action, Protocol};
-    use std::time::Duration;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     struct Echo;
 
@@ -205,5 +241,77 @@ mod tests {
             .unwrap();
         assert_eq!(&buffer[..length], b"ping");
         drop(shutdown);
+    }
+
+    struct BatchProbe {
+        started: Arc<AtomicUsize>,
+        cancelled: watch::Sender<bool>,
+    }
+    impl Handler for BatchProbe {
+        fn parallel_query(&self, query: &[u8], _: SocketAddr) -> Option<watch::Receiver<bool>> {
+            (query == [1]).then(|| self.cancelled.subscribe())
+        }
+        async fn handle(
+            &self,
+            query: &[u8],
+            _: SocketAddr,
+            _: Protocol,
+            response: &mut Vec<u8>,
+        ) -> Action {
+            // recvmmsg(2): a batch can contain both ordinary datagrams and a probe.
+            if query == [1] {
+                response.extend_from_slice(query);
+                return Action::Respond;
+            }
+            self.started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_worker_handles_probe_behind_ordinary_datagrams_in_batch() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let started = Arc::new(AtomicUsize::new(0));
+        let (shutdown, receiver) = watch::channel(false);
+        let worker = spawn(
+            server,
+            Arc::new(BatchProbe {
+                started: started.clone(),
+                cancelled: watch::channel(false).0,
+            }),
+            receiver,
+        );
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        client.set_nonblocking(true).unwrap();
+        for count in 1..=crate::udp::MAX_IN_FLIGHT {
+            client.send_to(&[0], address).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while started.load(Ordering::SeqCst) < count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        for index in 0..BATCH {
+            client
+                .send_to(&[u8::from(index == BATCH - 1)], address)
+                .unwrap();
+        }
+        let client = UdpSocket::from_std(client).unwrap();
+        let mut response = [0; 8];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&response[..length], &[1]);
+        shutdown.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }

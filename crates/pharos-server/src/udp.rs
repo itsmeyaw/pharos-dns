@@ -14,9 +14,11 @@ use tokio::{net::UdpSocket, sync::watch};
 
 use crate::{Action, Handler, Protocol};
 
-// RFC 1035 §4.2.1: UDP carries Queries; cap waiting work to bound per-worker memory.
+// Implementation limit: bound pending work and retained buffer pairs per worker.
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
-type Buffers = (Vec<u8>, Option<Vec<u8>>);
+// Implementation limit: retain at most 16 completed buffer pairs per worker.
+const MAX_REUSABLE_BUFFERS: usize = 16;
+pub(crate) type Buffers = (Vec<u8>, Option<Vec<u8>>);
 
 struct ResponseBuffer {
     data: Option<Vec<u8>>,
@@ -32,7 +34,7 @@ impl Drop for ResponseBuffer {
     }
 }
 
-// RFC 1035 §4.2.1: UDP carries Messages; retain each Query and Response until completion.
+// RFC 1035 §4.2.1: UDP carries DNS Messages in datagrams.
 pub(crate) async fn answer<H: Handler>(
     handler: Arc<H>,
     socket: Arc<UdpSocket>,
@@ -41,11 +43,8 @@ pub(crate) async fn answer<H: Handler>(
     response: Option<Vec<u8>>,
     stack: Option<Arc<crate::shed::ShedStack>>,
 ) -> Buffers {
-    let data = if let Some(stack) = &stack {
-        stack.checkout_wait().await
-    } else {
-        response.unwrap_or_else(|| Vec::with_capacity(65535))
-    };
+    // RFC 1035 §4.2.2: a forwarded TCP Message can reach 65,535 octets before UDP truncation.
+    let data = response.unwrap_or_else(|| Vec::with_capacity(65535));
     let mut response = ResponseBuffer {
         data: Some(data),
         stack,
@@ -103,6 +102,7 @@ pub(crate) async fn dispatch<F: Future<Output = Buffers> + Send + 'static>(
     } else {
         *slot = Some(Box::pin(future));
     }
+    // Rust AssertUnwindSafe: a panicking handler may leave shared state partially mutated.
     let polled = poll_fn(|cx| {
         Poll::Ready(catch_unwind(AssertUnwindSafe(|| {
             slot.as_mut().unwrap().as_mut().poll(cx)
@@ -117,25 +117,118 @@ pub(crate) async fn dispatch<F: Future<Output = Buffers> + Send + 'static>(
         }
         Err(_) => {
             *slot = None;
+            crate::logging::log("ERROR", "server", "Recovered panic in UDP Query");
             None
         }
     }
 }
 
-// POSIX recvfrom: leave datagrams in the receive queue while the worker is at capacity.
-pub(crate) async fn capacity(
+// Implementation limit: retain one deferred Query and drop further ordinary datagrams at capacity.
+pub(crate) async fn capacity<H: Handler>(
     pending: &mut JoinSet<Buffers>,
+    free: &mut Vec<Buffers>,
     shutdown: &mut watch::Receiver<bool>,
+    socket: &Arc<UdpSocket>,
+    handler: &Arc<H>,
+    stack: Option<&Arc<crate::shed::ShedStack>>,
+    scratch: &mut Option<Vec<u8>>,
 ) -> bool {
     while pending.len() >= MAX_IN_FLIGHT {
+        let probe_shutdown = shutdown.clone();
         tokio::select! {
             biased;
             _ = shutdown.changed() => return false,
-            _ = pending.join_next() => {},
+            result = pending.join_next() => recycle(result, free),
+            result = receive_probe(socket, handler, probe_shutdown, stack, scratch) => if let Err(error) = result {
+                crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
+                tokio::select! { _ = shutdown.changed() => return false, _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {} }
+            },
         }
     }
-    while pending.try_join_next().is_some() {}
+    while let Some(result) = pending.try_join_next() {
+        recycle(Some(result), free);
+    }
     true
+}
+
+// RFC 1035 §4.2.1: inspect datagrams while a deferred Query waits for capacity.
+async fn receive_probe<H: Handler>(
+    socket: &Arc<UdpSocket>,
+    handler: &Arc<H>,
+    shutdown: watch::Receiver<bool>,
+    stack: Option<&Arc<crate::shed::ShedStack>>,
+    scratch: &mut Option<Vec<u8>>,
+) -> io::Result<()> {
+    let buffer = scratch.get_or_insert_with(|| vec![0; 65535]);
+    let (length, peer) = socket.recv_from(buffer).await?;
+    if let Some(cancelled) = handler.parallel_query(&buffer[..length], crate::canonical_peer(peer))
+    {
+        spawn_parallel(
+            Arc::clone(socket),
+            Arc::clone(handler),
+            &buffer[..length],
+            peer,
+            shutdown,
+            cancelled,
+            stack.cloned(),
+        );
+    }
+    Ok(())
+}
+
+// Implementation limit: wait for a shed buffer before starting an ordinary Query.
+async fn shed_buffer<H: Handler>(
+    stack: &Arc<crate::shed::ShedStack>,
+    socket: &Arc<UdpSocket>,
+    handler: &Arc<H>,
+    shutdown: &mut watch::Receiver<bool>,
+    scratch: &mut Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if let Some(buffer) = stack.checkout() {
+        return Some(buffer);
+    }
+    loop {
+        let probe_shutdown = shutdown.clone();
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => return None,
+            buffer = stack.checkout_wait() => return Some(buffer),
+            result = receive_probe(socket, handler, probe_shutdown, Some(stack), scratch) => if let Err(error) = result {
+                crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
+                tokio::select! { _ = shutdown.changed() => return None, _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {} }
+            },
+        }
+    }
+}
+
+// Tokio JoinSet::join_next: completed Queries return reusable buffers; panic loses only that Query.
+pub(crate) fn recycle(
+    result: Option<Result<Buffers, tokio::task::JoinError>>,
+    free: &mut Vec<Buffers>,
+) {
+    match result {
+        Some(Ok(buffers)) if free.len() < MAX_REUSABLE_BUFFERS => free.push(buffers),
+        Some(Err(error)) if error.is_panic() => {
+            crate::logging::log("ERROR", "server", "Recovered panic in UDP Query")
+        }
+        _ => {}
+    }
+}
+
+// Rust Vec::capacity: reuse a completed Query's buffers before allocating replacements.
+pub(crate) fn take_buffers(
+    query: &mut Vec<u8>,
+    response: &mut Option<Vec<u8>>,
+    free: &mut Vec<Buffers>,
+) {
+    if query.capacity() == 0
+        && let Some((reused, data)) = free.pop()
+    {
+        *query = reused;
+        if response.is_none() {
+            *response = data;
+        }
+    }
 }
 
 // A forwarding-loop probe must not hold the receive worker while it returns to us.
@@ -245,13 +338,13 @@ fn spawn_shed<H: Handler>(
         let mut owned_query = Vec::with_capacity(65535);
         let mut slot = None;
         let mut pending = JoinSet::new();
+        let mut free = Vec::new();
+        let mut scratch = None;
         loop {
-            if !capacity(&mut pending, &mut shutdown).await {
-                break;
-            }
             let received = tokio::select! {
                 biased;
                 _ = shutdown.changed() => break,
+                result = pending.join_next(), if !pending.is_empty() => { recycle(result, &mut free); continue; },
                 received = socket.recv_from(&mut query) => received,
             };
             let (length, peer) = match received {
@@ -278,6 +371,25 @@ fn spawn_shed<H: Handler>(
                 );
                 continue;
             }
+            if !capacity(
+                &mut pending,
+                &mut free,
+                &mut shutdown,
+                &socket,
+                &handler,
+                Some(&stack),
+                &mut scratch,
+            )
+            .await
+            {
+                break;
+            }
+            let Some(response) =
+                shed_buffer(&stack, &socket, &handler, &mut shutdown, &mut scratch).await
+            else {
+                break;
+            };
+            take_buffers(&mut owned_query, &mut None, &mut free);
             owned_query.clear();
             owned_query.extend_from_slice(&query[..length]);
             if let Some((reused, _)) = dispatch(
@@ -286,7 +398,7 @@ fn spawn_shed<H: Handler>(
                     Arc::clone(&socket),
                     std::mem::take(&mut owned_query),
                     peer,
-                    None,
+                    Some(response),
                     Some(Arc::clone(&stack)),
                 ),
                 &mut slot,
@@ -338,13 +450,13 @@ fn spawn_plain<H: Handler>(
         let mut response = Some(Vec::with_capacity(65535));
         let mut slot = None;
         let mut pending = JoinSet::new();
+        let mut free = Vec::new();
+        let mut scratch = None;
         'read: loop {
-            if !capacity(&mut pending, &mut shutdown).await {
-                break;
-            }
             tokio::select! {
                 biased;
-                _ = shutdown.changed() => break,
+                _ = shutdown.changed() => break 'read,
+                result = pending.join_next(), if !pending.is_empty() => { recycle(result, &mut free); continue; },
                 received = socket.recv_from(&mut query) => {
                     let (length, peer) = match received {
                         Ok(message) => message,
@@ -362,6 +474,8 @@ fn spawn_plain<H: Handler>(
                         spawn_parallel(Arc::clone(&socket), Arc::clone(&handler), &query[..length], peer, shutdown.clone(), cancelled, None);
                         continue;
                     }
+                    if !capacity(&mut pending, &mut free, &mut shutdown, &socket, &handler, None, &mut scratch).await { break 'read; }
+                    take_buffers(&mut owned_query, &mut response, &mut free);
                     owned_query.clear();
                     owned_query.extend_from_slice(&query[..length]);
                     if let Some((reused, data)) = dispatch(answer(Arc::clone(&handler), Arc::clone(&socket), std::mem::take(&mut owned_query), peer, response.take(), None), &mut slot, &mut pending).await {
@@ -388,6 +502,91 @@ mod tests {
     }
 
     struct Shedding(bool);
+
+    #[test]
+    fn completed_buffer_pool_is_bounded() {
+        let mut free = Vec::new();
+        // Rust Vec::capacity: retaining completed buffers must stay bounded after a burst.
+        for _ in 0..MAX_IN_FLIGHT {
+            recycle(Some(Ok((vec![0], Some(vec![0])))), &mut free);
+        }
+        assert_eq!(free.len(), MAX_REUSABLE_BUFFERS);
+    }
+
+    struct Panicking(bool);
+    impl Handler for Panicking {
+        async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+            // Rust Future::poll: a panic can occur before or after a Pending result.
+            if self.0 {
+                tokio::task::yield_now().await;
+            }
+            panic!("test panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn shed_panics_return_checked_out_buffers() {
+        for pending_panic in [false, true] {
+            let stack = Arc::new(crate::shed::ShedStack::new(
+                1,
+                crate::metrics::Registry::default().shed("dns://:53"),
+            ));
+            let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let response = stack.checkout().unwrap();
+            let mut slot = None;
+            let mut pending = JoinSet::new();
+            let mut free = Vec::new();
+            let future = answer(
+                Arc::new(Panicking(pending_panic)),
+                socket,
+                vec![0],
+                "127.0.0.1:53".parse().unwrap(),
+                Some(response),
+                Some(Arc::clone(&stack)),
+            );
+            assert!(dispatch(future, &mut slot, &mut pending).await.is_none());
+            if pending_panic {
+                recycle(pending.join_next().await, &mut free);
+            }
+            let held = (0..3)
+                .map(|_| stack.checkout().expect("buffer returned after panic"))
+                .collect::<Vec<_>>();
+            assert!(stack.checkout().is_none());
+            for buffer in held {
+                stack.release(buffer);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shed_exhaustion_defers_checkout_until_a_buffer_returns() {
+        let stack = Arc::new(crate::shed::ShedStack::new(
+            1,
+            crate::metrics::Registry::default().shed("dns://:53"),
+        ));
+        let mut held = (0..3)
+            .map(|_| stack.checkout().unwrap())
+            .collect::<Vec<_>>();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let handler = Arc::new(Shedding(false));
+        let (_shutdown, mut receiver) = watch::channel(false);
+        let stack_clone = stack.clone();
+        let waiter = tokio::spawn(async move {
+            shed_buffer(&stack_clone, &socket, &handler, &mut receiver, &mut None).await
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        stack.release(held.pop().unwrap());
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        held.push(response);
+        for buffer in held {
+            stack.release(buffer);
+        }
+    }
     impl Handler for Shedding {
         fn shed_query(&self, _: &[u8], _: SocketAddr) -> bool {
             self.0
