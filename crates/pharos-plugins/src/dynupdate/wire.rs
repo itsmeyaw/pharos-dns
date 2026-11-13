@@ -97,4 +97,27 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn coredns_decode_records_fuzz_seeds_remain_bounded() {
+        for data in [Vec::new(), vec![0xc0, 0, 0, 1]] {
+            assert!(decode(&data, 64, 4096).is_err());
+        }
+        let mut state = 0x739d_229bu32;
+        for len in 0..1024 {
+            let mut data = vec![0; len % 512];
+            for byte in &mut data {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = state as u8;
+            }
+            let result = std::panic::catch_unwind(|| decode(&data, 64, 4096));
+            if let Ok(Ok(records)) = result {
+                assert!(!records.is_empty() && records.len() <= 64);
+            } else {
+                assert!(result.is_ok(), "decoder panicked on {len}");
+            }
+        }
+    }
 }
