@@ -102,7 +102,7 @@ pub(crate) async fn dispatch<F: Future<Output = Buffers> + Send + 'static>(
     } else {
         *slot = Some(Box::pin(future));
     }
-    // Rust AssertUnwindSafe: a panicking handler may leave shared state partially mutated.
+    // Rust AssertUnwindSafe: drop the panicked future; shared handler state may be partially mutated.
     let polled = poll_fn(|cx| {
         Poll::Ready(catch_unwind(AssertUnwindSafe(|| {
             slot.as_mut().unwrap().as_mut().poll(cx)
