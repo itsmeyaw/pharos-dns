@@ -4,11 +4,11 @@ use std::{
     net::{SocketAddr, UdpSocket as StdUdpSocket},
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
-    task::Poll,
+    task::{Context, Poll},
 };
 
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::{net::UdpSocket, sync::watch};
 
@@ -18,15 +18,13 @@ use crate::{Action, Handler, Protocol};
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
 // Implementation limit: retain 16 pairs (about 1 MiB of Responses); larger bursts allocate again.
 const MAX_REUSABLE_BUFFERS: usize = 16;
-pub(crate) type Buffers = (Vec<u8>, Option<Vec<u8>>);
-
-struct ResponseBuffer {
+struct ResponseBuffer<'a> {
     data: Option<Vec<u8>>,
-    stack: Option<Arc<crate::shed::ShedStack>>,
+    stack: Option<&'a crate::shed::ShedStack>,
 }
 
 // Rust Drop::drop: return checked-out storage when a Query is cancelled or panics.
-impl Drop for ResponseBuffer {
+impl Drop for ResponseBuffer<'_> {
     fn drop(&mut self) {
         if let (Some(stack), Some(data)) = (&self.stack, self.data.take()) {
             stack.release(data);
@@ -34,99 +32,156 @@ impl Drop for ResponseBuffer {
     }
 }
 
-// RFC 1035 §4.2.1: UDP carries DNS Messages in datagrams.
-pub(crate) async fn answer<H: Handler>(
-    handler: Arc<H>,
-    socket: Arc<UdpSocket>,
+struct SlotData {
     query: Vec<u8>,
-    peer: SocketAddr,
     response: Option<Vec<u8>>,
-    stack: Option<Arc<crate::shed::ShedStack>>,
-) -> Buffers {
-    // RFC 1035 §4.2.2: a forwarded TCP Message can reach 65,535 octets before UDP truncation.
-    let data = response.unwrap_or_else(|| Vec::with_capacity(65535));
-    let mut response = ResponseBuffer {
-        data: Some(data),
-        stack,
-    };
-    let data = response.data.as_mut().unwrap();
-    data.clear();
-    let action = H::handle_shared(
-        &handler,
-        &query,
-        crate::canonical_peer(peer),
-        Protocol::Udp,
-        data,
-    )
-    .await;
-    if action == Action::Respond {
-        if let Some(stack) = &response.stack {
-            stack.push(response.data.take().unwrap(), peer);
-        } else {
-            #[cfg(target_os = "linux")]
-            let result = socket
-                .async_io(tokio::io::Interest::WRITABLE, || {
-                    crate::udp_linux::send(&socket, response.data.as_ref().unwrap(), peer)
-                })
-                .await;
-            #[cfg(not(target_os = "linux"))]
-            let result = socket
-                .send_to(response.data.as_ref().unwrap(), peer)
-                .await
-                .map(|_| ());
-            if let Err(error) = result {
-                crate::logging::log(
-                    "ERROR",
-                    "server",
-                    &format!("UDP Response to {peer} failed: {error}"),
-                );
-            }
-        }
-    }
-    let data = if response.stack.is_some() {
-        None
-    } else {
-        response.data.take()
-    };
-    (query, data)
+    peer: Option<(SocketAddr, SocketAddr)>,
+    done: bool,
 }
 
-// Rust Future::poll: reuse completed futures; spawn pending ones to isolate each Query.
-pub(crate) async fn dispatch<F: Future<Output = Buffers> + Send + 'static>(
-    future: F,
-    slot: &mut Option<Pin<Box<F>>>,
-    pending: &mut JoinSet<Buffers>,
-) -> Option<Buffers> {
-    if let Some(slot) = slot.as_mut() {
-        slot.as_mut().set(future);
-    } else {
-        *slot = Some(Box::pin(future));
+pub(crate) struct Slot {
+    data: Arc<Mutex<SlotData>>,
+    future: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl Slot {
+    // Rust Future::poll: one pinned coroutine reuses its Handler future storage across Queries.
+    pub(crate) fn new<H: Handler>(
+        handler: &Arc<H>,
+        socket: &Arc<UdpSocket>,
+        stack: Option<&Arc<crate::shed::ShedStack>>,
+    ) -> Self {
+        let data = Arc::new(Mutex::new(SlotData {
+            query: Vec::with_capacity(65535),
+            response: stack.is_none().then(|| Vec::with_capacity(65535)),
+            peer: None,
+            done: false,
+        }));
+        let future = Box::pin(serve_slot(
+            Arc::clone(&data),
+            Arc::clone(handler),
+            Arc::clone(socket),
+            stack.cloned(),
+        ));
+        Self { data, future }
     }
-    // Rust AssertUnwindSafe: drop the panicked future; shared handler state may be partially mutated.
-    let polled = poll_fn(|cx| {
-        Poll::Ready(catch_unwind(AssertUnwindSafe(|| {
-            slot.as_mut().unwrap().as_mut().poll(cx)
-        })))
-    })
-    .await;
-    match polled {
-        Ok(Poll::Ready(buffers)) => Some(buffers),
-        Ok(Poll::Pending) => {
-            pending.spawn(slot.take().unwrap());
-            None
+
+    // RFC 1035 §4.2.1: each datagram retains its own Query and peer until completion.
+    pub(crate) fn prepare(
+        &mut self,
+        query: &[u8],
+        peer: SocketAddr,
+        client: SocketAddr,
+        response: Option<Vec<u8>>,
+    ) {
+        let mut data = self.data.lock().unwrap();
+        data.query.clear();
+        data.query.extend_from_slice(query);
+        data.peer = Some((peer, client));
+        if response.is_some() {
+            data.response = response;
         }
-        Err(_) => {
+    }
+
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
+        // Rust AssertUnwindSafe: drop a panicked future; shared Handler state may be partially mutated.
+        match catch_unwind(AssertUnwindSafe(|| self.future.as_mut().poll(cx))) {
+            Err(_) => Poll::Ready(Err(())),
+            Ok(_) if std::mem::take(&mut self.data.lock().unwrap().done) => Poll::Ready(Ok(())),
+            Ok(_) => Poll::Pending,
+        }
+    }
+}
+
+// RFC 1035 §4.2.1: process UDP Messages independently while reusing the pinned coroutine.
+async fn serve_slot<H: Handler>(
+    data: Arc<Mutex<SlotData>>,
+    handler: Arc<H>,
+    socket: Arc<UdpSocket>,
+    stack: Option<Arc<crate::shed::ShedStack>>,
+) {
+    loop {
+        let (query, response, peer, client) = poll_fn(|_| {
+            let mut data = data.lock().unwrap();
+            match data.peer.take() {
+                Some((peer, client)) => Poll::Ready((
+                    std::mem::take(&mut data.query),
+                    data.response.take(),
+                    peer,
+                    client,
+                )),
+                None => Poll::Pending,
+            }
+        })
+        .await;
+        // RFC 1035 §4.2.2: forwarded TCP Messages can reach 65,535 octets before UDP truncation.
+        let mut response = ResponseBuffer {
+            data: Some(response.unwrap_or_else(|| Vec::with_capacity(65535))),
+            stack: stack.as_deref(),
+        };
+        let body = response.data.as_mut().unwrap();
+        body.clear();
+        let action = H::handle_shared(&handler, &query, client, Protocol::Udp, body).await;
+        if action == Action::Respond {
+            if let Some(stack) = response.stack {
+                stack.push(response.data.take().unwrap(), peer);
+            } else {
+                #[cfg(target_os = "linux")]
+                let result = socket
+                    .async_io(tokio::io::Interest::WRITABLE, || {
+                        crate::udp_linux::send(&socket, response.data.as_ref().unwrap(), peer)
+                    })
+                    .await;
+                #[cfg(not(target_os = "linux"))]
+                let result = socket
+                    .send_to(response.data.as_ref().unwrap(), peer)
+                    .await
+                    .map(|_| ());
+                if let Err(error) = result {
+                    crate::logging::log(
+                        "ERROR",
+                        "server",
+                        &format!("UDP Response to {peer} failed: {error}"),
+                    );
+                }
+            }
+        }
+        let mut data = data.lock().unwrap();
+        data.query = query;
+        if response.stack.is_none() {
+            data.response = response.data.take();
+        }
+        data.done = true;
+    }
+}
+
+// Rust Future::poll: ready Queries reuse the coroutine; waiting Queries transfer it to a task.
+pub(crate) async fn dispatch(slot: &mut Option<Slot>, pending: &mut JoinSet<Option<Slot>>) {
+    let polled = poll_fn(|cx| Poll::Ready(slot.as_mut().unwrap().poll(cx))).await;
+    match polled {
+        Poll::Ready(Ok(())) => {}
+        Poll::Pending => {
+            let mut task = slot.take().unwrap();
+            pending.spawn(async move {
+                if poll_fn(|cx| task.poll(cx)).await.is_ok() {
+                    Some(task)
+                } else {
+                    crate::logging::log("ERROR", "server", "Recovered panic in UDP Query");
+                    None
+                }
+            });
+        }
+        Poll::Ready(Err(())) => {
             *slot = None;
             crate::logging::log("ERROR", "server", "Recovered panic in UDP Query");
-            None
         }
     }
 }
 
 // Implementation limit: retain one deferred Query and drop further ordinary datagrams at capacity.
 pub(crate) async fn capacity<H: Handler>(
-    pending: &mut JoinSet<Buffers>,
-    free: &mut Vec<Buffers>,
+    pending: &mut JoinSet<Option<Slot>>,
+    free: &mut Vec<Slot>,
     shutdown: &mut watch::Receiver<bool>,
     socket: &Arc<UdpSocket>,
     handler: &Arc<H>,
@@ -211,11 +266,11 @@ async fn shed_buffer<H: Handler>(
 
 // Tokio JoinSet::join_next: completed Queries return reusable buffers; panic loses only that Query.
 pub(crate) fn recycle(
-    result: Option<Result<Buffers, tokio::task::JoinError>>,
-    free: &mut Vec<Buffers>,
+    result: Option<Result<Option<Slot>, tokio::task::JoinError>>,
+    free: &mut Vec<Slot>,
 ) {
     match result {
-        Some(Ok(buffers)) if free.len() < MAX_REUSABLE_BUFFERS => free.push(buffers),
+        Some(Ok(Some(slot))) if free.len() < MAX_REUSABLE_BUFFERS => free.push(slot),
         Some(Err(error)) if error.is_panic() => {
             crate::logging::log("ERROR", "server", "Recovered panic in UDP Query")
         }
@@ -224,7 +279,7 @@ pub(crate) fn recycle(
 }
 
 // Tokio JoinSet::abort_all: cancel Queries and report panics completed before shutdown.
-pub(crate) async fn shutdown_pending(pending: &mut JoinSet<Buffers>) {
+pub(crate) async fn shutdown_pending(pending: &mut JoinSet<Option<Slot>>) {
     pending.abort_all();
     while let Some(result) = pending.join_next().await {
         if let Err(error) = result
@@ -235,19 +290,19 @@ pub(crate) async fn shutdown_pending(pending: &mut JoinSet<Buffers>) {
     }
 }
 
-// Rust Vec::capacity: reuse a completed Query's buffers before allocating replacements.
-pub(crate) fn take_buffers(
-    query: &mut Vec<u8>,
-    response: &mut Option<Vec<u8>>,
-    free: &mut Vec<Buffers>,
+// Rust Future::poll: reuse a completed slot before allocating a new coroutine.
+pub(crate) fn take_slot<H: Handler>(
+    slot: &mut Option<Slot>,
+    free: &mut Vec<Slot>,
+    handler: &Arc<H>,
+    socket: &Arc<UdpSocket>,
+    stack: Option<&Arc<crate::shed::ShedStack>>,
 ) {
-    if query.capacity() == 0
-        && let Some((reused, data)) = free.pop()
-    {
-        *query = reused;
-        if response.is_none() {
-            *response = data;
-        }
+    if slot.is_none() {
+        *slot = Some(
+            free.pop()
+                .unwrap_or_else(|| Slot::new(handler, socket, stack)),
+        );
     }
 }
 
@@ -277,7 +332,7 @@ pub(crate) fn spawn_parallel<H: Handler>(
         };
         let mut response = ResponseBuffer {
             data: Some(data),
-            stack,
+            stack: stack.as_deref(),
         };
         let action = {
             // Rust catch_unwind: isolate probe panics even after the handler yields.
@@ -381,7 +436,6 @@ fn spawn_shed<H: Handler>(
         let stack = crate::shed::ShedStack::for_socket(metrics);
         let mut writer = AbortOnDrop(tokio::spawn(Arc::clone(&stack).writer(Arc::clone(&socket))));
         let mut query = vec![0; 65535];
-        let mut owned_query = Vec::with_capacity(65535);
         let mut slot = None;
         let mut pending = JoinSet::new();
         let mut free = Vec::new();
@@ -435,25 +489,11 @@ fn spawn_shed<H: Handler>(
             else {
                 break;
             };
-            take_buffers(&mut owned_query, &mut None, &mut free);
-            owned_query.clear();
-            owned_query.extend_from_slice(&query[..length]);
-            if let Some((reused, _)) = dispatch(
-                answer(
-                    Arc::clone(&handler),
-                    Arc::clone(&socket),
-                    std::mem::take(&mut owned_query),
-                    peer,
-                    Some(response),
-                    Some(Arc::clone(&stack)),
-                ),
-                &mut slot,
-                &mut pending,
-            )
-            .await
-            {
-                owned_query = reused;
-            }
+            take_slot(&mut slot, &mut free, &handler, &socket, Some(&stack));
+            slot.as_mut()
+                .unwrap()
+                .prepare(&query[..length], peer, client, Some(response));
+            dispatch(&mut slot, &mut pending).await;
         }
         shutdown_pending(&mut pending).await;
         stack.close();
@@ -492,8 +532,6 @@ fn spawn_plain<H: Handler>(
     tokio::spawn(async move {
         let socket = Arc::new(socket);
         let mut query = vec![0; 65535];
-        let mut owned_query = Vec::with_capacity(65535);
-        let mut response = Some(Vec::with_capacity(65535));
         let mut slot = None;
         let mut pending = JoinSet::new();
         let mut free = Vec::new();
@@ -521,13 +559,9 @@ fn spawn_plain<H: Handler>(
                         continue;
                     }
                     if !capacity(&mut pending, &mut free, &mut shutdown, &socket, &handler, None, &mut scratch).await { break 'read; }
-                    take_buffers(&mut owned_query, &mut response, &mut free);
-                    owned_query.clear();
-                    owned_query.extend_from_slice(&query[..length]);
-                    if let Some((reused, data)) = dispatch(answer(Arc::clone(&handler), Arc::clone(&socket), std::mem::take(&mut owned_query), peer, response.take(), None), &mut slot, &mut pending).await {
-                        owned_query = reused;
-                        response = data;
-                    }
+                    take_slot(&mut slot, &mut free, &handler, &socket, None);
+                    slot.as_mut().unwrap().prepare(&query[..length], peer, client, None);
+                    dispatch(&mut slot, &mut pending).await;
                 }
             }
         }
@@ -557,12 +591,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn completed_buffer_pool_is_bounded() {
+    #[tokio::test]
+    async fn completed_buffer_pool_is_bounded() {
         let mut free = Vec::new();
-        // Rust Vec::capacity: retaining completed buffers must stay bounded after a burst.
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let handler = Arc::new(Shedding(false));
+        // Rust Vec::capacity: retaining completed slots must stay bounded after a burst.
         for _ in 0..MAX_IN_FLIGHT {
-            recycle(Some(Ok((vec![0], Some(vec![0])))), &mut free);
+            recycle(
+                Some(Ok(Some(Slot::new(&handler, &socket, None)))),
+                &mut free,
+            );
         }
         assert_eq!(free.len(), MAX_REUSABLE_BUFFERS);
     }
@@ -587,7 +626,7 @@ mod tests {
                     &mut response,
                 )
                 .await;
-            (Vec::new(), Some(response))
+            None
         });
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while !panic.is_finished() || !started.load(Ordering::SeqCst) {
@@ -633,18 +672,16 @@ mod tests {
             ));
             let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
             let response = stack.checkout().unwrap();
-            let mut slot = None;
+            let handler = Arc::new(Panicking(pending_panic));
+            let mut slot = Some(Slot::new(&handler, &socket, Some(&stack)));
             let mut pending = JoinSet::new();
             let mut free = Vec::new();
-            let future = answer(
-                Arc::new(Panicking(pending_panic)),
-                socket,
-                vec![0],
-                "127.0.0.1:53".parse().unwrap(),
-                Some(response),
-                Some(Arc::clone(&stack)),
-            );
-            assert!(dispatch(future, &mut slot, &mut pending).await.is_none());
+            let peer = "127.0.0.1:53".parse().unwrap();
+            slot.as_mut()
+                .unwrap()
+                .prepare(&[0], peer, peer, Some(response));
+            dispatch(&mut slot, &mut pending).await;
+            assert!(slot.is_none());
             if pending_panic {
                 recycle(pending.join_next().await, &mut free);
             }

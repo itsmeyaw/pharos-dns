@@ -82,8 +82,6 @@ pub(crate) fn spawn<H: Handler>(
         // Zeroed on the first readable event, not at startup: 64 workers' buffers took ~30 ms to fault in.
         let mut buffers: Option<[Vec<u8>; BATCH]> = None;
         let mut peers = [None; BATCH];
-        let mut response = Some(Vec::with_capacity(MAX_MESSAGE));
-        let mut query = Vec::with_capacity(MAX_MESSAGE);
         let mut slot = None;
         let mut pending = tokio::task::JoinSet::new();
         let mut free = Vec::new();
@@ -174,26 +172,11 @@ pub(crate) fn spawn<H: Handler>(
                     {
                         break 'read;
                     }
-                    crate::udp::take_buffers(&mut query, &mut response, &mut free);
-                    query.clear();
-                    query.extend_from_slice(&buffers[index][..length]);
-                    if let Some((reused, data)) = crate::udp::dispatch(
-                        crate::udp::answer(
-                            Arc::clone(&handler),
-                            Arc::clone(&socket),
-                            std::mem::take(&mut query),
-                            peer,
-                            response.take(),
-                            None,
-                        ),
-                        &mut slot,
-                        &mut pending,
-                    )
-                    .await
-                    {
-                        query = reused;
-                        response = data;
-                    }
+                    crate::udp::take_slot(&mut slot, &mut free, &handler, &socket, None);
+                    slot.as_mut()
+                        .unwrap()
+                        .prepare(&buffers[index][..length], peer, client, None);
+                    crate::udp::dispatch(&mut slot, &mut pending).await;
                 }
             }
         }
