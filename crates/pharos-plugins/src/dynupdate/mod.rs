@@ -273,7 +273,7 @@ fn expand_record(record: pharos_proto::Record<'_>, message: &[u8]) -> Result<Zon
 #[cfg(feature = "plugin-dynupdate")]
 fn reply(cx: &mut Context<'_, '_>, code: Rcode) -> Outcome {
     // RFC 2136 §3.8: the response preserves the UPDATE question and reports the transaction status.
-    let flags = 0x8400 | (cx.query.flags() & 0x7910) | code.0;
+    let flags = 0x8400 | (cx.query.flags() & 0x7800) | code.0;
     let Ok(mut builder) = MessageBuilder::new(
         cx.response,
         cx.max_response_size.max(512),

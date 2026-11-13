@@ -59,7 +59,7 @@ async fn authenticated_update_is_visible_to_subsequent_query() {
     let key: Name = "key.example.org.".parse().unwrap();
     let host: Name = "new.example.org.".parse().unwrap();
     let mut wire = Vec::with_capacity(512);
-    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2910).unwrap();
     builder
         .question(
             NameRef::parse(domain.as_wire(), 0).unwrap(),
@@ -94,7 +94,9 @@ async fn authenticated_update_is_visible_to_subsequent_query() {
         max_response_size: 512,
     };
     assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
-    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    let update_response = Message::parse(&response).unwrap();
+    assert_eq!(update_response.rcode(), Rcode::NOERROR);
+    assert_eq!(update_response.flags() & 0x0110, 0);
     wire.clear();
     let mut builder = MessageBuilder::new(&mut wire, 512, 2, 0).unwrap();
     builder
