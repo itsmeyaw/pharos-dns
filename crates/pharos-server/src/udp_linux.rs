@@ -99,8 +99,11 @@ pub(crate) fn spawn<H: Handler>(
                     }
                 },
             }
-            let buffers = buffers.get_or_insert_with(|| std::array::from_fn(|_| vec![0; MAX_MESSAGE]));
-            let count = match socket.try_io(Interest::READABLE, || receive(&socket, buffers, &mut peers)) {
+            let buffers =
+                buffers.get_or_insert_with(|| std::array::from_fn(|_| vec![0; MAX_MESSAGE]));
+            let count = match socket
+                .try_io(Interest::READABLE, || receive(&socket, buffers, &mut peers))
+            {
                 Ok(count) => count,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => {
@@ -163,7 +166,13 @@ mod tests {
     struct Echo;
 
     impl Handler for Echo {
-        async fn handle(&self, query: &[u8], _: SocketAddr, _: Protocol, response: &mut Vec<u8>) -> Action {
+        async fn handle(
+            &self,
+            query: &[u8],
+            _: SocketAddr,
+            _: Protocol,
+            response: &mut Vec<u8>,
+        ) -> Action {
             response.extend_from_slice(query);
             Action::Respond
         }
