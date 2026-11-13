@@ -1,0 +1,3 @@
+mask additional.srv.port
+rcode REFUSED | example.org. A IN udp
+rcode REFUSED | example.org. A IN tcp
