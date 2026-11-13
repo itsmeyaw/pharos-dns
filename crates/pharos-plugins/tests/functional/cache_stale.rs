@@ -12,14 +12,13 @@ const QUERY: &[u8] = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
 async fn request(server: &impl Handler, port: u16) -> (u16, u32) {
     let mut response = Vec::with_capacity(65535);
     assert_eq!(
-        server
-            .handle(
-                QUERY,
-                ([127, 0, 0, 1], port).into(),
-                Protocol::Udp,
-                &mut response
-            )
-            .await,
+        Box::pin(server.handle(
+            QUERY,
+            ([127, 0, 0, 1], port).into(),
+            Protocol::Udp,
+            &mut response
+        ))
+        .await,
         Action::Respond
     );
     let message = Message::parse(&response).unwrap();
@@ -105,16 +104,14 @@ async fn verify_timeout_serves_stale_and_keeps_refresh_running() {
     let peer = ([127, 0, 0, 1], 1001).into();
     let mut response = Vec::with_capacity(65535);
     assert_eq!(
-        server
-            .handle(QUERY, peer, Protocol::Udp, &mut response)
-            .await,
+        Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
         Action::Respond
     );
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(
         tokio::time::timeout(
             Duration::from_millis(300),
-            server.handle(QUERY, peer, Protocol::Udp, &mut response)
+            Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response))
         )
         .await
         .unwrap(),
@@ -137,9 +134,7 @@ async fn verify_timeout_serves_stale_and_keeps_refresh_running() {
     tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 assert_eq!(
-                    server
-                        .handle(QUERY, peer, Protocol::Udp, &mut response)
-                        .await,
+                    Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
                     Action::Respond
                 );
                 if matches!(Message::parse(&response).unwrap().answers().next().unwrap().data().unwrap(), Rdata::A(ip) if ip.octets() == [192, 0, 2, 2]) {
@@ -278,16 +273,12 @@ async fn late_stale_refresh_cannot_replace_newer_answer() {
     let mut response = Vec::with_capacity(65535);
     let peer = ([127, 0, 0, 1], 1001).into();
     assert_eq!(
-        server
-            .handle(QUERY, peer, Protocol::Udp, &mut response)
-            .await,
+        Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
         Action::Respond
     );
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(
-        server
-            .handle(QUERY, peer, Protocol::Udp, &mut response)
-            .await,
+        Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
         Action::Respond
     );
     tokio::time::timeout(Duration::from_secs(2), started.notified())
@@ -295,17 +286,13 @@ async fn late_stale_refresh_cannot_replace_newer_answer() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(
-        server
-            .handle(QUERY, peer, Protocol::Udp, &mut response)
-            .await,
+        Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
         Action::Respond
     );
     release.notify_one();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        server
-            .handle(QUERY, peer, Protocol::Udp, &mut response)
-            .await,
+        Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
         Action::Respond
     );
     assert!(
@@ -368,25 +355,19 @@ async fn prefetched_result(options: &str, second_flags: u16) -> Vec<u8> {
     let mut response = Vec::with_capacity(65535);
     let peer = ([127, 0, 0, 1], 1001).into();
     assert_eq!(
-        server
-            .handle(QUERY, peer, Protocol::Udp, &mut response)
-            .await,
+        Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
         Action::Respond
     );
     tokio::time::sleep(Duration::from_millis(1100)).await;
     assert_eq!(
-        server
-            .handle(QUERY, peer, Protocol::Udp, &mut response)
-            .await,
+        Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
         Action::Respond
     );
     // RFC 1035 §7.4: a second prefetch can start only after the first was processed.
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             assert_eq!(
-                server
-                    .handle(QUERY, peer, Protocol::Udp, &mut response)
-                    .await,
+                Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
                 Action::Respond
             );
             if retry_started.try_recv().is_ok() {
@@ -398,9 +379,7 @@ async fn prefetched_result(options: &str, second_flags: u16) -> Vec<u8> {
     .await
     .unwrap();
     assert_eq!(
-        server
-            .handle(QUERY, peer, Protocol::Udp, &mut response)
-            .await,
+        Box::pin(server.handle(QUERY, peer, Protocol::Udp, &mut response)).await,
         Action::Respond
     );
     upstream.await.unwrap();
