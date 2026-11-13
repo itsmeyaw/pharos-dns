@@ -1294,4 +1294,116 @@ mod tests {
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
+
+    #[cfg(feature = "plugin-file")]
+    #[test]
+    fn coredns_serves_a_database_updated_by_rust() {
+        use pharos_proto::{Class, Name, Type, zone::ZoneRecord};
+        use std::time::{Duration, Instant};
+        let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/coredns/v1.15.0/coredns");
+        if !binary.is_file() || Command::new("dig").arg("-v").output().is_err() {
+            eprintln!("skipping CoreDNS database interop: CoreDNS or dig is unavailable");
+            return;
+        }
+        let dir = path();
+        std::fs::create_dir(&dir).unwrap();
+        let database = dir.join("db");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/dynupdate/coredns.db"
+            ),
+            &database,
+        )
+        .unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&database)
+            .unwrap();
+        let mut store = Store::open(file).unwrap();
+        let (origin, records) = store.read().unwrap();
+        let apex: Name = "example.org.".parse().unwrap();
+        let zone = crate::zone::Zone::from_records(
+            apex.clone(),
+            crate::dynupdate::wire::decode(&records, 10000, 8 << 20).unwrap(),
+        )
+        .unwrap();
+        let addition = ZoneRecord {
+            owner: "rust.example.org.".parse().unwrap(),
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 77],
+        };
+        let (zone, changed) = zone.apply_updates(&[addition]).unwrap();
+        assert!(changed);
+        store
+            .commit(
+                &origin,
+                &crate::dynupdate::wire::encode(zone.records()).unwrap(),
+            )
+            .unwrap();
+        drop(store);
+        let seed = dir.join("seed");
+        std::fs::write(
+            &seed,
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+        )
+        .unwrap();
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        drop(socket);
+        let config = dir.join("Corefile");
+        std::fs::write(&config, format!("example.org:{port} {{\n bind 127.0.0.1\n dynupdate {{\n file {}\n database {}\n allow key.example.org. * A\n }}\n}}\n", seed.display(), database.display())).unwrap();
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Child(
+            Command::new(binary)
+                .args(["-conf", config.to_str().unwrap()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "CoreDNS exited before answering"
+            );
+            let output = Command::new("dig")
+                .args([
+                    "@127.0.0.1",
+                    "-p",
+                    &port.to_string(),
+                    "+time=1",
+                    "+tries=1",
+                    "+short",
+                    "rust.example.org.",
+                    "A",
+                ])
+                .output()
+                .unwrap();
+            if output.status.success()
+                && String::from_utf8_lossy(&output.stdout).trim() == "192.0.2.77"
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "CoreDNS did not serve the Rust update: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(child);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
