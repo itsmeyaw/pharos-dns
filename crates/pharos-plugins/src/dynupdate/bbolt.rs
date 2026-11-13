@@ -669,4 +669,39 @@ mod tests {
         );
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn reads_database_written_by_coredns_updates() {
+        let path = path();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/dynupdate/coredns.db"
+            ),
+            &path,
+        )
+        .unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::open(file).unwrap();
+        let (origin, records) = store.read().unwrap();
+        assert_eq!(origin, b"example.org.");
+        assert!(records.len() > 100);
+        store.commit(&origin, &records).unwrap();
+        drop(store);
+        let Some(output) = go("read", &path) else {
+            std::fs::remove_file(path).unwrap();
+            return;
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.starts_with(b"example.org.\n"));
+        std::fs::remove_file(path).unwrap();
+    }
 }
