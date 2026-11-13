@@ -227,6 +227,10 @@ impl DynUpdate {
 #[cfg(feature = "plugin-dynupdate")]
 fn expand_record(record: pharos_proto::Record<'_>, message: &[u8]) -> Result<ZoneRecord, ()> {
     // RFC 2136 §3.4: UPDATE records are expanded before becoming Zone data.
+    // RFC 4398 §2: nonempty CERT RDATA includes type, key tag and algorithm.
+    if record.rtype == Type::CERT && !record.rdata.is_empty() && record.rdata.len() < 5 {
+        return Err(());
+    }
     // miekg/dns accepts zero-length RDATA before decoding the RR type.
     let rdata = if record.rdata.is_empty() {
         Vec::new()
@@ -392,6 +396,21 @@ mod tests {
             let rr = message.authorities().next().unwrap();
             assert_eq!(expand_record(rr, &wire).unwrap().rdata, expected, "{kind}");
         }
+    }
+
+    #[test]
+    fn rejects_truncated_cert_update_rdata() {
+        let apex: pharos_proto::Name = "example.org.".parse().unwrap();
+        let name = NameRef::parse(apex.as_wire(), 0).unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
+        builder.question(name, Type::SOA, Class::IN).unwrap();
+        builder
+            .record(Section::Authority, name, Type::CERT, Class::IN, 60, &[1])
+            .unwrap();
+        let _ = builder.finish();
+        let message = Message::parse(&wire).unwrap();
+        assert!(expand_record(message.authorities().next().unwrap(), &wire).is_err());
     }
 
     #[test]
