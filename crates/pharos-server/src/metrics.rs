@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt::Write,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -37,6 +37,8 @@ const TYPES: &[(u16, &str)] = &[
     (255, "ANY"),
 ];
 const RESPONSE_CODES: usize = 4096;
+// RFC 6895 §2.3 and IANA DNS Parameters: assigned RCODEs fit in 0 through 23.
+const DENSE_RESPONSE_CODES: usize = 24;
 pub const WRITER_METADATA: &str = "prometheus/writer";
 const TIME_BUCKETS: &[f64] = &[
     0.00025, 0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128, 0.256, 0.512, 1.024,
@@ -510,7 +512,7 @@ impl TransportStatus {
 #[derive(Clone)]
 pub struct PluginMetrics {
     block: Arc<Block>,
-    responses: Arc<Vec<AtomicU64>>,
+    responses: Arc<ResponseCounters>,
 }
 
 struct Block {
@@ -522,9 +524,51 @@ struct Block {
     duration: Histogram,
     request_size: [Histogram; 2],
     response_size: [Histogram; 2],
-    default_responses: Arc<Vec<AtomicU64>>,
-    plugins: Mutex<BTreeMap<String, Arc<Vec<AtomicU64>>>>,
+    default_responses: Arc<ResponseCounters>,
+    plugins: Mutex<BTreeMap<String, Arc<ResponseCounters>>>,
     enabled: Mutex<BTreeMap<String, bool>>,
+}
+
+struct ResponseCounters {
+    dense: [AtomicU64; DENSE_RESPONSE_CODES],
+    extended: OnceLock<Box<[AtomicU64]>>,
+}
+
+impl Default for ResponseCounters {
+    fn default() -> Self {
+        Self {
+            dense: std::array::from_fn(|_| AtomicU64::new(0)),
+            extended: OnceLock::new(),
+        }
+    }
+}
+
+impl ResponseCounters {
+    fn increment(&self, code: u16) {
+        let code = usize::from(code);
+        let counter = if let Some(counter) = self.dense.get(code) {
+            counter
+        } else {
+            // RFC 6891 §6.1.3: extended RCODEs occupy the remaining 12-bit range.
+            &self
+                .extended
+                .get_or_init(|| counters(RESPONSE_CODES - DENSE_RESPONSE_CODES).into_boxed_slice())
+                [code - DENSE_RESPONSE_CODES]
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (usize, &AtomicU64)> {
+        self.dense
+            .iter()
+            .enumerate()
+            .chain(self.extended.get().into_iter().flat_map(|counters| {
+                counters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, counter)| (index + DENSE_RESPONSE_CODES, counter))
+            }))
+    }
 }
 
 struct Histogram {
@@ -607,7 +651,7 @@ impl Registry {
         let key = (server.to_owned(), zone.to_owned(), view.to_owned());
         let mut blocks = self.0.blocks.lock().unwrap();
         BlockMetrics(Arc::clone(blocks.entry(key).or_insert_with(|| {
-            let default_responses = Arc::new(counters(RESPONSE_CODES));
+            let default_responses = Arc::new(ResponseCounters::default());
             let mut plugins = BTreeMap::new();
             plugins.insert(String::new(), Arc::clone(&default_responses));
             Arc::new(Block {
@@ -1201,7 +1245,7 @@ impl Registry {
                 .lock()
                 .unwrap()
                 .values()
-                .any(|v| v.iter().any(|n| n.load(Ordering::Relaxed) != 0))
+                .any(|v| v.iter().any(|(_, n)| n.load(Ordering::Relaxed) != 0))
         }) {
             header(
                 out,
@@ -1212,7 +1256,7 @@ impl Registry {
             let mut sorted = SortedSamples::default();
             for b in blocks.values() {
                 for (plugin, counts) in b.plugins.lock().unwrap().iter() {
-                    for (code, counter) in counts.iter().enumerate() {
+                    for (code, counter) in counts.iter() {
                         let n = counter.load(Ordering::Relaxed);
                         if n != 0 {
                             let rcode = rcode(code as u16);
@@ -1549,7 +1593,7 @@ impl BlockMetrics {
         let responses = Arc::clone(
             plugins
                 .entry(name.into())
-                .or_insert_with(|| Arc::new(counters(RESPONSE_CODES))),
+                .or_insert_with(|| Arc::new(ResponseCounters::default())),
         );
         PluginMetrics {
             block: Arc::clone(&self.0),
@@ -1620,7 +1664,7 @@ impl PluginMetrics {
 #[allow(clippy::too_many_arguments)]
 fn record(
     block: &Block,
-    responses: &[AtomicU64],
+    responses: &ResponseCounters,
     qtype: u16,
     tcp: bool,
     ipv6: bool,
@@ -1648,7 +1692,7 @@ fn record(
     block.duration.observe(TIME_BUCKETS, duration);
     block.request_size[proto].observe(SIZE_BUCKETS, request_bytes as f64);
     block.response_size[proto].observe(SIZE_BUCKETS, response_bytes as f64);
-    responses[usize::from(rcode)].fetch_add(1, Ordering::Relaxed);
+    responses.increment(rcode);
 }
 
 // Prometheus text exposition §Comments, help text, and type information: emit HELP and TYPE.
@@ -1828,6 +1872,52 @@ fn rcode(code: u16) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn response_code_counters_keep_common_codes_inline() {
+        use std::sync::atomic::Ordering;
+        let counters = super::ResponseCounters::default();
+        assert_eq!(super::DENSE_RESPONSE_CODES, 24);
+        assert!(std::mem::size_of::<super::ResponseCounters>() <= 224);
+        counters.increment(0);
+        counters.increment(23);
+        assert!(counters.extended.get().is_none());
+        counters.increment(24);
+        counters.increment(4095);
+        let extended = counters.extended.get().unwrap();
+        assert_eq!(extended[0].load(Ordering::Relaxed), 1);
+        assert_eq!(extended[4095 - 24].load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counters
+                .iter()
+                .map(|(_, counter)| counter.load(Ordering::Relaxed))
+                .sum::<u64>(),
+            4
+        );
+    }
+
+    #[test]
+    fn concurrent_first_extended_rcode_records_every_response() {
+        use std::sync::{Arc, Barrier, atomic::Ordering};
+        let counters = Arc::new(super::ResponseCounters::default());
+        let barrier = Arc::new(Barrier::new(8));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let counters = Arc::clone(&counters);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..100 {
+                        counters.increment(42);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            counters.extended.get().unwrap()[42 - 24].load(Ordering::Relaxed),
+            800
+        );
+    }
+
     #[test]
     fn dynamic_zone_labels_include_block_domain_and_root_fallback() {
         use pharos_proto::{Name, NameRef};

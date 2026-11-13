@@ -216,6 +216,30 @@ fn response_codes_match_coredns_and_unknown_values_are_preserved() {
 }
 
 #[test]
+fn response_code_series_keep_exact_labels_across_storage_boundary() {
+    let registry = Registry::new("v", "r", "rust");
+    let plugin = registry.block("s", ".", "").plugin("auto");
+    for code in [0, 23, 24, 4095] {
+        plugin.record(1, false, false, false, 0, 0, code, 0.0);
+    }
+    let mut text = String::new();
+    registry.encode(&mut text);
+    let lines: Vec<_> = text
+        .lines()
+        .filter(|line| line.starts_with("pharos_dns_responses_total{"))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "pharos_dns_responses_total{plugin=\"auto\",rcode=\"BADCOOKIE\",server=\"s\",view=\"\",zone=\".\"} 1",
+            "pharos_dns_responses_total{plugin=\"auto\",rcode=\"NOERROR\",server=\"s\",view=\"\",zone=\".\"} 1",
+            "pharos_dns_responses_total{plugin=\"auto\",rcode=\"RCODE24\",server=\"s\",view=\"\",zone=\".\"} 1",
+            "pharos_dns_responses_total{plugin=\"auto\",rcode=\"RCODE4095\",server=\"s\",view=\"\",zone=\".\"} 1",
+        ]
+    );
+}
+
+#[test]
 fn series_sort_by_label_values_across_server_blocks() {
     let registry = Registry::new("v", "r", "rust");
     registry
