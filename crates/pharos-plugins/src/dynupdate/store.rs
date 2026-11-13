@@ -1188,4 +1188,86 @@ mod tests {
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn coredns_rejects_invalid_database_contents_and_limits() {
+        use pharos_proto::{Class, Type, zone::ZoneRecord};
+        for case in [
+            "wrong-zone",
+            "unknown-format",
+            "truncated-records",
+            "invalid-zone",
+            "records",
+            "bytes",
+        ] {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target")
+                .join(format!(
+                    "pharos-dynamic-invalid-db-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("seed"), "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n").unwrap();
+            let tokens = lex(
+                "Corefile",
+                "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+            );
+            let mut config = setup::parse(
+                &mut Cursor::new("Corefile", &tokens),
+                &["example.org"],
+                Some(&dir),
+            )
+            .unwrap();
+            let shared = acquire(&config).unwrap();
+            if matches!(case, "wrong-zone" | "truncated-records" | "invalid-zone") {
+                let mut guard = shared.db.lock().unwrap();
+                let db = guard.as_mut().unwrap();
+                let (_, records) = db.read().unwrap();
+                let invalid_rr = ZoneRecord {
+                    owner: "outside.test.".parse().unwrap(),
+                    rtype: Type::A,
+                    class: Class::IN,
+                    ttl: 60,
+                    rdata: vec![192, 0, 2, 1],
+                };
+                let data = match case {
+                    "truncated-records" => vec![0xff, 1],
+                    "invalid-zone" => super::wire::encode(&[invalid_rr]).unwrap(),
+                    _ => records,
+                };
+                db.commit(
+                    if case == "wrong-zone" {
+                        b"other.example."
+                    } else {
+                        b"example.org."
+                    },
+                    &data,
+                )
+                .unwrap();
+            }
+            drop(shared);
+            if case == "unknown-format" {
+                let path = dir.join("db");
+                std::fs::write(&path, []).unwrap();
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .unwrap();
+                drop(super::bbolt::Store::create(file).unwrap());
+            }
+            if case == "records" {
+                config.max_records = 1;
+            }
+            if case == "bytes" {
+                config.max_bytes = 1;
+            }
+            let before = std::fs::read(dir.join("db")).unwrap();
+            assert!(validate(&config).is_err(), "{case}");
+            assert!(acquire(&config).is_err(), "{case}");
+            assert_eq!(std::fs::read(dir.join("db")).unwrap(), before, "{case}");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }
