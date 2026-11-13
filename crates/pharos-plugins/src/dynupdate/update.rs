@@ -438,4 +438,83 @@ mod tests {
         }
         assert!(tested >= 50, "tested {tested} types");
     }
+
+    #[test]
+    fn coredns_serial_arithmetic_and_explicit_soa_updates() {
+        for (old, new, changed) in [
+            (10u32, 10u32, false),
+            (10, 11, true),
+            (u32::MAX, 1, true),
+            (11, 10, false),
+            (10, (1u32 << 31) + 10, false),
+        ] {
+            let base = zone();
+            let mut records = base.records().to_vec();
+            let soa = records.iter_mut().find(|rr| rr.rtype == Type::SOA).unwrap();
+            let offset = soa.rdata.len() - 20;
+            soa.rdata[offset..offset + 4].copy_from_slice(&old.to_be_bytes());
+            let original = Zone::from_records(base.apex().clone(), records).unwrap();
+            let mut update = original
+                .records()
+                .iter()
+                .find(|rr| rr.rtype == Type::SOA)
+                .unwrap()
+                .clone();
+            let offset = update.rdata.len() - 20;
+            update.rdata[offset..offset + 4].copy_from_slice(&new.to_be_bytes());
+            let (candidate, actual) = original.apply_updates(&[update]).unwrap();
+            assert_eq!(actual, changed, "{old} -> {new}");
+            assert_eq!(candidate.serial(), Some(if changed { new } else { old }));
+        }
+    }
+
+    #[test]
+    fn coredns_add_duplicate_ttl_and_apex_deletes() {
+        let original = zone();
+        let mut txt = rr("new.example.org.", Type::TXT, Class::IN, &[1, b'x']);
+        txt.ttl = 60;
+        let (added, changed) = original.apply_updates(std::slice::from_ref(&txt)).unwrap();
+        assert!(changed);
+        assert_eq!(added.serial(), Some(11));
+        let (unchanged, changed) = added.apply_updates(std::slice::from_ref(&txt)).unwrap();
+        assert!(!changed);
+        assert_eq!(unchanged.serial(), Some(11));
+        txt.ttl = 120;
+        let (updated, changed) = unchanged.apply_updates(&[txt]).unwrap();
+        assert!(changed);
+        assert_eq!(updated.serial(), Some(12));
+        let apex = updated.apex().clone();
+        let delete_all = ZoneRecord {
+            owner: apex.clone(),
+            rtype: Type::ANY,
+            class: Class::ANY,
+            ttl: 0,
+            rdata: Vec::new(),
+        };
+        let ns = updated
+            .records()
+            .iter()
+            .find(|rr| rr.owner == apex && rr.rtype == Type::NS)
+            .unwrap();
+        let mut delete_ns = ns.clone();
+        delete_ns.class = Class::NONE;
+        delete_ns.ttl = 0;
+        let (protected, _) = updated.apply_updates(&[delete_all, delete_ns]).unwrap();
+        assert_eq!(
+            protected
+                .records()
+                .iter()
+                .filter(|rr| rr.owner == apex && rr.rtype == Type::NS)
+                .count(),
+            1
+        );
+        assert_eq!(
+            protected
+                .records()
+                .iter()
+                .filter(|rr| rr.owner == apex && rr.rtype == Type::SOA)
+                .count(),
+            1
+        );
+    }
 }
