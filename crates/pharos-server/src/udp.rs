@@ -57,6 +57,8 @@ impl Slot {
             peer: None,
             done: false,
         }));
+        // Rust Mutex: initialize any platform lock storage before the ready Query path.
+        drop(data.lock().unwrap());
         let future = Box::pin(serve_slot(
             Arc::clone(&data),
             Arc::clone(handler),
@@ -158,7 +160,14 @@ async fn serve_slot<H: Handler>(
 }
 
 // Rust Future::poll: ready Queries reuse the coroutine; waiting Queries transfer it to a task.
-pub(crate) async fn dispatch(slot: &mut Option<Slot>, pending: &mut JoinSet<Option<Slot>>) {
+pub(crate) async fn dispatch<H: Handler>(
+    slot: &mut Option<Slot>,
+    pending: &mut JoinSet<Option<Slot>>,
+    free: &mut Vec<Slot>,
+    handler: &Arc<H>,
+    socket: &Arc<UdpSocket>,
+    stack: Option<&Arc<crate::shed::ShedStack>>,
+) {
     let polled = poll_fn(|cx| Poll::Ready(slot.as_mut().unwrap().poll(cx))).await;
     match polled {
         Poll::Ready(Ok(())) => {}
@@ -172,10 +181,13 @@ pub(crate) async fn dispatch(slot: &mut Option<Slot>, pending: &mut JoinSet<Opti
                     None
                 }
             });
+            // Rust Future::poll: allocate replacements on the pending path, not the next ready Query.
+            take_slot(slot, free, handler, socket, stack);
         }
         Poll::Ready(Err(())) => {
             *slot = None;
             crate::logging::log("ERROR", "server", "Recovered panic in UDP Query");
+            take_slot(slot, free, handler, socket, stack);
         }
     }
 }
@@ -495,7 +507,15 @@ fn spawn_shed<H: Handler>(
             slot.as_mut()
                 .unwrap()
                 .prepare(&query[..length], peer, client, Some(response));
-            dispatch(&mut slot, &mut pending).await;
+            dispatch(
+                &mut slot,
+                &mut pending,
+                &mut free,
+                &handler,
+                &socket,
+                Some(&stack),
+            )
+            .await;
         }
         shutdown_pending(&mut pending).await;
         stack.close();
@@ -563,7 +583,7 @@ fn spawn_plain<H: Handler>(
                     if !capacity(&mut pending, &mut free, &mut shutdown, &socket, &handler, None, &mut scratch).await { break 'read; }
                     take_slot(&mut slot, &mut free, &handler, &socket, None);
                     slot.as_mut().unwrap().prepare(&query[..length], peer, client, None);
-                    dispatch(&mut slot, &mut pending).await;
+                    dispatch(&mut slot, &mut pending, &mut free, &handler, &socket, None).await;
                 }
             }
         }
@@ -614,12 +634,13 @@ mod tests {
         let handler = Arc::new(Shedding(false));
         let mut slot = Some(Slot::new(&handler, &socket, None));
         let mut pending = JoinSet::new();
+        let mut free = Vec::new();
         let address = slot.as_ref().unwrap().future.as_ref().get_ref() as *const _ as *const ();
         let peer = "127.0.0.1:53".parse().unwrap();
         // Rust Pin: repeated ready Queries must keep the same coroutine allocation.
         for _ in 0..32 {
             slot.as_mut().unwrap().prepare(b"query", peer, peer, None);
-            dispatch(&mut slot, &mut pending).await;
+            dispatch(&mut slot, &mut pending, &mut free, &handler, &socket, None).await;
             let current = slot.as_ref().unwrap().future.as_ref().get_ref() as *const _ as *const ();
             assert_eq!(current, address);
             assert!(pending.is_empty());
@@ -700,8 +721,16 @@ mod tests {
             slot.as_mut()
                 .unwrap()
                 .prepare(&[0], peer, peer, Some(response));
-            dispatch(&mut slot, &mut pending).await;
-            assert!(slot.is_none());
+            dispatch(
+                &mut slot,
+                &mut pending,
+                &mut free,
+                &handler,
+                &socket,
+                Some(&stack),
+            )
+            .await;
+            assert!(slot.is_some());
             if pending_panic {
                 recycle(pending.join_next().await, &mut free);
             }

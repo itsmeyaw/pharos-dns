@@ -109,7 +109,9 @@ async fn completed_pending_queries_reuse_response_buffers() {
         let addresses = addresses.lock().unwrap();
         assert_eq!(addresses.len(), 20);
         assert!(
-            addresses.iter().all(|address| *address == addresses[0]),
+            addresses
+                .iter()
+                .all(|address| *address == addresses[0] || *address == addresses[1]),
             "{addresses:?}"
         );
     }
@@ -119,6 +121,7 @@ async fn completed_pending_queries_reuse_response_buffers() {
 struct SlowEcho {
     started: std::sync::Arc<tokio::sync::Notify>,
     release: std::sync::Arc<tokio::sync::Notify>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     shed: Option<pharos_server::metrics::ShedMetrics>,
 }
 
@@ -139,6 +142,7 @@ impl Handler for SlowEcho {
         response: &mut Vec<u8>,
     ) -> Action {
         // RFC 1035 §4.2.1: UDP carries each Query in a separate datagram.
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if query == b"slow" {
             self.started.notify_one();
             self.release.notified().await;
@@ -153,11 +157,13 @@ async fn slow_query_does_not_delay_fast_query_on_same_socket() {
     for shed in [false, true] {
         let started = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = Listener::bind(
             "127.0.0.1:0".parse().unwrap(),
             SlowEcho {
                 started: started.clone(),
                 release: release.clone(),
+                calls: calls.clone(),
                 shed: shed.then(|| pharos_server::metrics::Registry::default().shed("dns://:53")),
             },
         )
@@ -177,6 +183,12 @@ async fn slow_query_does_not_delay_fast_query_on_same_socket() {
             .unwrap();
         assert_eq!(&response[..length], b"fast");
         release.notify_one();
+        let length = tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&response[..length], b"slow");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         listener.shutdown().await.unwrap();
     }
 }

@@ -176,7 +176,15 @@ pub(crate) fn spawn<H: Handler>(
                     slot.as_mut()
                         .unwrap()
                         .prepare(&buffers[index][..length], peer, client, None);
-                    crate::udp::dispatch(&mut slot, &mut pending).await;
+                    crate::udp::dispatch(
+                        &mut slot,
+                        &mut pending,
+                        &mut free,
+                        &handler,
+                        &socket,
+                        None,
+                    )
+                    .await;
                 }
             }
         }
