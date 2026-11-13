@@ -9,9 +9,9 @@
 - CAA and URI output preserves literal backslash octets. CoreDNS's presentation-format writer can interpret them as escapes.
 - Restart and shutdown wait for in-progress signing to finish before returning; CoreDNS does not wait for its signing goroutines.
 
-CoreDNS checks SOA signature inception and expiration every five hours; it does not check whether the unsigned file changed. The actual expiration window is seven days, despite the upstream README saying 14 days. Like CoreDNS, `key directory` is not implemented.
+- CoreDNS checks SOA signature inception and expiration every five hours; it does not check whether the unsigned file changed. The actual expiration window is seven days, despite the upstream README saying 14 days. Like CoreDNS, `key directory` is not implemented.
 
-CoreDNS shares key records across multiple origins in one Directive and leaves their owner set to the last origin. Pharos follows this behavior: earlier Zones may lack their apex DNSKEY and produce invalid DNSSEC. Configure one `sign` Directive per origin.
+- CoreDNS shares key records across multiple origins in one Directive and leaves their owner set to the last origin. Pharos follows this behavior: earlier Zones may lack their apex DNSKEY and produce invalid DNSSEC. Configure one `sign` Directive per origin.
 
 ## Sources
 
