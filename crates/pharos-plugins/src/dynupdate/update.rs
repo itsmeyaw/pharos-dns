@@ -519,6 +519,38 @@ mod tests {
     }
 
     #[test]
+    fn coredns_cname_update_rules() {
+        let original = zone();
+        let www: Name = "www.example.org.".parse().unwrap();
+        let target = "target.example.org.".parse::<Name>().unwrap();
+        let mut cname = rr("www.example.org.", Type::CNAME, Class::IN, target.as_wire());
+        cname.ttl = 60;
+        let (same, changed) = original
+            .apply_updates(std::slice::from_ref(&cname))
+            .unwrap();
+        assert!(!changed);
+        assert_eq!(same.serial(), Some(10));
+        let mut updates = [
+            rr("www.example.org.", Type::A, Class::NONE, &[192, 0, 2, 1]),
+            rr("www.example.org.", Type::A, Class::NONE, &[192, 0, 2, 2]),
+        ]
+        .to_vec();
+        updates.push(cname.clone());
+        let (added, changed) = original.apply_updates(&updates).unwrap();
+        assert!(changed);
+        assert_eq!(added.serial(), Some(11));
+        assert!(
+            added
+                .records()
+                .iter()
+                .any(|rr| rr.owner == www && rr.rtype == Type::CNAME)
+        );
+        let (again, changed) = added.apply_updates(std::slice::from_ref(&cname)).unwrap();
+        assert!(!changed);
+        assert_eq!(again.serial(), Some(11));
+    }
+
+    #[test]
     fn coredns_delete_rrset_and_specific_record() {
         let original = zone();
         let mut txt = rr("www.example.org.", Type::TXT, Class::IN, &[1, b'x']);
