@@ -1,6 +1,136 @@
 use super::*;
 
 #[test]
+fn update_builds_a_new_snapshot_without_mutating_the_old_one() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let original = Zone::load(apex.clone(), Path::new("tests/fixtures/file/example.zone")).unwrap();
+    let owner: Name = "new.example.org.".parse().unwrap();
+    let update = pharos_proto::zone::ZoneRecord {
+        owner: owner.clone(),
+        class: Class::IN,
+        rtype: Type::A,
+        ttl: 60,
+        rdata: vec![192, 0, 2, 99],
+    };
+    let (candidate, changed) = original.apply_updates(&[update]).unwrap();
+    let owner = NameRef::parse(owner.as_wire(), 0).unwrap();
+    assert!(changed);
+    assert_eq!(original.rrset(owner, Type::A).count(), 0);
+    assert_eq!(candidate.rrset(owner, Type::A).count(), 1);
+    assert_eq!(
+        candidate.serial(),
+        original.serial().map(|serial| serial + 1)
+    );
+}
+
+#[test]
+fn update_delete_matches_case_insensitive_domain_rdata() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nwww 60 IN CNAME target.example.org.\n";
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let zone = Zone::from_records(apex, records).unwrap();
+    let target: Name = "TARGET.Example.Org.".parse().unwrap();
+    let owner: Name = "WWW.EXAMPLE.ORG.".parse().unwrap();
+    let update = pharos_proto::zone::ZoneRecord {
+        owner: owner.clone(),
+        class: Class::NONE,
+        rtype: Type::CNAME,
+        ttl: 0,
+        rdata: target.as_wire().to_vec(),
+    };
+    let (candidate, changed) = zone.apply_updates(&[update]).unwrap();
+    assert!(changed);
+    assert_eq!(
+        candidate
+            .rrset(NameRef::parse(owner.as_wire(), 0).unwrap(), Type::CNAME)
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn update_protects_apex_and_applies_ordered_cname_changes() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 4294967295 2 3 4 5\n@ 60 IN NS ns.example.org.\nwww 60 IN A 192.0.2.1\n";
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let original = Zone::from_records(apex.clone(), records).unwrap();
+    let owner: Name = "www.example.org.".parse().unwrap();
+    let target: Name = "target.example.org.".parse().unwrap();
+    let cname = pharos_proto::zone::ZoneRecord {
+        owner: owner.clone(),
+        class: Class::IN,
+        rtype: Type::CNAME,
+        ttl: 60,
+        rdata: target.as_wire().to_vec(),
+    };
+    let (unchanged, changed) = original
+        .apply_updates(std::slice::from_ref(&cname))
+        .unwrap();
+    assert!(!changed);
+    assert_eq!(unchanged.serial(), Some(u32::MAX));
+    let delete = pharos_proto::zone::ZoneRecord {
+        owner: owner.clone(),
+        class: Class::ANY,
+        rtype: Type::A,
+        ttl: 0,
+        rdata: Vec::new(),
+    };
+    let apex_delete = pharos_proto::zone::ZoneRecord {
+        owner: apex.clone(),
+        class: Class::ANY,
+        rtype: Type::ANY,
+        ttl: 0,
+        rdata: Vec::new(),
+    };
+    let (updated, changed) = original
+        .apply_updates(&[delete, cname, apex_delete])
+        .unwrap();
+    assert!(changed);
+    assert_eq!(updated.serial(), Some(1));
+    assert_eq!(
+        updated
+            .rrset(NameRef::parse(owner.as_wire(), 0).unwrap(), Type::CNAME)
+            .count(),
+        1
+    );
+    assert_eq!(
+        updated
+            .rrset(NameRef::parse(apex.as_wire(), 0).unwrap(), Type::NS)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn update_replaces_multiple_existing_cnames_with_one() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\nwww 60 IN CNAME a.example.org.\nwww 60 IN CNAME b.example.org.\n";
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let zone = Zone::from_records(apex, records).unwrap();
+    let existing = zone
+        .records()
+        .iter()
+        .find(|rr| rr.rtype == Type::CNAME)
+        .unwrap()
+        .clone();
+    let owner = existing.owner.clone();
+    let (candidate, changed) = zone.apply_updates(&[existing]).unwrap();
+    assert!(changed);
+    assert_eq!(
+        candidate
+            .rrset(NameRef::parse(owner.as_wire(), 0).unwrap(), Type::CNAME)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn shared_zone_snapshot_retains_previous_generation() {
     let apex: Name = "example.org.".parse().unwrap();
     let path = Path::new("tests/fixtures/file/example.zone");
