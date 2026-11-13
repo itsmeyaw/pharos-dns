@@ -23,6 +23,7 @@ struct ResponseBuffer {
     stack: Option<Arc<crate::shed::ShedStack>>,
 }
 
+// Rust Drop::drop: return checked-out storage when a Query is cancelled or panics.
 impl Drop for ResponseBuffer {
     fn drop(&mut self) {
         if let (Some(stack), Some(data)) = (&self.stack, self.data.take()) {
