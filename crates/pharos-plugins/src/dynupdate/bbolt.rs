@@ -1705,4 +1705,50 @@ mod tests {
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn malformed_pages_and_truncation_return_errors_without_panics() {
+        let path = path();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut store = Store::create(file).unwrap();
+        store.commit(b"example.org.", b"record data").unwrap();
+        let root = store
+            .tree(store.meta.root, &mut std::collections::BTreeSet::new())
+            .unwrap();
+        let bucket = super::u64_at(&root.get(b"dynupdate-v1".as_slice()).unwrap().1, 0).unwrap();
+        let root_offset = store.meta.root as usize * store.meta.page_size;
+        let bucket_offset = bucket as usize * store.meta.page_size;
+        let freelist_offset = store.meta.freelist as usize * store.meta.page_size;
+        let required = store.meta.high as usize * store.meta.page_size;
+        drop(store);
+        let original = std::fs::read(&path).unwrap();
+        let mut bad_root = original.clone();
+        bad_root[root_offset + 8..root_offset + 10].copy_from_slice(&0u16.to_ne_bytes());
+        let mut bad_entry = original.clone();
+        bad_entry[bucket_offset + 16 + 4..bucket_offset + 16 + 8]
+            .copy_from_slice(&u32::MAX.to_ne_bytes());
+        let mut bad_free = original.clone();
+        bad_free[freelist_offset + 10..freelist_offset + 12].copy_from_slice(&1u16.to_ne_bytes());
+        bad_free[freelist_offset + 16..freelist_offset + 24].copy_from_slice(&1u64.to_ne_bytes());
+        for damaged in [
+            bad_root,
+            bad_entry,
+            bad_free,
+            original[..required - 1].to_vec(),
+        ] {
+            std::fs::write(&path, damaged).unwrap();
+            let result = std::panic::catch_unwind(|| {
+                let file = OpenOptions::new().read(true).write(true).open(&path)?;
+                Store::open(file)?.read()
+            });
+            assert!(result.is_ok(), "corrupt database panicked");
+            assert!(result.unwrap().is_err(), "corrupt database was accepted");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 }
