@@ -266,8 +266,9 @@ async fn coredns_services_rows() {
 #[tokio::test]
 async fn coredns_parse_request_dns_visible_rows() {
     let (endpoint, server) = api().await;
-    let zonal = chain(&endpoint, "zonal").await;
-    let ordinary = chain(&endpoint, "").await;
+    // Keep both configured Chains out of the default-size test future.
+    let zonal = Box::new(chain(&endpoint, "zonal").await);
+    let ordinary = Box::new(chain(&endpoint, "").await);
     let mut failures = Vec::new();
     for (id, chain, name, kind, expected_code, expected_ips) in [
         (
