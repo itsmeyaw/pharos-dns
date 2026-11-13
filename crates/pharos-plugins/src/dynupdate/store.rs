@@ -919,4 +919,89 @@ mod tests {
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[cfg(feature = "plugin-transfer")]
+    #[test]
+    fn transfer_snapshots_remain_consistent_during_updates() {
+        use crate::transfer::TransferRequest;
+        use pharos_proto::{Class, Message, Name, NameRef, Rcode, Rdata, Type, zone::ZoneRecord};
+        use pharos_server::Protocol;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-snapshot-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("seed"), "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n").unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = acquire(&config).unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let barrier = std::sync::Barrier::new(5);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let shared = &shared;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let apex: Name = "example.org.".parse().unwrap();
+                    barrier.wait();
+                    for _ in 0..40 {
+                        let snapshot = shared.current.load_full();
+                        let mut stream = snapshot
+                            .transfer(TransferRequest {
+                                zone: NameRef::parse(apex.as_wire(), 0).unwrap(),
+                                serial: 0,
+                                id: 1,
+                                flags: 0,
+                                protocol: Protocol::Tcp,
+                                qtype: Type::AXFR,
+                                qclass: Class::IN,
+                            })
+                            .unwrap();
+                        let mut wire = Vec::with_capacity(65535);
+                        let mut serials = Vec::new();
+                        let mut count = 0;
+                        while stream.next(&mut wire).unwrap() {
+                            let message = Message::parse(&wire).unwrap();
+                            for rr in message.answers() {
+                                count += 1;
+                                if let Ok(Rdata::Soa { serial, .. }) = rr.data() {
+                                    serials.push(serial);
+                                }
+                            }
+                        }
+                        assert_eq!(serials.len(), 2);
+                        assert_eq!(serials[0], serials[1]);
+                        assert_eq!(serials[0] as usize - 10, count - 3);
+                    }
+                });
+            }
+            barrier.wait();
+            for index in 0..20 {
+                let record = ZoneRecord {
+                    owner: format!("host-{index}.example.org.").parse().unwrap(),
+                    rtype: Type::A,
+                    class: Class::IN,
+                    ttl: 60,
+                    rdata: vec![192, 0, 2, index + 1],
+                };
+                assert_eq!(
+                    shared.transact(&config, &key, &[], &[record]).unwrap().0,
+                    Rcode::NOERROR
+                );
+            }
+        });
+        drop(shared);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
