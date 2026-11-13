@@ -119,6 +119,30 @@ async fn handler_panic_keeps_connection_open() {
     listener.shutdown().await.unwrap();
 }
 
+struct PanicAfterYield;
+
+impl Handler for PanicAfterYield {
+    async fn handle(&self, query: &[u8], _: SocketAddr, _: Protocol, out: &mut Vec<u8>) -> Action {
+        if query == b"panic" {
+            tokio::task::yield_now().await;
+            panic!("handler panic after yielding");
+        }
+        out.extend_from_slice(query);
+        Action::Respond
+    }
+}
+
+#[tokio::test]
+async fn handler_panic_after_yield_keeps_connection_open() {
+    let (listener, mut stream) = connect(PanicAfterYield).await;
+    send(&mut stream, b"panic").await;
+    send(&mut stream, b"next").await;
+    assert_eq!(receive(&mut stream).await, b"next");
+    send(&mut stream, b"again").await;
+    assert_eq!(receive(&mut stream).await, b"again");
+    listener.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn broken_transfer_closes_connection_promptly() {
     for panic in [false, true] {
@@ -273,6 +297,137 @@ async fn pipelined_tcp_queries_reuse_response_buffers() {
     }
     for _ in 0..16 {
         assert_eq!(receive(&mut stream).await, vec![b'r'; 1024]);
+    }
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_query_finishes_after_listener_shutdown() {
+    let (started, mut observed) = async_mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    let (listener, mut stream) = connect(BufferProbe {
+        started,
+        release: Arc::clone(&release),
+    })
+    .await;
+    send(&mut stream, b"warm").await;
+    timeout(TEST_TIMEOUT, observed.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let shutdown = tokio::spawn(listener.shutdown());
+    let mut byte = [0];
+    assert!(
+        timeout(Duration::from_millis(100), stream.read(&mut byte))
+            .await
+            .is_err()
+    );
+    assert!(!shutdown.is_finished());
+    release.add_permits(1);
+    assert_eq!(receive(&mut stream).await, vec![b'w'; 1024]);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, stream.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    timeout(TEST_TIMEOUT, shutdown)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pending_query_finishes_after_client_half_close() {
+    let (started, mut observed) = async_mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    let (listener, mut stream) = connect(BufferProbe {
+        started,
+        release: Arc::clone(&release),
+    })
+    .await;
+    send(&mut stream, b"warm").await;
+    timeout(TEST_TIMEOUT, observed.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    stream.shutdown().await.unwrap();
+
+    let mut byte = [0];
+    assert!(
+        timeout(Duration::from_millis(100), stream.read(&mut byte))
+            .await
+            .is_err()
+    );
+    release.add_permits(1);
+    assert_eq!(receive(&mut stream).await, vec![b'w'; 1024]);
+    assert_eq!(
+        timeout(TEST_TIMEOUT, stream.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_query_does_not_block_ready_query() {
+    let (started, mut observed) = async_mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    let (listener, mut stream) = connect(BufferProbe {
+        started,
+        release: Arc::clone(&release),
+    })
+    .await;
+    // RFC 7766 §6.2.1.1: pipelined Queries may complete out of order.
+    send(&mut stream, b"warm").await;
+    timeout(TEST_TIMEOUT, observed.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    send(&mut stream, b"ready").await;
+    assert_eq!(receive(&mut stream).await, vec![b'r'; 1024]);
+    release.add_permits(1);
+    assert_eq!(receive(&mut stream).await, vec![b'w'; 1024]);
+    listener.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn in_flight_limit_defers_the_next_query_until_one_finishes() {
+    let (started, mut capacities) = async_mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    let (listener, mut stream) = connect(BufferProbe {
+        started,
+        release: Arc::clone(&release),
+    })
+    .await;
+    // RFC 7766 §6.2.1.1: pipelined queries may be processed concurrently.
+    for _ in 0..17 {
+        send(&mut stream, b"warm").await;
+    }
+    for _ in 0..16 {
+        timeout(TEST_TIMEOUT, capacities.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        timeout(Duration::from_millis(100), capacities.recv())
+            .await
+            .is_err()
+    );
+    release.add_permits(1);
+    timeout(TEST_TIMEOUT, capacities.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    release.add_permits(16);
+    for _ in 0..17 {
+        assert_eq!(receive(&mut stream).await, vec![b'w'; 1024]);
     }
     listener.shutdown().await.unwrap();
 }

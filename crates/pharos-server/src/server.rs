@@ -134,6 +134,7 @@ pub struct Server<C> {
     dropped: Option<BlockMetrics>,
     shed: Option<crate::metrics::ShedMetrics>,
     has_views: Arc<AtomicBool>,
+    root: pharos_proto::Name,
 }
 
 impl<C: Chain> Server<C> {
@@ -230,6 +231,7 @@ impl<C: Chain> Server<C> {
             dropped,
             shed,
             has_views,
+            root: ".".parse().expect("root Domain"),
         }
     }
 
@@ -343,6 +345,7 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             shed: self.shed.clone(),
             has_views: Arc::clone(&self.has_views),
             dropped: self.dropped.clone(),
+            root: self.root.clone(),
         }))
     }
 }
@@ -438,16 +441,34 @@ impl<C: Chain> Server<C> {
         slots[0] = Some((crate::metrics::WRITER_METADATA, ""));
         slots[1] = Some((crate::logging::PLUGIN_METADATA, ""));
         slots[2] = Some((crate::logging::ERROR_LOGGED_METADATA, ""));
-        let mut metadata = Metadata::new(&mut slots);
-        metadata.self_lookup = Some(crate::SelfLookupState {
+        // ADR 0005 (#92): finish the potentially unwinding call first so Metadata is built in place, not copied.
+        let max_response_size = response_limit(query, protocol);
+        let mut context = Context {
+            query,
+            client: peer,
+            local: self.key.address,
+            transport: self.key.transport,
+            protocol,
+            domain: &self.root,
+            metadata: Metadata::new(&mut slots),
+            response,
+            max_response_size,
+        };
+        context.metadata.self_lookup = Some(crate::SelfLookupState {
             server: lookup_server,
             depth: lookup.0,
             siit: lookup.1,
             autopath: lookup.2,
         });
         let (block, view) = if has_views {
-            metadata.set_enabled(false);
-            self.route_view(query, peer, protocol, response, &mut metadata)
+            context.metadata.set_enabled(false);
+            self.route_view(
+                query,
+                peer,
+                protocol,
+                context.response,
+                &mut context.metadata,
+            )
         } else {
             (self.router.route(&self.key, query, peer, protocol), "")
         };
@@ -463,19 +484,9 @@ impl<C: Chain> Server<C> {
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
                 if has_views {
-                    metadata.set_metric_view(view);
+                    context.metadata.set_metric_view(view);
                 }
-                let mut context = Context {
-                    query,
-                    client: peer,
-                    local: self.key.address,
-                    transport: self.key.transport,
-                    protocol,
-                    domain: block.domain(),
-                    metadata,
-                    response,
-                    max_response_size: response_limit(query, protocol),
-                };
+                context.domain = block.domain();
                 let outcome = {
                     let future = std::pin::pin!(chain.serve_routed(&mut context, has_views));
                     crate::panic::contain_panic_with_stacktrace(

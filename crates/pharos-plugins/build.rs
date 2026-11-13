@@ -225,7 +225,8 @@ fn main() {
         }
         code.push_str("}\n");
     }
-    code.push_str("pub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_routed(cx, false) }\nfn serve_routed(&self, cx: &mut pharos_server::Context<'_>, collected: bool) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { if !collected { ");
+    // Inline across crates so the Chain future can be constructed in place.
+    code.push_str("#[inline]\npub fn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { self.serve_routed(cx, false) }\n#[inline]\nfn serve_routed(&self, cx: &mut pharos_server::Context<'_>, collected: bool) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { if !collected { ");
     if enabled.contains(&"metadata") {
         code.push_str("cx.metadata.set_enabled(self.metadata.is_some()); ");
     } else {
@@ -262,7 +263,7 @@ fn main() {
     }
     writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
     code.push_str("}\n");
-    code.push_str("impl pharos_server::Chain for Chain {\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
+    code.push_str("impl pharos_server::Chain for Chain {\n#[inline]\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {
         if registered_handler(name) {
             write!(code, " && self.r#{name}.is_none()").unwrap();
@@ -296,7 +297,7 @@ fn main() {
         }
         code.push_str("}\n");
     }
-    code.push_str("fn serve_routed(&self, cx: &mut pharos_server::Context<'_>, collected: bool) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve_routed(self, cx, collected) }\n");
+    code.push_str("#[inline]\nfn serve_routed(&self, cx: &mut pharos_server::Context<'_>, collected: bool) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve_routed(self, cx, collected) }\n");
     if enabled.contains(&"loop") {
         code.push_str("fn parallel_query(&self, query: &pharos_proto::Message<'_>) -> Option<tokio::sync::watch::Receiver<bool>> { self.r#loop.as_ref().and_then(|plugin| plugin.parallel_query(query)) }\n");
     }
