@@ -102,7 +102,8 @@ async fn query(chain: &Chain, name: &str, kind: Type, local: &str) -> Vec<u8> {
         response: &mut response,
         max_response_size: 4096,
     };
-    assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    // Keep the unmeasured Chain future out of the visibility fixture's stack.
+    assert_eq!(Box::pin(chain.serve(&mut cx)).await, Outcome::Response);
     response
 }
 
