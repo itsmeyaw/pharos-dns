@@ -224,6 +224,15 @@
 
 ## Server
 
+- Each UDP worker handles up to 256 waiting Queries concurrently and retains one
+  active or spare slot plus at most 16 completed slots for reuse. Each plain slot reserves 65,535
+  bytes each for its Query and Response, plus coroutine storage; shed Responses
+  use the shared stack. Forwarded Responses may exceed the client's UDP limit.
+  At capacity one ordinary Query waits; further ordinary datagrams are dropped,
+  with a shed counter only for shed-eligible Queries when the stack is full.
+  Forwarding-loop probes remain serviceable.
+  Linux may have already received a batch of up to 16 datagrams. Ready Queries
+  remain inline; Listener shutdown cancels in-flight Queries.
 - View-aware routing and metrics perform per-Query dispatch checks and initialize Metadata before routing even when no View is configured; no View filters run in that case.
 - The Rust `Server` API stores its Router in an `Arc`; callers adding blocks after construction must obtain unique access with `Arc::get_mut`.
 - The Rust Plugin API's `Context` has separate Query and Metadata lifetimes to support allocation-free internal Query rewrites.

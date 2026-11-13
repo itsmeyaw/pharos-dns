@@ -31,6 +31,10 @@ impl Handler for Echo {
         _: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
+        // Rust Future::poll: a pending Query must not prevent later slot reuse.
+        if query == b"slow" {
+            tokio::task::yield_now().await;
+        }
         let mut counts = self.counts.lock().unwrap();
         counts.queries += 1;
         if counts.queries == 101 {
@@ -64,10 +68,15 @@ async fn udp_worker_reuses_buffers_without_per_query_allocations() {
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
         let mut buf = [0; 32];
-        for _ in 0..201 {
-            socket.send_to(b"query", address).unwrap();
+        for index in 0..201 {
+            let query = if index == 0 {
+                b"slow".as_slice()
+            } else {
+                b"query"
+            };
+            socket.send_to(query, address).unwrap();
             let (n, _) = socket.recv_from(&mut buf).unwrap();
-            assert_eq!(&buf[..n], b"query");
+            assert_eq!(&buf[..n], query);
         }
         let _ = done.send(());
     });

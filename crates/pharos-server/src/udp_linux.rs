@@ -9,7 +9,7 @@ use std::{
 use nix::sys::socket::{MsgFlags, MultiHeaders, SockaddrStorage, recvmmsg, sendmmsg};
 use tokio::{io::Interest, net::UdpSocket, sync::watch, task::JoinHandle};
 
-use crate::{Action, Handler, Protocol};
+use crate::Handler;
 
 const BATCH: usize = 16;
 const MAX_MESSAGE: usize = 65535;
@@ -54,7 +54,7 @@ fn receive(
     })
 }
 
-fn send(socket: &UdpSocket, response: &[u8], peer: SocketAddr) -> io::Result<()> {
+pub(crate) fn send(socket: &UdpSocket, response: &[u8], peer: SocketAddr) -> io::Result<()> {
     let slices = [[IoSlice::new(response)]];
     let peers = [Some(SockaddrStorage::from(peer))];
     SEND.with_borrow_mut(|headers| {
@@ -82,17 +82,21 @@ pub(crate) fn spawn<H: Handler>(
         // Zeroed on the first readable event, not at startup: 64 workers' buffers took ~30 ms to fault in.
         let mut buffers: Option<[Vec<u8>; BATCH]> = None;
         let mut peers = [None; BATCH];
-        let mut response = Vec::with_capacity(MAX_MESSAGE);
-        loop {
+        let mut slot = None;
+        let mut pending = tokio::task::JoinSet::new();
+        let mut free = Vec::new();
+        let mut scratch = None;
+        'read: loop {
             tokio::select! {
                 biased;
-                _ = shutdown.changed() => return Ok(()),
+                _ = shutdown.changed() => break,
+                result = pending.join_next(), if !pending.is_empty() => { crate::udp::recycle(result, &mut free); continue; },
                 ready = socket.readable() => match ready {
                     Ok(()) => {}
                     Err(error) => {
                         crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
                         tokio::select! {
-                            _ = shutdown.changed() => return Ok(()),
+                            _ = shutdown.changed() => break 'read,
                             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
                         }
                         continue;
@@ -109,7 +113,7 @@ pub(crate) fn spawn<H: Handler>(
                 Err(error) => {
                     crate::logging::log("ERROR", "server", &format!("UDP receive failed: {error}"));
                     tokio::select! {
-                        _ = shutdown.changed() => return Ok(()),
+                        _ = shutdown.changed() => break 'read,
                         _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
                     }
                     continue;
@@ -132,36 +136,72 @@ pub(crate) fn spawn<H: Handler>(
                         );
                         continue;
                     }
-                    response.clear();
-                    if H::handle_shared(
+                    // recvmmsg(2): inspect already-received probes before waiting for capacity.
+                    if pending.len() >= crate::udp::MAX_IN_FLIGHT {
+                        for (later, buffer) in peers[index + 1..count]
+                            .iter_mut()
+                            .zip(&buffers[index + 1..count])
+                        {
+                            if let Some((size, address)) = *later
+                                && let Some(cancelled) = handler
+                                    .parallel_query(&buffer[..size], crate::canonical_peer(address))
+                            {
+                                crate::udp::spawn_parallel(
+                                    Arc::clone(&socket),
+                                    Arc::clone(&handler),
+                                    &buffer[..size],
+                                    address,
+                                    shutdown.clone(),
+                                    cancelled,
+                                    None,
+                                );
+                                *later = None;
+                            }
+                        }
+                    }
+                    if !crate::udp::capacity(
+                        &mut pending,
+                        &mut free,
+                        &mut shutdown,
+                        &socket,
                         &handler,
-                        &buffers[index][..length],
-                        client,
-                        Protocol::Udp,
-                        &mut response,
+                        None,
+                        &mut scratch,
                     )
                     .await
-                        == Action::Respond
-                        && let Err(error) = socket
-                            .async_io(Interest::WRITABLE, || send(&socket, &response, peer))
-                            .await
                     {
-                        crate::logging::log(
-                            "ERROR",
-                            "server",
-                            &format!("UDP Response to {peer} failed: {error}"),
-                        );
+                        break 'read;
                     }
+                    crate::udp::take_slot(&mut slot, &mut free, &handler, &socket, None);
+                    slot.as_mut()
+                        .unwrap()
+                        .prepare(&buffers[index][..length], peer, client, None);
+                    crate::udp::dispatch(
+                        &mut slot,
+                        &mut pending,
+                        &mut free,
+                        &handler,
+                        &socket,
+                        None,
+                    )
+                    .await;
                 }
             }
         }
+        // Tokio JoinSet::abort_all: release pending sockets before the Listener is replaced.
+        crate::udp::shutdown_pending(&mut pending).await;
+        Ok(())
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::{Action, Protocol};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     struct Echo;
 
@@ -193,5 +233,77 @@ mod tests {
             .unwrap();
         assert_eq!(&buffer[..length], b"ping");
         drop(shutdown);
+    }
+
+    struct BatchProbe {
+        started: Arc<AtomicUsize>,
+        cancelled: watch::Sender<bool>,
+    }
+    impl Handler for BatchProbe {
+        fn parallel_query(&self, query: &[u8], _: SocketAddr) -> Option<watch::Receiver<bool>> {
+            (query == [1]).then(|| self.cancelled.subscribe())
+        }
+        async fn handle(
+            &self,
+            query: &[u8],
+            _: SocketAddr,
+            _: Protocol,
+            response: &mut Vec<u8>,
+        ) -> Action {
+            // recvmmsg(2): a batch can contain both ordinary datagrams and a probe.
+            if query == [1] {
+                response.extend_from_slice(query);
+                return Action::Respond;
+            }
+            self.started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_worker_handles_probe_behind_ordinary_datagrams_in_batch() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let started = Arc::new(AtomicUsize::new(0));
+        let (shutdown, receiver) = watch::channel(false);
+        let worker = spawn(
+            server,
+            Arc::new(BatchProbe {
+                started: started.clone(),
+                cancelled: watch::channel(false).0,
+            }),
+            receiver,
+        );
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        client.set_nonblocking(true).unwrap();
+        for count in 1..=crate::udp::MAX_IN_FLIGHT {
+            client.send_to(&[0], address).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while started.load(Ordering::SeqCst) < count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        for index in 0..BATCH {
+            client
+                .send_to(&[u8::from(index == BATCH - 1)], address)
+                .unwrap();
+        }
+        let client = UdpSocket::from_std(client).unwrap();
+        let mut response = [0; 8];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&response[..length], &[1]);
+        shutdown.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }
