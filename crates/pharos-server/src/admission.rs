@@ -116,7 +116,7 @@ pub fn admit_with_update<'a>(
     Admission::Query(query)
 }
 
-// RFC 8490 §5.4.1: DSO is unsupported; this shortcut suppresses ID-zero requests without parsing Primary TLVs.
+// RFC 8490 §5.4.1; shortcut: skip Primary-TLV parsing for ID-zero DSO until support lands.
 pub(crate) fn is_dso_unidirectional(wire: &[u8]) -> bool {
     if wire.len() < 12 {
         return false;
