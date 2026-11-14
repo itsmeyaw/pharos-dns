@@ -27,19 +27,19 @@ struct Entry {
     start: usize,
     first_len: usize,
     second_len: usize,
-    port: u16,
+    tag: u16,
     next: Option<usize>,
 }
 
 impl Seen {
-    pub(super) fn insert(&mut self, first: &[u8], second: &[u8], port: u16) -> bool {
-        let hash = self.buckets.hasher().hash_one((first, second, port));
+    pub(super) fn insert(&mut self, first: &[u8], second: &[u8], tag: u16) -> bool {
+        let hash = self.buckets.hasher().hash_one((first, second, tag));
         let mut next = self.buckets.get(&hash).copied();
         while let Some(index) = next {
             let entry = &self.entries[index];
             let middle = entry.start + entry.first_len;
             let end = middle + entry.second_len;
-            if entry.port == port
+            if entry.tag == tag
                 && &self.bytes[entry.start..middle] == first
                 && &self.bytes[middle..end] == second
             {
@@ -55,28 +55,32 @@ impl Seen {
             start,
             first_len: first.len(),
             second_len: second.len(),
-            port,
+            tag,
             next: self.buckets.insert(hash, index),
         });
         true
     }
 
-    pub(super) fn contains(&self, first: &[u8], second: &[u8], port: u16) -> bool {
-        let hash = self.buckets.hasher().hash_one((first, second, port));
+    pub(super) fn contains(&self, first: &[u8], second: &[u8], tag: u16) -> bool {
+        self.find(first, second, tag).is_some()
+    }
+
+    pub(super) fn find(&self, first: &[u8], second: &[u8], tag: u16) -> Option<usize> {
+        let hash = self.buckets.hasher().hash_one((first, second, tag));
         let mut next = self.buckets.get(&hash).copied();
         while let Some(index) = next {
             let entry = &self.entries[index];
             let middle = entry.start + entry.first_len;
             let end = middle + entry.second_len;
-            if entry.port == port
+            if entry.tag == tag
                 && &self.bytes[entry.start..middle] == first
                 && &self.bytes[middle..end] == second
             {
-                return true;
+                return Some(index);
             }
             next = entry.next;
         }
-        false
+        None
     }
 
     fn clear(&mut self) {
@@ -91,6 +95,7 @@ pub(super) struct Scratch {
     pub(super) addresses: HashSet<Address>,
     pub(super) srv: Seen,
     pub(super) extra: Seen,
+    pub(super) targets: Seen,
 }
 
 thread_local! {
@@ -124,6 +129,7 @@ impl Drop for Lease {
         scratch.addresses.clear();
         scratch.srv.clear();
         scratch.extra.clear();
+        scratch.targets.clear();
         let _ = POOL.try_with(|pool| pool.borrow_mut().push(scratch));
     }
 }
