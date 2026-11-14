@@ -1,10 +1,10 @@
-use aws_lc_rs::digest::{self, SHA1_FOR_LEGACY_USE_ONLY, SHA256, SHA384};
+use aws_lc_rs::digest::{self, SHA256, SHA384};
 use pharos_proto::Name;
 
 /// The digest algorithm used in DS and CDS records.
+// RFC 9904 §4 and RFC 9905 §5: SHA-1 MUST NOT be used for DNSSEC delegation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DigestType {
-    Sha1,
     Sha256,
     Sha384,
 }
@@ -42,7 +42,6 @@ pub fn ds_digest(owner: &Name, rdata: &[u8], algorithm: DigestType) -> Vec<u8> {
     // RFC 4034 §5.1.4: the digest covers the canonical owner followed by DNSKEY RDATA.
     // RFC 4509 §3: DS digest calculation supports SHA-256.
     let algorithm = match algorithm {
-        DigestType::Sha1 => &SHA1_FOR_LEGACY_USE_ONLY,
         // RFC 4509 §2.1: SHA-256 DS digests use digest type 2 and all 32 digest octets.
         DigestType::Sha256 => &SHA256,
         DigestType::Sha384 => &SHA384,
@@ -62,7 +61,6 @@ pub fn cds_rdata(owner: &Name, dnskey: &[u8], algorithm: DigestType) -> Option<V
     // RFC 7344 §3.1: CDS has the same RDATA format and digest as DS.
     let tag = key_tag(dnskey)?;
     let digest_type = match algorithm {
-        DigestType::Sha1 => 1,
         // RFC 4509 §2.1: SHA-256 uses digest type 2.
         DigestType::Sha256 => 2,
         // RFC 6605 §7: DS digest type 4 identifies SHA-384.

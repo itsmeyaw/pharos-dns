@@ -11,6 +11,9 @@
 - The signature cache key includes the Response's TTLs. RRsets whose TTL counts down behind `cache` or `forward` can miss more often than in CoreDNS.
 - On a cache miss, TTL normalization rescans the Response for each record; its cost grows quadratically with the record count.
 - Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as insecure. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
+- RSASHA512 (algorithm 10) is refused for signing under RFC 9904 §3. RSA modulus and exponent values above 4096 bits are rejected (RFC 3110 §2; RFC 5702 §§2.1–2.2).
+- Each loaded DNSKEY is bound to its owner zone and cannot sign another configured zone (RFC 8080 §8).
+- A configured zone without a matching key passes DNSKEY and DO queries through unchanged.
 - RSA private keys below 2048 bits are rejected by aws-lc-rs; CoreDNS accepts them.
 - Key files currently require a standalone DNSKEY record with an absolute owner, IN class if specified, and a numeric TTL; the complete zone-file grammar is not supported.
 - Canonical signing rejects A6 and legacy name-bearing RDATA that `pharos-proto` cannot safely relocate, rather than signing them as CoreDNS does.

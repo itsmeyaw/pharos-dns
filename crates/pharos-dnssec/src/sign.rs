@@ -42,17 +42,18 @@ enum Key {
 pub struct SigningKey(Key);
 
 impl SigningKey {
-    /// Use a parsed RSA private key with DNSSEC algorithm 8 or 10.
+    /// Use a parsed RSA private key with DNSSEC algorithm 8.
     pub fn from_rsa(algorithm: u8, key: RsaKeyPair) -> Result<Self, SignError> {
-        // RFC 8017 §B.1 and RFC 5702 §3: Algorithms 8 and 10 use SHA-256 and SHA-512.
-        // RFC 5702 §3: algorithm 8 uses SHA-256 and algorithm 10 uses SHA-512.
-        // RFC 8017 §A.2.4: Algorithms 8 and 10 select SHA-256 and SHA-512 RSA identifiers.
+        // RFC 9904 §3: Do not create signatures with the NOT RECOMMENDED algorithm 10.
         let encoding: &'static dyn signature::RsaEncoding = match algorithm {
             // RFC 9904 §3: Support algorithm 8, required for DNSSEC signing.
             8 => &signature::RSA_PKCS1_SHA256,
-            10 => &signature::RSA_PKCS1_SHA512,
             _ => return Err(SignError::UnsupportedAlgorithm(algorithm)),
         };
+        // RFC 3110 §2 and RFC 5702 §§2.1–2.2: RSA modulus MUST NOT exceed 4096 bits.
+        if key.public_modulus_len() > 512 {
+            return Err(SignError::InvalidKey);
+        }
         Ok(Self(Key::Rsa(key, encoding)))
     }
 
@@ -79,14 +80,14 @@ impl SigningKey {
 
     /// Parse an unencrypted DER PKCS#8 private key for a DNSSEC algorithm number.
     ///
-    /// Supported algorithms are 8, 10, 13, 14 and 15. Algorithms 5 and 7 are
-    /// unavailable because aws-lc-rs does not expose RSA/SHA-1 signing. RSA
-    /// keys must be 2048–8192 bits, as required by aws-lc-rs.
+    /// Supported algorithms are 8, 13, 14 and 15. Algorithms 5 and 7 are
+    /// unavailable because aws-lc-rs does not expose RSA/SHA-1 signing; algorithm
+    /// 10 is rejected as NOT RECOMMENDED by RFC 9904 §3. RSA keys must be 2048–4096 bits.
     pub fn from_pkcs8(algorithm: u8, der: &[u8]) -> Result<Self, SignError> {
         // RFC 5702 §3, RFC 6605 §4 and RFC 8080 §5: DNSSEC algorithm numbers.
         // RFC 6944 §2.3: RSAMD5 is not implemented for DNSSEC signing.
         match algorithm {
-            8 | 10 => {
+            8 => {
                 let key = RsaKeyPair::from_pkcs8(der).map_err(|_| SignError::InvalidKey)?;
                 Self::from_rsa(algorithm, key)
             }

@@ -64,7 +64,7 @@ fn invalid(message: &str) -> KeyError {
     KeyError(message.to_owned())
 }
 
-fn refuse_sha1(algorithm: u8) -> Result<(), KeyError> {
+fn refuse_signing_algorithm(algorithm: u8) -> Result<(), KeyError> {
     // RFC 9905 §2: RSASHA1 and RSASHA1-NSEC3-SHA1 MUST NOT be used to create RRSIG records.
     // RFC 9904 §3: Algorithms 5 and 7 are not recommended for signing, so refuse them.
     if matches!(algorithm, 5 | 7) {
@@ -72,6 +72,12 @@ fn refuse_sha1(algorithm: u8) -> Result<(), KeyError> {
             "DNSSEC algorithm {algorithm} (SHA-1) must not be used for signing (RFC 9905 §2); \
              perform an algorithm rollover to 8, 13 or 15 (RFC 6781 §4.1.4)"
         )));
+    }
+    // RFC 9904 §3: Algorithm 10 is NOT RECOMMENDED for DNSSEC signing.
+    if algorithm == 10 {
+        return Err(invalid(
+            "DNSSEC algorithm 10 must not be used for signing (RFC 9904 §3)",
+        ));
     }
     Ok(())
 }
@@ -91,7 +97,7 @@ impl KeyPair {
 /// Parses one DNSKEY record and its BIND v1.2/v1.3 private key.
 pub fn parse_key_pair(public: &str, private: &str) -> Result<KeyPair, KeyError> {
     let public = parse_dnskey(public)?;
-    refuse_sha1(public.algorithm)?;
+    refuse_signing_algorithm(public.algorithm)?;
     let mut fields = HashMap::new();
     for line in private.lines() {
         let line = line.split(';').next().unwrap_or("").trim();
@@ -128,10 +134,10 @@ pub fn parse_key_pair(public: &str, private: &str) -> Result<KeyPair, KeyError> 
             .decode(value)
             .map_err(|_| invalid("invalid private-key base64"))
     };
-    // RFC 5702 §5.1: Algorithms 8 and 10 support RSA/SHA-2 DNSKEY signing keys.
+    // RFC 5702 §5.1: Algorithm 8 supports RSA/SHA-256 DNSKEY signing keys.
     let private = match algorithm {
         // RFC 8017 §3.2: Load n, e, d and CRT values p, q, dP, dQ, and qInv.
-        8 | 10 => {
+        8 => {
             // RFC 8017 Appendix A.1.2: RSAPrivateKey is a sequence of nine integers.
             let mut body = vec![2, 1, 0];
             for name in [
@@ -184,7 +190,7 @@ pub fn parse_key_pair(public: &str, private: &str) -> Result<KeyPair, KeyError> 
 /// Parses a DNSKEY record with an unencrypted PKCS#8 DER or PEM private key.
 pub fn parse_pkcs8(public: &str, private: &[u8]) -> Result<KeyPair, KeyError> {
     let public = parse_dnskey(public)?;
-    refuse_sha1(public.algorithm)?;
+    refuse_signing_algorithm(public.algorithm)?;
     // RFC 7468 §10: a PKCS#8 PEM uses the PRIVATE KEY textual label.
     let decoded;
     // RFC 7468 §3: PEM parsing accepts standard encapsulation and Base64 lines of any length.
@@ -208,7 +214,7 @@ pub fn parse_pkcs8(public: &str, private: &[u8]) -> Result<KeyPair, KeyError> {
     };
     // RFC 5958 §2: the algorithm identifier determines the private key representation.
     let private = match public.algorithm {
-        8 | 10 => PrivateKey::Rsa(
+        8 => PrivateKey::Rsa(
             signature::RsaKeyPair::from_pkcs8(private)
                 .map_err(|_| invalid("invalid RSA PKCS#8"))?,
         ),
@@ -304,6 +310,10 @@ pub fn parse_dnskey(input: &str) -> Result<Dnskey, KeyError> {
     let flags = tokens[index + 1]
         .parse()
         .map_err(|_| invalid("invalid DNSKEY flags"))?;
+    // RFC 4034 §2.1.1: Reserved DNSKEY flag bits MUST be zero.
+    if flags & !0x0181 != 0 {
+        return Err(invalid("reserved DNSKEY flag bits must be zero"));
+    }
     let protocol = tokens[index + 2]
         .parse()
         .map_err(|_| invalid("invalid DNSKEY protocol"))?;
@@ -347,10 +357,22 @@ fn rsa_public_der(public: &[u8]) -> Result<Vec<u8>, KeyError> {
     if length == 0 || end >= public.len() {
         return Err(invalid("invalid RSA DNSKEY"));
     }
+    // RFC 3110 §2 and RFC 5702 §§2.1–2.2: RSA exponent and modulus are at most 4096 bits.
+    if significant_octets(&public[start..end]) > 512 || significant_octets(&public[end..]) > 512 {
+        return Err(invalid("RSA DNSKEY exponent or modulus exceeds 4096 bits"));
+    }
     // RFC 8017 §A.1.1: RSAPublicKey DER encodes modulus followed by publicExponent.
     let mut body = der_integer(&public[end..])?;
     body.extend(der_integer(&public[start..end])?);
     Ok(der(0x30, &body))
+}
+
+fn significant_octets(bytes: &[u8]) -> usize {
+    // RFC 3110 §2: Count significant octets to enforce the 4096-bit component ceiling.
+    bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .map_or(0, |start| bytes.len() - start)
 }
 
 // ITU-T X.690 §8.3: DER integers use minimal signed two's-complement representation.
@@ -384,4 +406,25 @@ fn der(tag: u8, body: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(body);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rsa_public_der;
+
+    #[test]
+    fn rsa_dnskey_components_are_limited_to_4096_bits() {
+        let mut valid = vec![1, 3];
+        valid.extend(vec![1; 512]);
+        assert!(rsa_public_der(&valid).is_ok());
+
+        let mut oversized_modulus = vec![1, 3];
+        oversized_modulus.extend(vec![1; 513]);
+        assert!(rsa_public_der(&oversized_modulus).is_err());
+
+        let mut oversized_exponent = vec![0, 2, 1];
+        oversized_exponent.extend(vec![1; 513]);
+        oversized_exponent.push(3);
+        assert!(rsa_public_der(&oversized_exponent).is_err());
+    }
 }

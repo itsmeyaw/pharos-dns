@@ -20,17 +20,15 @@ const MESSAGE: &[u8] = b"canonical RRSIG fields and RRset";
 fn rsa_signatures_verify_as_pkcs1_v15() {
     let key = RsaKeyPair::generate(KeySize::Rsa2048).unwrap();
     let der = key.as_der().unwrap();
-    for (algorithm, verifier) in [
-        (8, &signature::RSA_PKCS1_2048_8192_SHA256),
-        (10, &signature::RSA_PKCS1_2048_8192_SHA512),
-    ] {
-        let signer = SigningKey::from_pkcs8(algorithm, der.as_ref()).unwrap();
-        let signed = signer.sign(MESSAGE).unwrap();
-        let verifier = UnparsedPublicKey::new(verifier, key.public_key().as_ref());
-        assert_eq!(signed.len(), 256);
-        assert!(verifier.verify(MESSAGE, &signed).is_ok());
-        assert!(verifier.verify(b"altered", &signed).is_err());
-    }
+    let signer = SigningKey::from_pkcs8(8, der.as_ref()).unwrap();
+    let signed = signer.sign(MESSAGE).unwrap();
+    let verifier = UnparsedPublicKey::new(
+        &signature::RSA_PKCS1_2048_8192_SHA256,
+        key.public_key().as_ref(),
+    );
+    assert_eq!(signed.len(), 256);
+    assert!(verifier.verify(MESSAGE, &signed).is_ok());
+    assert!(verifier.verify(b"altered", &signed).is_err());
 }
 
 #[test]
@@ -92,7 +90,11 @@ fn invalid_keys_and_unsupported_algorithms_fail_closed() {
         SigningKey::from_pkcs8(5, &[]),
         Err(SignError::UnsupportedAlgorithm(5))
     ));
-    for algorithm in [8, 10, 13, 14, 15] {
+    assert!(matches!(
+        SigningKey::from_pkcs8(10, &[]),
+        Err(SignError::UnsupportedAlgorithm(10))
+    ));
+    for algorithm in [8, 13, 14, 15] {
         assert!(matches!(
             SigningKey::from_pkcs8(algorithm, &[]),
             Err(SignError::InvalidKey)
@@ -136,10 +138,8 @@ fn emit_miekg_dns_verification_vectors() {
     let mut rsa_public = vec![u8::try_from(exponent.len()).unwrap()];
     rsa_public.extend_from_slice(exponent);
     rsa_public.extend_from_slice(modulus);
-    for algorithm in [8, 10] {
-        let signer = SigningKey::from_pkcs8(algorithm, rsa_der.as_ref()).unwrap();
-        emit_vector(algorithm, &rsa_public, &signer);
-    }
+    let signer = SigningKey::from_pkcs8(8, rsa_der.as_ref()).unwrap();
+    emit_vector(8, &rsa_public, &signer);
 
     for (algorithm, method) in [
         (13, &signature::ECDSA_P256_SHA256_FIXED_SIGNING),
