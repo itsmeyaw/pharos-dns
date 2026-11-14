@@ -28,6 +28,7 @@
 ## cache
 
 - [cache Plugin notes](../crates/pharos-plugins/src/cache/README.md)
+- `test.`, `invalid.`, and RFC 6303 reverse names bypass cache by default; configured file Zones retain precedence. `forward { allow_special }` enables upstream resolution only for test and reverse names; otherwise `forward` returns NXDOMAIN for `.invalid` (RFC 6761 §§6.1, 6.2, 6.4).
 
 ## cancel
 
@@ -64,6 +65,7 @@
 ## file
 
 - [file Plugin notes](../crates/pharos-plugins/src/file/README.md)
+- Unconfigured `test.`, `invalid.`, and RFC 6303 reverse names return authoritative NXDOMAIN; explicit file Zones take precedence (RFC 6761 §§6.1, 6.2, 6.4; RFC 6303 §3).
 - Pharos intentionally differs from CoreDNS where RFC-conformant Zone behavior requires it:
   - An apex query for an absent type returns NOERROR/NODATA with the SOA (RFC 2308 §2.2); CoreDNS v1.15.0 returns NXDOMAIN for an SOA/NS-only apex.
   - Master-file loading rejects multiple SOAs, CNAME RRsets with multiple targets, and DNAME descendant data; CoreDNS retains the last SOA and can retain conflicting aliases.
@@ -78,6 +80,7 @@
 ## forward
 
 - [forward Plugin notes](../crates/pharos-plugins/src/forward/README.md)
+- `forward { allow_special }` permits upstream resolution for `.test` and RFC 6303 reverse names. `forward` returns NXDOMAIN for `.invalid`; an earlier explicit file Zone retains precedence (RFC 6761 §§6.1, 6.2, 6.4).
 
 ## header
 
@@ -106,6 +109,7 @@
 ## local
 
 - [local Plugin notes](../crates/pharos-plugins/src/local/README.md)
+- Pharos serves the complete RFC 6303 empty-zone catalogue by default and allows per-zone `disable`; configured file Zones and `allow_special` forwarding take precedence for reverse names.
 
 ## log
 
@@ -208,6 +212,7 @@
 ## CLI
 
 - Pharos uses POSIX-style flags rather than CoreDNS's single-dash long flags; legacy spellings report their replacements.
+- RFC 6761 §§6.3–6.5: localhost RDATA is fixed to loopback and cannot be overridden; `.invalid` names default to NXDOMAIN, but explicit file Zones remain available as a compatibility exception; example names remain reserved for documentation.
 - The Corefile lookup also checks `/etc/pharos/pharos.conf` before `./Corefile`.
 - Version and startup banners identify Pharos and include Rust rather than Go build information.
 - `--log-format json` switches log lines to JSON; the startup banner stays text.
@@ -380,7 +385,8 @@
 - `any` synthesizes HINFO before checking CNAME and cannot sign the generated answer when DO=1 (RFC 8482 §4.2); CoreDNS v1.15.0 `plugin/any` has the same behavior.
 - `hosts` returns authoritative NXDOMAIN with a synthetic SOA for unmapped names instead of CoreDNS's SERVFAIL (RFC 1034 §4.3.2; RFC 2308 §3; CoreDNS v1.15.0 `plugin/hosts/hosts_test.go` `hostsExample`).
 - `hosts` authoritative NODATA also includes a synthetic SOA for negative caching (RFC 2308 §3).
-- The local plugin returns positive `localhost.` apex NS/SOA data for CoreDNS compatibility (RFC 6761 §6.3).
+- The local plugin returns negative NODATA for `localhost.` apex NS/SOA queries as RFC 6761 §6.3 requires; CoreDNS's positive apex records are not retained.
+- The local plugin serves the RFC 6303 reverse-zone catalogue with authoritative negative answers and per-zone `disable`; configured file Zones take precedence.
 - Local answers set AA; local NS and SOA MNAME use resolvable `localhost.`, and SOA RNAME is `nobody.invalid.` (RFC 1034 §4.3.2; RFC 2181 §7.3; RFC 6303 §3; CoreDNS v1.15.0 `plugin/local`).
 - DNS64 and SIIT reject non-/96 RFC 6052 Well-Known Prefixes and nonzero /96 reserved octets; CoreDNS v1.15.0 DNS64 setup tests accept `64:ff9b::/32` (`plugin/dns64/setup_test.go`). DNS64 synthesized AA/RA come from the initial AAAA response (RFC 6052 §§2.1–2.2; RFC 6147 §5.4; CoreDNS v1.15.0 `plugin/dns64` and `plugin/siit`).
 - A successful empty A lookup returns the original AAAA response (RFC 6147 §5.4); this differs from the former Pharos behavior.

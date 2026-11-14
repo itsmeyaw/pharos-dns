@@ -38,6 +38,7 @@ pub(super) struct Config {
     pub max_concurrent: usize,
     pub next: Vec<u16>,
     pub next_on_nodata: bool,
+    pub allow_special: bool,
     pub failover: Vec<u16>,
     pub failfast_all_unhealthy_upstreams: bool,
     pub source_address: Option<IpAddr>,
@@ -78,6 +79,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
         max_concurrent: 0,
         next: Vec::new(),
         next_on_nodata: false,
+        allow_special: false,
         failover: Vec::new(),
         failfast_all_unhealthy_upstreams: false,
         source_address: None,
@@ -98,7 +100,11 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
                     config.except.extend(normalize_domain(name));
                 }
             }
-            "force_tcp" | "prefer_udp" | "next_on_nodata" | "failfast_all_unhealthy_upstreams" => {
+            "force_tcp"
+            | "prefer_udp"
+            | "next_on_nodata"
+            | "allow_special"
+            | "failfast_all_unhealthy_upstreams" => {
                 if !args.is_empty() {
                     return Err(cursor.arg_err());
                 }
@@ -106,6 +112,8 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
                     "force_tcp" => config.force_tcp = true,
                     "prefer_udp" => config.prefer_udp = true,
                     "next_on_nodata" => config.next_on_nodata = true,
+                    // RFC 6761 §§6.1–6.2: special reverse and test names require explicit upstream opt-in.
+                    "allow_special" => config.allow_special = true,
                     _ => config.failfast_all_unhealthy_upstreams = true,
                 }
             }
@@ -470,7 +478,7 @@ mod tests {
 
     #[test]
     fn parses_options_and_preserves_zero_attempts() {
-        let config = parse_text("forward . 192.0.2.1 {\nexcept example.org 10.0.0.0/8\nforce_tcp\nprefer_udp\nexpire 1m2.5s\nmax_age 90s\nmax_idle_conns 4\nread_timeout 3s\nmax_fails 0\nmax_connect_attempts 0\npolicy round_robin\nhealth_check 250ms no_rec domain Example.org\nmax_concurrent 10\nnext NXDOMAIN servfail\nnext_on_nodata\nfailover REFUSED\nfailfast_all_unhealthy_upstreams\nsource_address 192.0.2.9\n}").unwrap();
+        let config = parse_text("forward . 192.0.2.1 {\nexcept example.org 10.0.0.0/8\nforce_tcp\nprefer_udp\nexpire 1m2.5s\nmax_age 90s\nmax_idle_conns 4\nread_timeout 3s\nmax_fails 0\nmax_connect_attempts 0\npolicy round_robin\nhealth_check 250ms no_rec domain Example.org\nmax_concurrent 10\nnext NXDOMAIN servfail\nnext_on_nodata\nallow_special\nfailover REFUSED\nfailfast_all_unhealthy_upstreams\nsource_address 192.0.2.9\n}").unwrap();
         assert_eq!(config.except, ["example.org.", "10.in-addr.arpa."]);
         assert!(config.force_tcp && config.prefer_udp);
         assert_eq!(config.expire, Duration::from_millis(62500));
@@ -486,6 +494,7 @@ mod tests {
         assert_eq!(config.max_concurrent, 10);
         assert_eq!(config.next, [3, 2]);
         assert!(config.next_on_nodata && config.failfast_all_unhealthy_upstreams);
+        assert!(config.allow_special);
         assert_eq!(config.failover, [5]);
         assert_eq!(config.source_address, Some("192.0.2.9".parse().unwrap()));
     }
@@ -502,6 +511,7 @@ mod tests {
             "forward . 1.1.1.1 {\ntls_servername x\n}",
             "forward . 1.1.1.1 {\nunknown x\n}",
             "forward . 1.1.1.1 {\nforce_tcp x\n}",
+            "forward . 1.1.1.1 {\nallow_special x\n}",
             "forward . 1.1.1.1 {\nhealth_check -1s\n}",
             "forward . 1.1.1.1 {\nhealth_check 1s domain a..b\n}",
             "forward . 1.1.1.1 {\nhealth_check 1s nonsense\n}",

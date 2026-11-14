@@ -36,6 +36,7 @@ struct Stanza {
     failover: Vec<Rcode>,
     next: Vec<Rcode>,
     next_on_nodata: bool,
+    allow_special: bool,
 }
 
 /// Multiple forward Directives form one contiguous Plugin Chain segment.
@@ -242,6 +243,7 @@ impl Forward {
                 failover: config.failover.into_iter().map(Rcode).collect(),
                 next: config.next.into_iter().map(Rcode).collect(),
                 next_on_nodata: config.next_on_nodata,
+                allow_special: config.allow_special,
             });
         }
         Ok(result)
@@ -267,16 +269,43 @@ impl Forward {
             }
         }
     }
+
+    pub(crate) fn allows_special(&self, name: NameRef<'_>) -> bool {
+        // RFC 6761 §§6.1–6.2: permit special-name forwarding only inside opted-in, non-excluded stanzas.
+        self.stanzas.iter().any(|stanza| {
+            stanza.allow_special
+                && contains(name, &stanza.from)
+                && (name == NameRef::parse(stanza.from.as_wire(), 0).expect("configured Domain")
+                    || !stanza.ignored.iter().any(|ignored| contains(name, ignored)))
+        })
+    }
+
+    pub(crate) fn allows_any_special(&self) -> bool {
+        self.stanzas.iter().any(|stanza| stanza.allow_special)
+    }
 }
 
 // RFC 6761 §6.2: Explicit forward zones enable upstream lookup for test names.
 impl Plugin for Forward {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        let query = cx.query;
         let root = [0];
         let name = cx.query.questions().next().map_or_else(
             || NameRef::parse(&root, 0).expect("root"),
             |question| question.name,
         );
+        if let Some(special) = crate::special_use(name)
+            && (!special.permits_upstream() || !self.allows_special(name))
+        {
+            // RFC 6761 §§6.1, 6.2 and 6.4: special names never reach public Upstreams by default.
+            return crate::special_negative(
+                cx.response,
+                query,
+                cx.protocol,
+                cx.max_response_size,
+                Rcode::NXDOMAIN,
+            );
+        }
         // RFC 6761 §6.5: Forward example names like other DNS names.
         for (index, stanza) in self.stanzas.iter().enumerate() {
             if !contains(name, &stanza.from)

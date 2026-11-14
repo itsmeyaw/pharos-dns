@@ -5,6 +5,7 @@
 //! configuration rather than silently accepting it.
 
 use pharos_corefile::{BlockContext, Cursor, Directive, Error};
+use pharos_proto::{Name, NameRef};
 use pharos_server::{Lifecycle, ListenerKey, Router, Server, Transport};
 use std::{
     collections::HashMap,
@@ -142,6 +143,183 @@ pub mod view;
 pub mod whoami;
 
 include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SpecialUse {
+    Test,
+    Invalid,
+    Reverse { zone_labels: usize },
+}
+
+impl SpecialUse {
+    // RFC 6761 §§6.1–6.2 permit opt-in forwarding only for private reverse and test names.
+    pub(crate) const fn permits_upstream(self) -> bool {
+        matches!(self, Self::Test | Self::Reverse { .. })
+    }
+
+    pub(crate) const fn zone_labels(self) -> usize {
+        match self {
+            Self::Test | Self::Invalid => 1,
+            Self::Reverse { zone_labels } => zone_labels,
+        }
+    }
+}
+
+// RFC 6761 §§6.1–6.4 and RFC 6303 §4: classify reserved suffixes by wire labels without allocating.
+pub(crate) fn special_use(name: NameRef<'_>) -> Option<SpecialUse> {
+    if has_suffix(name, &[b"test"]) {
+        return Some(SpecialUse::Test);
+    }
+    if has_suffix(name, &[b"invalid"]) {
+        return Some(SpecialUse::Invalid);
+    }
+    // RFC 6303 §4: skip the reverse-zone catalogue for ordinary non-reverse QNAMEs.
+    let in_addr = has_suffix(name, &[b"in-addr", b"arpa"]);
+    let ip6 = has_suffix(name, &[b"ip6", b"arpa"]);
+    if !in_addr && !ip6 {
+        return None;
+    }
+
+    if in_addr {
+        for zone in [
+            &[b"10".as_slice(), b"in-addr", b"arpa"][..],
+            &[b"168", b"192", b"in-addr", b"arpa"],
+            &[b"0", b"in-addr", b"arpa"],
+            &[b"127", b"in-addr", b"arpa"],
+            &[b"254", b"169", b"in-addr", b"arpa"],
+            &[b"2", b"0", b"192", b"in-addr", b"arpa"],
+            &[b"100", b"51", b"198", b"in-addr", b"arpa"],
+            &[b"113", b"0", b"203", b"in-addr", b"arpa"],
+            &[b"255", b"255", b"255", b"255", b"in-addr", b"arpa"],
+        ] {
+            if has_suffix(name, zone) {
+                return Some(SpecialUse::Reverse {
+                    zone_labels: zone.len(),
+                });
+            }
+        }
+        for first in [
+            b"16".as_slice(),
+            b"17",
+            b"18",
+            b"19",
+            b"20",
+            b"21",
+            b"22",
+            b"23",
+            b"24",
+            b"25",
+            b"26",
+            b"27",
+            b"28",
+            b"29",
+            b"30",
+            b"31",
+        ] {
+            if has_suffix(name, &[first, b"172", b"in-addr", b"arpa"]) {
+                return Some(SpecialUse::Reverse { zone_labels: 4 });
+            }
+        }
+    }
+
+    if ip6 {
+        if has_ipv6_zone_suffix(name, b"0") {
+            return Some(SpecialUse::Reverse { zone_labels: 34 });
+        }
+        if has_ipv6_zone_suffix(name, b"1") {
+            return Some(SpecialUse::Reverse { zone_labels: 34 });
+        }
+        for zone in [
+            &[b"d".as_slice(), b"f", b"ip6", b"arpa"][..],
+            &[b"8", b"e", b"f", b"ip6", b"arpa"],
+            &[b"9", b"e", b"f", b"ip6", b"arpa"],
+            &[b"a", b"e", b"f", b"ip6", b"arpa"],
+            &[b"b", b"e", b"f", b"ip6", b"arpa"],
+            &[
+                b"8", b"b", b"d", b"0", b"1", b"0", b"0", b"2", b"ip6", b"arpa",
+            ],
+        ] {
+            if has_suffix(name, zone) {
+                return Some(SpecialUse::Reverse {
+                    zone_labels: zone.len(),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn has_ipv6_zone_suffix(name: NameRef<'_>, first: &[u8]) -> bool {
+    let count = name.labels().count();
+    count >= 34
+        && name
+            .labels()
+            .skip(count - 34)
+            .enumerate()
+            .all(|(index, label)| match index {
+                0 => label.eq_ignore_ascii_case(first),
+                1..=31 => label == b"0",
+                32 => label.eq_ignore_ascii_case(b"ip6"),
+                _ => label.eq_ignore_ascii_case(b"arpa"),
+            })
+}
+
+fn has_suffix(name: NameRef<'_>, suffix: &[&[u8]]) -> bool {
+    let count = name.labels().count();
+    count >= suffix.len()
+        && name
+            .labels()
+            .skip(count - suffix.len())
+            .zip(suffix)
+            .all(|(label, suffix)| label.eq_ignore_ascii_case(suffix))
+}
+
+pub(crate) fn name_within(name: NameRef<'_>, zone: &Name) -> bool {
+    // RFC 1034 §3.1: a Domain contains itself and every name with its label suffix.
+    let zone = NameRef::parse(zone.as_wire(), 0).expect("configured Domain");
+    let count = name.labels().count();
+    let suffix = zone.labels().count();
+    count >= suffix
+        && name
+            .labels()
+            .skip(count - suffix)
+            .zip(zone.labels())
+            .all(|(label, suffix)| label.eq_ignore_ascii_case(suffix))
+}
+
+pub(crate) fn special_negative(
+    response: &mut Vec<u8>,
+    query: pharos_proto::Message<'_>,
+    protocol: pharos_server::Protocol,
+    max_response_size: usize,
+    rcode: pharos_proto::Rcode,
+) -> pharos_server::Outcome {
+    let Some(question) = query.questions().next() else {
+        return pharos_server::Outcome::Drop;
+    };
+    // RFC 6761 §§6.1, 6.2 and 6.4: answer reserved cache names immediately without recursion.
+    let max = max_response_size.max(512);
+    if response.capacity() < max {
+        if protocol == pharos_server::Protocol::Tcp {
+            response.reserve(max.saturating_sub(response.len()));
+        } else {
+            return pharos_server::Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
+        }
+    }
+    let mut flags = 0x8000 | (query.flags() & 0x7800) | rcode.0;
+    if query.opcode() == pharos_proto::Opcode::QUERY {
+        flags |= query.flags() & 0x0110;
+    }
+    let mut builder = match pharos_proto::MessageBuilder::new(response, max, query.id(), flags) {
+        Ok(builder) => builder,
+        Err(error) => return pharos_server::Outcome::Error(pharos_server::Error::Build(error)),
+    };
+    if let Err(error) = builder.question(question.name, question.qtype, question.qclass) {
+        return pharos_server::Outcome::Error(pharos_server::Error::Build(error));
+    }
+    let _ = builder.finish();
+    pharos_server::Outcome::Response
+}
 
 /// Plugin-specific CoreDNS compatibility notes in their documented order.
 pub const COMPATIBILITY: &[(&str, &str)] = &[
@@ -517,6 +695,14 @@ pub fn servers_with_registry(
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &chain.cache {
             cache.bind(&chain);
+        }
+        #[cfg(feature = "plugin-local")]
+        if let Some(local) = &chain.local {
+            local.bind(&chain);
+        }
+        #[cfg(feature = "plugin-file")]
+        if let Some(file) = &chain.file {
+            file.bind(&chain);
         }
         #[cfg(feature = "plugin-forward")]
         if chain.forward.is_some() {

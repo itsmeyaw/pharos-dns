@@ -3,12 +3,12 @@
 pub(crate) mod setup;
 
 use std::sync::{
-    Arc,
+    Arc, OnceLock, Weak,
     atomic::{AtomicU64, Ordering},
 };
 
-use pharos_corefile::{Cursor, Error as CorefileError};
-use pharos_proto::{Class, MessageBuilder, NameRef, Opcode, Section, Type};
+use pharos_corefile::{Cursor, Error as CorefileError, normalize_domain};
+use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Section, Type};
 use pharos_server::{Context, Error, Next, Outcome, Plugin, Protocol, metrics::Registry};
 
 // RFC 6303 §3: Set the SOA minimum (negative-cache TTL) equal to the record TTL.
@@ -22,7 +22,9 @@ const SOA_TAIL: &[u8] = b"\x06nobody\x07invalid\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\
 #[derive(Debug)]
 pub struct Local {
     prefix: bool,
+    disabled_zones: Vec<Name>,
     counter: Option<Arc<AtomicU64>>,
+    chain: OnceLock<Weak<crate::Chain>>,
 }
 
 impl Local {
@@ -32,21 +34,46 @@ impl Local {
             return Err(cursor.arg_err());
         }
         let mut prefix = true;
+        let mut disabled_zones = Vec::new();
         while cursor.next_block() {
-            if cursor.val() != "localhost_prefix" {
-                return Err(cursor.error("unknown local property"));
-            }
+            let option = cursor.val().to_owned();
             let args = cursor.remaining_args();
-            prefix = match args.as_slice() {
-                [value] if value == "on" => true,
-                [value] if value == "off" => false,
-                _ => return Err(cursor.arg_err()),
-            };
+            match option.as_str() {
+                "localhost_prefix" => {
+                    prefix = match args.as_slice() {
+                        [value] if value == "on" => true,
+                        [value] if value == "off" => false,
+                        _ => return Err(cursor.arg_err()),
+                    };
+                }
+                "disable" if !args.is_empty() => {
+                    for value in args {
+                        let zones = normalize_domain(&value);
+                        if zones.is_empty() {
+                            return Err(cursor.error(format!("invalid Zone {value}")));
+                        }
+                        for zone in zones {
+                            disabled_zones.push(
+                                zone.parse::<Name>()
+                                    .map_err(|_| cursor.error(format!("invalid Zone {value}")))?,
+                            );
+                        }
+                    }
+                }
+                "disable" => return Err(cursor.arg_err()),
+                _ => return Err(cursor.error("unknown local property")),
+            }
         }
         Ok(Self {
             prefix,
+            disabled_zones,
             counter: None,
+            chain: OnceLock::new(),
         })
+    }
+
+    pub(crate) fn bind(&self, chain: &Arc<crate::Chain>) {
+        let _ = self.chain.set(Arc::downgrade(chain));
     }
 
     pub(crate) fn set_metrics(&mut self, registry: &Registry) {
@@ -86,22 +113,52 @@ impl Local {
         // RFC 6761 §6.3: localhost and its subdomains resolve to loopback.
         let special =
             count > 1 && (eq(count - 1, b"localhost") || (self.prefix && eq(0, b"localhost")));
-        // RFC 6303 §4.2: serve the 0 and 127 IPv4 reverse Domains locally.
+        let reverse_zone_labels = if count > 0 && eq(count - 1, b"localhost") {
+            None
+        } else {
+            match crate::special_use(question.name) {
+                Some(crate::SpecialUse::Reverse { zone_labels }) => Some(zone_labels),
+                _ => None,
+            }
+        };
+        // RFC 6303 §4: serve all locally assigned reverse Zones from the shared catalogue.
         let zone_start = if count > 0 && eq(count - 1, b"localhost") {
             Some(count - 1)
-        } else if count >= 3
-            && eq(count - 2, b"in-addr")
-            && eq(count - 1, b"arpa")
-            && [b"0".as_slice(), b"127", b"255"]
-                .iter()
-                .any(|z| eq(count - 3, z))
-        {
-            Some(count - 3)
         } else {
-            None
+            reverse_zone_labels.map(|zone_labels| count - zone_labels)
         };
         if !special && zone_start.is_none() {
             return None;
+        }
+        // RFC 6303 §3: Let operators disable each locally served reverse Zone independently.
+        if reverse_zone_labels.is_some()
+            && self
+                .disabled_zones
+                .iter()
+                .any(|zone| crate::name_within(question.name, zone))
+        {
+            return None;
+        }
+        #[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
+        if reverse_zone_labels.is_some()
+            && let Some(chain) = self.chain.get().and_then(Weak::upgrade)
+        {
+            #[cfg(feature = "plugin-file")]
+            if chain
+                .file
+                .as_ref()
+                .is_some_and(|file| file.has_zone_for(question.name))
+            {
+                return None;
+            }
+            #[cfg(feature = "plugin-forward")]
+            if chain
+                .forward
+                .as_ref()
+                .is_some_and(|forward| forward.allows_special(question.name))
+            {
+                return None;
+            }
         }
         if special {
             if pharos_server::logging::debug_enabled() {
@@ -132,7 +189,6 @@ impl Local {
         let answer_type = if special || localhost_apex {
             match question.qtype {
                 Type::A | Type::AAAA => Some(question.qtype),
-                Type::NS | Type::SOA if !special => Some(question.qtype),
                 _ => None,
             }
         // RFC 6303 §3: Answer NS and SOA at the zone apex for UPDATE zone discovery.

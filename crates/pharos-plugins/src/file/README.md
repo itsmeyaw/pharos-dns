@@ -12,6 +12,7 @@
 - The current Self Lookup API allocates Query and Response buffers and a recursive
   task/future. Resolving locally instead would bypass the Plugin Chain and can
   change routing or other Plugin behavior; allocation-free re-entry needs #86.
+- With no configured matching Zone, `test.`, `invalid.`, and RFC 6303 reverse names return authoritative NXDOMAIN with a local SOA. An explicitly configured Zone wins.
 
 ## Sources
 

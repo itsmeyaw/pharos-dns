@@ -1,9 +1,36 @@
 #![forbid(unsafe_code)]
 
 use pharos_corefile::{configure, parse};
-use pharos_plugins::{Chain, directives};
+use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
-use pharos_server::{Context, Metadata, Outcome, Phase, Protocol, Transport};
+use pharos_server::{Action, Context, Handler, Metadata, Outcome, Phase, Protocol, Transport};
+
+async fn handle_query(text: &str, name: &str) -> (Action, Vec<u8>) {
+    let blocks = configure::<Chain>(&parse("Corefile", text).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    let name: Name = name.parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    let action = server
+        .handle(
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response,
+        )
+        .await;
+    (action, response)
+}
 
 #[tokio::test]
 async fn serves_zone_and_negative_answers() {
@@ -47,6 +74,76 @@ async fn serves_zone_and_negative_answers() {
         assert_eq!(response.answer_count(), answers);
         assert_eq!(response.authority_count(), authorities);
     }
+}
+
+#[tokio::test]
+async fn special_use_names_are_negative_unless_an_explicit_zone_matches() {
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
+    let unconfigured = format!(".:0 {{\n file {fixture} example.org.\n}}");
+    let (action, wire) = handle_query(&unconfigured, "service.test.").await;
+    assert_eq!(action, Action::Respond);
+    let response = Message::parse(&wire).unwrap();
+    assert!(response.aa());
+    assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+    let soa = response
+        .authorities()
+        .find(|record| record.rtype == Type::SOA)
+        .unwrap();
+    assert_eq!(soa.name.to_string(), "test.");
+    assert_eq!(soa.ttl, 604_800);
+    let mname = NameRef::parse(soa.rdata, 0).unwrap();
+    let rname = NameRef::parse(soa.rdata, mname.wire_len()).unwrap();
+    assert_eq!(rname.to_string(), "nobody.invalid.");
+
+    let path = std::env::temp_dir().join(format!("pharos-special-{}.zone", std::process::id()));
+    std::fs::write(
+        &path,
+        "@ 60 IN SOA ns.test. nobody.invalid. 1 2 3 4 5\n@ 60 IN NS ns.test.\nwww 60 IN A 192.0.2.9\n",
+    )
+    .unwrap();
+    let configured = format!(".:0 {{\n cache\n file {} test.\n}}", path.display());
+    let (action, wire) = handle_query(&configured, "www.test.").await;
+    assert_eq!(action, Action::Respond);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    assert_eq!(response.answers().next().unwrap().rdata, [192, 0, 2, 9]);
+
+    std::fs::write(
+        &path,
+        "@ 60 IN SOA ns.invalid. nobody.invalid. 1 2 3 4 5\n@ 60 IN NS ns.invalid.\nwww 60 IN A 192.0.2.11\n",
+    )
+    .unwrap();
+    let configured = format!(".:0 {{\n cache\n file {} invalid.\n}}", path.display());
+    let (action, wire) = handle_query(&configured, "www.invalid.").await;
+    assert_eq!(action, Action::Respond);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    assert_eq!(response.answers().next().unwrap().rdata, [192, 0, 2, 11]);
+
+    std::fs::write(
+        &path,
+        "@ 60 IN SOA ns.10.in-addr.arpa. nobody.invalid. 1 2 3 4 5\n@ 60 IN NS ns.10.in-addr.arpa.\n1 60 IN A 192.0.2.10\n",
+    )
+    .unwrap();
+    let configured = format!(
+        ".:0 {{\n local\n cache\n file {} 10.in-addr.arpa.\n}}",
+        path.display()
+    );
+    let (action, wire) = handle_query(&configured, "1.10.in-addr.arpa.").await;
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(action, Action::Respond);
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata,
+        [192, 0, 2, 10]
+    );
 }
 
 #[tokio::test]

@@ -15,6 +15,7 @@
 - Cache hits may precede authoritative file data because plugin order places cache before file; deployments needing zone-file precedence must avoid overlapping cached names (RFC 2181 §5.4.1).
 - AD from upstream is retained for AD/DO clients without a configured secure-channel trust policy (RFC 4035 §4.6).
 - NXDOMAIN Responses with CNAME-only Answers are negative Responses under RFC 6604 §3 and use denial caching.
+- `test.`, `invalid.`, and RFC 6303 reverse names do not enter cache lookup/admission by default. Configured `file` Zones take precedence; otherwise `forward` returns an immediate negative response. `forward { allow_special }` opts into upstream lookup for `test.` and reverse names only.
 - The cache hashes the same Query fields with FNV-1a rather than CoreDNS's FNV-1, so shard placement and eviction choices differ.
 - Configured Domains must be representable as DNS names; CoreDNS can normalize some malformed `disable` names without validating them.
 - Very large TTLs are bounded to the DNS TTL range during use rather than reproducing Go duration overflow.

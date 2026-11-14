@@ -3,8 +3,12 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
-use pharos_proto::{EdnsOption, Message, Name, Rcode};
+use pharos_proto::{Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Type};
 use pharos_server::{Action, Context, Handler, Metadata, Outcome, Protocol, Transport};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::net::UdpSocket;
 
 const QUERY: &[u8] = b"\x12\x34\x01\x00\x00\x01\0\0\0\0\0\0\x03www\x07example\x03com\0\0\x01\0\x01";
@@ -94,6 +98,139 @@ fn chain(text: &str) -> Chain {
         .unwrap()
         .remove(0)
         .config
+}
+
+fn named_query(name: &str) -> Vec<u8> {
+    let name: Name = name.parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 7, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    wire
+}
+
+async fn counting_upstream() -> (
+    std::net::SocketAddr,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&requests);
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        loop {
+            let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+            count.fetch_add(1, Ordering::Relaxed);
+            let mut response = wire[..len].to_vec();
+            response[2] |= 0x80;
+            socket.send_to(&response, peer).await.unwrap();
+        }
+    });
+    (address, requests, task)
+}
+
+#[tokio::test]
+async fn cache_and_forward_block_reserved_names_without_upstream_queries() {
+    let (address, requests, upstream) = counting_upstream().await;
+    let corefile = format!(".:0 {{\n cache\n forward . {address}\n}}");
+    let blocks = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    for name in ["service.test.", "service.invalid.", "1.10.in-addr.arpa."] {
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &named_query(name),
+                    "127.0.0.1:1000".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response,
+                )
+                .await,
+            Action::Respond,
+            "{name}"
+        );
+        assert_eq!(
+            Message::parse(&response).unwrap().rcode(),
+            Rcode::NXDOMAIN,
+            "{name}"
+        );
+    }
+    let forward_only = format!(".:0 {{\n forward . {address}\n}}");
+    let blocks =
+        configure::<Chain>(&parse("Corefile", &forward_only).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    for name in ["service.test.", "service.invalid."] {
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &named_query(name),
+                    "127.0.0.1:1000".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response,
+                )
+                .await,
+            Action::Respond,
+            "{name}"
+        );
+        assert_eq!(
+            Message::parse(&response).unwrap().rcode(),
+            Rcode::NXDOMAIN,
+            "{name}"
+        );
+    }
+    assert_eq!(requests.load(Ordering::Relaxed), 0);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn allow_special_opt_in_forwards_test_and_reverse_but_never_invalid() {
+    let (address, requests, upstream) = counting_upstream().await;
+    let corefile = format!(".:0 {{\n cache\n forward . {address} {{\n allow_special\n }}\n}}");
+    let blocks = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    for name in ["service.test.", "1.10.in-addr.arpa."] {
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &named_query(name),
+                    "127.0.0.1:1000".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response,
+                )
+                .await,
+            Action::Respond,
+            "{name}"
+        );
+        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    }
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &named_query("service.invalid."),
+                "127.0.0.1:1000".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NXDOMAIN);
+    assert_eq!(requests.load(Ordering::Relaxed), 2);
+    upstream.abort();
 }
 
 async fn fake(

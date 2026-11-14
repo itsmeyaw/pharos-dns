@@ -59,6 +59,7 @@ fn coredns_setup_cases() {
         "local {\n localhost_prefix on\n}",
         "local {\n localhost_prefix off\n}",
         "local {\n localhost_prefix off\n localhost_prefix on\n}",
+        "local {\n disable 10.in-addr.arpa 16.172.in-addr.arpa\n}",
     ] {
         assert!(configured(text).is_ok(), "{text}");
     }
@@ -68,6 +69,8 @@ fn coredns_setup_cases() {
         "local {\n localhost_prefix maybe\n}",
         "local {\n localhost_prefix\n}",
         "local {\n localhost_prefix on off\n}",
+        "local {\n disable\n}",
+        "local {\n disable a..b\n}",
     ] {
         assert!(configured(text).is_err(), "{text}");
     }
@@ -102,15 +105,15 @@ async fn coredns_local_cases() {
             "localhost.",
             Type::NS,
             Rcode::NOERROR,
-            Some(("localhost.", Type::NS)),
             None,
+            Some("localhost."),
         ),
         (
             "localhost.",
             Type::SOA,
             Rcode::NOERROR,
-            Some(("localhost.", Type::SOA)),
             None,
+            Some("localhost."),
         ),
         (
             "127.in-addr.arpa.",
@@ -190,11 +193,11 @@ async fn coredns_local_cases() {
             Some("0.in-addr.arpa."),
         ),
         (
-            "x.255.in-addr.arpa.",
+            "x.255.255.255.255.in-addr.arpa.",
             Type::AAAA,
             Rcode::NXDOMAIN,
             None,
-            Some("255.in-addr.arpa."),
+            Some("255.255.255.255.in-addr.arpa."),
         ),
     ] {
         let (outcome, wire) = query(&chain, name, qtype).await;
@@ -233,6 +236,73 @@ async fn coredns_local_cases() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn serves_rfc6303_reverse_zones_authoritatively() {
+    let chain = configured("local").unwrap();
+    let mut zones = [
+        "0.in-addr.arpa.",
+        "127.in-addr.arpa.",
+        "10.in-addr.arpa.",
+        "16.172.in-addr.arpa.",
+        "168.192.in-addr.arpa.",
+        "254.169.in-addr.arpa.",
+        "2.0.192.in-addr.arpa.",
+        "100.51.198.in-addr.arpa.",
+        "113.0.203.in-addr.arpa.",
+        "255.255.255.255.in-addr.arpa.",
+        "d.f.ip6.arpa.",
+        "8.e.f.ip6.arpa.",
+        "9.e.f.ip6.arpa.",
+        "a.e.f.ip6.arpa.",
+        "b.e.f.ip6.arpa.",
+        "8.b.d.0.1.0.0.2.ip6.arpa.",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    zones.extend((16..=31).map(|second| format!("{second}.172.in-addr.arpa.")));
+    zones.push(format!("{}.ip6.arpa.", vec!["0"; 32].join(".")));
+    let mut loopback_nibbles = vec!["0"; 31];
+    loopback_nibbles.insert(0, "1");
+    zones.push(format!("{}.ip6.arpa.", loopback_nibbles.join(".")));
+    for apex in &zones {
+        let descendant = format!("x.{apex}");
+        for (name, rcode, owner) in [
+            (apex.as_str(), Rcode::NOERROR, apex.as_str()),
+            (descendant.as_str(), Rcode::NXDOMAIN, apex.as_str()),
+        ] {
+            let (outcome, wire) = query(&chain, name, Type::A).await;
+            assert_eq!(outcome, Outcome::Response, "{name}");
+            let response = Message::parse(&wire).unwrap();
+            assert!(response.aa(), "{name}");
+            assert_eq!(response.rcode(), rcode, "{name}");
+            assert_eq!(response.answers().count(), 0, "{name}");
+            assert_eq!(
+                response
+                    .authorities()
+                    .find(|record| record.rtype == Type::SOA)
+                    .unwrap()
+                    .name
+                    .to_string(),
+                owner,
+                "{name}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_reverse_zone_can_be_disabled_individually() {
+    let chain = configured("local {\n disable 10.in-addr.arpa\n}").unwrap();
+    assert_eq!(
+        query(&chain, "1.10.in-addr.arpa.", Type::PTR).await.0,
+        Outcome::Drop
+    );
+    assert_eq!(
+        query(&chain, "1.16.172.in-addr.arpa.", Type::PTR).await.0,
+        Outcome::Response
+    );
 }
 
 #[tokio::test]
