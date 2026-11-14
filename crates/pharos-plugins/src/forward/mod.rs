@@ -141,8 +141,12 @@ fn random(max: usize) -> usize {
 }
 
 // RFC 9520 §3.1: Send at most three Queries per server address and transport.
+const MAX_ATTEMPTS: u8 = 3;
+
 fn max_attempts(configured: Option<u32>) -> u8 {
-    configured.map_or(2, |attempts| attempts.clamp(1, 3) as u8)
+    configured.map_or(2, |attempts| {
+        attempts.clamp(1, u32::from(MAX_ATTEMPTS)) as u8
+    })
 }
 
 // RFC 9520 §3.1 and RFC 7871 §7.1.3: Reserve final query slot for required ECS fallback.
@@ -402,7 +406,7 @@ impl Plugin for Forward {
                     if fails >= count {
                         break;
                     }
-                    // Local policy: Skip invalid targets; no DNS Query reaches a server.
+                    // RFC 1034 §5.3.3: Continue resolution when this server target cannot be used.
                     tokio::time::sleep(Duration::from_millis(1)).await;
                     continue;
                 };
@@ -458,21 +462,23 @@ impl Plugin for Forward {
                         continue;
                     }
                 };
-                let mut response =
-                    Some(Message::parse(&wire[..exchange.len]).expect("proxy validated Response"));
+                let (mut rcode, mut answer_count) = {
+                    let response =
+                        Message::parse(&wire[..exchange.len]).expect("proxy validated Response");
+                    (response.rcode(), response.answer_count())
+                };
                 if can_retry_ecs
-                    && response.as_ref().unwrap().rcode() == Rcode::REFUSED
+                    && rcode == Rcode::REFUSED
                     && let Some(fallback_len) =
                         proxy::without_ecs(query_wire, fallback_buffer, protocol)
                             .ok()
                             .flatten()
-                    && upstream_attempts[upstream_index] < 3
+                    && upstream_attempts[upstream_index] < MAX_ATTEMPTS
                 {
                     // RFC 7871 §7.1.3: Retry REFUSED without the ECS address.
                     let refused_len = exchange.len;
                     cx.response.clear();
                     cx.response.extend_from_slice(&wire[..refused_len]);
-                    let _ = response.take();
                     upstream_attempts[upstream_index] += 1;
                     let retry = timeout_at(
                         deadline,
@@ -492,24 +498,21 @@ impl Plugin for Forward {
                         return Outcome::Response;
                     };
                     exchange = retried;
-                    response = Some(
-                        Message::parse(&wire[..exchange.len])
-                            .expect("proxy validated ECS-free Response"),
-                    );
+                    let response = Message::parse(&wire[..exchange.len])
+                        .expect("proxy validated ECS-free Response");
+                    rcode = response.rcode();
+                    answer_count = response.answer_count();
                 }
                 let answer = &wire[..exchange.len];
-                let response = response.expect("response remains available unless retried");
-                if stanza.failover.contains(&response.rcode()) {
+                if stanza.failover.contains(&rcode) {
                     failovers += 1;
                     if failovers < count {
                         continue;
                     }
                 }
                 if index + 1 < self.stanzas.len()
-                    && (stanza.next.contains(&response.rcode())
-                        || (stanza.next_on_nodata
-                            && response.rcode() == Rcode::NOERROR
-                            && response.answer_count() == 0))
+                    && (stanza.next.contains(&rcode)
+                        || (stanza.next_on_nodata && rcode == Rcode::NOERROR && answer_count == 0))
                 {
                     try_next = true;
                     break;
