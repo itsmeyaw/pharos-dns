@@ -42,6 +42,7 @@ fn rsa_signer_accepts_4096_bits_and_rejects_8192_bits() {
     ));
 }
 
+// RFC 6605 §4: DNSSEC ECDSA verification must cover both P-256 and P-384.
 #[test]
 fn ecdsa_signatures_are_fixed_width_dns_wire_format() {
     let random = SystemRandom::new();
