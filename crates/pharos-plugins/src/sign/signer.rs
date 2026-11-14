@@ -49,26 +49,69 @@ pub(super) fn sign_with_owner(
     let mut records = parser
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    let delete_cds = records
+        .iter()
+        .find(|rr| rr.rtype == Type::CDS && rr.rdata == [0, 0, 0, 0, 0]);
+    let delete_cdnskey = records
+        .iter()
+        .find(|rr| rr.rtype == Type::CDNSKEY && rr.rdata == [0, 0, 3, 0, 0]);
+    // RFC 8078 §4: A delete signal must be the sole record in its CDS/CDNSKEY RRset.
+    for (rtype, delete) in [(Type::CDS, delete_cds), (Type::CDNSKEY, delete_cdnskey)] {
+        if delete.is_some() && records.iter().filter(|rr| rr.rtype == rtype).count() != 1 {
+            return Err("DNSSEC delete signal must be the only RR in its RRset".into());
+        }
+    }
+    // RFC 8078 §4: Preserve the single-record CDS/CDNSKEY delete signal for signing.
+    let delete_cds = delete_cds.cloned();
+    let delete_cdnskey = delete_cdnskey.cloned();
+    // RFC 4035 §2.5: Reject non-DNSSEC data that conflicts with a CNAME owner.
+    for cname in records.iter().filter(|rr| rr.rtype == Type::CNAME) {
+        if records.iter().any(|rr| {
+            rr.owner == cname.owner
+                && !matches!(rr.rtype, Type::CNAME | Type::KEY | Type::NSEC | Type::RRSIG)
+        }) {
+            return Err("CNAME owner contains incompatible RR type".into());
+        }
+    }
     records.retain(|rr| {
         !matches!(
             rr.rtype,
             Type::DNSKEY | Type::RRSIG | Type::CDS | Type::CDNSKEY
         )
     });
-    // CoreDNS retains only the last SOA, even if its owner differs from the configured origin.
+    // CoreDNS sign retains the last SOA; RFC 4034 requires that owner to identify this zone.
     let last_soa = records
         .iter()
         .rposition(|rr| rr.rtype == Type::SOA)
         .ok_or("Zone has no SOA")?;
     let soa_owner = records[last_soa].owner.clone();
+    // RFC 4034 §3.1.7: The Signer's Name must identify the zone containing each RRset.
+    if soa_owner != *apex {
+        // RFC 4034 §3.1.7: Signer Name cannot identify a different SOA-owner zone.
+        return Err("SOA owner differs from configured Zone".into());
+    }
+    if delete_cds.as_ref().is_some_and(|rr| rr.owner != soa_owner)
+        || delete_cdnskey
+            .as_ref()
+            .is_some_and(|rr| rr.owner != soa_owner)
+    {
+        return Err("DNSSEC delete signal must be at the zone apex".into());
+    }
     let mut index = 0;
     records.retain(|rr| {
         let keep = rr.rtype != Type::SOA || index == last_soa;
         index += 1;
         keep
     });
-    let zone = Zone::from_records(soa_owner, records)?;
+    let zone = Zone::from_records(soa_owner.clone(), records)?;
     let mut records = zone.records().to_vec();
+    // RFC 4035 §2.4: DS is data in the parent zone, never at its own apex.
+    if records
+        .iter()
+        .any(|rr| rr.owner == soa_owner && rr.rtype == Type::DS)
+    {
+        return Err("DS RRset cannot appear at the zone apex".into());
+    }
 
     let soa = records
         .iter_mut()
@@ -101,9 +144,14 @@ pub(super) fn sign_with_owner(
         // RFC 8078 §2.1: publishing CDS and CDNSKEY tells the parent to synchronize the DS RRset.
         for (rtype, rdata) in [
             (Type::DNSKEY, dnskey.clone()),
-            (Type::CDNSKEY, dnskey),
+            (Type::CDNSKEY, dnskey.clone()),
             (Type::CDS, cds),
         ] {
+            if (rtype == Type::CDS && delete_cds.is_some())
+                || (rtype == Type::CDNSKEY && delete_cdnskey.is_some())
+            {
+                continue;
+            }
             records.push(ZoneRecord {
                 owner: key_owner.clone(),
                 ttl: soa_ttl,
@@ -119,12 +167,33 @@ pub(super) fn sign_with_owner(
             SigningKey::from_pkcs8(key.public.algorithm, &der).map_err(|e| e.to_string())?,
         ));
     }
+    if let Some(record) = delete_cds {
+        records.push(record);
+    }
+    if let Some(record) = delete_cdnskey {
+        records.push(record);
+    }
     // RFC 4035 §2.3: delegation names are authoritative, but descendants are not.
     let cuts: Vec<_> = records
         .iter()
         .filter(|rr| rr.rtype == Type::NS && rr.owner != *apex)
         .map(|rr| rr.owner.clone())
         .collect();
+    // RFC 4035 §2.4: DS TTL SHOULD match the delegating NS RRset TTL.
+    let ns_ttls = records
+        .iter()
+        .filter(|rr| rr.rtype == Type::NS && rr.owner != *apex)
+        .fold(BTreeMap::<Name, u32>::new(), |mut ttls, rr| {
+            ttls.entry(rr.owner.clone())
+                .and_modify(|ttl| *ttl = (*ttl).min(rr.ttl))
+                .or_insert(rr.ttl);
+            ttls
+        });
+    for rr in records.iter_mut().filter(|rr| rr.rtype == Type::DS) {
+        if let Some(ttl) = ns_ttls.get(&rr.owner) {
+            rr.ttl = *ttl;
+        }
+    }
     // RFC 4034 §4.1.1: NSEC links exclude glue and other non-authoritative names.
     let authoritative = |name: &Name| {
         !cuts
@@ -150,13 +219,17 @@ pub(super) fn sign_with_owner(
         types.extend([Type::NSEC, Type::RRSIG]);
         if owner == apex {
             types.extend([Type::NS, Type::SOA]);
+        } else if cuts.iter().any(|cut| cut == owner) {
+            // RFC 4034 §4.1.2: At a delegation, parent-side bitmap data is NS and DS only.
+            types.retain(|rtype| matches!(*rtype, Type::NS | Type::DS));
+            types.extend([Type::NSEC, Type::RRSIG]);
         }
         let mut rdata = names[(index + 1) % names.len()].0.as_wire().to_vec();
         rdata.extend_from_slice(&type_bitmap(&types).map_err(|e| e.to_string())?);
         records.push(ZoneRecord {
             owner: owner.clone(),
-            // RFC 4035 §2.3: NSEC TTL should equal the SOA minimum TTL.
-            ttl: minimum,
+            // RFC 9077 §3.1: NSEC TTL is the lesser of SOA TTL and SOA.MINIMUM.
+            ttl: minimum.min(soa_ttl),
             class: Class::IN,
             rtype: Type::NSEC,
             rdata,
@@ -188,11 +261,8 @@ pub(super) fn sign_with_owner(
     // RFC 4035 §2.2: Sign each authoritative RRset with its matching RRSIG fields and zone key.
     for ((owner, rtype, _), indices) in rrsets {
         let first = &records[indices[0]];
-        let ttl = if owner == *apex && first.rtype == Type::NS {
-            soa_ttl
-        } else {
-            first.ttl
-        };
+        // RFC 4034 §3: RRSIG TTL matches the covered RRset TTL, including apex NS.
+        let ttl = first.ttl;
         let owner_ref = NameRef::parse(owner.as_wire(), 0).map_err(|e| e.to_string())?;
         let rrset = indices
             .iter()
@@ -397,7 +467,7 @@ mod tests {
                 unreachable!()
             };
             assert_eq!(next.to_name(), nsecs[(i + 1) % nsecs.len()].owner);
-            assert_eq!(rr.ttl, 14_400);
+            assert_eq!(rr.ttl, 1_800);
         }
         assert!(!nsecs.is_empty());
     }
@@ -440,26 +510,18 @@ mod tests {
     }
 
     #[test]
-    fn coredns_signs_a_file_whose_soa_owner_differs_from_origin() {
+    fn rejects_a_zone_whose_soa_owner_differs_from_origin() {
         let apex: Name = "example.org.".parse().unwrap();
-        let records = sign(
-            &apex,
-            &fixture("file/coredns-miek.zone"),
-            &[key()],
-            1_700_000_000,
-            0,
-            0,
-        )
-        .unwrap();
         assert!(
-            records
-                .iter()
-                .any(|rr| rr.owner.to_string() == "miek.nl." && rr.rtype == Type::SOA)
-        );
-        assert!(
-            records
-                .iter()
-                .any(|rr| rr.owner == apex && rr.rtype == Type::DNSKEY)
+            sign(
+                &apex,
+                &fixture("file/coredns-miek.zone"),
+                &[key()],
+                1_700_000_000,
+                0,
+                0,
+            )
+            .is_err()
         );
     }
 
@@ -484,7 +546,7 @@ mod tests {
             panic!("expected NSEC")
         };
         assert_eq!(next.to_name().to_string(), "www.miek.nl.");
-        assert_eq!(nsec.ttl, 14400);
+        assert_eq!(nsec.ttl, 1800);
         let nsec = pharos_dnssec::denial::Nsec {
             owner: child.clone(),
             next: next.to_name(),
@@ -493,6 +555,8 @@ mod tests {
         for kind in [Type::NS, Type::DS, Type::RRSIG, Type::NSEC] {
             assert!(nsec.bitmap_contains(kind));
         }
+        assert!(!nsec.bitmap_contains(Type::A));
+        assert!(!nsec.bitmap_contains(Type::AAAA));
         assert_eq!(
             records
                 .iter()
@@ -533,6 +597,103 @@ mod tests {
         assert!(records.iter().any(|rr| rr.rtype == Type::RRSIG
             && rr.rdata.starts_with(&Type::DNSKEY.0.to_be_bytes())
             && rr.ttl == 1800));
+    }
+
+    #[test]
+    fn apex_ns_signature_and_nsec_use_their_required_ttls() {
+        let path = std::env::temp_dir().join(format!("pharos-sign-ttls-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "$TTL 1H\n$ORIGIN miek.nl.\n@ 3600 IN SOA ns. host. (1 4H 1H 7D 4H)\n@ 900 IN NS ns.\n",
+        )
+        .unwrap();
+        let apex: Name = "miek.nl.".parse().unwrap();
+        let records = sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let ns_signature = records
+            .iter()
+            .find(|rr| rr.rtype == Type::RRSIG && rr.rdata.starts_with(&Type::NS.0.to_be_bytes()))
+            .unwrap();
+        assert_eq!(ns_signature.ttl, 900);
+        assert!(
+            records
+                .iter()
+                .filter(|rr| rr.rtype == Type::NSEC)
+                .all(|rr| rr.ttl == 3600)
+        );
+    }
+
+    #[test]
+    fn delegation_ds_ttl_matches_parent_ns_ttl() {
+        let path = std::env::temp_dir().join(format!("pharos-sign-ds-ttl-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n@ IN NS ns.\ndeleg 600 IN NS ns.deleg.\ndeleg 1800 IN DS 34385 13 2 fc7397c77afbccb6742fcff19c7b1410d0044661e7085fc200ae1ab3d15a5842\nns.deleg 600 IN A 192.0.2.1\n",
+        )
+        .unwrap();
+        let apex: Name = "miek.nl.".parse().unwrap();
+        let records = sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let child: Name = "deleg.miek.nl.".parse().unwrap();
+        let ns_ttl = records
+            .iter()
+            .find(|rr| rr.owner == child && rr.rtype == Type::NS)
+            .unwrap()
+            .ttl;
+        let ds_ttl = records
+            .iter()
+            .find(|rr| rr.owner == child && rr.rtype == Type::DS)
+            .unwrap()
+            .ttl;
+        assert_eq!(ds_ttl, ns_ttl);
+        assert_eq!(ns_ttl, 600);
+    }
+
+    #[test]
+    fn rejects_apex_ds_and_cname_mixed_data() {
+        let path = std::env::temp_dir().join(format!("pharos-sign-invalid-{}", std::process::id()));
+        let apex: Name = "miek.nl.".parse().unwrap();
+        for text in [
+            "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n@ IN NS ns.\n@ IN DS 34385 13 2 fc7397c77afbccb6742fcff19c7b1410d0044661e7085fc200ae1ab3d15a5842\n",
+            "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n@ IN NS ns.\nalias IN CNAME target.\nalias IN A 192.0.2.1\n",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert!(sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).is_err());
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn preserves_and_signs_cds_and_cdnskey_delete_signals() {
+        let path = std::env::temp_dir().join(format!("pharos-sign-delete-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n@ IN NS ns.\n@ IN CDS 0 0 0 00\n@ IN CDNSKEY 0 3 0 AA==\n",
+        )
+        .unwrap();
+        let apex: Name = "miek.nl.".parse().unwrap();
+        let records = sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|rr| rr.rtype == Type::CDS && rr.rdata == [0, 0, 0, 0, 0])
+        );
+        assert!(
+            records
+                .iter()
+                .any(|rr| rr.rtype == Type::CDNSKEY && rr.rdata == [0, 0, 3, 0, 0])
+        );
+        assert!(
+            records
+                .iter()
+                .any(|rr| rr.rtype == Type::RRSIG
+                    && rr.rdata.starts_with(&Type::CDS.0.to_be_bytes()))
+        );
+        assert!(
+            records.iter().any(|rr| rr.rtype == Type::RRSIG
+                && rr.rdata.starts_with(&Type::CDNSKEY.0.to_be_bytes()))
+        );
     }
 
     #[test]
