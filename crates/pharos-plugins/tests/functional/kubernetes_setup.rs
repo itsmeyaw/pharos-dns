@@ -246,7 +246,9 @@ fn multicluster_setup_matches_coredns() {
     assert!(!empty.watch_config().multicluster);
     let malformed = config("kubernetes cluster.local {\n multicluster bad..zone\n}").unwrap();
     assert!(malformed.multicluster_zones.is_empty());
-    assert!(!malformed.watch_config().multicluster);
+    let mixed =
+        config("kubernetes cluster.local {\n multicluster bad..zone cluster.local\n}").unwrap_err();
+    assert!(mixed.message.contains("clusterset.local"), "{mixed}");
     let invalid =
         config("kubernetes cluster.local {\n multicluster cluster.local\n zonal\n noendpoints\n}")
             .unwrap_err();
