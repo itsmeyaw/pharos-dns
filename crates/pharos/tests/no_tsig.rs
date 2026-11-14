@@ -29,6 +29,7 @@ impl Drop for Process {
 fn unsigned_listener_matches_pre_tsig_udp_and_tcp_wire() {
     // RFC 1035 §4.2: UDP and TCP carry identical DNS Messages apart from TCP framing.
     // Fixtures were captured from commit 687f5bad56105aae6ac00c9582deab998f346884.
+    // RFC 6891 §6.2.4: Response OPT advertises server capacity, not the Query's size.
     let fixture =
         Fixture(std::env::temp_dir().join(format!("pharos-no-tsig-{}", std::process::id())));
     fs::create_dir_all(&fixture.0).unwrap();
