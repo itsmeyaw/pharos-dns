@@ -599,9 +599,9 @@ mod tests {
     }
 
     #[test]
-    fn startup_accepts_corefile_unicode_domain_names() {
+    fn unicode_corefile_key_routes_raw_utf8_query_name() {
         // RFC 4343 §2.1: normalized Corefile keys must be parseable ASCII presentation names.
-        let (_, _, domains, _, _, _) = super::prepare(
+        let (servers, _, domains, _, _, _) = super::prepare(
             &crate::Options::default(),
             "Corefile",
             "MÜNICH.example:1053 {\nwhoami\n}",
@@ -611,6 +611,22 @@ mod tests {
         assert_eq!(
             domains.values().next().unwrap(),
             &[r"m\195\188nich.example.".to_owned()]
+        );
+        let (_, server) = servers.iter().next().unwrap();
+        let wire = [
+            0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, b'm', 0xc3, 0xbc, b'n', b'i', b'c', b'h', 7,
+            b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0, 0, 1, 0, 1,
+        ];
+        assert!(
+            server
+                .router
+                .route(
+                    &server.key,
+                    pharos_proto::Message::parse(&wire).unwrap(),
+                    "127.0.0.1:1234".parse().unwrap(),
+                    pharos_server::Protocol::Udp,
+                )
+                .is_some()
         );
     }
 

@@ -43,6 +43,60 @@ fn owner_names_escape_non_ascii_wire_octets() {
 }
 
 #[test]
+fn unquoted_raw_utf8_char_strings_are_data_but_names_require_escapes() {
+    let origin: Name = ".".parse().unwrap();
+    let records = ZoneParser::new(
+        Cursor::new(
+            "txt.example. 60 IN TXT héllo\nhost.example. 60 IN HINFO héllo linux\ncaa.example. 60 IN CAA 0 issue héllo\n",
+        ),
+        origin.clone(),
+        "utf8-strings.zone",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    assert_eq!(records[0].rdata, [6, b'h', 0xc3, 0xa9, b'l', b'l', b'o']);
+    assert_eq!(
+        records[1].rdata,
+        [
+            6, b'h', 0xc3, 0xa9, b'l', b'l', b'o', 5, b'l', b'i', b'n', b'u', b'x'
+        ]
+    );
+    assert_eq!(
+        records[2].rdata,
+        [
+            0, 5, b'i', b's', b's', b'u', b'e', b'h', 0xc3, 0xa9, b'l', b'l', b'o'
+        ]
+    );
+    assert!(
+        ZoneParser::new(
+            Cursor::new("alias.example. 60 IN CNAME héllo.example.\n"),
+            origin,
+            "utf8-name.zone",
+        )
+        .next()
+        .unwrap()
+        .is_err()
+    );
+}
+
+#[test]
+fn raw_utf8_is_rejected_in_legacy_and_gateway_name_fields() {
+    let origin: Name = ".".parse().unwrap();
+    for record in [
+        "rt.example. 60 IN RT 10 héllo.example.\n",
+        "key.example. 60 IN IPSECKEY 0 3 0 héllo.example.\n",
+    ] {
+        assert!(
+            ZoneParser::new(Cursor::new(record), origin.clone(), "utf8-rdata.zone")
+                .next()
+                .unwrap()
+                .is_err(),
+            "{record}"
+        );
+    }
+}
+
+#[test]
 fn any_class_matches_miekg_rejection() {
     let parser = ZoneParser::new(
         Cursor::new("a 60 ANY A 192.0.2.1\n"),

@@ -445,20 +445,16 @@ impl<R: BufRead> ZoneParser<R> {
             }
             return Ok(None);
         }
-        // RFC 4343 §2.1: Unquoted DNS presentation tokens must escape non-ASCII octets.
-        if let Some((index, _)) = tokens
-            .iter()
-            .enumerate()
-            .find(|(_, token)| token.quotes.is_empty() && has_raw_non_ascii(&token.raw))
-        {
-            return Err(err_at(index, "non-ASCII octet must be escaped"));
-        }
         // RFC 1035 §5.1: blank owners inherit, and omitted classes reuse the prior explicit class.
         let mut i = 0;
         let owner = if inherited {
             self.owner.clone().ok_or_else(|| err("missing owner"))?
         } else {
             i += 1;
+            // RFC 4343 §2.1: Raw non-ASCII octets in owner names need escapes.
+            if has_raw_non_ascii(&tokens[0].raw) {
+                return Err(err_at(0, "non-ASCII octet must be escaped"));
+            }
             Name::parse(&normalize_escapes(&tokens[0]), &self.origin)
                 .map_err(|e| err(&e.to_string()))?
         };
@@ -529,6 +525,7 @@ impl<R: BufRead> ZoneParser<R> {
             );
         let mut normalized = Vec::new();
         let mut bad = Vec::new();
+        let mut raw_non_ascii = Vec::new();
         let mut field_tokens = Vec::new();
         for (index, token) in tokens[i..].iter().enumerate() {
             let svc_param = !generic && (rtype == Type::SVCB || rtype == Type::HTTPS) && index >= 2;
@@ -557,11 +554,13 @@ impl<R: BufRead> ZoneParser<R> {
             if split_strings {
                 for part in parts {
                     bad.push(has_invalid_digit_escape(part));
+                    raw_non_ascii.push(has_raw_non_ascii(&token.raw));
                     normalized.push(normalize_escapes(part));
                     field_tokens.push(i + index);
                 }
             } else {
                 bad.push(!svc_param && has_invalid_digit_escape(&token.text));
+                raw_non_ascii.push(has_raw_non_ascii(&token.raw));
                 normalized.push(if svc_param {
                     token.text.clone()
                 } else {
@@ -579,14 +578,13 @@ impl<R: BufRead> ZoneParser<R> {
         {
             return Err(err_at(i + 2 + index, "invalid SvcParam escape"));
         }
-        let rdata = rdata::parse_rdata_located(rtype, &fields, &bad, &self.origin).map_err(
-            |(index, message)| {
+        let rdata = rdata::parse_rdata_located(rtype, &fields, &bad, &raw_non_ascii, &self.origin)
+            .map_err(|(index, message)| {
                 err_at(
                     field_tokens.get(index).copied().unwrap_or(tokens.len()),
                     &message,
                 )
-            },
-        )?;
+            })?;
         // RFC 2308 §4: omitted legacy SIG TTL comes from its Original TTL field.
         let ttl = if rtype == Type::SIG && !saw_ttl {
             let Some(original_ttl) = rdata.get(4..8) else {
