@@ -28,6 +28,7 @@ impl Map {
         auto_reverse: bool,
         source: &str,
     ) -> Self {
+        const INVALID_NAME_LOG_LIMIT: usize = 10;
         let mut map = Self::default();
         let mut field = Vec::new();
         let mut oversized = false;
@@ -35,6 +36,7 @@ impl Map {
         let mut line = 1;
         let mut comment = false;
         let mut address = None;
+        let mut invalid_names = 0;
         for result in BufReader::new(input)
             .bytes()
             .chain(std::iter::once(Ok(b'\n')))
@@ -81,14 +83,17 @@ impl Map {
                     } else if let Some(ip) = address {
                         // RFC 4343 §2.1: Report host names whose ASCII presentation is invalid.
                         if let Err(reason) = map.add(&field, ip, domains, auto_reverse) {
-                            let skipped = String::from_utf8_lossy(&field);
-                            pharos_server::logging::log(
-                                "ERROR",
-                                "hosts",
-                                &format!(
-                                    "{source}, line {line}: {reason}, skipping name {skipped:?}"
-                                ),
-                            );
+                            if invalid_names < INVALID_NAME_LOG_LIMIT {
+                                let skipped = String::from_utf8_lossy(&field);
+                                pharos_server::logging::log(
+                                    "ERROR",
+                                    "hosts",
+                                    &format!(
+                                        "{source}, line {line}: {reason}, skipping name {skipped:?}"
+                                    ),
+                                );
+                            }
+                            invalid_names += 1;
                         }
                     }
                     field.clear();
@@ -108,6 +113,16 @@ impl Map {
                     field.push(byte);
                 }
             }
+        }
+        if invalid_names > INVALID_NAME_LOG_LIMIT {
+            pharos_server::logging::log(
+                "ERROR",
+                "hosts",
+                &format!(
+                    "{source}: skipped {invalid_names} invalid names; suppressed {} further entries",
+                    invalid_names - INVALID_NAME_LOG_LIMIT
+                ),
+            );
         }
         map
     }
@@ -259,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_raw_unicode_host_names_are_logged_and_skipped() {
+    fn invalid_raw_unicode_host_names_are_skipped() {
         let root: Name = ".".parse().unwrap();
         let map = Map::parse(
             &b"192.0.2.1 m\xc3\xbcnich.example\n192.0.2.2 m\\195\\188nich.example\n"[..],
