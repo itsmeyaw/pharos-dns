@@ -157,7 +157,10 @@ async fn chaos_enables_non_in_for_all_blocks_on_listener() {
     let blocks = parse("Corefile", source).unwrap();
     let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let server = servers.values().next().unwrap();
-    for name in ["version.bind.", "other.example."] {
+    for (name, expected_rcode) in [
+        ("version.bind.", pharos_proto::Rcode::NOERROR),
+        ("other.example.", pharos_proto::Rcode::SERVFAIL),
+    ] {
         let name: Name = name.parse().unwrap();
         let mut wire = Vec::new();
         let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
@@ -183,7 +186,7 @@ async fn chaos_enables_non_in_for_all_blocks_on_listener() {
         );
         assert_eq!(
             Message::parse(&response).unwrap().rcode(),
-            pharos_proto::Rcode::NOERROR
+            expected_rcode
         );
     }
 }

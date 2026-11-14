@@ -89,7 +89,7 @@ async fn forward_alone_allows_non_in_queries_through_listener_admission() {
 
 #[tokio::test]
 #[cfg(feature = "plugin-whoami")]
-async fn forward_allows_non_in_queries_for_other_blocks_on_same_listener() {
+async fn whoami_does_not_answer_non_in_queries_on_shared_listener() {
     let text = "example.:0 {\n forward . 127.0.0.1:53\n}\nother.:0 {\n whoami\n}";
     let blocks = configure::<Chain>(&parse("Corefile", text).unwrap(), directives()).unwrap();
     let (mut listeners, _) = servers(blocks).unwrap();
@@ -108,8 +108,8 @@ async fn forward_allows_non_in_queries_for_other_blocks_on_same_listener() {
         Action::Respond
     );
     let reply = Message::parse(&response).unwrap();
-    assert_eq!(reply.rcode(), pharos_proto::Rcode::NOERROR);
-    assert_eq!(reply.additional_count(), 2);
+    assert_eq!(reply.rcode(), pharos_proto::Rcode::SERVFAIL);
+    assert_eq!(reply.additional_count(), 0);
     assert_eq!(
         reply.questions().next().unwrap().qclass,
         pharos_proto::Class::CH
