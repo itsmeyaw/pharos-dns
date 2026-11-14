@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(all(feature = "plugin-cache", feature = "plugin-whoami"))]
+#![cfg(all(feature = "plugin-cache", feature = "plugin-template"))]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
@@ -7,7 +7,11 @@ use pharos_server::{Action, Handler, Protocol};
 
 #[tokio::test]
 async fn cache_counts_routed_requests_and_hits() {
-    let blocks = parse("Corefile", ".:0 {\n cache\n whoami\n}").unwrap();
+    let blocks = parse(
+        "Corefile",
+        ".:0 {\n cache\n template IN A {\n answer \"{{ .Name }} 60 IN A 192.0.2.1\"\n }\n}",
+    )
+    .unwrap();
     let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let (_, server) = servers.drain().next().unwrap();
     let query = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";

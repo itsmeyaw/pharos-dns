@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(all(feature = "plugin-cache", feature = "plugin-whoami"))]
+#![cfg(all(feature = "plugin-cache", feature = "plugin-template"))]
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
@@ -11,10 +11,11 @@ const QUERY: &[u8] = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
 
 async fn request(server: &impl Handler, port: u16) -> (u16, u32) {
     let mut response = Vec::with_capacity(65535);
+    let client_ip = [127, 0, 0, u8::try_from(port - 1000).unwrap()];
     assert_eq!(
         Box::pin(server.handle(
             QUERY,
-            ([127, 0, 0, 1], port).into(),
+            (client_ip, port).into(),
             Protocol::Udp,
             &mut response
         ))
@@ -23,17 +24,24 @@ async fn request(server: &impl Handler, port: u16) -> (u16, u32) {
     );
     let message = Message::parse(&response).unwrap();
     let rr = message
-        .additionals()
-        .find(|rr| rr.rtype == pharos_proto::Type::SRV)
+        .answers()
+        .find(|rr| rr.rtype == pharos_proto::Type::A)
         .unwrap();
-    let Rdata::Srv { port, .. } = rr.data().unwrap() else {
-        panic!("not SRV")
+    let Rdata::A(address) = rr.data().unwrap() else {
+        panic!("not A")
+    };
+    let port = if address.is_unspecified() {
+        0
+    } else {
+        1000 + u16::from(address.octets()[3])
     };
     (port, rr.ttl)
 }
 
 fn setup(options: &str) -> impl Handler {
-    let text = format!(".:0 {{\n cache {{\n success 1024 2 2\n {options}\n }}\n whoami\n}}");
+    let text = format!(
+        ".:0 {{\n cache {{\n success 1024 2 2\n {options}\n }}\n template IN A {{\n answer \"{{{{ .Name }}}} 2 IN A {{{{ .Remote }}}}\"\n }}\n}}"
+    );
     let blocks = parse("Corefile", &text).unwrap();
     let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     servers.drain().next().unwrap().1
@@ -124,7 +132,7 @@ async fn verify_timeout_serves_stale_and_keeps_refresh_running() {
             .next()
             .unwrap()
             .ttl,
-        0
+        30
     );
     tokio::time::timeout(Duration::from_secs(2), done)
         .await
@@ -456,7 +464,7 @@ async fn verify_returns_stale_on_servfail() {
             .next()
             .unwrap()
             .ttl,
-        0
+        30
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(10), cache.serve(&mut cx, Pending))

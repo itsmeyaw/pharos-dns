@@ -2,7 +2,8 @@
 #![cfg(all(
     feature = "plugin-nsid",
     feature = "plugin-whoami",
-    feature = "plugin-cache"
+    feature = "plugin-cache",
+    feature = "plugin-template"
 ))]
 
 use pharos_corefile::{configure, parse};
@@ -78,7 +79,10 @@ async fn query(chain: &Chain, options: Option<&[u8]>) -> Vec<u8> {
 
 #[tokio::test]
 async fn coredns_nsid_and_cache_return_requested_identifier() {
-    for config in ["nsid NSID\nwhoami", "cache\nnsid NSID\nwhoami"] {
+    for config in [
+        "nsid NSID\nwhoami",
+        "cache\nnsid NSID\ntemplate IN A {\n answer \"{{ .Name }} 60 IN A 192.0.2.1\"\n}",
+    ] {
         let mut chain = configured(config).unwrap();
         for iteration in 0..2 {
             let response = query(&chain, Some(&[0, 3, 0, 0])).await;
@@ -90,7 +94,7 @@ async fn coredns_nsid_and_cache_return_requested_identifier() {
                 [EdnsOption::Nsid(b"NSID")]
             );
             if iteration == 0 && config.starts_with("cache") {
-                chain.whoami = None;
+                chain.template = None;
                 let response = query(&chain, Some(&[])).await;
                 let message = Message::parse(&response).unwrap();
                 assert!(!message.opt().is_some_and(|opt| {

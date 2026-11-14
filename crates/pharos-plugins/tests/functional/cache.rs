@@ -324,9 +324,16 @@ async fn authenticated_refresh_sets_ad_on_forwarded_wire() {
         let mut wire = [0_u8; 512];
         let (len, peer) = upstream.recv_from(&mut wire).await.unwrap();
         assert!(Message::parse(&wire[..len]).unwrap().ad());
-        wire[2] |= 0x80;
-        wire[3] |= 0x20;
-        upstream.send_to(&wire[..len], peer).await.unwrap();
+        let mut response = wire[..len].to_vec();
+        response[2] |= 0x80;
+        response[3] |= 0x20;
+        response[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        // RFC 1035 §4.1.2: Put a cacheable Answer before the echoed OPT Additional.
+        response.splice(
+            19..19,
+            [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 192, 0, 2, 1],
+        );
+        upstream.send_to(&response, peer).await.unwrap();
     });
     let text = format!(".:0 {{\n cache\n forward . {address}\n}}");
     let blocks = parse("Corefile", &text).unwrap();
@@ -557,7 +564,7 @@ async fn caches_servfail_and_can_disable_it() {
 }
 
 #[tokio::test]
-async fn uncached_other_errors_use_coredns_fallback_ttl() {
+async fn caches_refused_with_failure_ttl() {
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
     let chain = cache();
     let calls = AtomicUsize::new(0);
@@ -573,7 +580,7 @@ async fn uncached_other_errors_use_coredns_fallback_ttl() {
             5
         );
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(all(feature = "plugin-cache", feature = "plugin-whoami"))]
+#![cfg(all(feature = "plugin-cache", feature = "plugin-template"))]
 
 use std::alloc::System;
 
@@ -22,7 +22,7 @@ async fn warmed_routed_cache_hit_has_no_allocations() {
 async fn warmed_routed_cache_hit() {
     let blocks = parse(
         "Corefile",
-        ".:0 {\n cache {\n success 1024 3600 3600\n }\n whoami\n}",
+        ".:0 {\n cache {\n success 1024 3600 3600\n }\n template IN A {\n answer \"{{ .Name }} 60 IN A {{ .Remote }}\"\n }\n}",
     )
     .unwrap();
     let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
@@ -50,8 +50,11 @@ async fn warmed_routed_cache_hit() {
     assert_eq!(after.allocations - before.allocations, 0);
     assert_eq!(after.reallocations - before.reallocations, 0);
     let answer = Message::parse(&response).unwrap();
-    let port = answer.additionals().find_map(|rr| match rr.data().ok()? {
-        Rdata::Srv { port, .. } => Some(port),
+    let port = answer.answers().find_map(|rr| match rr.data().ok()? {
+        Rdata::A(address) if !address.is_unspecified() => {
+            Some(1000 + u16::from(address.octets()[3]))
+        }
+        Rdata::A(_) => Some(0),
         _ => None,
     });
     assert_eq!(port, Some(1001), "response must come from the warmed cache");
