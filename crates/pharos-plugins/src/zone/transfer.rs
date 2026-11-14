@@ -7,7 +7,7 @@ use std::sync::Arc;
 impl Zone {
     /// Stream this Zone in response to a Zone Transfer request.
     pub fn transfer(self: Arc<Self>, request: TransferRequest<'_>) -> Result<Stream, Error> {
-        self.transfer_with_question(request, false)
+        self.transfer_with_question(request, true)
     }
 
     #[cfg_attr(not(feature = "plugin-auto"), allow(dead_code))]
@@ -23,11 +23,15 @@ impl Zone {
             .position(|rr| rr.rtype == Type::SOA)
             .ok_or(Error::InvalidQuery)?;
         let current = zone.serial().ok_or(Error::InvalidQuery)?;
+        // RFC 5936 §2.2.1: A transfer query class must match the Zone class.
+        if request.qclass != zone.class {
+            return Err(Error::InvalidQuery);
+        }
         // RFC 1995 §2: an up-to-date IXFR returns only the current SOA.
         // RFC 1995 §6: An unknown requested version falls back to a full TCP zone transfer.
+        // RFC 1982 §2: Serial zero is a value, not a sentinel.
         let only_soa = request.qtype == Type::IXFR
-            && (request.protocol == Protocol::Udp
-                || request.serial != 0 && request.serial == current);
+            && (request.protocol == Protocol::Udp || request.serial == current);
         let authoritative = !(only_soa && request.protocol == Protocol::Tcp);
         let id = request.id;
         let flags = request.flags;
@@ -64,7 +68,8 @@ impl Zone {
                 response,
                 64500,
                 id,
-                0x8000 | if authoritative { 0x0400 } else { 0 } | (flags & 0x0110),
+                // RFC 5936 §2.2.1: Echo RD, but clear CD in the transfer response.
+                0x8000 | if authoritative { 0x0400 } else { 0 } | (flags & 0x0100),
             )
             .map_err(Error::Build)?;
             let qname = if preserve_question {

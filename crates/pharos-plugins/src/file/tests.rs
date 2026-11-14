@@ -246,16 +246,35 @@ fn shared_zone_exposes_transfer_stream() {
     let apex: Name = "example.org.".parse().unwrap();
     let zone =
         Arc::new(Zone::load(apex.clone(), Path::new("tests/fixtures/file/example.zone")).unwrap());
+    let query_name: Name = "EXAMPLE.ORG.".parse().unwrap();
     let request = crate::transfer::TransferRequest {
-        zone: NameRef::parse(apex.as_wire(), 0).unwrap(),
+        zone: NameRef::parse(query_name.as_wire(), 0).unwrap(),
         qtype: Type::AXFR,
         qclass: Class::IN,
+        serial: 0,
+        id: 1,
+        flags: 0x0110,
+        protocol: Protocol::Tcp,
+    };
+    let mut stream = zone.clone().transfer(request).unwrap();
+    let mut response = Vec::with_capacity(65535);
+    assert!(stream.next(&mut response).unwrap());
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(
+        message.questions().next().unwrap().name.to_string(),
+        "EXAMPLE.ORG."
+    );
+    assert_eq!(message.flags() & 0x0110, 0x0100);
+    let wrong_class = crate::transfer::TransferRequest {
+        zone: NameRef::parse(apex.as_wire(), 0).unwrap(),
+        qtype: Type::AXFR,
+        qclass: Class(3),
         serial: 0,
         id: 1,
         flags: 0,
         protocol: Protocol::Tcp,
     };
-    assert!(zone.transfer(request).is_ok());
+    assert!(zone.transfer(wrong_class).is_err());
 }
 
 #[test]
