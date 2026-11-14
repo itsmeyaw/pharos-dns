@@ -46,16 +46,14 @@ fn svcb_rejects_bad_parameter_framing_and_order() {
 }
 
 #[test]
-fn svcb_parameter_presentations_follow_miekg() {
+fn svcb_parameter_presentations_follow_rfc() {
     let ipv6 = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
     for (key, value, expected) in [
-        (0, &[0, 1, 0, 3][..], "1 . mandatory=\"alpn,port\""),
         (
             1,
             &[2, b'h', b'2', 3, b'f', b',', b'x'][..],
             r#"1 . alpn="h2,f\\\044x""#,
         ),
-        (2, &[][..], "1 . no-default-alpn=\"\""),
         (3, &[0, 53][..], "1 . port=\"53\""),
         (4, &[192, 0, 2, 1][..], "1 . ipv4hint=\"192.0.2.1\""),
         (5, &[1, 2, 3][..], "1 . ech=\"AQID\""),
@@ -108,7 +106,6 @@ fn svcb_rejects_invalid_parameter_values() {
 #[test]
 fn miekg_parameter_examples() {
     for (key, value, expected) in [
-        (0, &b"\x00\x01\xfd\xe8"[..], r#"mandatory="alpn,key65000""#),
         (1, &b"\x02h2\x03h2c"[..], r#"alpn="h2,h2c""#),
         (
             1,
@@ -157,7 +154,7 @@ fn compressed_targets_and_borrowed_parameters_are_relocated() {
             .record_with(Section::Answer, owner, rtype, Class::IN, 0, |w| {
                 w.write_bytes(&[0, 0])?;
                 w.write_name(owner)?;
-                w.write_bytes(&[0, 2, 0, 0, 0, 3, 0, 2, 1, 187])
+                w.write_bytes(&[0, 1, 0, 3, 2, b'h', b'2', 0, 2, 0, 0, 0, 3, 0, 2, 1, 187])
             })
             .unwrap();
         let message = Message::parse(builder.finish()).unwrap();
@@ -170,10 +167,13 @@ fn compressed_targets_and_borrowed_parameters_are_relocated() {
             record.rdata[4..].as_ptr()
         ));
         let pairs: Vec<_> = params.iter().collect();
-        assert_eq!(pairs, [(2, &b""[..]), (3, &b"\x01\xbb"[..])]);
+        assert_eq!(
+            pairs,
+            [(1, &b"\x02h2"[..]), (2, &b""[..]), (3, &b"\x01\xbb"[..])]
+        );
         assert!(std::ptr::eq(
-            pairs[1].1.as_ptr(),
-            record.rdata[12..].as_ptr()
+            pairs[2].1.as_ptr(),
+            record.rdata[19..].as_ptr()
         ));
         let mut rebuilt = Vec::new();
         let mut builder = MessageBuilder::new(&mut rebuilt, 512, 0, 0).unwrap();
@@ -194,11 +194,11 @@ fn compressed_targets_and_borrowed_parameters_are_relocated() {
 }
 
 #[test]
-fn rejects_malformed_values_and_handles_public_variants_safely() {
+fn rejects_malformed_values_and_accepts_mapped_ipv6_hints() {
     let root: Name = ".".parse().unwrap();
     let root = NameRef::parse(root.as_wire(), 0).unwrap();
     let mapped = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 192, 0, 2, 1];
-    assert!(Rdata::parse(Type::HTTPS, &one_param(6, &mapped)).is_err());
+    assert!(Rdata::parse(Type::HTTPS, &one_param(6, &mapped)).is_ok());
     assert!(Rdata::parse(Type::SVCB, &one_param(1, &[1, b'h', 0])).is_err());
     for bad in [&b"\x00"[..], &b"\x00\x03\x00\x01\x00"[..]] {
         let data = Rdata::Svcb {
@@ -245,14 +245,13 @@ fn target_cannot_extend_past_rdata_boundary() {
 }
 
 #[test]
-fn cross_key_consistency_is_left_to_consumers() {
+fn cross_key_consistency_is_enforced() {
     for rtype in [Type::SVCB, Type::HTTPS] {
-        let mut wire = one_param(0, &[0, 1]); // mandatory lists an absent ALPN
-        wire[1] = 0; // AliasMode retains parameters for the caller to ignore.
-        assert_eq!(
-            Rdata::parse(rtype, &wire).unwrap().to_string(),
-            "0 . mandatory=\"alpn\""
-        );
-        assert!(Rdata::parse(rtype, &one_param(2, &[])).is_ok());
+        assert!(Rdata::parse(rtype, &one_param(0, &[0, 1])).is_err());
+        assert!(Rdata::parse(rtype, &one_param(2, &[])).is_err());
+        let mut wire = vec![0, 0, 0];
+        wire.extend_from_slice(&[0, 1, 0, 3, 2, b'h', b'2']);
+        wire.extend_from_slice(&[0, 2, 0, 0]);
+        assert!(Rdata::parse(rtype, &wire).is_ok());
     }
 }

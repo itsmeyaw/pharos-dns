@@ -10,7 +10,8 @@ fn known_codes_have_miekg_presentation_names() {
 
 #[test]
 fn presentation_matches_miekg_special_cases() {
-    assert_eq!(Type::NONE.to_string(), "None");
+    assert_eq!(Type::NONE.to_string(), "TYPE0");
+    assert_eq!(Type::from_mnemonic("TYPE0"), None);
     assert_eq!(Type::RESERVED.to_string(), "Reserved");
     assert_eq!(Type::NSAP_PTR.to_string(), "NSAP-PTR");
     assert_eq!(Class::NONE.to_string(), "NONE");
@@ -26,7 +27,7 @@ fn unknown_values_are_preserved_and_printed_numerically() {
     assert_eq!(Rcode(4095).to_string(), "4095");
     assert_eq!(Class(65535).to_string(), "CLASS65535");
     assert_eq!(Type(65534).to_string(), "TYPE65534");
-    assert_eq!(Type(11).to_string(), "TYPE11");
+    assert_eq!(Type(11).to_string(), "WKS");
 }
 
 #[test]

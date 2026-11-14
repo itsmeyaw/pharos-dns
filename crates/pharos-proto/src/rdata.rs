@@ -58,6 +58,7 @@ impl<'a> SvcParams<'a> {
             previous = Some(key);
             rest = &rest[4 + len..];
         }
+        validate_svc_param_relations(bytes)?;
         Ok(Self(bytes))
     }
 
@@ -81,6 +82,66 @@ impl<'a> SvcParams<'a> {
             Some((key, value))
         })
     }
+}
+
+// RFC 9460 §§2.4.1, 7.1.1: mandatory keys must exist, and no-default-alpn needs alpn.
+pub(crate) fn validate_svc_param_relations(bytes: &[u8]) -> Result<(), RdataError> {
+    let mut rest = bytes;
+    let mut mandatory = None;
+    let mut has_alpn = false;
+    let mut no_default_alpn = false;
+    while !rest.is_empty() {
+        let key = u16::from_be_bytes([rest[0], rest[1]]);
+        let len = usize::from(u16::from_be_bytes([rest[2], rest[3]]));
+        let value = &rest[4..4 + len];
+        has_alpn |= key == 1;
+        no_default_alpn |= key == 2;
+        if key == 0 {
+            if value.is_empty() || !value.len().is_multiple_of(2) {
+                return Err(RdataError);
+            }
+            let mut previous = 0;
+            for pair in value.as_chunks::<2>().0 {
+                let required = u16::from_be_bytes(*pair);
+                if required <= previous || required == u16::MAX {
+                    return Err(RdataError);
+                }
+                previous = required;
+            }
+            mandatory = Some(value);
+        }
+        rest = &rest[4 + len..];
+    }
+    if no_default_alpn && !has_alpn {
+        return Err(RdataError);
+    }
+    if let Some(required) = mandatory {
+        let mut actual = bytes;
+        let key0_len = usize::from(u16::from_be_bytes([actual[2], actual[3]]));
+        actual = &actual[4 + key0_len..];
+        let mut required = required.as_chunks::<2>().0.iter().copied().peekable();
+        while !actual.is_empty() {
+            let actual_key = u16::from_be_bytes([actual[0], actual[1]]);
+            let actual_len = usize::from(u16::from_be_bytes([actual[2], actual[3]]));
+            if required
+                .peek()
+                .is_some_and(|pair| u16::from_be_bytes(*pair) < actual_key)
+            {
+                return Err(RdataError);
+            }
+            if required
+                .peek()
+                .is_some_and(|pair| u16::from_be_bytes(*pair) == actual_key)
+            {
+                required.next();
+            }
+            actual = &actual[4 + actual_len..];
+        }
+        if required.next().is_some() {
+            return Err(RdataError);
+        }
+    }
+    Ok(())
 }
 
 fn valid_svc_param(key: u16, value: &[u8]) -> Result<(), RdataError> {
@@ -120,16 +181,7 @@ fn valid_svc_param(key: u16, value: &[u8]) -> Result<(), RdataError> {
         3 if value.len() != 2 => return Err(RdataError),
         // RFC 9460 §7.3: address hints are nonempty sequences of addresses.
         4 if value.is_empty() || !value.len().is_multiple_of(4) => return Err(RdataError),
-        6 => {
-            if value.is_empty() || !value.len().is_multiple_of(16) {
-                return Err(RdataError);
-            }
-            for ip in value.chunks(16) {
-                if ip[..10] == [0; 10] && ip[10..12] == [255, 255] {
-                    return Err(RdataError);
-                }
-            }
-        }
+        6 if value.is_empty() || !value.len().is_multiple_of(16) => return Err(RdataError),
         _ => {}
     }
     Ok(())
@@ -220,6 +272,7 @@ fn valid_bitmap(mut bytes: &[u8]) -> Result<(), RdataError> {
             return Err(RdataError);
         }
         let block = bytes.get(2..2 + len).ok_or(RdataError)?;
+        // RFC 4034 §4.1.2: Ignore TYPE0's reserved bit instead of rejecting the bitmap.
         if block.last() == Some(&0) {
             return Err(RdataError);
         }
@@ -246,7 +299,11 @@ fn display_bitmap(f: &mut fmt::Formatter<'_>, mut bytes: &[u8]) -> fmt::Result {
         for (index, byte) in bytes[2..2 + len].iter().enumerate() {
             for bit in 0..8 {
                 if byte & (0x80 >> bit) != 0 {
-                    write!(f, " {}", Type(window * 256 + (index * 8 + bit) as u16))?;
+                    let code = window * 256 + (index * 8 + bit) as u16;
+                    // RFC 4034 §4.1.2: Receivers ignore the reserved TYPE0 bitmap bit.
+                    if code != 0 {
+                        write!(f, " {}", Type(code))?;
+                    }
                 }
             }
         }
@@ -754,6 +811,7 @@ impl<'a> Rdata<'a> {
             Type::CAA => {
                 let (&flags, rest) = bytes.split_first().ok_or(RdataError)?;
                 let (tag, value) = character_string(rest)?;
+                // RFC 8659 §4.1: Ignore reserved flag bits on receipt.
                 if tag.is_empty() || !tag.iter().all(u8::is_ascii_alphanumeric) {
                     return Err(RdataError);
                 }
@@ -792,7 +850,10 @@ impl<'a> Rdata<'a> {
                 // RFC 3403 §4.1: NAPTR replacement is a fully qualified domain name.
                 let replacement =
                     NameRef::parse(wire, offset + name_start).map_err(|_| RdataError)?;
-                if replacement.wire_len() != rest.len() {
+                if replacement.wire_len() != rest.len()
+                    || !flags.iter().all(u8::is_ascii_alphanumeric)
+                    || (!regexp.is_empty() && rest != [0])
+                {
                     return Err(RdataError);
                 }
                 Ok(Self::Naptr {
@@ -834,6 +895,10 @@ impl<'a> Rdata<'a> {
                 let (key_tag, algorithm, digest_type, digest) =
                     // RFC 4034 §5.1.1: DS key tags are in network byte order.
                     (u16::from_be_bytes([h[0], h[1]]), h[2], h[3], &bytes[4..]);
+                // RFC 4509 §2.2: SHA-256 DS digest is exactly 32 octets.
+                if digest_type == 2 && digest.len() != 32 {
+                    return Err(RdataError);
+                }
                 Ok(if rtype == Type::DS {
                     Self::Ds {
                         key_tag,
@@ -850,9 +915,18 @@ impl<'a> Rdata<'a> {
                     }
                 })
             }
+            // RFC 7043 §§3.1, 4.1: EUI48 and EUI64 have fixed six- and eight-octet lengths.
+            Type::EUI48 | Type::EUI64 => {
+                let expected = if rtype == Type::EUI48 { 6 } else { 8 };
+                if bytes.len() != expected {
+                    return Err(RdataError);
+                }
+                Ok(Self::Unknown(rtype, bytes))
+            }
             // RFC 4034 §2.1: DNSKEY has flags, protocol, algorithm, and public key.
             // RFC 7344 §3.2: CDNSKEY RDATA has the DNSKEY field layout.
             Type::DNSKEY | Type::CDNSKEY => {
+                // RFC 4034 §§2.1.1–2.1.2: Ignore reserved flags and protocol values on receipt.
                 let h = bytes.get(..4).ok_or(RdataError)?;
                 let (flags, protocol, algorithm, public_key) =
                     (u16::from_be_bytes([h[0], h[1]]), h[2], h[3], &bytes[4..]);
@@ -908,19 +982,28 @@ impl<'a> Rdata<'a> {
                 // RFC 5155 §4.1.1: NSEC3PARAM carries an NSEC3 hash-algorithm identifier.
                 let (hash_algorithm, flags, iterations) =
                     (h[0], h[1], u16::from_be_bytes([h[2], h[3]]));
+                // RFC 5155 §3.1.2: only NSEC3 Opt-Out bit is defined.
+                if rtype == Type::NSEC3 && flags & !1 != 0 {
+                    return Err(RdataError);
+                }
                 if rtype == Type::NSEC3PARAM {
                     if !rest.is_empty() {
                         return Err(RdataError);
                     }
                     Ok(Self::Nsec3param {
                         hash_algorithm,
-                        flags,
+                        // RFC 5155 §4.1.2: Ignore non-zero flags on received NSEC3PARAM RRs.
+                        flags: 0,
                         iterations,
                         salt,
                     })
                 } else {
                     // RFC 5155 §3.1.7: The next owner stores the binary hash, not the zone.
+                    // RFC 5155 §3.1.6: Next Hashed Owner Name length is 1–255 octets.
                     let (next_owner, bitmap) = character_string(rest)?;
+                    if next_owner.is_empty() {
+                        return Err(RdataError);
+                    }
                     valid_bitmap(bitmap)?;
                     Ok(Self::Nsec3 {
                         hash_algorithm,
@@ -931,6 +1014,17 @@ impl<'a> Rdata<'a> {
                         bitmap,
                     })
                 }
+            }
+            // RFC 7477 §2.1.1.2: IMMEDIATE and SOAMINIMUM are the two defined flags.
+            Type::CSYNC => {
+                let header = bytes.get(..6).ok_or(RdataError)?;
+                let flags = u16::from_be_bytes([header[4], header[5]]);
+                let bitmap = bytes.get(6..).ok_or(RdataError)?;
+                if flags & !3 != 0 {
+                    return Err(RdataError);
+                }
+                valid_nsec_bitmap(bitmap)?;
+                Ok(Self::Unknown(rtype, bytes))
             }
             // RFC 6698 §2.1.4: TLSA association data is the unparsed remainder after fixed fields.
             Type::TLSA => {
@@ -954,6 +1048,14 @@ impl<'a> Rdata<'a> {
             // RFC 8976 §2.2.4: a ZONEMD digest is at least 12 octets.
             Type::ZONEMD => {
                 let h = bytes.get(..18).ok_or(RdataError)?;
+                let expected = match h[5] {
+                    1 => Some(48),
+                    2 => Some(64),
+                    _ => None,
+                };
+                if expected.is_some_and(|size| bytes.len() - 6 != size) {
+                    return Err(RdataError);
+                }
                 Ok(Self::Zonemd {
                     // RFC 8976 §2.2.1: Serial is a 32-bit unsigned network-order integer.
                     serial: u32::from_be_bytes([h[0], h[1], h[2], h[3]]),
@@ -1087,7 +1189,8 @@ impl<'a> Rdata<'a> {
                 if tag.is_empty() || !tag.iter().all(u8::is_ascii_alphanumeric) {
                     return Err(BuildError::InvalidRdata);
                 }
-                writer.write_bytes(&[*flags])?;
+                // RFC 8659 §4.1: Clear reserved flag bits when re-encoding received data.
+                writer.write_bytes(&[*flags & 0x80])?;
                 write_character_string(writer, tag)?;
                 writer.write_bytes(value)
             }
@@ -1121,6 +1224,12 @@ impl<'a> Rdata<'a> {
                 regexp,
                 replacement,
             } => {
+                // RFC 3403 §4.1: flags are alphanumeric; a nonempty regexp requires root replacement.
+                if !flags.iter().all(u8::is_ascii_alphanumeric)
+                    || (!regexp.is_empty() && replacement.labels().next().is_some())
+                {
+                    return Err(BuildError::InvalidRdata);
+                }
                 writer.write_bytes(&order.to_be_bytes())?;
                 writer.write_bytes(&preference.to_be_bytes())?;
                 write_character_string(writer, flags)?;
@@ -1158,6 +1267,10 @@ impl<'a> Rdata<'a> {
                 digest_type,
                 digest,
             } => {
+                // RFC 4509 §2.2: SHA-256 DS digest is exactly 32 octets.
+                if *digest_type == 2 && digest.len() != 32 {
+                    return Err(BuildError::InvalidRdata);
+                }
                 // RFC 4034 §5.1.1: DS key tags are serialized in network byte order.
                 writer.write_bytes(&key_tag.to_be_bytes())?;
                 writer.write_bytes(&[*algorithm, *digest_type])?;
@@ -1175,7 +1288,9 @@ impl<'a> Rdata<'a> {
                 algorithm,
                 public_key,
             } => {
-                writer.write_bytes(&flags.to_be_bytes())?;
+                // RFC 4034 §2.1.1: Clear reserved DNSKEY flag bits when re-encoding.
+                writer.write_bytes(&(*flags & 0x0181).to_be_bytes())?;
+                // RFC 4034 §2.1.2: Preserve protocol; values other than 3 remain unusable keys.
                 writer.write_bytes(&[*protocol, *algorithm])?;
                 writer.write_bytes(public_key)
             }
@@ -1217,6 +1332,11 @@ impl<'a> Rdata<'a> {
             } => {
                 // RFC 5155 §3.2: NSEC3 fields use wire order and network-byte-order integers.
                 valid_bitmap(bitmap).map_err(|_| BuildError::InvalidRdata)?;
+                // RFC 5155 §3.1.2: only the Opt-Out flag bit is defined.
+                // RFC 5155 §3.1.6: Next Hashed Owner Name length is 1–255 octets.
+                if *flags & !1 != 0 || next_owner.is_empty() {
+                    return Err(BuildError::InvalidRdata);
+                }
                 writer.write_bytes(&[*hash_algorithm, *flags])?;
                 writer.write_bytes(&iterations.to_be_bytes())?;
                 write_character_string(writer, salt)?;
@@ -1226,12 +1346,13 @@ impl<'a> Rdata<'a> {
             }
             Self::Nsec3param {
                 hash_algorithm,
-                flags,
+                flags: _,
                 iterations,
                 salt,
             } => {
-                // RFC 5155 §4.2: NSEC3PARAM encodes algorithm, flags, iterations, and salt.
-                writer.write_bytes(&[*hash_algorithm, *flags])?;
+                // RFC 5155 §4.2: NSEC3PARAM carries algorithm, flags, iterations, and salt.
+                // RFC 5155 §4.1.2: Ignore received flags and emit the required zero value.
+                writer.write_bytes(&[*hash_algorithm, 0])?;
                 writer.write_bytes(&iterations.to_be_bytes())?;
                 // RFC 5155 §4.1.4: Salt Length counts the following salt octets.
                 write_character_string(writer, salt)
@@ -1268,8 +1389,11 @@ impl<'a> Rdata<'a> {
                 hash_algorithm,
                 digest,
             } => {
-                // RFC 8976 §2.2.4: A ZONEMD digest is at least 12 octets.
-                if !(12..=usize::from(u16::MAX) - 6).contains(&digest.len()) {
+                // RFC 8976 §2.2.3: SHA384 and SHA512 digests have exact lengths.
+                if !(12..=usize::from(u16::MAX) - 6).contains(&digest.len())
+                    || matches!(*hash_algorithm, 1 | 2)
+                        && digest.len() != if *hash_algorithm == 1 { 48 } else { 64 }
+                {
                     return Err(BuildError::InvalidRdata);
                 }
                 writer.write_bytes(&serial.to_be_bytes())?;
@@ -1343,6 +1467,23 @@ impl<'a> Rdata<'a> {
                     ) =>
             {
                 Err(BuildError::InvalidRdata)
+            }
+            // RFC 7043 §§3.1, 4.1: EUI48 and EUI64 have fixed wire lengths.
+            Self::Unknown(rtype, bytes)
+                if *rtype == Type::EUI48 && bytes.len() != 6
+                    || *rtype == Type::EUI64 && bytes.len() != 8 =>
+            {
+                Err(BuildError::InvalidRdata)
+            }
+            // RFC 7477 §2.1.1.2: CSYNC permits its two defined flags and a nonempty bitmap.
+            Self::Unknown(rtype, bytes) if *rtype == Type::CSYNC => {
+                if bytes.len() < 7
+                    || u16::from_be_bytes([bytes[4], bytes[5]]) & !3 != 0
+                    || valid_nsec_bitmap(&bytes[6..]).is_err()
+                {
+                    return Err(BuildError::InvalidRdata);
+                }
+                writer.write_bytes(bytes)
             }
             // RFC 3597 §3: Unknown RDATA is transmitted unchanged as binary data.
             Self::Unknown(_, bytes) => writer.write_bytes(bytes),

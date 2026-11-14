@@ -67,9 +67,9 @@ fn character_strings_and_escapes() {
         b"\x00\x01\x00\x02https://x"
     );
     assert!(parse(Type::TXT, &[]).is_err());
-    assert_eq!(parse(Type::TXT, &[r"\999"]).unwrap(), [1, 231]);
+    assert!(parse(Type::TXT, &[r"\999"]).is_err());
     assert_eq!(parse(Type::TXT, &[&"a".repeat(256)]).unwrap().len(), 258);
-    assert_eq!(parse(Type::HINFO, &["cpu"]).unwrap(), b"\x03cpu\0");
+    assert!(parse(Type::HINFO, &["cpu"]).is_err());
 }
 
 #[test]
@@ -78,10 +78,10 @@ fn generic_rdata_and_binary_security_fields() {
         parse(Type(65000), &[r"\#", "4", "DEad", "beEF"]).unwrap(),
         [0xde, 0xad, 0xbe, 0xef]
     );
-    assert!(parse(Type::A, &[r"\#", "0"]).unwrap().is_empty());
+    assert!(parse(Type::A, &[r"\#", "0"]).is_err());
     assert_eq!(
-        parse(Type::DS, &["1234", "8", "2", "ABCD"]).unwrap(),
-        [4, 210, 8, 2, 0xab, 0xcd]
+        parse(Type::DS, &["1234", "8", "0", "ABCD"]).unwrap(),
+        [4, 210, 8, 0, 0xab, 0xcd]
     );
     assert_eq!(
         parse(Type::DNSKEY, &["257", "3", "8", "AQID", "BA=="]).unwrap(),
@@ -133,7 +133,7 @@ fn signatures_and_nsec3_hashes() {
     assert_eq!(parse(Type::RRSIG, &["A", "8", "2", "3600", "0", "1", "123", "example.", "AQID"]).unwrap(), b"\x00\x01\x08\x02\x00\x00\x0e\x10\x00\x00\x00\x00\x00\x00\x00\x01\x00\x7b\x07example\x00\x01\x02\x03");
     assert_eq!(
         parse(Type::NSEC3, &["1", "0", "1", "AABB", "00", "A"]).unwrap(),
-        [1, 0, 0, 1, 2, 0xaa, 0xbb, 20, 0, 0, 1, 0x40]
+        [1, 0, 0, 1, 2, 0xaa, 0xbb, 1, 0, 0, 1, 0x40]
     );
     assert!(parse(Type::NSEC3, &["1", "0", "1", "-", "!"]).is_err());
 }
@@ -149,12 +149,10 @@ fn svcb_parameters_are_encoded_in_key_order() {
     assert!(parse(Type::SVCB, &["1", ".", r"key1=\002h2"]).is_err());
     assert!(parse(Type::SVCB, &["1", ".", r"key1=bad"]).is_err());
     assert!(parse(Type::HTTPS, &["1", ".", "port=443", "port=80"]).is_err());
-    assert_eq!(
-        parse(Type::HTTPS, &["1", ".", "mandatory=port"]).unwrap(),
-        b"\x00\x01\x00\x00\x00\x00\x02\x00\x03"
-    );
+    assert!(parse(Type::HTTPS, &["1", ".", "mandatory=port"]).is_err());
     assert!(parse(Type::HTTPS, &["1", ".", "no-default-alpn=x"]).is_err());
-    assert!(parse(Type::HTTPS, &["1", ".", "ipv6hint=::ffff:192.0.2.1"]).is_err());
+    assert!(parse(Type::HTTPS, &["1", ".", "no-default-alpn"]).is_err());
+    assert!(parse(Type::HTTPS, &["1", ".", "ipv6hint=::ffff:192.0.2.1"]).is_ok());
 }
 
 #[test]
@@ -184,14 +182,11 @@ fn tsig_and_validation() {
         )
         .is_err()
     );
-    assert_eq!(
-        parse(Type::CAA, &["0", "bad-tag", "x"]).unwrap(),
-        b"\0\x07bad-tagx"
-    );
+    assert!(parse(Type::CAA, &["0", "bad-tag", "x"]).is_err());
     assert_eq!(parse(Type::NSEC, &["next."]).unwrap(), b"\x04next\0");
     assert_eq!(
-        parse(Type::ZONEMD, &["1", "1", "1", "ABCD"]).unwrap(),
-        [0, 0, 0, 1, 1, 1, 0xab, 0xcd]
+        parse(Type::ZONEMD, &["1", "1", "0", "ABCD"]).unwrap(),
+        [0, 0, 0, 1, 1, 0, 0xab, 0xcd]
     );
     assert_eq!(
         parse(Type::TSIG, &["hmac.", "1", "300", "0", "42", "0", "0"]).unwrap(),
@@ -211,8 +206,8 @@ fn related_record_families_and_dnssec_dates() {
         [3, 1, 1, 0xab]
     );
     assert_eq!(
-        parse(Type::CDS, &["1", "8", "2", "AABB"]).unwrap(),
-        [0, 1, 8, 2, 0xaa, 0xbb]
+        parse(Type::CDS, &["1", "8", "0", "AABB"]).unwrap(),
+        [0, 1, 8, 0, 0xaa, 0xbb]
     );
     assert_eq!(
         parse(Type::CDNSKEY, &["257", "3", "8", "AQID"]).unwrap(),
@@ -222,10 +217,14 @@ fn related_record_families_and_dnssec_dates() {
         parse(Type::SSHFP, &["1", "2", "ABCD"]).unwrap(),
         [1, 2, 0xab, 0xcd]
     );
+    let sha384 = "00".repeat(48);
     assert_eq!(
-        parse(Type::ZONEMD, &["1", "1", "1", "000102030405060708090A0B"]).unwrap(),
-        [0, 0, 0, 1, 1, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        parse(Type::ZONEMD, &["1", "1", "1", &sha384])
+            .unwrap()
+            .len(),
+        54
     );
+    assert!(parse(Type::ZONEMD, &["1", "1", "1", "000102030405060708090A0B"]).is_err());
     assert_eq!(
         parse(
             Type::RRSIG,

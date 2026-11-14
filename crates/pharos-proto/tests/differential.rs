@@ -39,6 +39,19 @@ struct Parsed {
     sections: [Vec<Record>; 3],
 }
 
+// RFC 2181 §8: Treat received TTL values with the MSB set as zero.
+fn received_ttl(ttl: u32) -> u32 {
+    if ttl & 0x8000_0000 != 0 { 0 } else { ttl }
+}
+
+fn received_record_ttl(rtype: u16, ttl: u32) -> u32 {
+    if rtype == Type::OPT.0 {
+        ttl
+    } else {
+        received_ttl(ttl)
+    }
+}
+
 // Hickory rejects this overlapping pointer; domain accepts it. Pharos must reject it.
 const OVERLAPPING_POINTER: &[u8] = &[
     0, 0, 0x81, 0x80, 0, 1, 0, 1, 0, 1, 0, 1, 1, b'9', 0, 0, 1, 0, 1, 0xc0, 12, 0xfd, 0xe8, 0, 1,
@@ -136,6 +149,7 @@ fn domain(wire: &[u8]) -> Result<Parsed, String> {
             let record = record.map_err(|e| e.to_string())?;
             let end = section.pos();
             let data_start = end - usize::from(record.rdlen());
+            let rtype = record.rtype().to_int();
             output.push(Record {
                 start,
                 end,
@@ -145,9 +159,9 @@ fn domain(wire: &[u8]) -> Result<Parsed, String> {
                     .filter(|l| !l.as_slice().is_empty())
                     .map(|l| l.as_slice().to_vec())
                     .collect(),
-                kind: record.rtype().to_int(),
+                kind: rtype,
                 class: record.class().to_int(),
-                ttl: record.ttl().as_secs(),
+                ttl: received_record_ttl(rtype, record.ttl().as_secs()),
                 rdata: wire[data_start..end].to_vec(),
             });
         }
@@ -196,7 +210,7 @@ fn hickory_fields(wire: &[u8]) -> Result<Parsed, String> {
             HickoryName::read(&mut raw).map_err(|e| e.to_string())?;
             let kind = raw.read_u16().map_err(|e| e.to_string())?.unverified();
             let class = raw.read_u16().map_err(|e| e.to_string())?.unverified();
-            let ttl = raw.read_u32().map_err(|e| e.to_string())?.unverified();
+            let raw_ttl = raw.read_u32().map_err(|e| e.to_string())?.unverified();
             let len = usize::from(raw.read_u16().map_err(|e| e.to_string())?.unverified());
             let data_start = raw.index();
             let rdata = raw
@@ -210,7 +224,7 @@ fn hickory_fields(wire: &[u8]) -> Result<Parsed, String> {
                 return Err("Hickory record consumed a different RDLENGTH".into());
             }
             if u16::from(record.record_type()) != kind
-                || record.ttl != ttl
+                || record.ttl != raw_ttl
                 // Hickory normalizes the OPT UDP payload size to at least 512.
                 || (kind != 41 && u16::from(record.dns_class) != class)
             {
@@ -222,7 +236,7 @@ fn hickory_fields(wire: &[u8]) -> Result<Parsed, String> {
                 name: record.name.iter().map(<[u8]>::to_vec).collect(),
                 kind,
                 class,
-                ttl,
+                ttl: received_record_ttl(kind, raw_ttl),
                 rdata,
             });
         }
@@ -589,8 +603,9 @@ fn supported_typed_rdata_agrees_with_domain() {
         (Type::HINFO, b"\x03CPU\x02OS".to_vec()),
         (Type::CAA, b"\x80\x05issueexample.org".to_vec()),
         (Type::URI, b"\x00\x0a\x00\x01https://example.org/".to_vec()),
-        (Type::DS, vec![0x12, 0x34, 8, 2, 0xab, 0xcd]),
-        (Type::CDS, vec![0x12, 0x34, 8, 2, 0xab, 0xcd]),
+        (Type::DS, vec![0x12, 0x34, 8, 0, 0xab, 0xcd]),
+        (Type::DS, [vec![0x12, 0x34, 8, 2], vec![0xab; 32]].concat()),
+        (Type::CDS, vec![0x12, 0x34, 8, 0, 0xab, 0xcd]),
         (Type::DNSKEY, vec![1, 0, 3, 8, 1, 2, 3]),
         (Type::CDNSKEY, vec![1, 0, 3, 8, 1, 2, 3]),
         (Type::TLSA, vec![3, 1, 1, 0xab, 0xcd]),
@@ -599,7 +614,7 @@ fn supported_typed_rdata_agrees_with_domain() {
         (Type::SSHFP, vec![1, 2]),
         (
             Type::ZONEMD,
-            [vec![0, 0, 0, 1, 1, 1], vec![0xab; 12]].concat(),
+            [vec![0, 0, 0, 1, 1, 1], vec![0xab; 48]].concat(),
         ),
         (
             Type::TSIG,
@@ -1130,5 +1145,19 @@ fn domain_requires_at_least_twelve_zonemd_digest_octets() {
                 .is_ok(),
             len >= 12
         );
+    }
+}
+
+#[test]
+fn zonemd_sha_digests_require_exact_lengths() {
+    for (algorithm, required) in [(1, 48), (2, 64)] {
+        for len in [required - 1, required, required + 1] {
+            let mut data = vec![0, 0, 0, 1, 1, algorithm];
+            data.extend(vec![0xab; len]);
+            assert_eq!(
+                pharos_proto::Rdata::parse(Type::ZONEMD, &data).is_ok(),
+                len == required
+            );
+        }
     }
 }

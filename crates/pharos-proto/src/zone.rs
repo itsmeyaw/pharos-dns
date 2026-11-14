@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{Class, Name, Type};
+use crate::{Class, Name, NameRef, Type};
 
 /// An owned Zone record with uncompressed wire-format RDATA.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,6 +53,7 @@ pub struct ZoneParser<R> {
     entry_end: (usize, usize),
     owner: Option<Name>,
     ttl: Option<u32>,
+    class: Option<Class>,
     directive_ttl: bool,
     finished: bool,
     input: Vec<u8>,
@@ -105,6 +106,7 @@ impl<R: BufRead> ZoneParser<R> {
             entry_end: (1, 1),
             owner: None,
             ttl: None,
+            class: None,
             directive_ttl: false,
             finished: false,
             input: Vec::new(),
@@ -437,7 +439,7 @@ impl<R: BufRead> ZoneParser<R> {
             }
             return Ok(None);
         }
-        // RFC 1035 §5.1: a blank owner inherits the previous owner; class defaults to IN.
+        // RFC 1035 §5.1: blank owners inherit, and omitted classes reuse the prior explicit class.
         let mut i = 0;
         let owner = if inherited {
             self.owner.clone().ok_or_else(|| err("missing owner"))?
@@ -447,8 +449,8 @@ impl<R: BufRead> ZoneParser<R> {
                 .map_err(|e| err(&e.to_string()))?
         };
         let mut ttl = self.ttl;
-        // RFC 3123 §5: An APL zone record may use the IN class.
-        let mut class = Class::IN;
+        // RFC 1035 §5.1: class defaults to IN only before any class has been specified.
+        let mut class = self.class.unwrap_or(Class::IN);
         let mut saw_class = false;
         let mut saw_ttl = false;
         let rtype = loop {
@@ -479,8 +481,22 @@ impl<R: BufRead> ZoneParser<R> {
         let ttl = ttl
             .or_else(|| saw_class.then_some(0))
             .ok_or_else(|| err_at(i - 1, "missing TTL"))?;
-        if rtype == Type::TSIG && tokens.get(i).is_none_or(|field| field.text != r"\#") {
-            return Err(err_at(i - 1, "TSIG has no zone presentation format"));
+        // RFC 3123 §5: An APL zone record may use the IN class.
+        // RFC 6895 §3.2: NONE, ANY, and reserved CLASS0 are not zone RR classes.
+        if matches!(class, Class::NONE | Class::ANY | Class(0)) {
+            return Err(err_at(i - 1, "invalid record class"));
+        }
+        // RFC 1706 §5 and RFC 2163 §4: NSAP and PX RRs are Internet class only.
+        if class != Class::IN && matches!(rtype, Type::NSAP | Type::PX) {
+            return Err(err_at(i - 1, "record type requires IN class"));
+        }
+        // RFC 1035 §§3.3.4-5: obsolete MD/MF RRs should be rejected from master files.
+        if matches!(rtype, Type::MD | Type::MF) {
+            return Err(err_at(i - 1, "obsolete record type"));
+        }
+        // RFC 6895 §3.1: query-only and meta types are not stored as zone RRs.
+        if matches!(rtype.0, 0 | 41 | 249..=255) {
+            return Err(err_at(i - 1, "invalid zone record type"));
         }
         // RFC 1035 §5.1: quotes delimit character-strings, not merely whitespace.
         // RFC 3597 §5: \# selects generic RDATA presentation for known or unknown RR types.
@@ -557,12 +573,33 @@ impl<R: BufRead> ZoneParser<R> {
                 )
             },
         )?;
+        // RFC 2308 §4: omitted legacy SIG TTL comes from its Original TTL field.
+        let ttl = if rtype == Type::SIG && !saw_ttl {
+            let Some(original_ttl) = rdata.get(4..8) else {
+                return Err(err_at(i, "invalid SIG RDATA"));
+            };
+            u32::from_be_bytes([
+                original_ttl[0],
+                original_ttl[1],
+                original_ttl[2],
+                original_ttl[3],
+            ])
+        } else {
+            ttl
+        };
+        // RFC 6742 §2.4.1.2: LP target must not be its own owner.
+        if rtype == Type::LP && NameRef::parse(&rdata, 2).is_ok_and(|target| target == owner) {
+            return Err(err_at(i, "LP target must differ from owner"));
+        }
         // RFC 1035 §4.2.2: a wire Message cannot exceed 65,535 octets.
         if owner.as_wire().len() + 10 + rdata.len() > usize::from(u16::MAX) {
             return Err(err_at(i, "record exceeds DNS wire size"));
         }
         if saw_ttl && !self.directive_ttl {
             self.ttl = Some(ttl);
+        }
+        if saw_class {
+            self.class = Some(class);
         }
         self.owner = Some(owner.clone());
         // RFC 3123 §6: Multiple APL RRs are legal; applications define their interpretation.
@@ -594,7 +631,7 @@ fn text_parts(token: &Token) -> Vec<&str> {
     parts
 }
 
-// RFC 1035 §5.1: decimal escapes denote octets; miekg truncates larger values.
+// RFC 1035 §5.1: decimal escapes denote exactly one octet.
 fn normalize_escapes(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut output = String::with_capacity(value.len());
@@ -605,9 +642,15 @@ fn normalize_escapes(value: &str) -> String {
                 .get(i + 1..i + 4)
                 .filter(|d| d.iter().all(u8::is_ascii_digit))
             {
-                let number = (u16::from(digits[0] - b'0') * 100
+                let number = u16::from(digits[0] - b'0') * 100
                     + u16::from(digits[1] - b'0') * 10
-                    + u16::from(digits[2] - b'0')) as u8;
+                    + u16::from(digits[2] - b'0');
+                if number > 255 {
+                    output.push_str(&value[i..i + 4]);
+                    i += 4;
+                    continue;
+                }
+                let number = number as u8;
                 write!(output, "\\{number:03}").expect("writing to a String");
                 i += 4;
             } else {
@@ -634,10 +677,17 @@ fn has_invalid_digit_escape(value: &str) -> bool {
         if bytes[i] != b'\\' {
             i += 1;
         } else if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
-            if !bytes
+            let Some(digits) = bytes
                 .get(i + 1..i + 4)
-                .is_some_and(|d| d.iter().all(u8::is_ascii_digit))
-            {
+                .filter(|d| d.iter().all(u8::is_ascii_digit))
+            else {
+                return true;
+            };
+            // RFC 1035 §5.1: decimal escape value must fit in one octet.
+            let number = u16::from(digits[0] - b'0') * 100
+                + u16::from(digits[1] - b'0') * 10
+                + u16::from(digits[2] - b'0');
+            if number > 255 {
                 return true;
             }
             i += 4;
@@ -881,13 +931,13 @@ fn expand_generate(input: &str, value: i64, end: i64) -> Result<String, String> 
 // RFC 2308 §4: a default TTL may be written using unit suffixes.
 // RFC 1035 §5.1: TTL fields use decimal integers; unit suffixes are an extension.
 fn parse_ttl(value: &str) -> Option<u32> {
-    let mut result = 0_usize;
-    let mut number = 0_usize;
+    let mut result = 0_u32;
+    let mut number = 0_u32;
     for byte in value.bytes() {
         if byte.is_ascii_digit() {
             number = number
-                .wrapping_mul(10)
-                .wrapping_add(usize::from(byte - b'0'));
+                .checked_mul(10)?
+                .checked_add(u32::from(byte - b'0'))?;
         } else {
             let unit = match byte.to_ascii_lowercase() {
                 b's' => 1,
@@ -897,14 +947,16 @@ fn parse_ttl(value: &str) -> Option<u32> {
                 b'w' => 604800,
                 _ => return None,
             };
-            result = result.wrapping_add(number.wrapping_mul(unit));
+            result = result.checked_add(number.checked_mul(unit)?)?;
             number = 0;
         }
     }
     if value.is_empty() {
         return None;
     }
-    u32::try_from(result.wrapping_add(number)).ok()
+    let ttl = result.checked_add(number)?;
+    // RFC 2181 §8: The largest valid TTL is 2^31 - 1.
+    (ttl <= i32::MAX as u32).then_some(ttl)
 }
 
 // RFC 1035 §3.2.4 and RFC 3597 §5: classes use mnemonics or CLASS followed by a number.

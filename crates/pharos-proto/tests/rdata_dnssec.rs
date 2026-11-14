@@ -9,10 +9,10 @@ use proptest::prelude::*;
 fn dnssec_digest_and_key_presentations() {
     for rtype in [Type::DS, Type::CDS] {
         assert_eq!(
-            Rdata::parse(rtype, &[0x12, 0x34, 8, 2, 0x12, 0xab])
+            Rdata::parse(rtype, &[0x12, 0x34, 8, 0, 0x12, 0xab])
                 .unwrap()
                 .to_string(),
-            "4660 8 2 12AB"
+            "4660 8 0 12AB"
         );
     }
     for rtype in [Type::DNSKEY, Type::CDNSKEY] {
@@ -144,11 +144,16 @@ proptest! {
 
 #[test]
 fn lengths_empty_tails_and_encodings() {
-    for (rtype, min) in [(Type::RRSIG, 19), (Type::NSEC3, 6), (Type::NSEC3PARAM, 5)] {
+    for (rtype, min) in [(Type::RRSIG, 19), (Type::NSEC3, 7), (Type::NSEC3PARAM, 5)] {
         for len in 0..min {
             assert!(Rdata::parse(rtype, &vec![0; len]).is_err(), "{rtype} {len}");
         }
-        assert!(Rdata::parse(rtype, &vec![0; min]).is_ok());
+        let data = if rtype == Type::NSEC3 {
+            vec![0, 0, 0, 0, 0, 1, 0]
+        } else {
+            vec![0; min]
+        };
+        assert!(Rdata::parse(rtype, &data).is_ok());
     }
     for (tail, expected) in [
         (&b""[..], ""),
@@ -165,10 +170,7 @@ fn lengths_empty_tails_and_encodings() {
         );
     }
     assert!(Rdata::parse(Type::NSEC, &[0]).is_err());
-    assert_eq!(
-        Rdata::parse(Type::NSEC3, &[0; 6]).unwrap().to_string(),
-        "0 0 0 - "
-    );
+    assert!(Rdata::parse(Type::NSEC3, &[0; 6]).is_err());
     assert!(Rdata::parse(Type::NSEC3PARAM, &[0, 0, 0, 0, 0, 0]).is_err());
 }
 
@@ -283,8 +285,8 @@ fn builder_roundtrips_and_relocates_compressed_names() {
         assert_eq!(record.data().unwrap().to_string(), data.to_string());
     }
     for (rtype, bytes) in [
-        (Type::DS, &b"\x12\x34\x08\x02\xaa"[..]),
-        (Type::CDS, &b"\x12\x34\x08\x02\xaa"[..]),
+        (Type::DS, &b"\x12\x34\x08\x00\xaa"[..]),
+        (Type::CDS, &b"\x12\x34\x08\x00\xaa"[..]),
         (Type::DNSKEY, &b"\x01\x00\x03\x08\x01"[..]),
         (Type::CDNSKEY, &b"\x01\x00\x03\x08\x01"[..]),
         (

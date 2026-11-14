@@ -30,7 +30,11 @@ proptest! {
             prop_assert_eq!(record.name, name.clone());
             prop_assert_eq!(record.rtype, Type(*kind));
             prop_assert_eq!(record.class, Class(*class));
-            prop_assert_eq!(record.ttl, *ttl);
+            // RFC 2181 §8: high-bit TTL values are exposed as zero on receipt.
+            prop_assert_eq!(
+                record.ttl,
+                if *ttl & 0x8000_0000 != 0 { 0 } else { *ttl }
+            );
             prop_assert_eq!(record.rdata, rdata.as_slice());
         }
     }

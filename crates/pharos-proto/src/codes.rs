@@ -119,7 +119,6 @@ dns_code! {
     // RFC 3597 §5: Unknown RR types display as TYPE followed by the decimal type code.
     /// A DNS resource record type or QTYPE. Unknown values display in RFC 3597 `TYPE` form.
     Type, u16, "TYPE", {
-        NONE = 0 => "None",
         A = 1 => "A",
         NS = 2 => "NS",
         MD = 3 => "MD",
@@ -130,6 +129,8 @@ dns_code! {
         MG = 8 => "MG",
         MR = 9 => "MR",
         NULL = 10 => "NULL",
+        // RFC 1035 §3.4.2: WKS uses RR type code 11.
+        WKS = 11 => "WKS",
         PTR = 12 => "PTR",
         HINFO = 13 => "HINFO",
         MINFO = 14 => "MINFO",
@@ -145,6 +146,8 @@ dns_code! {
         ISDN = 20 => "ISDN",
         // RFC 1183 §3.3: RT uses RR type code 21.
         RT = 21 => "RT",
+        // RFC 1706 §5: NSAP uses RR type code 22.
+        NSAP = 22 => "NSAP",
         NSAP_PTR = 23 => "NSAP-PTR",
         SIG = 24 => "SIG",
         KEY = 25 => "KEY",
@@ -257,4 +260,9 @@ dns_code! {
         DLV = 32769 => "DLV",
         RESERVED = 65535 => "Reserved",
     }
+}
+
+impl Type {
+    /// Type code zero has no RR mnemonic and displays as `TYPE0`.
+    pub const NONE: Self = Self(0);
 }

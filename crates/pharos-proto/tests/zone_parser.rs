@@ -32,13 +32,13 @@ fn any_class_matches_miekg_rejection() {
 #[test]
 fn known_type_mnemonic_accepts_generic_rdata() {
     let parser = ZoneParser::new(
-        Cursor::new("a 60 IN MD \\# 1 00\n"),
+        Cursor::new("a 60 IN A \\# 4 c0000201\n"),
         ".".parse().unwrap(),
         "generic",
     );
     let records = parser.collect::<Result<Vec<_>, _>>().unwrap();
-    assert_eq!(records[0].rtype, Type::MD);
-    assert_eq!(records[0].rdata, [0]);
+    assert_eq!(records[0].rtype, Type::A);
+    assert_eq!(records[0].rdata, [192, 0, 2, 1]);
 }
 
 #[test]
@@ -118,4 +118,94 @@ fn generate_has_independent_default_ttl_and_owner() {
     assert_eq!(records[1].ttl, 3600);
     assert_eq!(records[2].owner.to_string(), "first.example.");
     assert_eq!(records[2].ttl, 90);
+}
+
+#[test]
+fn class_inherits_last_explicit_class_and_rejects_query_classes() {
+    let records = ZoneParser::new(
+        Cursor::new("a 60 CH A 192.0.2.1\nb A 192.0.2.2\n"),
+        ".".parse().unwrap(),
+        "class-inheritance",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.class)
+            .collect::<Vec<_>>(),
+        [Class::CH, Class::CH]
+    );
+
+    for class in ["NONE", "CLASS255", "CLASS0"] {
+        let parser = ZoneParser::new(
+            Cursor::new(format!("a 60 {class} A 192.0.2.1\n")),
+            ".".parse().unwrap(),
+            "invalid-class",
+        );
+        assert!(parser.collect::<Result<Vec<_>, _>>().is_err(), "{class}");
+    }
+}
+
+#[test]
+fn rejects_ttl_overflow_and_oversized_decimal_escape() {
+    for zone in [
+        "a 18446744073709551616 A 192.0.2.1\n",
+        "a 2147483648 A 192.0.2.1\n",
+        "a 60 TXT \"\\999\"\n",
+    ] {
+        let parser = ZoneParser::new(Cursor::new(zone), ".".parse().unwrap(), "strict");
+        assert!(parser.collect::<Result<Vec<_>, _>>().is_err(), "{zone}");
+    }
+}
+
+#[test]
+fn parses_wks_mnemonic_with_generic_rdata() {
+    let parser = ZoneParser::new(
+        Cursor::new("a 60 IN WKS \\# 0\n"),
+        ".".parse().unwrap(),
+        "wks",
+    );
+    let records = parser.collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(records[0].rtype, Type::WKS);
+}
+
+#[test]
+fn omitted_sig_ttl_uses_original_ttl_not_zone_default() {
+    let input = "$TTL 99\na IN SIG A 8 2 3600 0 1 123 . AQID\n";
+    let record = ZoneParser::new(Cursor::new(input), "example.".parse().unwrap(), "sig")
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.ttl, 3600);
+}
+
+#[test]
+fn rejects_non_in_nsap_and_px_records() {
+    for record in ["a 60 CH NSAP 0x47000580", "a 60 CH PX 1 . ."] {
+        let parser = ZoneParser::new(Cursor::new(record), ".".parse().unwrap(), "class-specific");
+        assert!(parser.collect::<Result<Vec<_>, _>>().is_err(), "{record}");
+    }
+}
+
+#[test]
+fn rejects_lp_target_equal_to_owner() {
+    let parser = ZoneParser::new(
+        Cursor::new("a.example. 60 IN LP 1 a.example.\n"),
+        "example.".parse().unwrap(),
+        "lp",
+    );
+    assert!(parser.collect::<Result<Vec<_>, _>>().is_err());
+}
+
+#[test]
+fn rejects_obsolete_md_and_mf_zone_records() {
+    for rtype in ["MD", "MF"] {
+        let parser = ZoneParser::new(
+            Cursor::new(format!("a 60 {rtype} target.example.\n")),
+            "example.".parse().unwrap(),
+            "obsolete",
+        );
+        assert!(parser.collect::<Result<Vec<_>, _>>().is_err(), "{rtype}");
+    }
 }

@@ -189,6 +189,10 @@ impl Next for Reply {
                 }
             }
             Self::ReferralTtl => {
+                // RFC 4509 §2.2: SHA-256 DS data must carry 32 digest octets.
+                let mut sha256_ds = [0_u8; 36];
+                sha256_ds[..4].copy_from_slice(&[0, 1, 13, 2]);
+                sha256_ds[4] = 42;
                 for ttl in [300, 30] {
                     b.record(Section::Authority, q.name, Type::NS, Class::IN, ttl, &[0])
                         .unwrap();
@@ -198,7 +202,7 @@ impl Next for Reply {
                         Type::DS,
                         Class::IN,
                         ttl,
-                        &[0, 1, 13, 2, 42],
+                        &sha256_ds,
                     )
                     .unwrap();
                 }
