@@ -21,24 +21,15 @@ pub fn admit_with_update<'a>(
     allow_update: bool,
     response: &mut Vec<u8>,
 ) -> Admission<'a> {
-    // RFC 1035 §4.1: drop datagrams too short to contain the Message ID and QR bit.
-    if wire.len() < 4 {
-        return Admission::Drop;
-    }
     // RFC 1035 §4.1.1: QR=1 identifies a Response, not a request.
-    if wire[2] & 0x80 != 0 {
+    if wire.get(2).is_some_and(|flags| flags & 0x80 != 0) {
         return Admission::Drop;
     }
     if wire.len() < 12 {
-        // RFC 1035 §4.1.1: FORMERR identifies a message that cannot be parsed as DNS.
+        // RFC 5625 §6.3: Return FORMERR for a DNS message shorter than its header.
         response.clear();
-        response.extend_from_slice(
-            &u16::from_be_bytes([
-                wire.first().copied().unwrap_or(0),
-                wire.get(1).copied().unwrap_or(0),
-            ])
-            .to_be_bytes(),
-        );
+        response.extend_from_slice(&wire[..wire.len().min(2)]);
+        response.resize(2, 0);
         response.extend_from_slice(&(0x8000 | Rcode::FORMERR.0).to_be_bytes());
         response.extend_from_slice(&[0; 8]);
         return Admission::Respond;
@@ -47,6 +38,22 @@ pub fn admit_with_update<'a>(
     // RFC 6895 §2.1: Do not reject the reserved DNS header Z bit.
     let opcode = Opcode(((flags >> 11) & 15) as u8);
     let count = |i| u16::from_be_bytes([wire[i], wire[i + 1]]);
+    let update_query = if opcode == Opcode::UPDATE {
+        // RFC 2136 §2.2: malformed UPDATEs receive FORMERR even when UPDATE is disabled.
+        if count(4) != 1 {
+            header_error(wire, response, Rcode::FORMERR);
+            return Admission::Respond;
+        }
+        match Message::parse(wire) {
+            Ok(query) if !query.has_nonfinal_tsig() => Some(query),
+            _ => {
+                header_error(wire, response, Rcode::FORMERR);
+                return Admission::Respond;
+            }
+        }
+    } else {
+        None
+    };
     // RFC 8490 §§5.4.1, 5.4.3: DSO unidirectional Messages have ID zero and no Response.
     if opcode == Opcode::STATEFUL {
         if is_dso_unidirectional(wire) {
@@ -73,8 +80,7 @@ pub fn admit_with_update<'a>(
     // RFC 2136 §§2.4–2.5: UPDATE prerequisite and update sections may contain multiple records.
     // RFC 2136 §2.3: The UPDATE Zone section contains exactly one record.
     // RFC 1996 §§3.7, 3.9: NOTIFY requires at least one Question and ignores other sections.
-    if (opcode == Opcode::UPDATE && count(4) != 1)
-        || (opcode == Opcode::NOTIFY && count(4) == 0)
+    if (opcode == Opcode::NOTIFY && count(4) == 0)
         || (opcode != Opcode::UPDATE && opcode != Opcode::NOTIFY && count(4) > 1)
         || (opcode != Opcode::UPDATE
             && opcode != Opcode::NOTIFY
@@ -84,9 +90,14 @@ pub fn admit_with_update<'a>(
         return Admission::Respond;
     }
     // RFC 6891 §6.1.1: Message parsing rejects duplicate OPT records.
-    let Ok(query) = Message::parse(wire) else {
-        header_error(wire, response, Rcode::FORMERR);
-        return Admission::Respond;
+    let query = if let Some(query) = update_query {
+        query
+    } else {
+        let Ok(query) = Message::parse(wire) else {
+            header_error(wire, response, Rcode::FORMERR);
+            return Admission::Respond;
+        };
+        query
     };
     if query.has_nonfinal_tsig() {
         // RFC 8945 §5.2: a misplaced TSIG requires FORMERR even without a TSIG Plugin.
@@ -95,8 +106,14 @@ pub fn admit_with_update<'a>(
     }
     // RFC 1996 §3.9: hide ignored Authority and Additional records from handlers.
     let query = query.ignore_notify_sections();
+    // RFC 2930 §3: TKEY Queries use QCLASS ANY and must reach the NOTIMP handler.
+    let tkey_query = query.opcode() == Opcode::QUERY
+        && query
+            .questions()
+            .any(|question| question.qtype == Type::TKEY);
     // RFC 1035 §4.1.1: RCODE 5 refuses an operation for policy reasons.
     if !allow_non_in
+        && !tkey_query
         && query
             .questions()
             .next()

@@ -13,7 +13,11 @@ fn valid() -> Vec<u8> {
 fn rejects_invalid_queries_and_honors_class_flag() {
     let mut response = Vec::with_capacity(512);
     for wire in [&[][..], &[0][..], &[0, 1][..], &[0, 1, 1][..]] {
-        assert!(matches!(admit(wire, false, &mut response), Admission::Drop));
+        assert!(matches!(
+            admit(wire, false, &mut response),
+            Admission::Respond
+        ));
+        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::FORMERR);
     }
     assert!(matches!(
         admit(&[0; 11], false, &mut response),
@@ -245,6 +249,21 @@ fn malformed_update_formerr_preserves_opcode() {
     let mut response = Vec::with_capacity(512);
     assert!(matches!(
         admit_with_update(&wire, false, true, &mut response),
+        Admission::Respond
+    ));
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.opcode().0, 5);
+    assert_eq!(message.rcode(), Rcode::FORMERR);
+}
+
+#[test]
+fn malformed_update_without_enabled_handler_returns_formerr() {
+    let mut wire = valid();
+    wire[2] = 0x28;
+    wire[5] = 2;
+    let mut response = Vec::with_capacity(512);
+    assert!(matches!(
+        admit_with_update(&wire, false, false, &mut response),
         Admission::Respond
     ));
     let message = Message::parse(&response).unwrap();
