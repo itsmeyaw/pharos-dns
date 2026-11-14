@@ -471,7 +471,7 @@ impl Dnssec {
         // RFC 4034 §3.1.7: The Signer's Name identifies the zone of the covered RRset.
         let signer = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
         // RFC 6840 §5.11: each DNSKEY algorithm signs every required RRset.
-        let apex = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
+        let apex = signer;
         let apex_dnskey = first.rtype == Type::DNSKEY && first.name == apex;
         // RFC 6840 §5.11: Track KSK/ZSK roles per algorithm without query-path allocation.
         let mut roles_by_algorithm = [0u8; 16];

@@ -39,7 +39,7 @@ impl Plugin for Dnssec {
         }
         let matching = cx.query.questions().next().and_then(|question| {
             let zone = self.zone_for(question.name)?;
-            // RFC 8080 §8: A zone without its own key must not be served as signed.
+            // RFC 8080 §8 and RFC 9824 §3.1: Do not sign another zone or emit keyless denial.
             self.keys
                 .iter()
                 .any(|key| key.public.owner == *zone)
