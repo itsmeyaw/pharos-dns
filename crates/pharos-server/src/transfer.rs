@@ -10,7 +10,7 @@ use pharos_proto::{
     Class, Message, MessageBuilder, Name, NameRef, Rcode, TsigKey, TsigRecord, TsigStream, Type,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncReadExt,
     net::{TcpStream, UdpSocket},
     time::timeout,
 };
@@ -126,8 +126,7 @@ async fn notify_tcp(
     // RFC 1996 §3.4: Use TCP when UDP cannot complete the NOTIFY transaction.
     timeout(deadline, async {
         let mut socket = TcpStream::connect(address).await?;
-        socket.write_u16(query.len() as u16).await?;
-        socket.write_all(query).await?;
+        crate::write_tcp_frame(&mut socket, query).await?;
         let len = socket.read_u16().await?;
         let mut wire = vec![0; usize::from(len)];
         socket.read_exact(&mut wire).await?;
@@ -221,13 +220,7 @@ async fn axfr_inner(
     // RFC 5936 §2: AXFR sessions use TCP.
     let mut socket = timeout(deadline, TcpStream::connect(address)).await??;
     // RFC 1035 §4.2.2: TCP Messages are prefixed with a two-octet length.
-    timeout(deadline, async {
-        socket
-            .write_all(&(query.len() as u16).to_be_bytes())
-            .await?;
-        socket.write_all(&query).await
-    })
-    .await??;
+    timeout(deadline, crate::write_tcp_frame(&mut socket, &query)).await??;
     let mut wire = Vec::new();
     let mut opening = None;
     loop {

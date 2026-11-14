@@ -1,7 +1,7 @@
 use super::*;
 use pharos_proto::{Message, MessageBuilder, NameRef, Section, Type, zone::ZoneRecord};
 use std::{fmt::Write, io, net::SocketAddr, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
     let host = if let Some(value) = address.strip_prefix('[') {
@@ -275,8 +275,7 @@ async fn should_transfer_at(zone: &SecondaryZone, primary: SocketAddr) -> io::Re
             .map_err(io::Error::other)?;
         let _ = builder.finish();
         // RFC 1035 §4.2.2: TCP DNS messages use a two-octet length prefix.
-        socket.write_u16(query.len() as u16).await?;
-        socket.write_all(&query).await?;
+        pharos_server::write_tcp_frame(&mut socket, &query).await?;
         let len = socket.read_u16().await?;
         let mut response = vec![0; usize::from(len)];
         socket.read_exact(&mut response).await?;
