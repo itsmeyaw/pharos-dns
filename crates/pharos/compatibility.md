@@ -141,6 +141,7 @@
 
 - [ready Plugin notes](../crates/pharos-plugins/src/ready/README.md)
 - `/ready` returns 405, not its previous 404, for recognized methods other than GET and HEAD; HEAD now shares GET status and headers.
+- A 503 `/ready` body prefixes the reported state with `Service temporarily unavailable:`; readiness probes should key on the status.
 
 ## reload
 
@@ -240,7 +241,7 @@
 
 ## Server
 
-- Operational HTTP responses carry SHA-256 strong ETags and evaluate `If-Match` / `If-None-Match`; byte ranges are ignored. Cleartext HTTP rejects absolute-form HTTPS targets with 421, and the listener caps HTTP/1 request buffering at 16 KiB.
+- `/health` and `/ready` 200 responses carry SHA-256 strong ETags; `/metrics` computes one only for conditional requests. 304/412 retain the selected validator. Byte ranges are ignored as RFC 9110 §14.2 permits. Cleartext HTTP rejects absolute-form HTTPS targets with 421, and the listener caps HTTP/1 request buffering at 16 KiB.
 - Each UDP worker handles up to 256 waiting Queries concurrently and retains one
   active or spare slot plus at most 16 completed slots for reuse. Each plain slot reserves 65,535
   bytes each for its Query and Response, plus coroutine storage; shed Responses

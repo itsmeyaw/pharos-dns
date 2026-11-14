@@ -15,8 +15,7 @@ use hyper::{
     Request, Response, StatusCode,
     body::Incoming,
     header::{
-        ALLOW, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MATCH,
-        IF_NONE_MATCH,
+        ALLOW, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MATCH, IF_NONE_MATCH,
     },
     server::conn::http1,
     service::service_fn,
@@ -105,8 +104,6 @@ async fn health_request(address: &str) -> io::Result<()> {
         .header("host", address)
         // RFC 9110 §10.1.5: Identify this robotic user agent.
         .header("user-agent", "Pharos health probe")
-        // RFC 9110 §10.1.2: Identify the local operational contact.
-        .header("from", "pharos@localhost")
         .body(Full::<Bytes>::default())
         .map_err(io::Error::other)?;
     let response = sender.send_request(request);
@@ -294,6 +291,7 @@ where
 {
     let method = request.method().as_str();
     let path = request.uri().path();
+    let is_metrics = path == "/metrics";
     let response = if request.uri().scheme_str() == Some("https") {
         // RFC 9110 §7.4: Cleartext listeners reject absolute HTTPS targets.
         Some((
@@ -320,8 +318,8 @@ where
         // RFC 9110 §9.1: Unsupported method tokens receive 501.
         Some((501, "text/plain; charset=utf-8", "Not Implemented\n".into()))
     };
-    let is_head = method == "HEAD";
     let headers = request.into_parts().0.headers;
+    let has_preconditions = headers.contains_key(IF_MATCH) || headers.contains_key(IF_NONE_MATCH);
     let mut result = Response::new(Full::default());
     match response {
         Some((status, content_type, mut body)) => {
@@ -343,12 +341,14 @@ where
                         // RFC 9110 §15.6.4: Explain that readiness failure is temporary.
                         body = format!("Service temporarily unavailable: {body}");
                     }
-                    // RFC 9110 §8.8.3.1: A SHA-256 body hash is a strong validator.
-                    if let Ok(tag) = entity_tag(&body) {
-                        result.headers_mut().insert(ETAG, tag);
+                    if status == StatusCode::OK && (!is_metrics || has_preconditions) {
+                        // RFC 9110 §8.8.3.1: Skip hashing routine metrics scrapes unless validation needs a tag.
+                        if let Ok(tag) = entity_tag(&body) {
+                            result.headers_mut().insert(ETAG, tag);
+                        }
                     }
                     // RFC 9110 §6.4: Send endpoint content as body.
-                    set_body(&mut result, Bytes::from(body));
+                    *result.body_mut() = Full::new(Bytes::from(body));
                     if status.is_success() || status == StatusCode::PRECONDITION_FAILED {
                         apply_preconditions(&mut result, &headers);
                     }
@@ -362,7 +362,7 @@ where
                     )]
                     .into_iter()
                     .collect();
-                    set_body(&mut result, Bytes::from_static(b"Internal Server Error\n"));
+                    *result.body_mut() = Full::new(Bytes::from_static(b"Internal Server Error\n"));
                 }
             }
         }
@@ -375,12 +375,8 @@ where
             )]
             .into_iter()
             .collect();
-            set_body(&mut result, Bytes::from_static(b"Not Found\n"));
+            *result.body_mut() = Full::new(Bytes::from_static(b"Not Found\n"));
         }
-    }
-    if is_head {
-        // RFC 9110 §9.3.2: HEAD sends metadata but no representation content.
-        *result.body_mut() = Full::default();
     }
     result
 }
@@ -407,31 +403,24 @@ fn entity_tag(body: &str) -> Result<HeaderValue, hyper::header::InvalidHeaderVal
     HeaderValue::from_str(&tag)
 }
 
-fn set_body(response: &mut Response<Full<Bytes>>, body: Bytes) {
-    // RFC 9110 §8.6: Declare the selected representation length, including for HEAD responses.
-    if let Ok(length) = HeaderValue::from_str(&body.len().to_string()) {
-        response.headers_mut().insert(CONTENT_LENGTH, length);
-    }
-    *response.body_mut() = Full::new(body);
-}
-
 fn apply_preconditions(response: &mut Response<Full<Bytes>>, headers: &HeaderMap) {
     let Some(current) = response.headers().get(ETAG) else {
         return;
     };
     let current = current.as_bytes();
     let if_match = conditional_tag_matches(headers, &IF_MATCH, current, false);
-    let if_none_match = conditional_tag_matches(headers, &IF_NONE_MATCH, current, true);
     if if_match == Some(false) {
-        // RFC 9110 §13.1.1: If-Match uses strong comparison before If-None-Match.
+        // RFC 9110 §§13.1.1, 13.2.2: A failed strong If-Match precedes If-None-Match.
         *response.status_mut() = StatusCode::PRECONDITION_FAILED;
         response.headers_mut().insert(
             CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
-        set_body(response, Bytes::from_static(b"Precondition Failed\n"));
-    } else if if_none_match == Some(true) {
-        // RFC 9110 §13.2.2: A matching If-None-Match returns 304 for GET and HEAD.
+        *response.body_mut() = Full::new(Bytes::from_static(b"Precondition Failed\n"));
+        return;
+    }
+    if conditional_tag_matches(headers, &IF_NONE_MATCH, current, true) == Some(true) {
+        // RFC 9110 §§13.1.2, 15.4.5: Matching If-None-Match returns 304 for GET and HEAD.
         *response.status_mut() = StatusCode::NOT_MODIFIED;
         response.headers_mut().remove(CONTENT_TYPE);
         *response.body_mut() = Full::default();
@@ -507,7 +496,7 @@ impl Drop for Listener {
 
 #[cfg(test)]
 mod tests {
-    use super::{Listener, health_request};
+    use super::{Listener, MAX_HTTP1_BUFFER_SIZE, health_request};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -550,7 +539,8 @@ mod tests {
                 request.contains("user-agent: pharos health probe"),
                 "{request}"
             );
-            assert!(request.contains("from: pharos@localhost"), "{request}");
+            // RFC 9110 §10.1.2: Do not send From when no user address is configured.
+            assert!(!request.contains("from:"), "{request}");
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .await
@@ -577,6 +567,7 @@ mod tests {
         )
         .await;
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(!response.contains("\netag: "), "{response}");
         assert!(response.ends_with("not-ready"));
         listener.shutdown().await.unwrap();
     }
@@ -610,6 +601,7 @@ mod tests {
         .await;
         assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
         assert!(response.contains("allow: GET, HEAD\r\n"));
+        assert!(!response.contains("\netag: "), "{response}");
         listener.shutdown().await.unwrap();
         assert!(TcpStream::connect(address).await.is_err());
     }
@@ -625,15 +617,16 @@ mod tests {
 
         let response = operational_request(address, "").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        // RFC 9110 §8.8.3.1: A 200 readiness representation carries a strong validator.
         let etag = response
             .lines()
             .find_map(|line| line.strip_prefix("etag: "))
             .unwrap();
-        let content_length = response
+        assert!(etag.starts_with('"') && etag.ends_with('"'), "{response}");
+        let get_content_length = response
             .lines()
             .find_map(|line| line.strip_prefix("content-length: "))
-            .unwrap();
-        assert!(etag.starts_with('"') && etag.ends_with('"'), "{response}");
+            .map(str::to_owned);
         assert_eq!(
             etag,
             "\"b24d6d33736ecd5604a4b17bc9c6481039fac362bb7df044ef1c10a2bfd21db6\""
@@ -653,10 +646,11 @@ mod tests {
             response.contains("content-type: text/plain\r\n"),
             "{response}"
         );
-        assert!(
-            response.contains(&format!("content-length: {content_length}\r\n")),
-            "{response}"
-        );
+        let head_content_length = response
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .map(str::to_owned);
+        assert_eq!(head_content_length, get_content_length);
         assert!(response.ends_with("\r\n\r\n"), "{response}");
 
         let response = request(
@@ -668,6 +662,7 @@ mod tests {
             response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
             "{response}"
         );
+        assert!(!response.contains("\netag: "), "{response}");
 
         let response = request(
             address,
@@ -680,10 +675,30 @@ mod tests {
         );
         assert!(response.contains("allow: GET, HEAD\r\n"), "{response}");
         assert!(response.ends_with("Method Not Allowed\n"), "{response}");
+        assert!(!response.contains("\netag: "), "{response}");
 
         let response = operational_request(address, &format!("If-None-Match: {etag}\r\n")).await;
         assert!(
             response.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+            "{response}"
+        );
+        assert!(response.ends_with("\r\n\r\n"), "{response}");
+        assert!(
+            response.contains(&format!("etag: {etag}\r\n")),
+            "{response}"
+        );
+
+        let response = request(
+            address,
+            "HEAD /ready HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: *\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains(&format!("etag: {etag}\r\n")),
             "{response}"
         );
         assert!(response.ends_with("\r\n\r\n"), "{response}");
@@ -703,6 +718,10 @@ mod tests {
         let response = operational_request(address, "If-Match: \"different\"\r\n").await;
         assert!(
             response.starts_with("HTTP/1.1 412 Precondition Failed\r\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains(&format!("etag: {etag}\r\n")),
             "{response}"
         );
         assert!(response.ends_with("Precondition Failed\n"), "{response}");
@@ -737,6 +756,7 @@ mod tests {
             "{response}"
         );
         assert!(response.ends_with("Not Found\n"), "{response}");
+        assert!(!response.contains("\netag: "), "{response}");
 
         let response = request(
             address,
@@ -747,6 +767,7 @@ mod tests {
             response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
             "{response}"
         );
+        assert!(!response.contains("\netag: "), "{response}");
 
         for scheme in ["https", "HTTPS"] {
             let response = request(
@@ -758,8 +779,30 @@ mod tests {
                 response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"),
                 "{response}"
             );
+            assert!(!response.contains("\netag: "), "{response}");
         }
 
+        listener.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_request_target_is_rejected_by_http1_buffer_limit() {
+        let listener = Listener::bind("127.0.0.1:0", |_| None).await.unwrap();
+        let mut stream = TcpStream::connect(listener.local_addr()).await.unwrap();
+        let target = format!("/{}", "x".repeat(MAX_HTTP1_BUFFER_SIZE));
+        let request =
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+            .await
+            .expect("oversized request was not closed");
+        // RFC 9110 §17.5: Reject an over-limit request target instead of parsing it.
+        if let Err(error) = read {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        } else if !response.is_empty() {
+            assert!(response.starts_with(b"HTTP/1.1 431 Request Header Fields Too Large\r\n"));
+        }
         listener.shutdown().await.unwrap();
     }
 
@@ -782,6 +825,7 @@ mod tests {
                 response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
                 "{response}"
             );
+            assert!(!response.contains("\netag: "), "{response}");
             assert!(response.ends_with("Internal Server Error\n"), "{response}");
         }
         listener.shutdown().await.unwrap();

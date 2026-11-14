@@ -6,11 +6,21 @@ use pharos_server::Phase;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn request(address: std::net::SocketAddr, method: &str) -> String {
+    request_with_headers(address, method, "").await
+}
+
+async fn request_with_headers(
+    address: std::net::SocketAddr,
+    method: &str,
+    headers: &str,
+) -> String {
     let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
     stream
         .write_all(
-            format!("{method} /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
+            format!(
+                "{method} /ready HTTP/1.1\r\nHost: localhost\r\n{headers}Connection: close\r\n\r\n"
+            )
+            .as_bytes(),
         )
         .await
         .unwrap();
@@ -31,6 +41,38 @@ async fn shared_address_serves_ready() {
     let response = request(address, "GET").await;
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     assert!(response.ends_with("\r\n\r\nOK"), "{response}");
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn ready_head_and_if_match_preconditions_use_get_representation() {
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap();
+    drop(socket);
+    let input = format!(".:0 {{\n ready {address}\n}}");
+    let blocks = parse("Corefile", &input).unwrap();
+    let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+
+    let response = request_with_headers(address, "GET", "If-None-Match: \"stale\"\r\n").await;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    let etag = response
+        .lines()
+        .find_map(|line| line.strip_prefix("etag: "))
+        .unwrap();
+
+    let head = request_with_headers(address, "HEAD", "If-None-Match: *\r\n").await;
+    assert!(head.starts_with("HTTP/1.1 304 Not Modified\r\n"), "{head}");
+    assert!(head.contains(&format!("etag: {etag}\r\n")), "{head}");
+    assert!(head.ends_with("\r\n\r\n"), "{head}");
+
+    let failed = request_with_headers(address, "GET", "If-Match: \"stale\"\r\n").await;
+    assert!(
+        failed.starts_with("HTTP/1.1 412 Precondition Failed\r\n"),
+        "{failed}"
+    );
+    assert!(failed.contains(&format!("etag: {etag}\r\n")), "{failed}");
+
     lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 

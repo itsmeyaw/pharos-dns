@@ -47,6 +47,7 @@ async fn scrape_counts_only_blocks_with_prometheus() {
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(!response.contains("\netag: "), "{response}");
     assert!(response.contains("pharos_dns_requests_total{family=\"1\",proto=\"udp\",server=\"dns://:0\",type=\"A\",view=\"\",zone=\"example.org.\"} 1"), "{response}");
     assert!(response.contains("pharos_dns_responses_total{plugin=\"whoami\",rcode=\"NOERROR\",server=\"dns://:0\",view=\"\",zone=\"example.org.\"} 1"), "{response}");
     assert!(
@@ -97,16 +98,29 @@ async fn metrics_head_uses_get_metadata_and_post_is_not_allowed() {
     let mut head = String::new();
     stream.read_to_string(&mut head).await.unwrap();
     assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
-    let etag = head
-        .lines()
-        .find_map(|line| line.strip_prefix("etag: "))
-        .unwrap();
-    assert!(etag.starts_with('"') && etag.ends_with('"'), "{head}");
+    assert!(!head.contains("\netag: "), "{head}");
     assert!(
         head.contains("content-type: text/plain; version=0.0.4; charset=utf-8\r\n"),
         "{head}"
     );
     assert!(head.ends_with("\r\n\r\n"), "{head}");
+
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"HEAD /metrics HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: *\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut conditional_head = String::new();
+    stream.read_to_string(&mut conditional_head).await.unwrap();
+    assert!(
+        conditional_head.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+        "{conditional_head}"
+    );
+    assert!(
+        conditional_head.contains("\netag: \""),
+        "{conditional_head}"
+    );
+    assert!(conditional_head.ends_with("\r\n\r\n"), "{conditional_head}");
 
     let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
     stream
