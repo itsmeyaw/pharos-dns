@@ -93,6 +93,7 @@ async fn coredns_query_and_response_rules_and_precedence() {
         } else {
             initial
         };
+        let response_expected = (expected & !0x0100) | (initial & 0x0100);
         assert_eq!(
             chain
                 .header
@@ -110,7 +111,7 @@ async fn coredns_query_and_response_rules_and_precedence() {
         );
         assert_eq!(
             Message::parse(cx.response).unwrap().flags(),
-            expected,
+            response_expected,
             "{directive}"
         );
     }
@@ -155,7 +156,14 @@ async fn rules_are_ordered_and_non_response_outcomes_are_preserved() {
                 .await,
             outcome
         );
-        assert_eq!(Message::parse(cx.response).unwrap().flags(), 0x80);
+        assert_eq!(
+            Message::parse(cx.response).unwrap().flags(),
+            if outcome == Outcome::Response {
+                0x180
+            } else {
+                0x80
+            }
+        );
     }
 }
 
