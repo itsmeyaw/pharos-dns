@@ -71,17 +71,14 @@ fn lookup_chain(
     let mut id = [0; 2];
     getrandom::getrandom(&mut id).map_err(|_| io::Error::other("random ID generation failed"))?;
     let id = u16::from_ne_bytes(id);
+    let question_name = NameRef::parse(name.as_wire(), 0).map_err(io::Error::other)?;
     let mut query = Vec::new();
     // RFC 1035 §4.2.1: UDP messages are limited to 512 octets.
     // RFC 6891 §4.3: traditional DNS messages over UDP are limited to 512 octets.
     let mut builder = MessageBuilder::new(&mut query, 512, id, 0x0100).map_err(io::Error::other)?;
     // RFC 1035 §4.1.2: Encode the name, type, and class in the Question section.
     builder
-        .question(
-            NameRef::parse(name.as_wire(), 0).map_err(io::Error::other)?,
-            qtype,
-            Class::IN,
-        )
+        .question(question_name, qtype, Class::IN)
         .map_err(io::Error::other)?;
     let _ = builder.finish();
     let bind = if resolver.is_ipv4() {
@@ -119,7 +116,7 @@ fn lookup_chain(
         || !response.qr()
         || response.question_count() != 1
         || !response.questions().all(|question| {
-            question.name == NameRef::parse(name.as_wire(), 0).expect("valid configured name")
+            question.name == question_name
                 && question.qtype == qtype
                 && question.qclass == Class::IN
         })
@@ -137,9 +134,7 @@ fn lookup_chain(
         if answer.class != Class::IN {
             continue;
         }
-        if answer.rtype == Type::CNAME
-            && answer.name == NameRef::parse(name.as_wire(), 0).expect("valid configured name")
-        {
+        if answer.rtype == Type::CNAME && answer.name == question_name {
             if let Ok(pharos_proto::Rdata::Cname(target)) = answer.data() {
                 cname = Some(
                     target
@@ -151,7 +146,7 @@ fn lookup_chain(
             continue;
         }
         // RFC 5452 §6: Accept address data only for the queried owner name.
-        if answer.name != NameRef::parse(name.as_wire(), 0).expect("valid configured name") {
+        if answer.name != question_name {
             continue;
         }
         // RFC 1035 §3.4.1: A RDATA contains a 32-bit Internet address.

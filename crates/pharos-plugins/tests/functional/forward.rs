@@ -3,18 +3,22 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
-use pharos_proto::{Message, Name};
+use pharos_proto::{EdnsOption, Message, Name, Rcode};
 use pharos_server::{Action, Context, Handler, Metadata, Outcome, Protocol, Transport};
 use tokio::net::UdpSocket;
 
 const QUERY: &[u8] = b"\x12\x34\x01\x00\x00\x01\0\0\0\0\0\0\x03www\x07example\x03com\0\0\x01\0\x01";
 
 async fn run(chain: &Chain) -> (Outcome, Vec<u8>, Option<String>) {
+    run_query(chain, QUERY).await
+}
+
+async fn run_query(chain: &Chain, query: &[u8]) -> (Outcome, Vec<u8>, Option<String>) {
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::with_capacity(65535);
     let mut slots = [];
     let mut context = Context {
-        query: Message::parse(QUERY).unwrap(),
+        query: Message::parse(query).unwrap(),
         client: "127.0.0.1:1000".parse().unwrap(),
         local: "127.0.0.1:53".parse().unwrap(),
         transport: Transport::Dns,
@@ -27,6 +31,61 @@ async fn run(chain: &Chain) -> (Outcome, Vec<u8>, Option<String>) {
     let outcome = chain.serve(&mut context).await;
     let upstream = context.metadata.get("forward/upstream").map(str::to_owned);
     (outcome, response, upstream)
+}
+
+fn ecs_query() -> Vec<u8> {
+    let mut query = QUERY.to_vec();
+    query[10..12].copy_from_slice(&1_u16.to_be_bytes());
+    query.extend_from_slice(&[
+        0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 11, 0, 8, 0, 7, 0, 1, 24, 8, 192, 0, 2,
+    ]);
+    query
+}
+
+async fn ecs_refused_upstream(
+    mismatch_retry: bool,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+        let query = Message::parse(&wire[..len]).unwrap();
+        let ecs = query
+            .opt()
+            .unwrap()
+            .options()
+            .iter()
+            .find_map(|option| match option {
+                EdnsOption::ClientSubnet(subnet) => Some(subnet),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(ecs.scope_prefix(), 0);
+        let mut refused = wire[..len].to_vec();
+        refused[2] |= 0x80;
+        refused[3] = Rcode::REFUSED.0 as u8;
+        socket.send_to(&refused, peer).await.unwrap();
+
+        let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+        let query = Message::parse(&wire[..len]).unwrap();
+        assert!(
+            query
+                .opt()
+                .unwrap()
+                .options()
+                .iter()
+                .all(|option| !matches!(option, EdnsOption::ClientSubnet(_)))
+        );
+        let mut reply = wire[..len].to_vec();
+        reply[2] |= 0x80;
+        if mismatch_retry {
+            let question_end = 12 + query.questions().next().unwrap().name.wire_len();
+            reply[question_end..question_end + 2].copy_from_slice(&28_u16.to_be_bytes());
+        }
+        socket.send_to(&reply, peer).await.unwrap();
+    });
+    (address, task)
 }
 
 fn chain(text: &str) -> Chain {
@@ -155,6 +214,28 @@ async fn forwards_query_and_restores_client_id() {
 }
 
 #[tokio::test]
+async fn refused_ecs_query_retries_without_ecs() {
+    let (address, upstream) = ecs_refused_upstream(false).await;
+    let chain = chain(&format!(".:0 {{\n forward . {address}\n}}"));
+    let query = ecs_query();
+    let (outcome, response, _) = run_query(&chain, &query).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_ecs_retry_preserves_original_refused_response() {
+    let (address, upstream) = ecs_refused_upstream(true).await;
+    let chain = chain(&format!(".:0 {{\n forward . {address}\n}}"));
+    let query = ecs_query();
+    let (outcome, response, _) = run_query(&chain, &query).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
 async fn refuses_unsafe_modified_query_view() {
     let chain = chain(".:0 {\n forward . 127.0.0.1:53\n}");
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\xc0\x03\0\x01\0\x01";
@@ -212,15 +293,17 @@ async fn invalid_file_nameserver_falls_back_to_next_upstream() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unlimited_invalid_upstream_does_not_block_runtime() {
+async fn all_invalid_upstreams_fail_fast() {
     let path = std::env::temp_dir().join(format!("pharos-forward-busy-{}", std::process::id()));
     std::fs::write(&path, "nameserver #\n").unwrap();
     let chain = chain(&format!(
         ".:0 {{\n forward . {} {{\n max_connect_attempts 0\n }}\n}}",
         path.display()
     ));
-    let result = tokio::time::timeout(std::time::Duration::from_millis(50), run(&chain)).await;
-    assert!(result.is_err(), "invalid upstream blocked the runtime");
+    let result = tokio::time::timeout(std::time::Duration::from_millis(50), run(&chain))
+        .await
+        .expect("all-invalid upstream set should fail fast");
+    assert_eq!(result.0, Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL));
     std::fs::remove_file(path).unwrap();
 }
 
@@ -250,7 +333,7 @@ async fn next_rcode_passes_to_following_forward_and_records_upstream() {
 }
 
 #[tokio::test]
-async fn failover_tries_next_upstream_and_question_mismatch_is_formerr() {
+async fn failover_discards_mismatched_upstream_response() {
     let (first, task1) = fake(2, false).await;
     let (second, task2) = fake(0, true).await;
     let chain = chain(&format!(
@@ -258,7 +341,7 @@ async fn failover_tries_next_upstream_and_question_mismatch_is_formerr() {
     ));
     assert_eq!(
         run(&chain).await.0,
-        Outcome::Unanswered(pharos_proto::Rcode::FORMERR)
+        Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL)
     );
     task1.await.unwrap();
     task2.await.unwrap();

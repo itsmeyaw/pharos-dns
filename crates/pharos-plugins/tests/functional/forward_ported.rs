@@ -295,16 +295,16 @@ async fn failover_returns_first_nonmatching_or_last_matching_response() {
     }
 }
 
-// CoreDNS forward_test.go TestForward_Regression_NoBusyLoop and default cap.
+// RFC 9520 §3.1: Configured retry caps apply per Upstream and transport.
 #[tokio::test]
-async fn max_connect_attempts_caps_failed_exchanges_and_zero_is_unbounded() {
+async fn max_connect_attempts_caps_each_upstream_and_zero_is_one() {
     for (setting, failed_before_success, expected_attempts, success) in [
         ("max_connect_attempts 1", 10, 1, false),
         ("max_connect_attempts 2", 10, 2, false),
-        ("max_connect_attempts 5", 10, 5, false),
+        ("max_connect_attempts 5", 10, 3, false),
         ("", 10, 2, false),
-        ("max_connect_attempts 0", 3, 4, true),
-        ("max_connect_attempts 5", 3, 4, true),
+        ("max_connect_attempts 0", 3, 1, false),
+        ("max_connect_attempts 5", 2, 3, true),
     ] {
         let fake = tcp_fake(failed_before_success).await;
         let chain = configure_chain(&format!(
@@ -329,9 +329,9 @@ async fn max_connect_attempts_caps_failed_exchanges_and_zero_is_unbounded() {
     }
 }
 
-// CoreDNS forward_test.go TestForward_DefaultConnectAttemptCap.
+// RFC 9520 §3.1: Default attempts are bounded per Upstream and transport.
 #[tokio::test]
-async fn default_connect_attempt_cap_is_twice_the_number_of_upstreams() {
+async fn default_attempt_cap_applies_per_upstream() {
     let a = tcp_fake(10).await;
     let b = tcp_fake(10).await;
     let c = tcp_fake(10).await;

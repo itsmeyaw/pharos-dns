@@ -45,7 +45,7 @@ async fn mismatch_with_debug() {
     };
     assert_eq!(
         chain.serve(&mut cx).await,
-        Outcome::Unanswered(pharos_proto::Rcode::FORMERR)
+        Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL)
     );
 }
 

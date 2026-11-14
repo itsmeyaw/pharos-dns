@@ -25,6 +25,7 @@ struct Stanza {
     from: Name,
     ignored: Vec<Name>,
     proxies: Vec<Upstream>,
+    has_valid_upstream: bool,
     options: Options,
     policy: Policy,
     robin: AtomicUsize,
@@ -54,11 +55,20 @@ struct Scratch {
     order: Vec<usize>,
     query: Vec<u8>,
     fallback: Vec<u8>,
+    upstream_attempts: Vec<u8>,
 }
 
 struct Buffer<'a> {
     pool: &'a BufferPool,
     scratch: Option<Scratch>,
+}
+
+struct BufferParts<'a> {
+    order: &'a mut Vec<usize>,
+    bytes: &'a mut [u8],
+    query: &'a mut Vec<u8>,
+    fallback: &'a mut Vec<u8>,
+    upstream_attempts: &'a mut Vec<u8>,
 }
 
 impl BufferPool {
@@ -68,6 +78,7 @@ impl BufferPool {
             order: Vec::new(),
             query: Vec::new(),
             fallback: Vec::new(),
+            upstream_attempts: Vec::new(),
         });
         Buffer {
             pool: self,
@@ -77,14 +88,15 @@ impl BufferPool {
 }
 
 impl Buffer<'_> {
-    fn parts(&mut self) -> (&mut Vec<usize>, &mut [u8], &mut Vec<u8>, &mut Vec<u8>) {
+    fn parts(&mut self) -> BufferParts<'_> {
         let scratch = self.scratch.as_mut().expect("buffer returned only on drop");
-        (
-            &mut scratch.order,
-            &mut scratch.bytes,
-            &mut scratch.query,
-            &mut scratch.fallback,
-        )
+        BufferParts {
+            order: &mut scratch.order,
+            bytes: &mut scratch.bytes,
+            query: &mut scratch.query,
+            fallback: &mut scratch.fallback,
+            upstream_attempts: &mut scratch.upstream_attempts,
+        }
     }
 }
 
@@ -128,11 +140,19 @@ fn random(max: usize) -> usize {
     (u64::from_ne_bytes(bytes) % max as u64) as usize
 }
 
-// RFC 9520 §3.1: Send at most three queries per server and transport.
-fn max_attempts(configured: Option<u32>, upstreams: usize) -> u64 {
-    configured.map_or((upstreams * 2).min(3) as u64, |attempts| {
-        u64::from(attempts.clamp(1, 3))
-    })
+// RFC 9520 §3.1: Send at most three Queries per server address and transport.
+fn max_attempts(configured: Option<u32>) -> u8 {
+    configured.map_or(2, |attempts| attempts.clamp(1, 3) as u8)
+}
+
+// RFC 9520 §3.1 and RFC 7871 §7.1.3: Reserve final query slot for required ECS fallback.
+fn primary_attempt_limit(configured: Option<u32>, reserve_ecs_retry: bool) -> u8 {
+    let limit = max_attempts(configured);
+    if reserve_ecs_retry {
+        limit.min(2)
+    } else {
+        limit
+    }
 }
 
 fn clear_ad_after_tsig_strip(validated_tsig: bool, response: &mut [u8]) {
@@ -201,6 +221,7 @@ impl Forward {
             result.stanzas.push(Stanza {
                 from,
                 ignored,
+                has_valid_upstream: proxies.iter().any(|upstream| upstream.proxy.is_some()),
                 proxies,
                 options: Options {
                     force_tcp: config.force_tcp,
@@ -274,16 +295,18 @@ impl Plugin for Forward {
             };
 
             let count = stanza.proxies.len();
-            if stanza
-                .proxies
-                .iter()
-                .all(|upstream| upstream.proxy.is_none())
-            {
+            if !stanza.has_valid_upstream {
                 // RFC 1034 §5.2.3: An unusable resolver set is a temporary resolution failure.
                 return Outcome::Unanswered(Rcode::SERVFAIL);
             }
             let mut buffer = self.buffers.get();
-            let (order, wire, query_buffer, fallback_buffer) = buffer.parts();
+            let BufferParts {
+                order,
+                bytes: wire,
+                query: query_buffer,
+                fallback: fallback_buffer,
+                upstream_attempts,
+            } = buffer.parts();
             // RFC 1034 §4.3.1: Forward RD unchanged so recursion occurs only on request.
             let original_query = cx.query.as_wire();
             let query_wire = if cx.query.wire_changed() {
@@ -323,8 +346,14 @@ impl Plugin for Forward {
             }
             // RFC 1035 §4.2.1: Retry lost UDP queries after timeout, trying other servers first.
             let deadline = Instant::now() + Duration::from_secs(5);
-            let attempt_limit = max_attempts(stanza.max_connect_attempts, count);
-            let mut attempts = 0_u64;
+            let can_retry_ecs = if cx.query.wire_changed() {
+                proxy::has_unsigned_ecs(query_wire)
+            } else {
+                proxy::has_unsigned_ecs_message(&cx.query)
+            };
+            let attempt_limit = primary_attempt_limit(stanza.max_connect_attempts, can_retry_ecs);
+            upstream_attempts.clear();
+            upstream_attempts.resize(count, 0);
             let mut i = 0;
             let mut fails = 0;
             let mut failovers = 0;
@@ -335,29 +364,17 @@ impl Plugin for Forward {
             } else {
                 proxy::Transport::Udp
             };
-            // RFC 7871 §7.1.3: Prepare fallback only when Query carries ECS.
-            let fallback_len = if cx.query.wire_changed() {
-                proxy::without_ecs(query_wire, fallback_buffer, protocol)
-                    .ok()
-                    .flatten()
-            } else if cx
-                .query
-                .additionals()
-                .any(|record| record.rtype == pharos_proto::Type::TSIG)
-                || !proxy::has_ecs(&cx.query)
+            'upstream_loop: while Instant::now() < deadline
+                && order
+                    .iter()
+                    .any(|&upstream| upstream_attempts[upstream] < attempt_limit)
             {
-                None
-            } else {
-                proxy::without_ecs(query_wire, fallback_buffer, protocol)
-                    .ok()
-                    .flatten()
-            };
-            while Instant::now() < deadline && attempts < attempt_limit {
                 if i == count {
                     i = 0;
                     fails = 0;
                 }
-                let mut upstream = &stanza.proxies[order[i]];
+                let mut upstream_index = order[i];
+                let mut upstream = &stanza.proxies[upstream_index];
                 i += 1;
                 if upstream.proxy.as_ref().is_some_and(Proxy::down) {
                     fails += 1;
@@ -370,21 +387,30 @@ impl Plugin for Forward {
                     if stanza.failfast {
                         break;
                     }
-                    upstream = &stanza.proxies[random(count)];
+                    upstream_index = random(count);
+                    upstream = &stanza.proxies[upstream_index];
+                }
+                if upstream_attempts[upstream_index] >= attempt_limit {
+                    continue;
                 }
                 if cx.metadata.enabled() {
                     cx.metadata
                         .insert_inline("forward/upstream", &upstream.address);
                 }
                 let Some(proxy) = &upstream.proxy else {
+                    upstream_attempts[upstream_index] = attempt_limit;
                     if fails >= count {
                         break;
                     }
-                    // RFC 9520 §3.1: Invalid targets send no query and use no retry slot.
+                    // Local policy: Skip invalid targets; no DNS Query reaches a server.
                     tokio::time::sleep(Duration::from_millis(1)).await;
                     continue;
                 };
                 let result = loop {
+                    if upstream_attempts[upstream_index] >= attempt_limit {
+                        continue 'upstream_loop;
+                    }
+                    upstream_attempts[upstream_index] += 1;
                     let result = timeout_at(
                         deadline,
                         proxy.exchange(query_wire, wire, protocol, stanza.options),
@@ -414,7 +440,6 @@ impl Plugin for Forward {
                             );
                         }
                         // RFC 1035 §4.1.1: An upstream mismatch is not a client FORMERR.
-                        attempts += 1;
                         if fails >= count {
                             break;
                         }
@@ -427,23 +452,28 @@ impl Plugin for Forward {
                         return Outcome::Unanswered(Rcode::NOTIMP);
                     }
                     _ => {
-                        attempts += 1;
                         if fails >= count {
                             break;
                         }
                         continue;
                     }
                 };
-                attempts += 1;
-                let rcode = Message::parse(&wire[..exchange.len])
-                    .expect("proxy validated Response")
-                    .rcode();
-                if rcode == Rcode::REFUSED
-                    && let Some(fallback_len) = fallback_len
-                    && attempts < attempt_limit
+                let mut response =
+                    Some(Message::parse(&wire[..exchange.len]).expect("proxy validated Response"));
+                if can_retry_ecs
+                    && response.as_ref().unwrap().rcode() == Rcode::REFUSED
+                    && let Some(fallback_len) =
+                        proxy::without_ecs(query_wire, fallback_buffer, protocol)
+                            .ok()
+                            .flatten()
+                    && upstream_attempts[upstream_index] < 3
                 {
                     // RFC 7871 §7.1.3: Retry REFUSED without the ECS address.
-                    attempts += 1;
+                    let refused_len = exchange.len;
+                    cx.response.clear();
+                    cx.response.extend_from_slice(&wire[..refused_len]);
+                    let _ = response.take();
+                    upstream_attempts[upstream_index] += 1;
                     let retry = timeout_at(
                         deadline,
                         proxy.exchange(
@@ -455,15 +485,20 @@ impl Plugin for Forward {
                     )
                     .await;
                     let Ok(Ok(retried)) = retry else {
-                        if fails >= count {
-                            break;
-                        }
-                        continue;
+                        clear_ad_after_tsig_strip(
+                            cx.metadata.validated_tsig().is_some(),
+                            cx.response,
+                        );
+                        return Outcome::Response;
                     };
                     exchange = retried;
+                    response = Some(
+                        Message::parse(&wire[..exchange.len])
+                            .expect("proxy validated ECS-free Response"),
+                    );
                 }
                 let answer = &wire[..exchange.len];
-                let response = Message::parse(answer).expect("proxy validated Response");
+                let response = response.expect("response remains available unless retried");
                 if stanza.failover.contains(&response.rcode()) {
                     failovers += 1;
                     if failovers < count {
@@ -479,7 +514,7 @@ impl Plugin for Forward {
                     try_next = true;
                     break;
                 }
-                // RFC 7871 §7.2.2: Return an answer with SCOPE longer than SOURCE unchanged.
+                // RFC 7871 §7.3: Preserve valid ECS response scope, including scope longer than source.
                 cx.response.clear();
                 // RFC 5625 §4.3: return Responses without filtering RRs by TYPE or CLASS.
                 cx.response.extend_from_slice(answer);
@@ -497,26 +532,27 @@ impl Plugin for Forward {
 
 #[cfg(test)]
 mod tests {
-    use super::{BufferPool, clear_ad_after_tsig_strip, max_attempts};
+    use super::{BufferPool, clear_ad_after_tsig_strip, max_attempts, primary_attempt_limit};
 
     #[test]
     fn returned_buffers_keep_their_contents_and_are_reused() {
         let pool = BufferPool::default();
         {
             let mut buffer = pool.get();
-            buffer.parts().1[65534] = 123;
+            buffer.parts().bytes[65534] = 123;
         }
         let mut buffer = pool.get();
-        assert_eq!(buffer.parts().1[65534], 123);
+        assert_eq!(buffer.parts().bytes[65534], 123);
     }
 
     #[test]
     fn connect_attempts_never_exceed_three() {
-        assert_eq!(max_attempts(None, 1), 2);
-        assert_eq!(max_attempts(None, 8), 3);
-        assert_eq!(max_attempts(Some(0), 8), 1);
-        assert_eq!(max_attempts(Some(2), 8), 2);
-        assert_eq!(max_attempts(Some(9), 8), 3);
+        assert_eq!(max_attempts(None), 2);
+        assert_eq!(max_attempts(Some(0)), 1);
+        assert_eq!(max_attempts(Some(2)), 2);
+        assert_eq!(max_attempts(Some(9)), 3);
+        assert_eq!(primary_attempt_limit(Some(3), true), 2);
+        assert_eq!(primary_attempt_limit(Some(3), false), 3);
     }
 
     #[test]

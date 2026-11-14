@@ -4,6 +4,69 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Message, Name, Rcode, TsigAlgorithm, TsigKey};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
+use tokio::net::UdpSocket;
+
+#[tokio::test]
+async fn forward_clears_ad_after_verified_tsig_is_stripped() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = upstream.recv_from(&mut wire).await.unwrap();
+        let request = Message::parse(&wire[..len]).unwrap();
+        assert!(
+            !request
+                .additionals()
+                .any(|record| record.rtype == pharos_proto::Type::TSIG)
+        );
+        let mut reply = wire[..len].to_vec();
+        reply[2] |= 0x80;
+        reply[3] |= 0x20;
+        upstream.send_to(&reply, peer).await.unwrap();
+    });
+    let text = format!(".:0 {{\n tsig {{\n secret key. c2VjcmV0\n }}\n forward . {address}\n}}");
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut wire = vec![
+        0, 1, 1, 0x20, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1,
+    ];
+    key.sign(&mut wire, now, 300, None).unwrap();
+    let query = Message::parse(&wire).unwrap();
+    let mac = key.verify(&wire, now, None, 0).unwrap().mac;
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    let mut slots = [];
+    let mut cx = Context {
+        query,
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    let outcome = configured[0].config.serve(&mut cx).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert!(!Message::parse(cx.response).unwrap().ad());
+    let signing = cx.metadata.take_tsig_signing();
+    pharos_server::finish_outcome_signed(
+        query,
+        Protocol::Udp,
+        outcome,
+        &mut response,
+        signing,
+        |error| panic!("{error}"),
+    );
+    key.verify(&response, now, Some(mac), 0).unwrap();
+    assert!(!Message::parse(&response).unwrap().ad());
+    task.await.unwrap();
+}
 
 #[tokio::test]
 async fn upstream_nsid_must_not_invalidate_tsig() {
