@@ -1,4 +1,6 @@
-use pharos_corefile::{Cursor, Error, Fallthrough, origins_from_args_or_server_block};
+use pharos_corefile::{
+    Cursor, Error, Fallthrough, normalize_domain, origins_from_args_or_server_block,
+};
 use std::{
     collections::{BTreeSet, HashSet},
     time::Duration,
@@ -184,10 +186,16 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
                 config.kubeconfig = Some((args[0].clone(), args.get(1).cloned()));
             }
             "multicluster" => {
-                config.multicluster_zones = origins_from_args_or_server_block(
-                    &args.iter().map(String::as_str).collect::<Vec<_>>(),
-                    &[],
-                )
+                let mut zones = Vec::new();
+                for argument in args {
+                    // RFC 1035 §2.3.4: reject arguments that cannot encode valid DNS names.
+                    let normalized = normalize_domain(&argument);
+                    if normalized.is_empty() {
+                        return Err(cursor.error(format!("invalid multicluster zone '{argument}'")));
+                    }
+                    zones.extend(normalized);
+                }
+                config.multicluster_zones = zones;
             }
             "startup_timeout" => {
                 let value = args.first().ok_or_else(|| cursor.arg_err())?;

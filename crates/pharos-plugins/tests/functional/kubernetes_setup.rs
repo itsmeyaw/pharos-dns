@@ -244,11 +244,16 @@ fn multicluster_setup_matches_coredns() {
     let empty = config("kubernetes cluster.local {\n multicluster\n}").unwrap();
     assert!(empty.multicluster_zones.is_empty());
     assert!(!empty.watch_config().multicluster);
-    let malformed = config("kubernetes cluster.local {\n multicluster bad..zone\n}").unwrap();
-    assert!(malformed.multicluster_zones.is_empty());
-    let mixed =
-        config("kubernetes cluster.local {\n multicluster bad..zone cluster.local\n}").unwrap_err();
-    assert!(mixed.message.contains("clusterset.local"), "{mixed}");
+    for zones in ["bad..zone", "bad..zone cluster.local"] {
+        let malformed = config(&format!(
+            "kubernetes cluster.local {{\n multicluster {zones}\n}}"
+        ))
+        .unwrap_err();
+        assert!(
+            malformed.message.contains("invalid multicluster zone"),
+            "{zones}: {malformed}"
+        );
+    }
     let invalid =
         config("kubernetes cluster.local {\n multicluster cluster.local\n zonal\n noendpoints\n}")
             .unwrap_err();
