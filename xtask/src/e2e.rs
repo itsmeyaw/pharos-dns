@@ -224,6 +224,10 @@ fn cases(service_ip: &str, kube_ip: &str, pod_ip: &str) -> Result<Vec<Case>, Str
         arguments: args.iter().map(|s| (*s).to_owned()).collect(),
         required: records.iter().map(|s| (*s).to_owned()).collect(),
     };
+    // Kubernetes DNS spec 1.1.0 §2.3.1: A Service ClusterIP has its matching A record.
+    // RFC 7766 §5: Full DNS implementations support both UDP and TCP transport.
+    // Kubernetes DNS spec 1.1.0 §2.4.1: Headless Services publish ready IPv4 endpoint A records.
+    // RFC 1035 §4.1.1: RCODE 3 means the queried domain does not exist.
     Ok(vec![
         make(
             "kubernetes Service A UDP",
@@ -687,6 +691,7 @@ fn normalize(input: &str) -> Result<String, String> {
                 return Err(format!("invalid dig record: {line}"));
             }
             // TTLs age and loadbalance can reorder RRsets.
+            // Kubernetes DNS spec 1.1.0 §2.1: Compare query and Kubernetes data without case.
             records.push(
                 format!("{section} {} {}", fields[0], fields[2..].join(" ")).to_ascii_lowercase(),
             );

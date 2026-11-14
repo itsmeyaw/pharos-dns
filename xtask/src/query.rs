@@ -50,12 +50,14 @@ fn decimal<T: std::str::FromStr>(value: &str) -> Option<T> {
         .flatten()
 }
 
+// RFC 1035 §3.2.3: QTYPE includes all TYPE codes and query-specific codes.
 fn record_type(value: &str) -> Option<Type> {
     macro_rules! types {
         ($($name:ident),* $(,)?) => {
             match value {
                 $(stringify!($name) => Some(Type::$name),)*
                 "NSAP-PTR" => Some(Type::NSAP_PTR),
+                // RFC 3597 §5: Unknown type codes use the TYPE<number> presentation form.
                 _ => value.strip_prefix("TYPE").and_then(decimal).map(Type),
             }
         };
@@ -80,6 +82,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
     let name = Name::parse(name, &root).map_err(|err| format!("invalid name: {err}"))?;
     let qtype =
         record_type(&qtype.to_ascii_uppercase()).ok_or_else(|| format!("invalid type: {qtype}"))?;
+    // RFC 1035 §3.2.5: QCLASS includes all CLASS values and query-specific classes.
     let class = match class.to_ascii_uppercase().as_str() {
         "IN" => Some(Class::IN),
         "CS" => Some(Class::CS),
@@ -87,6 +90,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         "HS" => Some(Class::HS),
         "NONE" => Some(Class::NONE),
         "ANY" => Some(Class::ANY),
+        // RFC 3597 §5: Unknown class codes use the CLASS<number> presentation form.
         value => value.strip_prefix("CLASS").and_then(decimal).map(Class),
     }
     .ok_or_else(|| format!("invalid class: {class}"))?;
@@ -246,6 +250,7 @@ impl Query {
         }
         match &self.tsig {
             Some((name, secret, TsigCase::Valid)) => {
+                // RFC 8945 §6: HMAC-SHA256 is a required TSIG algorithm.
                 Some(TsigKey::new(name.clone(), TsigAlgorithm::Sha256, secret))
             }
             _ => None,
@@ -315,10 +320,12 @@ impl Query {
     }
     pub(crate) fn wire(&self) -> Result<Vec<u8>, String> {
         let mut wire = Vec::new();
+        // RFC 1035 §4.1.1: Query headers set opcode and RD, leaving QR 0.
         let flags = (u16::from(self.opcode) << 11) | if self.recursion { 0x0100 } else { 0 };
         let mut builder =
             MessageBuilder::new(&mut wire, 65535, 0, flags).map_err(|err| err.to_string())?;
         let name = NameRef::parse(self.name.as_wire(), 0).map_err(|err| err.to_string())?;
+        // RFC 1035 §4.1.2: Question entries encode QNAME, QTYPE, and QCLASS.
         if !builder
             .question(name, self.qtype, self.class)
             .map_err(|err| err.to_string())?
@@ -347,9 +354,10 @@ impl Query {
             }
         }
         if self.edns {
-            // RFC 5001 §2.2: a Query requests NSID with an empty option payload.
+            // RFC 5001 §2.1: A resolver requests NSID with an empty option payload.
             let mut raw_options = Vec::new();
             if self.nsid {
+                // RFC 5001 §2.3: The NSID option code is 3.
                 raw_options.extend_from_slice(&[0, 3, 0, 0]);
             }
             // RFC 6891 §6.1.2: each option is encoded as code, length, and data.
@@ -359,10 +367,13 @@ impl Query {
                 raw_options.extend_from_slice(data);
             }
             let options = EdnsOptions::parse(&raw_options).map_err(|err| err.to_string())?;
+            // RFC 6891 §6.1.3: OPT TTL encodes the extended RCODE, EDNS version, and flags.
             let opt = Opt::new(
+                // RFC 6891 §6.2.3: OPT CLASS advertises the requestor's UDP payload size.
                 self.bufsize,
                 0,
                 self.edns_version,
+                // RFC 3225 §3: The DO bit signals that a resolver can accept DNSSEC records.
                 if self.dnssec { 0x8000 } else { 0 },
                 options,
             );
@@ -378,12 +389,13 @@ impl Query {
             let _ = builder.finish();
         }
         if let Some((name, secret, mode)) = &self.tsig {
+            // RFC 8945 §6: HMAC-SHA256 is a required TSIG algorithm.
             let key = TsigKey::new(name.clone(), TsigAlgorithm::Sha256, secret);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e| e.to_string())?
                 .as_secs();
-            // RFC 8945 §4.3: sign the complete Query before transmitting it.
+            // RFC 8945 §5.1: Sign the complete Query before transmitting it.
             key.sign(
                 &mut wire,
                 if *mode == TsigCase::BadTime {

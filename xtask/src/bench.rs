@@ -169,7 +169,7 @@ fn write_hickory_config(directory: &Path) -> Result<(), String> {
         config.push_str(&format!(
             "\n[[zones]]\nzone = \"{zone}\"\nzone_type = \"Primary\"\nfile = \"{zone}.zone\"\n"
         ));
-        // RFC 1035 §5.1: master file entries; RFC 1034 §4.3.4: zone needs SOA and NS at the apex.
+        // RFC 1035 §§5.1, 5.2; RFC 1034 §4.2.1: master files have apex SOA and NS records.
         let data = format!(
             "$ORIGIN {zone}.\n@ 3600 IN SOA ns admin 1 3600 600 86400 60\n@ 3600 IN NS ns\nns 3600 IN A 127.0.0.1\n@ 3600 IN A 192.0.2.1\n@ 3600 IN AAAA 2001:db8::1\nwww 3600 IN TXT \"pharos\"\n"
         );

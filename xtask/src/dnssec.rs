@@ -14,6 +14,7 @@ pub(crate) fn validate_response(
     let mut rdata = key.flags.to_be_bytes().to_vec();
     rdata.extend_from_slice(&[key.protocol, key.algorithm]);
     rdata.extend_from_slice(&key.public_key);
+    // RFC 4034 Appendix B: The DNSKEY RDATA key tag selects a matching key.
     let tag = key_tag(&rdata).ok_or("invalid DNSKEY")?;
     let (algorithm, public): (&dyn signature::VerificationAlgorithm, Vec<u8>) = match key.algorithm
     {
@@ -21,6 +22,7 @@ pub(crate) fn validate_response(
             &signature::ECDSA_P256_SHA256_FIXED,
             [&[4][..], &key.public_key].concat(),
         ),
+        // RFC 8080 §3: Ed25519 DNSKEY public keys are raw 32-octet verification keys.
         15 => (&signature::ED25519, key.public_key.clone()),
         _ => return Err("unsupported test DNSKEY algorithm".into()),
     };
@@ -45,7 +47,8 @@ pub(crate) fn validate_response(
             else {
                 continue;
             };
-            // RFC 4035 §5.3: the signer, key tag, algorithm, validity and RRset must agree.
+            // RFC 4035 §5.3.1: Signer, key tag, algorithm, validity, and RRset must agree.
+            // RFC 4034 §B: Key tags narrow candidates but do not uniquely identify a DNSKEY.
             if signer != key.owner
                 || key_tag != tag
                 || algorithm != key.algorithm
@@ -69,6 +72,7 @@ pub(crate) fn validate_response(
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             let input = signed_data(&data, &rrset).map_err(|e| e.to_string())?;
+            // RFC 8032 §5.1.7: Verify Ed25519 signatures using the key and signed data.
             verifier
                 .verify(&input, signature)
                 .map_err(|_| "invalid DNSSEC signature")?;

@@ -111,6 +111,7 @@ fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
     Ok(expect)
 }
 
+// RFC 1035 §4.1.1: RCODE encodes the response status.
 fn check_rcode(expect: &Expect, query: &str, rcode: Rcode) -> Result<(), String> {
     if expect
         .rcodes
@@ -122,6 +123,7 @@ fn check_rcode(expect: &Expect, query: &str, rcode: Rcode) -> Result<(), String>
     Ok(())
 }
 
+// RFC 1035 §3.4.1: An A record carries its IPv4 address in RDATA.
 fn check_answer(expect: &Expect, query: &str, message: &Message<'_>) -> Result<(), String> {
     for (_, address) in expect.addresses.iter().filter(|(line, _)| line == query) {
         if !message
@@ -372,6 +374,7 @@ fn exchange_with_key(
     key: Option<&pharos_proto::TsigKey>,
 ) -> Result<Vec<u8>, String> {
     let timeout = Some(Duration::from_secs(2));
+    // RFC 7766 §5: General-purpose DNS implementations support both UDP and TCP.
     match transport {
         Transport::Udp => {
             let socket = UdpSocket::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
@@ -395,6 +398,7 @@ fn exchange_with_key(
             stream
                 .set_write_timeout(timeout)
                 .map_err(|e| e.to_string())?;
+            // RFC 1035 §4.2.2: TCP DNS messages use a two-byte length excluding the prefix.
             let len = u16::try_from(wire.len()).map_err(|e| e.to_string())?;
             stream
                 .write_all(&len.to_be_bytes())
@@ -474,6 +478,7 @@ fn collect_axfr(
             break;
         }
         let mut length = [0; 2];
+        // RFC 5936 §2.3: A closed TCP connection terminates the AXFR session.
         stream.read_exact(&mut length).map_err(|e| e.to_string())?;
         let mut wire = vec![0; usize::from(u16::from_be_bytes(length))];
         stream.read_exact(&mut wire).map_err(|e| e.to_string())?;
@@ -565,6 +570,7 @@ fn wait_for_secondary(port: u16, line: &str) -> Result<(), String> {
 }
 
 fn kubernetes_http_ready(response: &[u8]) -> bool {
+    // RFC 9110 §15.3.1: A 200 status code indicates that the request succeeded.
     response.starts_with(b"HTTP/1.1 200 ")
 }
 
@@ -573,6 +579,7 @@ fn readiness_probe(port: u16) -> bool {
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
         return false;
     };
+    // RFC 9110 §9.3.1: GET requests the target resource's current representation.
     if stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .is_err()

@@ -87,6 +87,7 @@ pub(crate) fn compare_with_soa_serial(
             true,
         ),
     ] {
+        // RFC 5936 §2.2: Compare AXFR records without depending on their order.
         let mut left_sorted = left.clone();
         let mut right_sorted = right.clone();
         if additional && dedupe_additional {
