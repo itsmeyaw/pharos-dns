@@ -1258,12 +1258,15 @@ fn timestamp(value: &str) -> Result<u32, String> {
     if value.len() != 14 {
         return number(value);
     }
-    let seconds = timestamp_calendar(value)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "system clock is before Unix epoch")?;
     let now = i64::try_from(now.as_secs()).map_err(|_| "system clock is out of range")?;
-    timestamp_serial_at(seconds, now)
+    timestamp_at(value, now)
+}
+
+fn timestamp_at(value: &str, now: i64) -> Result<u32, String> {
+    timestamp_serial_at(timestamp_calendar(value)?, now)
 }
 
 fn timestamp_serial_at(seconds: i64, now: i64) -> Result<u32, String> {
@@ -1366,5 +1369,11 @@ mod tests {
             Ok((now - half_range + 1) as u32)
         );
         assert!(timestamp_serial_at(now - half_range, now).is_err());
+    }
+
+    // RFC 4034 §3.1.5: Reject year-2200 presentation dates against a fixed reference time.
+    #[test]
+    fn signature_calendar_date_outside_injected_window_is_rejected() {
+        assert!(timestamp_at("22000101000000", 1_000_000_000).is_err());
     }
 }
