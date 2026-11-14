@@ -1,15 +1,15 @@
 //! On-demand upstream health checks, independent of the forwarding transport.
 
-use pharos_proto::{Message, Name, Opcode};
+use pharos_proto::{Class, Name, NameRef, Opcode, Type};
 use pharos_server::metrics::ProxyMetrics;
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::AsyncReadExt,
@@ -20,6 +20,8 @@ use tokio::{
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
+// RFC 2308 §7.2: Dead-server state expires after five minutes.
+const DOWN_TTL_SECS: u64 = 300;
 
 /// Settings for on-demand checks of one upstream.
 #[derive(Clone)]
@@ -64,6 +66,8 @@ struct Shared {
     config: HealthConfig,
     state: Mutex<State>,
     fails: AtomicU32,
+    started: Instant,
+    down_since_secs: AtomicU64,
 }
 
 /// A single upstream's on-demand probe and consecutive failed-check count.
@@ -87,6 +91,8 @@ impl Health {
                 config,
                 state: Mutex::new(State::default()),
                 fails: AtomicU32::new(0),
+                started: Instant::now(),
+                down_since_secs: AtomicU64::new(u64::MAX),
             }),
         }
     }
@@ -118,18 +124,11 @@ impl Health {
                     }
                     if healthy {
                         shared.fails.store(0, Ordering::Relaxed);
+                        shared.down_since_secs.store(u64::MAX, Ordering::Relaxed);
                         state.running = false;
                         return;
                     }
-                    let _ =
-                        shared
-                            .fails
-                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |fails| {
-                                Some(fails.saturating_add(1))
-                            });
-                    if let Some(metrics) = &shared.config.metrics {
-                        metrics.healthcheck_failure();
-                    }
+                    record_failure(&shared);
                 }
                 sleep(shared.config.interval).await;
             }
@@ -139,7 +138,12 @@ impl Health {
     /// Whether failed checks strictly exceed the configured threshold.
     #[must_use]
     pub fn down(&self) -> bool {
-        self.shared.config.max_fails != 0 && self.fails() > self.shared.config.max_fails
+        let since = self.shared.down_since_secs.load(Ordering::Relaxed);
+        let max_fails = self.shared.config.max_fails;
+        if max_fails == 0 || self.fails() <= max_fails || since == u64::MAX {
+            return false;
+        }
+        !down_expired(since, self.shared.started.elapsed().as_secs())
     }
 
     /// Consecutive failed checks, reset to zero by a successful check.
@@ -166,6 +170,55 @@ impl Health {
         }
         state.running = false;
         state.generation = state.generation.wrapping_add(1);
+    }
+}
+
+fn down_expired(since_secs: u64, now_secs: u64) -> bool {
+    // RFC 2308 §7.2: Dead-server indications expire no later than five minutes.
+    now_secs.saturating_sub(since_secs) >= DOWN_TTL_SECS
+}
+
+fn record_failure(shared: &Shared) {
+    let elapsed = shared.started.elapsed().as_secs();
+    // RFC 2308 §7.2: Expire old dead-server state before recording this failure.
+    reset_expired_down_window(
+        &shared.fails,
+        &shared.down_since_secs,
+        shared.config.max_fails,
+        elapsed,
+    );
+    let _ = shared
+        .fails
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |fails| {
+            Some(fails.saturating_add(1))
+        });
+    if shared.fails.load(Ordering::Relaxed) > shared.config.max_fails {
+        let _ = shared.down_since_secs.compare_exchange(
+            u64::MAX,
+            elapsed,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+    if let Some(metrics) = &shared.config.metrics {
+        metrics.healthcheck_failure();
+    }
+}
+
+fn reset_expired_down_window(
+    fails: &AtomicU32,
+    down_since_secs: &AtomicU64,
+    max_fails: u32,
+    now_secs: u64,
+) {
+    let since = down_since_secs.load(Ordering::Relaxed);
+    if fails.load(Ordering::Relaxed) > max_fails
+        && since != u64::MAX
+        && down_expired(since, now_secs)
+    {
+        // RFC 2308 §7.2: Re-arm the five-minute dead-server expiry after it elapses.
+        fails.store(0, Ordering::Relaxed);
+        down_since_secs.store(u64::MAX, Ordering::Relaxed);
     }
 }
 
@@ -231,15 +284,33 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
         response
     };
 
-    // CoreDNS treats even a partially decoded response as healthy if its header is sane.
-    if Message::parse(&response).is_ok()
-        || (response.len() >= 12
-            && (response[2] & 0x80 != 0 || (response[2] >> 3) & 15 == Opcode::QUERY.0))
-    {
+    if response_matches_query(&response, id, &config.domain) {
         Ok(())
     } else {
         Err(io::ErrorKind::InvalidData.into())
     }
+}
+
+fn response_matches_query(response: &[u8], id: [u8; 2], domain: &Name) -> bool {
+    // RFC 5452 §4.2: Match response ID, QR, opcode, and Question without decoding answer RDATA.
+    if response.len() < 12
+        || response[..2] != id
+        || response[2] & 0x80 == 0
+        || response[2] & 0x78 != Opcode::QUERY.0 << 3
+        || response[4..6] != [0, 1]
+    {
+        return false;
+    }
+    let Ok(name) = NameRef::parse(response, 12) else {
+        return false;
+    };
+    let question_offset = 12 + name.wire_len();
+    let Some(question) = response.get(question_offset..question_offset + 4) else {
+        return false;
+    };
+    name == NameRef::parse(domain.as_wire(), 0).expect("valid health name")
+        && u16::from_be_bytes([question[0], question[1]]) == Type::NS.0
+        && u16::from_be_bytes([question[2], question[3]]) == Class::IN.0
 }
 
 #[cfg(test)]
@@ -251,6 +322,64 @@ mod tests {
         net::{TcpListener, UdpSocket},
         time::timeout,
     };
+
+    #[test]
+    fn down_state_expires_after_five_minutes() {
+        assert!(!down_expired(10, 309));
+        assert!(down_expired(10, 310));
+        assert!(!down_expired(310, 10));
+        let fails = AtomicU32::new(4);
+        let down_since = AtomicU64::new(10);
+        reset_expired_down_window(&fails, &down_since, 3, 310);
+        assert_eq!(fails.load(Ordering::Relaxed), 0);
+        assert_eq!(down_since.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn health_down_rearms_after_expiry_and_fresh_failures() {
+        let mut health = Health::new("127.0.0.1:53".parse().unwrap(), 1);
+        {
+            let shared = Arc::get_mut(&mut health.shared).unwrap();
+            shared.started = Instant::now() - Duration::from_secs(DOWN_TTL_SECS + 1);
+            shared.fails.store(2, Ordering::Relaxed);
+            shared.down_since_secs.store(0, Ordering::Relaxed);
+        }
+        assert!(!health.down());
+        record_failure(Arc::get_mut(&mut health.shared).unwrap());
+        assert!(!health.down());
+        record_failure(Arc::get_mut(&mut health.shared).unwrap());
+        assert!(health.down());
+    }
+
+    #[test]
+    fn matching_health_question_survives_malformed_answer_rdata() {
+        let response = [
+            0x12, 0x34, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0xc0, 0x0c, 0, 1, 0, 1,
+            0, 0, 0, 30, 0, 4, 127,
+        ];
+        assert!(response_matches_query(
+            &response,
+            [0x12, 0x34],
+            &".".parse().unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_response_with_a_different_question() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = HealthConfig::new(server.local_addr().unwrap(), 1);
+        config.domain = "example.org.".parse().unwrap();
+        let check = tokio::spawn(async move { check(&config).await });
+        let mut wire = [0; 512];
+        let (len, peer) = timeout(Duration::from_secs(1), server.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        wire[2] |= 0x80;
+        wire[len - 4..len - 2].copy_from_slice(&Type::A.0.to_be_bytes());
+        server.send_to(&wire[..len], peer).await.unwrap();
+        assert!(check.await.unwrap().is_err());
+    }
 
     #[tokio::test]
     async fn default_probe_sends_recursive_root_ns_over_udp() {

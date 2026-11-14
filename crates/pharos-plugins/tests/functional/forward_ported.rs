@@ -6,12 +6,14 @@ use pharos_plugins::{Chain, directives};
 use pharos_proto::{Message, Name, Rcode};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 use std::{
+    io::{ErrorKind, Read as StdRead, Write as StdWrite},
     net::SocketAddr,
+    net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -82,6 +84,24 @@ async fn udp_fake(rcode: u8, answer: Option<u8>) -> Fake {
                 ]);
             }
             socket.send_to(&reply, peer).await.unwrap();
+        }
+    });
+    Fake { addr, count, task }
+}
+
+async fn udp_mismatch_fake() -> Fake {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        loop {
+            let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+            seen.fetch_add(1, Ordering::SeqCst);
+            wire[2] |= 0x80;
+            wire[len - 4..len - 2].copy_from_slice(&28_u16.to_be_bytes());
+            socket.send_to(&wire[..len], peer).await.unwrap();
         }
     });
     Fake { addr, count, task }
@@ -295,16 +315,16 @@ async fn failover_returns_first_nonmatching_or_last_matching_response() {
     }
 }
 
-// CoreDNS forward_test.go TestForward_Regression_NoBusyLoop and default cap.
+// RFC 9520 §3.1: Configured retry caps apply per Upstream and transport.
 #[tokio::test]
-async fn max_connect_attempts_caps_failed_exchanges_and_zero_is_unbounded() {
+async fn max_connect_attempts_caps_each_upstream_and_zero_is_one() {
     for (setting, failed_before_success, expected_attempts, success) in [
         ("max_connect_attempts 1", 10, 1, false),
         ("max_connect_attempts 2", 10, 2, false),
-        ("max_connect_attempts 5", 10, 5, false),
+        ("max_connect_attempts 5", 10, 3, false),
         ("", 10, 2, false),
-        ("max_connect_attempts 0", 3, 4, true),
-        ("max_connect_attempts 5", 3, 4, true),
+        ("max_connect_attempts 0", 3, 1, false),
+        ("max_connect_attempts 5", 2, 3, true),
     ] {
         let fake = tcp_fake(failed_before_success).await;
         let chain = configure_chain(&format!(
@@ -329,9 +349,9 @@ async fn max_connect_attempts_caps_failed_exchanges_and_zero_is_unbounded() {
     }
 }
 
-// CoreDNS forward_test.go TestForward_DefaultConnectAttemptCap.
+// RFC 9520 §3.1: Default attempts are bounded per Upstream and transport.
 #[tokio::test]
-async fn default_connect_attempt_cap_is_twice_the_number_of_upstreams() {
+async fn default_attempt_cap_applies_per_upstream() {
     let a = tcp_fake(10).await;
     let b = tcp_fake(10).await;
     let c = tcp_fake(10).await;
@@ -342,6 +362,32 @@ async fn default_connect_attempt_cap_is_twice_the_number_of_upstreams() {
     .unwrap();
     assert_eq!(query(&chain).await.0, Outcome::Unanswered(Rcode::SERVFAIL));
     assert_eq!(counts(&[&a, &b, &c]), vec![2, 2, 2]);
+}
+
+// RFC 9520 §3.1: Per-upstream caps leave later configured servers reachable.
+#[tokio::test]
+async fn default_attempts_reach_fourth_upstream_after_three_mismatches() {
+    let first = udp_mismatch_fake().await;
+    let second = udp_mismatch_fake().await;
+    let third = udp_mismatch_fake().await;
+    let last = udp_fake(Rcode::NOERROR.0 as u8, Some(42)).await;
+    let chain = configure_chain(&format!(
+        "forward . {} {} {} {} {{\npolicy sequential\n}}",
+        first.addr, second.addr, third.addr, last.addr
+    ))
+    .unwrap();
+    let (outcome, response) = query(&chain).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata[3],
+        42
+    );
+    assert_eq!(counts(&[&first, &second, &third, &last]), [1, 1, 1, 1]);
 }
 
 // CoreDNS setup_test.go TestNextAlternate, exercised with actual responses.
@@ -408,6 +454,95 @@ async fn resolver_expands_hostname_and_deduplicates_numeric_address() {
         );
     }
     assert_eq!(counts(&[&first, &second]), vec![1, 2]);
+}
+
+// RFC 1035 §§4.1.1, 4.1.4, 4.2.2; RFC 7766 §5: encode TC, compressed RRs, and TCP frames.
+#[tokio::test]
+async fn configured_resolver_retries_truncated_udp_over_tcp() {
+    let tcp = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    tcp.set_nonblocking(true).unwrap();
+    let resolver_address = tcp.local_addr().unwrap();
+    let udp = StdUdpSocket::bind(resolver_address).unwrap();
+    udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let resolver = std::thread::spawn(move || {
+        let mut wire = [0; 512];
+        let (len, peer) = udp.recv_from(&mut wire).unwrap();
+        assert_eq!(
+            Message::parse(&wire[..len])
+                .unwrap()
+                .questions()
+                .next()
+                .unwrap()
+                .qtype
+                .0,
+            1
+        );
+        let mut truncated = wire[..len].to_vec();
+        truncated[2..4].copy_from_slice(&0x8380_u16.to_be_bytes());
+        udp.send_to(&truncated, peer).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (mut stream, _) = loop {
+            match tcp.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("TCP resolver accept failed: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut frame = [0; 2];
+        stream.read_exact(&mut frame).unwrap();
+        let mut query = vec![0; usize::from(u16::from_be_bytes(frame))];
+        stream.read_exact(&mut query).unwrap();
+        let mut answer = query.clone();
+        answer[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+        answer[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+        stream
+            .write_all(&(answer.len() as u16).to_be_bytes())
+            .unwrap();
+        stream.write_all(&answer).unwrap();
+
+        let (len, peer) = udp.recv_from(&mut wire).unwrap();
+        assert_eq!(
+            Message::parse(&wire[..len])
+                .unwrap()
+                .questions()
+                .next()
+                .unwrap()
+                .qtype
+                .0,
+            28
+        );
+        wire[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+        udp.send_to(&wire[..len], peer).unwrap();
+    });
+
+    let upstream = udp_fake(0, Some(42)).await;
+    let chain = configure_chain(&format!(
+        "forward . upstream.example:{} {{\nresolver {resolver_address}\n}}",
+        upstream.addr.port()
+    ))
+    .unwrap();
+    resolver.join().unwrap();
+    let (outcome, response) = query(&chain).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata[3],
+        42
+    );
+    assert_eq!(upstream.count.load(Ordering::SeqCst), 1);
 }
 
 // CoreDNS health_test.go TestHealth, TestHealthNoRecursion, TestHealthDomain and TestHealthNoMaxFails.
