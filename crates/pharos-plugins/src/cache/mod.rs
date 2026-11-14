@@ -640,6 +640,7 @@ impl Cache {
         let maximum = cached_maximum(maximum.as_secs());
         let mut ttl = maximum;
         let mut found = false;
+        let mut has_zero_ttl = false;
         // RFC 4035 §4.5: use the shortest RR TTL so the cache entry expires together.
         for record in response
             .answers()
@@ -650,10 +651,15 @@ impl Cache {
                 continue;
             }
             found = true;
+            has_zero_ttl |= record.ttl == 0;
             ttl = ttl.min(record.ttl);
             // RFC 2308 §4: bound the negative-response TTL by SOA.MINIMUM.
             if denial && let Ok(Rdata::Soa { minimum, .. }) = record.data() {
                 ttl = ttl.min(minimum);
+            }
+            if let Ok(Rdata::Rrsig { expiration, .. }) = record.data() {
+                // RFC 4033 §8.1: Do not retain signed RRsets past signature expiration.
+                ttl = ttl.min(signature_ttl(expiration, now as u32));
             }
         }
         if !found
@@ -665,7 +671,7 @@ impl Cache {
             ttl = 5;
         }
         // RFC 8767 §4: cached TTLs are capped by the configured maximum.
-        ttl = bound_ttl(ttl, denial, minimum, maximum);
+        ttl = bound_ttl(ttl, denial, minimum, maximum, has_zero_ttl);
         if failure {
             // RFC 9520 §3.2: Cache SERVFAIL and REFUSED with the failure backoff.
             ttl = self
@@ -771,18 +777,27 @@ fn is_soa_less_nodata(message: &Message<'_>, has_soa: bool, has_ns: bool) -> boo
     message.rcode() == Rcode::NOERROR && message.answer_count() == 0 && !has_soa && !has_ns
 }
 
-fn bound_ttl(ttl: u32, denial: bool, minimum: u32, maximum: u32) -> u32 {
+fn bound_ttl(ttl: u32, denial: bool, minimum: u32, maximum: u32, has_zero_ttl: bool) -> u32 {
     if denial {
         // RFC 2308 §3: Never raise a negative TTL above its SOA-derived lifetime.
         ttl.min(maximum)
-    } else {
+    } else if has_zero_ttl {
+        // RFC 1035 §3.2.1: Retain the documented zero-TTL minimum without raising positive TTLs.
         ttl.max(minimum).min(maximum)
+    } else {
+        // RFC 4033 §8.1: Purge positive RRsets no later than their nonzero TTL.
+        ttl.min(maximum)
     }
 }
 
 fn cached_maximum(maximum: u64) -> u32 {
     // RFC 8767 §4: Cap cached TTLs at the recommended 604800 seconds.
     maximum.min(u64::from(MAX_CACHED_TTL)) as u32
+}
+
+fn signature_ttl(expiration: u32, now: u32) -> u32 {
+    // RFC 4034 §3.1.5: Compare RRSIG times with 32-bit serial arithmetic.
+    u32::try_from(expiration.wrapping_sub(now) as i32).unwrap_or(0)
 }
 
 fn is_resolution_failure(rcode: Rcode) -> bool {
@@ -940,13 +955,21 @@ mod tests {
 
     #[test]
     fn negative_ttl_is_not_raised_to_positive_minimum() {
-        assert_eq!(bound_ttl(1, true, 5, 100), 1);
-        assert_eq!(bound_ttl(1, false, 5, 100), 5);
+        assert_eq!(bound_ttl(1, true, 5, 100, false), 1);
+        assert_eq!(bound_ttl(1, false, 5, 100, false), 1);
+        assert_eq!(bound_ttl(0, false, 5, 100, true), 5);
     }
 
     #[test]
     fn cache_ttl_cap_is_one_week() {
         assert_eq!(cached_maximum(u64::MAX), MAX_CACHED_TTL);
+    }
+
+    #[test]
+    fn cache_ttl_ends_at_rrsig_expiration() {
+        assert_eq!(signature_ttl(1_040, 1_000), 40);
+        assert_eq!(signature_ttl(990, 1_000), 0);
+        assert_eq!(signature_ttl(10, u32::MAX - 9), 20);
     }
 
     #[test]
