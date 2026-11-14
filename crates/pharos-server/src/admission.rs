@@ -57,6 +57,7 @@ pub fn admit_with_update<'a>(
             header_error(wire, response, Rcode::FORMERR);
             return Admission::Respond;
         }
+        // RFC 8490 §5.4.1: DSO-not-supported Responses use NOTIMP.
         header_error(wire, response, Rcode::NOTIMP);
         return Admission::Respond;
     }
@@ -86,6 +87,7 @@ pub fn admit_with_update<'a>(
         header_error(wire, response, Rcode::FORMERR);
         return Admission::Respond;
     };
+    // RFC 1996 §3.9: hide ignored Authority and Additional records from handlers.
     let query = query.ignore_notify_sections();
     // RFC 1035 §4.1.1: RCODE 5 refuses an operation for policy reasons.
     if !allow_non_in
@@ -125,8 +127,18 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode) {
     let dso = Opcode(((flags >> 11) & 15) as u8) == Opcode::STATEFUL;
     // RFC 8490 §5.4.1: DSO Response reserved flag bits are zero.
     let flags = 0x8000 | (flags & 0x7800) | if dso { 0 } else { flags & 0x0110 } | rcode.0;
-    let query = Message::parse(wire).ok();
-    let raw_opt = query.is_none().then(|| raw_opt(wire)).flatten();
+    // RFC 1035 §4.1.1: copy Questions only from a fully parsed Message.
+    let mut pointer_budget = NameRef::MAX_MESSAGE_POINTER_HOPS;
+    let parsed = Message::parse_with_pointer_budget(wire, &mut pointer_budget);
+    let query = parsed.ok();
+    // RFC 1035 §4.1.4: malformed-message recovery shares the aggregate pointer budget.
+    // RFC 6891 §7: preserve raw OPT presence when strict option parsing fails.
+    let raw_opt = if query.is_none() {
+        raw_opt(wire, &mut pointer_budget)
+    } else {
+        None
+    };
+    // RFC 1035 §4.1.1: construct a Response with the Query ID and selected RCODE.
     let Some(mut builder) = MessageBuilder::new(
         response,
         usize::from(u16::MAX),
@@ -141,13 +153,16 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode) {
         response.extend_from_slice(&[0; 8]);
         return;
     };
+    // RFC 1035 §4.1.1: copy validated Questions into the Response.
     if let Some(query) = &query {
         for question in query.questions() {
             let _ = builder.question(question.name, question.qtype, question.qclass);
         }
-    } else if let Some((name, qtype, qclass)) = raw_question(wire) {
+    } else if let Some((name, qtype, qclass)) = raw_question(wire, &mut pointer_budget) {
+        // RFC 1035 §4.1.2: recover the first Question from an otherwise malformed Message.
         let _ = builder.question(name, qtype, qclass);
     }
+    // RFC 6891 §7: include an OPT Response when a valid Query contained OPT.
     if let Some(opt) = query.as_ref().and_then(Message::opt) {
         let response_opt = opt.response_registered(None, rcode);
         if builder.reserve_response_opt(&response_opt).is_ok() {
@@ -173,11 +188,14 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode) {
 }
 
 // RFC 1035 §4.1.2: recover the first Question without constructing a validated Message.
-fn raw_question(wire: &[u8]) -> Option<(NameRef<'_>, Type, Class)> {
+fn raw_question<'a>(
+    wire: &'a [u8],
+    pointer_budget: &mut usize,
+) -> Option<(NameRef<'a>, Type, Class)> {
     if wire.len() < 12 || u16::from_be_bytes([wire[4], wire[5]]) == 0 {
         return None;
     }
-    let name = NameRef::parse(wire, 12).ok()?;
+    let name = NameRef::parse_with_budget(wire, 12, pointer_budget).ok()?;
     let offset = 12 + name.wire_len();
     Some((
         name,
@@ -191,7 +209,7 @@ fn raw_question(wire: &[u8]) -> Option<(NameRef<'_>, Type, Class)> {
 }
 
 // RFC 6891 §7: fall back only when strict parsing rejects malformed EDNS; recover OPT presence.
-fn raw_opt(wire: &[u8]) -> Option<u16> {
+fn raw_opt(wire: &[u8], pointer_budget: &mut usize) -> Option<u16> {
     if wire.len() < 12 {
         return None;
     }
@@ -204,7 +222,7 @@ fn raw_opt(wire: &[u8]) -> Option<u16> {
     let mut offset = 12;
     for (section, count) in counts.into_iter().enumerate() {
         for _ in 0..count {
-            let name = NameRef::parse(wire, offset).ok()?;
+            let name = NameRef::parse_with_budget(wire, offset, pointer_budget).ok()?;
             offset = offset.checked_add(name.wire_len())?;
             if section == 0 {
                 offset = offset.checked_add(4)?;

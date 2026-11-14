@@ -11,7 +11,6 @@ const MAX_LABEL_LEN: usize = 63;
 const MAX_LABELS: usize = 127;
 // RFC 1035 §4.1.4 requires backward targets; local per-name and per-Message caps bound parser work.
 const MAX_POINTER_HOPS_PER_NAME: usize = 255;
-pub(crate) const MAX_POINTER_HOPS_PER_MESSAGE: usize = 8192;
 
 /// An absolute domain name used in configuration and authoritative data.
 #[derive(Clone, Debug)]
@@ -333,13 +332,18 @@ impl PartialOrd for Name {
 }
 
 impl<'a> NameRef<'a> {
+    /// Maximum aggregate compression-pointer steps allowed for one DNS Message.
+    // RFC 1035 §4.1.4: local parser budget bounds work on backward pointers.
+    pub const MAX_MESSAGE_POINTER_HOPS: usize = 8192;
+
     /// Validates and borrows the name at `offset` in a DNS message.
     pub fn parse(message: &'a [u8], offset: usize) -> Result<Self, NameError> {
         let mut pointer_budget = MAX_POINTER_HOPS_PER_NAME;
         Self::parse_with_budget(message, offset, &mut pointer_budget)
     }
 
-    pub(crate) fn parse_with_budget(
+    /// Validates a name while consuming the caller's aggregate pointer-work budget.
+    pub fn parse_with_budget(
         message: &'a [u8],
         offset: usize,
         pointer_budget: &mut usize,
@@ -469,6 +473,7 @@ pub struct NameRefLabels<'a> {
 impl<'a> Iterator for NameRefLabels<'a> {
     type Item = &'a [u8];
 
+    // RFC 1035 §4.1.4: only validated, bounded compression chains reach this iterator.
     // RFC 4343 §4: Preserve input label octets where convenient.
     fn next(&mut self) -> Option<Self::Item> {
         while !self.done {

@@ -200,6 +200,45 @@ fn notify_requests_hide_valid_authority_and_additional_records() {
 }
 
 #[test]
+fn notify_request_view_retains_tsig_for_authentication() {
+    use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
+
+    let name: Name = ".".parse().unwrap();
+    let name = NameRef::parse(name.as_wire(), 0).unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2000).unwrap();
+    builder.question(name, Type::SOA, Class::IN).unwrap();
+    builder
+        .record(
+            Section::Additional,
+            name,
+            Type::A,
+            Class::IN,
+            0,
+            &[192, 0, 2, 1],
+        )
+        .unwrap();
+    builder
+        .record(Section::Additional, name, Type::TSIG, Class::ANY, 0, &[0])
+        .unwrap();
+    let message = Message::parse(builder.finish())
+        .unwrap()
+        .ignore_notify_sections();
+
+    assert_eq!(message.additional_count(), 1);
+    assert_eq!(
+        message
+            .additionals()
+            .map(|record| record.rtype)
+            .collect::<Vec<_>>(),
+        [Type::TSIG]
+    );
+    let unsigned = message.without_final_tsig().unwrap();
+    assert_eq!(unsigned.additional_count(), 0);
+    assert_eq!(unsigned.additionals().count(), 0);
+}
+
+#[test]
 fn reads_flags_counts_and_record_offsets() {
     let wire = b"\xab\xcd\xff\xff\x00\x01\x00\x01\x00\x01\x00\x01\x01x\0\x00\x01\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x78\x00\x04\x7f\x00\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x01\x00\x00\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00";
     let message = Message::parse(wire).unwrap();
@@ -225,6 +264,25 @@ fn reads_flags_counts_and_record_offsets() {
     );
     assert_eq!(message.authorities().next().unwrap().ttl, 1);
     assert_eq!(message.additionals().next().unwrap().ttl, 2);
+}
+
+#[test]
+fn message_parser_consumes_a_shared_pointer_budget() {
+    let wire = [
+        0x12, 0x34, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0xc0, 0x0c, 0, 1, 0, 1,
+    ];
+    let mut budget = 1;
+    let message = Message::parse_with_pointer_budget(&wire, &mut budget).unwrap();
+    assert_eq!(message.question_count(), 2);
+    assert_eq!(budget, 0);
+
+    let mut exhausted = 0;
+    assert!(matches!(
+        Message::parse_with_pointer_budget(&wire, &mut exhausted),
+        Err(pharos_proto::MessageError::Name(
+            pharos_proto::NameError::PointerLimit
+        ))
+    ));
 }
 
 #[test]
