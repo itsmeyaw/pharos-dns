@@ -583,14 +583,6 @@ fn visit(
         let Some(svc) = index.service_import(namespace, service) else {
             return false;
         };
-        if config.ignore_empty_service
-            && !svc.headless()
-            && !index
-                .multicluster_endpoints(namespace, service)
-                .any(|ep| !ep.endpoints.addresses.is_empty())
-        {
-            return false;
-        }
         // KEP-1645 MCS DNS spec §2.4.1: headless records use ready endpoint addresses.
         // KEP-1645 MCS DNS spec §2.3.4: A leading label selects a hostname, not a cluster.
         if svc.headless() || !req.endpoint.is_empty() {
@@ -626,7 +618,7 @@ fn visit(
             return found;
         }
         let mut found = false;
-        // KEP-1645 MCS DNS spec §2.3.1: ClusterSetIP records use the service IPs.
+        // KEP-1645 MCS DNS spec §2.3.1: ClusterSetIP records use ServiceImport IPs, not endpoint state.
         // KEP-1645 §Design Details > ClusterSet Service Behavior Expectations > DNS: Import IPs.
         for port in &svc.ports {
             if matching(req, port) {

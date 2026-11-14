@@ -463,7 +463,7 @@ async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
 async fn multicluster_answers_service_and_cluster_qualified_endpoint() {
     let zone = "clusterset.local.";
     run_group(
-        "multicluster clusterset.local",
+        "multicluster clusterset.local\n ignore empty_service",
         vec![
             positive(
                 "import",
