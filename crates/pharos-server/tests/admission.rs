@@ -58,7 +58,7 @@ fn bad_edns_version_is_answered_before_chain() {
 }
 
 #[test]
-fn accepts_query_with_zero_questions_and_rejects_reserved_z() {
+fn accepts_zero_question_queries_and_ignores_reserved_z() {
     let mut wire = valid();
     wire[5] = 0;
     let mut response = Vec::with_capacity(512);
@@ -71,9 +71,8 @@ fn accepts_query_with_zero_questions_and_rejects_reserved_z() {
     wire[3] |= 0x40;
     assert!(matches!(
         admit(&wire, false, &mut response),
-        Admission::Respond
+        Admission::Query(_)
     ));
-    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::FORMERR);
 }
 
 #[test]

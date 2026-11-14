@@ -190,7 +190,8 @@ async fn metrics_select_the_inherited_view_for_each_query() {
     let mut metrics = String::new();
     server.metrics().encode(&mut metrics);
     assert!(metrics.contains("plugin=\"test\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"deep\",zone=\"org.\"} 1\n"), "{metrics}");
-    assert!(metrics.contains("plugin=\"test\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"other\",zone=\"org.\"} 2\n"), "{metrics}");
+    assert!(metrics.contains("plugin=\"test\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"other\",zone=\"org.\"} 1\n"), "{metrics}");
+    assert!(metrics.contains("plugin=\"test\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"\",zone=\"org.\"} 1\n"), "{metrics}");
     assert!(metrics.contains("plugin=\"\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"deep\",zone=\"deep.example.org.\"} 1\n"), "{metrics}");
 }
 

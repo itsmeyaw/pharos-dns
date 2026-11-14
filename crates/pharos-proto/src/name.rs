@@ -9,6 +9,8 @@ use std::{
 const MAX_NAME_LEN: usize = 255;
 const MAX_LABEL_LEN: usize = 63;
 const MAX_LABELS: usize = 127;
+const MAX_POINTER_HOPS_PER_NAME: usize = 255;
+pub(crate) const MAX_POINTER_HOPS_PER_MESSAGE: usize = 8192;
 
 /// An absolute domain name used in configuration and authoritative data.
 #[derive(Clone, Debug)]
@@ -321,7 +323,16 @@ impl PartialOrd for Name {
 impl<'a> NameRef<'a> {
     /// Validates and borrows the name at `offset` in a DNS message.
     pub fn parse(message: &'a [u8], offset: usize) -> Result<Self, NameError> {
-        let wire_len = check_message_name(message, offset)?;
+        let mut pointer_budget = MAX_POINTER_HOPS_PER_NAME;
+        Self::parse_with_budget(message, offset, &mut pointer_budget)
+    }
+
+    pub(crate) fn parse_with_budget(
+        message: &'a [u8],
+        offset: usize,
+        pointer_budget: &mut usize,
+    ) -> Result<Self, NameError> {
+        let wire_len = check_message_name(message, offset, pointer_budget)?;
         Ok(Self {
             message,
             offset,
@@ -476,10 +487,15 @@ impl<'a> Iterator for NameRefLabels<'a> {
     }
 }
 
-fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError> {
+fn check_message_name(
+    message: &[u8],
+    offset: usize,
+    pointer_budget: &mut usize,
+) -> Result<usize, NameError> {
     let mut position = offset;
     let mut wire_len = 0;
     let mut expanded_len = 0;
+    let mut pointer_hops = 0;
     let mut jumped = false;
     let mut pointer_limit = message.len();
     loop {
@@ -513,6 +529,10 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
                 position = end;
             }
             0xc0..=0xff => {
+                // RFC 1035 §4.1.4: Compression pointers refer backwards; cap adversarial walk work.
+                if pointer_hops == MAX_POINTER_HOPS_PER_NAME || *pointer_budget == 0 {
+                    return Err(NameError::PointerLimit);
+                }
                 if jumped && position + 2 > pointer_limit {
                     return Err(NameError::PointerNotBackwards);
                 }
@@ -526,6 +546,8 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
                     wire_len += 2;
                     jumped = true;
                 }
+                pointer_hops += 1;
+                *pointer_budget -= 1;
                 pointer_limit = position;
                 position = target;
             }

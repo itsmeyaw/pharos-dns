@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::{
     BuildError, Class, EdnsOptions, MessageBuilder, Name, NameError, NameRef, Opcode, Opt, Rcode,
-    Section, Type,
+    Section, Type, name::MAX_POINTER_HOPS_PER_MESSAGE,
 };
 
 const HEADER_LEN: usize = 12;
@@ -119,8 +119,17 @@ impl<'a> Record<'a> {
 }
 
 fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), MessageError> {
+    let mut pointer_budget = usize::MAX;
+    question_with_budget(wire, offset, &mut pointer_budget)
+}
+
+fn question_with_budget<'a>(
+    wire: &'a [u8],
+    offset: usize,
+    pointer_budget: &mut usize,
+) -> Result<(Question<'a>, usize), MessageError> {
     // RFC 1035 §4.1.2: a question consists of QNAME, QTYPE, and QCLASS.
-    let name = NameRef::parse(wire, offset)?;
+    let name = NameRef::parse_with_budget(wire, offset, pointer_budget)?;
     let offset = offset + name.wire_len();
     let result = Question {
         name,
@@ -132,9 +141,18 @@ fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), Message
 }
 // RFC 6698 §2: record class and TTL are parsed with no TLSA-specific restriction.
 fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageError> {
+    let mut pointer_budget = usize::MAX;
+    record_with_budget(wire, offset, &mut pointer_budget)
+}
+
+fn record_with_budget<'a>(
+    wire: &'a [u8],
+    offset: usize,
+    pointer_budget: &mut usize,
+) -> Result<(Record<'a>, usize), MessageError> {
     // RFC 6895 §3: each RR has NAME, TYPE, CLASS, TTL, RDLENGTH, and variable RDATA.
     // RFC 1035 §4.1.3: RDLENGTH bounds the RDATA following the fixed RR fields.
-    let name = NameRef::parse(wire, offset)?;
+    let name = NameRef::parse_with_budget(wire, offset, pointer_budget)?;
     let offset = offset + name.wire_len();
     let rtype = Type(read_u16(wire, offset)?);
     // RFC 8162 §2: the record class is read per record, so SMIMEA is class independent.
@@ -232,6 +250,9 @@ impl<'a> Message<'a> {
         let mut starts = [0; 4];
         let mut offset = HEADER_LEN;
         let mut has_opt = false;
+        let mut has_sig0 = false;
+        // RFC 1035 §4.1.4: Bound aggregate compression-pointer walks for this Message.
+        let mut pointer_budget = MAX_POINTER_HOPS_PER_MESSAGE;
         'sections: for section in 0..4 {
             starts[section] = offset;
             let wire_count = counts[section];
@@ -241,9 +262,9 @@ impl<'a> Message<'a> {
             }
             for _ in 0..wire_count {
                 offset = if section == 0 {
-                    question(wire, offset)?.1
+                    question_with_budget(wire, offset, &mut pointer_budget)?.1
                 } else {
-                    let (rr, next) = match record(wire, offset) {
+                    let (rr, next) = match record_with_budget(wire, offset, &mut pointer_budget) {
                         Ok(record) => record,
                         Err(_) if notify && section >= 2 => {
                             // RFC 1996 §3.9: malformed ignored data cannot reject a NOTIFY.
@@ -257,6 +278,10 @@ impl<'a> Message<'a> {
                     };
                     let sig0 =
                         section == 3 && rr.rtype == Type::SIG && rr.rdata.starts_with(&[0, 0]);
+                    // RFC 6891 §6.1.1 and RFC 2931 §3.1: SIG(0) is the final Additional RR.
+                    if section == 3 && has_sig0 && !notify {
+                        return Err(MessageError::InvalidOpt);
+                    }
                     // RFC 6891 §6.1.1: OPT appears at most once in the additional section.
                     // RFC 6891 §6.1.2: the OPT owner is the root and its RDATA holds options.
                     if rr.rtype == Type::OPT && !(notify && section == 2) {
@@ -273,13 +298,8 @@ impl<'a> Message<'a> {
                         }
                         has_opt = true;
                     }
-                    // RFC 6891 §6.1.1: SIG(0) precedes OPT in Additional.
-                    if sig0 && has_opt {
-                        if notify {
-                            counts[3] = 0;
-                            break;
-                        }
-                        return Err(MessageError::InvalidOpt);
+                    if sig0 {
+                        has_sig0 = true;
                     }
                     next
                 };

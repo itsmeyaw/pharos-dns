@@ -155,8 +155,14 @@ impl<C> Router<C> {
         query: Message<'_>,
         mut matches: impl FnMut(&'a ServerBlock<C>) -> bool,
     ) -> Option<&'a ServerBlock<C>> {
-        let question = query.questions().next()?;
         let blocks = self.listeners.get(key)?;
+        let Some(question) = query.questions().next() else {
+            // RFC 9619 §4: route zero-question Queries to the root Server Block.
+            return blocks
+                .iter()
+                .filter(|block| block.domain.label_count() == 0 && block.chain.is_some())
+                .find(|block| matches(block));
+        };
         // RFC 4035 §3.1.4.1: Answer DS queries at a zone cut from the parent zone's side.
         let ds = query.opcode() == Opcode::QUERY && question.qtype == Type::DS;
         let labels = question.name.labels().count();
@@ -183,6 +189,7 @@ impl<C> Router<C> {
         }
         let mut selected = None;
         let mut selected_labels = None;
+        let mut child_at_cut = None;
         // RFC 4035 §3.1.4.1: route DS at a cut to the closest matching parent zone.
         // RFC 1034 §4.3.2: Select the nearest ancestor zone for QNAME.
         for block in blocks
@@ -194,9 +201,9 @@ impl<C> Router<C> {
                 continue;
             }
             if ds_at_cut && count == labels {
-                if VIEW {
+                if VIEW && question.name == block.domain && matches(block) {
                     // RFC 4035 §3.1.4.1: collect child-view metadata; answer from the parent zone.
-                    let _ = matches(block);
+                    child_at_cut = Some(block);
                 }
                 continue;
             }
@@ -218,6 +225,23 @@ impl<C> Router<C> {
         }
         if selected.is_some() {
             return selected;
+        }
+        if ds_at_cut {
+            if VIEW {
+                if child_at_cut.is_some() {
+                    return child_at_cut;
+                }
+            } else if let Some(child) = blocks
+                .iter()
+                .filter(|block| {
+                    block.domain.label_count() == labels && question.name == block.domain
+                })
+                .filter(|block| block.chain.is_some())
+                .find(|block| matches(block))
+            {
+                // RFC 4035 §3.1.4.1: without parent authority, return child-apex DS NODATA.
+                return Some(child);
+            }
         }
         blocks
             .iter()

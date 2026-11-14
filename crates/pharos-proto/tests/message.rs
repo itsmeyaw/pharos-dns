@@ -119,21 +119,10 @@ fn hostile_counts_and_compression_are_rejected() {
 }
 
 #[test]
-fn sig0_precedes_opt_and_notify_ignores_trailing_sections() {
+fn sig0_is_last_after_opt_and_notify_ignores_trailing_sections() {
     use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
     let name: Name = ".".parse().unwrap();
     let root = NameRef::parse(name.as_wire(), 0).unwrap();
-    let mut sig0_then_opt = Vec::new();
-    let mut builder = MessageBuilder::new(&mut sig0_then_opt, 512, 1, 0).unwrap();
-    builder
-        .record(Section::Additional, root, Type::SIG, Class::IN, 0, &[0, 0])
-        .unwrap();
-    builder
-        .record(Section::Additional, root, Type::OPT, Class(1232), 0, &[])
-        .unwrap();
-    let sig0_then_opt = builder.finish();
-    assert!(Message::parse(sig0_then_opt).is_ok());
-
     let mut opt_then_sig0 = Vec::new();
     let mut builder = MessageBuilder::new(&mut opt_then_sig0, 512, 1, 0).unwrap();
     builder
@@ -143,7 +132,17 @@ fn sig0_precedes_opt_and_notify_ignores_trailing_sections() {
         .record(Section::Additional, root, Type::SIG, Class::IN, 0, &[0, 0])
         .unwrap();
     let opt_then_sig0 = builder.finish();
-    assert!(Message::parse(opt_then_sig0).is_err());
+    assert!(Message::parse(opt_then_sig0).is_ok());
+
+    let mut sig0_then_opt = Vec::new();
+    let mut builder = MessageBuilder::new(&mut sig0_then_opt, 512, 1, 0).unwrap();
+    builder
+        .record(Section::Additional, root, Type::SIG, Class::IN, 0, &[0, 0])
+        .unwrap();
+    builder
+        .record(Section::Additional, root, Type::OPT, Class(1232), 0, &[])
+        .unwrap();
+    assert!(Message::parse(builder.finish()).is_err());
 
     let notify = b"\0\x01\x20\0\0\x01\0\0\0\x01\0\x01\x01a\0\0\x06\0\x01\xff";
     assert_eq!(Message::parse(notify).unwrap().authority_count(), 0);
@@ -191,7 +190,7 @@ fn reads_flags_counts_and_record_offsets() {
 }
 
 #[test]
-fn accepts_backward_pointer_chains_over_255_hops() {
+fn rejects_backward_pointer_chains_over_255_hops() {
     let mut wire = vec![0; 12];
     wire[7] = 2; // Answer count
     wire.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 0, 0, 2, 0]); // root, RR header, 512-byte RDATA
@@ -203,8 +202,39 @@ fn accepts_backward_pointer_chains_over_255_hops() {
     let target = 23 + 2 * 255;
     wire.extend_from_slice(&[0xc0 | (target >> 8) as u8, target as u8]);
     wire.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
-    let message = Message::parse(&wire).unwrap();
-    assert_eq!(message.answers().next().unwrap().name.labels().count(), 0);
+    assert!(matches!(
+        Message::parse(&wire),
+        Err(pharos_proto::MessageError::Name(
+            pharos_proto::NameError::PointerLimit
+        ))
+    ));
+}
+
+#[test]
+fn bounds_aggregate_pointer_work_in_large_messages() {
+    let mut wire = vec![0; 12];
+    wire[6..8].copy_from_slice(&1001_u16.to_be_bytes());
+    wire.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 0, 0, 0xc3, 0x50]);
+    let chain_start = wire.len();
+    wire.push(0);
+    let mut last_pointer = chain_start;
+    for _ in 0..200 {
+        wire.extend_from_slice(&[0xc0 | ((last_pointer >> 8) as u8), last_pointer as u8]);
+        last_pointer = wire.len() - 2;
+    }
+    wire.resize(chain_start + 50_000, 0);
+    for _ in 0..1000 {
+        wire.extend_from_slice(&[0xc0 | ((last_pointer >> 8) as u8), last_pointer as u8]);
+        wire.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
+    }
+
+    assert!(wire.len() < 65_535);
+    assert!(matches!(
+        Message::parse(&wire),
+        Err(pharos_proto::MessageError::Name(
+            pharos_proto::NameError::PointerLimit
+        ))
+    ));
 }
 
 proptest::proptest! {

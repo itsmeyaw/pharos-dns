@@ -24,7 +24,7 @@ pub fn admit_with_update<'a>(
     response: &mut Vec<u8>,
 ) -> Admission<'a> {
     // RFC 1035 §4.1.1: the DNS header consists of six 16-bit fields.
-    // RFC 1035 §4.1.1: never answer a truncated Response.
+    // RFC 1035 §4.1.1: QR=1 identifies a Response, not a request.
     if wire.len() >= 4 && wire[2] & 0x80 != 0 {
         return Admission::Drop;
     }
@@ -83,11 +83,7 @@ pub fn admit_with_update<'a>(
         header_error(wire, response, Rcode::FORMERR);
         return Admission::Respond;
     }
-    // RFC 1035 §4.1.1: the reserved DNS header Z bit is zero in Queries.
-    if flags & 0x0040 != 0 {
-        header_error(wire, response, Rcode::FORMERR);
-        return Admission::Respond;
-    }
+    // RFC 6895 §2.1: receivers ignore the reserved header Z bit.
     // RFC 6891 §6.1.1: Multiple OPT records cause FORMERR.
     let Ok(query) = Message::parse(wire) else {
         header_error(wire, response, Rcode::FORMERR);
