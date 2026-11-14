@@ -440,8 +440,24 @@ fn zone_rejects_mixed_svcb_modes() {
             ttl: 60,
             rdata: [0, 1, 0].into(),
         },
+        pharos_proto::zone::ZoneRecord {
+            owner: "svc.example.org.".parse().unwrap(),
+            class: Class::IN,
+            rtype: Type::A,
+            ttl: 60,
+            rdata: [192, 0, 2, 1].into(),
+        },
     ]);
-    assert!(Zone::from_records(apex, svcb).is_err());
+    let zone = Zone::from_records(apex, svcb).unwrap();
+    let owner: Name = "svc.example.org.".parse().unwrap();
+    let bindings = zone.rrset(NameRef::parse(owner.as_wire(), 0).unwrap(), Type::SVCB);
+    let bindings = bindings.collect::<Vec<_>>();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(&bindings[0].rdata[..2], &[0, 0]);
+
+    let (outcome, response) = zone_response(&zone, &owner, Type::SVCB, Class::IN, true).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().additional_count(), 0);
 }
 
 #[test]

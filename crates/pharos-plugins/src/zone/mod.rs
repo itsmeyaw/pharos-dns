@@ -885,6 +885,7 @@ impl Zone {
         let lookup = if cut.is_none()
             && !chain_limited
             && !empty_alias
+            && !yxdomain
             && (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
             && (!zone.exact(target)
                 || question.qtype == Type::NS

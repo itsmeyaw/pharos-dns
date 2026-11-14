@@ -338,6 +338,97 @@ async fn external_alias_preserves_target_rcode_and_truncation() {
     external_alias_test().await;
 }
 
+#[tokio::test]
+async fn overlong_dname_with_self_lookup_returns_one_dname() {
+    use pharos_server::{Action, Handler, ListenerKey, Router, Server};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    struct CountSelfLookup {
+        chain: Chain,
+        calls: Arc<AtomicUsize>,
+    }
+    impl pharos_server::Chain for CountSelfLookup {
+        async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+            if cx.self_lookup_depth() != 0 {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+            }
+            pharos_server::Chain::serve(&self.chain, cx).await
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+    }
+
+    let path = std::env::temp_dir().join(format!("pharos-yxdomain-{}.zone", std::process::id()));
+    let _cleanup = Cleanup(path.clone());
+    let long_label = "a".repeat(63);
+    let target = format!("{}.{}.", "t".repeat(63), "u".repeat(30));
+    let zone = format!(
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nd.example.org. 60 IN DNAME {target}\n"
+    );
+    std::fs::write(&path, zone).unwrap();
+    let corefile = format!("example.org:53 {{\n file {}\n}}", path.display());
+    let chain = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut router = Router::default();
+    router.add(
+        key,
+        "example.org.".parse().unwrap(),
+        Some(CountSelfLookup {
+            chain,
+            calls: Arc::clone(&calls),
+        }),
+        vec![],
+    );
+    let server = Arc::new(Server::new(router, key));
+    let query_name: Name = format!("{long_label}.{long_label}.{long_label}.d.example.org.")
+        .parse()
+        .unwrap();
+    let mut query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(query_name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        Handler::handle_shared(
+            &server,
+            &query,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response,
+        )
+        .await,
+        Action::Respond
+    );
+    let response = Message::parse(&response).unwrap();
+    assert_eq!(response.rcode(), Rcode::YXDOMAIN);
+    assert_eq!(response.answers().filter(|rr| rr.rtype == Type::DNAME).count(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
 async fn external_alias_test() {
     use pharos_server::{Action, Handler, ListenerKey, Router, Server};
     use std::sync::Arc;
