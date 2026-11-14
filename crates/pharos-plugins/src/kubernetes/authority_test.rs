@@ -149,7 +149,7 @@ fn copies_final_target_authority_records() {
     let mut response = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut response, 512, 7, 0x8003).unwrap();
     builder.question(target_ref, Type::A, Class::IN).unwrap();
-    copy_authorities(&mut builder, &upstream).unwrap();
+    crate::dns::copy_authorities(&mut builder, &upstream).unwrap();
     let _ = builder.finish();
     let response = Message::parse(&response).unwrap();
     assert_eq!(response.rcode(), Rcode::NXDOMAIN);

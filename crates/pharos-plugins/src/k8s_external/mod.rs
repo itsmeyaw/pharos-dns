@@ -306,7 +306,7 @@ impl External {
                     && (message.rcode() != Rcode::NOERROR || message.answer_count() == 0)
                 {
                     // RFC 2308 §3: append negative Authority after all CNAME-cycle answers.
-                    crate::kubernetes::copy_authorities(&mut b, &message)?;
+                    crate::dns::copy_authorities(&mut b, &message)?;
                 }
             }
             // RFC 3596 §3: SRV answers include available target addresses in Additional.

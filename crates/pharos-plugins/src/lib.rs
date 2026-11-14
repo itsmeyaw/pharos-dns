@@ -33,6 +33,8 @@ pub mod cancel;
 pub mod chaos;
 #[cfg(feature = "plugin-debug")]
 pub mod debug;
+#[cfg(any(feature = "plugin-kubernetes", feature = "plugin-k8s-external"))]
+mod dns;
 #[cfg(feature = "plugin-dns64")]
 pub mod dns64;
 #[cfg(feature = "plugin-dnssec")]

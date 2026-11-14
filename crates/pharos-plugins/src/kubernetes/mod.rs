@@ -397,26 +397,6 @@ fn soa(
     Ok(())
 }
 
-// RFC 1034 §4.3.2 and RFC 2308 §3: preserve Authority records from the final CNAME cycle.
-pub(crate) fn copy_authorities(
-    builder: &mut pharos_proto::MessageBuilder<'_>,
-    message: &Message<'_>,
-) -> Result<(), BuildError> {
-    for record in message.authorities() {
-        if let Ok(data) = record.data() {
-            builder.record_with(
-                Section::Authority,
-                record.name,
-                record.rtype,
-                record.class,
-                record.ttl,
-                |w| data.write(w),
-            )?;
-        }
-    }
-    Ok(())
-}
-
 fn matching(request: &name::Request<'_>, port: &Port) -> bool {
     (request.port.is_empty() || request.port.eq_ignore_ascii_case(port.name.as_bytes()))
         && (request.protocol.is_empty()
@@ -1222,7 +1202,7 @@ impl pharos_server::Plugin for Kubernetes {
                     }
                     if message.rcode() != Rcode::NOERROR || message.answer_count() == 0 {
                         // RFC 2308 §3: preserve target authority data on negative CNAME cycles.
-                        copy_authorities(&mut b, &message)?;
+                        crate::dns::copy_authorities(&mut b, &message)?;
                     }
                 }
             }
