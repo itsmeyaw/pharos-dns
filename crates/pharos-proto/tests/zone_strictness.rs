@@ -54,6 +54,8 @@ fn nsec3_short_hash_keeps_miekg_fixed_length_octet() {
     );
 }
 
+// RFC 4034 §3.1.5: Calendar RRSIG timestamps outside the serial window are rejected.
+// RFC 4034 §3.1.5: Calendar RRSIG timestamps outside the serial window are rejected.
 #[test]
 fn rrsig_calendar_dates_outside_the_serial_window_are_rejected() {
     let result = parse(

@@ -1263,8 +1263,12 @@ fn timestamp(value: &str) -> Result<u32, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "system clock is before Unix epoch")?;
     let now = i64::try_from(now.as_secs()).map_err(|_| "system clock is out of range")?;
-    // RFC 4034 §3.1.5: Dates more than 68 years from now are ambiguous under serial arithmetic.
-    if seconds.abs_diff(now) > (1_u64 << 31) {
+    timestamp_serial_at(seconds, now)
+}
+
+fn timestamp_serial_at(seconds: i64, now: i64) -> Result<u32, String> {
+    // RFC 1982 §3.2; RFC 4034 §3.1.5: Half-range and larger differences are ambiguous.
+    if seconds.abs_diff(now) >= (1_u64 << 31) {
         return Err("signature timestamp is outside the 68-year serial window".into());
     }
     // RFC 4034 §3.1.5: Encode seconds since the Unix epoch as a 32-bit unsigned serial.
@@ -1344,5 +1348,23 @@ mod tests {
                 expected
             );
         }
+    }
+
+    // RFC 1982 §3.2: Serial comparisons are undefined at the half-range boundary.
+    #[test]
+    fn signature_timestamp_serial_window_rejects_half_range() {
+        let now = 100_i64;
+        let half_range = 1_i64 << 31;
+        assert_eq!(
+            timestamp_serial_at(now + half_range - 1, now),
+            Ok((now + half_range - 1) as u32)
+        );
+        assert!(timestamp_serial_at(now + half_range, now).is_err());
+        assert!(timestamp_serial_at(now + half_range + 1, now).is_err());
+        assert_eq!(
+            timestamp_serial_at(now - half_range + 1, now),
+            Ok((now - half_range + 1) as u32)
+        );
+        assert!(timestamp_serial_at(now - half_range, now).is_err());
     }
 }
