@@ -141,6 +141,13 @@ async fn coredns_lookup_cases() {
         assert_eq!(answer.rdata, expected, "{name}");
     }
 
+    let (outcome, wire) = query_class(&chain, "example.org.", Type::A, Class::ANY).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(!response.aa());
+    let answer = response.answers().next().unwrap();
+    assert_eq!((answer.rtype, answer.class), (Type::A, Class::IN));
+
     for (name, expected) in [
         ("1.0.0.10.in-addr.arpa.", vec!["example.org."]),
         ("2.0.0.10.in-addr.arpa.", vec!["example.com."]),

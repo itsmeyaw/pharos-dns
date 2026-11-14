@@ -4,8 +4,8 @@
 
 ## local
 
-- Non-IN Questions pass through; CoreDNS emits this plugin's IN-class answers for them (RFC 1034 §4.3.1).
-- Pharos sets AA on every intercepted local answer, including NXDOMAIN (RFC 1034 §4.3.2).
+- Non-IN classes other than ANY pass through. QCLASS=ANY may receive selected IN local data with AA clear (RFC 1035 §6.2).
+- Pharos sets AA on intercepted IN-class local answers, including NXDOMAIN (RFC 1034 §4.3.2).
 - Local NS and SOA MNAME use resolvable `localhost.`; SOA RNAME is `nobody.invalid.` (RFC 2181 §7.3; RFC 6303 §3).
 - `localhost.` apex NS/SOA queries keep positive answers for CoreDNS compatibility (RFC 6761 §6.3).
 - The localhost interception debug log can be enabled through the process logging API; the `debug` Directive is not implemented yet. Unlike CoreDNS, logged Query names retain their original case.

@@ -247,6 +247,18 @@ async fn local_passes_non_in_questions_to_next_plugin() {
 }
 
 #[tokio::test]
+async fn local_qclass_any_answer_is_not_authoritative() {
+    let chain = configured("local").unwrap();
+    let (outcome, wire) = query_class(&chain, "localhost.", Type::A, Class::ANY).await;
+
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(!response.aa());
+    let answer = response.answers().next().unwrap();
+    assert_eq!((answer.rtype, answer.class), (Type::A, Class::IN));
+}
+
+#[tokio::test]
 async fn coredns_localhost_prefix_and_next() {
     let on = configured("local").unwrap();
     let off = configured("local {\n localhost_prefix off\n}").unwrap();
