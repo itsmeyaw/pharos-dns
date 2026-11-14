@@ -60,6 +60,7 @@ impl std::fmt::Write for NameText {
 pub struct Zone {
     pub(crate) apex: Name,
     class: Class,
+    // RFC 2308 §3: Cache the negative-answer SOA TTL cap in the Zone snapshot.
     negative_ttl: u32,
     pub(crate) records: Vec<ZoneRecord>,
     names: Vec<ZoneNode>,
@@ -72,6 +73,7 @@ struct ZoneNode {
     types: BTreeMap<u16, Vec<usize>>,
     tree: bool,
     tree_exists: bool,
+    // RFC 9460 §2.4.1: Track AliasMode per type to suppress ServiceMode records.
     alias_modes: u8,
 }
 
@@ -596,6 +598,7 @@ fn same_wire_name(left: &[u8], right: &[u8]) -> bool {
         .is_some_and(|(left, right)| left == right)
 }
 
+// RFC 2308 §3: Negative cache TTL is min(SOA TTL, SOA MINIMUM).
 fn negative_soa_ttl(soa: &ZoneRecord) -> Option<u32> {
     let minimum = soa.rdata.get(soa.rdata.len().checked_sub(4)?..)?;
     let minimum = u32::from_be_bytes(minimum.try_into().ok()?);
@@ -786,7 +789,7 @@ impl Zone {
         let zone = self;
         if matches!(question.qtype, Type::AXFR | Type::IXFR) {
             if question.qclass != zone.class {
-                // RFC 5936 §2.2.1 Note e: A server without authority returns NOTAUTH.
+                // RFC 5936 §§2.1.2, 2.2.1 Note e: QCLASS mismatch means NOTAUTH.
                 let max = cx.max_response_size.max(512);
                 if cx.response.capacity() < max {
                     if cx.protocol == Protocol::Tcp {
