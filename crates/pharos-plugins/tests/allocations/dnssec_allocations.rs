@@ -5,13 +5,13 @@ use pharos_plugins::{Chain, directives, servers};
 use pharos_server::{Action, Handler, Protocol};
 
 #[test]
-fn prepared_ecdsa_and_ed25519_signers_do_not_allocate() {
+fn prepared_p256_p384_ed25519_signers_do_not_allocate() {
     use aws_lc_rs::{
         rand::SystemRandom,
         signature::{self, EcdsaKeyPair},
     };
 
-    if crate::run_isolated("dnssec::cases::prepared_ecdsa_and_ed25519_signers_do_not_allocate") {
+    if crate::run_isolated("dnssec::cases::prepared_p256_p384_ed25519_signers_do_not_allocate") {
         return;
     }
     let _serial = crate::serial();

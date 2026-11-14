@@ -26,7 +26,7 @@ pub struct Dnssec {
 // shortcut: all-feature debug chains can overflow 2 MiB stacks; flatten dispatch to remove this limit.
 impl Plugin for Dnssec {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        // RFC 9824 §3.5: Explicit queries for QTYPE NXNAME receive FORMERR.
+        // RFC 9824 §3.5: An implementing DNS server returns FORMERR for any QTYPE NXNAME query.
         if cx
             .query
             .questions()
@@ -40,7 +40,7 @@ impl Plugin for Dnssec {
         }
         let matching = cx.query.questions().next().and_then(|question| {
             let zone = self.zone_for(question.name)?;
-            // RFC 8080 §8 and RFC 9824 §3.1: Do not sign another zone or emit keyless denial.
+            // RFC 4035 §3.1.3.1: Skip synthetic denial if this configured zone has no signing key.
             self.keys
                 .iter()
                 .any(|key| key.public.owner == *zone)
@@ -144,7 +144,7 @@ impl Dnssec {
             .question(question.name, question.qtype, question.qclass)
             .map_err(Error::Build)?;
         // RFC 2181 §5.2: every record in an RRset uses its lowest TTL.
-        // RFC 4035 §2.1 and RFC 8080 §8: Publish only keys belonging to the queried zone.
+        // RFC 4035 §2.1: Publish only keys belonging to the queried zone.
         let keys = self
             .keys
             .iter()

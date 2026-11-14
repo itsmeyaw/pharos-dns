@@ -50,8 +50,6 @@ async fn signature_cache_metrics_report_miss_and_hit() {
     }
 }
 
-// CoreDNS plugin/dnssec TestCacheEmptySigsNotCached: Empty signature results are not cached.
-// RFC 9824 §3.1: Without a signing key, do not synthesize unsigned denial records.
 #[tokio::test]
 async fn keyless_rrsets_never_produce_cache_hits_or_entries() {
     let text = "miek.nl:53 {\n dnssec\n whoami\n}";

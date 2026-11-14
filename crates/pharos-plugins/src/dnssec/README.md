@@ -12,12 +12,13 @@
 - On a cache miss, TTL normalization rescans the Response for each record; its cost grows quadratically with the record count.
 - Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as insecure. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
 - RSASHA512 (algorithm 10) is refused for signing under RFC 9904 §3. RSA modulus and exponent values above 4096 bits are rejected (RFC 3110 §2; RFC 5702 §§2.1–2.2).
-- P-256/P-384/Ed25519 use RustCrypto fixed-size signatures to avoid per-sign allocations; ECDSA signatures use deterministic nonces (RFC 6979 §3.3). RSA still allocates an intermediate signature buffer in aws-lc-rs; binary-size impact of the added crypto crates is unmeasured.
-- Each loaded DNSKEY is bound to its owner zone and cannot sign another configured zone (RFC 8080 §8).
+- P-256/P-384/Ed25519 use RustCrypto fixed-size signatures; ECDSA uses deterministic nonces (RFC 6979 §3.3). `stats_alloc` measured zero Rust-heap allocations across 100 signatures per algorithm; the prior aws-lc-rs P-256 path allocated 300 times and Ed25519 100 times. RSA still allocates an intermediate signature buffer; C-heap use is not measured.
+- Against `main`, remote release `pharos` grows from 19,391,992 to 19,623,736 bytes (+231,744 bytes, +1.195%); `cargo tree` adds 29 unique runtime crate names.
+- Each loaded DNSKEY is bound to its owner zone and cannot sign another configured zone (RFC 4035 §2.1).
 - A configured zone without a matching key passes DNSKEY and DO queries through unchanged.
 - Negative NXDOMAIN/NODATA answers return NOERROR with synthetic NXNAME NSEC in Authority. CoreDNS also maps NXDOMAIN to NOERROR, but puts its black-lie NSEC in Answer.
 - A DO negative response without SOA fails with SERVFAIL; Pharos does not return an unsigned denial. CoreDNS returns the upstream negative response.
-- Explicit QTYPE 128 receives FORMERR when the dnssec plugin is in the chain; CoreDNS does not reject the query this way.
+- Any explicit QTYPE 128 query receives FORMERR when the dnssec plugin is in the chain, regardless of QNAME, as RFC 9824 §3.5 requires of implementing servers.
 - Only a DNAME-synthesized CNAME is unsigned; real CNAME RRsets in the same response remain signed (RFC 6672 §5.3.1).
 - A sole apex CDS/CDNSKEY delete signal is retained and signed; CoreDNS drops it while replacing publication records (RFC 8078 §4).
 - RSA private keys below 2048 bits are rejected by aws-lc-rs; CoreDNS accepts them.

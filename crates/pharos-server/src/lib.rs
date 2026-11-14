@@ -155,6 +155,7 @@ pub enum Outcome {
 pub enum Error {
     Build(BuildError),
     InvalidQuery,
+    /// A plugin cannot safely complete the response from the available data.
     Internal,
     ResponseBufferTooSmall,
     NotImplemented,

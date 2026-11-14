@@ -81,11 +81,12 @@ pub(crate) fn setup(
         if key.public.flags & 0x0100 == 0 {
             return Err(cursor.error("DNSKEY Zone Key bit must be set"));
         }
-        // RFC 8080 §8: A DNSSEC private key belongs only to its own zone.
+        // RFC 4035 §2.1: A zone key signs only authoritative RRsets in its zone.
         if !zones.iter().any(|zone| zone == &key.public.owner) {
             return Err(cursor.error("DNSKEY owner must match a configured DNSSEC zone"));
         }
     }
+    // RFC 4034 §3.1.8.1: Prepare private keys once before they sign RRsets.
     let signers = keys
         .iter()
         .map(|key| {
@@ -131,6 +132,19 @@ fn load_file(base: &Path) -> Result<KeyPair, String> {
 #[cfg(test)]
 mod tests {
     use pharos_corefile::{configure, parse};
+    use std::{path::PathBuf, process};
+
+    struct TempKeyFiles {
+        key: PathBuf,
+        private: PathBuf,
+    }
+
+    impl Drop for TempKeyFiles {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.key);
+            let _ = std::fs::remove_file(&self.private);
+        }
+    }
 
     #[test]
     fn keeps_a_key_bound_to_its_zone_in_multi_zone_setup() {
@@ -153,27 +167,29 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
         );
-        let path =
-            std::env::temp_dir().join(format!("pharos-dnssec-invalid-key-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("pharos-dnssec-invalid-key-{}", process::id()));
+        let files = TempKeyFiles {
+            key: base.with_extension("key"),
+            private: base.with_extension("private"),
+        };
         let key = std::fs::read_to_string(format!("{source}.key")).unwrap();
         let private = std::fs::read_to_string(format!("{source}.private")).unwrap();
-        std::fs::write(format!("{}.private", path.display()), private).unwrap();
+        std::fs::write(&files.private, private).unwrap();
         for (zone, key_text, expected) in [
             ("miek.nl", key.replace("257 3 13", "1 3 13"), "Zone Key"),
             ("example.org", key.clone(), "configured DNSSEC zone"),
         ] {
-            std::fs::write(format!("{}.key", path.display()), key_text).unwrap();
+            std::fs::write(&files.key, key_text).unwrap();
             let text = format!(
                 "{zone} {{\n dnssec {{\n key file {}\n }}\n}}",
-                path.display()
+                base.display()
             );
             let result =
                 configure::<crate::Chain>(&parse("Corefile", &text).unwrap(), crate::directives());
             let error = result.unwrap_err().to_string();
             assert!(error.contains(expected), "{error}");
         }
-        std::fs::remove_file(format!("{}.key", path.display())).unwrap();
-        std::fs::remove_file(format!("{}.private", path.display())).unwrap();
     }
 
     #[test]
