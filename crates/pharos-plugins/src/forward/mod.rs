@@ -476,6 +476,8 @@ impl Plugin for Forward {
                         Message::parse(&wire[..exchange.len]).expect("proxy validated Response");
                     (response.rcode(), response.answer_count())
                 };
+                // RFC 7871 §7.1.3: Keep the original REFUSED candidate when fallback fails.
+                let mut use_refused_fallback = false;
                 if can_retry_ecs
                     && rcode == Rcode::REFUSED
                     && let Some(fallback_len) =
@@ -499,23 +501,24 @@ impl Plugin for Forward {
                         ),
                     )
                     .await;
-                    let Ok(Ok(retried)) = retry else {
-                        clear_ad_after_tsig_strip(
-                            cx.metadata.validated_tsig().is_some(),
-                            cx.response,
-                        );
-                        return Outcome::Response;
-                    };
-                    exchange = retried;
-                    let response = Message::parse(&wire[..exchange.len])
-                        .expect("proxy validated ECS-free Response");
-                    rcode = response.rcode();
-                    answer_count = response.answer_count();
+                    match retry {
+                        Ok(Ok(retried)) => {
+                            cx.response.clear();
+                            exchange = retried;
+                            let response = Message::parse(&wire[..exchange.len])
+                                .expect("proxy validated ECS-free Response");
+                            rcode = response.rcode();
+                            answer_count = response.answer_count();
+                        }
+                        _ => use_refused_fallback = true,
+                    }
                 }
-                let answer = &wire[..exchange.len];
                 if stanza.failover.contains(&rcode) {
                     failovers += 1;
                     if failovers < count {
+                        if use_refused_fallback {
+                            cx.response.clear();
+                        }
                         continue;
                     }
                 }
@@ -523,9 +526,17 @@ impl Plugin for Forward {
                     && (stanza.next.contains(&rcode)
                         || (stanza.next_on_nodata && rcode == Rcode::NOERROR && answer_count == 0))
                 {
+                    if use_refused_fallback {
+                        cx.response.clear();
+                    }
                     try_next = true;
                     break;
                 }
+                if use_refused_fallback {
+                    clear_ad_after_tsig_strip(cx.metadata.validated_tsig().is_some(), cx.response);
+                    return Outcome::Response;
+                }
+                let answer = &wire[..exchange.len];
                 // RFC 7871 §7.3: Preserve valid ECS response scope, including scope longer than source.
                 cx.response.clear();
                 // RFC 5625 §4.3: return Responses without filtering RRs by TYPE or CLASS.

@@ -236,6 +236,20 @@ async fn failed_ecs_retry_preserves_original_refused_response() {
 }
 
 #[tokio::test]
+async fn failed_ecs_retry_still_fails_over_from_refused() {
+    let (first, refused) = ecs_refused_upstream(true).await;
+    let (second, answer) = fake(Rcode::NOERROR.0 as u8, false).await;
+    let chain = chain(&format!(
+        ".:0 {{\n forward . {first} {second} {{\n policy sequential\n failover REFUSED\n }}\n}}"
+    ));
+    let (outcome, response, _) = run_query(&chain, &ecs_query()).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    refused.await.unwrap();
+    answer.await.unwrap();
+}
+
+#[tokio::test]
 async fn refuses_unsafe_modified_query_view() {
     let chain = chain(".:0 {\n forward . 127.0.0.1:53\n}");
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\xc0\x03\0\x01\0\x01";
