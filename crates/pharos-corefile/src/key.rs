@@ -32,17 +32,12 @@ pub fn normalize_key(key: &str) -> Result<Vec<ServerBlockKey>, String> {
                 .map(|port| (host, port.to_string()))
         })
         .unwrap_or((host, String::new()));
-    if host.len() > 255 || !valid_domain(host) {
+    if !valid_domain(host) {
         return Err(format!("invalid Domain: {host}"));
     }
 
     let domains = match parse_cidr(host) {
-        Some((ip, prefix)) => {
-            if host.starts_with(':') || (host.starts_with('0') && host.contains(':')) {
-                return Err(format!("invalid CIDR {host}"));
-            }
-            reverse_domains(ip, prefix)
-        }
+        Some((ip, prefix)) => reverse_domains(ip, prefix),
         None => vec![fqdn(host)],
     };
     // RFC 1035 §4.2.2: DNS messages sent over TCP use server port 53.
@@ -60,7 +55,7 @@ pub fn normalize_key(key: &str) -> Result<Vec<ServerBlockKey>, String> {
     domains
         .into_iter()
         .map(|domain| {
-            if domain.len() > 255 || !valid_domain(&domain) {
+            if !valid_domain(&domain) {
                 return Err(format!("invalid Domain: {domain}"));
             }
             Ok(ServerBlockKey {
@@ -73,20 +68,8 @@ pub fn normalize_key(key: &str) -> Result<Vec<ServerBlockKey>, String> {
 }
 
 fn go_lowercase(c: char) -> char {
-    // Go's Unicode tables predate these case mappings in Rust's tables.
-    match c {
-        '\u{1c89}'
-        | '\u{a7cb}'
-        | '\u{a7cc}'
-        | '\u{a7ce}'
-        | '\u{a7d2}'
-        | '\u{a7d4}'
-        | '\u{a7da}'
-        | '\u{a7dc}'
-        | '\u{10d50}'..='\u{10d65}'
-        | '\u{16ea0}'..='\u{16eb8}' => c,
-        _ => c.to_lowercase().next().unwrap_or(c),
-    }
+    // RFC 4343 §3: DNS name matching folds ASCII A–Z only.
+    c.to_ascii_lowercase()
 }
 
 fn fqdn(name: &str) -> String {
@@ -107,53 +90,60 @@ fn fqdn(name: &str) -> String {
 }
 
 fn valid_domain(name: &str) -> bool {
-    if name.is_empty() {
+    // RFC 1035 §5.1: reject a trailing escape before FQDN expansion can consume it.
+    if name.is_empty() || name.ends_with('\\') {
         return false;
     }
     let qualified = fqdn(name);
     let bytes = qualified.as_bytes();
-    let (mut i, mut begin, mut offset) = (0, 0, 0);
-    let (mut was_dot, mut escape) = (false, false);
+    let (mut i, mut label_len, mut name_len) = (0, 0, 0);
+    let mut was_dot = false;
     while i < bytes.len() {
         match bytes[i] {
             b'\\' => {
-                escape = !escape;
-                if offset + 1 > 256 {
-                    return false;
-                }
                 let digits = bytes
                     .get(i + 1..i + 4)
                     .is_some_and(|digits| digits.iter().all(u8::is_ascii_digit));
-                let escaped = if digits { 3 } else { 1 };
-                i += escaped;
-                begin += escaped;
+                if digits {
+                    // RFC 1035 §2.3.4: a decimal escape represents one wire octet.
+                    label_len += 1;
+                    i += 4;
+                } else if i + 1 < bytes.len() {
+                    label_len += 1;
+                    i += 2;
+                } else {
+                    return false;
+                }
+                if label_len > 63 {
+                    return false;
+                }
                 was_dot = false;
             }
             b'.' => {
-                escape = false;
                 if (i == 0 && bytes.len() > 1) || was_dot {
                     return false;
                 }
-                let label_len = i - begin;
-                // RFC 1035 §2.3.4: DNS labels are limited to 63 octets.
-                if label_len >= 64 {
+                name_len += 1 + label_len;
+                // RFC 1035 §2.3.4: DNS names are limited to 255 wire octets.
+                if name_len > 255 {
                     return false;
                 }
-                offset += 1 + label_len;
-                if offset > 256 {
-                    return false;
-                }
-                begin = i + 1;
+                label_len = 0;
                 was_dot = true;
+                i += 1;
             }
             _ => {
-                escape = false;
+                label_len += 1;
+                if label_len > 63 {
+                    return false;
+                }
                 was_dot = false;
+                i += 1;
             }
         }
-        i += 1;
     }
-    !escape
+    // RFC 1035 §5.1: an escaped dot is label data, not the terminating root label.
+    was_dot
 }
 
 fn parse_cidr(host: &str) -> Option<(IpAddr, u32)> {
@@ -291,8 +281,8 @@ mod tests {
         let expanded = normalize_key("2001:db8::/29:853").unwrap();
         assert_eq!(expanded.len(), 8);
         assert_eq!(expanded[7], key("dns", "f.b.d.0.1.0.0.2.ip6.arpa.", "853"));
-        assert!(normalize_key("::1/128").is_err());
-        assert!(normalize_key("0:1::/32").is_err());
+        assert!(normalize_key("::1/128").is_ok());
+        assert!(normalize_key("0:1::/32").is_ok());
         assert_eq!(
             normalize_key("2001:db8::/0").unwrap(),
             [key("dns", "ip6.arpa.", "53")]
@@ -328,8 +318,31 @@ mod tests {
         );
         assert_eq!(normalize_key("A\\.").unwrap(), [key("dns", "a\\..", "53")]);
         assert_eq!(
-            normalize_key("İᲉ\u{10d50}\u{16ea0}").unwrap(),
-            [key("dns", "iᲉ\u{10d50}\u{16ea0}.", "53")]
+            normalize_key("AİᲉ\u{10d50}\u{16ea0}").unwrap(),
+            [key("dns", "aİᲉ\u{10d50}\u{16ea0}.", "53")]
         );
+    }
+
+    #[test]
+    fn name_limits_count_wire_octets_not_presentation_escapes() {
+        let long_presentation = [
+            "A".repeat(63),
+            "B".repeat(63),
+            "C".repeat(63),
+            "D".repeat(61),
+        ]
+        .iter()
+        .map(|label| {
+            label
+                .chars()
+                .map(|c| format!("\\{:03}", c as u8))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+        let key = normalize_key(&long_presentation).unwrap();
+        assert_eq!(key[0].domain, format!("{long_presentation}."));
+        let overlong = vec!["a".repeat(63); 4].join(".");
+        assert!(normalize_key(&overlong).is_err());
     }
 }
