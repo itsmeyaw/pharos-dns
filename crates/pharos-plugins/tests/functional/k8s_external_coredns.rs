@@ -15,6 +15,7 @@ const SERVICES: &str = r#"[
  {"metadata":{"name":"svc6","namespace":"testns"},"spec":{"type":"ClusterIP","clusterIP":"10.0.0.3","externalIPs":["1:2::5"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"svc11","namespace":"testns"},"spec":{"type":"LoadBalancer","clusterIP":"10.0.0.3","externalIPs":["2.3.4.5"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"svc12","namespace":"testns"},"spec":{"type":"LoadBalancer","clusterIP":"10.0.0.3","externalIPs":["dummy.hostname"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
+ {"metadata":{"name":"svc-multi-host","namespace":"testns"},"spec":{"type":"LoadBalancer","clusterIP":"10.0.0.5","externalIPs":["lb.example.net"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]}},
  {"metadata":{"name":"mixed","namespace":"testns"},"spec":{"type":"LoadBalancer","clusterIP":"10.0.0.4","externalIPs":["192.0.2.1"],"ports":[{"name":"http","protocol":"TCP","port":80},{"name":"https","protocol":"TCP","port":443}]},"status":{"loadBalancer":{"ingress":[{"hostname":"one.target.test"},{"ip":"2001:db8::1"},{"ip":"192.0.2.2"},{"ip":"2001:0db8:0:0:0:0:0:1"},{"hostname":"two.target.test"},{"ip":"2001:db8::2"},{"ip":"192.0.2.1"}]}}},
  {"metadata":{"name":"svc-headless","namespace":"testns"},"spec":{"type":"ClusterIP","clusterIP":"None","ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"dns-service","namespace":"kube-system"},"spec":{"clusterIP":"10.0.0.111","externalIPs":["127.0.0.1"]}}
@@ -440,6 +441,34 @@ async fn coredns_scenario() {
             assert_eq!(*serial.get_or_insert(actual), actual, "SOA serial changed");
         }
     }
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+    task.abort();
+}
+
+#[tokio::test]
+#[cfg(feature = "plugin-hosts")]
+async fn multi_port_hostname_srv_uses_the_answer_chase_for_each_port() {
+    let (endpoint, task) = api(local_ip()).await;
+    let text = format!(
+        ".:0 {{\n k8s_external example.com\n kubernetes cluster.local {{\n  endpoint {endpoint}\n  startup_timeout 3s\n }}\n hosts /nonexistent example.net {{\n  ttl 5\n  203.0.113.9 lb.example.net\n }}\n}}"
+    );
+    let (mut configured, lifecycle) =
+        servers(configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap())
+            .unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+    let (_, server) = configured.drain().next().unwrap();
+    let case = case!(
+        "svc-multi-host.testns.example.com.",
+        SRV,
+        NOERROR,
+        [
+            "svc-multi-host.testns.example.com. SRV 0 50 80 lb.example.net.",
+            "svc-multi-host.testns.example.com. SRV 0 50 443 lb.example.net."
+        ],
+        [],
+        ["lb.example.net. A 203.0.113.9"]
+    );
+    check(&server, &case).await;
     lifecycle.run(Phase::Shutdown).await.unwrap();
     task.abort();
 }
