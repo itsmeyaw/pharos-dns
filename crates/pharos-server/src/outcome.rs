@@ -1,5 +1,6 @@
 use pharos_proto::{
-    Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type, normalized_udp_size,
+    Message, MessageBuilder, Opt, RESPONSE_UDP_PAYLOAD_SIZE, Rcode, Section, TsigKey, TsigRecord,
+    Type, normalized_udp_size,
 };
 use std::sync::Arc;
 
@@ -78,9 +79,10 @@ pub fn finish_outcome_signed(
             }
         }
         Outcome::Unanswered(code) => {
+            // RFC 2136 §3.1.1: NOTAUTH reports an UPDATE outside server authority.
             if !matches!(
                 code,
-                Rcode::SERVFAIL | Rcode::REFUSED | Rcode::FORMERR | Rcode::NOTIMP
+                Rcode::SERVFAIL | Rcode::REFUSED | Rcode::FORMERR | Rcode::NOTIMP | Rcode::NOTAUTH
             ) {
                 return Action::Drop;
             }
@@ -98,6 +100,10 @@ pub fn finish_outcome_signed(
         TsigSigning::Signed { reserved, .. } | TsigSigning::Error { reserved, .. } => *reserved,
     });
     let signed = signing.is_some();
+    // RFC 4035 §3.2.3: clear AD because no upstream transaction security reaches this Listener.
+    if response.len() >= 4 {
+        response[3] &= !0x20;
+    }
     let before = signed
         .then(|| Message::parse(response).ok())
         .flatten()
@@ -272,7 +278,7 @@ fn scrub(
             break;
         }
     }
-    let truncated = counts != original;
+    let truncated = counts[1..3] != original[1..3];
     let existing_flags = existing.map(Opt::flags);
     if end + opt_len > wire.capacity() {
         if protocol == Protocol::Udp {
@@ -286,10 +292,10 @@ fn scrub(
         wire.copy_within(offset..offset + len, end + 11);
         wire.truncate(end + opt_len);
         wire[end..end + 3].copy_from_slice(&[0, 0, 41]);
-        wire[end + 3..end + 5].copy_from_slice(&query_opt.udp_payload_size().to_be_bytes());
+        wire[end + 3..end + 5].copy_from_slice(&RESPONSE_UDP_PAYLOAD_SIZE.to_be_bytes());
         // RFC 3225 §3: Copy the query's DO bit into the response.
         let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
-            | u32::from(existing_flags.unwrap_or_default() & 0xff00)
+            | u32::from(existing_flags.unwrap_or_default() & 0x4000)
             | if query_opt.dnssec_ok() { 0x8000 } else { 0 };
         wire[end + 5..end + 9].copy_from_slice(&ttl.to_be_bytes());
         wire[end + 9..end + 11].copy_from_slice(&(len as u16).to_be_bytes());
