@@ -913,12 +913,7 @@ fn generic_name_pointer_results_follow_rfc_pointer_order() {
             "Go: {}",
             input.name
         );
-        assert_eq!(
-            rust_result(&input),
-            rust_expected,
-            "Rust: {}",
-            input.name
-        );
+        assert_eq!(rust_result(&input), rust_expected, "Rust: {}", input.name);
     }
 }
 
