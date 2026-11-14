@@ -43,7 +43,7 @@ async fn serves_zone_loaded_on_startup() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\nwww 60 IN A 192.0.2.1\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n",
     )
     .unwrap();
     let text = format!(
@@ -145,7 +145,7 @@ async fn discovered_zones_label_metrics_and_removed_series_remain() {
     ] {
         std::fs::write(
             path,
-            "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\nwww 60 IN A 192.0.2.1\n",
+            "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n",
         )
         .unwrap();
     }
@@ -201,7 +201,7 @@ async fn discovered_zones_label_metrics_and_removed_series_remain() {
     assert_eq!(count(&registry, "."), fallback + 1);
     std::fs::write(
         &first,
-        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\nwww 60 IN A 192.0.2.1\n",
+        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n",
     )
     .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -233,7 +233,7 @@ async fn discovered_zone_metrics_preserve_inherited_view() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let text = format!(
@@ -287,7 +287,7 @@ async fn discovered_zone_metrics_include_all_server_block_keys() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let text = format!(
@@ -341,7 +341,7 @@ async fn sends_notify_on_startup_but_not_unchanged_rescan() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

@@ -129,6 +129,13 @@ impl Zone {
             // RFC 8976 §2.1: Keep non-apex ZONEMD records as ordinary records.
             records.push(record);
         }
+        // RFC 1034 §4.2.1: A master-file Zone must contain an apex NS RRset.
+        if !records
+            .iter()
+            .any(|record| record.owner == apex && record.rtype == Type::NS)
+        {
+            return Err("Zone apex has no NS record".into());
+        }
         Self::from_records(apex, records)
     }
 
@@ -159,6 +166,13 @@ impl Zone {
         // RFC 1035 §5.2: Every resource record in one zone has the same class.
         if records.iter().any(|record| record.class != class) {
             return Err("Zone has records in multiple classes".into());
+        }
+        // RFC 5936 §3.1: A Zone contains no owner names outside its apex.
+        if records
+            .iter()
+            .any(|record| !contains(record.owner.as_wire(), &apex))
+        {
+            return Err("Zone has an out-of-zone owner".into());
         }
         // RFC 4592 §2: Wildcard owners use ordinary resource-record syntax.
         // RFC 4343 §4.2: Keep master-file owner spelling in stored ZoneRecords.
@@ -216,6 +230,14 @@ impl Zone {
         }
         if !soa {
             return Err("Zone has no SOA".into());
+        }
+        // RFC 8976 §2.5: Each owner has at most one ZONEMD per scheme and hash algorithm.
+        let mut zonemd = std::collections::HashSet::new();
+        for record in records.iter().filter(|record| record.rtype == Type::ZONEMD) {
+            let fields = record.rdata.get(4..6).ok_or("invalid ZONEMD RDATA")?;
+            if !zonemd.insert((record.owner.clone(), fields[0], fields[1])) {
+                return Err("duplicate ZONEMD scheme and hash algorithm".into());
+            }
         }
         // RFC 5936 §2.2: AXFR framing carries opening and closing SOAs; keep one in the snapshot.
         let final_soa = records.iter().rposition(|record| record.rtype == Type::SOA);
@@ -624,6 +646,27 @@ fn same_wire_name(left: &[u8], right: &[u8]) -> bool {
         .is_some_and(|(left, right)| left == right)
 }
 
+// RFC 1034 §3.6.2: Floyd traversal detects CNAME cycles beyond the emitted chain limit.
+fn cname_chain_loops(zone: &Zone, start: &[u8]) -> bool {
+    let mut slow = Some(start);
+    let mut fast = Some(start);
+    loop {
+        slow = slow
+            .and_then(|name| zone.records_at(name, Type::CNAME).next())
+            .map(|record| record.rdata.as_slice());
+        fast = fast
+            .and_then(|name| zone.records_at(name, Type::CNAME).next())
+            .and_then(|record| zone.records_at(&record.rdata, Type::CNAME).next())
+            .map(|record| record.rdata.as_slice());
+        let (Some(slow_name), Some(fast_name)) = (slow, fast) else {
+            return false;
+        };
+        if slow_name.eq_ignore_ascii_case(fast_name) {
+            return true;
+        }
+    }
+}
+
 // RFC 2308 §3: Negative cache TTL is min(SOA TTL, SOA MINIMUM).
 fn negative_soa_ttl(soa: &ZoneRecord) -> Option<u32> {
     let minimum = soa.rdata.get(soa.rdata.len().checked_sub(4)?..)?;
@@ -795,7 +838,7 @@ impl Zone {
         next: N,
         fallthrough: &[Name],
         drop_notify: bool,
-        case_mismatch: bool,
+        _case_mismatch: bool,
     ) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
@@ -852,13 +895,8 @@ impl Zone {
         }
         // RFC 1034 §4.3.2: return the first Zone Cut between the apex and QNAME.
         // RFC 2181 §6.1: A parent zone stops authoritative answers at each child cut.
-        let cut = if case_mismatch
-            && !(question.qtype == Type::DS && name.eq_ignore_ascii_case(zone.apex.as_wire()))
-        {
-            zone.records_at(zone.apex.as_wire(), Type::NS).next()
-        } else {
-            zone.cut(name, question.qtype)
-        };
+        // RFC 4343 §3: Case differences do not change Zone Cut selection.
+        let cut = zone.cut(name, question.qtype);
         // RFC 6672 §2.3: DNAME redirects strict descendants, not its owner.
         let dname = zone
             .dname(name)
@@ -931,7 +969,7 @@ impl Zone {
                 cx.metadata.insert_copied("zone/wildcard", text);
             }
         }
-        let mut chain = [None; 10];
+        let mut chain: [Option<&ZoneRecord>; 10] = [None; 10];
         let mut count = 0;
         let mut chain_limited = false;
         let mut empty_alias = false;
@@ -950,10 +988,22 @@ impl Zone {
             // RFC 2181 §10.2: PTR lookup names may alias even though PTR targets may not.
             while let Some(alias) = zone.records_at(target, Type::CNAME).next() {
                 if count == chain.len() {
+                    if cname_chain_loops(zone, target) {
+                        return Outcome::Unanswered(Rcode::SERVFAIL);
+                    }
                     chain_limited = true;
                     break;
                 }
                 if alias.owner.as_wire().eq_ignore_ascii_case(&alias.rdata) {
+                    return Outcome::Unanswered(Rcode::SERVFAIL);
+                }
+                // RFC 1034 §3.6.2: A repeated owner identifies a multi-name CNAME loop.
+                if chain[..count].iter().flatten().any(|previous| {
+                    previous
+                        .owner
+                        .as_wire()
+                        .eq_ignore_ascii_case(alias.owner.as_wire())
+                }) {
                     return Outcome::Unanswered(Rcode::SERVFAIL);
                 }
                 chain[count] = Some(alias);
@@ -1361,6 +1411,8 @@ impl Zone {
             if cut.is_none() {
                 // RFC 1706 §5: NSAP answers do not trigger additional address processing.
                 let target_offset = match question.qtype {
+                    // RFC 1035 §3.3.3: MB MADNAME is the single name in its RDATA.
+                    Type::MB => Some(0),
                     Type::MX => Some(2),
                     // RFC 1183 §§1, 3.3 and RFC 2230 §3.1: process their host targets.
                     Type::AFSDB | Type::RT | Type::KX => Some(2),
@@ -1372,11 +1424,12 @@ impl Zone {
                 };
                 // RFC 1035 §§3.3.9, 3.3.11; RFC 2782 §3; RFC 1183 §§1, 3.3; RFC 2230 §3.1; RFC 9460 §4.1: Select target data types.
                 let additional_types: &[Type] = match question.qtype {
+                    Type::MB => &[Type::A],
                     Type::MX | Type::AFSDB => &[Type::A, Type::AAAA],
                     Type::RT => &[Type::A, Type::AAAA, Type::X25, Type::ISDN],
-                    Type::KX | Type::SVCB | Type::HTTPS | Type::SRV | Type::NS => {
-                        &[Type::A, Type::AAAA]
-                    }
+                    Type::SVCB => &[Type::A, Type::AAAA, Type::SVCB],
+                    Type::HTTPS => &[Type::A, Type::AAAA, Type::HTTPS],
+                    Type::KX | Type::SRV | Type::NS => &[Type::A, Type::AAAA],
                     _ => &[],
                 };
                 if let Some(offset) = target_offset {
@@ -1399,6 +1452,12 @@ impl Zone {
                         let owner = NameRef::parse(address, 0)
                             .map_err(|_| pharos_server::Error::InvalidQuery)?;
                         for &kind in additional_types {
+                            // RFC 9460 §4.1: Do not repeat an owner's binding RRset in Additional.
+                            if matches!(kind, Type::SVCB | Type::HTTPS)
+                                && address.eq_ignore_ascii_case(rr.owner.as_wire())
+                            {
+                                continue;
+                            }
                             write_set(
                                 &mut builder,
                                 zone,

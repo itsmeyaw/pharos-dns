@@ -164,13 +164,24 @@ fn reusable_zone_rejects_trailing_name_only_rdata() {
     use pharos_proto::zone::ZoneRecord;
     let apex: Name = "example.org.".parse().unwrap();
     let soa = ZoneParser::new(
-        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n".as_bytes(),
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\n".as_bytes(),
         apex.clone(),
         "test",
     )
     .next()
     .unwrap()
     .unwrap();
+    let ns = pharos_proto::zone::ZoneRecord {
+        owner: apex.clone(),
+        ttl: 60,
+        class: pharos_proto::Class::IN,
+        rtype: Type::NS,
+        rdata: "ns.example.org."
+            .parse::<Name>()
+            .unwrap()
+            .as_wire()
+            .to_vec(),
+    };
     for kind in [Type::NS, Type::CNAME, Type::DNAME] {
         let record = ZoneRecord {
             owner: "test.example.org.".parse().unwrap(),
@@ -180,19 +191,19 @@ fn reusable_zone_rejects_trailing_name_only_rdata() {
             rdata: vec![0],
         };
         assert!(
-            Zone::from_records(apex.clone(), vec![soa.clone(), record.clone()]).is_ok(),
+            Zone::from_records(apex.clone(), vec![soa.clone(), ns.clone(), record.clone()]).is_ok(),
             "{kind:?}"
         );
         for trailing in [vec![0, 0], vec![1, b'x', 0, 0xff]] {
             let mut invalid = record.clone();
             invalid.rdata = trailing;
             assert!(
-                Zone::from_records(apex.clone(), vec![soa.clone(), invalid]).is_err(),
+                Zone::from_records(apex.clone(), vec![soa.clone(), ns.clone(), invalid]).is_err(),
                 "{kind:?}"
             );
         }
     }
-    let structured = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\na 60 IN MX 10 mail.example.org.\nb 60 IN SRV 1 2 3 host.example.org.\nc 60 IN SVCB 1 svc.example.org. alpn=h2\n";
+    let structured = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\na 60 IN MX 10 mail.example.org.\nb 60 IN SRV 1 2 3 host.example.org.\nc 60 IN SVCB 1 svc.example.org. alpn=h2\n";
     assert!(zone("example.org.", structured).is_ok());
 }
 
@@ -217,8 +228,11 @@ fn coredns_soa_owner_origin_cases() {
         ("example.org.", "$ORIGIN example.net.\n", "@", false),
         (".", "", "example.org.", false),
     ] {
+        let root: Name = ".".parse().unwrap();
+        let apex = Name::parse(origin, &root).unwrap();
+        let apex = apex.to_string();
         let input = format!(
-            "{prefix}{owner} 500 IN SOA ns.example. hostmaster.example. 3 3600 600 86400 300\n"
+            "{prefix}{owner} 500 IN SOA ns.example. hostmaster.example. 3 3600 600 86400 300\n{apex} 500 IN NS ns.example.\n"
         );
         assert_eq!(zone(origin, &input).is_ok(), valid, "{origin} {owner}");
     }
@@ -254,7 +268,7 @@ fn coredns_include_loads_relative_zone_file() {
     let child = dir.join("included.zone");
     let parent = dir.join("parent.zone");
     std::fs::write(&child, "foo 60 IN A 127.0.0.1\n").unwrap();
-    std::fs::write(&parent, "$ORIGIN example.org.\n@ 60 IN SOA sns.dns.icann.org. noc.dns.icann.org. 2017042766 7200 3600 1209600 3600\n$INCLUDE included.zone\n").unwrap();
+    std::fs::write(&parent, "$ORIGIN example.org.\n@ 60 IN SOA sns.dns.icann.org. noc.dns.icann.org. 2017042766 7200 3600 1209600 3600\n@ 60 IN NS sns.dns.icann.org.\n$INCLUDE included.zone\n").unwrap();
     let zone = Zone::load("example.org.".parse().unwrap(), &parent).unwrap();
     let owner: Name = "foo.example.org.".parse().unwrap();
     assert_eq!(
@@ -320,7 +334,7 @@ async fn coredns_right_to_left_name_traversal() {
 // RFC 4343 §4.1: DNS name output preserves stored label case where possible.
 #[test]
 fn coredns_srv_owner_and_target_keep_case() {
-    let input = "@ 60 IN SOA ns.home.arpa. hostmaster.home.arpa. 1 2 3 4 5\nHome\\032Media._smb._tcp.home.arpa. 5 IN SRV 0 0 445 samba.home.arpa.\n";
+    let input = "@ 60 IN SOA ns.home.arpa. hostmaster.home.arpa. 1 2 3 4 5\n@ 60 IN NS ns.home.arpa.\nHome\\032Media._smb._tcp.home.arpa. 5 IN SRV 0 0 445 samba.home.arpa.\n";
     let zone = zone("home.arpa.", input).unwrap();
     let owner: Name = r"home\032media._smb._tcp.home.arpa.".parse().unwrap();
     let record = zone
@@ -892,7 +906,7 @@ async fn coredns_missing_zone_and_later_zone_recover_by_mtime() {
     wait_for_address(chain, &apex, "leaf.external.test.", [192, 0, 2, 88]).await;
     std::fs::write(
         &missing,
-        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\nfoo 60 IN A 192.0.2.10\n",
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nfoo 60 IN A 192.0.2.10\n",
     )
     .unwrap();
     tokio::time::advance(Duration::from_secs(5)).await;
@@ -1030,7 +1044,7 @@ async fn coredns_apex_only_zone_returns_nodata_for_missing_type() {
 fn coredns_record_removal_builds_new_immutable_snapshots() {
     let apex: Name = "example.org.".parse().unwrap();
     assert!(Zone::from_records(apex.clone(), Vec::new()).is_err());
-    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\na 3600 IN A 127.0.0.1\na 3600 IN MX 10 mx.example.org.\n";
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\na 3600 IN A 127.0.0.1\na 3600 IN MX 10 mx.example.org.\n";
     let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -2040,6 +2054,48 @@ async fn coredns_signed_aliases_to_delegated_zones() {
     )));
 }
 
+#[tokio::test]
+async fn cname_cycle_within_answer_limit_returns_servfail() {
+    let zone = zone(
+        "example.org.",
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nfirst 60 IN CNAME second.example.org.\nsecond 60 IN CNAME first.example.org.\n",
+    )
+    .unwrap();
+
+    let (outcome, wire) = query(&zone, "first.example.org.", Type::A, false, &[]).await;
+
+    assert_eq!(outcome, Outcome::Unanswered(Rcode::SERVFAIL));
+    assert!(wire.is_empty());
+}
+
+#[tokio::test]
+async fn cname_cycle_longer_than_answer_limit_returns_servfail() {
+    let zone = zone(
+        "example.org.",
+        concat!(
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n",
+            "@ 60 IN NS ns.example.org.\n",
+            "first 60 IN CNAME second.example.org.\n",
+            "second 60 IN CNAME third.example.org.\n",
+            "third 60 IN CNAME fourth.example.org.\n",
+            "fourth 60 IN CNAME fifth.example.org.\n",
+            "fifth 60 IN CNAME sixth.example.org.\n",
+            "sixth 60 IN CNAME seventh.example.org.\n",
+            "seventh 60 IN CNAME eighth.example.org.\n",
+            "eighth 60 IN CNAME ninth.example.org.\n",
+            "ninth 60 IN CNAME tenth.example.org.\n",
+            "tenth 60 IN CNAME eleventh.example.org.\n",
+            "eleventh 60 IN CNAME first.example.org.\n",
+        ),
+    )
+    .unwrap();
+
+    let (outcome, wire) = query(&zone, "first.example.org.", Type::A, false, &[]).await;
+
+    assert_eq!(outcome, Outcome::Unanswered(Rcode::SERVFAIL));
+    assert!(wire.is_empty());
+}
+
 // Derived from CoreDNS wildcard_test.go TestLookupWildcard.
 // RFC 4035 §3.1.3.3: Wildcard answers include a proof that no closer name exists.
 #[tokio::test]
@@ -2407,6 +2463,63 @@ async fn coredns_additional_processing_deduplicates_targets() {
         );
         assert_records(response.additionals(), additional);
     }
+}
+
+#[tokio::test]
+async fn mb_answers_include_madname_a_in_additional() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let target: Name = "mailbox.example.org.".parse().unwrap();
+    let mut records = ZoneParser::new(
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\n"
+            .as_bytes(),
+        apex.clone(),
+        "db.test",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    records.push(pharos_proto::zone::ZoneRecord {
+        owner: "mail.example.org.".parse().unwrap(),
+        class: pharos_proto::Class::IN,
+        rtype: Type::MB,
+        ttl: 60,
+        rdata: target.as_wire().to_vec(),
+    });
+    records.push(pharos_proto::zone::ZoneRecord {
+        owner: target,
+        class: pharos_proto::Class::IN,
+        rtype: Type::A,
+        ttl: 60,
+        rdata: vec![192, 0, 2, 25],
+    });
+    let zone = Zone::from_records(apex, records).unwrap();
+
+    let (outcome, wire) = query(&zone, "mail.example.org.", Type::MB, false, &[]).await;
+
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.answers().next().unwrap().rtype, Type::MB);
+    assert_eq!(
+        response.additionals().next().unwrap().rdata,
+        [192, 0, 2, 25]
+    );
+}
+
+#[tokio::test]
+async fn svcb_answers_include_target_svcb_in_additional() {
+    let zone = zone(
+        "example.org.",
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nsvc 60 IN SVCB 1 target.example.org. alpn=h2\ntarget 60 IN SVCB 1 backup.example.org. alpn=h2\n",
+    )
+    .unwrap();
+
+    let (outcome, wire) = query(&zone, "svc.example.org.", Type::SVCB, false, &[]).await;
+
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.answers().next().unwrap().rtype, Type::SVCB);
+    let additional = response.additionals().next().unwrap();
+    assert_eq!(additional.rtype, Type::SVCB);
+    assert_eq!(additional.name.to_string(), "target.example.org.");
 }
 
 // CoreDNS tsig README: require signatures for IXFR as well as AXFR.

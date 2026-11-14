@@ -13,7 +13,7 @@ async fn auto_queries_do_not_allocate() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\nwww 60 IN A 192.0.2.1\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n",
     )
     .unwrap();
     let text = format!(
@@ -73,7 +73,7 @@ async fn auto_metrics_queries_do_not_allocate() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\nwww 60 IN A 192.0.2.1\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n",
     )
     .unwrap();
     let text = format!(
