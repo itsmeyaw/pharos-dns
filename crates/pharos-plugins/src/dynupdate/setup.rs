@@ -40,6 +40,7 @@ impl Config {
 }
 
 // RFC 3007 §3.1.1: Dynamic UPDATE must not create, modify, or delete NXT records.
+// RFC 7208 §14.1: SPF rejection is UPDATE-only; seed Zones may retain legacy type 99.
 pub(super) fn unsupported(kind: Type) -> bool {
     matches!(
         kind,
@@ -61,8 +62,8 @@ pub(super) fn unsupported(kind: Type) -> bool {
     )
 }
 
-// miekg/dns v1.1.73 ztypes.go:11-92: only types with RR constructors are accepted.
-pub(super) fn known(kind: Type) -> bool {
+// RFC 3597 §§2, 5: only known RDATA formats use type-specific parsing and mnemonic syntax.
+fn has_rdata_parser(kind: Type) -> bool {
     matches!(
         kind,
         Type::A
@@ -148,6 +149,23 @@ pub(super) fn known(kind: Type) -> bool {
     )
 }
 
+// RFC 3597 §3: accept unrecognized ordinary RR types as opaque RDATA.
+pub(super) fn known(kind: Type) -> bool {
+    has_rdata_parser(kind)
+        || (kind.0 != 0
+            && kind.0 != u16::MAX
+            && !matches!(
+                kind,
+                Type::AXFR
+                    | Type::IXFR
+                    | Type::MAILA
+                    | Type::MAILB
+                    | Type::OPT
+                    | Type::TKEY
+                    | Type::TSIG
+            ))
+}
+
 // CoreDNS plugin/normalize.go:65: allow names may omit the trailing dot.
 fn fully_qualified(value: &str) -> String {
     if value.ends_with('.') {
@@ -158,8 +176,11 @@ fn fully_qualified(value: &str) -> String {
 }
 
 fn policy_type(raw: &str) -> Option<Type> {
+    let uppercase = raw.to_ascii_uppercase();
+    // RFC 3597 §3: `TYPEnnn` explicitly requests opaque RDATA handling.
+    let opaque_type = uppercase.starts_with("TYPE");
     let kind = Type::from_mnemonic(raw).or_else(|| {
-        raw.to_ascii_uppercase()
+        uppercase
             .strip_prefix("TYPE")?
             .parse::<u16>()
             .ok()
@@ -178,7 +199,8 @@ fn policy_type(raw: &str) -> Option<Type> {
                 | Type::TKEY
                 | Type::TSIG
         )
-        || kind.to_string().starts_with("TYPE")
+        || (!has_rdata_parser(kind) && !opaque_type)
+        || kind == Type::SPF // RFC 7208 §14.1: reject obsolete SPF type in UPDATE policy.
         || kind == Type::RESERVED
     {
         return None;
@@ -378,11 +400,41 @@ mod tests {
     }
 
     #[test]
+    fn allows_explicit_wks_permission_but_rejects_obsolete_spf() {
+        let parsed = config(
+            "dynupdate {\nfile seed.zone\nallow key.example.org. * TYPE11\n}",
+            &["example.org"],
+        )
+        .unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let owner: Name = "host.example.org.".parse().unwrap();
+        assert!(parsed.allows(&key, &owner, Type(11)));
+        assert!(
+            config(
+                "dynupdate {\nfile seed.zone\nallow key.example.org. * SPF\n}",
+                &["example.org"]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn allows_opaque_rfc3597_policy_types() {
+        let parsed = config(
+            "dynupdate {\nfile seed.zone\nallow key.example.org. * TYPE65280\n}",
+            &["example.org"],
+        )
+        .unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let owner: Name = "host.example.org.".parse().unwrap();
+        assert!(parsed.allows(&key, &owner, Type(65280)));
+    }
+
+    #[test]
     fn rejects_coredns_unsafe_setup_cases() {
         for body in [
             "allow key.example.org. * A",
             "file seed.zone",
-            "file seed.zone\nallow key.example.org. * TYPE65280",
             "file seed.zone\nallow key.example.org. * ATMA",
             "file seed.zone\nallow key.example.org. * UNSPEC",
             "file seed.zone\nallow key.example.org. * * TXT",

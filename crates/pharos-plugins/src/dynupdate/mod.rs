@@ -45,6 +45,12 @@ struct NotifyState {
 struct ZoneTerminal;
 
 #[cfg(feature = "plugin-dynupdate")]
+pub(super) struct ExpandedRecord {
+    pub(super) record: ZoneRecord,
+    pub(super) rdata_len: usize,
+}
+
+#[cfg(feature = "plugin-dynupdate")]
 impl Next for ZoneTerminal {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
         Outcome::Unanswered(Rcode::REFUSED)
@@ -143,9 +149,10 @@ impl DynUpdate {
         };
         let config = Arc::clone(&self.config);
         // RFC 2136 §3.7: UPDATE transactions publish complete Zone snapshots atomically.
-        let result =
-            tokio::task::spawn_blocking(move || shared.transact(&config, &key, &prereqs, &updates))
-                .await;
+        let result = tokio::task::spawn_blocking(move || {
+            shared.transact_expanded(&config, &key, &prereqs, &updates)
+        })
+        .await;
         let code = match result {
             Ok(Ok((code, changed))) => {
                 #[cfg(feature = "plugin-transfer")]
@@ -234,22 +241,15 @@ fn expand_record(
     record: pharos_proto::Record<'_>,
     message: &[u8],
     update: bool,
-) -> Result<ZoneRecord, ()> {
+) -> Result<ExpandedRecord, ()> {
     // RFC 2136 §3.4: UPDATE records are expanded before becoming Zone data.
-    // miekg/dns accepts zero-length RDATA before decoding the RR type.
+    let rdata_len = record.rdata.len();
+    // RFC 4398 §2: CERT RDATA must contain the complete five-octet header.
     let rdata = if record.rtype == Type::CERT
-        && record.rdata.len() < 5
-        && (!record.rdata.is_empty()
-            || record.class == Class::IN
-            || update && record.class == Class::NONE)
+        && (record.class == Class::IN || update && record.class == Class::NONE)
+        && rdata_len < 5
     {
-        // miekg/dns accepts complete partial fields and packs omitted fields as zero.
-        if matches!(record.rdata.len(), 1 | 3) {
-            return Err(());
-        }
-        let mut data = record.rdata.to_vec();
-        data.resize(5, 0);
-        data
+        return Err(());
     } else if record.rdata.is_empty() {
         Vec::new()
     } else if let Some(data) = crate::zone::update::legacy_name_rdata(
@@ -284,20 +284,26 @@ fn expand_record(
         let message = Message::parse(&wire).map_err(|_| ())?;
         message.answers().next().ok_or(())?.rdata.to_vec()
     };
-    Ok(ZoneRecord {
-        owner: record.name.to_name(),
-        rtype: record.rtype,
-        class: record.class,
-        ttl: record.ttl,
-        rdata,
+    Ok(ExpandedRecord {
+        record: ZoneRecord {
+            owner: record.name.to_name(),
+            rtype: record.rtype,
+            class: record.class,
+            ttl: record.ttl,
+            rdata,
+        },
+        rdata_len,
     })
 }
 
 #[cfg(feature = "plugin-dynupdate")]
+const QR: u16 = 1 << 15;
+
+#[cfg(feature = "plugin-dynupdate")]
 fn reply(cx: &mut Context<'_, '_>, code: Rcode) -> Outcome {
-    // RFC 2136 §3.8: the response preserves the UPDATE question and reports the transaction status.
-    let flags = 0x8400 | (cx.query.flags() & 0x7800) | code.0;
-    let Ok(mut builder) = MessageBuilder::new(
+    // RFC 2136 §§2.2 and 3.8: copy ID/opcode, set QR, and omit all request sections.
+    let flags = QR | (cx.query.flags() & 0x7800) | code.0;
+    let Ok(builder) = MessageBuilder::new(
         cx.response,
         cx.max_response_size.max(512),
         cx.query.id(),
@@ -305,13 +311,6 @@ fn reply(cx: &mut Context<'_, '_>, code: Rcode) -> Outcome {
     ) else {
         return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
     };
-    if let Some(question) = cx.query.questions().next()
-        && builder
-            .question(question.name, question.qtype, question.qclass)
-            .is_err()
-    {
-        return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
-    }
     let _ = builder.finish();
     Outcome::Response
 }
@@ -413,7 +412,7 @@ mod tests {
             let message = Message::parse(&wire).unwrap();
             let rr = message.authorities().next().unwrap();
             assert_eq!(
-                expand_record(rr, &wire, true).unwrap().rdata,
+                expand_record(rr, &wire, true).unwrap().record.rdata,
                 expected,
                 "{kind}"
             );
@@ -421,18 +420,31 @@ mod tests {
     }
 
     #[test]
-    fn coredns_cert_partial_fields_are_normalized() {
+    fn cert_rdata_requires_complete_header() {
         let apex: pharos_proto::Name = "example.org.".parse().unwrap();
         let name = NameRef::parse(apex.as_wire(), 0).unwrap();
         for (class, data, update, expected) in [
-            (Class::IN, vec![], true, Some(vec![0, 0, 0, 0, 0])),
-            (Class::IN, vec![0, 1], true, Some(vec![0, 1, 0, 0, 0])),
-            (Class::IN, vec![0, 1, 0, 2], true, Some(vec![0, 1, 0, 2, 0])),
+            (Class::IN, vec![], true, None),
+            (Class::IN, vec![0, 1], true, None),
+            (Class::IN, vec![0, 1, 0, 2], true, None),
+            (
+                Class::IN,
+                vec![0, 1, 0, 2, 0],
+                true,
+                Some(vec![0, 1, 0, 2, 0]),
+            ),
             (Class::IN, vec![1], true, None),
             (Class::IN, vec![0, 1, 2], true, None),
             (Class::ANY, vec![], true, Some(vec![])),
             (Class::NONE, vec![], false, Some(vec![])),
-            (Class::NONE, vec![], true, Some(vec![0, 0, 0, 0, 0])),
+            (Class::NONE, vec![], true, None),
+            (Class::NONE, vec![0, 1, 0, 2], true, None),
+            (
+                Class::NONE,
+                vec![0, 1, 0, 2, 0],
+                true,
+                Some(vec![0, 1, 0, 2, 0]),
+            ),
         ] {
             let mut wire = Vec::with_capacity(512);
             let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
@@ -444,8 +456,8 @@ mod tests {
             let message = Message::parse(&wire).unwrap();
             let result = expand_record(message.authorities().next().unwrap(), &wire, update)
                 .ok()
-                .map(|record| record.rdata);
-            assert_eq!(result, expected, "{class:?} {data:?} {update}");
+                .map(|record| record.record.rdata);
+            assert_eq!(result, expected, "{class:?} {data:?}");
         }
     }
 
@@ -522,5 +534,113 @@ mod tests {
             );
             drop(guard);
         });
+    }
+
+    #[test]
+    fn expanded_records_retain_received_rdata_length() {
+        let apex: pharos_proto::Name = "example.org.".parse().unwrap();
+        let alias: pharos_proto::Name = "alias.example.org.".parse().unwrap();
+        let zone_text = concat!(
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+            "@ 60 IN NS ns.example.org.\n",
+            "alias 60 IN CNAME example.org.\n",
+        );
+        let zone_records =
+            pharos_proto::zone::ZoneParser::new(zone_text.as_bytes(), apex.clone(), "test")
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+        let zone = crate::zone::Zone::from_records(apex.clone(), zone_records).unwrap();
+
+        for (wire_rdata, expected) in [
+            (&[0xc0, 0x0c][..], Rcode::NXRRSET),
+            (apex.as_wire(), Rcode::NOERROR),
+        ] {
+            let mut wire = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
+            builder
+                .question(
+                    NameRef::parse(apex.as_wire(), 0).unwrap(),
+                    Type::SOA,
+                    Class::IN,
+                )
+                .unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    NameRef::parse(alias.as_wire(), 0).unwrap(),
+                    Type::CNAME,
+                    Class::IN,
+                    0,
+                    wire_rdata,
+                )
+                .unwrap();
+            let _ = builder.finish();
+            let message = Message::parse(&wire).unwrap();
+            let record = message.answers().next().unwrap();
+            let expanded = expand_record(record, &wire, false).unwrap();
+            assert_eq!(
+                expanded.rdata_len,
+                wire_rdata.len(),
+                "received RDLENGTH must survive expansion"
+            );
+            assert_eq!(update::prerequisites(&zone, &[expanded]), expected);
+        }
+    }
+
+    #[test]
+    fn update_reply_copies_opcode_without_aa_and_omits_sections() {
+        let apex: pharos_proto::Name = "example.org.".parse().unwrap();
+        let name = NameRef::parse(apex.as_wire(), 0).unwrap();
+        let mut query_wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut query_wire, 512, 7, 0x2800).unwrap();
+        builder.question(name, Type::SOA, Class::IN).unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&query_wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: pharos_server::Transport::Dns,
+            protocol: pharos_server::Protocol::Udp,
+            domain: &apex,
+            metadata: pharos_server::Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+
+        assert_eq!(reply(&mut cx, Rcode::NOERROR), Outcome::Response);
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.flags() & 0xf800, 0xa800);
+        assert_eq!(response.question_count(), 0);
+        assert_eq!(response.answer_count(), 0);
+        assert_eq!(response.authority_count(), 0);
+        assert_eq!(response.additional_count(), 0);
+    }
+
+    #[test]
+    fn expands_opaque_wks_and_unassigned_rr_types() {
+        let apex: pharos_proto::Name = "example.org.".parse().unwrap();
+        let name = NameRef::parse(apex.as_wire(), 0).unwrap();
+        for (kind, data) in [
+            (Type(11), vec![192, 0, 2, 1, 6, 1]),
+            (Type(65280), vec![1, 2, 3]),
+        ] {
+            let mut wire = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
+            builder.question(name, Type::SOA, Class::IN).unwrap();
+            builder
+                .record(Section::Authority, name, kind, Class::IN, 60, &data)
+                .unwrap();
+            let _ = builder.finish();
+            let message = Message::parse(&wire).unwrap();
+            assert_eq!(
+                expand_record(message.authorities().next().unwrap(), &wire, true)
+                    .unwrap()
+                    .record
+                    .rdata,
+                data
+            );
+        }
     }
 }
