@@ -156,7 +156,14 @@ fn loopback_except_and_reload_change_listeners() {
                 "reload did not remove IPv4 listener"
             );
         }
-        assert!(answers(v6));
+        // RFC 1035 §4.2.1: Wait for the reloaded UDP listener to answer again.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !answers(v6) {
+            assert!(
+                Instant::now() < deadline,
+                "reload did not keep IPv6 listener"
+            );
+        }
     }
     drop(process);
     fs::remove_dir_all(dir).unwrap();
