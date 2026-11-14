@@ -42,7 +42,7 @@ async fn coredns_any_synthesizes_hinfo() {
     let name_ref = NameRef::parse(name.as_wire(), 0).unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 0x1234, 0x0110).unwrap();
-    builder.question(name_ref, Type::ANY, Class::CH).unwrap();
+    builder.question(name_ref, Type::ANY, Class::IN).unwrap();
     let _ = builder.finish();
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::with_capacity(512);
@@ -81,7 +81,7 @@ async fn coredns_any_synthesizes_hinfo() {
     let question = message.questions().next().unwrap();
     assert_eq!(
         (question.name.to_string(), question.qtype, question.qclass),
-        ("ExAmple.org.".into(), Type::ANY, Class::CH)
+        ("ExAmple.org.".into(), Type::ANY, Class::IN)
     );
     let answer = message.answers().next().unwrap();
     assert_eq!(
@@ -94,6 +94,42 @@ async fn coredns_any_synthesizes_hinfo() {
         ("ExAmple.org.".into(), Type::HINFO, Class::IN, 8482)
     );
     assert_eq!(answer.rdata, b"\x0dANY obsoleted\x0cSee RFC 8482");
+}
+
+#[tokio::test]
+async fn any_passes_non_in_queries_to_next_plugin() {
+    let chain = configured("any").unwrap();
+    let name: Name = "example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::ANY, Class::CH)
+        .unwrap();
+    let _ = builder.finish();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .any
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, NextOutcome(Outcome::Drop))
+            .await,
+        Outcome::Drop
+    );
+    assert!(response.is_empty());
 }
 
 #[tokio::test]

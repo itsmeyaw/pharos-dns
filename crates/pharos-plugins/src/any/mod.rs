@@ -15,6 +15,10 @@ impl Plugin for Any {
         if question.qtype != Type::ANY {
             return next.run(cx).await;
         }
+        // RFC 8482 §4.2: synthesize the minimal answer only for IN-class ANY queries.
+        if question.qclass != Class::IN {
+            return next.run(cx).await;
+        }
         let result = (|| {
             let max_size = cx.max_response_size.max(512);
             if cx.response.capacity() < max_size {
