@@ -222,13 +222,13 @@ async fn nxdomain_with_cname_suppresses_siit_translation() {
 #[tokio::test]
 async fn coredns_siit_translation_fallback_and_eam() {
     let wire = query(
-        "eam 203.0.113.9 64:ff9b::192.0.2.1",
+        "eam 203.0.113.9 64:ff9b::8.8.8.1",
         0,
         false,
         false,
         0,
         0x0480,
-        &["2001:db8::1", "64:ff9b::192.0.2.1", "64:ff9b::192.0.2.42"],
+        &["2001:db8::1", "64:ff9b::8.8.8.1", "64:ff9b::8.8.8.42"],
     )
     .await;
     let m = Message::parse(&wire).unwrap();
@@ -237,14 +237,14 @@ async fn coredns_siit_translation_fallback_and_eam() {
     let answers = m.answers().collect::<Vec<_>>();
     assert_eq!(answers.len(), 2);
     assert_eq!(answers[0].rdata, &[203, 0, 113, 9]);
-    assert_eq!(answers[1].rdata, &[192, 0, 2, 42]);
+    assert_eq!(answers[1].rdata, &[8, 8, 8, 42]);
     assert!(answers.iter().all(|rr| rr.rtype == Type::A && rr.ttl == 70));
     assert_eq!(m.flags() & 0x04a0, 0x0480);
 
     for (initial, tc, a, secondary, addresses, expected_code, expected_answers) in [
-        (3, false, false, 0, vec!["64:ff9b::192.0.2.1"], 3, 0),
-        (0, true, false, 0, vec!["64:ff9b::192.0.2.1"], 0, 0),
-        (0, false, true, 0, vec!["64:ff9b::192.0.2.1"], 0, 1),
+        (3, false, false, 0, vec!["64:ff9b::8.8.8.1"], 3, 0),
+        (0, true, false, 0, vec!["64:ff9b::8.8.8.1"], 0, 0),
+        (0, false, true, 0, vec!["64:ff9b::8.8.8.1"], 0, 1),
         (0, false, false, 0, vec!["2001:db8::1"], 0, 0),
         (0, false, false, 0, vec![], 0, 0),
         (0, false, false, 2, vec![], 2, 0),
@@ -269,7 +269,7 @@ async fn coredns_siit_translation_fallback_and_eam() {
             false,
             0,
             0x0480,
-            &["64:ff9b::192.0.2.1"],
+            &["64:ff9b::8.8.8.1"],
         )
         .await;
         assert_eq!(
@@ -278,11 +278,28 @@ async fn coredns_siit_translation_fallback_and_eam() {
         );
     }
     for flags in [0, 0x80, 0x400, 0x480] {
-        let wire = query("", 0, false, false, 0, flags, &["64:ff9b::192.0.2.1"]).await;
+        let wire = query("", 0, false, false, 0, flags, &["64:ff9b::8.8.8.1"]).await;
         assert_eq!(Message::parse(&wire).unwrap().flags() & 0x4a0, flags);
     }
-    let wire = query("", 0, false, false, 0x200, 0x0480, &["64:ff9b::192.0.2.1"]).await;
+    let wire = query("", 0, false, false, 0x200, 0x0480, &["64:ff9b::8.8.8.1"]).await;
     assert!(Message::parse(&wire).unwrap().tc());
+}
+
+#[tokio::test]
+async fn well_known_prefix_does_not_translate_non_global_ipv4() {
+    let wire = query(
+        "",
+        0,
+        false,
+        false,
+        0,
+        0x0480,
+        &["64:ff9b::192.0.2.1"],
+    )
+    .await;
+    let message = Message::parse(&wire).unwrap();
+    assert_eq!(message.rcode(), Rcode::NOERROR);
+    assert_eq!(message.answers().count(), 0);
 }
 
 // RFC 6052 §2.2 Table 1: independent address mapping vectors.
@@ -334,7 +351,7 @@ async fn siit_metrics_count_translations_only() {
 
 #[cfg(feature = "plugin-hosts")]
 async fn siit_metrics_count_translations() {
-    let config = ".:53 {\n siit\n hosts /nonexistent {\n  64:ff9b::192.0.2.1 mapped.example\n  2001:db8::1 unmapped.example\n  ttl 60\n }\n}";
+    let config = ".:53 {\n siit\n hosts /nonexistent {\n  64:ff9b::8.8.8.1 mapped.example\n  2001:db8::1 unmapped.example\n  ttl 60\n }\n}";
     let (mut listeners, _) = pharos_plugins::servers(
         configure::<Chain>(&parse("Corefile", config).unwrap(), directives()).unwrap(),
     )

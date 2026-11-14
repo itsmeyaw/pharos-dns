@@ -124,6 +124,13 @@ impl Siit {
             *byte = addr[index];
             index += 1;
         }
+        // RFC 6052 §3.1: Do not translate non-global IPv4 through the Well-Known Prefix.
+        if self.prefix_len == 96
+            && self.prefix == crate::rfc6052::WELL_KNOWN_PREFIX
+            && !crate::rfc6052::is_global_ipv4(Ipv4Addr::from(v4))
+        {
+            return None;
+        }
         Some(v4)
     }
 }
