@@ -700,6 +700,8 @@ async fn handler_common_and_regular() {
             vec![],
             vec![],
         ),
+        // RFC 2308 §2.2: ns.dns exists for A/AAAA but has no TXT RRset.
+        negative("ns TXT NODATA", "ns.dns.cluster.local.", Type::TXT, a, zone),
         negative("common 15", svc1, Type::TXT, a, zone),
         negative(
             "common 16",

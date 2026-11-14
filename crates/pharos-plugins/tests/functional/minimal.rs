@@ -163,6 +163,7 @@ async fn coredns_minimization_and_response_types() {
             Outcome::Response
         );
         let result = Message::parse(cx.response).unwrap();
+        assert_eq!(result.questions().count(), 1, "flags={flags:x}");
         assert_eq!(result.answer_count(), u16::from(answer));
         if answer {
             let record = result.answers().next().unwrap();
