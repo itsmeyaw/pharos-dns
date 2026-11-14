@@ -501,7 +501,7 @@ fn generate(
             if index.namespace(&service.namespace).is_none() {
                 continue;
             }
-            if service.service_type == "ExternalName" {
+            if service.service_type.as_ref() == "ExternalName" {
                 if service.external_name.parse::<IpAddr>().is_ok() {
                     continue;
                 }
@@ -525,7 +525,7 @@ fn generate(
                     snapshot.record(base, Type::CNAME, snapshot.ttl, |w| w.write_name(target))?;
                 }
             } else if matches!(
-                service.service_type.as_str(),
+                service.service_type.as_ref(),
                 "ClusterIP" | "NodePort" | "LoadBalancer"
             ) {
                 snapshot.service(
@@ -880,8 +880,17 @@ mod tests {
             .collect();
         assert_eq!(
             records.iter().map(|rr| rr.rtype).collect::<Vec<_>>(),
-            [Type::A, Type::AAAA, Type::SRV, Type::SRV, Type::SRV]
+            [Type::A, Type::AAAA, Type::SRV, Type::SRV]
         );
+        assert!(matches!(
+            records[2].data().unwrap(),
+            Rdata::Srv {
+                weight: 100,
+                port: 8080,
+                target,
+                ..
+            } if target.to_string() == "web.prod.svc.cluster.local."
+        ));
         assert_eq!(
             records[3].name.to_string(),
             "_http._tcp.web.prod.svc.cluster.local."
@@ -889,14 +898,6 @@ mod tests {
         assert!(
             matches!(records[3].data().unwrap(), Rdata::Srv { weight: 100, port: 8080, target, .. } if target.to_string() == "web.prod.svc.cluster.local.")
         );
-        assert!(matches!(
-            records[4].data().unwrap(),
-            Rdata::Srv {
-                weight: 100,
-                port: 53,
-                ..
-            }
-        ));
     }
 
     // CoreDNS's Kubernetes controller represents a Service with no ports by port -1.
@@ -977,7 +978,7 @@ mod tests {
                 ip: "10.0.0.1".into(),
                 hostname: "node".into(),
                 node_name: String::new(),
-                target_ref_name: String::new(),
+                target_ref_name: String::new().into(),
                 ready: true,
             }],
             ports: vec![Port {
@@ -1020,7 +1021,7 @@ mod tests {
                 ip: "10.0.0.1".into(),
                 hostname: "node".into(),
                 node_name: String::new(),
-                target_ref_name: String::new(),
+                target_ref_name: String::new().into(),
                 ready: false,
             }],
             ports: vec![Port {
@@ -1062,7 +1063,7 @@ mod tests {
                     ip: ip.into(),
                     hostname: format!("node{i}"),
                     node_name: String::new(),
-                    target_ref_name: String::new(),
+                    target_ref_name: String::new().into(),
                     ready: true,
                 })
                 .collect(),
@@ -1110,7 +1111,7 @@ mod tests {
                 ip: "10.0.0.1".into(),
                 hostname: "node".into(),
                 node_name: String::new(),
-                target_ref_name: String::new(),
+                target_ref_name: String::new().into(),
                 ready: true,
             }],
             ports: vec![Port {
