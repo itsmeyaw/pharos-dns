@@ -402,6 +402,55 @@ async fn pending_query_finishes_after_client_half_close() {
     listener.shutdown().await.unwrap();
 }
 
+struct CancelOnDrop(async_mpsc::UnboundedSender<()>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+struct WaitForReset {
+    started: async_mpsc::UnboundedSender<()>,
+    cancelled: async_mpsc::UnboundedSender<()>,
+}
+
+impl Handler for WaitForReset {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        self.started.send(()).unwrap();
+        let _cancelled = CancelOnDrop(self.cancelled.clone());
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn peer_reset_cancels_in_flight_query_tasks() {
+    let (started, mut started_rx) = async_mpsc::unbounded_channel();
+    let (cancelled, mut cancelled_rx) = async_mpsc::unbounded_channel();
+    let (listener, mut stream) = connect(WaitForReset { started, cancelled }).await;
+    send(&mut stream, b"wait").await;
+    timeout(TEST_TIMEOUT, started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let stream = stream.into_std().unwrap();
+    socket2::SockRef::from(&stream)
+        .set_linger(Some(Duration::ZERO))
+        .unwrap();
+    drop(stream);
+
+    let cancelled_before_shutdown = matches!(
+        timeout(Duration::from_millis(250), cancelled_rx.recv()).await,
+        Ok(Some(()))
+    );
+    listener.shutdown().await.unwrap();
+    assert!(
+        cancelled_before_shutdown,
+        "peer reset left the Query running"
+    );
+}
+
 #[tokio::test]
 async fn pending_query_does_not_block_ready_query() {
     let (started, mut observed) = async_mpsc::unbounded_channel();

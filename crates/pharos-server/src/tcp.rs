@@ -193,7 +193,16 @@ async fn serve<H: Handler>(
                 };
                 match result {
                     Ok(query) => break query,
-                    Err(_) => break 'read,
+                    Err(error) => {
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                        ) {
+                            // RFC 7766 §6.2.4; RFC 5936 §4.1.2: A reset peer abandoned active Responses and Transfers.
+                            queries.abort_all();
+                        }
+                        break 'read;
+                    }
                 }
             }
         };
