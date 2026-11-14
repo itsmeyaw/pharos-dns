@@ -525,6 +525,8 @@ impl Plugin for Forward {
                     break;
                 }
                 if use_refused_fallback {
+                    // RFC 4035 §4.6: Ignore AD from an upstream without a secure channel.
+                    cx.response[3] &= !0x20;
                     // RFC 8945 §5.5: Listener clears AD if it re-signs this forwarded Response.
                     cx.metadata.mark_forwarded_response();
                     return Outcome::Response;
@@ -534,6 +536,8 @@ impl Plugin for Forward {
                 cx.response.clear();
                 // RFC 5625 §4.3: return Responses without filtering RRs by TYPE or CLASS.
                 cx.response.extend_from_slice(answer);
+                // RFC 4035 §4.6: Ignore AD from an upstream without a secure channel.
+                cx.response[3] &= !0x20;
                 // RFC 8945 §5.5: Listener clears AD if it re-signs this forwarded Response.
                 cx.metadata.mark_forwarded_response();
                 return Outcome::Response;

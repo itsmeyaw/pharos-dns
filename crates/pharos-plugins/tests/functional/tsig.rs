@@ -7,7 +7,7 @@ use pharos_server::{Context, Metadata, Outcome, Plugin, Protocol, Transport};
 use tokio::net::UdpSocket;
 
 #[tokio::test]
-async fn forward_preserves_ad_for_listener_tsig_finalization() {
+async fn forward_clears_unsecured_ad_for_listener_tsig_finalization() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = upstream.local_addr().unwrap();
     let task = tokio::spawn(async move {
@@ -52,8 +52,8 @@ async fn forward_preserves_ad_for_listener_tsig_finalization() {
     };
     let outcome = configured[0].config.serve(&mut cx).await;
     assert_eq!(outcome, Outcome::Response);
-    // RFC 8945 §5.5: Listener clears AD only when it re-signs without upstream transaction security.
-    assert!(Message::parse(cx.response).unwrap().ad());
+    // RFC 4035 §4.6: Disregard AD received from an upstream over an unsecured channel.
+    assert!(!Message::parse(cx.response).unwrap().ad());
     assert!(cx.metadata.take_tsig_signing().is_some());
     task.await.unwrap();
 }

@@ -185,6 +185,32 @@ async fn forwards_query_and_restores_client_id() {
 }
 
 #[tokio::test]
+async fn opt_out_nsec3_response_does_not_preserve_ad() {
+    // RFC 5155 §9.2: An Opt-Out proof cannot establish authenticated denial.
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = upstream.recv_from(&mut wire).await.unwrap();
+        let mut reply = wire[..len].to_vec();
+        reply[2] |= 0x80;
+        reply[3] |= 0x20;
+        reply[10..12].copy_from_slice(&1_u16.to_be_bytes());
+        reply.extend_from_slice(&[
+            0xc0, 0x0c, 0, 50, 0, 1, 0, 0, 0, 30, 0, 10, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0x40,
+        ]);
+        upstream.send_to(&reply, peer).await.unwrap();
+    });
+    let chain = chain(&format!(".:0 {{\n forward . {address}\n}}"));
+
+    let (outcome, response, _) = run(&chain).await;
+
+    assert_eq!(outcome, Outcome::Response);
+    assert!(!Message::parse(&response).unwrap().ad());
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn refused_ecs_query_retries_without_ecs() {
     let (address, upstream) = ecs_refused_upstream(false).await;
     let chain = chain(&format!(".:0 {{\n forward . {address}\n}}"));
