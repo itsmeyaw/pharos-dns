@@ -38,7 +38,7 @@ fn fallthrough_matches_domains_at_label_boundaries() {
 }
 
 #[test]
-fn normalizes_server_block_keys_and_valid_cidrs() {
+fn coredns_normalize_exact_fixtures() {
     for (host, expected) in [
         (".:53", vec!["."]),
         ("example.org:53", vec!["example.org."]),
@@ -49,13 +49,7 @@ fn normalizes_server_block_keys_and_valid_cidrs() {
             "10.0.0.0/15",
             vec!["0.10.in-addr.arpa.", "1.10.in-addr.arpa."],
         ),
-        (
-            "::fFFF:B:F/115",
-            vec![
-                "0.b.0.0.0.f.f.f.f.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa.",
-                "1.b.0.0.0.f.f.f.f.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa.",
-            ],
-        ),
+        ("::fFFF:B:F/115", vec![]),
         (
             "2001:db8::/112",
             vec!["0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."],
