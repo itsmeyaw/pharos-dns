@@ -22,6 +22,108 @@ impl Next for Unanswered<'_> {
     }
 }
 
+struct EmptyNoData<'a>(&'a AtomicUsize);
+impl Next for EmptyNoData<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct Referral<'a>(&'a AtomicUsize);
+impl Next for Referral<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let root = pharos_proto::NameRef::parse(&[0], 0).unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                root,
+                Type::NS,
+                Class::IN,
+                1,
+                b"\x02ns\0",
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct EcsResponse<'a>(&'a AtomicUsize);
+impl Next for EcsResponse<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let root = pharos_proto::NameRef::parse(&[0], 0).unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::A,
+                Class::IN,
+                30,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Additional,
+                root,
+                Type::OPT,
+                Class(1232),
+                0,
+                &[0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct TkeyResponse<'a>(&'a AtomicUsize);
+impl Next for TkeyResponse<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let root = pharos_proto::NameRef::parse(&[0], 0).unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::A,
+                Class::IN,
+                30,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        builder
+            .record(Section::Additional, root, Type::TKEY, Class::IN, 30, &[])
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
 struct Pending;
 impl Next for Pending {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
@@ -91,6 +193,40 @@ impl Next for ExpiredSignature<'_> {
                 Class(1232),
                 0x8000,
                 &[],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct ZeroTtlExpiredSignature<'a>(&'a AtomicUsize);
+impl Next for ZeroTtlExpiredSignature<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::A,
+                Class::IN,
+                0,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::RRSIG,
+                Class::IN,
+                0,
+                b"\0\x01\x08\0\0\0\0\x1e\0\0\0\x02\0\0\0\x01\0\x01\0",
             )
             .unwrap();
         let _ = builder.finish();
@@ -197,6 +333,19 @@ fn cache_with(directive: &str) -> Chain {
         .config
 }
 
+fn query_wire(qtype: Type, name: &[u8], ecs: bool) -> Vec<u8> {
+    let mut wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0".to_vec();
+    wire.extend_from_slice(name);
+    wire.extend_from_slice(&qtype.0.to_be_bytes());
+    wire.extend_from_slice(&Class::IN.0.to_be_bytes());
+    if ecs {
+        // RFC 7871 §6: Encode a valid IPv4 /24 ECS option.
+        wire[10..12].copy_from_slice(&1_u16.to_be_bytes());
+        wire.extend_from_slice(b"\0\0\x29\x04\xd0\0\0\0\0\0\x0b\0\x08\0\x07\0\x01\x18\0\xc0\0\x02");
+    }
+    wire
+}
+
 #[tokio::test]
 async fn ad_is_per_request_and_do_and_cd_use_separate_keys() {
     let chain = cache();
@@ -267,6 +416,27 @@ async fn expired_dnssec_signature_is_not_cached() {
 }
 
 #[tokio::test]
+async fn positive_zero_ttl_floor_cannot_outlive_expired_rrsig() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    for _ in 0..2 {
+        let (outcome, response) = query_with(&chain, &query, ZeroTtlExpiredSignature(&calls)).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(
+            Message::parse(&response)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .ttl,
+            0
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
 async fn cache_removes_upstream_opt_on_miss_and_hit() {
     let chain = cache();
     let calls = AtomicUsize::new(0);
@@ -324,9 +494,16 @@ async fn authenticated_refresh_sets_ad_on_forwarded_wire() {
         let mut wire = [0_u8; 512];
         let (len, peer) = upstream.recv_from(&mut wire).await.unwrap();
         assert!(Message::parse(&wire[..len]).unwrap().ad());
-        wire[2] |= 0x80;
-        wire[3] |= 0x20;
-        upstream.send_to(&wire[..len], peer).await.unwrap();
+        let mut response = wire[..len].to_vec();
+        response[2] |= 0x80;
+        response[3] |= 0x20;
+        response[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        // RFC 2308 §5: Use a positive answer so this test exercises a cacheable response.
+        response.splice(
+            19..19,
+            [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 192, 0, 2, 1],
+        );
+        upstream.send_to(&response, peer).await.unwrap();
     });
     let text = format!(".:0 {{\n cache\n forward . {address}\n}}");
     let blocks = parse("Corefile", &text).unwrap();
@@ -557,7 +734,7 @@ async fn caches_servfail_and_can_disable_it() {
 }
 
 #[tokio::test]
-async fn uncached_other_errors_use_coredns_fallback_ttl() {
+async fn caches_refused_with_failure_ttl() {
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
     let chain = cache();
     let calls = AtomicUsize::new(0);
@@ -573,7 +750,7 @@ async fn uncached_other_errors_use_coredns_fallback_ttl() {
             5
         );
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -644,6 +821,24 @@ async fn ttl_caps_and_negative_soa_minimum_apply_on_miss_and_hit() {
 }
 
 #[tokio::test]
+async fn denial_minimum_does_not_raise_negative_soa_ttl() {
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let chain = cache_with("cache {\n denial 1024 30 5\n}");
+    let calls = AtomicUsize::new(0);
+    let response = query(&chain, wire, &calls, 3, false).await;
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .authorities()
+            .next()
+            .unwrap()
+            .ttl,
+        3
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn incomplete_positive_without_soa_is_not_cached() {
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x1c\0\x01";
     let chain = cache();
@@ -693,6 +888,26 @@ async fn query(
     response
 }
 
+async fn query_with<N: Next + Send>(chain: &Chain, wire: &[u8], next: N) -> (Outcome, Vec<u8>) {
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(wire).unwrap(),
+        client: "127.0.0.1:1000".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    let outcome = chain.cache.as_ref().unwrap().serve(&mut cx, next).await;
+    drop(cx);
+    (outcome, response)
+}
+
 #[tokio::test]
 async fn caches_positive_response_and_patches_question_and_id() {
     let chain = cache();
@@ -731,6 +946,158 @@ async fn caches_denial_but_not_truncated_response() {
     let _ = query(&chain, wire, &calls, 0, true).await;
     let _ = query(&chain, wire, &calls, 0, true).await;
     assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn nxdomain_for_a_is_reused_for_aaaa() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let a = query_wire(Type::A, b"\x01x\0", false);
+    let aaaa = query_wire(Type::AAAA, b"\x01x\0", false);
+    let _ = query(&chain, &a, &calls, 3, false).await;
+    let hit = query(&chain, &aaaa, &calls, 3, false).await;
+    let hit = Message::parse(&hit).unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(hit.rcode(), pharos_proto::Rcode::NXDOMAIN);
+    assert_eq!(hit.questions().next().unwrap().qtype, Type::AAAA);
+}
+
+#[tokio::test]
+async fn ecs_queries_and_ecs_responses_are_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let ecs_query = query_wire(Type::A, b"\x01x\0", true);
+    let _ = query(&chain, &ecs_query, &calls, 0, false).await;
+    let _ = query(&chain, &ecs_query, &calls, 0, false).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    for _ in 0..2 {
+        let (outcome, response) = query_with(&chain, &query, EcsResponse(&calls)).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert!(
+            Message::parse(&response)
+                .unwrap()
+                .opt()
+                .unwrap()
+                .options()
+                .iter()
+                .any(|option| matches!(option, pharos_proto::EdnsOption::ClientSubnet(_)))
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn explicit_wildcard_and_tkey_responses_are_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let wildcard = query_wire(Type::A, b"\x01*\x01x\0", false);
+    let _ = query(&chain, &wildcard, &calls, 0, false).await;
+    let _ = query(&chain, &wildcard, &calls, 0, false).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    let calls = AtomicUsize::new(0);
+    let ordinary = query_wire(Type::A, b"\x01x\0", false);
+    for _ in 0..2 {
+        let (outcome, _) = query_with(&chain, &ordinary, TkeyResponse(&calls)).await;
+        assert_eq!(outcome, Outcome::Response);
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn referral_lifetime_uses_ns_ttl() {
+    let chain = cache_with("cache {\nsuccess 1024 60 0\n}");
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let calls = AtomicUsize::new(0);
+    let (outcome, response) = query_with(&chain, &query, Referral(&calls)).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .authorities()
+            .next()
+            .unwrap()
+            .ttl,
+        1
+    );
+    let (outcome, response) = query_with(&chain, &query, Referral(&calls)).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .authorities()
+            .next()
+            .unwrap()
+            .ttl,
+        1
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn referral_ttl_uses_positive_minimum_floor() {
+    let chain = cache_with("cache {\nsuccess 1024 60 5\n}");
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let calls = AtomicUsize::new(0);
+    for _ in 0..2 {
+        let (outcome, response) = query_with(&chain, &query, Referral(&calls)).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(
+            Message::parse(&response)
+                .unwrap()
+                .authorities()
+                .next()
+                .unwrap()
+                .ttl,
+            5
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn soa_less_nodata_is_not_cached() {
+    let chain = cache();
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let calls = AtomicUsize::new(0);
+    for _ in 0..2 {
+        let (outcome, response) = query_with(&chain, &query, EmptyNoData(&calls)).await;
+        assert_eq!(outcome, Outcome::Response);
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.rcode(), pharos_proto::Rcode::NOERROR);
+        assert_eq!(response.answer_count(), 0);
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn failure_backoff_and_stale_rejection_work_end_to_end() {
+    let chain = cache_with("cache {\nservfail 1s\nserve_stale 10s immediate\n}");
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let calls = AtomicUsize::new(0);
+    let (outcome, _) = query_with(&chain, &query, Unanswered(&calls)).await;
+    assert_eq!(outcome, Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL));
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (outcome, _) = query_with(&chain, &query, Unanswered(&calls)).await;
+    assert_eq!(outcome, Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL));
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (outcome, response) = query_with(&chain, &query, Unanswered(&calls)).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&response).unwrap().rcode(),
+        pharos_proto::Rcode::SERVFAIL
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (outcome, _) = query_with(&chain, &query, Unanswered(&calls)).await;
+    assert_eq!(outcome, Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL));
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
 }
 
 #[tokio::test]

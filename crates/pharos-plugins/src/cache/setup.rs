@@ -53,7 +53,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, server_keys: &[&str]) -> Result<Con
         denial_capacity: 10_000,
         success_max_ttl: Duration::from_secs(3600),
         success_min_ttl: Duration::from_secs(5),
-        // RFC 2308 §5: negative-cache lifetime defaults below positive TTL and stays configurable.
+        // RFC 2308 §3: Retain denial_min_ttl for syntax compatibility; response lifetime never uses it.
         denial_max_ttl: Duration::from_secs(1800),
         denial_min_ttl: Duration::from_secs(5),
         prefetch_amount: 0,
@@ -146,7 +146,8 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, server_keys: &[&str]) -> Result<Con
                 config.stale = Duration::from_secs(3600);
                 config.verify = false;
                 config.verify_timeout = Duration::ZERO;
-                config.stale_ttl = Duration::ZERO;
+                // RFC 8767 §4: The default stale response TTL should be 30 seconds.
+                config.stale_ttl = Duration::from_secs(30);
                 config.stale_recheck = Duration::ZERO;
                 if let Some(value) = args.first() {
                     config.stale = nonnegative_duration(cursor, value)?;
@@ -247,6 +248,8 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, server_keys: &[&str]) -> Result<Con
             _ => return Err(cursor.arg_err()),
         }
     }
+    // RFC 2308 §5: The negative-cache maximum must not exceed the positive maximum.
+    config.denial_max_ttl = config.denial_max_ttl.min(config.success_max_ttl);
     if policy_configured && !stale_configured {
         return Err(cursor.error("serve_stale_policy requires serve_stale"));
     }
@@ -406,6 +409,8 @@ mod tests {
         ] {
             assert!(parse_text(text).is_err(), "accepted {text}");
         }
+        let capped = parse_text("cache {\nsuccess 10 7 0\ndenial 10 20 0\n}").unwrap();
+        assert_eq!(capped.denial_max_ttl, Duration::from_secs(7));
     }
 
     #[test]
@@ -517,14 +522,14 @@ mod tests {
     #[test]
     fn coredns_stale_and_servfail_cases() {
         for (option, stale, verify, timeout, ttl, recheck) in [
-            ("serve_stale", 3600, false, 0, 0, 0),
-            ("serve_stale 20m", 1200, false, 0, 0, 0),
-            ("serve_stale 1h20m", 4800, false, 0, 0, 0),
-            ("serve_stale 0m", 0, false, 0, 0, 0),
-            ("serve_stale 0", 0, false, 0, 0, 0),
-            ("serve_stale 0 verify", 0, true, 0, 0, 0),
-            ("serve_stale 0 immediate", 0, false, 0, 0, 0),
-            ("serve_stale 0 VERIFY", 0, true, 0, 0, 0),
+            ("serve_stale", 3600, false, 0, 30, 0),
+            ("serve_stale 20m", 1200, false, 0, 30, 0),
+            ("serve_stale 1h20m", 4800, false, 0, 30, 0),
+            ("serve_stale 0m", 0, false, 0, 30, 0),
+            ("serve_stale 0", 0, false, 0, 30, 0),
+            ("serve_stale 0 verify", 0, true, 0, 30, 0),
+            ("serve_stale 0 immediate", 0, false, 0, 30, 0),
+            ("serve_stale 0 VERIFY", 0, true, 0, 30, 0),
             ("serve_stale 1h immediate 30s", 3600, false, 0, 30, 0),
             (
                 "serve_stale 1h immediate 30s 30s",
@@ -535,7 +540,7 @@ mod tests {
                 30000,
             ),
             ("serve_stale 1h immediate 0", 3600, false, 0, 0, 0),
-            ("serve_stale 1h verify 100ms", 3600, true, 100, 0, 0),
+            ("serve_stale 1h verify 100ms", 3600, true, 100, 30, 0),
             ("serve_stale 1h verify 100ms 30s", 3600, true, 100, 30, 0),
             (
                 "serve_stale 1h verify 100ms 30s 30s",
@@ -545,9 +550,9 @@ mod tests {
                 30,
                 30000,
             ),
-            ("serve_stale 1h verify 0", 3600, true, 0, 0, 0),
+            ("serve_stale 1h verify 0", 3600, true, 0, 30, 0),
             ("serve_stale 1h verify 0 1m", 3600, true, 0, 60, 0),
-            ("serve_stale 1h VERIFY 250ms", 3600, true, 250, 0, 0),
+            ("serve_stale 1h VERIFY 250ms", 3600, true, 250, 30, 0),
             ("serve_stale 1h verify 0 0 5m", 3600, true, 0, 0, 300000),
         ] {
             let config = parse_text(&format!("cache {{\n{option}\n}}")).unwrap();
@@ -607,7 +612,7 @@ mod tests {
                 config.stale_ttl,
                 config.stale_recheck
             ),
-            (Duration::ZERO, Duration::ZERO, Duration::ZERO)
+            (Duration::ZERO, Duration::from_secs(30), Duration::ZERO)
         );
     }
 
