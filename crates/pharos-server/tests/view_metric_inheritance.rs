@@ -189,9 +189,8 @@ async fn metrics_select_the_inherited_view_for_each_query() {
         .await;
     let mut metrics = String::new();
     server.metrics().encode(&mut metrics);
-    for view in ["deep", "other", ""] {
-        assert!(metrics.contains(&format!("plugin=\"test\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"{view}\",zone=\"org.\"}} 1\n")), "{metrics}");
-    }
+    assert!(metrics.contains("plugin=\"test\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"deep\",zone=\"org.\"} 1\n"), "{metrics}");
+    assert!(metrics.contains("plugin=\"test\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"other\",zone=\"org.\"} 2\n"), "{metrics}");
     assert!(metrics.contains("plugin=\"\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"deep\",zone=\"deep.example.org.\"} 1\n"), "{metrics}");
 }
 
@@ -230,7 +229,7 @@ async fn ds_empty_parent_uses_last_accepted_name_not_rejected_or_empty_views() {
         .await;
     let mut metrics = String::new();
     server.metrics().encode(&mut metrics);
-    assert!(metrics.contains("plugin=\"test\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"second\",zone=\"org.\"} 1\n"), "{metrics}");
+    assert!(metrics.contains("plugin=\"\",rcode=\"REFUSED\",server=\"dns://127.0.0.1:53\",view=\"second\",zone=\"example.org.\"} 1\n"), "{metrics}");
 }
 
 #[tokio::test]

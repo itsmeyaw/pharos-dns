@@ -537,11 +537,26 @@ impl<C: Chain> Server<C> {
                     outcome
                 }
             } else {
-                Outcome::Unanswered(Rcode::REFUSED)
+                // RFC 2136 §3.1.1: an UPDATE handler that is absent gets NOTIMP.
+                if query.opcode() == pharos_proto::Opcode::UPDATE {
+                    Outcome::Unanswered(Rcode::NOTIMP)
+                } else {
+                    Outcome::Unanswered(Rcode::REFUSED)
+                }
             }
         } else {
-            // RFC 1035 §4.1.1: REFUSED means the server declines the requested operation.
-            Outcome::Unanswered(Rcode::REFUSED)
+            if query.opcode() == pharos_proto::Opcode::UPDATE {
+                if self.router.has_unhandled_zone(&self.key, query) {
+                    // RFC 2136 §3.1.1: a zone with no UPDATE handler gets NOTIMP.
+                    Outcome::Unanswered(Rcode::NOTIMP)
+                } else {
+                    // RFC 2136 §3.1.1: UPDATE outside server authority gets NOTAUTH.
+                    Outcome::Unanswered(Rcode::NOTAUTH)
+                }
+            } else {
+                // RFC 1035 §4.1.1: REFUSED means the server declines the requested operation.
+                Outcome::Unanswered(Rcode::REFUSED)
+            }
         };
         let recorded_size = if outcome == Outcome::Response {
             response.len()

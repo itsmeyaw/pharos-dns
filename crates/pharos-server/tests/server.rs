@@ -76,11 +76,13 @@ async fn update_admission_is_listener_and_block_scoped() {
         Some(UpdateProbe(false)),
         vec![],
     );
+    router.add(key, "missing.example.".parse().unwrap(), None, vec![]);
     let server = Server::new(router, key);
     for (domain, expected) in [
         ("dynamic.example.", Rcode::REFUSED),
         ("static.example.", Rcode::NOTIMP),
-        ("other.example.", Rcode::REFUSED),
+        ("missing.example.", Rcode::NOTIMP),
+        ("other.example.", Rcode::NOTAUTH),
     ] {
         let domain: Name = domain.parse().unwrap();
         let name = NameRef::parse(domain.as_wire(), 0).unwrap();
