@@ -336,22 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn health_down_expires_and_rearms_on_new_probe_failures() {
-        let mut health = Health::new("127.0.0.1:53".parse().unwrap(), 1);
-        {
-            let shared = Arc::get_mut(&mut health.shared).unwrap();
-            shared.started = Instant::now() - Duration::from_secs(DOWN_TTL_SECS + 1);
-            shared.fails.store(2, Ordering::Relaxed);
-            shared.down_since_secs.store(0, Ordering::Relaxed);
-        }
-        assert!(!health.down());
-        record_failure(Arc::get_mut(&mut health.shared).unwrap());
-        assert!(!health.down());
-        record_failure(Arc::get_mut(&mut health.shared).unwrap());
-        assert!(health.down());
-    }
-
-    #[test]
     fn health_down_rearms_after_expiry_and_fresh_failures() {
         let mut health = Health::new("127.0.0.1:53".parse().unwrap(), 1);
         {
