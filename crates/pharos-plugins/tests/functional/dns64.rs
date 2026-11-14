@@ -197,6 +197,7 @@ async fn nxdomain_with_cname_does_not_trigger_dns64_synthesis() {
     let chain = ScriptedChain {
         dns64: config.dns64.take().unwrap(),
         initial_rcode: 3,
+        initial_aa_ra: 0,
         initial_soa: false,
         initial_cname: true,
         fallback_rcode: 0,
