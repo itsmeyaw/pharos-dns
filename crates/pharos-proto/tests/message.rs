@@ -221,6 +221,33 @@ fn notify_requests_hide_valid_authority_and_additional_records() {
 }
 
 #[test]
+fn notify_ignores_duplicate_tkeys_in_ignored_sections() {
+    use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
+
+    let name: Name = "a.".parse().unwrap();
+    let name = NameRef::parse(name.as_wire(), 0).unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2000).unwrap();
+    builder.question(name, Type::SOA, Class::IN).unwrap();
+    for section in [
+        Section::Authority,
+        Section::Authority,
+        Section::Additional,
+        Section::Additional,
+    ] {
+        builder
+            .record(section, name, Type::TKEY, Class::IN, 0, &[])
+            .unwrap();
+    }
+    let message = Message::parse(builder.finish())
+        .unwrap()
+        .ignore_notify_sections();
+
+    assert_eq!(message.authority_count(), 0);
+    assert_eq!(message.additional_count(), 0);
+}
+
+#[test]
 fn notify_request_view_retains_tsig_for_authentication() {
     use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
 

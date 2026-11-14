@@ -345,8 +345,8 @@ impl<'a> Message<'a> {
                     }
                     // RFC 6891 §6.1.1: OPT appears at most once in the additional section.
                     // RFC 6891 §6.1.2: the OPT owner is the root and its RDATA holds options.
-                    // RFC 2930 §3: a DNS Message contains no more than one TKEY RR.
-                    if rr.rtype == Type::TKEY {
+                    // RFC 2930 §3; RFC 1996 §3.9: ignore TKEYs in NOTIFY's ignored sections.
+                    if rr.rtype == Type::TKEY && !(notify && section >= 2) {
                         if has_tkey {
                             return Err(MessageError::InvalidTkey);
                         }
