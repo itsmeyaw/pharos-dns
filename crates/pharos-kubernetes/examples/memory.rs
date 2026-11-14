@@ -191,6 +191,11 @@ async fn serve(address: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn client(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "Object sizes: Service={} B; EndpointAddress={} B",
+        std::mem::size_of::<pharos_kubernetes::object::Service>(),
+        std::mem::size_of::<pharos_kubernetes::object::EndpointAddress>()
+    );
     let registry = pharos_server::metrics::Registry::new("memory", "memory", "memory");
     let config = ClientConfig {
         endpoint: Some(url.into()),
