@@ -79,6 +79,7 @@ fn endpoints_retain_readiness_and_names() {
 }
 
 #[test]
+#[cfg(target_pointer_width = "64")]
 fn readiness_policy_keeps_dns_objects_at_their_original_size() {
     // Retained object counts make a per-object word material at cluster scale.
     assert_eq!(std::mem::size_of::<Service>(), 176);
