@@ -321,7 +321,7 @@ async fn coredns_scenario() {
         case!(
             "svc12.testns.example.com.",
             A,
-            NOERROR,
+            SERVFAIL,
             ["svc12.testns.example.com. CNAME dummy.hostname."],
             [],
             []
@@ -330,18 +330,11 @@ async fn coredns_scenario() {
             "_http._tcp.svc12.testns.example.com.",
             SRV,
             NOERROR,
-            ["_http._tcp.svc12.testns.example.com. SRV 0 100 80 dummy.hostname."],
             [],
+            [SOA],
             []
         ),
-        case!(
-            "svc12.testns.example.com.",
-            SRV,
-            NOERROR,
-            ["svc12.testns.example.com. SRV 0 100 80 dummy.hostname."],
-            [],
-            []
-        ),
+        case!("svc12.testns.example.com.", SRV, NOERROR, [], [SOA], []),
         case!(
             "svc-headless.testns.example.com.",
             A,

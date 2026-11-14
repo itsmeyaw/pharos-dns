@@ -446,8 +446,8 @@ async fn services_scenario() {
         (
             "dead.prod.svc.cluster.local.",
             Type::A,
-            Rcode::NXDOMAIN,
-            0,
+            Rcode::NOERROR,
+            1,
             0,
         ),
         (
@@ -556,7 +556,7 @@ async fn services_scenario() {
         ("cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
         ("svc.cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
         ("prod.svc.cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
-        ("ns.dns.cluster.local.", Type::TXT, Rcode::NXDOMAIN, 0, 0),
+        ("ns.dns.cluster.local.", Type::TXT, Rcode::NOERROR, 0, 0),
         (
             "missing.prod.svc.cluster.local.",
             Type::SOA,

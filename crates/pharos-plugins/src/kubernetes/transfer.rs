@@ -158,7 +158,8 @@ impl Snapshot<'_> {
             &mut wire,
             1024,
             self.id,
-            0x8000 | if self.authoritative { 0x0400 } else { 0 } | (self.flags & 0x0110),
+            // RFC 5936 §2.2.1: response CD is always zero.
+            0x8000 | if self.authoritative { 0x0400 } else { 0 } | (self.flags & 0x0100),
         )
         .map_err(Error::Build)?;
         if !builder
@@ -250,6 +251,10 @@ impl Snapshot<'_> {
         base_srv: bool,
     ) -> Result<(), Error> {
         for port in ports {
+            // KEP-752 §Proposal > Endpoint Port: omit nil ports, matching query answers.
+            if port.port < 0 {
+                continue;
+            }
             if base_srv {
                 self.srv(base, target, port.port, weight)?;
             }
@@ -291,14 +296,27 @@ impl Snapshot<'_> {
         base: NameRef<'_>,
         endpoints: &Endpoints,
         pod_names: bool,
+        tolerate_unready: bool,
+        cluster_id: Option<&str>,
     ) -> Result<(), Error> {
-        let weight = (100 / endpoints.addresses.len().max(1)).max(1) as u16;
+        // Kubernetes DNS spec 1.1.0 §2.1: only DNS-eligible endpoints contribute to transfer data.
+        let weight = (100
+            / endpoints
+                .addresses
+                .iter()
+                .filter(|address| address.dns_eligible(tolerate_unready))
+                .count()
+                .max(1))
+        .max(1) as u16;
         for addr in &endpoints.addresses {
+            if !addr.dns_eligible(tolerate_unready) {
+                continue;
+            }
             self.address(base, &addr.ip)?;
             let mut label_buf = [0; 64];
             let label = endpoint_label(addr, pod_names, &mut label_buf);
             let mut wire = [0; 255];
-            if let Some(target) = child(&[label], base, &mut wire) {
+            if let Some(target) = endpoint_name(label, cluster_id, base, &mut wire) {
                 let valid = self.address(target, &addr.ip)?;
                 let root = NameRef::parse(&[0], 0).map_err(|_| Error::InvalidQuery)?;
                 self.ports(
@@ -340,14 +358,37 @@ impl Snapshot<'_> {
             self.ports(base, if valid { base } else { root }, ports, 100, true)?;
         } else if multi {
             for ep in index.multicluster_endpoints(namespace, name) {
-                self.endpoints(base, &ep.endpoints, self.pod_names)?;
+                self.endpoints(
+                    base,
+                    &ep.endpoints,
+                    self.pod_names,
+                    false,
+                    Some(&ep.cluster_id),
+                )?;
             }
         } else {
+            let tolerate_unready = index
+                .service(namespace, name)
+                .is_some_and(|service| service.tolerate_unready_endpoints);
             for ep in index.endpoints(namespace, name) {
-                self.endpoints(base, ep, self.pod_names)?;
+                self.endpoints(base, ep, self.pod_names, tolerate_unready, None)?;
             }
         }
         Ok(())
+    }
+}
+
+fn endpoint_name<'a>(
+    label: &[u8],
+    cluster_id: Option<&str>,
+    base: NameRef<'_>,
+    wire: &'a mut [u8; 255],
+) -> Option<NameRef<'a>> {
+    if let Some(cluster_id) = cluster_id {
+        // KEP-1645 MCS DNS spec §2.4.1: endpoint owners include their source-cluster ID.
+        child(&[label, cluster_id.as_bytes()], base, wire)
+    } else {
+        child(&[label], base, wire)
     }
 }
 
@@ -424,6 +465,22 @@ fn generate(
         return Err(err);
     }
 
+    // RFC 1035 §3.5 and RFC 3596 §2.5: reverse zones end in in-addr.arpa or ip6.arpa.
+    let label_count = snapshot.zone.labels().count();
+    let mut suffix = snapshot.zone.labels().skip(label_count.saturating_sub(2));
+    let is_reverse_zone = suffix.next().is_some_and(|label| {
+        label.eq_ignore_ascii_case(b"in-addr") || label.eq_ignore_ascii_case(b"ip6")
+    }) && suffix
+        .next()
+        .is_some_and(|label| label.eq_ignore_ascii_case(b"arpa"));
+    if !is_reverse_zone {
+        // Kubernetes DNS spec 1.1.0 §2.2: forward transfers include dns-version TXT.
+        let mut version_wire = [0; 255];
+        if let Some(owner) = child(&[b"dns-version"], snapshot.zone, &mut version_wire) {
+            snapshot.record(owner, Type::TXT, 28800, |w| w.write_bytes(b"\x051.1.0"))?;
+        }
+    }
+
     if multi {
         for service in index.service_imports() {
             if index.namespace(&service.namespace).is_some() {
@@ -498,6 +555,10 @@ impl crate::transfer::Transferer for Kubernetes {
             qtype,
             qclass,
         } = request;
+        // RFC 1035 §3.7.1: this transfer contains only Internet-class records.
+        if qclass != Class::IN {
+            return Ok(None);
+        }
         let zone_ref = zone;
         if !self.zones.iter().any(|z| contains(zone_ref, z)) {
             return Ok(None);
@@ -606,6 +667,8 @@ fn transfer_record_len(owner: NameRef<'_>, data: &Rdata<'_>) -> Result<usize, Er
     let data_len = match data {
         Rdata::A(_) => 4,
         Rdata::Aaaa(_) => 16,
+        // RFC 1035 §3.3.14: TXT RDATA is a sequence of wire character-strings.
+        Rdata::Txt(bytes) => bytes.len(),
         Rdata::Ns(name) | Rdata::Cname(name) => name_len(*name),
         Rdata::Soa { mname, rname, .. } => name_len(*mname) + name_len(*rname) + 20,
         Rdata::Srv { target, .. } => 6 + name_len(*target),
@@ -676,9 +739,24 @@ mod tests {
                 ("cluster.local.".into(), Type::NS),
                 ("ns.dns.cluster.local.".into(), Type::A),
                 ("ns.dns.cluster.local.".into(), Type::AAAA),
+                ("dns-version.cluster.local.".into(), Type::TXT),
                 ("cluster.local.".into(), Type::SOA),
             ]
         );
+    }
+
+    #[test]
+    fn axfr_clears_cd_and_rejects_non_in_class() {
+        let plugin = plugin();
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let mut query = request(&zone, 0x0110);
+        let mut stream = plugin.transfer(query).unwrap().unwrap();
+        let mut wire = Vec::new();
+        assert!(stream.next(&mut wire).unwrap());
+        assert_eq!(Message::parse(&wire).unwrap().flags() & 0x0010, 0);
+
+        query.qclass = Class::CH;
+        assert!(plugin.transfer(query).unwrap().is_none());
     }
 
     #[test]
@@ -688,7 +766,7 @@ mod tests {
         let mut stream = plugin.transfer(request(&zone, 0x0100)).unwrap().unwrap();
         let mut wire = Vec::new();
         assert!(stream.next(&mut wire).unwrap());
-        assert_eq!(Message::parse(&wire).unwrap().answer_count(), 5);
+        assert_eq!(Message::parse(&wire).unwrap().answer_count(), 6);
         assert_eq!(Message::parse(&wire).unwrap().flags(), 0x8500);
         assert!(!stream.next(&mut wire).unwrap());
     }
@@ -821,7 +899,7 @@ mod tests {
 
     // CoreDNS's Kubernetes controller represents a Service with no ports by port -1.
     #[test]
-    fn service_without_ports_transfers_coredns_sentinel_srv() {
+    fn service_without_ports_transfers_no_sentinel_srv() {
         let zone: Name = "cluster.local.".parse().unwrap();
         let mut snapshot = snapshot(&zone);
         snapshot
@@ -840,7 +918,7 @@ mod tests {
             .unwrap();
         let bytes = snapshot.bytes.unwrap();
         let messages = messages(&bytes);
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 1);
         assert_eq!(
             Message::parse(messages[0])
                 .unwrap()
@@ -850,16 +928,87 @@ mod tests {
                 .rtype,
             Type::A
         );
-        assert!(matches!(
-            Message::parse(messages[1])
-                .unwrap()
-                .answers()
-                .next()
-                .unwrap()
-                .data()
-                .unwrap(),
-            Rdata::Srv { port: 65535, .. }
-        ));
+    }
+
+    #[test]
+    fn nil_endpoint_port_does_not_transfer_srv_port_65535() {
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let base_name: Name = "web.prod.svc.cluster.local.".parse().unwrap();
+        let base = NameRef::parse(base_name.as_wire(), 0).unwrap();
+        let endpoints = Endpoints {
+            version: "1".into(),
+            name: "slice".into(),
+            namespace: "prod".into(),
+            service_name: "web".into(),
+            addresses: vec![EndpointAddress {
+                ip: "10.0.0.1".into(),
+                hostname: "node".into(),
+                node_name: String::new(),
+                target_ref_name: String::new(),
+                ready: true,
+            }],
+            ports: vec![Port {
+                name: String::new(),
+                protocol: "TCP".into(),
+                port: -1,
+            }],
+            zones: None,
+        };
+        let mut snapshot = snapshot(&zone);
+        snapshot
+            .endpoints(base, &endpoints, false, false, None)
+            .unwrap();
+        let records: Vec<_> = messages(&snapshot.bytes.unwrap())
+            .into_iter()
+            .map(|wire| {
+                Message::parse(wire)
+                    .unwrap()
+                    .answers()
+                    .next()
+                    .unwrap()
+                    .rtype
+            })
+            .collect();
+        // KEP-752 §Proposal > Endpoint Port: nil endpoint ports are omitted, not cast to 65535.
+        assert_eq!(records, [Type::A, Type::A]);
+    }
+
+    #[test]
+    fn transfer_includes_unready_endpoint_only_when_service_allows_it() {
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let base_name: Name = "web.prod.svc.cluster.local.".parse().unwrap();
+        let base = NameRef::parse(base_name.as_wire(), 0).unwrap();
+        let endpoints = Endpoints {
+            version: "1".into(),
+            name: "slice".into(),
+            namespace: "prod".into(),
+            service_name: "web".into(),
+            addresses: vec![EndpointAddress {
+                ip: "10.0.0.1".into(),
+                hostname: "node".into(),
+                node_name: String::new(),
+                target_ref_name: String::new(),
+                ready: false,
+            }],
+            ports: vec![Port {
+                name: "http".into(),
+                protocol: "TCP".into(),
+                port: 80,
+            }],
+            zones: None,
+        };
+        let mut transfer = snapshot(&zone);
+        transfer
+            .endpoints(base, &endpoints, false, false, None)
+            .unwrap();
+        assert_eq!(transfer.size, 0);
+
+        // Kubernetes DNS spec 1.1.0 §2.1: the Service annotation opts into unready endpoints.
+        let mut tolerated = snapshot(&zone);
+        tolerated
+            .endpoints(base, &endpoints, false, true, None)
+            .unwrap();
+        assert!(tolerated.size > 0);
     }
 
     #[test]
@@ -881,6 +1030,7 @@ mod tests {
                     hostname: format!("node{i}"),
                     node_name: String::new(),
                     target_ref_name: String::new(),
+                    ready: true,
                 })
                 .collect(),
             ports: vec![Port {
@@ -890,7 +1040,9 @@ mod tests {
             }],
             zones: None,
         };
-        snapshot.endpoints(base, &endpoints, false).unwrap();
+        snapshot
+            .endpoints(base, &endpoints, false, false, None)
+            .unwrap();
         let bytes = snapshot.bytes.unwrap();
         let messages = messages(&bytes);
         let records: Vec<_> = messages
@@ -909,6 +1061,50 @@ mod tests {
         assert!(
             matches!(records[2].data().unwrap(), Rdata::Srv { weight: 50, port: 80, target, .. } if target.to_string() == "node0.web.prod.svc.cluster.local.")
         );
+    }
+
+    #[test]
+    fn multicluster_transfer_includes_source_cluster_in_endpoint_name() {
+        let zone: Name = "clusterset.local.".parse().unwrap();
+        let base_name: Name = "web.prod.svc.clusterset.local.".parse().unwrap();
+        let base = NameRef::parse(base_name.as_wire(), 0).unwrap();
+        let endpoints = Endpoints {
+            version: "1".into(),
+            name: "slice".into(),
+            namespace: "prod".into(),
+            service_name: "web".into(),
+            addresses: vec![EndpointAddress {
+                ip: "10.0.0.1".into(),
+                hostname: "node".into(),
+                node_name: String::new(),
+                target_ref_name: String::new(),
+                ready: true,
+            }],
+            ports: vec![Port {
+                name: "http".into(),
+                protocol: "TCP".into(),
+                port: 80,
+            }],
+            zones: None,
+        };
+        let mut snapshot = snapshot(&zone);
+        snapshot
+            .endpoints(base, &endpoints, false, false, Some("west"))
+            .unwrap();
+        let bytes = snapshot.bytes.unwrap();
+        let records: Vec<_> = messages(&bytes)
+            .into_iter()
+            .map(|wire| Message::parse(wire).unwrap().answers().next().unwrap())
+            .collect();
+        assert_eq!(
+            records[1].name.to_string(),
+            "node.west.web.prod.svc.clusterset.local."
+        );
+        assert!(matches!(
+            records[2].data().unwrap(),
+            Rdata::Srv { target, .. }
+                if target.to_string() == "node.west.web.prod.svc.clusterset.local."
+        ));
     }
 
     #[test]

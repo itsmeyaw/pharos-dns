@@ -10,6 +10,10 @@
 - Zone Transfers encode the entire Zone under the Kubernetes store read lock before sending. Memory and worker time grow with Zone size; CoreDNS streams batches.
 - Zone Transfers allocate one encoded snapshot, one shared Stream producer, and one reusable deduplication table, not per record. macOS also allocates the producer's mutex on first use.
 - UDP IXFR returns the current SOA instead of CoreDNS's REFUSED, following RFC 1995 §2.
+- SRV query responses require named ports and address-resolving, non-CNAME targets; missing target addresses suppress the SRV RR (RFC 2782).
+- AXFR emits SRV records for hostname targets without resolving their address records; transfer generation is synchronous.
+- A/AAAA alias queries keep their CNAME; the target lookup sets the final RCODE, and negative answers carry target Authority records (RFC 1034 §4.3.2, RFC 6604 §3, RFC 2308 §3).
+- AXFR omits unavailable IPv6 address RRs and deduplicates repeated address and SRV records.
 
 ## Sources
 

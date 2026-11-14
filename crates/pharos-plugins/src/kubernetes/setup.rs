@@ -1,6 +1,6 @@
 use pharos_corefile::{Cursor, Error, Fallthrough, origins_from_args_or_server_block};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeSet, HashSet},
     time::Duration,
 };
 
@@ -246,6 +246,14 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
     if config.zonal && !config.endpoints {
         return Err(cursor.error("zonal requires the endpoint cache; remove noendpoints"));
     }
+    // KEP-1645 §2.1: Multi-Cluster Services use the clusterset.local zone.
+    if config
+        .multicluster_zones
+        .iter()
+        .any(|zone| zone != "clusterset.local.")
+    {
+        return Err(cursor.error("multicluster zone must be clusterset.local."));
+    }
     Ok(config)
 }
 
@@ -420,7 +428,6 @@ fn parse_selector(input: &str) -> Option<String> {
         }
     }
     let mut pos = 0;
-    let mut equal = BTreeMap::new();
     let mut expressions: Vec<(&str, String)> = Vec::new();
     while pos < tokens.len() {
         let negated = tokens[pos] == "!";
@@ -436,7 +443,7 @@ fn parse_selector(input: &str) -> Option<String> {
             return None;
         }
         match tokens.get(pos).copied() {
-            Some("=" | "==") => {
+            Some(op @ ("=" | "==" | "!=")) => {
                 pos += 1;
                 let mut value = "";
                 if let Some(&next) = tokens.get(pos).filter(|value| **value != ",") {
@@ -446,7 +453,11 @@ fn parse_selector(input: &str) -> Option<String> {
                     value = next;
                     pos += 1;
                 }
-                equal.insert(key, value);
+                // Kubernetes API Concepts > Labels and Selectors: comma-separated requirements are conjunctive.
+                expressions.push((
+                    key,
+                    format!("{key}{}{value}", if op == "!=" { "!=" } else { "=" }),
+                ));
             }
             Some(op @ ("in" | "notin")) => {
                 pos += 1;
@@ -501,11 +512,6 @@ fn parse_selector(input: &str) -> Option<String> {
         }
         pos += 1;
     }
-    expressions.extend(
-        equal
-            .into_iter()
-            .map(|(key, value)| (key, format!("{key}={value}"))),
-    );
     expressions.sort_by_key(|(key, _)| *key);
     Some(
         expressions

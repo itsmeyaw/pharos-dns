@@ -330,8 +330,16 @@ async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
 
 async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
     let (endpoint, gate, api_task) = api(!synced).await;
+    let multicluster = cases
+        .iter()
+        .any(|case| case.name.ends_with(".clusterset.local."));
+    let zones = if multicluster {
+        "cluster.local clusterset.local"
+    } else {
+        "cluster.local"
+    };
     let text = format!(
-        ".:53 {{\n bind 127.0.0.1\n kubernetes cluster.local {{\n  endpoint {endpoint}\n  startup_timeout 3s\n  {options}\n }}\n}}"
+        ".:53 {{\n bind 127.0.0.1\n kubernetes {zones} {{\n  endpoint {endpoint}\n  startup_timeout 3s\n  {options}\n }}\n}}"
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
     let lifecycle = blocks[0].config.lifecycle.clone();
@@ -347,7 +355,11 @@ async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
     let (servers, _) = servers(blocks).unwrap();
     let server = servers.values().next().unwrap();
     let serial = if synced {
-        let zone: Name = "cluster.local.".parse().unwrap();
+        let zone: Name = if multicluster {
+            "clusterset.local.".parse().unwrap()
+        } else {
+            "cluster.local.".parse().unwrap()
+        };
         let mut query = Vec::with_capacity(512);
         let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x100).unwrap();
         builder
@@ -448,52 +460,52 @@ async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
 
 #[tokio::test]
 async fn multicluster_answers_service_and_cluster_qualified_endpoint() {
-    let zone = "cluster.local.";
+    let zone = "clusterset.local.";
     run_group(
-        "multicluster cluster.local",
+        "multicluster clusterset.local",
         vec![
             positive(
                 "import",
-                "svc1.testns.svc.cluster.local.",
+                "svc1.testns.svc.clusterset.local.",
                 Type::A,
                 &["10.0.0.1"],
             ),
             positive(
                 "headless",
-                "hdls1.testns.svc.cluster.local.",
+                "hdls1.testns.svc.clusterset.local.",
                 Type::A,
                 &["172.0.0.2"],
             ),
             positive(
                 "endpoint",
-                "172-0-0-2.cluster1.hdls1.testns.svc.cluster.local.",
+                "172-0-0-2.cluster1.hdls1.testns.svc.clusterset.local.",
                 Type::A,
                 &["172.0.0.2"],
             ),
             srv(
                 "headless srv",
-                "_http._tcp.hdls1.testns.svc.cluster.local.",
-                "172-0-0-2.cluster1.hdls1.testns.svc.cluster.local.",
+                "_http._tcp.hdls1.testns.svc.clusterset.local.",
+                "172-0-0-2.cluster1.hdls1.testns.svc.clusterset.local.",
                 100,
                 "172.0.0.2",
             ),
             srv(
                 "import srv",
-                "_http._tcp.svc1.testns.svc.cluster.local.",
-                "svc1.testns.svc.cluster.local.",
+                "_http._tcp.svc1.testns.svc.clusterset.local.",
+                "svc1.testns.svc.clusterset.local.",
                 100,
                 "10.0.0.1",
             ),
             negative(
                 "missing cluster",
-                "172-0-0-2.hdls1.testns.svc.cluster.local.",
+                "172-0-0-2.hdls1.testns.svc.clusterset.local.",
                 Type::A,
                 Rcode::NXDOMAIN,
                 zone,
             ),
             negative(
                 "no ipv6",
-                "svc1.testns.svc.cluster.local.",
+                "svc1.testns.svc.clusterset.local.",
                 Type::AAAA,
                 Rcode::NOERROR,
                 zone,
@@ -730,6 +742,15 @@ async fn handler_common_and_regular() {
         ),
         positive("regular 9", ext, Type::CNAME, &["ext.interwebs.test."]),
         row(
+            "external target failure keeps alias",
+            ext,
+            Type::A,
+            Rcode::SERVFAIL,
+            vec![rr(ext, 5, "CNAME", "ext.interwebs.test.")],
+            vec![],
+            vec![],
+        ),
+        row(
             "regular 11",
             "external-to-service.testns.svc.cluster.local.",
             Type::A,
@@ -752,7 +773,6 @@ async fn handler_common_and_regular() {
 
 #[tokio::test]
 async fn handler_case_and_ignore_empty() {
-    let z = "cluster.local.";
     let cases = vec![
         negative(
             "case 1",
@@ -783,12 +803,11 @@ async fn handler_case_and_ignore_empty() {
             vec![],
             vec![],
         ),
-        negative(
+        positive(
             "empty 1",
             "svcempty.testns.svc.cluster.local.",
             Type::A,
-            Rcode::NXDOMAIN,
-            z,
+            &["10.0.0.1"],
         ),
         positive(
             "empty 2",

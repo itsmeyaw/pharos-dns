@@ -123,7 +123,8 @@ impl Snapshot<'_> {
             &mut wire,
             1024,
             self.request.id,
-            0x8000 | if self.authoritative { 0x0400 } else { 0 } | (self.request.flags & 0x0110),
+            // RFC 5936 §2.2.1: response CD is always zero.
+            0x8000 | if self.authoritative { 0x0400 } else { 0 } | (self.request.flags & 0x0100),
         )
         .map_err(Error::Build)?;
         if !b
@@ -169,7 +170,8 @@ impl Snapshot<'_> {
             Some(IpAddr::V6(ip)) => {
                 self.record(owner, Type::AAAA, ttl, |w| w.write_bytes(&ip.octets()))
             }
-            None => self.record(owner, Type::AAAA, ttl, |_| Ok(())),
+            // RFC 3596 §2.2: omit AAAA when no IPv6 address is available.
+            None => Ok(()),
         }
     }
 
@@ -181,12 +183,9 @@ impl Snapshot<'_> {
         let target = hostname(text, 0, &mut wire)?;
         // CoreDNS uses context.Background(), so upstream lookup fails during transfers.
         // RFC 1035 §3.3.1: CNAME RDATA names the canonical target.
-        for _ in 0..2 {
-            self.record(owner, Type::CNAME, self.service_ttl, |w| {
-                w.write_name(target)
-            })?;
-        }
-        Ok(())
+        self.record(owner, Type::CNAME, self.service_ttl, |w| {
+            w.write_name(target)
+        })
     }
 
     fn srv(
@@ -246,9 +245,13 @@ fn non_headless<'a>(
     seen.clear();
     let mut bare_seen = false;
     for ip in &service.external_ips {
-        for port in &service.ports {
+        // RFC 5936 §2.2: suppress repeated address RRs in the AXFR stream.
+        if seen.insert(Seen::Address(CaseInsensitive(ip)), 0).is_none() {
             snapshot.address(base, ip)?;
-            if port.port == -1 {
+        }
+        for port in &service.ports {
+            // KEP-752 §Proposal > Endpoint Port: omit nil ports, matching query answers.
+            if !port.has_srv() {
                 continue;
             }
             if !bare_seen {
@@ -294,6 +297,8 @@ fn entries<'a>(
         .flat_map(|ep| {
             ep.addresses
                 .iter()
+                // Kubernetes DNS spec 1.1.0 §2.1: only DNS-eligible endpoints are transferred.
+                .filter(|address| address.dns_eligible(service.tolerate_unready_endpoints))
                 .flat_map(|address| ep.ports.iter().map(move |port| (address, port)))
         })
 }
@@ -435,8 +440,10 @@ impl Hash for Target<'_> {
 
 #[derive(Hash, PartialEq, Eq)]
 enum Seen<'a> {
-    Address(&'a str),
+    Address(CaseInsensitive<'a>),
+    EndpointAddress(Label<'a>, CaseInsensitive<'a>),
     Bare(Target<'a>, i32),
+    EndpointBare(Target<'a>, i32),
     Named(CaseInsensitive<'a>, CaseInsensitive<'a>, i32, Label<'a>),
     Count(CaseInsensitive<'a>, CaseInsensitive<'a>),
 }
@@ -469,8 +476,11 @@ where
         let mut target_wire = [0; 255];
         let endpoint = endpoint_owner(label, base, &mut target_wire);
         let ip = normalized_ip(&address.ip);
-        let previous_ip = seen.insert(Seen::Address(&address.ip), 0).is_some();
-        if ip.is_none() || !previous_ip {
+        // RFC 5936 §2.2: keep one copy of each transfer RR across repeated endpoints and ports.
+        let previous_ip = seen
+            .insert(Seen::Address(CaseInsensitive(&address.ip)), 0)
+            .is_some();
+        if !previous_ip {
             snapshot.address(base, &address.ip)?;
         }
         let Some(endpoint) = endpoint else {
@@ -508,7 +518,7 @@ where
                 0,
             )
             .is_some();
-        if port.port != -1 {
+        if port.has_srv() {
             let mut host_wire = [0; 255];
             let target = if ip.is_some() {
                 endpoint
@@ -516,25 +526,43 @@ where
                 hostname(&address.ip, 0, &mut host_wire)?
             };
             if !duplicate_bare {
-                for _ in 0..2 {
-                    snapshot.srv(base, target, port.port, weight(total))?;
-                }
+                snapshot.srv(base, target, port.port, weight(total))?;
             }
         }
-        snapshot.address(endpoint, &address.ip)?;
-        if port.port != -1 {
-            let mut host_wire = [0; 255];
-            let target = if ip.is_some() {
-                endpoint
-            } else {
-                hostname(&address.ip, 0, &mut host_wire)?
-            };
-            for _ in 0..2 {
-                snapshot.srv(endpoint, target, port.port, 100)?;
-            }
+        let duplicate_endpoint_address = seen
+            .insert(
+                Seen::EndpointAddress(Label(address, pod_names), CaseInsensitive(&address.ip)),
+                0,
+            )
+            .is_some();
+        if !duplicate_endpoint_address {
+            snapshot.address(endpoint, &address.ip)?;
         }
-        if port.name.is_empty() || port.port == -1 {
+        if !port.has_srv() {
             continue;
+        }
+        let mut host_wire = [0; 255];
+        let target = if ip.is_some() {
+            endpoint
+        } else {
+            hostname(&address.ip, 0, &mut host_wire)?
+        };
+        let duplicate_endpoint_srv = seen
+            .insert(
+                Seen::EndpointBare(
+                    Target {
+                        address,
+                        service: origin.0,
+                        zone: origin.1,
+                        pod_names,
+                    },
+                    port.port,
+                ),
+                0,
+            )
+            .is_some();
+        if !duplicate_endpoint_srv {
+            snapshot.srv(endpoint, target, port.port, 100)?;
         }
         if !duplicate_named {
             let count =
@@ -548,9 +576,14 @@ where
     Ok(())
 }
 
+// RFC 1982 §3.2: compare serials in modulo-2^32 half-space order.
+fn serial_at_least(candidate: u32, current: u32) -> bool {
+    candidate == current || candidate.wrapping_sub(current) < (1 << 31)
+}
+
 // RFC 1995 §2: current IXFR and UDP IXFR return only the current SOA.
 fn soa_only(request: TransferRequest<'_>, current: u32) -> bool {
-    request.serial != 0 && request.serial >= current
+    request.qtype == Type::IXFR && serial_at_least(request.serial, current)
         || request.qtype == Type::IXFR && request.protocol == Protocol::Udp
 }
 
@@ -590,8 +623,8 @@ fn generate<'a>(
 ) -> Result<(), Error> {
     let current = index.external_serial();
     // RFC 1995 §2: a current IXFR is a single SOA; UDP IXFR returns the current SOA.
-    if snapshot.request.serial != 0
-        && snapshot.request.serial >= current
+    if snapshot.request.qtype == Type::IXFR
+        && serial_at_least(snapshot.request.serial, current)
         && snapshot.request.protocol == Protocol::Tcp
     {
         snapshot.authoritative = false;
@@ -700,6 +733,10 @@ fn encode(
 
 impl Transferer for External {
     fn transfer(&self, request: TransferRequest<'_>) -> Result<Option<Stream>, Error> {
+        // RFC 1035 §3.7.1: only emit the Internet-class data this zone stores.
+        if request.qclass != Class::IN {
+            return Ok(None);
+        }
         let Some(zone) = self.zones.iter().find(|zone| {
             NameRef::parse(zone.name.as_wire(), 0).is_ok_and(|name| name == request.zone)
         }) else {
@@ -844,6 +881,21 @@ mod tests {
     }
 
     #[test]
+    fn transfer_clears_cd_and_rejects_non_in_class() {
+        let plugin = plugin();
+        let zone: Name = "example.com.".parse().unwrap();
+        let mut query = request(&zone, Type::AXFR, 0, Protocol::Tcp);
+        query.flags |= 0x0010;
+        let mut stream = plugin.transfer(query).unwrap().unwrap();
+        let mut wire = Vec::new();
+        assert!(stream.next(&mut wire).unwrap());
+        assert_eq!(Message::parse(&wire).unwrap().flags() & 0x0010, 0);
+
+        query.qclass = Class::CH;
+        assert!(plugin.transfer(query).unwrap().is_none());
+    }
+
+    #[test]
     fn axfr_has_matching_soa_boundaries_and_apex_nameserver() {
         let zone: Name = "example.com.".parse().unwrap();
         let mut stream = plugin()
@@ -899,6 +951,31 @@ mod tests {
         assert_eq!(message.answer_count(), 1);
         assert_eq!(message.answers().next().unwrap().rtype, Type::SOA);
         assert!(!stream.next(&mut wire).unwrap());
+    }
+
+    #[test]
+    fn ixfr_serials_use_rfc1982_half_space_ordering() {
+        assert!(serial_at_least(0, u32::MAX));
+        assert!(serial_at_least(u32::MAX, u32::MAX));
+        assert!(!serial_at_least(u32::MAX, 0));
+        assert!(!serial_at_least(1 << 31, 0));
+        let zone: Name = "example.com.".parse().unwrap();
+        assert!(soa_only(
+            request(&zone, Type::IXFR, 1, Protocol::Tcp),
+            u32::MAX
+        ));
+        assert!(!soa_only(
+            request(&zone, Type::IXFR, u32::MAX, Protocol::Tcp),
+            1
+        ));
+    }
+
+    #[test]
+    fn zero_is_a_valid_ixfr_serial() {
+        let zone: Name = "example.com.".parse().unwrap();
+        let request = request(&zone, Type::IXFR, 0, Protocol::Tcp);
+        assert!(soa_only(request, 0));
+        assert!(!soa_only(request, 1));
     }
 
     #[test]
@@ -981,6 +1058,7 @@ mod tests {
                     port: 443,
                 },
             ],
+            tolerate_unready_endpoints: false,
         }
     }
 
@@ -1052,7 +1130,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!((a_count, cname_count, bare_srv, named_srv), (2, 4, 1, 2));
+        assert_eq!((a_count, cname_count, bare_srv, named_srv), (1, 1, 1, 2));
     }
 
     #[test]
@@ -1126,14 +1204,12 @@ mod tests {
         }
         let mut expected = Vec::new();
         for (ip_index, ip) in service.external_ips.iter().enumerate() {
+            if ip_index == 1 {
+                expected.push(format!("{base} CNAME lb.example.net."));
+            } else {
+                expected.push(format!("{base} A {ip}"));
+            }
             for (port_index, port) in service.ports.iter().enumerate() {
-                if ip_index == 1 {
-                    for _ in 0..2 {
-                        expected.push(format!("{base} CNAME lb.example.net."));
-                    }
-                } else {
-                    expected.push(format!("{base} A {ip}"));
-                }
                 if ip_index == 0 && port_index == 1 {
                     expected.push(format!("{base} SRV 100 1000 {base}"));
                 }
@@ -1179,7 +1255,37 @@ mod tests {
                 }
             }
         }
-        assert_eq!(cnames, 4);
+        assert_eq!(cnames, 1);
+    }
+
+    #[test]
+    fn unnamed_port_does_not_create_transfer_srv_records() {
+        use pharos_kubernetes::object::Port;
+        let plugin = plugin();
+        let zone: Name = "example.com.".parse().unwrap();
+        let base: Name = "web.hidden.example.com.".parse().unwrap();
+        let mut service = fixture_service();
+        service.external_ips = vec!["192.0.2.1".into()];
+        service.ports = vec![Port {
+            name: String::new(),
+            protocol: "TCP".into(),
+            port: 80,
+        }];
+        let mut snapshot = fixture_snapshot(&plugin, &zone);
+        non_headless(
+            &mut snapshot,
+            &service,
+            NameRef::parse(base.as_wire(), 0).unwrap(),
+            &mut HashMap::with_capacity(1),
+        )
+        .unwrap();
+        let mut stream = stream_snapshot(snapshot.bytes.unwrap());
+        let mut wire = Vec::new();
+        let mut records = Vec::new();
+        while stream.next(&mut wire).unwrap() {
+            records.extend(Message::parse(&wire).unwrap().answers().map(|rr| rr.rtype));
+        }
+        assert_eq!(records, [Type::A]);
     }
 
     #[test]
@@ -1212,6 +1318,7 @@ mod tests {
                     hostname: format!("node{i}"),
                     node_name: String::new(),
                     target_ref_name: String::new(),
+                    ready: true,
                 })
                 .collect(),
             ports: vec![Port {
@@ -1264,9 +1371,9 @@ mod tests {
                 }
             }
         }
-        assert_eq!(base.len(), 4);
+        assert_eq!(base.len(), 2);
         assert!(base.iter().all(|v| v.0 == 50));
-        assert_eq!(endpoint.len(), 4);
+        assert_eq!(endpoint.len(), 2);
         assert!(endpoint.iter().all(|v| v.0 == 100));
         assert_eq!(named.len(), 2);
         assert!(named.iter().all(|v| v.0 == 50));
@@ -1286,6 +1393,7 @@ mod tests {
                 hostname,
                 node_name: String::new(),
                 target_ref_name: String::new(),
+                ready: true,
             })
             .collect();
         let port = Port {
@@ -1333,6 +1441,7 @@ mod tests {
                 hostname: format!("node{}", i % 24),
                 node_name: String::new(),
                 target_ref_name: String::new(),
+                ready: true,
             })
             .collect();
         let ports: Vec<_> = [("http", 80), ("HTTP", 80), ("http", 81), ("metrics", 90)]
@@ -1390,12 +1499,12 @@ mod tests {
                     expected.push(format!("{base} A {ip}"));
                 }
                 if i < 24 && p != 1 {
-                    for _ in 0..2 {
-                        expected.push(format!("{base} SRV 1 {} {endpoint}", port.port));
-                    }
+                    expected.push(format!("{base} SRV 1 {} {endpoint}", port.port));
                 }
-                expected.push(format!("{endpoint} A {ip}"));
-                for _ in 0..2 {
+                if i < 24 && p == 0 {
+                    expected.push(format!("{endpoint} A {ip}"));
+                }
+                if i < 24 && p != 1 {
                     expected.push(format!("{endpoint} SRV 100 {} {endpoint}", port.port));
                 }
                 if i < 24 && p != 1 {
@@ -1423,6 +1532,7 @@ mod tests {
                 hostname: "node".into(),
                 node_name: String::new(),
                 target_ref_name: String::new(),
+                ready: true,
             })
             .collect();
         let port = Port {
@@ -1481,6 +1591,7 @@ mod tests {
                 hostname: hostname.into(),
                 node_name: String::new(),
                 target_ref_name: String::new(),
+                ready: true,
             })
             .collect();
         let port = Port {
@@ -1510,7 +1621,7 @@ mod tests {
                 })
                 .count();
         }
-        assert_eq!(count, 2);
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -1548,6 +1659,7 @@ mod tests {
             hostname: hostname.into(),
             node_name: String::new(),
             target_ref_name: String::new(),
+            ready: true,
         })
         .collect();
         let mut seen =
@@ -1595,12 +1707,14 @@ mod tests {
                     hostname: "node".into(),
                     node_name: String::new(),
                     target_ref_name: String::new(),
+                    ready: true,
                 },
                 EndpointAddress {
                     ip: target.into(),
                     hostname: "alias".into(),
                     node_name: String::new(),
                     target_ref_name: String::new(),
+                    ready: true,
                 },
             ];
             let mut seen = HashMap::new();
@@ -1648,6 +1762,7 @@ mod tests {
             hostname: hostname.into(),
             node_name: String::new(),
             target_ref_name: String::new(),
+            ready: true,
         })
         .collect();
         let ports: Vec<_> = [80, 81]
@@ -1688,9 +1803,7 @@ mod tests {
         let mut expected = Vec::new();
         for name in ["node", "other", "Node", "node", "nod\\.e"] {
             for port in [80, 81] {
-                for _ in 0..2 {
-                    expected.push((port, format!("{name}.web.hidden.example.com.")));
-                }
+                expected.push((port, format!("{name}.web.hidden.example.com.")));
             }
         }
         assert_eq!(actual, expected);
@@ -1708,6 +1821,7 @@ mod tests {
             hostname: String::new(),
             node_name: String::new(),
             target_ref_name: "pod.region".into(),
+            ready: true,
         };
         let port = Port {
             name: "http".into(),
@@ -1737,18 +1851,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_nameserver_address_keeps_empty_aaaa_rdata() {
+    fn invalid_nameserver_address_emits_no_aaaa_rdata() {
         let plugin = plugin();
         let zone: Name = "example.com.".parse().unwrap();
         let mut snapshot = fixture_snapshot(&plugin, &zone);
         snapshot.ip(snapshot.ns, None, 5).unwrap();
-        let mut stream = stream_snapshot(snapshot.bytes.unwrap());
-        let mut wire = Vec::new();
-        assert!(stream.next(&mut wire).unwrap());
-        let message = Message::parse(&wire).unwrap();
-        let rr = message.answers().next().unwrap();
-        assert_eq!(rr.rtype, Type::AAAA);
-        assert!(rr.rdata.is_empty());
+        assert_eq!(snapshot.size, 0);
     }
 
     #[test]
