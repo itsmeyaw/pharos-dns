@@ -339,11 +339,19 @@ async fn coredns_dns64_synthesizes_prefixes_through_self_lookup() {
     synthesizes_prefixes_through_self_lookup().await;
 }
 
+#[test]
+fn dns64_rejects_invalid_well_known_prefix_lengths_and_reserved_octet() {
+    for prefix in ["64:ff9b::/32", "64:ff9b::/64", "2001:db8:0:0:100::/96"] {
+        let config = format!(".:53 {{\n dns64 {prefix}\n}}");
+        let blocks = parse("Corefile", &config).unwrap();
+        assert!(configure::<Chain>(&blocks, directives()).is_err(), "{prefix}");
+    }
+}
+
 async fn synthesizes_prefixes_through_self_lookup() {
     for (prefix, expected) in [
         ("64:ff9b::/96", "64:ff9b::4040:4040"),
-        ("64:ff9b::/64", "64:ff9b::40:4040:4000:0"),
-        ("64:ff9b::/56", "64:ff9b:0:40:40:4040::"),
+        ("2001:db8:0:40::/56", "2001:db8:0:40:40:4040::"),
         ("64::/32", "64:0:4040:4040::"),
     ] {
         let config = format!(

@@ -93,11 +93,18 @@ fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Erro
         .parse()
         .map_err(|_| cursor.error("invalid dns64 prefix"))?;
     // RFC 6052 §2.2: only these six prefix lengths are defined.
-    // RFC 6147 §5.2: limit Pref64 prefix lengths to 96 bits.
     if !matches!(len, 32 | 40 | 48 | 56 | 64 | 96) {
         return Err(cursor.error("invalid dns64 prefix length"));
     }
     let mut bytes = ip.octets();
+    // RFC 6052 §2.2: the Well-Known Prefix is valid only in its /96 format.
+    if bytes[..12] == "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets()[..12] && len != 96 {
+        return Err(cursor.error("invalid dns64 well-known prefix length"));
+    }
+    // RFC 6052 §2.2: the reserved octet must be zero for /96 Network-Specific Prefixes.
+    if len == 96 && bytes[8] != 0 {
+        return Err(cursor.error("invalid dns64 reserved octet"));
+    }
     bytes[usize::from(len / 8)..].fill(0);
     Ok((bytes, len))
 }
