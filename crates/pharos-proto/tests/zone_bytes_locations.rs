@@ -20,12 +20,12 @@ fn arbitrary_octets_are_preserved_in_names_and_character_strings() {
 }
 
 #[test]
-fn decimal_escapes_wrap_like_miekg() {
-    let records = parser(b"$TTL 1\n\\256. TXT \"\\999\\256\\255\"\n")
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(records[0].owner.as_wire(), b"\x01\0\0");
-    assert_eq!(records[0].rdata, [3, 231, 0, 255]);
+fn decimal_escapes_above_one_octet_are_rejected() {
+    assert!(
+        parser(b"$TTL 1\n\\256. TXT \"\\999\\256\\255\"\n")
+            .collect::<Result<Vec<_>, _>>()
+            .is_err()
+    );
     assert!(
         parser(b"a 1 HTTPS 1 . key65534=\\256\n")
             .next()
@@ -35,13 +35,10 @@ fn decimal_escapes_wrap_like_miekg() {
 }
 
 #[test]
-fn quoted_newlines_carriage_returns_and_short_escapes_are_literal() {
-    let input = b"a 1 TXT \"x\ny\rz\" \"abc\\32xyz\" \"abc\\02xyz\" \"abc\\03xyz\"\n";
+fn quoted_newlines_and_valid_decimal_escapes_are_preserved() {
+    let input = b"a 1 TXT \"x\ny\rz\" \"abc\\032xyz\"\n";
     let record = parser(input).next().unwrap().unwrap();
-    assert_eq!(
-        record.rdata,
-        b"\x05x\ny\rz\x08abc32xyz\x08abc02xyz\x08abc03xyz"
-    );
+    assert_eq!(record.rdata, b"\x05x\ny\rz\x07abc xyz");
 }
 
 #[test]
@@ -237,14 +234,20 @@ fn class_first_without_default_ttl_matches_miekg() {
 }
 
 #[test]
-fn ttl_unit_segments_and_machine_integer_wrap_match_miekg() {
-    for (ttl, expected) in [("m", 0), ("1hms", 3600), ("18446744073709551616", 0)] {
+fn ttl_unit_segments_match_and_integer_overflow_is_rejected() {
+    for (ttl, expected) in [("m", 0), ("1hms", 3600)] {
         let input = format!("$TTL {ttl}\na A 192.0.2.1\n");
         assert_eq!(
             parser(input.as_bytes()).next().unwrap().unwrap().ttl,
             expected
         );
     }
+    assert!(
+        parser(b"$TTL 18446744073709551616\na A 192.0.2.1\n")
+            .next()
+            .unwrap()
+            .is_err()
+    );
     assert!(
         parser(b"$TTL 4294967296\na A 192.0.2.1\n")
             .next()

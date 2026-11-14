@@ -10,8 +10,8 @@ fn omitted_ttl_and_owner_follow_prior_records_and_directives() {
 $ORIGIN example.com.
 example.com. 42 IN SOA ns1.example.com. hostmaster.example.com. 1 86400 60 86400 3600
 example.com. NS 2
-@ MD 3
- MF 4
+@ MX 3 mail.example.com.
+ TXT "x"
  43 TYPE65280 \# 1 05
  MB 6
 $TTL 1337
