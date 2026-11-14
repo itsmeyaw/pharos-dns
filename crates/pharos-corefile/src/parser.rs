@@ -356,6 +356,13 @@ impl Parser<'_> {
                 clean_path(&base.parent().unwrap_or(Path::new("/")).join(&pattern))
             };
             let glob_pattern = path.to_string_lossy();
+            // ADR 0003: preserve CoreDNS v1.15.0 Caddy import glob limits.
+            if glob_pattern.matches('*').count() > 1
+                || glob_pattern.matches('?').count() > 1
+                || (glob_pattern.contains('[') && glob_pattern.contains(']'))
+            {
+                return Err(self.error("too many import wildcards"));
+            }
             let mut translated = String::new();
             let mut chars = glob_pattern.chars();
             while let Some(ch) = chars.next() {
@@ -368,7 +375,6 @@ impl Parser<'_> {
                     translated.push(ch);
                 }
             }
-            // ADR 0003: accept CoreDNS Corefile import glob patterns without narrowing syntax.
             let paths = glob::glob(&translated).map_err(|e| self.error(&e.to_string()))?;
             let mut imported = Vec::new();
             let mut count = 0;

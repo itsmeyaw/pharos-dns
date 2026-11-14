@@ -103,19 +103,10 @@ fn import_paths_are_cleaned_before_opening() {
 }
 
 #[test]
-fn imports_multiple_wildcards_and_bracket_expressions() {
+fn rejects_import_globs_with_multiple_wildcards_or_brackets() {
     let dir = fixture_dir();
-    fs::write(dir.join("a1.conf"), "one {\n errors\n}\n").unwrap();
-    fs::write(dir.join("b2.conf"), "two {\n errors\n}\n").unwrap();
-    fs::write(dir.join("c3.conf"), "three {\n errors\n}\n").unwrap();
-
-    let blocks = parse(
-        &dir.join("Corefile").to_string_lossy(),
-        "import [ab][12].conf",
-    )
-    .unwrap();
-    assert_eq!(
-        blocks.iter().map(|block| block.keys()).collect::<Vec<_>>(),
-        [vec!["one".to_owned()], vec!["two".to_owned()]]
-    );
+    let corefile = dir.join("Corefile").to_string_lossy().into_owned();
+    for pattern in ["import a**.conf", "import a??.conf", "import [ab].conf"] {
+        assert!(parse(&corefile, pattern).is_err(), "{pattern}");
+    }
 }
