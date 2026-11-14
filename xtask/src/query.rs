@@ -669,9 +669,15 @@ mod tests {
 
     #[test]
     fn notify_clears_recursion_and_dso_requires_tcp() {
-        let notify = parse("example. SOA IN udp +opcode=NOTIFY").unwrap();
-        assert!(!Message::parse(&notify.wire().unwrap()).unwrap().rd());
-        assert!(parse("example. SOA IN udp +opcode=NOTIFY +norec").is_ok());
+        for line in [
+            "example. SOA IN udp +opcode=NOTIFY",
+            "example. SOA IN udp +opcode=NOTIFY +norec",
+        ] {
+            let wire = parse(line).unwrap().wire().unwrap();
+            let message = Message::parse(&wire).unwrap();
+            assert_eq!(message.opcode(), Opcode::NOTIFY, "{line}");
+            assert!(!message.rd(), "{line}");
+        }
         assert!(parse("example. A IN udp +opcode=stateful").is_err());
         assert!(parse("example. A IN tcp +opcode=stateful").is_ok());
     }
