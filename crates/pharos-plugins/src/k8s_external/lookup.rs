@@ -253,7 +253,7 @@ mod tests {
                     ip: address.into(),
                     hostname: hostname.into(),
                     node_name: String::new(),
-                    target_ref_name: String::new(),
+                    target_ref_name: String::new().into(),
                     ready: true,
                 }],
                 ports: vec![
@@ -281,7 +281,7 @@ mod tests {
                 name: "head".into(),
                 namespace: "prod".into(),
                 cluster_ips: vec!["None".into()],
-                service_type: String::new(),
+                service_type: String::new().into(),
                 external_name: String::new(),
                 ports: vec![],
                 external_ips: vec![],
@@ -352,7 +352,7 @@ mod tests {
                 ip: "192.0.2.1".into(),
                 hostname: "node".into(),
                 node_name: String::new(),
-                target_ref_name: String::new(),
+                target_ref_name: String::new().into(),
                 ready: false,
             }],
             ports: vec![Port {

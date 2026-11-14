@@ -1317,7 +1317,7 @@ mod tests {
                     ip: ip.into(),
                     hostname: format!("node{i}"),
                     node_name: String::new(),
-                    target_ref_name: String::new(),
+                    target_ref_name: String::new().into(),
                     ready: true,
                 })
                 .collect(),
@@ -1392,7 +1392,7 @@ mod tests {
                 ip: "192.0.2.1".into(),
                 hostname,
                 node_name: String::new(),
-                target_ref_name: String::new(),
+                target_ref_name: String::new().into(),
                 ready: true,
             })
             .collect();
@@ -1440,7 +1440,7 @@ mod tests {
                 ip: format!("192.0.2.{}", i % 24 + 1),
                 hostname: format!("node{}", i % 24),
                 node_name: String::new(),
-                target_ref_name: String::new(),
+                target_ref_name: String::new().into(),
                 ready: true,
             })
             .collect();
@@ -1531,7 +1531,7 @@ mod tests {
                 ip: ip.into(),
                 hostname: "node".into(),
                 node_name: String::new(),
-                target_ref_name: String::new(),
+                target_ref_name: String::new().into(),
                 ready: true,
             })
             .collect();
@@ -1590,7 +1590,7 @@ mod tests {
                 ip: "target.example.net".into(),
                 hostname: hostname.into(),
                 node_name: String::new(),
-                target_ref_name: String::new(),
+                target_ref_name: String::new().into(),
                 ready: true,
             })
             .collect();
@@ -1658,7 +1658,7 @@ mod tests {
             ip: ip.into(),
             hostname: hostname.into(),
             node_name: String::new(),
-            target_ref_name: String::new(),
+            target_ref_name: String::new().into(),
             ready: true,
         })
         .collect();
@@ -1706,14 +1706,14 @@ mod tests {
                     ip: "192.0.2.1".into(),
                     hostname: "node".into(),
                     node_name: String::new(),
-                    target_ref_name: String::new(),
+                    target_ref_name: String::new().into(),
                     ready: true,
                 },
                 EndpointAddress {
                     ip: target.into(),
                     hostname: "alias".into(),
                     node_name: String::new(),
-                    target_ref_name: String::new(),
+                    target_ref_name: String::new().into(),
                     ready: true,
                 },
             ];
@@ -1761,7 +1761,7 @@ mod tests {
             ip: ip.into(),
             hostname: hostname.into(),
             node_name: String::new(),
-            target_ref_name: String::new(),
+            target_ref_name: String::new().into(),
             ready: true,
         })
         .collect();

@@ -115,7 +115,7 @@ mod tests {
             name: "dns".into(),
             namespace: "system".into(),
             cluster_ips: vec![if headless { "None" } else { "10.0.0.10" }.into()],
-            service_type: String::new(),
+            service_type: String::new().into(),
             external_name: String::new(),
             ports: vec![],
             external_ips: external_ips.iter().map(|ip| (*ip).into()).collect(),
@@ -135,7 +135,7 @@ mod tests {
                     ip: ip.into(),
                     hostname: String::new(),
                     node_name: String::new(),
-                    target_ref_name: String::new(),
+                    target_ref_name: String::new().into(),
                     ready: true,
                 })
                 .collect(),

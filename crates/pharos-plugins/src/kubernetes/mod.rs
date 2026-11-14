@@ -539,7 +539,7 @@ fn external_name(index: &Index, req: &name::Request<'_>) -> Option<Option<Arc<Na
     let namespace = std::str::from_utf8(req.namespace).ok()?;
     let name = std::str::from_utf8(req.service).ok()?;
     let service = index.service(namespace, name)?;
-    (service.service_type == "ExternalName").then(|| index.external_name(namespace, name))
+    (service.service_type.as_ref() == "ExternalName").then(|| index.external_name(namespace, name))
 }
 
 fn visit(
@@ -617,7 +617,7 @@ fn visit(
     if !req.zone.is_empty() && !svc.headless() {
         return false;
     }
-    if svc.service_type == "ExternalName" {
+    if svc.service_type.as_ref() == "ExternalName" {
         return req.endpoint.is_empty()
             && req.port.is_empty()
             && req.protocol.is_empty()
