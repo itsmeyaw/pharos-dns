@@ -231,9 +231,16 @@ fn same_ecs(request: &Message<'_>, response: &Message<'_>) -> bool {
 struct RecordIndex {
     name_hash: u32,
     ttl: u32,
-    offset: u16,
+    name_offset: u16,
+    ttl_offset: u16,
     rtype: u16,
     class: u16,
+}
+
+#[derive(Clone, Copy)]
+struct TtlNormalization {
+    records: usize,
+    changed: bool,
 }
 
 fn name_hash(name: NameRef<'_>) -> u32 {
@@ -270,19 +277,22 @@ fn compare_names(left: NameRef<'_>, right: NameRef<'_>) -> std::cmp::Ordering {
     }
 }
 
-fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
-    // RFC 2181 §5.2: Validate TTL consistency; OPT and TSIG are pseudo-records.
+fn rrsets_ttl_normalization(message: &Message<'_>, wire: &[u8]) -> Result<TtlNormalization, ()> {
+    // RFC 2181 §5.2: Treat each RRset's TTLs as its lowest received TTL.
     let mut ordinary = message
         .answers()
         .chain(message.authorities())
         .chain(message.additionals())
         .filter(|record| !matches!(record.rtype, Type::OPT | Type::TSIG));
     if ordinary.next().is_none() || ordinary.next().is_none() {
-        return true;
+        return Ok(TtlNormalization {
+            records: 0,
+            changed: false,
+        });
     }
     RRSET_SCRATCH.with(|scratch| {
         let Ok(mut indexes) = scratch.try_borrow_mut() else {
-            return false;
+            return Err(());
         };
         indexes.clear();
         for records in [
@@ -294,13 +304,13 @@ fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
                 if matches!(record.rtype, Type::OPT | Type::TSIG) {
                     continue;
                 }
-                let Ok(offset) = u16::try_from(record.name.offset()) else {
-                    return false;
-                };
+                let name_offset = u16::try_from(record.name.offset()).map_err(|_| ())?;
+                let ttl_offset = u16::try_from(record.ttl_offset).map_err(|_| ())?;
                 indexes.push(RecordIndex {
                     name_hash: name_hash(record.name),
                     ttl: record.ttl,
-                    offset,
+                    name_offset,
+                    ttl_offset,
                     rtype: record.rtype.0,
                     class: record.class.0,
                 });
@@ -312,30 +322,72 @@ fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
                 .then(left.rtype.cmp(&right.rtype))
                 .then(left.class.cmp(&right.class))
                 .then_with(|| {
-                    let same_name = NameRef::parse(wire, usize::from(left.offset))
+                    let same_name = NameRef::parse(wire, usize::from(left.name_offset))
                         .expect("Message validated RR owner");
-                    let other_name = NameRef::parse(wire, usize::from(right.offset))
+                    let other_name = NameRef::parse(wire, usize::from(right.name_offset))
                         .expect("Message validated RR owner");
                     compare_names(same_name, other_name)
                 })
                 .then(left.ttl.cmp(&right.ttl))
         });
-        indexes.windows(2).all(|pair| {
-            let left = pair[0];
-            let right = pair[1];
-            if left.name_hash != right.name_hash
-                || left.rtype != right.rtype
-                || left.class != right.class
-            {
-                return true;
+        let mut changed = false;
+        let mut start = 0;
+        while start < indexes.len() {
+            let first = indexes[start];
+            let mut end = start + 1;
+            while end < indexes.len() {
+                let next = indexes[end];
+                if first.name_hash != next.name_hash
+                    || first.rtype != next.rtype
+                    || first.class != next.class
+                {
+                    break;
+                }
+                let first_name = NameRef::parse(wire, usize::from(first.name_offset))
+                    .expect("Message validated RR owner");
+                let next_name = NameRef::parse(wire, usize::from(next.name_offset))
+                    .expect("Message validated RR owner");
+                if compare_names(first_name, next_name) != std::cmp::Ordering::Equal {
+                    break;
+                }
+                end += 1;
             }
-            let left_name =
-                NameRef::parse(wire, usize::from(left.offset)).expect("Message validated RR owner");
-            let right_name = NameRef::parse(wire, usize::from(right.offset))
-                .expect("Message validated RR owner");
-            compare_names(left_name, right_name) != std::cmp::Ordering::Equal
-                || left.ttl == right.ttl
+            let lowest_ttl = indexes[start..end]
+                .iter()
+                .map(|record| record.ttl)
+                .min()
+                .expect("RRset group is non-empty");
+            changed |= indexes[start..end]
+                .iter()
+                .any(|record| record.ttl != lowest_ttl);
+            for record in &mut indexes[start..end] {
+                record.ttl = lowest_ttl;
+            }
+            start = end;
+        }
+        Ok(TtlNormalization {
+            records: indexes.len(),
+            changed,
         })
+    })
+}
+
+fn apply_rrset_ttl_normalization(wire: &mut [u8], records: usize) -> bool {
+    RRSET_SCRATCH.with(|scratch| {
+        let Ok(indexes) = scratch.try_borrow() else {
+            return false;
+        };
+        let Some(indexes) = indexes.get(..records) else {
+            return false;
+        };
+        for record in indexes {
+            let offset = usize::from(record.ttl_offset);
+            let Some(ttl) = wire.get_mut(offset..offset + 4) else {
+                return false;
+            };
+            ttl.copy_from_slice(&record.ttl.to_be_bytes());
+        }
+        true
     })
 }
 
@@ -839,29 +891,34 @@ impl Proxy {
             response[3] = flags[1];
             response[6..12].fill(0);
         }
-        let answer = Message::parse(&response[..length])
-            .map_err(|_| Error::Io(io::ErrorKind::InvalidData.into()))?;
-        if let Some(metrics) = &self.metrics {
-            let code = answer.rcode().0;
-            // shortcut: first observation of an RCODE allocates; pre-register codes if cold traffic matters.
-            metrics.durations[usize::from(code)]
-                .get_or_init(|| metrics.proxy.request_duration(&Rcode(code).to_string()))
-                .observe(start.elapsed().as_secs_f64());
-        }
-        // RFC 5452 §4.2: Response Question must match the outstanding Query.
-        let same_questions = request.question_count() == answer.question_count()
-            && request
-                .questions()
-                .zip(answer.questions())
-                .all(|(a, b)| a.name == b.name && a.qtype == b.qtype && a.qclass == b.qclass);
-        if !answer.qr() || !same_questions || !same_ecs(&request, &answer) {
-            return Err(Error::Mismatch(length));
-        }
-        // RFC 2181 §5.2: Reject inconsistent RRset TTLs; §5.5 duplicate sections are SHOULD NOT.
-        if !rrsets_valid(&answer, &response[..length]) {
+        let (close_after, ttl_normalization) = {
+            let answer = Message::parse(&response[..length])
+                .map_err(|_| Error::Io(io::ErrorKind::InvalidData.into()))?;
+            if let Some(metrics) = &self.metrics {
+                let code = answer.rcode().0;
+                // shortcut: first observation of an RCODE allocates; pre-register codes if cold traffic matters.
+                metrics.durations[usize::from(code)]
+                    .get_or_init(|| metrics.proxy.request_duration(&Rcode(code).to_string()))
+                    .observe(start.elapsed().as_secs_f64());
+            }
+            // RFC 5452 §4.2: Response Question must match the outstanding Query.
+            let same_questions = request.question_count() == answer.question_count()
+                && request
+                    .questions()
+                    .zip(answer.questions())
+                    .all(|(a, b)| a.name == b.name && a.qtype == b.qtype && a.qclass == b.qclass);
+            if !answer.qr() || !same_questions || !same_ecs(&request, &answer) {
+                return Err(Error::Mismatch(length));
+            }
+            let ttl_normalization = rrsets_ttl_normalization(&answer, &response[..length])
+                .map_err(|_| Error::Io(io::ErrorKind::InvalidData.into()))?;
+            (keepalive_zero(&answer), ttl_normalization)
+        };
+        if ttl_normalization.changed
+            && !apply_rrset_ttl_normalization(&mut response[..length], ttl_normalization.records)
+        {
             return Err(Error::Io(io::ErrorKind::InvalidData.into()));
         }
-        let close_after = keepalive_zero(&answer);
         // RFC 1035 §4.1.1: the response ID matches the original query ID.
         response[..2].copy_from_slice(&query[..2]);
         {
@@ -1030,17 +1087,63 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mixed_ttl_rrsets() {
+    fn normalizes_mixed_ttl_rrsets_to_lowest_ttl() {
         let mut wire = vec![0, 1, 0x81, 0x80, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 1, 0, 1];
         wire.extend_from_slice(&[
             0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0,
             0, 30, 0, 4, 192, 0, 2, 2,
         ]);
+        let normalization = {
+            let message = Message::parse(&wire).unwrap();
+            rrsets_ttl_normalization(&message, &wire).unwrap()
+        };
+        assert!(normalization.changed);
+        assert!(apply_rrset_ttl_normalization(
+            &mut wire,
+            normalization.records
+        ));
         let message = Message::parse(&wire).unwrap();
-        assert!(!rrsets_valid(&message, &wire));
-        wire[42] = 60;
-        let message = Message::parse(&wire).unwrap();
-        assert!(rrsets_valid(&message, &wire));
+        assert!(message.answers().all(|record| record.ttl == 30));
+    }
+
+    #[tokio::test]
+    async fn mixed_ttl_response_is_normalized_without_starting_health_probe() {
+        let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = upstream.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut query = [0; 512];
+            let (len, peer) = upstream.recv_from(&mut query).await.unwrap();
+            let request = Message::parse(&query[..len]).unwrap();
+            let question_end = 12 + request.questions().next().unwrap().name.wire_len() + 4;
+            let mut response = query[..question_end].to_vec();
+            response[2] |= 0x80;
+            response[6..8].copy_from_slice(&2_u16.to_be_bytes());
+            response[10..12].fill(0);
+            response.extend_from_slice(&[
+                0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1, 0xc0, 0x0c, 0, 1, 0, 1, 0,
+                0, 0, 30, 0, 4, 192, 0, 2, 2,
+            ]);
+            upstream.send_to(&response, peer).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), upstream.recv_from(&mut query))
+                    .await
+                    .is_err()
+            );
+        });
+        let proxy = Proxy::new(address);
+        let query = query_with_options(&[]);
+        let mut response = [0; 512];
+        let exchange = proxy
+            .exchange(&query, &mut response, Transport::Udp, Options::default())
+            .await
+            .unwrap();
+        assert!(
+            Message::parse(&response[..exchange.len])
+                .unwrap()
+                .answers()
+                .all(|record| record.ttl == 30)
+        );
+        task.await.unwrap();
     }
 
     #[test]
@@ -1050,8 +1153,17 @@ mod tests {
             1, b'a', 0, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1, 1, b'A', 0, 0, 1, 0, 1, 0, 0,
             0, 30, 0, 4, 192, 0, 2, 2,
         ]);
+        let normalization = {
+            let message = Message::parse(&wire).unwrap();
+            rrsets_ttl_normalization(&message, &wire).unwrap()
+        };
+        assert!(normalization.changed);
+        assert!(apply_rrset_ttl_normalization(
+            &mut wire,
+            normalization.records
+        ));
         let message = Message::parse(&wire).unwrap();
-        assert!(!rrsets_valid(&message, &wire));
+        assert!(message.answers().all(|record| record.ttl == 30));
     }
 
     #[test]
@@ -1061,7 +1173,7 @@ mod tests {
         wire.extend_from_slice(&rr);
         wire.extend_from_slice(&rr);
         let message = Message::parse(&wire).unwrap();
-        assert!(rrsets_valid(&message, &wire));
+        assert!(!rrsets_ttl_normalization(&message, &wire).unwrap().changed);
     }
 
     #[cfg(target_os = "linux")]
