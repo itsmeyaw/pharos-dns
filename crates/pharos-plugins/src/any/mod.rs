@@ -14,11 +14,16 @@ pub struct Any {
 impl Any {
     pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Self, CorefileError> {
         cursor.next();
+        // RFC 8482 §4.2: accept optional operator-set TTL, defaulting to 8482.
         let ttl = match cursor.remaining_args().as_slice() {
             [] => 8482,
             [key, value] if key == "ttl" => value.parse().map_err(|_| cursor.arg_err())?,
             _ => return Err(cursor.arg_err()),
         };
+        // RFC 2181 §8: TTL values with the high bit set are treated as zero.
+        if ttl > i32::MAX as u32 {
+            return Err(cursor.error("invalid TTL"));
+        }
         if cursor.next_arg() {
             return Err(cursor.arg_err());
         }
