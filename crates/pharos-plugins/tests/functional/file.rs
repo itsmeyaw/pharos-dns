@@ -795,13 +795,11 @@ async fn signed_referral_includes_ds_and_in_bailiwick_signed_glue() {
     let extra = response.additionals().collect::<Vec<_>>();
     assert_eq!(
         extra.iter().map(|rr| rr.rtype).collect::<Vec<_>>(),
-        vec![Type::A, Type::RRSIG]
+        vec![Type::A, Type::RRSIG, Type::A]
     );
-    assert!(
-        extra
-            .iter()
-            .all(|rr| rr.name.to_string() == "ns.child.example.org.")
-    );
+    assert_eq!(extra[0].name.to_string(), "ns.child.example.org.");
+    assert_eq!(extra[1].name.to_string(), "ns.child.example.org.");
+    assert_eq!(extra[2].name.to_string(), "ns.example.org.");
 }
 
 #[cfg(feature = "plugin-transfer")]
