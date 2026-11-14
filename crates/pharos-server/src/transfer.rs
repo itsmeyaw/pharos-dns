@@ -91,12 +91,19 @@ pub async fn notify_from(
     }
     notify_tcp(address, zone, id, deadline, &query)
         .await
-        .map_err(|_| last_error)
+        .map_err(|tcp_error| {
+            io::Error::new(
+                tcp_error.kind(),
+                format!(
+                    "TCP NOTIFY fallback failed ({tcp_error}); UDP retries failed ({last_error})"
+                ),
+            )
+        })
 }
 
 fn notify_response(wire: &[u8], id: u16, zone: &Name) -> io::Result<Rcode> {
     let response = Message::parse(wire).map_err(|_| invalid("invalid NOTIFY Response"))?;
-    // RFC 1996 §§3.3, 4.8: Match QR, opcode, ID, and the SOA Question.
+    // RFC 1996 §§3.6, 4.7: Match response ID, Question, and NOTIFY response flags.
     if response.id() != id
         || response.flags() & 0xf800 != 0xa000
         || response.question_count() != 1

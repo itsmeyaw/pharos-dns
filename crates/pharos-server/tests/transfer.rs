@@ -646,6 +646,22 @@ async fn notify_uses_tcp_when_udp_does_not_reply() {
 }
 
 #[tokio::test]
+async fn notify_reports_tcp_fallback_error_after_udp_retries() {
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = udp.local_addr().unwrap();
+    let error = pharos_server::transfer::notify(
+        address,
+        &"a.".parse().unwrap(),
+        42,
+        Duration::from_millis(10),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("TCP NOTIFY fallback failed"));
+    assert!(error.to_string().contains("UDP retries failed"));
+}
+
+#[tokio::test]
 async fn notify_treats_notimp_as_transaction_complete() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
