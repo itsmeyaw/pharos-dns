@@ -162,6 +162,7 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode) {
     } else if let Some((_, opt_flags)) = raw_opt {
         // RFC 6891 §7: preserve EDNS's presence on FORMERR, even when option parsing failed.
         let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
+            // RFC 9824 §9: preserve CO; reserved EDNS flag bits remain zero.
             | u32::from(opt_flags & 0x4000)
             | if opt_flags & 0x8000 != 0 { 0x8000 } else { 0 };
         let mut opt = [0; 11];

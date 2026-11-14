@@ -159,6 +159,7 @@ impl<'a> Opt<'a> {
         let mut source = existing.unwrap_or(self);
         source.size = RESPONSE_UDP_PAYLOAD_SIZE;
         // RFC 6891 §6.1.3: responses carry version 0, the highest EDNS version implemented here.
+        // RFC 9824 §9: CO is allocated; clear other reserved flags and copy DO from the Query.
         source.ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
             | (source.ttl & 0x4000)
             | if self.dnssec_ok() { 0x8000 } else { 0 };
