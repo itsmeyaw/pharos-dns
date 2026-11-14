@@ -135,6 +135,7 @@ pub struct MessageBuilder<'a, B: MessageBuffer = Vec<u8>> {
     counts: [u16; 4],
     section: usize,
     stopped: bool,
+    has_opt: bool,
     offsets: [u16; COMPRESSION_SLOTS],
     offset_count: usize,
 }
@@ -153,7 +154,8 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
         wire.clear_buffer();
         // RFC 1035 §4.1.1: the header starts with ID, flags, and four section counts.
         wire.append_buffer(&id.to_be_bytes());
-        wire.append_buffer(&flags.to_be_bytes());
+        // RFC 1035 §4.1.1: the reserved header Z bit is zero on the wire.
+        wire.append_buffer(&(flags & !0x0040).to_be_bytes());
         wire.append_buffer(&[0; 8]);
         Ok(Self {
             wire,
@@ -162,6 +164,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
             counts: [0; 4],
             section: 0,
             stopped: false,
+            has_opt: false,
             offsets: [0; COMPRESSION_SLOTS],
             offset_count: 0,
         })
@@ -243,6 +246,10 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
             return Ok(false);
         }
         let index = section.index();
+        // RFC 6891 §6.1.1: OPT appears at most once in the Additional section.
+        if rtype == Type::OPT && (index != 3 || self.has_opt || name.labels().next().is_some()) {
+            return Err(BuildError::InvalidRdata);
+        }
         if index < self.section {
             return Err(BuildError::SectionOrder);
         }
@@ -269,7 +276,9 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
             self.wire[length_offset..length_offset + 2].copy_from_slice(&length.to_be_bytes());
             Ok(())
         })();
-        self.finish_entry(index, start, slots, result)
+        let added = self.finish_entry(index, start, slots, result)?;
+        self.has_opt |= added && rtype == Type::OPT;
+        Ok(added)
     }
 
     /// Appends one pre-encoded OPT record from the reserved space and finishes.
@@ -277,7 +286,9 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
     /// On error, the buffer contains the completed Message without the OPT.
     // RFC 6891 §6.1.2: OPT uses root NAME, TYPE 41, and RDLENGTH-bounded option data.
     pub fn finish_with_opt(mut self, opt: &[u8]) -> Result<&'a mut B, BuildError> {
-        let error = if opt.len() > self.reserved {
+        let error = if self.has_opt {
+            Some(BuildError::InvalidRdata)
+        } else if opt.len() > self.reserved {
             Some(BuildError::SizeLimit)
         } else if opt.len() < 11
             || opt[0..3] != [0, 0, 41]
@@ -332,9 +343,10 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
                 if error != BuildError::SizeLimit {
                     return Err(error);
                 }
-                // RFC 1035 §4.1.1: TC marks a message truncated by the transmission limit.
-                // RFC 2181 §5.1: Set TC when a required RRset cannot fit in full.
-                self.wire[2] |= 0x02;
+                // RFC 2181 §9: omitting optional Additional data alone does not set TC.
+                if index < 3 {
+                    self.wire[2] |= 0x02;
+                }
                 self.stopped = true;
                 Ok(false)
             }
@@ -394,7 +406,9 @@ impl<'a> MessageBuilder<'a, Vec<u8>> {
         mut self,
         opt: &ResponseOpt<'_, '_>,
     ) -> Result<&'a mut Vec<u8>, BuildError> {
-        let error = if opt.wire_len() > self.reserved {
+        let error = if self.has_opt {
+            Some(BuildError::InvalidRdata)
+        } else if opt.wire_len() > self.reserved {
             Some(BuildError::SizeLimit)
         } else {
             self.check_count(3).err()

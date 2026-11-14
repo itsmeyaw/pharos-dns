@@ -182,7 +182,7 @@ fn mandatory_overflow_rolls_back_sets_tc_and_stops() {
 }
 
 #[test]
-fn additional_overflow_keeps_previous_records_sets_tc_and_stops() {
+fn additional_overflow_keeps_previous_records_without_setting_tc() {
     let n = name(".");
     let mut wire = Vec::new();
     let mut b = MessageBuilder::new(&mut wire, 512, 0, 0x8000).unwrap();
@@ -217,7 +217,7 @@ fn additional_overflow_keeps_previous_records_sets_tc_and_stops() {
     assert_eq!(wire.len(), 501);
     assert_eq!(message.additional_count(), 1);
     assert_eq!(message.additionals().next().unwrap().rdata, &[1; 478]);
-    assert!(message.tc());
+    assert!(!message.tc());
 }
 
 #[test]
@@ -243,8 +243,39 @@ fn maximum_below_512_is_clamped() {
         );
         let wire = b.finish();
         assert_eq!(wire.len(), 512);
-        assert!(Message::parse(wire).unwrap().tc());
+        assert!(!Message::parse(wire).unwrap().tc());
     }
+}
+
+#[test]
+fn builder_clears_reserved_z_and_rejects_duplicate_opt() {
+    let root = name(".");
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 7, 0x8040).unwrap();
+    builder
+        .record(
+            Section::Additional,
+            borrowed(&root),
+            Type::OPT,
+            Class(1232),
+            0,
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        builder.record(
+            Section::Additional,
+            borrowed(&root),
+            Type::OPT,
+            Class(1232),
+            0,
+            &[]
+        ),
+        Err(BuildError::InvalidRdata)
+    );
+    let message = Message::parse(builder.finish()).unwrap();
+    assert!(!message.z());
+    assert_eq!(message.additional_count(), 1);
 }
 
 #[test]
@@ -427,7 +458,7 @@ fn reserves_space_for_opt_even_after_truncation() {
     let wire = builder.finish_with_opt(opt).unwrap();
     assert_eq!(wire.len(), 512);
     let message = Message::parse(wire).unwrap();
-    assert!(message.tc());
+    assert!(!message.tc());
     assert_eq!(message.answer_count(), 1);
     assert_eq!(message.additional_count(), 1);
     assert_eq!(message.additionals().next().unwrap().rtype, Type::OPT);
