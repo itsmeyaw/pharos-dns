@@ -20,7 +20,8 @@ const SERVICES: &str = r#"[
  {"metadata":{"name":"external","namespace":"testns"},"spec":{"type":"ExternalName","externalName":"ext.interwebs.test","ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"external-to-service","namespace":"testns"},"spec":{"type":"ExternalName","externalName":"svc1.testns.svc.cluster.local.","ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"svc1","namespace":"unexposedns"},"spec":{"clusterIP":"10.0.0.2","ports":[{"name":"http","protocol":"TCP","port":80}]}},
- {"metadata":{"name":"svc-dual-stack","namespace":"testns"},"spec":{"clusterIPs":["10.0.0.3","10::3"],"ports":[{"name":"http","protocol":"TCP","port":80}]}}
+ {"metadata":{"name":"svc-dual-stack","namespace":"testns"},"spec":{"clusterIPs":["10.0.0.3","10::3"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
+ {"metadata":{"name":"svc-unnamed","namespace":"testns"},"spec":{"clusterIP":"10.0.0.4","ports":[{"protocol":"TCP","port":80}]}}
 ]"#;
 const ENDPOINTS: &str = r#"[
  {"metadata":{"name":"kubedns","namespace":"kube-system","labels":{"kubernetes.io/service-name":"kubedns"}},"addressType":"IPv4","ports":[{"name":"dns","protocol":"UDP","port":53}],"endpoints":[{"addresses":["172.0.0.100"]}]},
@@ -543,6 +544,13 @@ async fn handler_common_and_regular() {
         positive("common 2", empty, Type::A, &["10.0.0.1"]),
         srv("common 3", svc1, svc1, 100, "10.0.0.1"),
         srv("common 4", empty, empty, 100, "10.0.0.1"),
+        negative(
+            "common unnamed port",
+            "svc-unnamed.testns.svc.cluster.local.",
+            Type::SRV,
+            a,
+            zone,
+        ),
         srv("common 5", svc6, svc6, 100, "1234:abcd::1"),
         srv(
             "common 6",

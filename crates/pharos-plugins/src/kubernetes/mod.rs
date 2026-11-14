@@ -1222,8 +1222,8 @@ impl pharos_server::Plugin for Kubernetes {
                                 ),
                                 _ => return,
                             }
-                        // KEP-1645 §specification.md > 2.3.2 - SRV Records: SRV uses named ports.
-                        } else if q.qtype == Type::SRV && port.port >= 0 {
+                        // Kubernetes DNS spec 1.1.0 §2.3.2: unnamed ports have no SRV records.
+                        } else if q.qtype == Type::SRV && port.has_srv() {
                             // Kubernetes DNS spec 1.1.0 §2.3.2: ClusterIP SRV targets name services.
                             // Kubernetes DNS spec 1.1.0 §2.4.2: headless SRV targets name endpoints.
                             // KEP-1645 MCS DNS spec §2.4.2: headless SRV targets include cluster IDs.
@@ -1286,7 +1286,8 @@ impl pharos_server::Plugin for Kubernetes {
                     if !stopped && q.qtype == Type::SRV && answers > 0 {
                         let mut error = None;
                         visit(i, req, &self.config, |ip, port, endpoint| {
-                            if stopped || error.is_some() || port.port < 0 {
+                            // Kubernetes DNS spec 1.1.0 §2.3.2: unnamed ports have no SRV Additional data.
+                            if stopped || error.is_some() || !port.has_srv() {
                                 return;
                             }
                             let ip_text = ip;

@@ -251,15 +251,12 @@ impl Snapshot<'_> {
         base_srv: bool,
     ) -> Result<(), Error> {
         for port in ports {
-            // KEP-752 §Proposal > Endpoint Port: omit nil ports, matching query answers.
-            if port.port < 0 {
+            // Kubernetes DNS spec 1.1.0 §2.3.2 and KEP-752: unnamed and nil ports have no SRV.
+            if !port.has_srv() {
                 continue;
             }
             if base_srv {
                 self.srv(base, target, port.port, weight)?;
-            }
-            if port.name.is_empty() {
-                continue;
             }
             let mut name = [0; 64];
             let mut protocol = [0; 64];
@@ -928,6 +925,37 @@ mod tests {
                 .rtype,
             Type::A
         );
+    }
+
+    #[test]
+    fn unnamed_service_port_does_not_transfer_base_srv() {
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let mut snapshot = snapshot(&zone);
+        snapshot
+            .service(
+                &Index::default(),
+                "prod",
+                "web",
+                &["10.0.0.1".into()],
+                &[Port {
+                    name: String::new(),
+                    protocol: "TCP".into(),
+                    port: 80,
+                }],
+                false,
+            )
+            .unwrap();
+        let records: Vec<_> = messages(&snapshot.bytes.unwrap())
+            .into_iter()
+            .flat_map(|wire| {
+                Message::parse(wire)
+                    .unwrap()
+                    .answers()
+                    .map(|rr| rr.rtype)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(records, [Type::A]);
     }
 
     #[test]
