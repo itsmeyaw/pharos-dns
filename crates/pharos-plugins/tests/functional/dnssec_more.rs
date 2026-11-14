@@ -602,6 +602,43 @@ async fn nxname_formerr_applies_outside_configured_zones() {
 }
 
 #[tokio::test]
+async fn nxname_in_later_question_gets_formerr() {
+    let dnssec = plugin("miek.nl", KEY);
+    let first: Name = "www.miek.nl.".parse().unwrap();
+    let second: Name = "outside.example.".parse().unwrap();
+    let mut query_wire = Vec::with_capacity(512);
+    let mut query_builder = MessageBuilder::new(&mut query_wire, 512, 1, 0x0100).unwrap();
+    query_builder
+        .question(
+            NameRef::parse(first.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    query_builder
+        .question(
+            NameRef::parse(second.as_wire(), 0).unwrap(),
+            Type::NXNAME,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = query_builder.finish();
+    let (outcome, response) = serve(
+        &dnssec,
+        &query_wire,
+        Reply::NegativeNoSoa,
+        Protocol::Udp,
+        4096,
+        4096,
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.rcode(), Rcode::FORMERR);
+    assert_eq!(message.questions().count(), 2);
+}
+
+#[tokio::test]
 async fn signed_responses_clear_cd() {
     let dnssec = plugin("miek.nl", KEY);
     for (name, qtype, reply) in [

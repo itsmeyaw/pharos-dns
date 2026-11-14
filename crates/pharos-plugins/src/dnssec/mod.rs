@@ -30,8 +30,7 @@ impl Plugin for Dnssec {
         if cx
             .query
             .questions()
-            .next()
-            .is_some_and(|question| question.qtype == Type::NXNAME)
+            .any(|question| question.qtype == Type::NXNAME)
         {
             return match nxname_formerr(cx) {
                 Ok(()) => Outcome::Response,
@@ -67,16 +66,20 @@ impl Plugin for Dnssec {
 }
 
 fn nxname_formerr(cx: &mut Context<'_, '_>) -> Result<(), Error> {
-    let question = cx.query.questions().next().ok_or(Error::InvalidQuery)?;
+    if cx.query.questions().next().is_none() {
+        return Err(Error::InvalidQuery);
+    }
     let max_size =
         Dnssec::ensure_response_capacity(cx.response, cx.protocol, cx.max_response_size)?;
     // RFC 1035 §4.1.1: FORMERR responses copy opcode and RD and set QR and RCODE.
     let flags = 0x8001 | (cx.query.flags() & 0x7900);
     let mut builder =
         MessageBuilder::new(cx.response, max_size, cx.query.id(), flags).map_err(Error::Build)?;
-    builder
-        .question(question.name, question.qtype, question.qclass)
-        .map_err(Error::Build)?;
+    for question in cx.query.questions() {
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .map_err(Error::Build)?;
+    }
     let _ = builder.finish();
     Ok(())
 }
