@@ -367,7 +367,7 @@ async fn pending_query_finishes_after_listener_shutdown() {
         .unwrap();
 }
 
-// RFC 1035 §4.2.2: Keep the connection open until outstanding requests are satisfied.
+// RFC 9293 §3.6.1: A peer half-close leaves the server's send direction open.
 #[tokio::test]
 async fn pending_query_finishes_after_client_half_close() {
     let (started, mut observed) = async_mpsc::unbounded_channel();

@@ -339,7 +339,11 @@ async fn serve<H: Handler>(
             Err(_) => {}
         }
     }
-    // RFC 1035 §4.2.2: Finish outstanding responses before closing a TCP connection.
+    if writer.lock().await.is_none() {
+        // RFC 7766 §6.2.4; RFC 5936 §4.1.2: A dead write half cannot serve active Queries or Transfers.
+        queries.abort_all();
+    }
+    // RFC 9293 §3.6.1: A peer FIN closes only its send direction; finish accepted Responses.
     while queries.join_next().await.is_some() {}
 }
 
