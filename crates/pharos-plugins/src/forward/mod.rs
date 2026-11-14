@@ -46,10 +46,10 @@ pub struct Forward {
     buffers: BufferPool,
 }
 
+// shortcut: retain four idle scratch buffers; raise only if measured burst allocations justify memory.
 const MAX_IDLE_SCRATCH: usize = 4;
 
 #[derive(Default)]
-// shortcut: the pool retains peak concurrency, cap it if idle memory becomes costly.
 struct BufferPool(Mutex<Vec<Scratch>>);
 
 struct Scratch {
@@ -113,7 +113,6 @@ impl Drop for Buffer<'_> {
     fn drop(&mut self) {
         let scratch = self.scratch.take().expect("buffer exists");
         let mut pool = self.pool.0.lock().unwrap();
-        // shortcut: Retain four idle buffers per Forward; raise only if burst allocation is measurable.
         if pool.len() < MAX_IDLE_SCRATCH {
             pool.push(scratch);
         }
