@@ -16,6 +16,10 @@ impl Transferer for File {
             return Ok(None);
         };
         let zone = loaded.current.load_full().ok_or(Error::InvalidQuery)?;
+        // RFC 5936 §2.1.2: A zone-transfer provider matches both QNAME and QCLASS.
+        if zone.class() != request.qclass {
+            return Ok(None);
+        }
         Ok(Some(zone.transfer(request)?))
     }
 }

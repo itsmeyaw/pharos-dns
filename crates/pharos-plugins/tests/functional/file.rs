@@ -338,6 +338,147 @@ async fn external_alias_preserves_target_rcode_and_truncation() {
     external_alias_test().await;
 }
 
+#[tokio::test]
+async fn overlong_dname_with_self_lookup_returns_one_dname() {
+    use pharos_server::{Action, Handler, ListenerKey, Router, Server};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    struct CountSelfLookup {
+        chain: Chain,
+        calls: Arc<AtomicUsize>,
+    }
+    impl pharos_server::Chain for CountSelfLookup {
+        async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+            if cx.self_lookup_depth() != 0 {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+            }
+            pharos_server::Chain::serve(&self.chain, cx).await
+        }
+        fn is_empty(&self) -> bool {
+            false
+        }
+    }
+
+    let path = std::env::temp_dir().join(format!("pharos-yxdomain-{}.zone", std::process::id()));
+    let _cleanup = Cleanup(path.clone());
+    let long_label = "a".repeat(63);
+    let target = format!("{}.{}.", "t".repeat(63), "u".repeat(30));
+    let zone = format!(
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nd.example.org. 60 IN DNAME {target}\n"
+    );
+    std::fs::write(&path, zone).unwrap();
+    let corefile = format!("example.org:53 {{\n file {}\n}}", path.display());
+    let chain = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut router = Router::default();
+    router.add(
+        key,
+        "example.org.".parse().unwrap(),
+        Some(CountSelfLookup {
+            chain,
+            calls: Arc::clone(&calls),
+        }),
+        vec![],
+    );
+    let server = Arc::new(Server::new(router, key));
+    let query_name: Name = format!("{long_label}.{long_label}.{long_label}.d.example.org.")
+        .parse()
+        .unwrap();
+    let mut query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(query_name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        Handler::handle_shared(
+            &server,
+            &query,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response,
+        )
+        .await,
+        Action::Respond
+    );
+    let response = Message::parse(&response).unwrap();
+    assert_eq!(response.rcode(), Rcode::YXDOMAIN);
+    assert_eq!(
+        response
+            .answers()
+            .filter(|rr| rr.rtype == Type::DNAME)
+            .count(),
+        1
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[cfg(feature = "plugin-transfer")]
+#[tokio::test]
+async fn axfr_class_mismatch_returns_notauth_on_wire() {
+    use pharos_plugins::servers;
+    use pharos_server::{Action, Handler};
+
+    let zonefile = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/coredns-miek.zone"
+    );
+    let corefile = format!(
+        "miek.nl:53 {{\n chaos v1 author\n file {zonefile}\n transfer miek.nl {{\n to *\n }}\n}}"
+    );
+    let (servers, _) =
+        servers(configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap())
+            .unwrap();
+    let server = servers.values().next().unwrap();
+    assert!(server.allow_non_in);
+    let apex: Name = "miek.nl.".parse().unwrap();
+    let mut query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(apex.as_wire(), 0).unwrap(),
+            Type::AXFR,
+            Class::CH,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &query,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Tcp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTAUTH);
+}
+
 async fn external_alias_test() {
     use pharos_server::{Action, Handler, ListenerKey, Router, Server};
     use std::sync::Arc;
@@ -740,7 +881,7 @@ async fn wildcard_publishes_metadata() {
 }
 
 #[tokio::test]
-async fn signed_referral_includes_ds_and_in_bailiwick_signed_glue() {
+async fn signed_referral_includes_ds_and_signed_sibling_glue() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/file/signed.zone"
@@ -795,13 +936,11 @@ async fn signed_referral_includes_ds_and_in_bailiwick_signed_glue() {
     let extra = response.additionals().collect::<Vec<_>>();
     assert_eq!(
         extra.iter().map(|rr| rr.rtype).collect::<Vec<_>>(),
-        vec![Type::A, Type::RRSIG]
+        vec![Type::A, Type::RRSIG, Type::A]
     );
-    assert!(
-        extra
-            .iter()
-            .all(|rr| rr.name.to_string() == "ns.child.example.org.")
-    );
+    assert_eq!(extra[0].name.to_string(), "ns.child.example.org.");
+    assert_eq!(extra[1].name.to_string(), "ns.child.example.org.");
+    assert_eq!(extra[2].name.to_string(), "ns.example.org.");
 }
 
 #[cfg(feature = "plugin-transfer")]

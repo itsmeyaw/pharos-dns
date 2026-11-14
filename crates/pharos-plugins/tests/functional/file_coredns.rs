@@ -1017,12 +1017,12 @@ async fn coredns_closest_encloser_cases_through_signed_denial() {
 
 // Derived from CoreDNS apex_test.go TestLookupApex.
 #[tokio::test]
-async fn coredns_apex_only_zone_returns_nxdomain_for_missing_type() {
+async fn coredns_apex_only_zone_returns_nodata_for_missing_type() {
     let input = "$ORIGIN example.com.\n@ 60 IN SOA ns1.example.com. admin.example.com. 2005011437 1200 144 1814400 7200\n@ 60 IN NS ns1.example.com.\n";
     let zone = zone("example.com.", input).unwrap();
     let (outcome, wire) = query(&zone, "example.com.", Type::A, false, &[]).await;
     assert_eq!(outcome, Outcome::Response);
-    assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::NXDOMAIN);
+    assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::NOERROR);
 }
 
 // Adapted from CoreDNS delete_test.go TestZoneInsertAndDelete and xfr_test.go TestAllNewZone.
@@ -1255,20 +1255,20 @@ async fn coredns_apex_and_nested_wildcards() {
     }
 }
 
-// Derived from CoreDNS svcb_test.go TestSVCBTargetNormalization.
+// Adapted from CoreDNS svcb_test.go; preserve source case per RFC 4343 §4.2.
 // RFC 9460 §4.1: Authoritative servers SHOULD return in-zone SVCB target data.
 #[tokio::test]
-async fn coredns_svcb_target_is_normalized_and_has_glue() {
+async fn coredns_svcb_target_preserves_case_and_has_glue() {
     let input = "$TTL 30M\n$ORIGIN example.com.\n@ IN SOA ns.example.com. admin.example.com. 2024010100 14400 3600 604800 14400\n@ IN NS ns.example.com.\nns IN A 192.0.2.1\nsvc IN A 192.0.2.10\n_foo IN SVCB 1 SVC.Example.COM. alpn=h2\n";
     let zone = zone("example.com.", input).unwrap();
     let (outcome, wire) = query(&zone, "_foo.example.com.", Type::SVCB, false, &[]).await;
     assert_eq!(outcome, Outcome::Response);
     let response = Message::parse(&wire).unwrap();
     assert!(
-        matches!(response.answers().next().unwrap().data(), Ok(Rdata::Svcb { target, .. }) if target.to_string() == "svc.example.com.")
+        matches!(response.answers().next().unwrap().data(), Ok(Rdata::Svcb { target, .. }) if target.to_string() == "SVC.Example.COM.")
     );
     let glue = response.additionals().next().unwrap();
-    assert_eq!(glue.name.to_string(), "svc.example.com.");
+    assert_eq!(glue.name.to_string(), "SVC.Example.COM.");
     assert_eq!(glue.rdata, [192, 0, 2, 10]);
 }
 

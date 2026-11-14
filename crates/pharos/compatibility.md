@@ -64,6 +64,12 @@
 ## file
 
 - [file Plugin notes](../crates/pharos-plugins/src/file/README.md)
+- Pharos intentionally differs from CoreDNS where RFC-conformant Zone behavior requires it:
+  - An apex query for an absent type returns NOERROR/NODATA with the SOA (RFC 2308 §2.2); CoreDNS v1.15.0 returns NXDOMAIN for an SOA/NS-only apex.
+  - Master-file loading rejects multiple SOAs, CNAME RRsets with multiple targets, and DNAME descendant data; CoreDNS retains the last SOA and can retain conflicting aliases.
+  - SOA serial 0 is valid for initial load and refresh (RFC 1982 §7); CoreDNS's file loader uses 0 as its initial no-change sentinel.
+  - When an SVCB/HTTPS RRset contains AliasMode and ServiceMode, Zone queries ignore ServiceMode records as RFC 9460 §2.4.1 requires; CoreDNS can return the mixed RRset.
+  - Overlong DNAME substitution returns YXDOMAIN with exactly one DNAME and no Self Lookup (RFC 6672 §2.2); the older Pharos path returned SERVFAIL and could recurse through Self Lookup.
 
 ## secondary
 
