@@ -1,6 +1,10 @@
 use super::Zone;
 use pharos_proto::{Class, NameRef, Rdata, Type, zone::ZoneRecord};
 
+// RFC 1035 §§3.2.2, 3.4.2: type 11 starts with address(4) and protocol(1).
+pub(crate) const WKS_TYPE: Type = Type(11);
+pub(crate) const WKS_HEADER_LEN: usize = 5;
+
 // RFC 1035 §4.1.4 and RFC 3597 §4: expand embedded names before moving RDATA.
 pub(crate) fn legacy_name_rdata(
     kind: Type,
@@ -65,8 +69,18 @@ pub(crate) fn legacy_name_rdata(
 
 // RFC 2136 §§1.1.1–1.1.2: UPDATE matching ignores TTL and compares names case-insensitively.
 pub(crate) fn same_record(left: &ZoneRecord, right: &ZoneRecord) -> bool {
+    same_record_with_rdata_lengths(left, left.rdata.len(), right, right.rdata.len())
+}
+
+pub(crate) fn same_record_with_rdata_lengths(
+    left: &ZoneRecord,
+    left_len: usize,
+    right: &ZoneRecord,
+    right_len: usize,
+) -> bool {
     left.owner == right.owner
         && left.rtype == right.rtype
+        && left_len == right_len
         && if let (Ok(Some(a)), Ok(Some(b))) = (
             legacy_name_rdata(left.rtype, &left.rdata, 0, left.rdata.len(), true),
             legacy_name_rdata(right.rtype, &right.rdata, 0, right.rdata.len(), true),
@@ -90,11 +104,30 @@ impl Zone {
     /// The caller must validate the UPDATE section, including owner, class,
     /// type, TTL, RDATA and nonzero SOA serial, before calling this method.
     pub fn apply_updates(&self, updates: &[ZoneRecord]) -> Result<(Self, bool), String> {
+        self.apply_updates_inner(
+            updates
+                .iter()
+                .map(|record| (record, record.rdata.len())),
+        )
+    }
+
+    // RFC 2136 §1.1.1: retain received RDLENGTH when name compression expands RDATA.
+    pub(crate) fn apply_updates_with_rdata_lengths<'a>(
+        &self,
+        updates: impl Iterator<Item = (&'a ZoneRecord, usize)>,
+    ) -> Result<(Self, bool), String> {
+        self.apply_updates_inner(updates)
+    }
+
+    fn apply_updates_inner<'a>(
+        &self,
+        updates: impl Iterator<Item = (&'a ZoneRecord, usize)>,
+    ) -> Result<(Self, bool), String> {
         let mut records = self.records.clone();
         let mut changed = false;
         let mut explicit_soa = false;
         // RFC 2136 §3.4.2: process UPDATE records in order on a private candidate.
-        for update in updates {
+        for (update, update_rdata_len) in updates {
             let apex = update.owner == self.apex;
             // RFC 2136 §3.4.2.6: Map Update CLASS and TYPE to add and delete operations.
             match update.class {
@@ -137,6 +170,57 @@ impl Zone {
                     records.push(update.clone());
                     changed = true;
                 }
+                // RFC 6672 §5.2: replace the existing DNAME at its singleton owner.
+                Class::IN if update.rtype == Type::DNAME => {
+                    if records
+                        .iter()
+                        .any(|rr| rr.owner == update.owner && rr.rtype == Type::CNAME)
+                    {
+                        continue;
+                    }
+                    let mut existing = records
+                        .iter()
+                        .filter(|rr| rr.owner == update.owner && rr.rtype == Type::DNAME);
+                    if existing.next().is_some_and(|rr| {
+                        same_record_with_rdata_lengths(
+                            rr,
+                            rr.rdata.len(),
+                            update,
+                            update_rdata_len,
+                        ) && rr.ttl == update.ttl
+                    }) && existing.next().is_none()
+                    {
+                        continue;
+                    }
+                    records.retain(|rr| !(rr.owner == update.owner && rr.rtype == Type::DNAME));
+                    records.push(update.clone());
+                    changed = true;
+                }
+                // RFC 2136 §1.1.5: WKS duplicate keys are owner, address, and protocol.
+                Class::IN if update.rtype == WKS_TYPE => {
+                    if records
+                        .iter()
+                        .any(|rr| rr.owner == update.owner && rr.rtype == Type::CNAME)
+                    {
+                        continue;
+                    }
+                    let key = update.rdata.get(..WKS_HEADER_LEN);
+                    if let Some(rr) = records.iter_mut().find(|rr| {
+                        rr.owner == update.owner
+                            && rr.rtype == WKS_TYPE
+                            && key.is_some_and(|key| {
+                                rr.rdata.get(..WKS_HEADER_LEN) == Some(key)
+                            })
+                    }) {
+                        if rr.rdata != update.rdata || rr.ttl != update.ttl {
+                            *rr = update.clone();
+                            changed = true;
+                        }
+                    } else {
+                        records.push(update.clone());
+                        changed = true;
+                    }
+                }
                 // RFC 6672 §5.2: ignore updates when a CNAME already owns the name.
                 Class::IN => {
                     if records
@@ -145,7 +229,14 @@ impl Zone {
                     {
                         continue;
                     }
-                    if let Some(rr) = records.iter_mut().find(|rr| same_record(rr, update)) {
+                    if let Some(rr) = records.iter_mut().find(|rr| {
+                        same_record_with_rdata_lengths(
+                            rr,
+                            rr.rdata.len(),
+                            update,
+                            update_rdata_len,
+                        )
+                    }) {
                         if rr.ttl != update.ttl {
                             *rr = update.clone();
                             changed = true;
@@ -180,7 +271,14 @@ impl Zone {
                     {
                         continue;
                     }
-                    if let Some(index) = records.iter().position(|rr| same_record(rr, update)) {
+                    if let Some(index) = records.iter().position(|rr| {
+                        same_record_with_rdata_lengths(
+                            rr,
+                            rr.rdata.len(),
+                            update,
+                            update_rdata_len,
+                        )
+                    }) {
                         records.remove(index);
                         changed = true;
                     }

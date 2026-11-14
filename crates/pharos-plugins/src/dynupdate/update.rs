@@ -1,4 +1,8 @@
-use crate::zone::{Zone, update::same_record};
+use super::ExpandedRecord;
+use crate::zone::{
+    Zone,
+    update::{WKS_HEADER_LEN, WKS_TYPE, same_record_with_rdata_lengths},
+};
 use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
 use std::collections::BTreeMap;
 
@@ -44,9 +48,11 @@ pub(super) fn build_zone(
             .checked_sub(size)
             .ok_or("Zone exceeds max_bytes")?;
         // RFC 1035 §5.2: Validate the seed zone's class and apex SOA before serving it.
+        // RFC 1035 §3.4.2: WKS RDATA needs a four-octet address and protocol octet.
         if rr.class != Class::IN
             || !rr.owner.is_subdomain_of(&origin)
             || super::setup::unsupported(rr.rtype)
+            || rr.rtype == WKS_TYPE && rr.rdata.len() < WKS_HEADER_LEN
         {
             return Err("invalid Zone record".into());
         }
@@ -85,8 +91,9 @@ pub(super) fn build_zone(
 }
 
 // RFC 2136 §3.4.1: prescan the complete Update section before changing the Zone.
-pub(super) fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
-    for record in records {
+pub(super) fn validate_updates(zone: &Zone, records: &[ExpandedRecord]) -> Rcode {
+    for expanded in records {
+        let record = &expanded.record;
         // RFC 2136 §1.2: UPDATE owner names must be within the Zone named in the request.
         if !record.owner.is_subdomain_of(zone.apex()) {
             return Rcode::NOTZONE;
@@ -97,6 +104,10 @@ pub(super) fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
         match record.class {
             Class::IN => {
                 if query_metatype(record.rtype) {
+                    return Rcode::FORMERR;
+                }
+                // RFC 1035 §3.4.2: WKS RDATA needs address, protocol, and bitmap fields.
+                if record.rtype == WKS_TYPE && record.rdata.len() < WKS_HEADER_LEN {
                     return Rcode::FORMERR;
                 }
                 if record.rtype == Type::SOA {
@@ -126,6 +137,10 @@ pub(super) fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
                 if record.ttl != 0 || query_metatype(record.rtype) {
                     return Rcode::FORMERR;
                 }
+                // RFC 1035 §3.4.2: a WKS deletion names its complete address/protocol key.
+                if record.rtype == WKS_TYPE && record.rdata.len() < WKS_HEADER_LEN {
+                    return Rcode::FORMERR;
+                }
             }
             _ => return Rcode::FORMERR,
         }
@@ -138,17 +153,16 @@ pub(super) fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
 }
 
 // RFC 2136 §3.2: evaluate all prerequisite forms against the transaction's current snapshot.
-pub(super) fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
-    let mut values: BTreeMap<(Name, Type), Vec<&ZoneRecord>> = BTreeMap::new();
-    for record in records {
+pub(super) fn prerequisites(zone: &Zone, records: &[ExpandedRecord]) -> Rcode {
+    let mut values: BTreeMap<(Name, Type), Vec<&ExpandedRecord>> = BTreeMap::new();
+    for expanded in records {
+        let record = &expanded.record;
+        // RFC 2136 §3.2: reject malformed prerequisite fields before checking zone state.
         if record.ttl != 0 {
             return Rcode::FORMERR;
         }
         if !record.owner.is_subdomain_of(zone.apex()) {
             return Rcode::NOTZONE;
-        }
-        if super::setup::unsupported(record.rtype) {
-            return Rcode::NOTIMP;
         }
         // RFC 2136 §3.2.2: class ANY and NONE prerequisites need empty RDATA and a known type.
         match record.class {
@@ -177,19 +191,30 @@ pub(super) fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
                 if !known(record.rtype) || query_metatype(record.rtype) {
                     return Rcode::FORMERR;
                 }
+                // RFC 1035 §3.4.2: value-dependent WKS prerequisites need its address/protocol key.
+                if record.rtype == WKS_TYPE && record.rdata.len() < WKS_HEADER_LEN {
+                    return Rcode::FORMERR;
+                }
                 values
                     .entry((record.owner.clone(), record.rtype))
                     .or_default()
-                    .push(record);
+                    .push(expanded);
             }
             _ => return Rcode::FORMERR,
         }
     }
     // RFC 2136 §2.4.2: value-dependent prerequisites compare entire RRsets, not TTL or order.
     for ((owner, kind), requested) in values {
-        let mut want: Vec<&ZoneRecord> = Vec::new();
+        let mut want: Vec<&ExpandedRecord> = Vec::new();
         for rr in requested {
-            if !want.iter().any(|other| same_record(other, rr)) {
+            if !want.iter().any(|other| {
+                same_record_with_rdata_lengths(
+                    &other.record,
+                    other.rdata_len,
+                    &rr.record,
+                    rr.rdata_len,
+                )
+            }) {
                 want.push(rr);
             }
         }
@@ -197,16 +222,30 @@ pub(super) fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
         for rr in zone
             .records()
             .iter()
-            .filter(|rr| rr.owner == owner && rr.rtype == kind)
+                .filter(|rr| rr.owner == owner && rr.rtype == kind)
         {
-            if !have.iter().any(|other| same_record(other, rr)) {
+            if !have.iter().any(|other| {
+                same_record_with_rdata_lengths(
+                    other,
+                    other.rdata.len(),
+                    rr,
+                    rr.rdata.len(),
+                )
+            }) {
                 have.push(rr);
             }
         }
         if have.len() != want.len()
-            || want
-                .iter()
-                .any(|rr| !have.iter().any(|actual| same_record(actual, rr)))
+            || want.iter().any(|rr| {
+                !have.iter().any(|actual| {
+                    same_record_with_rdata_lengths(
+                        &rr.record,
+                        rr.rdata_len,
+                        actual,
+                        actual.rdata.len(),
+                    )
+                })
+            })
         {
             return Rcode::NXRRSET;
         }
@@ -216,7 +255,7 @@ pub(super) fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_zone, prerequisites, validate_updates};
+    use super::{build_zone, prerequisites, validate_updates, ExpandedRecord};
     use crate::zone::Zone;
     use pharos_proto::{
         Class, Name, Rcode, Type,
@@ -239,6 +278,13 @@ mod tests {
             rtype: kind,
             ttl: 0,
             rdata: data.to_vec(),
+        }
+    }
+
+    fn expanded(record: &ZoneRecord) -> ExpandedRecord {
+        ExpandedRecord {
+            record: record.clone(),
+            rdata_len: record.rdata.len(),
         }
     }
 
@@ -280,19 +326,34 @@ mod tests {
             ),
             (
                 rr("www.example.org.", Type::RRSIG, Class::ANY, &[]),
-                Rcode::NOTIMP,
+                Rcode::NXRRSET,
+            ),
+            (
+                rr("missing.example.org.", Type::RRSIG, Class::NONE, &[]),
+                Rcode::NOERROR,
+            ),
+            (
+                rr("www.example.org.", Type::RRSIG, Class::ANY, &[1]),
+                Rcode::FORMERR,
+            ),
+            (
+                rr("wks.example.org.", Type(11), Class::IN, &[1, 2, 3, 4]),
+                Rcode::FORMERR,
             ),
         ] {
-            assert_eq!(prerequisites(&zone, &[record]), expected);
+            assert_eq!(prerequisites(&zone, &[expanded(&record)]), expected);
         }
         let first = rr("www.example.org.", Type::A, Class::IN, &[192, 0, 2, 1]);
         let second = rr("www.example.org.", Type::A, Class::IN, &[192, 0, 2, 2]);
         assert_eq!(
-            prerequisites(&zone, std::slice::from_ref(&first)),
+            prerequisites(&zone, &[expanded(&first)]),
             Rcode::NXRRSET
         );
         assert_eq!(
-            prerequisites(&zone, &[first.clone(), second, first]),
+            prerequisites(
+                &zone,
+                &[expanded(&first), expanded(&second), expanded(&first)],
+            ),
             Rcode::NOERROR
         );
     }
@@ -328,8 +389,12 @@ mod tests {
                 rr("example.org.", Type::SOA, Class::IN, &[0; 20]),
                 Rcode::FORMERR,
             ),
+            (
+                rr("wks.example.org.", Type(11), Class::IN, &[1, 2, 3, 4]),
+                Rcode::FORMERR,
+            ),
         ] {
-            assert_eq!(validate_updates(&zone, &[record]), expected);
+            assert_eq!(validate_updates(&zone, &[expanded(&record)]), expected);
         }
     }
 
@@ -350,6 +415,9 @@ mod tests {
         let mut duplicate_soa = records.clone();
         duplicate_soa.push(records[0].clone());
         assert!(build_zone(origin.clone(), duplicate_soa, 100, 10000).is_err());
+        let mut malformed_wks = records.clone();
+        malformed_wks.push(rr("wks.example.org.", Type(11), Class::IN, &[1, 2, 3, 4]));
+        assert!(build_zone(origin.clone(), malformed_wks, 100, 10000).is_err());
         let mut cname_conflict = records.clone();
         let mut cname = records[2].clone();
         cname.rtype = Type::CNAME;
@@ -381,10 +449,11 @@ mod tests {
             Type::ZONEMD,
             Type::TA,
             Type::DLV,
+            Type::SPF,
         ] {
             let record = rr("record.example.org.", kind, Class::IN, &[]);
             assert_eq!(
-                validate_updates(&original, std::slice::from_ref(&record)),
+                validate_updates(&original, &[expanded(&record)]),
                 Rcode::NOTIMP,
                 "{kind}"
             );
@@ -416,6 +485,7 @@ mod tests {
                 Type::MX | Type::SVCB | Type::HTTPS => vec![0, 0, 0],
                 Type::SRV => vec![0; 7],
                 Type::SOA => vec![0; 22],
+                super::WKS_TYPE => vec![0; super::WKS_HEADER_LEN],
                 _ => vec![0],
             };
             if kind == Type::SOA {
@@ -444,6 +514,84 @@ mod tests {
             tested += 1;
         }
         assert!(tested >= 50, "tested {tested} types");
+    }
+
+    #[test]
+    fn accepts_opaque_rfc3597_types_in_updates_and_prerequisites() {
+        let original = zone();
+        let mut opaque = rr("opaque.example.org.", Type(65280), Class::IN, &[1, 2, 3]);
+        opaque.ttl = 60;
+        assert_eq!(
+            validate_updates(&original, &[expanded(&opaque)]),
+            Rcode::NOERROR
+        );
+        let (updated, changed) = original.apply_updates(&[opaque.clone()]).unwrap();
+        assert!(changed);
+
+        opaque.ttl = 0;
+        assert_eq!(
+            prerequisites(&updated, &[expanded(&opaque)]),
+            Rcode::NOERROR
+        );
+    }
+
+    #[test]
+    fn replaces_wks_rr_with_same_address_and_protocol() {
+        let original = zone();
+        let first = rr(
+            "wks.example.org.",
+            Type(11),
+            Class::IN,
+            &[192, 0, 2, 1, 6, 0x01],
+        );
+        let second = rr(
+            "wks.example.org.",
+            Type(11),
+            Class::IN,
+            &[192, 0, 2, 1, 6, 0xff],
+        );
+        let (added, changed) = original.apply_updates(&[first]).unwrap();
+        assert!(changed);
+        let (replaced, changed) = added
+            .apply_updates(std::slice::from_ref(&second))
+            .unwrap();
+        assert!(changed);
+        let wks: Vec<_> = replaced
+            .records()
+            .iter()
+            .filter(|record| record.rtype == Type(11))
+            .collect();
+        assert_eq!(wks.len(), 1);
+        assert_eq!(wks[0].rdata, second.rdata);
+    }
+
+    #[test]
+    fn replaces_existing_dname_target() {
+        let original = zone();
+        let first = rr(
+            "alias.example.org.",
+            Type::DNAME,
+            Class::IN,
+            "old.example.org.".parse::<Name>().unwrap().as_wire(),
+        );
+        let second = rr(
+            "alias.example.org.",
+            Type::DNAME,
+            Class::IN,
+            "new.example.org.".parse::<Name>().unwrap().as_wire(),
+        );
+        let (added, _) = original.apply_updates(&[first]).unwrap();
+        let (replaced, changed) = added
+            .apply_updates(std::slice::from_ref(&second))
+            .unwrap();
+        assert!(changed);
+        let dnames: Vec<_> = replaced
+            .records()
+            .iter()
+            .filter(|record| record.rtype == Type::DNAME)
+            .collect();
+        assert_eq!(dnames.len(), 1);
+        assert_eq!(dnames[0].rdata, second.rdata);
     }
 
     #[test]

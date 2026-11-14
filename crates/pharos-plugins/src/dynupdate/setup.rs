@@ -1,5 +1,6 @@
 use pharos_corefile::{Cursor, Error, normalize_domain};
 use pharos_proto::{Name, Type};
+use crate::zone::update::WKS_TYPE;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -58,11 +59,11 @@ pub(super) fn unsupported(kind: Type) -> bool {
             | Type::ZONEMD
             | Type::TA
             | Type::DLV
+            | Type::SPF // RFC 7208 §14.1: type 99 is obsolete for SPF data.
     )
 }
 
-// miekg/dns v1.1.73 ztypes.go:11-92: only types with RR constructors are accepted.
-pub(super) fn known(kind: Type) -> bool {
+fn has_rdata_parser(kind: Type) -> bool {
     matches!(
         kind,
         Type::A
@@ -148,6 +149,17 @@ pub(super) fn known(kind: Type) -> bool {
     )
 }
 
+// RFC 3597 §6: accept unrecognized ordinary RR types as opaque RDATA.
+pub(super) fn known(kind: Type) -> bool {
+    has_rdata_parser(kind)
+        || (kind.0 != 0
+        && kind.0 != u16::MAX
+        && !matches!(
+            kind,
+            Type::AXFR | Type::IXFR | Type::MAILA | Type::MAILB | Type::OPT | Type::TKEY | Type::TSIG
+        ))
+}
+
 // CoreDNS plugin/normalize.go:65: allow names may omit the trailing dot.
 fn fully_qualified(value: &str) -> String {
     if value.ends_with('.') {
@@ -178,7 +190,9 @@ fn policy_type(raw: &str) -> Option<Type> {
                 | Type::TKEY
                 | Type::TSIG
         )
-        || kind.to_string().starts_with("TYPE")
+        || (!has_rdata_parser(kind) && kind != WKS_TYPE)
+        // RFC 2136 §1.1.5: allow the assigned WKS type as TYPE11.
+        || (kind.to_string().starts_with("TYPE") && kind != WKS_TYPE)
         || kind == Type::RESERVED
     {
         return None;
@@ -375,6 +389,23 @@ mod tests {
         let key: Name = "key.example.org.".parse().unwrap();
         let owner: Name = "host.example.org.".parse().unwrap();
         assert!(parsed.allows(&key, &owner, Type::A));
+    }
+
+    #[test]
+    fn allows_explicit_wks_permission_but_rejects_obsolete_spf() {
+        let parsed = config(
+            "dynupdate {\nfile seed.zone\nallow key.example.org. * TYPE11\n}",
+            &["example.org"],
+        )
+        .unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let owner: Name = "host.example.org.".parse().unwrap();
+        assert!(parsed.allows(&key, &owner, Type(11)));
+        assert!(config(
+            "dynupdate {\nfile seed.zone\nallow key.example.org. * SPF\n}",
+            &["example.org"]
+        )
+        .is_err());
     }
 
     #[test]

@@ -1,10 +1,12 @@
-use super::{bbolt, setup::Config, update::build_zone, wire};
+use super::{bbolt, setup::Config, update::build_zone, wire, ExpandedRecord};
 use crate::zone::Zone;
 use arc_swap::ArcSwap;
 use pharos_proto::{
     Name, Rcode,
-    zone::{ZoneParser, ZoneRecord},
+    zone::ZoneParser,
 };
+#[cfg(test)]
+use pharos_proto::zone::ZoneRecord;
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
@@ -32,12 +34,38 @@ impl Shared {
     }
 
     // RFC 2136 §3.7: Serialize transactions with dependent prerequisites or updates.
+    #[cfg(test)]
     pub(super) fn transact(
         &self,
         config: &Config,
         key: &Name,
         prereqs: &[ZoneRecord],
         updates: &[ZoneRecord],
+    ) -> io::Result<(Rcode, bool)> {
+        let prereqs = prereqs
+            .iter()
+            .map(|record| ExpandedRecord {
+                record: record.clone(),
+                rdata_len: record.rdata.len(),
+            })
+            .collect::<Vec<_>>();
+        let updates = updates
+            .iter()
+            .map(|record| ExpandedRecord {
+                record: record.clone(),
+                rdata_len: record.rdata.len(),
+            })
+            .collect::<Vec<_>>();
+        self.transact_expanded(config, key, &prereqs, &updates)
+    }
+
+    // RFC 2136 §1.1.1: carry received RDLENGTH through prerequisite and update comparison.
+    pub(super) fn transact_expanded(
+        &self,
+        config: &Config,
+        key: &Name,
+        prereqs: &[ExpandedRecord],
+        updates: &[ExpandedRecord],
     ) -> io::Result<(Rcode, bool)> {
         // RFC 3007 §3: Refuse updates unless the authenticated key has configured permission.
         if !config.configured_key(key)
@@ -59,7 +87,7 @@ impl Shared {
         if updates
             .iter()
             // RFC 2136 §3.3: Check requestor permission before applying the Update section.
-            .any(|rr| !config.allows(key, &rr.owner, rr.rtype))
+            .any(|rr| !config.allows(key, &rr.record.owner, rr.record.rtype))
         {
             return Ok((Rcode::REFUSED, false));
         }
@@ -67,7 +95,13 @@ impl Shared {
         if code != Rcode::NOERROR {
             return Ok((code, false));
         }
-        let (candidate, changed) = zone.apply_updates(updates).map_err(invalid)?;
+        let (candidate, changed) = zone
+            .apply_updates_with_rdata_lengths(
+                updates
+                    .iter()
+                    .map(|rr| (&rr.record, rr.rdata_len)),
+            )
+            .map_err(invalid)?;
         if !changed {
             return Ok((Rcode::NOERROR, false));
         }
