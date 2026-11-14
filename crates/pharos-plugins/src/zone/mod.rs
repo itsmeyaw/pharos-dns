@@ -129,13 +129,6 @@ impl Zone {
             // RFC 8976 §2.1: Keep non-apex ZONEMD records as ordinary records.
             records.push(record);
         }
-        // RFC 1034 §4.2.1: A master-file Zone must contain an apex NS RRset.
-        if !records
-            .iter()
-            .any(|record| record.owner == apex && record.rtype == Type::NS)
-        {
-            return Err("Zone apex has no NS record".into());
-        }
         Self::from_records(apex, records)
     }
 
@@ -167,7 +160,7 @@ impl Zone {
         if records.iter().any(|record| record.class != class) {
             return Err("Zone has records in multiple classes".into());
         }
-        // RFC 5936 §3.1: A Zone contains no owner names outside its apex.
+        // RFC 1034 §4.2; RFC 2181 §6.1: Zone owners stay at or below the apex.
         if records
             .iter()
             .any(|record| !contains(record.owner.as_wire(), &apex))
@@ -204,6 +197,8 @@ impl Zone {
                 return Err("invalid RRSIG RDATA".into());
             }
             let offset = match record.rtype {
+                // RFC 1035 §3.3.3: MB RDATA starts with one MADNAME.
+                Type::MB => Some(0),
                 Type::NS | Type::CNAME | Type::SOA | Type::DNAME => Some(0),
                 Type::MX | Type::SVCB | Type::HTTPS => Some(2),
                 Type::SRV => Some(6),
@@ -213,9 +208,11 @@ impl Zone {
             if let Some(offset) = offset {
                 // RFC 4343 §4.2: Preserve case in newly created names, including RDATA.
                 let end = normalize_rdata_name(&mut record.rdata, offset, false)?;
-                // RFC 1035 §§3.3.1, 3.3.11 and RFC 6672 §2.1: these RDATA fields contain only one name.
-                if matches!(record.rtype, Type::NS | Type::CNAME | Type::DNAME)
-                    && end != record.rdata.len()
+                // RFC 1035 §§3.3.1, 3.3.3, 3.3.11 and RFC 6672 §2.1: these contain one name.
+                if matches!(
+                    record.rtype,
+                    Type::MB | Type::NS | Type::CNAME | Type::DNAME
+                ) && end != record.rdata.len()
                 {
                     return Err("trailing name-only RDATA".into());
                 }
@@ -231,13 +228,28 @@ impl Zone {
         if !soa {
             return Err("Zone has no SOA".into());
         }
-        // RFC 8976 §2.5: Each owner has at most one ZONEMD per scheme and hash algorithm.
-        let mut zonemd = std::collections::HashSet::new();
-        for record in records.iter().filter(|record| record.rtype == Type::ZONEMD) {
+        // RFC 2181 §6.1: Every authoritative Zone has an NS RRset at its apex.
+        if !records
+            .iter()
+            .any(|record| record.owner == apex && record.rtype == Type::NS)
+        {
+            return Err("Zone apex has no NS record".into());
+        }
+        // RFC 8976 §§2.1, 2.5: Only apex ZONEMD tuples are unique; identical RRs dedupe below.
+        let mut zonemd = std::collections::HashMap::<(u8, u8), &[u8]>::new();
+        for record in records
+            .iter()
+            .filter(|record| record.owner == apex && record.rtype == Type::ZONEMD)
+        {
             let fields = record.rdata.get(4..6).ok_or("invalid ZONEMD RDATA")?;
-            if !zonemd.insert((record.owner.clone(), fields[0], fields[1])) {
+            let key = (fields[0], fields[1]);
+            if zonemd
+                .get(&key)
+                .is_some_and(|previous| *previous != record.rdata.as_slice())
+            {
                 return Err("duplicate ZONEMD scheme and hash algorithm".into());
             }
+            zonemd.entry(key).or_insert(record.rdata.as_slice());
         }
         // RFC 5936 §2.2: AXFR framing carries opening and closing SOAs; keep one in the snapshot.
         let final_soa = records.iter().rposition(|record| record.rtype == Type::SOA);
@@ -260,7 +272,9 @@ impl Zone {
             // RFC 4343 §3: Name-bearing RDATA compares without ASCII case.
             if !rdata.is_empty()
                 && let Some(offset) = match record.rtype {
-                    Type::NS | Type::CNAME | Type::DNAME | Type::PTR | Type::NSEC => Some(0),
+                    Type::MB | Type::NS | Type::CNAME | Type::DNAME | Type::PTR | Type::NSEC => {
+                        Some(0)
+                    }
                     Type::MX | Type::AFSDB | Type::RT | Type::KX | Type::SVCB | Type::HTTPS => {
                         Some(2)
                     }
@@ -646,18 +660,29 @@ fn same_wire_name(left: &[u8], right: &[u8]) -> bool {
         .is_some_and(|(left, right)| left == right)
 }
 
-// RFC 1034 §3.6.2: Floyd traversal detects CNAME cycles beyond the emitted chain limit.
-fn cname_chain_loops(zone: &Zone, start: &[u8]) -> bool {
+// RFC 1034 §3.6.2: Floyd traversal detects every CNAME cycle with constant extra storage.
+fn cname_target_before_cut<'a>(zone: &'a Zone, name: &[u8], qtype: Type) -> Option<&'a [u8]> {
+    // RFC 2136 §2.5: Empty update RDATA has no name to chase.
+    if name.is_empty() {
+        return None;
+    }
+    // RFC 1034 §4.3.2: Do not chase aliases across a Zone Cut.
+    if zone.cut(name, qtype).is_some() {
+        return None;
+    }
+    zone.records_at(name, Type::CNAME)
+        .next()
+        .map(|record| record.rdata.as_slice())
+}
+
+fn cname_chain_loops(zone: &Zone, start: &[u8], qtype: Type) -> bool {
     let mut slow = Some(start);
     let mut fast = Some(start);
     loop {
-        slow = slow
-            .and_then(|name| zone.records_at(name, Type::CNAME).next())
-            .map(|record| record.rdata.as_slice());
+        slow = slow.and_then(|name| cname_target_before_cut(zone, name, qtype));
         fast = fast
-            .and_then(|name| zone.records_at(name, Type::CNAME).next())
-            .and_then(|record| zone.records_at(&record.rdata, Type::CNAME).next())
-            .map(|record| record.rdata.as_slice());
+            .and_then(|name| cname_target_before_cut(zone, name, qtype))
+            .and_then(|name| cname_target_before_cut(zone, name, qtype));
         let (Some(slow_name), Some(fast_name)) = (slow, fast) else {
             return false;
         };
@@ -819,7 +844,7 @@ impl Zone {
         next: N,
         fallthrough: &[Name],
     ) -> Outcome {
-        self.lookup_inner(cx, next, fallthrough, true, false).await
+        self.lookup_inner(cx, next, fallthrough, true).await
     }
 
     #[cfg(feature = "plugin-auto")]
@@ -827,9 +852,8 @@ impl Zone {
         &self,
         cx: &mut Context<'_, '_>,
         next: N,
-        case_mismatch: bool,
     ) -> Outcome {
-        self.lookup_inner(cx, next, &[], false, case_mismatch).await
+        self.lookup_inner(cx, next, &[], false).await
     }
 
     async fn lookup_inner<N: Next + Send>(
@@ -838,7 +862,6 @@ impl Zone {
         next: N,
         fallthrough: &[Name],
         drop_notify: bool,
-        _case_mismatch: bool,
     ) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
@@ -986,25 +1009,14 @@ impl Zone {
         {
             // RFC 1034 §4.3.2: Follow a matched CNAME and restart lookup at its target.
             // RFC 2181 §10.2: PTR lookup names may alias even though PTR targets may not.
-            while let Some(alias) = zone.records_at(target, Type::CNAME).next() {
+            let mut next_alias = zone.records_at(target, Type::CNAME).next();
+            if next_alias.is_some() && cname_chain_loops(zone, target, question.qtype) {
+                return Outcome::Unanswered(Rcode::SERVFAIL);
+            }
+            while let Some(alias) = next_alias {
                 if count == chain.len() {
-                    if cname_chain_loops(zone, target) {
-                        return Outcome::Unanswered(Rcode::SERVFAIL);
-                    }
                     chain_limited = true;
                     break;
-                }
-                if alias.owner.as_wire().eq_ignore_ascii_case(&alias.rdata) {
-                    return Outcome::Unanswered(Rcode::SERVFAIL);
-                }
-                // RFC 1034 §3.6.2: A repeated owner identifies a multi-name CNAME loop.
-                if chain[..count].iter().flatten().any(|previous| {
-                    previous
-                        .owner
-                        .as_wire()
-                        .eq_ignore_ascii_case(alias.owner.as_wire())
-                }) {
-                    return Outcome::Unanswered(Rcode::SERVFAIL);
                 }
                 chain[count] = Some(alias);
                 count += 1;
@@ -1021,6 +1033,7 @@ impl Zone {
                 {
                     break;
                 }
+                next_alias = zone.records_at(target, Type::CNAME).next();
             }
         }
         let mut lookup_failed = false;

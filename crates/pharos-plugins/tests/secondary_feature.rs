@@ -82,6 +82,16 @@ async fn transfers_zone_in_background_and_serves_it() {
         builder
             .record(Section::Answer, q.name, Type::SOA, Class::IN, 60, &soa)
             .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                q.name,
+                Type::NS,
+                Class::IN,
+                60,
+                "ns.example.org.".parse::<Name>().unwrap().as_wire(),
+            )
+            .unwrap();
         let www: Name = "www.example.org.".parse().unwrap();
         builder
             .record(
@@ -194,6 +204,16 @@ async fn notify_checks_primary_and_transfers_new_serial() {
                 )
                 .unwrap();
             if question.qtype == Type::AXFR {
+                builder
+                    .record(
+                        Section::Answer,
+                        question.name,
+                        Type::NS,
+                        Class::IN,
+                        60,
+                        "ns.example.org.".parse::<Name>().unwrap().as_wire(),
+                    )
+                    .unwrap();
                 let www: Name = "www.example.org.".parse().unwrap();
                 builder
                     .record(

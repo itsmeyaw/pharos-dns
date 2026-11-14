@@ -42,6 +42,16 @@ async fn secondary_queries_do_not_allocate() {
                 &soa,
             )
             .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::NS,
+                Class::IN,
+                60,
+                "ns.example.org.".parse::<Name>().unwrap().as_wire(),
+            )
+            .unwrap();
         // RFC 1035 §3.4.1: An A record carries a 32-bit Internet address.
         let www: Name = "www.example.org.".parse().unwrap();
         builder

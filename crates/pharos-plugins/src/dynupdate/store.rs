@@ -410,7 +410,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let text = "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}";
@@ -446,7 +446,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let text = "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}";
@@ -527,7 +527,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -575,7 +575,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -688,7 +688,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -731,7 +731,7 @@ mod tests {
             }
         });
         assert_eq!(new.current.load().serial(), Some(26));
-        assert_eq!(new.current.load().records().len(), 17);
+        assert_eq!(new.current.load().records().len(), 18);
         drop(old);
         assert_eq!(new.current.load().serial(), Some(26));
         drop(new);
@@ -753,7 +753,7 @@ mod tests {
                 std::fs::create_dir(&dir).unwrap();
                 std::fs::write(
                     dir.join("seed"),
-                    "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+                    "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
                 )
                 .unwrap();
                 let database = if durable { "database db\n" } else { "" };
@@ -815,7 +815,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -880,7 +880,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let first_text = "dynupdate {\nfile seed\ndatabase first\nallow key.example.org. * A\n}";
@@ -949,7 +949,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1082,7 +1082,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1123,7 +1123,7 @@ mod tests {
         let seed = dir.join("seed");
         std::fs::write(
             &seed,
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         std::fs::hard_link(&seed, dir.join("alias")).unwrap();
@@ -1159,7 +1159,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1207,7 +1207,7 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join("seed"), "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\nwww 60 IN A 192.0.2.1\n").unwrap();
+        std::fs::write(dir.join("seed"), "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\nwww 60 IN A 192.0.2.1\n").unwrap();
         let tokens = lex(
             "Corefile",
             "dynupdate {\nfile seed\nallow key.example.org. www.example.org. ANY\n}",
@@ -1348,7 +1348,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1389,7 +1389,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1444,7 +1444,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1507,7 +1507,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         std::os::unix::fs::symlink("actual", dir.join("alias")).unwrap();

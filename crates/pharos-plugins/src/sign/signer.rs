@@ -738,11 +738,12 @@ mod tests {
     }
 
     #[test]
-    fn coredns_rejects_bad_and_missing_soa() {
+    fn coredns_rejects_bad_missing_soa_and_missing_apex_ns() {
         let path = std::env::temp_dir().join(format!("pharos-sign-bad-soa-{}", std::process::id()));
         let apex: Name = "example.org.".parse().unwrap();
         for text in [
             "$TTL 1M\n$ORIGIN example.org.\n@ IN SOA ns. admin. foobarbaz 1200 144 1814400 2h\n",
+            "$TTL 1M\n$ORIGIN example.org.\n@ IN SOA ns. admin. 1 1200 144 1814400 2h\n",
             "$TTL 1M\n$ORIGIN example.org.\nwww IN A 192.0.2.14\n",
         ] {
             std::fs::write(&path, text).unwrap();

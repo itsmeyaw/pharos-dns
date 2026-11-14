@@ -1574,7 +1574,7 @@ mod tests {
         let seed = dir.join("seed");
         std::fs::write(
             &seed,
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();

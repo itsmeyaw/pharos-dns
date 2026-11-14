@@ -182,7 +182,7 @@ fn reusable_zone_rejects_trailing_name_only_rdata() {
             .as_wire()
             .to_vec(),
     };
-    for kind in [Type::NS, Type::CNAME, Type::DNAME] {
+    for kind in [Type::MB, Type::NS, Type::CNAME, Type::DNAME] {
         let record = ZoneRecord {
             owner: "test.example.org.".parse().unwrap(),
             ttl: 60,
@@ -2519,6 +2519,24 @@ async fn svcb_answers_include_target_svcb_in_additional() {
     assert_eq!(response.answers().next().unwrap().rtype, Type::SVCB);
     let additional = response.additionals().next().unwrap();
     assert_eq!(additional.rtype, Type::SVCB);
+    assert_eq!(additional.name.to_string(), "target.example.org.");
+}
+
+#[tokio::test]
+async fn https_answers_include_target_https_in_additional() {
+    let zone = zone(
+        "example.org.",
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nweb 60 IN HTTPS 1 target.example.org. alpn=h2\ntarget 60 IN HTTPS 1 backup.example.org. alpn=h2\n",
+    )
+    .unwrap();
+
+    let (outcome, wire) = query(&zone, "web.example.org.", Type::HTTPS, false, &[]).await;
+
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.answers().next().unwrap().rtype, Type::HTTPS);
+    let additional = response.additionals().next().unwrap();
+    assert_eq!(additional.rtype, Type::HTTPS);
     assert_eq!(additional.name.to_string(), "target.example.org.");
 }
 

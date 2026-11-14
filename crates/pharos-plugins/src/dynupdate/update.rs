@@ -270,6 +270,20 @@ mod tests {
         Zone::from_records(origin, records).unwrap()
     }
 
+    #[test]
+    fn dynamic_zone_rejects_missing_apex_ns() {
+        let origin: Name = "example.org.".parse().unwrap();
+        let records = ZoneParser::new(
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n".as_bytes(),
+            origin.clone(),
+            "test",
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert!(build_zone(origin, records, 100, 10000).is_err());
+    }
+
     fn rr(owner: &str, kind: Type, class: Class, data: &[u8]) -> ZoneRecord {
         ZoneRecord {
             owner: owner.parse().unwrap(),

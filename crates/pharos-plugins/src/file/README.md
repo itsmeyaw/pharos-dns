@@ -4,6 +4,8 @@
 
 ## file
 
+- Zones require an apex NS RRset and reject out-of-zone owners (RFC 2181 §6.1; RFC 1034 §4.2; RFC 5936 §3.1). CoreDNS v1.15.0's file parser checks SOA ownership but not these rules.
+- Apex ZONEMD records with conflicting Scheme/Hash Algorithm tuples are rejected; identical RRs deduplicate. CoreDNS v1.15.0's file tree retains duplicate RRs.
 - CNAME and synthesized DNAME targets use allocating Self Lookup when the target
   has no Zone-tree record (including out-of-Zone and empty-nonterminal targets),
   for NS Queries, or for SOA Queries targeting the apex. Zone Cut Referrals and
