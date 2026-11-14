@@ -382,8 +382,13 @@ fn endpoint_name<'a>(
     wire: &'a mut [u8; 255],
 ) -> Option<NameRef<'a>> {
     if let Some(cluster_id) = cluster_id {
-        // KEP-1645 MCS DNS spec §2.4.1: endpoint owners include their source-cluster ID.
-        child(&[label, cluster_id.as_bytes()], base, wire)
+        // KEP-1645 §2.4.1: encode each source-cluster ID label as a separate DNS label.
+        let (first, second) = super::cluster_id_parts(cluster_id.as_bytes())?;
+        if let Some(second) = second {
+            child(&[label, first, second], base, wire)
+        } else {
+            child(&[label, first], base, wire)
+        }
     } else {
         child(&[label], base, wire)
     }
@@ -1117,7 +1122,7 @@ mod tests {
         };
         let mut snapshot = snapshot(&zone);
         snapshot
-            .endpoints(base, &endpoints, false, false, Some("west"))
+            .endpoints(base, &endpoints, false, false, Some("west.east"))
             .unwrap();
         let bytes = snapshot.bytes.unwrap();
         let records: Vec<_> = messages(&bytes)
@@ -1126,12 +1131,12 @@ mod tests {
             .collect();
         assert_eq!(
             records[1].name.to_string(),
-            "node.west.web.prod.svc.clusterset.local."
+            "node.west.east.web.prod.svc.clusterset.local."
         );
         assert!(matches!(
             records[2].data().unwrap(),
             Rdata::Srv { target, .. }
-                if target.to_string() == "node.west.web.prod.svc.clusterset.local."
+                if target.to_string() == "node.west.east.web.prod.svc.clusterset.local."
         ));
     }
 

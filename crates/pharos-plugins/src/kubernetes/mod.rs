@@ -163,8 +163,21 @@ impl Kubernetes {
                 cx.metadata.insert_copied(key, value);
             }
         }
-        if multicluster && let Ok(cluster) = std::str::from_utf8(request.cluster) {
-            cx.metadata.insert_copied("kubernetes/cluster", cluster);
+        if multicluster {
+            // KEP-1645 §2.4.1: cluster IDs are rendered as their DNS labels joined by dots.
+            let mut cluster = [0u8; 127];
+            let mut used = 0;
+            for label in request.cluster {
+                if used > 0 {
+                    cluster[used] = b'.';
+                    used += 1;
+                }
+                cluster[used..used + label.len()].copy_from_slice(label);
+                used += label.len();
+            }
+            if let Ok(value) = std::str::from_utf8(&cluster[..used]) {
+                cx.metadata.insert_copied("kubernetes/cluster", value);
+            }
         }
         if self.config.zonal {
             let mut zone = [0u8; 255];
@@ -314,6 +327,50 @@ fn child<'a>(prefix: &[&[u8]], zone: NameRef<'_>, wire: &'a mut [u8; 255]) -> Op
     }
     wire[n] = 0;
     NameRef::parse(&wire[..n + 1], 0).ok()
+}
+
+fn cluster_id_parts(id: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
+    let Some(dot) = id.iter().position(|&byte| byte == b'.') else {
+        return (!id.is_empty()).then_some((id, None));
+    };
+    let first = &id[..dot];
+    let second = &id[dot + 1..];
+    (!first.is_empty() && !second.is_empty() && !second.contains(&b'.'))
+        .then_some((first, Some(second)))
+}
+
+fn cluster_id_matches(labels: &[&[u8]], id: &str) -> bool {
+    let mut id_labels = id.split('.');
+    labels.iter().all(|label| {
+        id_labels
+            .next()
+            .is_some_and(|part| label.eq_ignore_ascii_case(part.as_bytes()))
+    }) && id_labels.next().is_none()
+}
+
+fn endpoint_target<'a>(
+    req: &name::Request<'_>,
+    endpoint: Option<(&[u8], Option<&[u8]>)>,
+    zone: NameRef<'_>,
+    wire: &'a mut [u8; 255],
+) -> Option<NameRef<'a>> {
+    let mut labels = [&[][..]; 6];
+    let mut count = 0;
+    if let Some((endpoint, cluster)) = endpoint {
+        labels[count] = endpoint;
+        count += 1;
+        if let Some(cluster) = cluster {
+            let (first, second) = cluster_id_parts(cluster)?;
+            labels[count] = first;
+            count += 1;
+            if let Some(second) = second {
+                labels[count] = second;
+                count += 1;
+            }
+        }
+    }
+    labels[count..count + 3].copy_from_slice(&[req.service, req.namespace, b"svc"]);
+    child(&labels[..count + 3], zone, wire)
 }
 
 // RFC 1035 §3.3.13 and RFC 2308 §5: SOA RDATA order and negative-cache TTL.
@@ -541,9 +598,7 @@ fn visit(
             // KEP-1645 MCS DNS spec §2.4.2: SRV answers include ready endpoints across clusters.
             for ep in index.multicluster_endpoints(namespace, service) {
                 // KEP-1645 MCS DNS spec §2.4.4: Filter hostname.clusterid, not a cluster name.
-                if !req.endpoint.is_empty()
-                    && !req.cluster.eq_ignore_ascii_case(ep.cluster_id.as_bytes())
-                {
+                if !req.endpoint.is_empty() && !cluster_id_matches(req.cluster, &ep.cluster_id) {
                     continue;
                 }
                 for addr in &ep.endpoints.addresses {
@@ -1228,23 +1283,8 @@ impl pharos_server::Plugin for Kubernetes {
                             // Kubernetes DNS spec 1.1.0 §2.4.2: headless SRV targets name endpoints.
                             // KEP-1645 MCS DNS spec §2.4.2: headless SRV targets include cluster IDs.
                             let mut wire = [0; 255];
-                            let mut parts = [&[][..]; 5];
-                            let start = if let Some((endpoint, cluster)) = endpoint {
-                                parts[0] = endpoint;
-                                if let Some(cluster) = cluster {
-                                    parts[1] = cluster;
-                                    0
-                                } else {
-                                    parts[1] = endpoint;
-                                    1
-                                }
-                            } else {
-                                2
-                            };
-                            parts[2] = req.service;
-                            parts[3] = req.namespace;
-                            parts[4] = b"svc";
-                            let Some(target) = child(&parts[start..], zone_ref, &mut wire) else {
+                            let Some(target) = endpoint_target(req, endpoint, zone_ref, &mut wire)
+                            else {
                                 return;
                             };
                             if !scratch
@@ -1295,23 +1335,8 @@ impl pharos_server::Plugin for Kubernetes {
                                 return;
                             };
                             let mut wire = [0; 255];
-                            let mut parts = [&[][..]; 5];
-                            let start = if let Some((endpoint, cluster)) = endpoint {
-                                parts[0] = endpoint;
-                                if let Some(cluster) = cluster {
-                                    parts[1] = cluster;
-                                    0
-                                } else {
-                                    parts[1] = endpoint;
-                                    1
-                                }
-                            } else {
-                                2
-                            };
-                            parts[2] = req.service;
-                            parts[3] = req.namespace;
-                            parts[4] = b"svc";
-                            let Some(target) = child(&parts[start..], zone_ref, &mut wire) else {
+                            let Some(target) = endpoint_target(req, endpoint, zone_ref, &mut wire)
+                            else {
                                 return;
                             };
                             if !scratch.extra.insert((

@@ -6,7 +6,7 @@ pub(super) struct Request<'a> {
     pub namespace: &'a [u8],
     pub service: &'a [u8],
     pub endpoint: &'a [u8],
-    pub cluster: &'a [u8],
+    pub cluster: &'a [&'a [u8]],
     pub multicluster: bool,
     pub port: &'a [u8],
     pub protocol: &'a [u8],
@@ -54,12 +54,22 @@ pub(super) fn parse_multicluster<'a>(
             // KEP-1645 §Design Details > ClusterSet Service Behavior Expectations > DNS: host+ID.
             if multicluster && !port.starts_with(b"_") && !protocol.starts_with(b"_") {
                 request.endpoint = port;
-                request.cluster = protocol;
+                request.cluster = &remaining[1..];
             } else {
                 // RFC 2782 §The format of the SRV RR: Service and Proto labels use underscores.
                 request.port = port.strip_prefix(b"_").unwrap_or(port);
                 request.protocol = protocol.strip_prefix(b"_").unwrap_or(protocol);
             }
+        }
+        [endpoint, cluster_a, cluster_b]
+            if multicluster
+                && !endpoint.starts_with(b"_")
+                && !cluster_a.starts_with(b"_")
+                && !cluster_b.starts_with(b"_") =>
+        {
+            // KEP-1645 §2.4.1: cluster IDs may contain two DNS labels.
+            request.endpoint = endpoint;
+            request.cluster = &remaining[1..];
         }
         _ => {
             if !zonal || multicluster || !kind.eq_ignore_ascii_case(b"svc") {
@@ -90,7 +100,15 @@ mod tests {
         let request =
             parse_multicluster(&[b"host", b"east", b"web", b"prod", b"svc"], true, true).unwrap();
         assert_eq!(request.endpoint, b"host");
-        assert_eq!(request.cluster, b"east");
+        assert_eq!(request.cluster, &[&b"east"[..]]);
+        let request = parse_multicluster(
+            &[b"host", b"west", b"east", b"web", b"prod", b"svc"],
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(request.endpoint, b"host");
+        assert_eq!(request.cluster, &[&b"west"[..], &b"east"[..]]);
         let request =
             parse_multicluster(&[b"_http", b"_tcp", b"web", b"prod", b"svc"], true, true).unwrap();
         assert_eq!(request.port, b"http");
@@ -106,11 +124,17 @@ mod tests {
     }
 
     fn coredns_string(request: &Request<'_>) -> String {
+        let cluster = request
+            .cluster
+            .iter()
+            .map(|label| std::str::from_utf8(label).unwrap())
+            .collect::<Vec<_>>()
+            .join(".");
         [
             request.port,
             request.protocol,
             request.endpoint,
-            &[][..],
+            cluster.as_bytes(),
             request.service,
             request.namespace,
             request.kind,

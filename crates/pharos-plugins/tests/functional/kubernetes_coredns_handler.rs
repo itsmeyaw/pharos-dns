@@ -34,7 +34,7 @@ const ENDPOINTS: &str = r#"[
 const PODS: &str = r#"[{"metadata":{"name":"foo","namespace":"podns","labels":{"app.kubernetes.io/name":"foo","bar":"baz"}},"status":{"podIPs":[{"ip":"10.240.0.1"}]}}]"#;
 const NAMESPACES: &str = r#"[{"metadata":{"name":"testns"}},{"metadata":{"name":"podns"}},{"metadata":{"name":"svcns"}},{"metadata":{"name":"kube-system"}},{"metadata":{"name":"unexposedns"}}]"#;
 const IMPORTS: &str = r#"[{"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"svc1","namespace":"testns"},"spec":{"type":"ClusterSetIP","ips":["10.0.0.1"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},{"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"hdls1","namespace":"testns"},"spec":{"type":"Headless"}}]"#;
-const MC_ENDPOINTS: &str = r#"[{"metadata":{"name":"mc1","namespace":"testns","labels":{"multicluster.kubernetes.io/service-name":"hdls1","multicluster.kubernetes.io/source-cluster":"cluster1"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":80}],"endpoints":[{"addresses":["172.0.0.2"]}]}]"#;
+const MC_ENDPOINTS: &str = r#"[{"metadata":{"name":"mc1","namespace":"testns","labels":{"multicluster.kubernetes.io/service-name":"hdls1","multicluster.kubernetes.io/source-cluster":"cluster1.cluster2"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":80}],"endpoints":[{"addresses":["172.0.0.2"]}]}]"#;
 
 async fn api(
     hold_endpoints: bool,
@@ -479,14 +479,14 @@ async fn multicluster_answers_service_and_cluster_qualified_endpoint() {
             ),
             positive(
                 "endpoint",
-                "172-0-0-2.cluster1.hdls1.testns.svc.clusterset.local.",
+                "172-0-0-2.cluster1.cluster2.hdls1.testns.svc.clusterset.local.",
                 Type::A,
                 &["172.0.0.2"],
             ),
             srv(
                 "headless srv",
                 "_http._tcp.hdls1.testns.svc.clusterset.local.",
-                "172-0-0-2.cluster1.hdls1.testns.svc.clusterset.local.",
+                "172-0-0-2.cluster1.cluster2.hdls1.testns.svc.clusterset.local.",
                 100,
                 "172.0.0.2",
             ),
