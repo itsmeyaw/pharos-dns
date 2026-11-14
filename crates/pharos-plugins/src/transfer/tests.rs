@@ -80,3 +80,71 @@ async fn generated_chain_tries_transferers_in_order() {
         assert_eq!(&*calls.lock().unwrap(), expected_calls);
     }
 }
+
+#[test]
+fn ixfr_rejects_an_authority_soa_that_does_not_match_the_zone_and_class() {
+    use pharos_proto::{Message, MessageBuilder, Section};
+
+    // RFC 1995 §3: The Authority SOA identifies the Zone and class being transferred.
+    let zone: Name = "example.org.".parse().unwrap();
+    let soa = [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for (owner, class) in [
+        ("other.example.", Class::IN),
+        ("example.org.", Class::CH),
+    ] {
+        let owner: Name = owner.parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 7, 0).unwrap();
+        builder
+            .question(
+                NameRef::parse(zone.as_wire(), 0).unwrap(),
+                Type::IXFR,
+                Class::IN,
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                NameRef::parse(owner.as_wire(), 0).unwrap(),
+                Type::SOA,
+                class,
+                0,
+                &soa,
+            )
+            .unwrap();
+        let _ = builder.finish();
+
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "192.0.2.1:1234".parse().unwrap(),
+            local: "192.0.2.53:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Tcp,
+            domain: &zone,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        let transfer = Transfer {
+            zones: vec![TransferZone {
+                domains: vec![zone.clone()],
+                destinations: vec![Destination::All],
+                source: None,
+            }],
+        };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let provider = TestProvider {
+            id: 1,
+            answer: Answer::Stream,
+            calls: Arc::clone(&calls),
+        };
+
+        assert_eq!(
+            transfer.process(&cx, Some(&provider)),
+            Some(Outcome::Unanswered(Rcode::SERVFAIL))
+        );
+        assert!(calls.lock().unwrap().is_empty());
+    }
+}

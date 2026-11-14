@@ -241,7 +241,11 @@ impl Transfer {
             let serial = authority
                 .next()
                 .and_then(|record| match record.data().ok()? {
-                    Rdata::Soa { serial, .. } => Some(serial),
+                    Rdata::Soa { serial, .. }
+                        if record.name == question.name && record.class == question.qclass =>
+                    {
+                        Some(serial)
+                    }
                     _ => None,
                 });
             match (serial, authority.next()) {
