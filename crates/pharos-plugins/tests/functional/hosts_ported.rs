@@ -176,8 +176,11 @@ async fn coredns_wildcard_parent_case() {
     let chain = chain(&file, "");
     chain.lifecycle.run(Phase::Startup).await.unwrap();
     let (outcome, wire) = query(&chain, "apps.example.com.", Type::A).await;
-    assert_eq!(outcome, Outcome::Unanswered(Rcode::SERVFAIL));
-    assert!(wire.is_empty());
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(response.aa());
+    assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+    assert_eq!(response.answer_count(), 0);
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 
@@ -223,14 +226,17 @@ async fn coredns_fallthrough_unsupported_cases() {
 }
 
 #[tokio::test]
-async fn missing_names_without_fallthrough_return_servfail() {
+async fn missing_names_without_fallthrough_return_authoritative_nxdomain() {
     let file = HostsFile::new();
     let chain = chain(&file, "");
     chain.lifecycle.run(Phase::Startup).await.unwrap();
     for qtype in [Type::A, Type::AAAA, Type::MX, Type::TXT] {
         let (outcome, wire) = query(&chain, "missing.example.org.", qtype).await;
-        assert_eq!(outcome, Outcome::Unanswered(Rcode::SERVFAIL), "{qtype:?}");
-        assert!(wire.is_empty());
+        assert_eq!(outcome, Outcome::Response, "{qtype:?}");
+        let response = Message::parse(&wire).unwrap();
+        assert!(response.aa());
+        assert_eq!(response.rcode(), Rcode::NXDOMAIN, "{qtype:?}");
+        assert_eq!(response.answer_count(), 0, "{qtype:?}");
     }
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
 }
