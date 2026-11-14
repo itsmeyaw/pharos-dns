@@ -73,9 +73,19 @@ fn endpoints_retain_readiness_and_names() {
     assert_eq!(ep.addresses.len(), 3);
     assert_eq!(ep.addresses[0].hostname, "host");
     assert_eq!(ep.addresses[0].node_name, "node");
-    assert_eq!(ep.addresses[0].target_ref_name, "pod");
+    assert_eq!(ep.addresses[0].target_ref_name.as_ref(), "pod");
     assert!(!ep.addresses[1].ready);
     assert_eq!(ep.ports[0].port, -1);
+}
+
+#[test]
+fn readiness_policy_keeps_dns_objects_at_their_original_size() {
+    // Retained object counts make a per-object word material at cluster scale.
+    assert_eq!(std::mem::size_of::<Service>(), 176);
+    assert_eq!(
+        std::mem::size_of::<pharos_kubernetes::object::EndpointAddress>(),
+        96
+    );
 }
 
 #[test]

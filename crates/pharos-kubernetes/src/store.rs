@@ -1127,7 +1127,7 @@ impl Index {
         self.delete_service(&service.namespace, &service.name);
         // RFC 1034 §3.1: store ExternalName targets as absolute domain names.
         // Kubernetes DNS spec 1.1.0 §2.5: Store ExternalName targets for CNAME answers.
-        if service.service_type == "ExternalName" {
+        if service.service_type.as_ref() == "ExternalName" {
             let fqdn = if service.external_name.ends_with('.') {
                 service.external_name.clone()
             } else {

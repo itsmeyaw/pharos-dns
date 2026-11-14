@@ -32,7 +32,8 @@ pub struct Service {
     pub name: Arc<str>,
     pub namespace: Arc<str>,
     pub cluster_ips: Vec<String>,
-    pub service_type: String,
+    // Box<str> frees one word for the readiness policy without growing Service.
+    pub service_type: Box<str>,
     pub external_name: String,
     pub ports: Vec<Port>,
     pub external_ips: Vec<String>,
@@ -96,7 +97,7 @@ impl From<v1::Service> for Service {
             name: input.metadata.name.unwrap_or_default().into(),
             namespace: input.metadata.namespace.unwrap_or_default().into(),
             cluster_ips,
-            service_type: spec.type_.unwrap_or_default(),
+            service_type: spec.type_.unwrap_or_default().into_boxed_str(),
             external_name: spec.external_name.unwrap_or_default(),
             ports,
             external_ips,
@@ -163,7 +164,8 @@ pub struct EndpointAddress {
     pub ip: String,
     pub hostname: String,
     pub node_name: String,
-    pub target_ref_name: String,
+    // Box<str> keeps the readiness bit within the original 96-byte address.
+    pub target_ref_name: Box<str>,
     pub ready: bool,
 }
 
@@ -236,7 +238,8 @@ impl Endpoints {
                 .target_ref
                 .and_then(|target| target.name)
                 .filter(|name| name.len() < 64)
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_boxed_str();
             // KEP-563 §Proposal: Retain every address of a dual-stack backend endpoint.
             for ip in endpoint.addresses {
                 // KEP-752 §Proposal > Zone (Per Endpoint): Retain endpoint zones.
