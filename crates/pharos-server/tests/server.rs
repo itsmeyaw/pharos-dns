@@ -185,6 +185,41 @@ async fn update_admission_is_listener_and_block_scoped() {
 }
 
 #[tokio::test]
+async fn tkey_query_returns_notimp_without_running_chain() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(UpdateProbe(true)), vec![]);
+    let server = Server::new(router, key);
+    let name: Name = "example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::TKEY,
+            Class::ANY,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTIMP);
+}
+
+#[tokio::test]
 async fn zero_question_query_is_not_rejected_as_malformed() {
     let key = ListenerKey {
         transport: Transport::Dns,
