@@ -331,21 +331,31 @@ impl Query {
         Ok(true)
     }
     pub(crate) fn wire(&self) -> Result<Vec<u8>, String> {
+        let dso = self.opcode == 6;
+        // RFC 8490 §5.4.1: DSO uses a nonzero ID, no Question or OPT/TSIG, and only OPCODE flags.
+        if dso && (self.edns || self.tsig.is_some() || self.ixfr_serial.is_some()) {
+            return Err("DSO builder does not support EDNS, TSIG, or IXFR data".into());
+        }
         let mut wire = Vec::new();
         // RFC 1035 §4.1.1 and RFC 1996 §3.2: NOTIFY requests set RD to zero.
-        let flags = (u16::from(self.opcode) << 11)
-            | if self.recursion && self.opcode != 4 {
-                0x0100
-            } else {
-                0
-            };
-        let mut builder =
-            MessageBuilder::new(&mut wire, 65535, 0, flags).map_err(|err| err.to_string())?;
+        let flags = if dso {
+            u16::from(self.opcode) << 11
+        } else {
+            (u16::from(self.opcode) << 11)
+                | if self.recursion && self.opcode != 4 {
+                    0x0100
+                } else {
+                    0
+                }
+        };
+        let mut builder = MessageBuilder::new(&mut wire, 65535, u16::from(dso), flags)
+            .map_err(|err| err.to_string())?;
         let name = NameRef::parse(self.name.as_wire(), 0).map_err(|err| err.to_string())?;
         // RFC 1035 §4.1.2: Question entries encode QNAME, QTYPE, and QCLASS.
-        if !builder
-            .question(name, self.qtype, self.class)
-            .map_err(|err| err.to_string())?
+        if !dso
+            && !builder
+                .question(name, self.qtype, self.class)
+                .map_err(|err| err.to_string())?
         {
             return Err("query exceeds DNS message size".into());
         }
@@ -681,6 +691,40 @@ mod tests {
             "DSO requires TCP"
         );
         assert!(parse("example. A IN tcp +opcode=stateful").is_ok());
+    }
+
+    #[test]
+    fn dso_query_has_no_dns_sections_or_edns_records_and_uses_nonzero_id() {
+        let wire = parse("example. A IN tcp +opcode=stateful")
+            .unwrap()
+            .wire()
+            .unwrap();
+        let message = Message::parse(&wire).unwrap();
+        assert_ne!(message.id(), 0);
+        assert_eq!(message.opcode(), Opcode::STATEFUL);
+        assert_eq!(message.flags(), u16::from(Opcode::STATEFUL.0) << 11);
+        assert_eq!(
+            (
+                message.question_count(),
+                message.answer_count(),
+                message.authority_count(),
+                message.additional_count(),
+            ),
+            (0, 0, 0, 0)
+        );
+        assert!(message.opt().is_none());
+        assert!(
+            parse("example. A IN tcp +opcode=stateful +dnssec")
+                .unwrap()
+                .wire()
+                .is_err()
+        );
+        assert!(
+            parse("example. A IN tcp +opcode=stateful +tsig=key.:c2VjcmV0")
+                .unwrap()
+                .wire()
+                .is_err()
+        );
     }
 
     #[test]
