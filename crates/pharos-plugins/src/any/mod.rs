@@ -76,7 +76,7 @@ impl Plugin for Any {
                     Type::HINFO,
                     Class::IN,
                     self.ttl,
-                    b"\x0dANY obsoleted\x0cSee RFC 8482",
+                    b"\x07RFC8482\x0cSee RFC 8482",
                 )
                 .map_err(Error::Build)?;
             let _ = builder.finish();

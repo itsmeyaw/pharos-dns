@@ -146,7 +146,7 @@ async fn coredns_any_synthesizes_hinfo() {
         ),
         ("ExAmple.org.".into(), Type::HINFO, Class::IN, 8482)
     );
-    assert_eq!(answer.rdata, b"\x0dANY obsoleted\x0cSee RFC 8482");
+    assert_eq!(answer.rdata, b"\x07RFC8482\x0cSee RFC 8482");
 }
 
 #[tokio::test]
