@@ -51,6 +51,7 @@ fn strings_and_coordinates() {
     );
     assert!(parse(Type::X25, &["+311061700956"]).is_err());
     assert_eq!(parse(Type::ISDN, &["123456"]).unwrap(), b"\x06123456");
+    assert_eq!(parse(Type::ISDN, &["1"]).unwrap(), b"\x011");
     assert_eq!(
         parse(Type::ISDN, &["123456", "ABcd"]).unwrap(),
         b"\x06123456\x04ABcd"

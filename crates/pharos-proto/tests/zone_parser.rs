@@ -151,6 +151,7 @@ fn class_inherits_last_explicit_class_and_rejects_query_classes() {
 fn rejects_ttl_overflow_and_oversized_decimal_escape() {
     for zone in [
         "a 18446744073709551616 A 192.0.2.1\n",
+        "a 2147483648 A 192.0.2.1\n",
         "a 60 TXT \"\\999\"\n",
     ] {
         let parser = ZoneParser::new(Cursor::new(zone), ".".parse().unwrap(), "strict");

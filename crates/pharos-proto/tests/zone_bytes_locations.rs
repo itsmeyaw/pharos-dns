@@ -254,6 +254,14 @@ fn ttl_unit_segments_match_and_integer_overflow_is_rejected() {
             .unwrap()
             .is_err()
     );
+    assert_eq!(
+        parser(b"$TTL 2147483647\na A 192.0.2.1\n")
+            .next()
+            .unwrap()
+            .unwrap()
+            .ttl,
+        2147483647
+    );
 }
 
 #[test]

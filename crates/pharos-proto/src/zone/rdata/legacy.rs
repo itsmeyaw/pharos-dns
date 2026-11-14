@@ -79,8 +79,11 @@ pub(super) fn parse(
                 let address = chunks
                     .first()
                     .map_or(&[][..], |(_, chunk)| chunk.as_slice());
-                // RFC 1183 §3.2: ISDN address and subaddress use decimal and hexadecimal digits.
-                if !(4..=15).contains(&address.len()) || !address.iter().all(u8::is_ascii_digit) {
+                // RFC 1183 §3.2: ISDN numbers are normally decimal digits, up to 15 octets.
+                if address.is_empty()
+                    || address.len() > 15
+                    || !address.iter().all(u8::is_ascii_digit)
+                {
                     index = 0;
                     return Err("invalid ISDN address".into());
                 }

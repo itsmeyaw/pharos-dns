@@ -956,7 +956,9 @@ fn parse_ttl(value: &str) -> Option<u32> {
     if value.is_empty() {
         return None;
     }
-    result.checked_add(number)
+    let ttl = result.checked_add(number)?;
+    // RFC 2181 §8: The largest valid TTL is 2^31 - 1.
+    (ttl <= i32::MAX as u32).then_some(ttl)
 }
 
 // RFC 1035 §3.2.4 and RFC 3597 §5: classes use mnemonics or CLASS followed by a number.
