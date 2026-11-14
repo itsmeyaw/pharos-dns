@@ -138,7 +138,8 @@ fn main() {
         let before = GLOBAL.stats();
         for _ in 0..n {
             let start = Instant::now();
-            black_box(signer.sign_into(black_box(b"canonical RRSIG data"), &mut signature)).unwrap();
+            black_box(signer.sign_into(black_box(b"canonical RRSIG data"), &mut signature))
+                .unwrap();
             sign.push(start.elapsed().as_nanos() as u64);
         }
         let after = GLOBAL.stats();

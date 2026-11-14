@@ -549,9 +549,7 @@ impl Plugin for Forward {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BufferPool, MAX_IDLE_SCRATCH, max_attempts, primary_attempt_limit,
-    };
+    use super::{BufferPool, MAX_IDLE_SCRATCH, max_attempts, primary_attempt_limit};
 
     #[test]
     fn returned_buffers_keep_their_contents_and_are_reused() {
@@ -583,5 +581,4 @@ mod tests {
         assert_eq!(primary_attempt_limit(Some(3), true), 2);
         assert_eq!(primary_attempt_limit(Some(3), false), 3);
     }
-
 }
