@@ -17,6 +17,7 @@ pub fn full(body: impl Into<Bytes>) -> Body {
 
 pub async fn serve(
     listener: TcpListener,
+    exists: fn(&str) -> bool,
     response: fn(&str, Option<&str>) -> Response<Body>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
@@ -34,13 +35,19 @@ pub async fn serve(
                                 let (parts, _) = response(request.uri().path(), request.uri().query()).into_parts();
                                 Response::from_parts(parts, full(Bytes::new()))
                             }
-                            "POST" | "PUT" | "DELETE" | "CONNECT" | "OPTIONS" | "TRACE" | "PATCH" => {
+                            "POST" | "PUT" | "DELETE" | "CONNECT" | "OPTIONS" | "TRACE" | "PATCH"
+                                if exists(request.uri().path()) =>
+                            {
                                 // RFC 9110 §9.1: Known methods unsupported by fixtures receive 405.
                                 let mut result = Response::new(full("Method Not Allowed\n"));
                                 *result.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
                                 result.headers_mut().insert("allow", HeaderValue::from_static("GET, HEAD"));
                                 result.headers_mut().insert("content-type", HeaderValue::from_static("text/plain; charset=utf-8"));
                                 result
+                            }
+                            "POST" | "PUT" | "DELETE" | "CONNECT" | "OPTIONS" | "TRACE" | "PATCH" => {
+                                // RFC 9110 §15.5.5: Unknown fixture paths remain 404.
+                                response(request.uri().path(), request.uri().query())
                             }
                             _ => {
                                 // RFC 9110 §9.1: Unknown method tokens receive 501.

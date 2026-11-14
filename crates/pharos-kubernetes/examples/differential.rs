@@ -300,6 +300,22 @@ fn discovery(path: &str) -> Option<Value> {
     })
 }
 
+fn api_path_exists(path: &str) -> bool {
+    // RFC 9110 §15.5.5: Resolve fixture target existence before applying method policy.
+    resource_path(path).is_some()
+        || matches!(
+            path,
+            "/version"
+                | "/api"
+                | "/apis"
+                | "/apis/multicluster.x-k8s.io"
+                | "/apis/discovery.k8s.io"
+                | "/api/v1"
+                | "/apis/discovery.k8s.io/v1"
+                | "/apis/multicluster.x-k8s.io/v1alpha1"
+        )
+}
+
 fn response(status: u16, body: Body) -> Response<Body> {
     Response::builder()
         .status(status)
@@ -393,7 +409,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     serde_json::to_writer(&mut file, &config)?;
     file.flush()?;
     std::fs::rename(temporary, path)?;
-    api::serve(listener, api_response).await
+    api::serve(listener, api_path_exists, api_response).await
 }
 
 #[cfg(test)]
@@ -576,7 +592,7 @@ mod tests {
                 .unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let _ = super::api::serve(listener, api_response).await;
+            let _ = super::api::serve(listener, super::api_path_exists, api_response).await;
         });
         let mut stream = std::net::TcpStream::connect(address).unwrap();
         stream
@@ -606,6 +622,20 @@ mod tests {
             "{response}"
         );
         assert!(response.contains("allow: GET, HEAD\r\n"), "{response}");
+
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .write_all(b"POST /unknown HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{response}"
+        );
 
         let mut stream = std::net::TcpStream::connect(address).unwrap();
         stream
