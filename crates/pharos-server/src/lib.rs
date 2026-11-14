@@ -892,8 +892,13 @@ impl Listener {
         bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
         bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
     ) -> io::Result<Self> {
-        // RFC 1035 §4.2.1: Retain one worker so the Listener can serve UDP Queries.
-        let workers = workers.max(1);
+        // RFC 7766 §5: Reject a Listener configuration that cannot serve UDP Queries.
+        if workers == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP worker count must be greater than zero",
+            ));
+        }
         let wildcard = address.is_ipv6() && address.ip().is_unspecified();
         let mut ipv4_only = false;
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
@@ -1106,24 +1111,30 @@ mod wildcard_tests {
     }
 
     #[tokio::test]
-    async fn listener_keeps_one_udp_worker_when_zero_is_configured() {
+    async fn listener_rejects_zero_udp_workers() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static BINDS: AtomicUsize = AtomicUsize::new(0);
         fn counting_bind(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
             BINDS.fetch_add(1, Ordering::SeqCst);
             udp::bind(address)
         }
-        let listener = Listener::bind_with_ipv6(
+        let result = Listener::bind_with_ipv6(
             "127.0.0.1:0".parse().unwrap(),
             Echo,
             0,
             bind_ipv6_dual,
             counting_bind,
         )
-        .await
-        .unwrap();
-        assert_eq!(BINDS.load(Ordering::SeqCst), 1);
-        listener.shutdown().await.unwrap();
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(listener) => {
+                listener.shutdown().await.unwrap();
+                panic!("zero UDP workers must be rejected");
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(BINDS.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1404,6 +1415,13 @@ impl ListenerRegistry {
                     "Listener handler type mismatch",
                 ));
             }
+        }
+        // RFC 7766 §5: Every DNS Listener must retain at least one UDP worker.
+        if servers.values().any(|server| server.udp_workers() == 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP worker count must be greater than zero",
+            ));
         }
         let mut added: Vec<(ListenerKey, Listener, Arc<ArcSwap<H>>)> = Vec::new();
         let new_keys: Vec<_> = servers
