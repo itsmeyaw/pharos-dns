@@ -187,10 +187,10 @@ fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
         .find_map(|address| update::primary_address(address, cx.client))
     else {
         // RFC 1996 §3.10: Record NOTIFY attempts from unknown Primary Servers.
-        pharos_server::logging::log(
+        pharos_server::logging::log_bounded(
             "WARN",
             "secondary",
-            &format!("NOTIFY from unknown Primary Server {}", cx.client),
+            format_args!("NOTIFY from unknown Primary Server {}", cx.client),
         );
         return Outcome::Drop;
     };
