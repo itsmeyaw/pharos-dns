@@ -287,7 +287,7 @@ fn question_lines(message: &Message<'_>) -> Vec<String> {
 }
 
 // RFC 4343 §3: DNS names compare case-insensitively for ASCII letters only.
-fn name_equal(a: NameRef<'_>, b: NameRef<'_>) -> bool {
+pub(crate) fn name_equal(a: NameRef<'_>, b: NameRef<'_>) -> bool {
     let (mut a, mut b) = (a.labels(), b.labels());
     loop {
         match (a.next(), b.next()) {

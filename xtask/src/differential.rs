@@ -436,7 +436,7 @@ fn collect_axfr(
         .questions()
         .next()
         .filter(|question| question.qtype == Type::AXFR)
-        .map(|question| question.name.to_string())
+        .map(|question| question.name)
         .ok_or("AXFR Query has no AXFR question")?;
     let request = key
         .map(|_| pharos_proto::TsigRecord::parse(query))
@@ -471,7 +471,7 @@ fn collect_axfr(
             }
             if record.rtype == Type::SOA {
                 // RFC 5936 §2.2: the opening SOA is first and names the requested zone.
-                if soa_count == 0 && !record.name.to_string().eq_ignore_ascii_case(&zone) {
+                if soa_count == 0 && !compare::name_equal(record.name, zone) {
                     return Err("AXFR opening SOA does not match requested zone".into());
                 }
                 let soa = (
@@ -818,9 +818,9 @@ fn scenario(
             let query = query::parse(line).map_err(|e| format!("{line}: {e}"))?;
             let wire = query.wire()?;
             let key = query.axfr_key();
-            let mut pwires = exchange_with_key(pp_num, query.transport, &wire, key.as_ref())
+            let pwires = exchange_with_key(pp_num, query.transport, &wire, key.as_ref())
                 .map_err(|e| format!("Pharos {line}: {e}"))?;
-            let mut cwires = exchange_with_key(cp_num, query.transport, &wire, key.as_ref())
+            let cwires = exchange_with_key(cp_num, query.transport, &wire, key.as_ref())
                 .map_err(|e| format!("CoreDNS {line}: {e}"))?;
             let is_axfr = Message::parse(&wire)
                 .map_err(|e| format!("{line}: {e}"))?
@@ -845,8 +845,8 @@ fn scenario(
                 count += 1;
                 continue;
             }
-            let mut pwire = pwires.pop().ok_or("Pharos has no response")?;
-            let cwire = cwires.pop().ok_or("CoreDNS has no response")?;
+            let mut pwire = pwires.into_iter().next().ok_or("Pharos has no response")?;
+            let cwire = cwires.into_iter().next().ok_or("CoreDNS has no response")?;
             if pwire.len() < 4 || cwire.len() < 4 {
                 return Err(format!("{line}: truncated Response header"));
             }
