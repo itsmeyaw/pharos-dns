@@ -102,8 +102,12 @@ fn caa_and_uri_display_preserves_literal_backslashes() {
 }
 
 #[test]
-fn naptr_character_strings_must_be_utf8() {
-    assert!(Rdata::parse(Type::NAPTR, b"\x00\x01\x00\x01\x00\x01\xff\x00\x00\x00").is_err());
+fn naptr_wire_preserves_non_utf8_character_strings() {
+    let data = Rdata::parse(Type::NAPTR, b"\x00\x01\x00\x01\x00\x01\xff\x00\x00").unwrap();
+    let Rdata::Naptr { services, .. } = data else {
+        panic!("expected NAPTR")
+    };
+    assert_eq!(services, &[0xff]);
 }
 
 #[test]

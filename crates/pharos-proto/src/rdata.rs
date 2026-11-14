@@ -827,17 +827,11 @@ impl<'a> Rdata<'a> {
             }
             // RFC 3403 §4.1: NAPTR has order, preference, three strings, and replacement.
             Type::NAPTR => {
+                // RFC 3403 §3: Preserve received strings as octets for CoreDNS compatibility.
                 let header = bytes.get(..4).ok_or(RdataError)?;
                 let (flags, rest) = character_string(&bytes[4..])?;
                 let (services, rest) = character_string(rest)?;
                 let (regexp, rest) = character_string(rest)?;
-                // RFC 3403 §3: NAPTR flags, services, and regexp values are UTF-8.
-                if [flags, services, regexp]
-                    .iter()
-                    .any(|value| std::str::from_utf8(value).is_err())
-                {
-                    return Err(RdataError);
-                }
                 let name_start = len - rest.len();
                 // RFC 3403 §4.1: NAPTR replacement is a fully qualified domain name.
                 let replacement =
