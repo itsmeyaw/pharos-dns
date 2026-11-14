@@ -116,7 +116,7 @@ impl Auto {
                                 _ = shutdown.changed() => break,
                             }
                             let worker = Arc::clone(&scan);
-                            let _loaded = tokio::task::spawn_blocking(move || worker.scan())
+                            let added = tokio::task::spawn_blocking(move || worker.scan())
                                 .await
                                 .unwrap_or_default();
                             if *shutdown.borrow() {
@@ -125,9 +125,9 @@ impl Auto {
                             // RFC 1996 §4.1: Newly loaded zones notify their Secondary Servers.
                             scan.start_watchers(interval);
                             #[cfg(feature = "plugin-transfer")]
-                            notify_zones(&scan, &_loaded).await;
+                            notify_zones(&scan, &added).await;
                             #[cfg(not(feature = "plugin-transfer"))]
-                            let _ = &_loaded;
+                            drop(added);
                         }
                     });
                     shared.tasks.lock().unwrap().push(scan_task);
