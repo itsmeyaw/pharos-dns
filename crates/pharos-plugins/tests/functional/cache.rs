@@ -22,7 +22,7 @@ struct PolicyResponse<'a> {
     mixed_ttl: bool,
     unrelated_answer: bool,
     unrelated_authority: bool,
-    unrelated_additional: bool,
+    additional_rrset: bool,
 }
 
 impl Next for PolicyResponse<'_> {
@@ -105,7 +105,7 @@ impl Next for PolicyResponse<'_> {
                 )
                 .unwrap();
         }
-        if self.unrelated_additional {
+        if self.additional_rrset {
             builder
                 .record(
                     Section::Additional,
@@ -113,10 +113,170 @@ impl Next for PolicyResponse<'_> {
                     Type::A,
                     question.qclass,
                     30,
+                    &[192, 0, 2, 3],
+                )
+                .unwrap();
+            builder
+                .record(
+                    Section::Additional,
+                    unrelated.as_name_ref(),
+                    Type::A,
+                    question.qclass,
+                    10,
                     &[192, 0, 2, 4],
                 )
                 .unwrap();
         }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct Nsec3Negative<'a> {
+    calls: &'a AtomicUsize,
+    rcode: u16,
+}
+
+impl Next for Nsec3Negative<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let zone: Name = "example.com.".parse().unwrap();
+        let owner: Name = "00000000000000000000000000.example.com.".parse().unwrap();
+        let mut nsec3 = vec![1, 0, 0, 0, 0, 20];
+        nsec3.extend([1; 20]);
+        nsec3.extend([0, 1, 0x40]);
+        let mut builder =
+            MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080 | self.rcode).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                zone.as_name_ref(),
+                Type::SOA,
+                question.qclass,
+                30,
+                b"\0\0\0\0\0\x01\0\0\0\x02\0\0\0\x03\0\0\0\x04\0\0\0\x03",
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                owner.as_name_ref(),
+                Type::NSEC3,
+                question.qclass,
+                30,
+                &nsec3,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct SignedReferral<'a>(&'a AtomicUsize);
+
+impl Next for SignedReferral<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let root = pharos_proto::NameRef::parse(&[0], 0).unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                root,
+                Type::NS,
+                Class::IN,
+                30,
+                b"\x02ns\0",
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                root,
+                Type::RRSIG,
+                Class::IN,
+                30,
+                &rrsig(Type::NS),
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                root,
+                Type::RRSIG,
+                Class::IN,
+                10,
+                &rrsig(Type::SOA),
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+fn rrsig(type_covered: Type) -> Vec<u8> {
+    let mut data = Vec::with_capacity(20);
+    data.extend_from_slice(&type_covered.0.to_be_bytes());
+    data.extend_from_slice(&[8, 0]);
+    data.extend_from_slice(&30_u32.to_be_bytes());
+    data.extend_from_slice(&3_000_000_000_u32.to_be_bytes());
+    data.extend_from_slice(&1_000_000_000_u32.to_be_bytes());
+    data.extend_from_slice(&1_u16.to_be_bytes());
+    data.extend_from_slice(b"\0\x01");
+    data
+}
+
+struct DnameResponse<'a>(&'a AtomicUsize);
+
+impl Next for DnameResponse<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let owner: Name = "example.com.".parse().unwrap();
+        let target: Name = "target.net.".parse().unwrap();
+        let alias: Name = "a.target.net.".parse().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                owner.as_name_ref(),
+                Type::DNAME,
+                question.qclass,
+                30,
+                target.as_wire(),
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::CNAME,
+                question.qclass,
+                30,
+                alias.as_wire(),
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                alias.as_name_ref(),
+                Type::A,
+                question.qclass,
+                20,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
         let _ = builder.finish();
         Outcome::Response
     }
@@ -839,14 +999,8 @@ async fn keepttl_retains_the_inserted_ttl() {
 }
 
 #[tokio::test]
-async fn servfail_zero_uses_one_second_minimum() {
+async fn servfail_zero_is_cached() {
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
-    let chain = cache();
-    let calls = AtomicUsize::new(0);
-    let _ = query(&chain, wire, &calls, 2, false).await;
-    let hit = query(&chain, wire, &calls, 2, false).await;
-    assert_eq!(Message::parse(&hit).unwrap().rcode().0, 2);
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
     let chain = cache_with("cache {\n servfail 0\n}");
     let calls = AtomicUsize::new(0);
     let _ = query(&chain, wire, &calls, 2, false).await;
@@ -981,7 +1135,7 @@ async fn cached_rrsets_keep_their_own_minimum_ttls() {
         mixed_ttl: false,
         unrelated_answer: false,
         unrelated_authority: false,
-        unrelated_additional: false,
+        additional_rrset: false,
     };
 
     let _ = query_with(&chain, &query, next()).await;
@@ -1005,10 +1159,18 @@ async fn non_authoritative_rrsets_with_mismatched_ttls_are_not_cached() {
         mixed_ttl: true,
         unrelated_answer: false,
         unrelated_authority: false,
-        unrelated_additional: false,
+        additional_rrset: false,
     };
 
-    let _ = query_with(&chain, &query, next()).await;
+    let (_, miss) = query_with(&chain, &query, next()).await;
+    assert_eq!(
+        Message::parse(&miss)
+            .unwrap()
+            .answers()
+            .map(|record| record.ttl)
+            .collect::<Vec<_>>(),
+        [10, 10]
+    );
     let _ = query_with(&chain, &query, next()).await;
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
@@ -1025,7 +1187,7 @@ async fn authoritative_mixed_ttl_rrset_uses_its_minimum_ttl() {
         mixed_ttl: true,
         unrelated_answer: false,
         unrelated_authority: false,
-        unrelated_additional: false,
+        additional_rrset: false,
     };
 
     let _ = query_with(&chain, &query, next()).await;
@@ -1053,7 +1215,7 @@ async fn response_with_unrelated_answer_records_is_not_cached() {
         mixed_ttl: false,
         unrelated_answer: true,
         unrelated_authority: false,
-        unrelated_additional: false,
+        additional_rrset: false,
     };
 
     let _ = query_with(&chain, &query, next()).await;
@@ -1073,7 +1235,7 @@ async fn response_with_out_of_domain_authority_records_is_not_cached() {
         mixed_ttl: false,
         unrelated_answer: false,
         unrelated_authority: true,
-        unrelated_additional: false,
+        additional_rrset: false,
     };
 
     let _ = query_with(&chain, &query, next()).await;
@@ -1082,24 +1244,92 @@ async fn response_with_out_of_domain_authority_records_is_not_cached() {
 }
 
 #[tokio::test]
-async fn cached_response_drops_additional_records() {
+async fn additional_rrsets_are_normalized_on_cache_misses() {
     let chain = cache();
     let calls = AtomicUsize::new(0);
     let query = query_wire(Type::A, b"\x01x\0", false);
-    let next = || PolicyResponse {
+    let next = PolicyResponse {
         calls: &calls,
-        authoritative: false,
+        authoritative: true,
         cname: false,
         mixed_ttl: false,
         unrelated_answer: false,
         unrelated_authority: false,
-        unrelated_additional: true,
+        additional_rrset: true,
     };
 
-    let (_, miss) = query_with(&chain, &query, next()).await;
-    let (_, hit) = query_with(&chain, &query, next()).await;
-    assert_eq!(Message::parse(&miss).unwrap().additional_count(), 1);
-    assert_eq!(Message::parse(&hit).unwrap().additional_count(), 0);
+    let (_, wire) = query_with(&chain, &query, next).await;
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .additionals()
+            .map(|record| record.ttl)
+            .collect::<Vec<_>>(),
+        [10, 10]
+    );
+}
+
+#[tokio::test]
+async fn nsec3_negative_proofs_are_cached_for_nxdomain_and_nodata() {
+    let query = query_wire(Type::A, b"\x07missing\x07example\x03com\0", false);
+    for rcode in [3, 0] {
+        let chain = cache();
+        let calls = AtomicUsize::new(0);
+        for _ in 0..2 {
+            let (outcome, wire) = query_with(
+                &chain,
+                &query,
+                Nsec3Negative {
+                    calls: &calls,
+                    rcode,
+                },
+            )
+            .await;
+            assert_eq!(outcome, Outcome::Response);
+            let response = Message::parse(&wire).unwrap();
+            assert_eq!(response.rcode().0, rcode);
+            assert_eq!(
+                response
+                    .authorities()
+                    .filter(|record| record.rtype == Type::NSEC3)
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[tokio::test]
+async fn referral_keeps_distinct_rrsig_covered_type_ttls() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let _ = query_with(&chain, &query, SignedReferral(&calls)).await;
+    let (_, hit) = query_with(&chain, &query, SignedReferral(&calls)).await;
+    let signatures = Message::parse(&hit)
+        .unwrap()
+        .authorities()
+        .filter(|record| record.rtype == Type::RRSIG)
+        .map(|record| record.ttl)
+        .collect::<Vec<_>>();
+    assert_eq!(signatures, [30, 10]);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn dname_answer_above_the_question_is_cacheable() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01a\x07example\x03com\0", false);
+    let _ = query_with(&chain, &query, DnameResponse(&calls)).await;
+    let (_, hit) = query_with(&chain, &query, DnameResponse(&calls)).await;
+    assert!(
+        Message::parse(&hit)
+            .unwrap()
+            .answers()
+            .any(|record| record.rtype == Type::DNAME)
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 

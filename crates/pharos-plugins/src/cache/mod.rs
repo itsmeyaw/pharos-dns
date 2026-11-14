@@ -4,8 +4,6 @@ pub(crate) mod setup;
 mod store;
 
 use std::{
-    collections::HashMap,
-    hash::{Hash, Hasher},
     net::SocketAddr,
     sync::{Arc, Mutex, OnceLock, Weak},
     time::{Instant, SystemTime},
@@ -586,12 +584,11 @@ impl Cache {
             if matches!(
                 outcome,
                 Outcome::Unanswered(Rcode::SERVFAIL) | Outcome::Error(_)
-            ) && !self.config.fail_ttl.is_zero()
-                && !self
-                    .config
-                    .disable_denial
-                    .iter()
-                    .any(|zone| contains(question.name, zone))
+            ) && !self
+                .config
+                .disable_denial
+                .iter()
+                .any(|zone| contains(question.name, zone))
             {
                 let ttl = self
                     .denial
@@ -670,11 +667,16 @@ impl Cache {
         let maximum = cached_maximum(maximum.as_secs());
         let rrset_minima = rrset_minimum_ttls(&response);
         let malformed_non_authoritative_rrset =
-            !response.aa() && has_mixed_rrset_ttl(&response, &rrset_minima);
+            !response.aa() && rrset_minima.iter().any(|rrset| rrset.mixed_ttl);
         // RFC 4033 §8.1: Keep cached data within every RRSIG's validity interval.
         let signature_remaining = response
             .answers()
             .chain(response.authorities())
+            .chain(
+                response
+                    .additionals()
+                    .filter(|record| record.rtype != Type::OPT),
+            )
             .filter(|record| record.rtype == Type::RRSIG)
             .filter_map(|record| match record.data() {
                 Ok(Rdata::Rrsig { expiration, .. }) => Some(signature_ttl(expiration, now as u32)),
@@ -682,31 +684,37 @@ impl Cache {
             })
             .min()
             .unwrap_or(u32::MAX);
+        let response_ttl_for = |record| {
+            if failure {
+                self.config.fail_ttl.as_secs().min(u64::from(u32::MAX)) as u32
+            } else {
+                normalized_record_ttl(
+                    record,
+                    &rrset_minima,
+                    denial,
+                    minimum,
+                    maximum,
+                    signature_remaining,
+                )
+            }
+        };
         let mut ttl = maximum;
-        let mut rr_ttls = Vec::new();
+        let mut ttl_updates = Vec::new();
         let mut found = false;
         // RFC 2181 §5.2: Normalize TTLs to each RRset's minimum, not the whole Response's.
         for record in response.answers().chain(response.authorities()) {
-            let record_ttl = if failure {
-                self.config.fail_ttl.as_secs().min(u64::from(u32::MAX)) as u32
-            } else {
-                cap_ttl_at_signature(
-                    normalized_rrset_ttl(
-                        record,
-                        rrset_minima
-                            .get(&RrsetKey::new(record))
-                            .copied()
-                            .unwrap_or(record.ttl),
-                        denial,
-                        minimum,
-                        maximum,
-                    ),
-                    signature_remaining,
-                )
-            };
+            let record_ttl = response_ttl_for(record);
             found = true;
             ttl = ttl.min(record_ttl);
-            rr_ttls.push((record.ttl_offset, record_ttl));
+            ttl_updates.push((record.ttl_offset, record_ttl));
+        }
+        // RFC 2181 §5.2: Normalize non-OPT Additional RRsets on the miss Response too.
+        for record in response
+            .additionals()
+            .filter(|record| record.rtype != Type::OPT)
+        {
+            let record_ttl = response_ttl_for(record);
+            ttl_updates.push((record.ttl_offset, record_ttl));
         }
         if !found
             || !matches!(
@@ -728,7 +736,7 @@ impl Cache {
             ttl = self.config.fail_ttl.as_secs() as u32;
         }
         if failure || response_type == ResponseType::ServerError {
-            for (_, record_ttl) in &mut rr_ttls {
+            for (_, record_ttl) in &mut ttl_updates {
                 *record_ttl = ttl;
             }
         }
@@ -736,14 +744,10 @@ impl Cache {
             q.name == question.name && q.qtype == question.qtype && q.qclass == question.qclass
         });
         // RFC 1035 §7.4: Reject truncated responses that may contain incomplete RRsets.
-        // RFC 2181 §5.4.1: Cache only complete Responses with query-relevant Answer/Authority data.
-        let relevant =
-            response_records_relevant(question.name, question.qtype, question.qclass, &response);
         let eligible = !response.tc()
             && ttl > 0
             && (!incomplete || has_soa)
             && !no_data_without_soa
-            && relevant
             && !malformed_non_authoritative_rrset
             && (matches!(
                 response_type,
@@ -759,7 +763,11 @@ impl Cache {
         {
             metrics.drop_response();
         }
-        let cacheable = eligible && matches;
+        // RFC 2181 §5.4.1: Check relevance only after cheap cache-admission tests.
+        let eligible = eligible
+            && matches
+            && response_records_relevant(question.name, question.qtype, question.qclass, &response);
+        let cacheable = eligible;
         let disabled = if denial {
             &self.config.disable_denial
         } else {
@@ -769,10 +777,8 @@ impl Cache {
         let cacheable = cacheable
             && !has_explicit_wildcard(question.name)
             && !disabled.iter().any(|zone| contains(question.name, zone));
-        if !malformed_non_authoritative_rrset {
-            for (offset, record_ttl) in rr_ttls {
-                cx.response[offset..offset + 4].copy_from_slice(&record_ttl.to_be_bytes());
-            }
+        for (offset, record_ttl) in ttl_updates {
+            cx.response[offset..offset + 4].copy_from_slice(&record_ttl.to_be_bytes());
         }
         // RFC 1035 §7.4: retain complete responses for later matching queries.
         if cacheable && let Ok(response) = Message::parse(cx.response) {
@@ -847,63 +853,79 @@ fn is_soa_less_nodata(message: &Message<'_>, has_soa: bool, has_ns: bool) -> boo
     message.rcode() == Rcode::NOERROR && message.answer_count() == 0 && !has_soa && !has_ns
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct RrsetKey<'a> {
     name: NameRef<'a>,
     rtype: Type,
     class: Class,
+    covered_type: Option<Type>,
 }
 
+// RFC 4343 §3 / RFC 1035 §2.3.3: RRset owner names compare case-insensitively.
 impl<'a> RrsetKey<'a> {
     fn new(record: pharos_proto::Record<'a>) -> Self {
         RrsetKey {
             name: record.name,
             rtype: record.rtype,
             class: record.class,
+            // RFC 4034 §3.1.1: RRSIG RRsets are partitioned by Type Covered.
+            covered_type: if record.rtype == Type::RRSIG {
+                match record.data() {
+                    Ok(Rdata::Rrsig { type_covered, .. }) => Some(type_covered),
+                    _ => None,
+                }
+            } else {
+                None
+            },
         }
     }
 }
 
-impl PartialEq for RrsetKey<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.rtype == other.rtype && self.class == other.class
-    }
+struct RrsetMinimum<'a> {
+    key: RrsetKey<'a>,
+    minimum_ttl: u32,
+    mixed_ttl: bool,
 }
 
-impl Eq for RrsetKey<'_> {}
-
-impl Hash for RrsetKey<'_> {
-    // RFC 1035 §3.1: Hash owner names case-insensitively to match RRset identity.
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.rtype.0.hash(state);
-        self.class.0.hash(state);
-        for label in self.name.labels() {
-            state.write_u8(label.len() as u8);
-            for byte in label {
-                state.write_u8(byte.to_ascii_lowercase());
-            }
+// RFC 2181 §5.2: Scan common small Responses without allocating a hash table.
+fn rrset_minimum_ttls<'a>(message: &Message<'a>) -> Vec<RrsetMinimum<'a>> {
+    let mut minima: Vec<RrsetMinimum<'a>> = Vec::with_capacity(8);
+    for record in message.answers().chain(message.authorities()).chain(
+        message
+            .additionals()
+            .filter(|record| record.rtype != Type::OPT),
+    ) {
+        let key = RrsetKey::new(record);
+        if let Some(rrset) = minima.iter_mut().find(|rrset| rrset.key == key) {
+            rrset.mixed_ttl |= rrset.minimum_ttl != record.ttl;
+            rrset.minimum_ttl = rrset.minimum_ttl.min(record.ttl);
+        } else {
+            minima.push(RrsetMinimum {
+                key,
+                minimum_ttl: record.ttl,
+                mixed_ttl: false,
+            });
         }
-        state.write_u8(0);
-    }
-}
-
-fn rrset_minimum_ttls<'a>(message: &Message<'a>) -> HashMap<RrsetKey<'a>, u32> {
-    let mut minima = HashMap::new();
-    for record in message.answers().chain(message.authorities()) {
-        minima
-            .entry(RrsetKey::new(record))
-            .and_modify(|minimum: &mut u32| *minimum = (*minimum).min(record.ttl))
-            .or_insert(record.ttl);
     }
     minima
 }
 
-// RFC 2181 §5.2: Reject mixed-TTL RRsets from non-authoritative responses.
-fn has_mixed_rrset_ttl<'a>(message: &Message<'a>, minima: &HashMap<RrsetKey<'a>, u32>) -> bool {
-    message
-        .answers()
-        .chain(message.authorities())
-        .any(|record| minima.get(&RrsetKey::new(record)) != Some(&record.ttl))
+fn normalized_record_ttl(
+    record: pharos_proto::Record<'_>,
+    minima: &[RrsetMinimum<'_>],
+    denial: bool,
+    minimum: u32,
+    maximum: u32,
+    signature_remaining: u32,
+) -> u32 {
+    let rrset_minimum = minima
+        .iter()
+        .find(|rrset| rrset.key == RrsetKey::new(record))
+        .map_or(record.ttl, |rrset| rrset.minimum_ttl);
+    cap_ttl_at_signature(
+        normalized_rrset_ttl(record, rrset_minimum, denial, minimum, maximum),
+        signature_remaining,
+    )
 }
 
 fn normalized_rrset_ttl(
@@ -931,16 +953,13 @@ fn response_records_relevant(
     qclass: Class,
     response: &Message<'_>,
 ) -> bool {
-    let mut chain = vec![qname.to_name()];
+    let mut chain = vec![qname];
     if qtype != Type::CNAME {
         loop {
-            let Some(current_name) = chain.last() else {
+            let Some(&current) = chain.last() else {
                 return false;
             };
-            let Ok(current) = NameRef::parse(current_name.as_wire(), 0) else {
-                return false;
-            };
-            let mut target: Option<Name> = None;
+            let mut target: Option<NameRef<'_>> = None;
             for record in response
                 .answers()
                 .filter(|record| record.rtype == Type::CNAME && record.name == current)
@@ -951,7 +970,6 @@ fn response_records_relevant(
                 let Ok(Rdata::Cname(alias)) = record.data() else {
                     return false;
                 };
-                let alias = alias.to_name();
                 if target.as_ref().is_some_and(|existing| existing != &alias) {
                     return false;
                 }
@@ -966,33 +984,53 @@ fn response_records_relevant(
             chain.push(target);
         }
     }
+    let denial_zones = response
+        .authorities()
+        .filter(|record| matches!(record.rtype, Type::SOA | Type::NS))
+        .map(|record| record.name)
+        .filter(|zone| chain.iter().any(|name| contains_ref(*name, *zone)))
+        .collect::<Vec<_>>();
     for record in response.answers() {
         if qclass != Class::ANY && record.class != qclass {
             return false;
         }
-        let Some(index) = chain.iter().position(|name| {
-            NameRef::parse(name.as_wire(), 0).is_ok_and(|name| name == record.name)
-        }) else {
-            return false;
-        };
-        let has_target = index + 1 < chain.len();
+        // RFC 6672 §2: A DNAME owner may be an ancestor of the original QNAME.
+        let index = chain.iter().position(|name| *name == record.name);
+        let dname_ancestor = chain.iter().any(|name| contains_ref(*name, record.name));
         let relevant = match record.rtype {
-            Type::CNAME => has_target || (qtype == Type::CNAME && index == 0),
+            Type::DNAME => {
+                if qtype == Type::DNAME {
+                    record.name == qname
+                } else {
+                    dname_ancestor
+                }
+            }
+            Type::CNAME => index.is_some_and(|index| {
+                index + 1 < chain.len() || (qtype == Type::CNAME && index == 0)
+            }),
             Type::RRSIG => match record.data() {
                 Ok(Rdata::Rrsig { type_covered, .. }) => {
-                    (type_covered == Type::CNAME
-                        && (has_target || (qtype == Type::CNAME && index == 0)))
-                        || (qtype == Type::ANY
-                            || (type_covered == qtype
-                                && !has_target
-                                && response.rcode() != Rcode::NXDOMAIN))
+                    if type_covered == Type::DNAME {
+                        dname_ancestor || (qtype == Type::DNAME && record.name == qname)
+                    } else {
+                        index.is_some_and(|index| {
+                            let has_target = index + 1 < chain.len();
+                            (type_covered == Type::CNAME
+                                && (has_target || (qtype == Type::CNAME && index == 0)))
+                                || (qtype == Type::ANY
+                                    || (type_covered == qtype
+                                        && !has_target
+                                        && response.rcode() != Rcode::NXDOMAIN))
+                        })
+                    }
                 }
                 _ => false,
             },
-            rtype => {
+            rtype => index.is_some_and(|index| {
+                let has_target = index + 1 < chain.len();
                 qtype == Type::ANY
                     || (rtype == qtype && !has_target && response.rcode() != Rcode::NXDOMAIN)
-            }
+            }),
         };
         if !relevant {
             return false;
@@ -1002,9 +1040,21 @@ fn response_records_relevant(
         if qclass != Class::ANY && record.class != qclass {
             return false;
         }
-        let in_domain = chain.iter().any(|name| {
-            NameRef::parse(name.as_wire(), 0).is_ok_and(|name| contains_ref(name, record.name))
-        });
+        let nsec3 = record.rtype == Type::NSEC3
+            || (record.rtype == Type::RRSIG
+                && matches!(
+                    record.data(),
+                    Ok(Rdata::Rrsig {
+                        type_covered: Type::NSEC3,
+                        ..
+                    })
+                ));
+        // RFC 5452 §6: Keep NSEC3 proof owners inside the question's authority zone.
+        let in_zone = nsec3
+            && denial_zones
+                .iter()
+                .any(|zone| contains_ref(record.name, *zone));
+        let in_domain = chain.iter().any(|name| contains_ref(*name, record.name)) || in_zone;
         if !in_domain {
             return false;
         }
@@ -1069,14 +1119,14 @@ fn answers_question(message: &Message<'_>) -> bool {
             .any(|rr| rr.name == question.name && matches_class(rr.class));
     }
     // RFC 1034 §3.6.2: follow CNAME chains and detect loops.
-    let mut name = question.name.to_name();
+    let mut name = question.name;
     let mut visited = Vec::new();
     loop {
         if visited.contains(&name) {
             return false;
         }
-        visited.push(name.clone());
-        let mut target: Option<Name> = None;
+        visited.push(name);
+        let mut target: Option<NameRef<'_>> = None;
         for rr in message.answers() {
             if rr.rtype != Type::CNAME || rr.name != name || !matches_class(rr.class) {
                 continue;
@@ -1087,7 +1137,7 @@ fn answers_question(message: &Message<'_>) -> bool {
             if target.as_ref().is_some_and(|existing| alias != *existing) {
                 return false;
             }
-            target = Some(alias.to_name());
+            target = Some(alias);
         }
         if question.qtype == Type::CNAME {
             return target.is_some();
