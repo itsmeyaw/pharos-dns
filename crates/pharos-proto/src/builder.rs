@@ -184,7 +184,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
 
     /// Adds optional content atomically. `None` rolls back the whole write without TC.
     // RFC 2181 §9: Omit optional Additional RRsets whole when the Message is full.
-    pub fn optional<T, E>(
+    pub fn try_optional<T, E>(
         &mut self,
         write: impl FnOnce(&mut Self) -> Result<Option<T>, E>,
     ) -> Result<Option<T>, E> {

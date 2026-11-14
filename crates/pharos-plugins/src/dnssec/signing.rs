@@ -36,8 +36,8 @@ fn same_rrset(left: &Record<'_>, right: &Record<'_>) -> bool {
     left.name == right.name && left.rtype == right.rtype && left.class == right.class
 }
 
-fn same_signatures(left: &Record<'_>, right: &Record<'_>) -> bool {
-    // RFC 4035 §2.2: Group RRSIGs by owner, class, and covered type, not RR type.
+fn same_covered_signatures(left: &Record<'_>, right: &Record<'_>) -> bool {
+    // RFC 4035 §3.1.1: Keep each set of signatures for a covered RRset together.
     left.name == right.name
         && left.class == right.class
         && matches!(
@@ -244,11 +244,7 @@ impl Dnssec {
                     {
                         continue;
                     }
-                    let group: Vec<_> = records
-                        .iter()
-                        .copied()
-                        .filter(|member| same_rrset(member, rr))
-                        .collect();
+                    let group = records.iter().filter(|member| same_rrset(member, rr));
                     let signed = !self.keys.is_empty()
                         && !matches!(rr.rtype, Type::OPT | Type::TSIG)
                         && self.zone_for(rr.name).is_some()
@@ -259,8 +255,8 @@ impl Dnssec {
                     } else {
                         rr.ttl
                     };
-                    let added = builder.optional(|builder| {
-                        for member in &group {
+                    let added = builder.try_optional(|builder| {
+                        for member in group {
                             let data = member.data().map_err(|_| Error::InvalidQuery)?;
                             let member_ttl = if signed { ttl } else { member.ttl };
                             if !builder
@@ -292,17 +288,15 @@ impl Dnssec {
                     if rr.rtype != Type::RRSIG
                         || records[..i]
                             .iter()
-                            .any(|previous| same_signatures(previous, rr))
+                            .any(|previous| same_covered_signatures(previous, rr))
                     {
                         continue;
                     }
-                    let group: Vec<_> = records
+                    let group = records
                         .iter()
-                        .copied()
-                        .filter(|member| same_signatures(member, rr))
-                        .collect();
-                    let added = builder.optional(|builder| {
-                        for member in &group {
+                        .filter(|member| same_covered_signatures(member, rr));
+                    let added = builder.try_optional(|builder| {
+                        for member in group {
                             let data = member.data().map_err(|_| Error::InvalidQuery)?;
                             let Rdata::Rrsig { type_covered, .. } = data else {
                                 continue;
@@ -357,7 +351,7 @@ impl Dnssec {
                             .copied()
                             .filter(|member| same_rrset(member, rr))
                             .collect();
-                        let signed = builder.optional(|builder| {
+                        let signed = builder.try_optional(|builder| {
                             let (signed, omitted) = self.sign_set(
                                 builder,
                                 section,

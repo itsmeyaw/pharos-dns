@@ -18,7 +18,7 @@ fn optional_rrset_overflow_rolls_back_data_and_tc() {
         )
         .unwrap();
     let included = builder
-        .optional(|builder| {
+        .try_optional(|builder| {
             for octet in 0..40 {
                 if !builder.record(
                     Section::Additional,
