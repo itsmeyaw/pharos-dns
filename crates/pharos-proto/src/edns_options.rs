@@ -205,6 +205,10 @@ impl EdnsOption<'_> {
                 extra_text,
             } => {
                 // RFC 8914 §2: OPTION-LENGTH includes INFO-CODE and EXTRA-TEXT.
+                // RFC 8914 §2: EXTRA-TEXT is UTF-8.
+                std::str::from_utf8(extra_text).map_err(|_| EdnsOptionError::InvalidOption {
+                    code: self.code(),
+                })?;
                 let len = extra_text
                     .len()
                     .checked_add(2)
@@ -263,6 +267,8 @@ fn parse_option(code: u16, data: &[u8]) -> Result<EdnsOption<'_>, EdnsOptionErro
             if data.len() < 2 {
                 return Err(invalid());
             }
+            // RFC 8914 §2: EXTRA-TEXT is UTF-8.
+            std::str::from_utf8(&data[2..]).map_err(|_| invalid())?;
             // RFC 8914 §2: INFO-CODE keeps any 16-bit registry index, known or not.
             EdnsOption::ExtendedError {
                 info_code: u16::from_be_bytes([data[0], data[1]]),
@@ -284,14 +290,13 @@ fn parse_option(code: u16, data: &[u8]) -> Result<EdnsOption<'_>, EdnsOptionErro
             let source_prefix = data[2];
             let scope_prefix = data[3];
             let bits = match family {
-                0 => 0,
                 1 => 32,
                 2 => 128,
                 _ => return Err(invalid()),
             };
             // RFC 7871 §6: the ECS address length and trailing padding must match its prefix.
             if source_prefix > bits
-                || (family != 0 && scope_prefix > bits)
+                || scope_prefix > bits
                 || data.len() != 4 + usize::from(source_prefix).div_ceil(8)
                 || (!source_prefix.is_multiple_of(8)
                     && data[data.len() - 1] & (0xff >> (source_prefix % 8)) != 0)
