@@ -193,20 +193,25 @@ pub fn parse_pkcs8(public: &str, private: &[u8]) -> Result<KeyPair, KeyError> {
     refuse_signing_algorithm(public.algorithm)?;
     // RFC 7468 §10: a PKCS#8 PEM uses the PRIVATE KEY textual label.
     let decoded;
-    // RFC 7468 §3: PEM parsing accepts standard encapsulation and Base64 lines of any length.
-    let private = if private.starts_with(b"-----BEGIN") {
-        // RFC 7468 §2: Malformed textual encodings return errors without panicking.
-        let text = std::str::from_utf8(private)
-            .map_err(|_| invalid("invalid PEM"))?
-            .trim();
+    // RFC 7468 §2: Allow text outside boundaries and ignore non-Base64 body characters.
+    let text = std::str::from_utf8(private).ok();
+    let pem = text.and_then(|text| {
+        text.find("-----BEGIN PRIVATE KEY-----")
+            .map(|start| &text[start..])
+    });
+    let private = if let Some(text) = pem {
         let body = text
-            // RFC 7468 §2: PKCS#8 PEM boundaries use exact BEGIN and END delimiters.
             .strip_prefix("-----BEGIN PRIVATE KEY-----")
-            .and_then(|s| s.strip_suffix("-----END PRIVATE KEY-----"))
+            .and_then(|text| text.split_once("-----END PRIVATE KEY-----"))
+            .map(|(body, _)| body)
             .ok_or_else(|| invalid("invalid PKCS#8 PEM"))?;
-        // RFC 4648 §§3.3,4 and RFC 7468 §2: Strip whitespace; reject invalid Base64 input.
+        let base64 = body
+            .bytes()
+            .filter(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'+' | b'/' | b'='))
+            .map(char::from)
+            .collect::<String>();
         decoded = STANDARD
-            .decode(body.split_whitespace().collect::<String>())
+            .decode(base64)
             .map_err(|_| invalid("invalid PEM base64"))?;
         decoded.as_slice()
     } else {

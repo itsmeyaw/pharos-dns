@@ -121,8 +121,9 @@ fn loads_generated_p384_bind_pkcs8_and_pem() {
         "example. IN DNSKEY 257 3 14 {}",
         STANDARD.encode(&key.public_key().as_ref()[1..])
     );
+    // RFC 7468 §2: Parsers tolerate preamble/trailing text and non-base64 body characters.
     let pem = format!(
-        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+        "Key follows:\n-----BEGIN PRIVATE KEY-----\n{}!\n-----END PRIVATE KEY-----\nTrailing note\n",
         STANDARD.encode(encoded.as_ref())
     );
     assert!(parse_pkcs8(&public, pem.as_bytes()).is_ok());
