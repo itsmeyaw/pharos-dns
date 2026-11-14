@@ -408,7 +408,7 @@ impl Next for LoopBackend<'_> {
 
 // Derived from CoreDNS v1.15.0 plugin/rewrite/cname_target_test.go.
 #[tokio::test]
-async fn coredns_cname_loop_stops_after_nine_lookups() {
+async fn rewrite_cname_depth_limit_returns_server_error() {
     let config = ".:53 {\n rewrite cname loop.example. target.example.\n}";
     let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
         .unwrap()
@@ -453,7 +453,7 @@ async fn coredns_cname_loop_stops_after_nine_lookups() {
         pharos_server::Action::Respond
     );
     assert_eq!(visits.load(std::sync::atomic::Ordering::Relaxed), 10);
-    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::SERVFAIL);
 }
 
 #[tokio::test]
@@ -509,14 +509,21 @@ impl Next for AliasBackend {
         let q = cx.query.questions().next().unwrap();
         let original = q.name.to_string() == "alias.example.";
         let target: Name = "old.example.".parse().unwrap();
-        let mut b = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        let nxdomain = !original && self.0 == "NXDOMAIN";
+        let mut b = MessageBuilder::new(
+            cx.response,
+            512,
+            cx.query.id(),
+            if nxdomain { 0x8183 } else { 0x8180 },
+        )
+        .unwrap();
         b.question(q.name, q.qtype, q.qclass).unwrap();
         if original {
             b.record_with(Section::Answer, q.name, Type::CNAME, Class::IN, 30, |w| {
                 w.write_name(NameRef::parse(target.as_wire(), 0).unwrap())
             })
             .unwrap();
-        } else {
+        } else if !nxdomain {
             assert_eq!(q.name.to_string(), self.0);
             b.record(
                 Section::Answer,
@@ -531,6 +538,51 @@ impl Next for AliasBackend {
         let _ = b.finish();
         Outcome::Response
     }
+}
+
+#[tokio::test]
+async fn rewrite_cname_uses_terminal_lookup_rcode() {
+    let config = ".:53 {\n rewrite cname old.example. new.example.\n}";
+    let mut chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(AliasChain(chain.rewrite.take().unwrap(), "NXDOMAIN")),
+        vec![],
+    );
+    let server = std::sync::Arc::new(pharos_server::Server::new(router, key));
+    let name: Name = "alias.example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        pharos_server::Handler::handle_shared(
+            &server,
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response,
+        )
+        .await,
+        pharos_server::Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NXDOMAIN);
 }
 
 // Derived from CoreDNS v1.15.0 plugin/rewrite/cname_target_test.go.
@@ -626,6 +678,22 @@ struct TtlFixture {
     ttl: u32,
     count: usize,
     kind: Type,
+}
+
+struct MixedTtl;
+impl Next for MixedTtl {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        for (ttl, address) in [(30, [192, 0, 2, 1]), (60, [192, 0, 2, 2])] {
+            builder
+                .record(Section::Answer, q.name, Type::A, Class::IN, ttl, &address)
+                .unwrap();
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
 }
 
 struct ReverterFixture {
@@ -894,6 +962,52 @@ impl Next for TtlFixture {
         let _ = builder.finish();
         Outcome::Response
     }
+}
+
+#[tokio::test]
+async fn ttl_rewrite_keeps_a_rrset_at_its_lowest_ttl() {
+    let config = ".:53 {\n rewrite ttl example.com. 10-40\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.com.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain.rewrite.as_ref().unwrap().serve(&mut cx, MixedTtl).await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(cx.response)
+            .unwrap()
+            .answers()
+            .map(|record| record.ttl)
+            .collect::<Vec<_>>(),
+        [30, 30]
+    );
 }
 
 // Derived from CoreDNS v1.15.0 plugin/rewrite/ttl_test.go TestTtlRewrite.
@@ -1503,6 +1617,14 @@ impl Next for InspectOptionBytes {
     }
 }
 
+struct InspectNoOpt;
+impl Next for InspectNoOpt {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        assert!(cx.query.opt().is_none());
+        Outcome::Drop
+    }
+}
+
 #[tokio::test]
 async fn coredns_edns_local_append_replace_and_unset() {
     let initial = b"\xff\xee\0\x01a";
@@ -1796,7 +1918,7 @@ async fn coredns_edns_nsid_and_subnet_rewrite() {
         ),
         (
             "rewrite edns0 subnet set 25 57",
-            &b"\0\x08\0\x08\0\x01\x19\0\xc0\0\x02\x80"[..],
+            &b"\0\x08\0\x07\0\x01\x18\0\xc0\0\x02"[..],
         ),
     ] {
         let config = format!(".:53 {{\n {rule}\n}}");
@@ -1898,7 +2020,7 @@ async fn coredns_edns_subnet_prefix_rows() {
         (
             "32 56",
             "10.240.0.1:40212",
-            &b"\0\x08\0\x08\0\x01\x20\0\x0a\xf0\0\x01"[..],
+            &b"\0\x08\0\x07\0\x01\x18\0\x0a\xf0\0"[..],
         ),
         ("0 56", "10.240.0.1:40212", &b"\0\x08\0\x04\0\x01\0\0"[..]),
         (
@@ -1909,7 +2031,7 @@ async fn coredns_edns_subnet_prefix_rows() {
         (
             "24 128",
             "[fe80::42:ff:feca:4c65]:40212",
-            &b"\0\x08\0\x14\0\x02\x80\0\xfe\x80\0\0\0\0\0\0\0\x42\0\xff\xfe\xca\x4c\x65"[..],
+            &b"\0\x08\0\x0b\0\x02\x38\0\xfe\x80\0\0\0\0\0"[..],
         ),
         (
             "24 0",
@@ -1958,6 +2080,113 @@ async fn coredns_edns_subnet_prefix_rows() {
             "{rule} {client}"
         );
     }
+}
+
+#[tokio::test]
+async fn subnet_rewrite_respects_incoming_ecs_source_prefix() {
+    for (input, expected) in [
+        (
+            &b"\0\x08\0\x05\0\x01\x08\0\xc0"[..],
+            &b"\0\x08\0\x05\0\x01\x08\0\xc0"[..],
+        ),
+        (
+            &b"\0\x08\0\x04\0\x01\0\0"[..],
+            &b"\0\x08\0\x04\0\x01\0\0"[..],
+        ),
+    ] {
+        let config = ".:53 {\n rewrite edns0 subnet set 24 56\n}";
+        let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+            .unwrap()
+            .remove(0)
+            .config;
+        let name: Name = "example.com.".parse().unwrap();
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Additional,
+                NameRef::parse(root.as_wire(), 0).unwrap(),
+                Type::OPT,
+                Class(1232),
+                0,
+                input,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "192.0.2.129:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .rewrite
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, InspectOptionBytes(expected))
+                .await,
+            Outcome::Drop
+        );
+    }
+}
+
+#[tokio::test]
+async fn subnet_rewrite_does_not_add_ecs_to_non_in_questions() {
+    let config = ".:53 {\n rewrite edns0 subnet set 24 56\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.com.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::CH,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "192.0.2.129:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, InspectNoOpt)
+            .await,
+        Outcome::Drop
+    );
 }
 
 struct InspectMaybeOptions(Option<&'static [u8]>);
@@ -4698,7 +4927,7 @@ async fn coredns_exact_name_rewrites_query_and_auto_reverts_response() {
 }
 
 #[tokio::test]
-async fn coredns_auto_rewrite_keeps_question_case_but_lowercases_answer() {
+async fn rewrite_preserves_question_case_in_automatically_rewritten_answers() {
     let config = ".:53 {\n rewrite name foo.example. internal.example.\n}";
     let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
         .unwrap()
@@ -4739,7 +4968,7 @@ async fn coredns_auto_rewrite_keeps_question_case_but_lowercases_answer() {
     );
     assert_eq!(
         response.answers().next().unwrap().name.to_string(),
-        "foo.example."
+        "FoO.Example."
     );
 }
 
