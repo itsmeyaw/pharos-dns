@@ -56,7 +56,7 @@ fn text(data: &[u8]) -> Result<Vec<u8>, &'static str> {
 pub(super) fn parse(origin: &Name, records: &[ZoneRecord]) -> Result<Catalog, &'static str> {
     let origin_labels = labels(origin);
     let mut version = Vec::new();
-    let mut soa = false;
+    let mut soa = 0;
     let mut ns = false;
     let mut ptr: HashMap<Vec<u8>, Vec<Name>> = HashMap::new();
     let mut coo: HashMap<Vec<u8>, Vec<Name>> = HashMap::new();
@@ -69,7 +69,7 @@ pub(super) fn parse(origin: &Name, records: &[ZoneRecord]) -> Result<Catalog, &'
         }
         let owner = labels(&record.owner);
         if owner == origin_labels {
-            soa |= record.rtype == Type::SOA;
+            soa += usize::from(record.rtype == Type::SOA);
             ns |= record.rtype == Type::NS;
         }
         if !owner.ends_with(&origin_labels) {
@@ -105,9 +105,13 @@ pub(super) fn parse(origin: &Name, records: &[ZoneRecord]) -> Result<Catalog, &'
             }
         }
     }
-    // RFC 9432 §§4, 4.2.1: A catalog requires apex SOA and NS records and version "2".
-    if !soa || !ns || version.len() != 1 || version[0] != b"2" {
+    // RFC 9432 §4: A catalog has one apex SOA, an apex NS RRset, and version "2".
+    if soa != 1 || !ns || version.len() != 1 || version[0] != b"2" {
         return Err("invalid catalog version or apex");
+    }
+    // RFC 9432 §§4.2, 4.3.1: A coo property is invalid unless it has exactly one PTR.
+    if coo.values().any(|owners| owners.len() > 1) {
+        return Err("duplicate catalog coo");
     }
     let mut seen = HashSet::new();
     let mut members = Vec::new();
@@ -117,9 +121,6 @@ pub(super) fn parse(origin: &Name, records: &[ZoneRecord]) -> Result<Catalog, &'
             return Err("duplicate catalog member");
         }
         let owners = coo.remove(&id).unwrap_or_default();
-        if owners.len() > 1 {
-            return Err("duplicate catalog coo");
-        }
         let mut groups = groups.remove(&id).unwrap_or_default();
         groups.sort();
         members.push(Member {
@@ -146,10 +147,9 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
     let mut admitted = HashSet::new();
     for member in &catalog.members {
         if source.config.catalog.as_ref().is_some_and(|allowed| {
-            !allowed.is_empty()
-                && !allowed
-                    .iter()
-                    .any(|suffix| member.zone.is_subdomain_of(suffix))
+            !allowed
+                .iter()
+                .any(|suffix| member.zone.is_subdomain_of(suffix))
         }) {
             continue;
         }
@@ -162,6 +162,14 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
         // RFC 9432 §5.2: Ignore member-name clashes unless old coo signals migration.
         if let Some(existing) = existing {
             let Some((owner, id)) = state.dynamic.get(&member.zone) else {
+                pharos_server::logging::log(
+                    "ERROR",
+                    "secondary",
+                    &format!(
+                        "Catalog member {} clashes with an existing Zone",
+                        member.zone
+                    ),
+                );
                 continue;
             };
             if owner == origin && id == &member.id {
@@ -235,4 +243,14 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
         }
     }
     shared.zones.store(Arc::new(zones));
+}
+
+pub(super) fn invalidate(shared: &Shared, source: &SecondaryZone) {
+    // RFC 9432 §5.1: A broken or expired catalog cannot authorize member changes.
+    shared
+        .catalogs
+        .lock()
+        .unwrap()
+        .catalogs
+        .remove(&source.config.apex);
 }

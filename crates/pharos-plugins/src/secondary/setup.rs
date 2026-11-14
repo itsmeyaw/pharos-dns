@@ -45,6 +45,10 @@ pub(super) fn parse(
                     }
                 }
                 "catalog" => {
+                    // RFC 9432 §7: Require an admissible suffix scope for catalog members.
+                    if args.is_empty() {
+                        return Err(cursor.arg_err());
+                    }
                     let names = args
                         .iter()
                         .map(|arg| {
@@ -57,9 +61,7 @@ pub(super) fn parse(
                         })
                         .collect::<Result<Vec<Name>, Error>>()?;
                     match &mut catalog {
-                        Some(existing) if existing.is_empty() || names.is_empty() => {
-                            existing.clear()
-                        }
+                        Some(existing) if existing.is_empty() => *existing = names,
                         Some(existing) => {
                             for name in names {
                                 if !existing.contains(&name) {

@@ -39,7 +39,7 @@ fn coredns_secondary_setup_cases() {
         ),
         (
             "secondary catalog.example {\n transfer from 127.0.0.1\n catalog example.org\n catalog\n}",
-            true,
+            false,
         ),
     ] {
         let corefile = format!("example.org:53 {{\n {directive}\n}}");
