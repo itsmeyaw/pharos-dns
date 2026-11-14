@@ -333,7 +333,7 @@ async fn discovered_zone_metrics_include_all_server_block_keys() {
 
 #[cfg(feature = "plugin-transfer")]
 #[tokio::test]
-async fn sends_notify_on_startup_and_rescan() {
+async fn sends_notify_on_startup_but_not_unchanged_rescan() {
     use pharos_plugins::servers;
     use pharos_proto::{Message, Opcode};
     use pharos_server::Phase;
@@ -347,24 +347,30 @@ async fn sends_notify_on_startup_and_rescan() {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
     let receiver = tokio::spawn(async move {
-        for _ in 0..2 {
-            let mut wire = [0; 512];
-            let (len, peer) = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
+        let mut wire = [0; 512];
+        let (len, peer) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            socket.recv_from(&mut wire),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let notify = Message::parse(&wire[..len]).unwrap();
+        assert_eq!(notify.opcode(), Opcode::NOTIFY);
+        assert_eq!(
+            notify.questions().next().unwrap().name.to_string(),
+            "example.org."
+        );
+        wire[2] |= 0x80;
+        socket.send_to(&wire[..len], peer).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
                 socket.recv_from(&mut wire),
             )
             .await
-            .unwrap()
-            .unwrap();
-            let notify = Message::parse(&wire[..len]).unwrap();
-            assert_eq!(notify.opcode(), Opcode::NOTIFY);
-            assert_eq!(
-                notify.questions().next().unwrap().name.to_string(),
-                "example.org."
-            );
-            wire[2] |= 0x80;
-            socket.send_to(&wire[..len], peer).await.unwrap();
-        }
+            .is_err()
+        );
     });
     let text = format!(
         "example.org:0 {{\n auto {{\n directory {}\n reload 20ms\n }}\n transfer {{\n to {address}\n }}\n}}",

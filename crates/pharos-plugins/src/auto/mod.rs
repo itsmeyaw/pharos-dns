@@ -116,9 +116,18 @@ impl Auto {
                                 _ = shutdown.changed() => break,
                             }
                             let worker = Arc::clone(&scan);
-                            let added = tokio::task::spawn_blocking(move || worker.scan())
-                                .await
-                                .unwrap_or_default();
+                            let added =
+                                match tokio::task::spawn_blocking(move || worker.scan()).await {
+                                    Ok(added) => added,
+                                    Err(error) => {
+                                        pharos_server::logging::log(
+                                            "ERROR",
+                                            "auto",
+                                            &format!("Zone scan failed: {error}"),
+                                        );
+                                        Vec::new()
+                                    }
+                                };
                             if *shutdown.borrow() {
                                 break;
                             }
