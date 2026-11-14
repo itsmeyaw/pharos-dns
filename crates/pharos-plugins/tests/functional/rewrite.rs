@@ -4179,7 +4179,8 @@ async fn coredns_response_value_fixture_rows() {
                 preference: 10,
                 flags: b"S",
                 services: b"SIP+D2U",
-                regexp: b"!^.*$!sip:customer-service@example.com!",
+                // RFC 3403 §4.1: A nonempty regexp requires a root replacement.
+                regexp: b"",
                 replacement: borrow(&naptr),
             },
             borrow(&ns),
