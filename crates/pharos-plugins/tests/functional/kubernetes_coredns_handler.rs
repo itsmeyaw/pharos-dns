@@ -508,6 +508,7 @@ async fn run_group_on_stack_with_fixtures(
         use pharos_plugins::transfer::{TransferRequest, Transferer};
 
         // RFC 5936 §2.2 and Kubernetes DNS spec 1.1.0 §2.1: AXFR includes tolerated endpoints.
+        let expected_address = address.parse::<IpAddr>().unwrap();
         let zone: Name = "cluster.local.".parse().unwrap();
         let mut stream = transferer
             .transfer(TransferRequest {
@@ -525,8 +526,13 @@ async fn run_group_on_stack_with_fixtures(
         let mut found = false;
         while stream.next(&mut wire).unwrap() {
             for record in Message::parse(&wire).unwrap().answers() {
+                let matches_address = match (record.data().unwrap(), expected_address) {
+                    (Rdata::A(ip), IpAddr::V4(expected)) => ip == expected,
+                    (Rdata::Aaaa(ip), IpAddr::V6(expected)) => ip == expected,
+                    _ => false,
+                };
                 if record.name.to_string() == "unready.svc-unready.testns.svc.cluster.local."
-                    && matches!(record.data().unwrap(), Rdata::A(ip) if ip.to_string() == address)
+                    && matches_address
                 {
                     found = true;
                 }
@@ -930,7 +936,7 @@ async fn tolerate_unready_annotation_covers_a_ptr_and_ns_queries() {
     .await;
 }
 
-// RFC 1035 §3.3.11: the NS test needs an address for its authoritative server target.
+// RFC 1035 §3.3.1 and RFC 3596 §2.1: the local NS target needs an address RR.
 fn local_ip() -> IpAddr {
     let addresses: Vec<_> = nix::ifaddrs::getifaddrs()
         .unwrap()

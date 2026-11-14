@@ -1051,7 +1051,7 @@ mod tests {
                 }
             }
         }
-        // RFC 2782 §The format of the SRV RR: include the tolerated endpoint's named port.
+        // RFC 2782 §3: include the tolerated endpoint's named SRV port.
         assert_eq!(
             srv,
             [(
