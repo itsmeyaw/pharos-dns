@@ -335,9 +335,14 @@ fn rebuild(cx: &mut Context<'_, '_>, response: &Message<'_>) -> Result<(), Serve
     b.question(question.name, question.qtype, question.qclass)
         .map_err(ServerError::Build)?;
     // RFC 1034 §4.3.2: Return a CNAME before records for its canonical name.
-    if let Some(first) = response
+    // RFC 2181 §10.1: An existing CNAME owns its owner name exclusively.
+    let has_question_cname = response
         .answers()
-        .find(|rr| different_name(rr.name, question.name))
+        .any(|rr| rr.rtype == Type::CNAME && !different_name(rr.name, question.name));
+    if !has_question_cname
+        && let Some(first) = response
+            .answers()
+            .find(|rr| different_name(rr.name, question.name))
     {
         // RFC 1035 §3.3.1: CNAME RDATA names the canonical name for the alias.
         b.record_with(
