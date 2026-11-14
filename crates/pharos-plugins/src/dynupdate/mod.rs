@@ -297,9 +297,12 @@ fn expand_record(
 }
 
 #[cfg(feature = "plugin-dynupdate")]
+const QR: u16 = 1 << 15;
+
+#[cfg(feature = "plugin-dynupdate")]
 fn reply(cx: &mut Context<'_, '_>, code: Rcode) -> Outcome {
     // RFC 2136 §§2.2 and 3.8: copy ID/opcode, set QR, and omit all request sections.
-    let flags = 0x8000 | (cx.query.flags() & 0x7800) | code.0;
+    let flags = QR | (cx.query.flags() & 0x7800) | code.0;
     let Ok(builder) = MessageBuilder::new(
         cx.response,
         cx.max_response_size.max(512),

@@ -1,4 +1,3 @@
-use crate::zone::update::WKS_TYPE;
 use pharos_corefile::{Cursor, Error, normalize_domain};
 use pharos_proto::{Name, Type};
 use std::{
@@ -41,6 +40,7 @@ impl Config {
 }
 
 // RFC 3007 §3.1.1: Dynamic UPDATE must not create, modify, or delete NXT records.
+// RFC 7208 §14.1: SPF rejection is UPDATE-only; seed Zones may retain legacy type 99.
 pub(super) fn unsupported(kind: Type) -> bool {
     matches!(
         kind,
@@ -59,7 +59,6 @@ pub(super) fn unsupported(kind: Type) -> bool {
             | Type::ZONEMD
             | Type::TA
             | Type::DLV
-            | Type::SPF // RFC 7208 §14.1: type 99 is obsolete for SPF data.
     )
 }
 
@@ -177,8 +176,11 @@ fn fully_qualified(value: &str) -> String {
 }
 
 fn policy_type(raw: &str) -> Option<Type> {
+    let uppercase = raw.to_ascii_uppercase();
+    // RFC 3597 §3: `TYPEnnn` explicitly requests opaque RDATA handling.
+    let opaque_type = uppercase.starts_with("TYPE");
     let kind = Type::from_mnemonic(raw).or_else(|| {
-        raw.to_ascii_uppercase()
+        uppercase
             .strip_prefix("TYPE")?
             .parse::<u16>()
             .ok()
@@ -197,9 +199,8 @@ fn policy_type(raw: &str) -> Option<Type> {
                 | Type::TKEY
                 | Type::TSIG
         )
-        || (!has_rdata_parser(kind) && kind != WKS_TYPE)
-        // RFC 1035 §3.2.2: WKS is assigned RR type 11.
-        || (kind.to_string().starts_with("TYPE") && kind != WKS_TYPE)
+        || (!has_rdata_parser(kind) && !opaque_type)
+        || kind == Type::SPF // RFC 7208 §14.1: reject obsolete SPF type in UPDATE policy.
         || kind == Type::RESERVED
     {
         return None;
@@ -418,11 +419,22 @@ mod tests {
     }
 
     #[test]
+    fn allows_opaque_rfc3597_policy_types() {
+        let parsed = config(
+            "dynupdate {\nfile seed.zone\nallow key.example.org. * TYPE65280\n}",
+            &["example.org"],
+        )
+        .unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let owner: Name = "host.example.org.".parse().unwrap();
+        assert!(parsed.allows(&key, &owner, Type(65280)));
+    }
+
+    #[test]
     fn rejects_coredns_unsafe_setup_cases() {
         for body in [
             "allow key.example.org. * A",
             "file seed.zone",
-            "file seed.zone\nallow key.example.org. * TYPE65280",
             "file seed.zone\nallow key.example.org. * ATMA",
             "file seed.zone\nallow key.example.org. * UNSPEC",
             "file seed.zone\nallow key.example.org. * * TXT",

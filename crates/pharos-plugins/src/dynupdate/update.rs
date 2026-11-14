@@ -125,9 +125,10 @@ pub(super) fn validate_updates(zone: &Zone, records: &[ExpandedRecord]) -> Rcode
                     }
                 }
             }
+            // RFC 2136 §3.4.1.2: ANY-class deletion requires empty received RDATA.
             Class::ANY => {
                 if record.ttl != 0
-                    || !record.rdata.is_empty()
+                    || expanded.rdata_len != 0
                     || query_metatype(record.rtype) && record.rtype != Type::ANY
                 {
                     return Rcode::FORMERR;
@@ -148,6 +149,10 @@ pub(super) fn validate_updates(zone: &Zone, records: &[ExpandedRecord]) -> Rcode
         if super::setup::unsupported(record.rtype) {
             return Rcode::NOTIMP;
         }
+        // RFC 7208 §14.1: reject type 99 in UPDATE while retaining seed-zone compatibility.
+        if record.rtype == Type::SPF {
+            return Rcode::NOTIMP;
+        }
     }
     Rcode::NOERROR
 }
@@ -164,12 +169,10 @@ pub(super) fn prerequisites(zone: &Zone, records: &[ExpandedRecord]) -> Rcode {
         if !record.owner.is_subdomain_of(zone.apex()) {
             return Rcode::NOTZONE;
         }
-        // RFC 2136 §3.2.2: class ANY and NONE prerequisites need empty RDATA and a known type.
-        // RFC 2136 §§3.2.1–3.2.5: prerequisite results follow class, type, and Zone state.
         match record.class {
-            // RFC 2136 §§2.4.1–2.4.5: ANY and NONE test existence with empty RDATA.
+            // RFC 2136 §§3.2.1–3.2.2: ANY and NONE prerequisites require empty RDATA.
             Class::ANY | Class::NONE => {
-                if !record.rdata.is_empty()
+                if expanded.rdata_len != 0
                     || !known(record.rtype)
                     || (query_metatype(record.rtype) && record.rtype != Type::ANY)
                 {
@@ -352,6 +355,31 @@ mod tests {
     }
 
     #[test]
+    fn validates_received_rdlength_for_any_and_none_fields() {
+        let zone = zone();
+        for class in [Class::ANY, Class::NONE] {
+            let record = rr("www.example.org.", Type::A, class, &[]);
+            let expanded = ExpandedRecord {
+                record,
+                rdata_len: 1,
+            };
+            assert_eq!(prerequisites(&zone, &[expanded]), Rcode::FORMERR);
+        }
+
+        let record = rr("www.example.org.", Type::A, Class::ANY, &[]);
+        assert_eq!(
+            validate_updates(
+                &zone,
+                &[ExpandedRecord {
+                    record,
+                    rdata_len: 1,
+                }],
+            ),
+            Rcode::FORMERR
+        );
+    }
+
+    #[test]
     fn coredns_update_prescan_cases() {
         let zone = zone();
         let mut bad_ttl = rr("www.example.org.", Type::A, Class::ANY, &[]);
@@ -442,7 +470,6 @@ mod tests {
             Type::ZONEMD,
             Type::TA,
             Type::DLV,
-            Type::SPF,
         ] {
             let record = rr("record.example.org.", kind, Class::IN, &[]);
             assert_eq!(
@@ -460,6 +487,26 @@ mod tests {
     }
 
     #[test]
+    fn keeps_spf_seed_data_but_rejects_spf_updates() {
+        let original = zone();
+        let spf = rr("record.example.org.", Type::SPF, Class::IN, &[1, b'x']);
+        let mut records = original.records().to_vec();
+        records.push(spf.clone());
+
+        let seeded = build_zone(original.apex().clone(), records, 100, 10000).unwrap();
+        assert!(
+            seeded
+                .records()
+                .iter()
+                .any(|record| record.rtype == Type::SPF)
+        );
+        assert_eq!(
+            validate_updates(&original, &[expanded(&spf)]),
+            Rcode::NOTIMP
+        );
+    }
+
+    #[test]
     fn zone_mutator_supports_every_coredns_policy_type() {
         let original = zone();
         let mut tested = 0;
@@ -468,6 +515,7 @@ mod tests {
             if !super::known(kind)
                 || super::query_metatype(kind)
                 || super::super::setup::unsupported(kind)
+                || kind == Type::SPF
             {
                 continue;
             }
@@ -581,6 +629,97 @@ mod tests {
             .collect();
         assert_eq!(dnames.len(), 1);
         assert_eq!(dnames[0].rdata, second.rdata);
+    }
+
+    #[test]
+    fn ignores_cname_added_at_existing_dname_owner() {
+        let original = zone();
+        let mut dname = rr(
+            "alias.example.org.",
+            Type::DNAME,
+            Class::IN,
+            "target.example.org.".parse::<Name>().unwrap().as_wire(),
+        );
+        dname.ttl = 60;
+        let (with_dname, changed) = original.apply_updates(&[dname]).unwrap();
+        assert!(changed);
+
+        let cname = rr(
+            "alias.example.org.",
+            Type::CNAME,
+            Class::IN,
+            "other.example.org.".parse::<Name>().unwrap().as_wire(),
+        );
+        let (unchanged, changed) = with_dname.apply_updates(&[cname]).unwrap();
+
+        assert!(!changed);
+        assert_eq!(unchanged.serial(), Some(11));
+        assert_eq!(
+            unchanged
+                .records()
+                .iter()
+                .filter(|record| record.owner.to_string() == "alias.example.org."
+                    && record.rtype == Type::DNAME)
+                .count(),
+            1
+        );
+        assert!(
+            !unchanged
+                .records()
+                .iter()
+                .any(|record| record.owner.to_string() == "alias.example.org."
+                    && record.rtype == Type::CNAME)
+        );
+    }
+
+    #[test]
+    fn updates_dname_ttl_without_changing_target() {
+        let original = zone();
+        let mut first = rr(
+            "alias.example.org.",
+            Type::DNAME,
+            Class::IN,
+            "target.example.org.".parse::<Name>().unwrap().as_wire(),
+        );
+        first.ttl = 60;
+        let (with_dname, _) = original.apply_updates(&[first.clone()]).unwrap();
+        first.ttl = 120;
+
+        let (updated, changed) = with_dname.apply_updates(&[first]).unwrap();
+
+        assert!(changed);
+        assert_eq!(updated.serial(), Some(12));
+        let dnames: Vec<_> = updated
+            .records()
+            .iter()
+            .filter(|record| record.rtype == Type::DNAME)
+            .collect();
+        assert_eq!(dnames.len(), 1);
+        assert_eq!(dnames[0].ttl, 120);
+    }
+
+    #[test]
+    fn compressed_duplicate_ns_add_does_not_duplicate_rr() {
+        let original = zone();
+        let ns = original
+            .records()
+            .iter()
+            .find(|record| record.owner == *original.apex() && record.rtype == Type::NS)
+            .unwrap();
+
+        let (unchanged, changed) = original
+            .apply_updates_with_rdata_lengths(std::iter::once((ns, 2)))
+            .unwrap();
+
+        assert!(!changed);
+        assert_eq!(
+            unchanged
+                .records()
+                .iter()
+                .filter(|record| record.owner == *original.apex() && record.rtype == Type::NS)
+                .count(),
+            1
+        );
     }
 
     #[test]

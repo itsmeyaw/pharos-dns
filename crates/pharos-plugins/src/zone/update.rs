@@ -178,11 +178,17 @@ impl Zone {
                     let mut existing = records
                         .iter()
                         .filter(|rr| rr.owner == update.owner && rr.rtype == Type::DNAME);
-                    if existing.next().is_some_and(|rr| {
-                        same_record_with_rdata_lengths(rr, rr.rdata.len(), update, update_rdata_len)
+                    let unchanged = existing.next().is_some_and(|rr| {
+                        existing.next().is_none()
+                            && same_record_with_rdata_lengths(
+                                rr,
+                                rr.rdata.len(),
+                                update,
+                                update_rdata_len,
+                            )
                             && rr.ttl == update.ttl
-                    }) && existing.next().is_none()
-                    {
+                    });
+                    if unchanged {
                         continue;
                     }
                     records.retain(|rr| !(rr.owner == update.owner && rr.rtype == Type::DNAME));
@@ -220,9 +226,8 @@ impl Zone {
                     {
                         continue;
                     }
-                    if let Some(rr) = records.iter_mut().find(|rr| {
-                        same_record_with_rdata_lengths(rr, rr.rdata.len(), update, update_rdata_len)
-                    }) {
+                    // RFC 2136 §3.4.2.2: compare expanded RDATA to avoid compressed duplicate additions.
+                    if let Some(rr) = records.iter_mut().find(|rr| same_record(rr, update)) {
                         if rr.ttl != update.ttl {
                             *rr = update.clone();
                             changed = true;
