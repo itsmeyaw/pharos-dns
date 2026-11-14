@@ -19,6 +19,10 @@ macro_rules! dns_code {
 
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                // RFC 6895 §2.3: Display DNS RCODE 16 as BADVERS; TSIG names it BADSIG.
+                if stringify!($name) == "Rcode" && self.0 == 16 {
+                    return f.write_str("BADVERS");
+                }
                 match self.0 {
                     $($value => f.write_str($text),)*
                     // RFC 3597 §5: Unknown types and classes use TYPE or CLASS plus decimal code.
@@ -68,8 +72,8 @@ dns_code! {
         NOTZONE = 10 => "NOTZONE",
         // RFC 8490 §5.4.1: DSOTYPENI is RCODE 11.
         DSOTYPENI = 11 => "DSOTYPENI",
-        // RFC 6895 §2.3: RCODE 16 displays as BADVERS; TSIG calls this value BADSIG.
-        BADSIG = 16 => "BADVERS",
+        // RFC 8945 §3: TSIG calls RCODE value 16 BADSIG.
+        BADSIG = 16 => "BADSIG",
         // RFC 8945 §3: DNS RCODE BADKEY is 17.
         BADKEY = 17 => "BADKEY",
         // RFC 8945 §3: DNS RCODE BADTIME is 18.
