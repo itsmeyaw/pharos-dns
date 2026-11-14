@@ -210,7 +210,7 @@ fn response_codes_match_coredns_and_unknown_values_are_preserved() {
     }
     let mut text = String::new();
     registry.encode(&mut text);
-    for code in ["DSOTYPENI", "BADSIG", "RCODE4095"] {
+    for code in ["DSOTYPENI", "BADVERS", "RCODE4095"] {
         assert!(text.contains(&format!("rcode=\"{code}\"")));
     }
 }

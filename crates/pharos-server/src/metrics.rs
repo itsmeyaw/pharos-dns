@@ -37,7 +37,7 @@ const TYPES: &[(u16, &str)] = &[
     (255, "ANY"),
 ];
 const RESPONSE_CODES: usize = 4096;
-// RFC 6895 §2.3 and IANA DNS Parameters: assigned RCODEs fit in 0 through 23.
+// RFC 7873 §4: BADCOOKIE is RCODE 23; keep dense counters through its assigned value.
 const DENSE_RESPONSE_CODES: usize = 24;
 pub const WRITER_METADATA: &str = "prometheus/writer";
 const TIME_BUCKETS: &[f64] = &[
@@ -1859,7 +1859,8 @@ fn rcode(code: u16) -> String {
         10 => "NOTZONE",
         // RFC 8490 §5.4.1: RCODE 11 is DSOTYPENI for DSO responses.
         11 => "DSOTYPENI",
-        16 => "BADSIG",
+        // RFC 6891 §9: OPT-extended RCODE 16 is BADVERS (BADSIG is a TSIG error).
+        16 => "BADVERS",
         17 => "BADKEY",
         18 => "BADTIME",
         19 => "BADMODE",
