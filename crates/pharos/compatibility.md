@@ -217,7 +217,8 @@
 - The build information label `goversion` is named `rustc` in Pharos.
 - The current Listener reports the encoded Query size; CoreDNS's metrics Plugin reports the decoded Message length.
 - Malformed Messages that cannot be parsed are not counted.
-- View names are currently empty, and a wildcard Listener is labelled as an unbound address even when explicitly bound to an unspecified IP.
+- View metrics use the last matching nonempty View name. A DS Query at a cut evaluates only the exact child-apex block and records once under the selected authoritative Zone.
+- A wildcard Listener is labelled as an unbound address even when explicitly bound to an unspecified IP.
 - Plugin attribution identifies the Plugin that returned the Response; CoreDNS's nested writers can attribute the outer Plugin instead.
 - Pharos counts dropped Queries only on a Listener with at least one `prometheus` Server Block; CoreDNS's server-level error reporting counts them unconditionally.
 - Concurrent scrapes can observe histogram buckets and sums at slightly different instants, unlike the Go client's synchronized histogram snapshot.
@@ -260,7 +261,7 @@
 - Zero-question QUERY Messages route to the root Server Block when configured; CoreDNS's standard query path also permits QDCOUNT=0.
 - For DS at a configured zone cut, Pharos uses the parent Server Block; if no parent is configured, it routes to the child and returns authoritative NODATA, as RFC 4035 §3.1.4.1 requires.
 - Response OPT advertises the requestor's normalized payload size, capped at 4096; the `bufsize` Plugin's reduced size is echoed for UDP and TCP. This differs from always advertising Pharos's 4096-octet capacity.
-- Ordinary and validating Plugin Responses retain AD. The Listener clears AD only when appending a TSIG to a signed exchange (RFC 8945 §5.5); the current API does not expose whether the upstream exchange itself had transaction security.
+- AD is preserved on ordinary upstream and local Responses. When a valid client TSIG is re-signed after forwarding, the Listener clears AD as RFC 8945 §5.5 requires; the `forward` Plugin has no upstream TSIG mode.
 - RRSIG inception and expiration use RFC 4034 §3.1.5 serial arithmetic from RFC 1982 §3.2; this corrects implementations that compare wrapped values as ordinary integers.
 - DNS RCODE 16 metrics use BADVERS. TSIG Error 16 is BADSIG and is not a DNS RCODE label (RFC 6895 §2.3; RFC 8945 §3).
 - CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC report transport errors.

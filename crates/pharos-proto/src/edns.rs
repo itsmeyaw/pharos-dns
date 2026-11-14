@@ -218,6 +218,7 @@ impl ResponseOpt<'_, '_> {
                 let (option, tail) = rest.split_at(len);
                 rest = tail;
                 if code == 8 {
+                    // RFC 7871 §7.2.2: echo ECS only when the Query supplied a valid option.
                     if self.query_ecs.is_none() {
                         continue;
                     }

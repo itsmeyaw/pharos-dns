@@ -1,6 +1,5 @@
-use pharos_proto::{
-    Class, Message, MessageBuilder, NameRef, Opcode, RESPONSE_UDP_PAYLOAD_SIZE, Rcode, Type,
-};
+use crate::RESPONSE_UDP_PAYLOAD_SIZE;
+use pharos_proto::{Class, Message, MessageBuilder, NameRef, Opcode, Rcode, Type};
 
 /// Query admission result. `Respond` writes to the supplied Response buffer.
 // Keep the Message inline: boxing it would allocate for every Query.
@@ -32,7 +31,7 @@ pub fn admit_with_update<'a>(
         return Admission::Drop;
     }
     if wire.len() < 12 {
-        // RFC 5625 §6.3: return an immediate DNS error for a malformed packet.
+        // RFC 1035 §4.1.1: FORMERR identifies a message that cannot be parsed as DNS.
         response.clear();
         response.extend_from_slice(
             &u16::from_be_bytes([
@@ -46,6 +45,7 @@ pub fn admit_with_update<'a>(
         return Admission::Respond;
     }
     let flags = u16::from_be_bytes([wire[2], wire[3]]);
+    // RFC 6895 §2.1: Do not reject the reserved DNS header Z bit.
     let opcode = Opcode(((flags >> 11) & 15) as u8);
     let count = |i| u16::from_be_bytes([wire[i], wire[i + 1]]);
     // RFC 8490 §§5.4.1, 5.4.3: DSO unidirectional Messages have ID zero and no Response.
@@ -82,8 +82,7 @@ pub fn admit_with_update<'a>(
         header_error(wire, response, Rcode::FORMERR);
         return Admission::Respond;
     }
-    // RFC 6895 §2.1: receivers ignore the reserved header Z bit.
-    // RFC 6891 §6.1.1: Multiple OPT records cause FORMERR.
+    // RFC 6891 §6.1.1: Message parsing rejects duplicate OPT records.
     let Ok(query) = Message::parse(wire) else {
         header_error(wire, response, Rcode::FORMERR);
         return Admission::Respond;
@@ -154,7 +153,7 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode) {
             let _ = builder.finish_with_response_opt(&response_opt);
             return;
         }
-    } else if let Some((_, opt_flags)) = raw_opt {
+    } else if let Some(opt_flags) = raw_opt {
         // RFC 6891 §7: preserve EDNS's presence on FORMERR, even when option parsing failed.
         let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
             // RFC 9824 §5.1: preserve CO; reserved EDNS flag bits remain zero.
@@ -191,7 +190,7 @@ fn raw_question(wire: &[u8]) -> Option<(NameRef<'_>, Type, Class)> {
 }
 
 // RFC 6891 §7: fall back only when strict parsing rejects malformed EDNS; recover OPT presence.
-fn raw_opt(wire: &[u8]) -> Option<(u16, u16)> {
+fn raw_opt(wire: &[u8]) -> Option<u16> {
     if wire.len() < 12 {
         return None;
     }
@@ -211,7 +210,6 @@ fn raw_opt(wire: &[u8]) -> Option<(u16, u16)> {
             } else {
                 let fields = wire.get(offset..offset + 10)?;
                 let rtype = u16::from_be_bytes([fields[0], fields[1]]);
-                let class = u16::from_be_bytes([fields[2], fields[3]]);
                 let flags = u16::from_be_bytes([fields[6], fields[7]]);
                 let rdata_len = usize::from(u16::from_be_bytes([fields[8], fields[9]]));
                 let end = offset.checked_add(10 + rdata_len)?;
@@ -219,7 +217,7 @@ fn raw_opt(wire: &[u8]) -> Option<(u16, u16)> {
                     return None;
                 }
                 if rtype == Type::OPT.0 && section == 3 {
-                    return Some((class, flags));
+                    return Some(flags);
                 }
                 offset = end;
             }

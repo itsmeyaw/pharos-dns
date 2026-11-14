@@ -251,7 +251,7 @@ impl<'a> Message<'a> {
         let mut offset = HEADER_LEN;
         let mut has_opt = false;
         let mut has_sig0 = false;
-        // RFC 1035 §4.1.4: Bound aggregate compression-pointer walks for this Message.
+        // RFC 1035 §4.1.4 requires prior targets; this budget caps aggregate pointer-walk work.
         let mut pointer_budget = MAX_POINTER_HOPS_PER_MESSAGE;
         'sections: for section in 0..4 {
             starts[section] = offset;
@@ -291,6 +291,7 @@ impl<'a> Message<'a> {
                             || EdnsOptions::parse(rr.rdata).is_err()
                         {
                             if notify && section == 3 {
+                                // RFC 1996 §3.9: malformed Additional data is ignored on NOTIFY requests.
                                 counts[3] = 0;
                                 break;
                             }

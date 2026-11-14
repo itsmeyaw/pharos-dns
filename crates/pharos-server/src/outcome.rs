@@ -1,10 +1,9 @@
 use pharos_proto::{
-    Message, MessageBuilder, Opt, RESPONSE_UDP_PAYLOAD_SIZE, Rcode, Section, TsigKey, TsigRecord,
-    Type, normalized_udp_size,
+    Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type, normalized_udp_size,
 };
 use std::sync::Arc;
 
-use crate::{Action, Error, Outcome, Protocol, admission::write_error};
+use crate::{Action, Error, Outcome, Protocol, RESPONSE_UDP_PAYLOAD_SIZE, admission::write_error};
 
 /// Per-Query TSIG request; keys are shared with the Listener's configuration.
 pub enum TsigSigning {

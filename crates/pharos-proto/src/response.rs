@@ -74,10 +74,11 @@ pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType 
         if rcode == Rcode::NXDOMAIN {
             // RFC 6604 §3: a final CNAME-chain response may carry NXDOMAIN and CNAME answers.
             let mut has_cname = false;
-            let is_cname_chain = message.answers().all(|rr| {
+            let mut is_cname_chain = true;
+            for rr in message.answers() {
                 has_cname |= rr.rtype == Type::CNAME;
-                matches!(rr.rtype, Type::CNAME | Type::RRSIG)
-            });
+                is_cname_chain &= matches!(rr.rtype, Type::CNAME | Type::RRSIG);
+            }
             return if has_cname && is_cname_chain {
                 ResponseType::NxDomain
             } else {

@@ -9,6 +9,7 @@ use std::{
 const MAX_NAME_LEN: usize = 255;
 const MAX_LABEL_LEN: usize = 63;
 const MAX_LABELS: usize = 127;
+// RFC 1035 §4.1.4 requires backward targets; local per-name and per-Message caps bound parser work.
 const MAX_POINTER_HOPS_PER_NAME: usize = 255;
 pub(crate) const MAX_POINTER_HOPS_PER_MESSAGE: usize = 8192;
 
@@ -446,7 +447,7 @@ impl PartialEq for NameRef<'_> {
 
 impl Eq for NameRef<'_> {}
 
-/// An allocation-free iterator over labels in a borrowed message name.
+/// An allocation-free iterator over a message name validated by `NameRef::parse`.
 pub struct NameRefLabels<'a> {
     message: &'a [u8],
     position: usize,
@@ -529,7 +530,7 @@ fn check_message_name(
                 position = end;
             }
             0xc0..=0xff => {
-                // RFC 1035 §4.1.4: Compression pointers refer backwards; cap adversarial walk work.
+                // RFC 1035 §4.1.4: targets must be prior; local hop caps bound adversarial parsing work.
                 if pointer_hops == MAX_POINTER_HOPS_PER_NAME || *pointer_budget == 0 {
                     return Err(NameError::PointerLimit);
                 }

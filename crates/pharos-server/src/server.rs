@@ -564,10 +564,9 @@ impl<C: Chain> Server<C> {
         if outcome == Outcome::Response
             && forwarded_response
             && matches!(&tsig_signing, Some(TsigSigning::Signed { .. }))
-            && !response_has_transaction_security(response)
             && response.len() >= 4
         {
-            // RFC 8945 §5.5: clear AD before signing a forwarded Response without upstream transaction security.
+            // RFC 8945 §5.5: Forward lacks upstream TSIG; clear AD before re-signing its Response.
             response[3] &= !0x20;
         }
         let recorded_size = if outcome == Outcome::Response {
@@ -660,16 +659,6 @@ impl<C: Chain> Server<C> {
         }
         action
     }
-}
-
-fn response_has_transaction_security(wire: &[u8]) -> bool {
-    // RFC 8945 §5.5 and RFC 2931 §3.2: TSIG and SIG(0) authenticate DNS transactions.
-    pharos_proto::Message::parse(wire).is_ok_and(|message| {
-        message.additionals().any(|record| {
-            record.rtype == pharos_proto::Type::TSIG
-                || (record.rtype == pharos_proto::Type::SIG && record.rdata.starts_with(&[0, 0]))
-        })
-    })
 }
 
 fn peer_is_ipv6(peer: SocketAddr) -> bool {

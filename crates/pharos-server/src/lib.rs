@@ -33,6 +33,8 @@ mod panic;
 mod process_metrics;
 mod quota;
 pub use admission::{Admission, admit, admit_with_update};
+// RFC 4035 §3.1: DNSSEC servers should support UDP payloads of at least 4000 octets.
+pub(crate) const RESPONSE_UDP_PAYLOAD_SIZE: u16 = 4096;
 pub use lifecycle::{Lifecycle, Phase};
 pub use outcome::{TsigSigning, finish_outcome, finish_outcome_signed, response_limit};
 pub use panic::{contain_panic, panics_total};

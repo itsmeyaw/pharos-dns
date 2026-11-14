@@ -166,6 +166,7 @@ impl<C> Router<C> {
         // RFC 4035 §3.1.4.1: Answer DS queries at a zone cut from the parent zone's side.
         let ds = query.opcode() == Opcode::QUERY && question.qtype == Type::DS;
         let labels = question.name.labels().count();
+        // RFC 4035 §3.1.4.1: A DS QNAME matching a child apex marks a parent-side zone cut.
         let ds_at_cut = ds
             && labels != 0
             && blocks
@@ -208,6 +209,7 @@ impl<C> Router<C> {
                 continue;
             }
             if selected_labels.is_some_and(|selected| count < selected) {
+                // RFC 1034 §4.3.2: Stop after leaving the nearest matching ancestor Zone.
                 break;
             }
             // RFC 4343 §3: DNS lookup compares ASCII letters case-insensitively.
@@ -250,6 +252,7 @@ impl<C> Router<C> {
     }
 }
 
+// RFC 1034 §4.3.2: A Zone matches only when its Domain is a label-boundary suffix of QNAME.
 fn domain_matches(name: NameRef<'_>, labels: usize, domain: &Name) -> bool {
     let count = domain.label_count();
     if count > labels {

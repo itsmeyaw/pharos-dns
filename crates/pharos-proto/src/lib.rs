@@ -18,8 +18,7 @@ pub use edns_options::{ClientSubnet, EdnsOption, EdnsOptionError, EdnsOptionIter
 
 mod edns;
 pub use edns::{
-    Opt, RESPONSE_UDP_PAYLOAD_SIZE, ResponseOpt, edns_option_registered, normalized_udp_size,
-    register_edns_option,
+    Opt, ResponseOpt, edns_option_registered, normalized_udp_size, register_edns_option,
 };
 
 mod rdata;
