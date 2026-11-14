@@ -67,6 +67,7 @@ impl Map {
                             ),
                         );
                     } else if index == 1 {
+                        // RFC 4291 §2.2: IPv6 uses conventional textual address forms.
                         address = std::str::from_utf8(&field)
                             .ok()
                             .and_then(|s| s.split('%').next())

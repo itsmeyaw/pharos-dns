@@ -750,7 +750,7 @@ fn call<'a>(
     };
     result.map_err(|_| "expression scratch buffer is too small")?;
     if name == "name" {
-        // RFC 4343 §2: DNS label comparisons ignore ASCII case.
+        // RFC 4343 §3: DNS label comparisons ignore ASCII case.
         scratch.buffer[start..scratch.len].make_ascii_lowercase();
     }
     Ok(Temporary::Stored(start, scratch.len))
@@ -782,19 +782,24 @@ fn write_ip(output: &mut Scratch<'_>, address: SocketAddr) -> fmt::Result {
             if let Some(ip) = address.ip().to_ipv4_mapped() {
                 write!(output, "{ip}")
             } else if address.scope_id() == 0 {
+                // RFC 5952 §4: Emit IPv6 addresses in canonical text form.
                 write!(output, "{}", address.ip())
             } else {
+                // RFC 4007 §11.2: Include a numeric zone ID for a scoped IPv6 address.
                 write!(output, "{}%{}", address.ip(), address.scope_id())
             }
         }
     }
 }
 
+// RFC 4632 §3.1: Check whether an address lies in a CIDR prefix by its significant bits.
 fn incidr(ip: &str, cidr: &str) -> Result<bool, &'static str> {
     use std::net::IpAddr;
+    // RFC 4291 §2.2: IPv6 addresses use conventional textual address forms.
     let ip: IpAddr = ip
         .parse()
         .map_err(|_| "first argument is not an IP address")?;
+    // RFC 4291 §2.3: IPv6 prefix length counts the leftmost contiguous address bits.
     let (network, prefix) = cidr.split_once('/').ok_or("invalid CIDR")?;
     let network: IpAddr = network.parse().map_err(|_| "invalid CIDR address")?;
     if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {

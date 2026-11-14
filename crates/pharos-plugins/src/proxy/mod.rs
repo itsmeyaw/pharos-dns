@@ -57,6 +57,7 @@ fn enable_recv_err(socket: &UdpSocket, address: SocketAddr) {
 #[cfg(not(target_os = "linux"))]
 fn enable_recv_err(_: &UdpSocket, _: SocketAddr) {}
 
+// RFC 5625 §4.4.1: Connect to DNS upstreams over TCP when TCP is selected.
 async fn connect_tcp(address: SocketAddr, source: Option<IpAddr>) -> io::Result<TcpStream> {
     let socket = if address.is_ipv4() {
         TcpSocket::new_v4()?
@@ -66,6 +67,7 @@ async fn connect_tcp(address: SocketAddr, source: Option<IpAddr>) -> io::Result<
     if let Some(source) = source {
         socket.bind(SocketAddr::new(source, 0))?;
     }
+    // RFC 5452 §9.1: The connected TCP stream accepts responses only from this upstream.
     let stream = socket.connect(address).await?;
     stream.set_nodelay(true)?;
     Ok(stream)
@@ -157,6 +159,7 @@ impl Socket {
     }
     async fn send(&mut self, wire: &[u8]) -> io::Result<()> {
         match self {
+            // RFC 1035 §4.2.1: UDP DNS messages are carried in datagrams.
             Self::Udp(s) => {
                 s.send(wire).await?;
                 Ok(())
@@ -336,8 +339,10 @@ impl Proxy {
                     IpAddr::V6(Ipv6Addr::UNSPECIFIED)
                 };
                 let socket =
+                    // RFC 5625 §6.1: Let the OS select an ephemeral source port for DNS queries.
                     UdpSocket::bind(SocketAddr::new(self.source_address.unwrap_or(ip), 0)).await?;
                 enable_recv_err(&socket, self.address);
+                // RFC 5452 §9.1: Accept responses only from the queried upstream address and port.
                 socket.connect(self.address).await?;
                 Ok(Socket::Udp(socket))
             }
@@ -404,6 +409,7 @@ impl Proxy {
             return Err(Error::Stopped);
         }
         self.sweep();
+        // RFC 7766 §5: DNS forwarders must support both UDP and TCP transport.
         let selected = if options.force_tcp {
             Transport::Tcp
         } else if options.prefer_udp {
@@ -413,6 +419,7 @@ impl Proxy {
         };
         let result = self.exchange_once(query, response, selected).await;
         // RFC 2181 §9: a client can retry a truncated response over TCP.
+        // RFC 9520 §3.1: Retry a truncated UDP response over TCP to the same server.
         let result = match result {
             Ok(_result)
                 if selected == Transport::Udp
@@ -437,6 +444,7 @@ impl Proxy {
         transport: Transport,
     ) -> Result<Exchange, Error> {
         let start = Instant::now();
+        // RFC 5625 §4.1: Accept packets with unknown DNS flags for proxying.
         let request = Message::parse(query).map_err(|_| Error::InvalidRequest)?;
         if query.len() > response.len() || query.len() > u16::MAX as usize {
             return Err(Error::InvalidRequest);
@@ -482,9 +490,11 @@ impl Proxy {
             id.copy_from_slice(&query[..2]);
         } else {
             // RFC 5452 §9.2: outgoing queries use unpredictable IDs.
+            // RFC 5625 §6.1: Use unpredictable full-range IDs for queries without unshared TSIG.
             getrandom::getrandom(&mut id)
                 .map_err(|_| Error::Io(io::Error::other("random ID generation failed")))?;
         }
+        // RFC 5625 §4.3: Proxy Queries regardless of QTYPE and QCLASS.
         response[..query.len()].copy_from_slice(query);
         response[..2].copy_from_slice(&id);
         let local_addr = socket.local_addr()?;
@@ -505,6 +515,7 @@ impl Proxy {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 // RFC 5452 §9.1: match response IDs to outstanding queries.
+                // RFC 7766 §7: Match TCP Responses to outstanding Queries by Message ID.
                 if len >= 12 && response[..2] == id {
                     return Ok::<_, io::Error>(len);
                 }
@@ -544,6 +555,7 @@ impl Proxy {
             let flags = [response[2], response[3]];
             response[..length].copy_from_slice(&query[..length]);
             // RFC 5625 §4.4: a proxy that truncates a response must set TC.
+            // RFC 1035 §4.2.1: Set TC when truncating a UDP response.
             response[2] = flags[0] | 0x02;
             response[3] = flags[1];
             response[6..12].fill(0);
@@ -558,6 +570,7 @@ impl Proxy {
                 .observe(start.elapsed().as_secs_f64());
         }
         // RFC 5452 §9.1: response names, classes, and types must match the query.
+        // RFC 1035 §7.3: Verify the echoed Question against the outstanding request.
         let same_questions = request.question_count() == answer.question_count()
             && request
                 .questions()

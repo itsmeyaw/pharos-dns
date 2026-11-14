@@ -54,7 +54,9 @@ impl Plugin for Erratic {
         }
         // RFC 5737 §3 and RFC 3849 §2: use documentation-only addresses.
         let data: &[u8] = match question.qtype {
+            // RFC 1035 §3.4.1: Encode A RDATA as a four-octet IPv4 address.
             Type::A => &[192, 0, 2, 53],
+            // RFC 3596 §2.1, §2.2: Encode AAAA RDATA as a 128-bit IPv6 address.
             Type::AAAA => &[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53],
             _ => return Outcome::Unanswered(Rcode::SERVFAIL),
         };
@@ -104,6 +106,7 @@ fn response(
     // RFC 1035 §4.1.1: preserve the opcode and echo the request flags in the Response.
     let mut flags = 0x8400 | (context.query.flags() & 0x7800);
     if context.query.opcode() == Opcode::QUERY {
+        // RFC 4035 §3.2.2: Copy the CD bit from the query into the response.
         flags |= context.query.flags() & 0x0110;
     }
     if truncated {
@@ -111,11 +114,13 @@ fn response(
     }
     let mut builder = MessageBuilder::new(context.response, limit, context.query.id(), flags)
         .map_err(Error::Build)?;
+    // RFC 1035 §4.1.2: Copy the parsed question into the response.
     builder
         .question(question.name, question.qtype, question.qclass)
         .map_err(Error::Build)?;
     for _ in 0..if large { 30 } else { 1 } {
         if !builder
+            // RFC 1035 §3.2.1: Set TTL to zero so synthetic answers cannot be cached.
             .record(
                 Section::Answer,
                 question.name,

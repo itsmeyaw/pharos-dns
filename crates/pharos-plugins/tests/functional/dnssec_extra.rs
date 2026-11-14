@@ -117,6 +117,7 @@ impl Next for Downstream {
     }
 }
 
+// RFC 3225 §3: The DO bit signals that the client accepts DNSSEC records.
 async fn query(name: &str, qtype: Type, downstream: Downstream) -> Vec<u8> {
     let base = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -225,6 +226,7 @@ fn has_type(bitmap: &[u8], rtype: Type) -> bool {
     false
 }
 
+// RFC 4035 §2.2: Signed authoritative RRsets carry matching RRSIG records.
 #[tokio::test]
 async fn cname_signs_only_owners_in_configured_zones() {
     for (target, expected) in [
@@ -338,6 +340,8 @@ async fn black_lie_excludes_missing_tlsa_for_nodata_and_nxdomain() {
     }
 }
 
+// RFC 4035 §3.1.4: Referrals carry a signed DS RRset or signed NSEC proof.
+// RFC 9824 §3.4: An unsigned-referral NSEC omits DS and identifies the delegation.
 #[tokio::test]
 async fn referral_nsec_bitmap_and_glue_signing() {
     for has_ds in [false, true] {

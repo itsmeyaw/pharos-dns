@@ -29,6 +29,7 @@ impl Config {
         self.permissions.iter().any(|rule| &rule.key == key)
     }
 
+    // RFC 3007 §3.1: Match update permissions by principal, owner name, and RR type.
     pub(super) fn allows(&self, key: &Name, owner: &Name, kind: Type) -> bool {
         self.permissions.iter().any(|rule| {
             &rule.key == key
@@ -38,6 +39,7 @@ impl Config {
     }
 }
 
+// RFC 3007 §3.1.1: Dynamic UPDATE must not create, modify, or delete NXT records.
 pub(super) fn unsupported(kind: Type) -> bool {
     matches!(
         kind,
@@ -295,6 +297,7 @@ pub(super) fn parse(
             _ => return Err(cursor.arg_err()),
         }
     }
+    // RFC 3007 §3: Deny updates unless the administrator configures permissions.
     if permissions.is_empty() {
         return Err(cursor.error("at least one allow rule is required"));
     }

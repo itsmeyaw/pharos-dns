@@ -29,6 +29,7 @@ pub(super) fn stream(context: &Context<'_, '_>, truncated: bool) -> Result<Strea
             return Ok(false);
         }
         done = true;
+        // RFC 1035 §2.3.4: Keep generated DNS names within the 255-octet wire limit.
         // CoreDNS cannot encode its generated a./b. names for these apexes.
         if len == 1 || len + 2 > wire.len() {
             return Ok(false);
@@ -48,8 +49,9 @@ pub(super) fn stream(context: &Context<'_, '_>, truncated: bool) -> Result<Strea
             .map_err(|_| Error::InvalidQuery)?;
         let rname = NameRef::parse(b"\x03noc\x03dns\x05icann\x03org\0", 0)
             .map_err(|_| Error::InvalidQuery)?;
-        // RFC 8945 §5.3: leave room for Listener-applied TSIG.
+        // RFC 8945 §5.3.1: Reserve message space for TSIG on TCP zone transfers.
         let mut builder = MessageBuilder::new(response, 64500, id, flags).map_err(Error::Build)?;
+        // RFC 5936 §2.2: Copy the AXFR query's Question into the first response message.
         if !builder
             .question(owner, Type::AXFR, class)
             .map_err(Error::Build)?
@@ -60,6 +62,7 @@ pub(super) fn stream(context: &Context<'_, '_>, truncated: bool) -> Result<Strea
         for index in 0..if truncated { 5 } else { 6 } {
             let written = match index {
                 0 | 5 => {
+                    // RFC 1035 §3.3.13: Encode SOA names and five unsigned 32-bit timing fields.
                     builder.record_with(Section::Answer, owner, Type::SOA, Class::IN, 0, |writer| {
                         writer.write_name(mname)?;
                         writer.write_name(rname)?;
@@ -70,6 +73,7 @@ pub(super) fn stream(context: &Context<'_, '_>, truncated: bool) -> Result<Strea
                     })
                 }
                 1 | 2 => {
+                    // RFC 1035 §3.3.11: Encode NS RDATA as the authoritative name server name.
                     builder.record_with(Section::Answer, owner, Type::NS, Class::IN, 0, |writer| {
                         writer.write_name(if index == 1 { b } else { a })
                     })
@@ -82,6 +86,7 @@ pub(super) fn stream(context: &Context<'_, '_>, truncated: bool) -> Result<Strea
                     0,
                     &[0x20, 1, 0x0b, 0xd8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53],
                 ),
+                // RFC 3596 §2.2: Encode AAAA RDATA as a 128-bit address in network byte order.
                 _ => builder.record(
                     Section::Answer,
                     b,

@@ -28,6 +28,7 @@ async fn scenario() {
         .map(|i| format!(r#"{{"name":"p{i}","protocol":"TCP","port":{}}}"#, 8000 + i))
         .collect::<Vec<_>>()
         .join(",");
+    // KEP-0752 §Proposal > EndpointSlice API: Endpoints have addresses and optional hostnames.
     let endpoints = (1..=64)
         .map(|i| format!(r#"{{"addresses":["192.0.2.{i}"],"hostname":"pod-{i}"}}"#))
         .collect::<Vec<_>>()
@@ -78,6 +79,7 @@ async fn scenario() {
     let (_, server) = servers.drain().next().unwrap();
     let name: Name = "head.prod.example.org.".parse().unwrap();
     let mut queries = Vec::new();
+    // k8s-dns §2.4.1: A headless Service returns endpoint address records.
     for kind in [Type::A, Type::SRV] {
         let mut request = Vec::with_capacity(512);
         let mut b = MessageBuilder::new(&mut request, 512, 1, 0x100).unwrap();
@@ -102,6 +104,7 @@ async fn scenario() {
         let msg = Message::parse(&response).unwrap();
         assert_eq!(msg.rcode(), Rcode::NOERROR);
         assert!(!msg.tc());
+        // RFC 1035 §3.4.1: A RDATA carries a 32-bit IPv4 address.
         if msg.questions().next().unwrap().qtype == Type::A {
             let addresses: HashSet<_> = msg
                 .answers()
@@ -117,6 +120,7 @@ async fn scenario() {
                     .map(|i| format!("192.0.2.{i}").parse().unwrap())
                     .collect()
             );
+        // RFC 2782 §The format of the SRV RR: SRV carries priority, weight, port, and target.
         } else {
             let mut records = HashSet::new();
             for rr in msg.answers() {

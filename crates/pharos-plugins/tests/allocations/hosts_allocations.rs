@@ -33,6 +33,7 @@ async fn routed_hosts_hit() {
     lifecycle.run(Phase::Startup).await.unwrap();
     let (_, server) = servers.drain().next().unwrap();
     let mut queries = Vec::new();
+    // RFC 1035 §4.1.2: This query carries QNAME, QTYPE, and IN QCLASS.
     for (name, kind) in [
         ("www.example.com.", Type::A),
         ("www.example.com.", Type::AAAA),

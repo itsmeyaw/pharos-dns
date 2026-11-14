@@ -114,6 +114,7 @@ impl Loaded {
                 return false;
             }
         };
+        // RFC 1035 §6.1.2: Publish a fully loaded Zone as one generation.
         self.current.store(Some(Arc::new(next)));
         if self.by_mtime {
             *self.modified.lock().unwrap() = modified;
@@ -288,6 +289,7 @@ impl File {
                 #[cfg(feature = "plugin-transfer")]
                 if let Some(transfer) = notifier.get() {
                     // RFC 1996 §4.1: notify Secondary Servers on startup.
+                    // RFC 1035 §6.1.1: Reload Zone files off the query-serving task.
                     tasks.push(tokio::spawn(async move {
                         for apex in notify_names {
                             let _ = transfer.notify(&apex).await;

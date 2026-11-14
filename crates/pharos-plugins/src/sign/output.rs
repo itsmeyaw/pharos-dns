@@ -31,6 +31,7 @@ pub(super) fn needs_resign(path: &Path, now: u32) -> bool {
             }
             let expiration = u32::from_be_bytes(data[8..12].try_into().unwrap());
             let inception = u32::from_be_bytes(data[12..16].try_into().unwrap());
+            // RFC 6781 §4.4.2.2: Re-sign when under seven days of validity remain.
             if inception > now
                 || now - inception > 6 * 86400
                 || expiration.saturating_sub(now) < 7 * 86400
@@ -62,7 +63,7 @@ pub(super) fn write(directory: &Path, target: &Path, records: &[ZoneRecord]) -> 
             .chain(records.iter().filter(|rr| rr.rtype != Type::SOA))
         {
             if matches!(record.rtype, Type::CAA | Type::URI) {
-                // RFC 8659 §4 and RFC 7553 §4: these fields contain literal octets.
+                // RFC 8659 §4 and RFC 7553 §4.4 and §4.5: These fields contain literal octets.
                 // CoreDNS writes plain octets as-is and reads backslashes as escapes, so only other octets are escaped.
                 let octets = |bytes: &[u8], plain: bool| {
                     if plain {

@@ -402,6 +402,7 @@ async fn referral_preserves_unsigned_ns_ttls() {
 }
 
 // RFC 2181 §5.2: inconsistent TTLs in an RRset are reduced to the lowest value.
+// RFC 4034 §3.1.8: The signature covers the RRSIG prefix and canonical covered RRset.
 #[tokio::test]
 async fn signed_rrsets_use_the_lowest_ttl_for_records_and_signatures() {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
@@ -604,6 +605,7 @@ async fn apex_dnskeys_use_the_lowest_ttl_with_and_without_do() {
 }
 
 // CoreDNS v1.15.0 plugin/dnssec/handler.go: requests without DO bypass signing.
+// RFC 3225 §3: DNSSEC records are omitted when DO is clear unless explicitly queried.
 #[tokio::test]
 async fn negative_without_do_passes_through_with_or_without_opt() {
     let dnssec = plugin("miek.nl", KEY);
@@ -720,6 +722,7 @@ async fn nxdomain_with_multiple_authority_records_passes_through() {
 }
 
 // CoreDNS v1.15.0 plugin/dnssec/handler_test.go: positive DS and authority NS are signed.
+// RFC 4035 §3.1.1: Return RRSIG records in the same section as each signed RRset.
 #[tokio::test]
 async fn positive_ds_is_signed_without_synthetic_nsec() {
     let dnssec = plugin("miek.nl", KEY);
@@ -768,6 +771,7 @@ async fn positive_txt_has_no_synthetic_nsec() {
 }
 
 // CoreDNS v1.15.0 plugin/dnssec/dnssec_test.go TestZoneSigningDouble.
+// RFC 4034 §3.1.2: The RRSIG Algorithm field identifies the cryptographic algorithm.
 #[tokio::test]
 async fn two_non_split_keys_sign_each_rrset() {
     let dnssec = plugin("miek.nl", &format!("{KEY} {OTHER_KEY}"));
@@ -836,7 +840,7 @@ async fn mixed_case_owners_form_one_signed_rrset() {
         .unwrap();
 }
 
-// RFC 4343 §2: DNS name matching is case-insensitive; select the longest matching zone.
+// RFC 4343 §3: DNS name matching is case-insensitive; select the longest matching zone.
 #[tokio::test]
 async fn nested_zone_selection_is_case_insensitive() {
     let dnssec = plugin("miek.nl sub.miek.nl", KEY);
@@ -943,6 +947,7 @@ async fn udp_truncation_remains_parseable_on_repeat() {
 }
 
 // RFC 7766 §8: DNS over TCP supports Messages larger than the UDP minimum.
+// RFC 7766 §5: Authoritative DNS servers MUST support TCP so responses need not fit a UDP packet.
 #[tokio::test]
 async fn tcp_dnskey_response_grows_small_buffer() {
     let dnssec = plugin("miek.nl", &format!("{KEY} {OTHER_KEY}"));

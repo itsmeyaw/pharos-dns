@@ -354,12 +354,14 @@ impl Template {
             else {
                 continue;
             };
+            // RFC 1035 §4.1.2: QCLASS identifies the class requested by the query.
             if rule.class != Class::ANY
                 && question.qclass != Class::ANY
                 && rule.class != question.qclass
             {
                 continue;
             }
+            // RFC 1035 §4.1.2: QTYPE identifies the resource-record type requested by the query.
             if rule.qtype != Type::ANY
                 && question.qtype != Type::ANY
                 && rule.qtype != question.qtype
@@ -624,7 +626,7 @@ fn evaluate_slots<'a>(
                     }
                     EvaluationError::Record
                 })?;
-            // RFC 1035 §5: rendered records use zone-file presentation format.
+            // RFC 1035 §5.1: rendered records are parsed as one zone-file entry.
             // shortcut: zone-text parse allocates per matched Query; see #91.
             let origin: Name = ".".parse().map_err(|_| EvaluationError::Record)?;
             let mut parser = ZoneParser::new(output.as_bytes(), origin, "template");
@@ -645,6 +647,7 @@ impl Plugin for Template {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let hit = match self.select(cx) {
             MatchResult::Next => return next.run(cx).await,
+            // RFC 1035 §4.1.1: SERVFAIL indicates a server problem.
             MatchResult::Failed => return Outcome::Unanswered(Rcode::SERVFAIL),
             MatchResult::RecordError => {
                 return Outcome::Error(Error::Build(pharos_proto::BuildError::InvalidRdata));
@@ -666,6 +669,7 @@ impl Plugin for Template {
             if *section == Section::Answer
                 && rr.rtype == Type::CNAME
                 && matches!(question.qtype, Type::A | Type::AAAA)
+                // RFC 1035 §3.3.1: CNAME RDATA names the canonical target.
                 && let Ok(target) = NameRef::parse(&rr.rdata, 0)
             {
                 // RFC 1034 §3.6.2: a CNAME answer restarts the lookup at its target.
@@ -685,10 +689,12 @@ impl Plugin for Template {
         }
         let result = (|| -> Result<(), Error> {
             // RFC 1035 §4.1.1: copy the Query ID, opcode and recursion-desired flag into the Response.
+            // RFC 1035 §4.1.1: propagate TC when a followed lookup is truncated.
             let truncated = lookups
                 .last()
                 .and_then(|(_, wire)| Message::parse(wire).ok())
                 .is_some_and(|message| message.tc());
+            // RFC 1035 §4.1.1: Set AA and the configured response code.
             let flags = 0x8400
                 | (query.flags() & 0x7800)
                 | if query.opcode() == pharos_proto::Opcode::QUERY {
@@ -696,13 +702,16 @@ impl Plugin for Template {
                 } else {
                     0
                 }
+                // RFC 1035 §4.1.1: The response RCODE reports the configured result code.
                 | (hit.rule.rcode.0 & 0xf)
                 | if truncated { 0x0200 } else { 0 };
             let mut builder =
                 MessageBuilder::new(cx.response, max, query.id(), flags).map_err(Error::Build)?;
             builder
+                // RFC 1035 §4.1.2: the response copies the query's question name, type, and class.
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(Error::Build)?;
+            // RFC 1035 §4.1: Place generated records in their configured message sections.
             for section in [Section::Answer, Section::Authority, Section::Additional] {
                 for (index, (_, rr)) in hit
                     .records
@@ -712,6 +721,7 @@ impl Plugin for Template {
                 {
                     let owner =
                         NameRef::parse(rr.owner.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
+                    // RFC 1035 §4.1.3: Encode owner, type, class, TTL, and RDATA.
                     builder
                         .record(section, owner, rr.rtype, rr.class, rr.ttl, &rr.rdata)
                         .map_err(Error::Build)?;
@@ -740,6 +750,7 @@ impl Plugin for Template {
             if let Some((code, reason)) = &hit.rule.ederror {
                 let option_len = u16::try_from(reason.len().saturating_add(2))
                     .map_err(|_| Error::ResponseBufferTooSmall)?;
+                // RFC 8914 §2: OPTION-CODE 15 carries INFO-CODE and EXTRA-TEXT.
                 let mut ede = Vec::with_capacity(6 + reason.len());
                 ede.extend_from_slice(&15u16.to_be_bytes());
                 ede.extend_from_slice(&option_len.to_be_bytes());

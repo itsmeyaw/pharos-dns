@@ -37,6 +37,7 @@ impl Auto {
         let Some(entry) = zones.origins.get(name) else {
             return Ok(None);
         };
+        // RFC 5936 §2.2.2: The first transfer response copies the AXFR query's Question section.
         let zone = entry.current.load_full().ok_or(Error::InvalidQuery)?;
         Ok(Some(zone.transfer_with_question(request, true)?))
     }

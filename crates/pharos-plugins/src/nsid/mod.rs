@@ -97,6 +97,7 @@ fn update_nsid(cx: &mut Context<'_, '_>, data: Option<&[u8]>) -> Result<(), Erro
     let (start, old_end) = record.map_or((cx.response.len(), cx.response.len()), |(_, rr)| {
         (rr.rdata_offset, rr.rdata_offset + rr.rdata.len())
     });
+    // RFC 1035 §4.2.2: The two-byte TCP length prefix caps a message at 65535 octets.
     let new_len = start
         .checked_add(len + if record.is_none() { 11 } else { 0 })
         .filter(|n| *n <= 65535 && *n <= cx.response.capacity())
@@ -111,8 +112,10 @@ fn update_nsid(cx: &mut Context<'_, '_>, data: Option<&[u8]>) -> Result<(), Erro
             .opt()
             .ok_or(Error::InvalidQuery)?
             .udp_payload_size();
+        // RFC 6891 §6.1.2: Encode OPT owner, type, class, and option data in wire fields.
         cx.response.extend_from_slice(&[0, 0, 41]);
         cx.response.extend_from_slice(&size.to_be_bytes());
+        // RFC 6891 §6.1.3: Set EDNS extended RCODE and version fields to zero.
         cx.response.extend_from_slice(&0x8000_u32.to_be_bytes());
         cx.response.extend_from_slice(&len_wire.to_be_bytes());
         cx.response.extend_from_slice(&options[..len]);
@@ -122,6 +125,7 @@ fn update_nsid(cx: &mut Context<'_, '_>, data: Option<&[u8]>) -> Result<(), Erro
         if old_end < cx.response.len() {
             // shortcut: records after OPT are dropped; re-encode the Message to retain them.
             // RFC 1035 §4.1.4: removing later records avoids invalidating compression pointers.
+            // RFC 1035 §4.1.1: Set TC when truncating the response.
             cx.response[2] |= 0x02;
             cx.response[10..12].copy_from_slice(&((index + 1) as u16).to_be_bytes());
         }
@@ -145,6 +149,7 @@ fn append_option(options: &mut [u8], len: &mut usize, data: &[u8]) -> Result<(),
     // RFC 5001 §2.3: NSID is EDNS option code 3 with an opaque byte payload.
     options[*len..*len + 2].copy_from_slice(&3_u16.to_be_bytes());
     options[*len + 2..*len + 4].copy_from_slice(&size.to_be_bytes());
+    // RFC 5001 §2.4: Copy NSID payload bytes without assuming null termination.
     options[*len + 4..end].copy_from_slice(data);
     *len = end;
     Ok(())

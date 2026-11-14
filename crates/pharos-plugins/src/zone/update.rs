@@ -63,7 +63,7 @@ pub(crate) fn legacy_name_rdata(
     Ok(Some(result))
 }
 
-// RFC 2136 §1.1.1: RR comparison ignores TTL and compares domain names case-insensitively.
+// RFC 2136 §§1.1.1–1.1.2: UPDATE matching ignores TTL and compares names case-insensitively.
 pub(crate) fn same_record(left: &ZoneRecord, right: &ZoneRecord) -> bool {
     left.owner == right.owner
         && left.rtype == right.rtype
@@ -84,6 +84,7 @@ pub(crate) fn same_record(left: &ZoneRecord, right: &ZoneRecord) -> bool {
 }
 
 impl Zone {
+    // RFC 2136 §1.1.3: UPDATE owners match literally, so a wildcard matches only a wildcard owner.
     /// Apply validated UPDATE records to a private copy and index the result once.
     ///
     /// The caller must validate the UPDATE section, including owner, class,
@@ -95,7 +96,9 @@ impl Zone {
         // RFC 2136 §3.4.2: process UPDATE records in order on a private candidate.
         for update in updates {
             let apex = update.owner == self.apex;
+            // RFC 2136 §3.4.2.6: Map Update CLASS and TYPE to add and delete operations.
             match update.class {
+                // RFC 3007 §4.4: Secure dynamic updates may change the Zone SOA.
                 Class::IN if update.rtype == Type::SOA => {
                     let current = records.iter().find(|rr| rr.rtype == Type::SOA);
                     let Some((old, new)) = current
@@ -112,6 +115,7 @@ impl Zone {
                         explicit_soa = true;
                     }
                 }
+                // RFC 6672 §5.2: ignore a CNAME update when a DNAME already owns the name.
                 Class::IN if update.rtype == Type::CNAME => {
                     if records
                         .iter()
@@ -133,6 +137,7 @@ impl Zone {
                     records.push(update.clone());
                     changed = true;
                 }
+                // RFC 6672 §5.2: ignore updates when a CNAME already owns the name.
                 Class::IN => {
                     if records
                         .iter()
@@ -150,6 +155,7 @@ impl Zone {
                         changed = true;
                     }
                 }
+                // RFC 2136 §3.4.2.3: delete the named RRsets, keeping apex SOA and NS.
                 Class::ANY => {
                     let before = records.len();
                     records.retain(|rr| {
@@ -159,6 +165,7 @@ impl Zone {
                     });
                     changed |= before != records.len();
                 }
+                // RFC 2136 §3.4.2.4: Delete the RR, keeping apex SOA and the final apex NS.
                 Class::NONE => {
                     if apex && update.rtype == Type::SOA {
                         continue;
@@ -181,14 +188,17 @@ impl Zone {
                 _ => return Err("invalid UPDATE class".into()),
             }
         }
+        // RFC 3007 §1.1: increment SOA serial after a Zone change.
         if changed && !explicit_soa {
             let soa = records
                 .iter_mut()
                 .find(|rr| rr.rtype == Type::SOA)
                 .ok_or("Zone has no SOA")?;
             let offset = soa.rdata.len().checked_sub(20).ok_or("invalid SOA")?;
+            // RFC 1982 §3.1: SOA serial addition wraps modulo 2^32.
             let serial = super::soa_serial(soa)
                 .ok_or("invalid SOA")?
+                // RFC 1982 §7 and RFC 2136 §7.11: Increment UPDATE SOA serial, skipping zero.
                 .wrapping_add(1)
                 .max(1);
             // RFC 2136 §7.11: skip zero when incrementing the SOA serial.

@@ -114,6 +114,7 @@ impl Format {
             match part {
                 Part::Literal(value) => output.push_str(value),
                 Part::Metadata(key) => output.push_str(cx.metadata.get(key).unwrap_or("-")),
+                // RFC 1035 §4.1.2: Log the first question's QTYPE.
                 Part::Type => {
                     if let Some(question) = cx.query.questions().next() {
                         let _ = write!(output, "{}", question.qtype);
@@ -124,6 +125,7 @@ impl Format {
                         let _ = write!(output, "{}", question.qclass);
                     }
                 }
+                // RFC 1035 §4.1.2: Log the first question's QNAME.
                 Part::Name => {
                     if let Some(question) = cx.query.questions().next() {
                         let start = output.len();
@@ -168,6 +170,7 @@ impl Format {
                         output.push(']');
                     }
                 },
+                // RFC 1035 §4.1.1: Log the DNS message identifier.
                 Part::Id => {
                     let _ = write!(output, "{}", cx.query.id());
                 }
@@ -184,6 +187,7 @@ impl Format {
                 Part::Bufsize => {
                     let _ = write!(output, "{}", response_limit(cx.query, cx.protocol));
                 }
+                // RFC 1035 §4.1.1: Log the DNS response code.
                 Part::Rcode => {
                     if let Some(code) = response.and_then(|r| r.code) {
                         let _ = write!(output, "{code}");

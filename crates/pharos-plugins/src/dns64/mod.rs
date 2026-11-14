@@ -27,7 +27,9 @@ pub struct Dns64 {
 
 impl Dns64 {
     pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Self, Error> {
+        // RFC 6147 §5.2: use the Well-Known Prefix when no Pref64 is configured.
         let mut result = Self {
+            // RFC 6052 §2.1: the default prefix is the well-known prefix 64:ff9b::/96.
             prefix: "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets(),
             prefix_len: 96,
             translate_all: false,
@@ -37,6 +39,7 @@ impl Dns64 {
         while cursor.next() {
             let args = cursor.remaining_args();
             if let [prefix] = args.as_slice() {
+                // RFC 6147 §5.2: use the configured Pref64 instead of the Well-Known Prefix.
                 (result.prefix, result.prefix_len) = parse_prefix(cursor, prefix)?;
                 continue;
             }
@@ -82,6 +85,7 @@ fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Erro
     let (ip, len) = value
         .split_once('/')
         .ok_or_else(|| cursor.error("invalid dns64 prefix"))?;
+    // RFC 4291 §2.2: IPv6 addresses use the conventional textual address forms.
     let ip: Ipv6Addr = ip
         .parse()
         .map_err(|_| cursor.error("invalid dns64 prefix"))?;
@@ -89,6 +93,7 @@ fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Erro
         .parse()
         .map_err(|_| cursor.error("invalid dns64 prefix"))?;
     // RFC 6052 §2.2: only these six prefix lengths are defined.
+    // RFC 6147 §5.2: limit Pref64 prefix lengths to 96 bits.
     if !matches!(len, 32 | 40 | 48 | 56 | 64 | 96) {
         return Err(cursor.error("invalid dns64 prefix length"));
     }
@@ -104,6 +109,7 @@ impl Plugin for Dns64 {
             return next.run(cx).await;
         };
         // RFC 6147 §5.1: DNS64 applies to IN AAAA Queries from IPv6 clients.
+        // RFC 6147 §5.3.1: process PTR queries for nonmatching prefixes as normal DNS queries.
         if question.qtype != Type::AAAA
             || question.qclass != Class::IN
             || (!self.allow_ipv4
@@ -111,6 +117,7 @@ impl Plugin for Dns64 {
         {
             return next.run(cx).await;
         }
+        // RFC 6147 §5.1: retrieve existing non-synthetic AAAA data before synthesis.
         let outcome = next.run(cx).await;
         if outcome != Outcome::Response {
             return outcome;
@@ -124,6 +131,7 @@ impl Plugin for Dns64 {
             .map_or(0, |duration| {
                 i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
             });
+        // RFC 6147 §5.1.1: return existing AAAA data without synthesis by default.
         if typify_response(Some(&original), now) == ResponseType::NxDomain
             || (!self.translate_all && original.answers().any(|rr| rr.rtype == Type::AAAA))
         {
@@ -137,6 +145,7 @@ impl Plugin for Dns64 {
             .map_or(600, |rr| rr.ttl);
         let name = question.name.to_name();
         // shortcut: Self Lookup allocates; remove when issue #86 makes it allocation-free.
+        // RFC 6147 §5.1.6: Retrieve A records when the AAAA lookup provides no usable AAAA answer.
         let lookup = match cx.self_lookup(&name, Type::A).await {
             Ok(wire) => wire,
             Err(error) => return Outcome::Error(error),
@@ -154,6 +163,7 @@ impl Plugin for Dns64 {
                     return Err(ServerError::ResponseBufferTooSmall);
                 }
             }
+            // RFC 6147 §5.4: Assemble the response for the original question.
             // RFC 1035 §4.1.1: construct a Response for the original Question.
             let flags = 0x8000
                 | (cx.query.flags() & 0x7800)
@@ -168,18 +178,22 @@ impl Plugin for Dns64 {
             builder
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(ServerError::Build)?;
+            // RFC 6147 §5.1.5: Preserve CNAME or DNAME chains with synthesized AAAA records.
             for (section, records) in [
                 (Section::Answer, response.answers()),
                 (Section::Authority, response.authorities()),
                 (Section::Additional, response.additionals()),
             ] {
                 for rr in records {
+                    // RFC 6147 §5.3.2: Synthesize AAAA records from Answer-section A records.
                     if section == Section::Answer && rr.rtype == Type::A {
                         let ipv4: [u8; 4] =
                             rr.rdata.try_into().map_err(|_| ServerError::InvalidQuery)?;
+                        // RFC 6147 §5.2: Embed IPv4 in the prefix, skipping byte 8.
                         let mut ipv6 = self.prefix;
                         let mut index = usize::from(self.prefix_len / 8);
                         // RFC 6052 §2.2: byte 8 is reserved unless the prefix is /96.
+                        // RFC 6147 §5.2: Use the RFC 6052 synthesis algorithm.
                         for byte in ipv4 {
                             if index == 8 {
                                 index += 1;
@@ -188,6 +202,7 @@ impl Plugin for Dns64 {
                             index += 1;
                         }
                         builder
+                            // RFC 6147 §5.1.7: Preserve NAME and CLASS and encode AAAA RDATA.
                             .record(
                                 section,
                                 rr.name,
@@ -197,6 +212,7 @@ impl Plugin for Dns64 {
                                 &ipv6,
                             )
                             .map_err(ServerError::Build)?;
+                    // RFC 9460 §4.2.1: DNS64 leaves SvcParam IP hints unchanged.
                     } else {
                         let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
                         builder

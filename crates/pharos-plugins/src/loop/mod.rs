@@ -163,6 +163,7 @@ impl State {
             .as_ref()
             .ok_or_else(|| io::Error::other("invalid probe name"))?;
         let mut id = [0; 2];
+        // RFC 5452 §9.2: Outgoing queries use unpredictable IDs.
         getrandom::getrandom(&mut id).map_err(|_| io::Error::other("random ID unavailable"))?;
         let id = u16::from_ne_bytes(id);
         let mut wire = Vec::new();

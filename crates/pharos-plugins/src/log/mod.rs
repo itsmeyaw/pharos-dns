@@ -124,6 +124,7 @@ fn classify(cx: &Context<'_, '_>, outcome: &Outcome) -> (&'static str, &'static 
     let message = (*outcome == Outcome::Response)
         .then(|| Message::parse(cx.response).ok())
         .flatten();
+    // RFC 1035 §4.1.1: RCODE identifies the response status used for log classification.
     let code = match outcome {
         Outcome::Response => message.map(|m| m.rcode()),
         Outcome::Error(_) => Some(Rcode::SERVFAIL),

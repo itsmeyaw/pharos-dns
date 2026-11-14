@@ -128,6 +128,7 @@ impl Kubernetes {
         };
         let mut lower = [0u8; 255];
         let mut len = 0;
+        // Kubernetes DNS spec 1.1.0 §2.1: Compare query data case-insensitively.
         for label in question.name.labels() {
             lower[len] = label.len() as u8;
             len += 1;
@@ -286,6 +287,7 @@ impl Kubernetes {
     }
 }
 
+// RFC 1035 §2.3.3: name labels compare without regard to ASCII case.
 fn contains(name: NameRef<'_>, zone: &Name) -> bool {
     let z = NameRef::parse(zone.as_wire(), 0).unwrap();
     let n = name.labels().count();
@@ -326,6 +328,7 @@ fn soa(
     let mut host_wire = [0; 255];
     let ns = child(&[b"ns", b"dns"], zone, &mut ns_wire).ok_or(BuildError::InvalidRdata)?;
     let host = child(&[b"hostmaster"], zone, &mut host_wire).ok_or(BuildError::InvalidRdata)?;
+    // RFC 2181 §7.2: synthesized SOA records keep their configured TTL, capped at 300 seconds.
     builder.record_with(section, zone, Type::SOA, Class::IN, ttl.min(300), |w| {
         w.write_name(ns)?;
         w.write_name(host)?;
@@ -380,6 +383,7 @@ fn endpoint_label<'a>(
     pod_names: bool,
     buf: &'a mut [u8; 64],
 ) -> &'a [u8] {
+    // KEP-752 §Proposal > EndpointSlice API: hostnames distinguish fungible endpoints.
     // Kubernetes DNS spec 1.1.0 §2.1: an explicit endpoint hostname takes precedence.
     if !address.hostname.is_empty() {
         return address.hostname.as_bytes();
@@ -387,6 +391,7 @@ fn endpoint_label<'a>(
     if pod_names && !address.target_ref_name.is_empty() {
         return address.target_ref_name.as_bytes();
     }
+    // KEP-1645 §specification.md > 2.1 - Definitions: Use an ID when hostname is absent.
     let bytes = address.ip.as_bytes();
     if bytes.len() + 1 > buf.len() {
         return b"";
@@ -488,7 +493,9 @@ fn visit(
     if index.namespace(namespace).is_none() {
         return false;
     }
+    // KEP-1645 §Design Details > Exporting Services: Multicluster answers need an import.
     if req.multicluster {
+        // KEP-1645 §Design Details > Importing Services: Resolve from imported services.
         let Some(svc) = index.service_import(namespace, service) else {
             return false;
         };
@@ -501,9 +508,12 @@ fn visit(
             return false;
         }
         // KEP-1645 MCS DNS spec §2.4.1: headless records use ready endpoint addresses.
+        // KEP-1645 MCS DNS spec §2.3.4: A leading label selects a hostname, not a cluster.
         if svc.headless() || !req.endpoint.is_empty() {
             let mut found = false;
+            // KEP-1645 MCS DNS spec §2.4.2: SRV answers include ready endpoints across clusters.
             for ep in index.multicluster_endpoints(namespace, service) {
+                // KEP-1645 MCS DNS spec §2.4.4: Filter hostname.clusterid, not a cluster name.
                 if !req.endpoint.is_empty()
                     && !req.cluster.eq_ignore_ascii_case(ep.cluster_id.as_bytes())
                 {
@@ -512,6 +522,7 @@ fn visit(
                 for addr in &ep.endpoints.addresses {
                     let mut buf = [0; 64];
                     let label = endpoint_label(addr, config.endpoint_pod_names, &mut buf);
+                    // Kubernetes DNS spec 1.1.0 §2.1: Compare endpoint names case-insensitively.
                     if !req.endpoint.is_empty() && !req.endpoint.eq_ignore_ascii_case(label) {
                         continue;
                     }
@@ -531,6 +542,7 @@ fn visit(
         }
         let mut found = false;
         // KEP-1645 MCS DNS spec §2.3.1: ClusterSetIP records use the service IPs.
+        // KEP-1645 §Design Details > ClusterSet Service Behavior Expectations > DNS: Import IPs.
         for port in &svc.ports {
             if matching(req, port) {
                 found = true;
@@ -565,6 +577,7 @@ fn visit(
     }
     let mut found = !req.zone.is_empty();
     // Kubernetes DNS spec 1.1.0 §2.4.1: headless records use ready endpoint addresses.
+    // KEP-563 §Proposal > CoreDNS Operation: Headless records use both IP families.
     if svc.headless() || !req.endpoint.is_empty() {
         let zone_matches = |ep: &pharos_kubernetes::object::Endpoints, addr: &EndpointAddress| {
             ep.zones
@@ -583,6 +596,7 @@ fn visit(
                         zone_matches(ep, addr) && ep.ports.iter().any(|port| matching(req, port))
                     })
                 }));
+        // KEP-563 §Proposal > CoreDNS Operation: Use EndpointSlice addresses.
         for ep in index.endpoints(namespace, service) {
             for addr in &ep.addresses {
                 if filter_zone && !zone_matches(ep, addr) {
@@ -602,6 +616,7 @@ fn visit(
             }
         }
     } else {
+        // KEP-563 §Proposal > CoreDNS Operation: Return A and AAAA for dual-stack Services.
         // Kubernetes DNS spec 1.1.0 §2.3.1: ClusterIP records use the service IPs.
         for port in &svc.ports {
             if matching(req, port) {
@@ -615,6 +630,7 @@ fn visit(
     found
 }
 
+// RFC 1035 §3.3.11: NS RDATA names a host authoritative for the owner domain.
 fn visit_ns(
     index: &Index,
     locals: &[IpAddr],
@@ -694,6 +710,7 @@ impl pharos_server::Plugin for Kubernetes {
         if q.qtype == Type::AXFR || q.qtype == Type::IXFR {
             return Outcome::Unanswered(Rcode::REFUSED);
         }
+        // Kubernetes DNS spec 1.1.0 §2.1: Compare queries case-insensitively.
         let mut lower = [0u8; 255];
         let mut n = 0;
         for label in q.name.labels() {
@@ -816,6 +833,7 @@ impl pharos_server::Plugin for Kubernetes {
             }) {
             if let Some(target) = target {
                 // shortcut: Self Lookup allocates per Query until #86 pools its buffers and futures.
+                // RFC 1035 §4.1.1: preserve TC when a chased DNS response was truncated.
                 let result = cx.self_lookup(target, q.qtype).await.ok();
                 truncated = result
                     .as_deref()
@@ -866,6 +884,7 @@ impl pharos_server::Plugin for Kubernetes {
             if exists && let Some(ip) = &reverse_ip {
                 let mut error = None;
                 store.with_read(|index| {
+                    // RFC 1035 §3.3.12: PTR RDATA points to another domain name.
                     visit_reverse(index, ip.as_str(), primary, &self.config, |target| {
                         if error.is_none() && scratch.names.insert(scratch::Name::new(target)) {
                             match b.record_with(
@@ -926,6 +945,7 @@ impl pharos_server::Plugin for Kubernetes {
                 if let Some(e) = err {
                     return Err(e);
                 }
+                // RFC 3596 §3: NS answers include available A and AAAA addresses in Additional.
                 store.with_read(|i| {
                     visit_ns(i, ns_ips, zone_ref, &self.config, |ns, ip| {
                         // RFC 2181 §5: duplicate RRs in an RRset are suppressed.
@@ -1006,6 +1026,7 @@ impl pharos_server::Plugin for Kubernetes {
                 }
             }
             // Kubernetes DNS spec 1.1.0 §2.2: dns-version carries the schema version in TXT.
+            // RFC 1035 §3.3.14: TXT RDATA contains length-prefixed character strings.
             if count == 1 && labels[0] == b"dns-version" && q.qtype == Type::TXT {
                 b.record(
                     Section::Answer,
@@ -1024,6 +1045,7 @@ impl pharos_server::Plugin for Kubernetes {
                     let mut wire = [0; 255];
                     if let Some(target) =
                         child(&[req.service, req.namespace, b"pod"], zone_ref, &mut wire)
+                        // RFC 2782 §The format of the SRV RR: Add target addresses to Additional.
                         && b.record_with(
                             Section::Answer,
                             q.name,
@@ -1133,6 +1155,7 @@ impl pharos_server::Plugin for Kubernetes {
                         let Ok(ip) = ip_text.parse::<IpAddr>() else {
                             return;
                         };
+                        // KEP-563 §Proposal > CoreDNS Operation: Match address families.
                         let result = if q.qtype == Type::A || q.qtype == Type::AAAA {
                             if !scratch.addresses.insert(scratch::Address::new(ip_text)) {
                                 return;
@@ -1156,6 +1179,7 @@ impl pharos_server::Plugin for Kubernetes {
                                 ),
                                 _ => return,
                             }
+                        // KEP-1645 §specification.md > 2.3.2 - SRV Records: SRV uses named ports.
                         } else if q.qtype == Type::SRV && port.port >= 0 {
                             // Kubernetes DNS spec 1.1.0 §2.3.2: ClusterIP SRV targets name services.
                             // Kubernetes DNS spec 1.1.0 §2.4.2: headless SRV targets name endpoints.
@@ -1186,8 +1210,9 @@ impl pharos_server::Plugin for Kubernetes {
                             {
                                 return;
                             }
-                            // RFC 2782 §3: SRV RDATA contains priority, weight, port and target.
+                            // KEP-1645 MCS DNS spec §2.3.2: RFC 2782 priority and weight.
                             let weight = (100 / total.max(1)).max(1) as u16;
+                            // RFC 2782 §The format of the SRV RR: priority, weight, port, target.
                             b.record_with(
                                 Section::Answer,
                                 q.name,
@@ -1214,6 +1239,7 @@ impl pharos_server::Plugin for Kubernetes {
                         return Err(err);
                     }
                     // Kubernetes DNS spec 1.1.0 §2.4.2: SRV answers may include target addresses.
+                    // KEP-1645 MCS DNS spec §2.4.2: SRV Additional may include A/AAAA targets.
                     if !stopped && q.qtype == Type::SRV && answers > 0 {
                         let mut error = None;
                         visit(i, req, &self.config, |ip, port, endpoint| {
@@ -1281,7 +1307,9 @@ impl pharos_server::Plugin for Kubernetes {
                     Ok(())
                 })?;
             }
+            // RFC 2308 §2.2.1: authoritative NODATA responses include SOA without NS records.
             // RFC 2308 §3: authoritative NXDOMAIN and NODATA responses include the zone SOA.
+            // RFC 2308 §2.1.1: Authoritative NXDOMAIN responses use SOA without NS records.
             if answers == 0 {
                 soa(
                     &mut b,

@@ -73,6 +73,7 @@ pub(super) fn parse<'a>(labels: &'a [&'a [u8]]) -> Result<Request<'a>, Rcode> {
         [endpoint] => req.endpoint = endpoint.strip_prefix(b"_").unwrap_or(endpoint),
         [port, protocol] => {
             // Kubernetes DNS spec 1.1.0 §2.3.2: SRV names contain port and protocol labels.
+            // RFC 2782 §The format of the SRV RR: Service and Proto use underscore prefixes.
             req.port = port.strip_prefix(b"_").unwrap_or(port);
             req.protocol = protocol.strip_prefix(b"_").unwrap_or(protocol);
         }
@@ -130,6 +131,7 @@ fn endpoints<'a>(
             if !req.endpoint.is_empty() && !req.endpoint.eq_ignore_ascii_case(label) {
                 continue;
             }
+            // Kubernetes DNS spec 1.1.0 §2.4.2: Headless SRV maps ready endpoints and ports.
             for port in &ep.ports {
                 if matches(req, port) {
                     code = Rcode::NOERROR;
@@ -141,6 +143,7 @@ fn endpoints<'a>(
     code
 }
 
+// RFC 1035 §2.3.3: DNS character-string comparisons are case-insensitive.
 fn matches(req: &Request<'_>, port: &Port) -> bool {
     (req.port.is_empty() || req.port.eq_ignore_ascii_case(port.name.as_bytes()))
         && (req.protocol.is_empty() || req.protocol.eq_ignore_ascii_case(port.protocol.as_bytes()))
@@ -202,6 +205,7 @@ pub(super) fn endpoint_label<'a>(
     if pod_names && !addr.target_ref_name.is_empty() {
         return addr.target_ref_name.as_bytes();
     }
+    // Kubernetes DNS spec 1.1.0 §2.1: Use a unique identifier when hostname is absent.
     let ip = addr.ip.as_bytes();
     let separator = if ip.contains(&b'.') {
         b'.'

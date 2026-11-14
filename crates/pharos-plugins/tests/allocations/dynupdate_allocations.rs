@@ -59,6 +59,7 @@ async fn warm_dynamic_and_unrelated_cached_queries_do_not_allocate() {
                 .await,
             Action::Respond
         );
+        // RFC 1035 §4.1.1: RCODE 3 means the queried domain name does not exist.
         assert_eq!(
             Message::parse(&response).unwrap().rcode(),
             if index == 1 {

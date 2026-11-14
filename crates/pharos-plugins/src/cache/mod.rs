@@ -137,6 +137,7 @@ impl Cache {
     }
 }
 
+// RFC 1034 §5.1: a shared resolver cache avoids repeated upstream queries and network delay.
 impl Plugin for Cache {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let query = cx.query;
@@ -150,8 +151,10 @@ impl Plugin for Cache {
             .is_some_and(|zone| contains(question.name, zone));
         #[cfg(not(feature = "plugin-dynupdate"))]
         let dynamic = false;
+        // RFC 8945 §4.1: TSIG records are not cached.
         if query.opcode() != Opcode::QUERY
             || dynamic
+            // RFC 8945 §4.3.2: TSIG-signed queries bypass cache because the MAC covers the wire.
             || query.additionals().any(|record| record.rtype == Type::TSIG)
             || question.name.wire_len()
                 != question
@@ -211,10 +214,12 @@ impl Plugin for Cache {
                 .serve(key, &query, cx.response, &self.config, false, can_grow)
                 .map(|hit| (false, hit))
         };
+        // RFC 9520 §3.2: Handle a cached resolution failure as a cache hit.
         if let Some((denial, hit)) = hit {
             if let Some(metrics) = metrics {
                 metrics.hit(denial);
             }
+            // RFC 8767 §4: an expired cache entry triggers a source refresh attempt.
             if let Some(stored) = hit.refresh {
                 let store = if denial { &self.denial } else { &self.success };
                 if !query.can_set_ad_in_wire() {
@@ -227,6 +232,7 @@ impl Plugin for Cache {
                     }
                     let task = self.spawn_refresh(chain, cx, key, denial, hit);
                     if hit.stale && self.config.verify {
+                        // RFC 8767 §5: Serve stale after the timer while refresh continues.
                         let result = if self.config.verify_timeout.is_zero() {
                             task.await.ok()
                         } else {
@@ -254,6 +260,7 @@ impl Plugin for Cache {
                     };
                     let stale = cx.response.clone();
                     let outcome = {
+                        // RFC 6840 §5.7: Set AD to request AD response data.
                         cx.query = query.with_ad();
                         let guard = QueryGuard {
                             context: &mut *cx,
@@ -287,6 +294,7 @@ impl Plugin for Cache {
             {
                 metrics.served_stale();
             }
+            // RFC 9520 §3.2: Return a cached resolution failure after any refresh handling.
             return Outcome::Response;
         }
         if let Some(metrics) = metrics {
@@ -296,6 +304,7 @@ impl Plugin for Cache {
             return next.run(cx).await;
         }
         let outcome = {
+            // RFC 6840 §5.7: Set AD to signal interest in the upstream response's AD bit.
             cx.query = query.with_ad();
             let guard = QueryGuard {
                 context: &mut *cx,
@@ -339,6 +348,7 @@ impl Cache {
         let Ok(response) = Message::parse(wire) else {
             return false;
         };
+        // RFC 8767 §4: NOERROR and NXDOMAIN answers can refresh cached data.
         if !matches!(response.rcode(), Rcode::NOERROR | Rcode::NXDOMAIN) {
             return false;
         }
@@ -408,6 +418,7 @@ impl Cache {
             },
             success: false,
         };
+        // RFC 8767 §7: continue refresh attempts after serving stale data.
         tokio::spawn(async move {
             let mut guard = guard;
             if !safe_query {
@@ -518,6 +529,7 @@ impl Cache {
             .metrics
             .iter()
             .find_map(|(address, metrics)| (*address == cx.local).then_some(metrics));
+        // RFC 9520 §3.2: cache resolution failures so matching queries skip upstream.
         if outcome != Outcome::Response {
             if matches!(
                 outcome,
@@ -579,6 +591,7 @@ impl Cache {
         if incomplete && has_soa {
             response_type = ResponseType::NoData;
         }
+        // RFC 8020 §2: store NXDOMAIN as a denial for subsequent matching queries.
         let denial = matches!(
             response_type,
             ResponseType::NxDomain | ResponseType::NoData | ResponseType::ServerError
@@ -592,6 +605,7 @@ impl Cache {
         let maximum = maximum.as_secs().min(u64::from(u32::MAX)) as u32;
         let mut ttl = maximum;
         let mut found = false;
+        // RFC 4035 §4.5: use the shortest RR TTL so the cache entry expires together.
         for record in response
             .answers()
             .chain(response.authorities())
@@ -602,7 +616,7 @@ impl Cache {
             }
             found = true;
             ttl = ttl.min(record.ttl);
-            // RFC 2308 §5: the negative cache TTL is bounded by the SOA MINIMUM field.
+            // RFC 2308 §4: bound the negative-response TTL by SOA.MINIMUM.
             if denial && let Ok(Rdata::Soa { minimum, .. }) = record.data() {
                 ttl = ttl.min(minimum);
             }
@@ -615,6 +629,7 @@ impl Cache {
         {
             ttl = 5;
         }
+        // RFC 8767 §4: cached TTLs are capped by the configured maximum.
         ttl = ttl.max(minimum).min(maximum);
         if response_type == ResponseType::ServerError {
             ttl = self.config.fail_ttl.as_secs() as u32;
@@ -622,6 +637,7 @@ impl Cache {
         let matches = response.questions().next().is_some_and(|q| {
             q.name == question.name && q.qtype == question.qtype && q.qclass == question.qclass
         });
+        // RFC 1035 §7.4: reject truncated responses that may contain incomplete RRsets.
         let eligible = !response.tc()
             && ttl > 0
             && (!incomplete || has_soa)
@@ -648,6 +664,7 @@ impl Cache {
         if let Ok(mut mutable) = MessageMut::parse(cx.response) {
             mutable.rewrite_ttls(|_| ttl);
         }
+        // RFC 1035 §7.4: retain complete responses for later matching queries.
         if cacheable && let Ok(response) = Message::parse(cx.response) {
             let inserted = self.insert_response(key, &response, ttl, denial, expected);
             if let Some(evicted) = inserted
@@ -689,12 +706,14 @@ fn strip_trailing_opt(wire: &mut Vec<u8>) {
     wire[10..12].copy_from_slice(&count.to_be_bytes());
 }
 
+// RFC 8482 §4.2: decide cacheability from the answer records alone, with no HINFO-specific case.
 fn answers_question(message: &Message<'_>) -> bool {
     let Some(question) = message.questions().next() else {
         return false;
     };
     let matches_class =
         |class| question.qclass == pharos_proto::Class::ANY || question.qclass == class;
+    // RFC 8482 §5: cache ANY replies with an answer RR at QNAME using normal TTLs.
     if question.qtype == Type::ANY {
         return message
             .answers()
@@ -744,6 +763,7 @@ fn contains(name: NameRef<'_>, domain: &Name) -> bool {
             .labels()
             .skip(count - suffix)
             .zip(domain.labels())
+            // RFC 1035 §3.1: DNS labels are compared case-insensitively.
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
@@ -757,6 +777,7 @@ impl KeyHash {
 }
 impl std::fmt::Write for KeyHash {
     fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        // RFC 1035 §3.1: DNS name comparisons ignore ASCII letter case.
         for byte in value.bytes() {
             self.bytes(&[byte.to_ascii_lowercase()]);
         }
@@ -764,6 +785,7 @@ impl std::fmt::Write for KeyHash {
     }
 }
 
+// RFC 2308 §5: index NODATA responses by QNAME, QTYPE, and QCLASS.
 fn key(query: &Message<'_>) -> u64 {
     let question = query.questions().next().expect("Query has a Question");
     let mut hash = KeyHash(0xcbf29ce484222325);

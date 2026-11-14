@@ -58,6 +58,7 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
         };
         assert_eq!(run(configured[0].config.serve(&mut ctx)), Outcome::Response);
         let reply = Message::parse(&response).unwrap();
+        // RFC 1035 §4.1.1: Copy the query identifier into the response.
         assert_eq!(reply.id(), 0x1234);
         assert!(reply.qr() && reply.aa() && reply.rd() && reply.cd());
         assert_eq!(
@@ -69,6 +70,7 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
             ),
             (1, 0, 0, 2)
         );
+        // RFC 1035 §4.1.3: Read the response's Additional resource records.
         let mut extra = reply.additionals();
         let ip = extra.next().unwrap();
         assert_eq!(ip.name.to_string(), name);
@@ -84,6 +86,7 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
                 assert_eq!(ip.rdata, ipv6.octets());
             }
         }
+        // RFC 2782 §2: The SRV owner carries the _udp or _tcp transport label before the zone.
         let srv = extra.next().unwrap();
         let prefix = if protocol == Protocol::Udp {
             "_udp."

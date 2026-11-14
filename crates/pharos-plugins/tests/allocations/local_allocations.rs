@@ -23,6 +23,7 @@ fn local_responses_do_not_allocate_per_query() {
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let domain: Name = ".".parse().unwrap();
     for wire in [
+        // RFC 1035 §4.1.2: Each question carries QNAME, QTYPE, and QCLASS.
         &b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01a\x09localhost\0\0\x01\0\x01"[..],
         &b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x011\x010\x010\x03127\x07in-addr\x04arpa\0\0\x0c\0\x01"[..],
         &b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x012\x010\x010\x03127\x07in-addr\x04arpa\0\0\x0c\0\x01"[..],

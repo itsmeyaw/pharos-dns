@@ -18,6 +18,7 @@ async fn readme_cidr_routes_ipv4_ipv6_and_fallback_responses() {
     for (peer, qtype, expected) in [
         ("127.0.0.1:1234", 1u8, vec![1, 1, 1, 1]),
         ("192.168.1.2:1234", 1, vec![2, 2, 2, 2]),
+        // RFC 3596 §2.2: AAAA RDATA is 16 address octets in network byte order.
         (
             "[2001:db8::1]:1234",
             28,
@@ -29,6 +30,7 @@ async fn readme_cidr_routes_ipv4_ipv6_and_fallback_responses() {
         ),
         ("203.0.113.1:1234", 1, vec![3, 3, 3, 3]),
     ] {
+        // RFC 1035 §4.1.2: Encode QNAME, QTYPE, and QCLASS in the Question section.
         let wire = [
             0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 4, b't', b'e', b's', b't', 0, 0, qtype, 0, 1,
         ];

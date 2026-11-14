@@ -94,6 +94,7 @@ async fn services_scenario() {
                 } else if request.contains("/endpointslices") {
                     (
                         "EndpointSliceList",
+                        // KEP-0752 §Proposal > Zone (Per Endpoint): Endpoints identify their zone.
                         r#"[{"metadata":{"name":"one","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.0.1.2"],"hostname":"one","targetRef":{"name":"ignored"},"zone":"us.a"}]},{"metadata":{"name":"two","namespace":"prod","labels":{"kubernetes.io/service-name":"head"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.3"],"targetRef":{"name":"pod-two"},"zone":"us.b"}]},{"metadata":{"name":"pool","namespace":"prod","labels":{"kubernetes.io/service-name":"pool"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["10.0.5.1"],"hostname":"a","zone":"us.a"},{"addresses":["10.0.5.2"],"hostname":"b","zone":"us.a"},{"addresses":["10.0.5.3"],"hostname":"c","zone":"us.b"}]},{"metadata":{"name":"v6","namespace":"prod","labels":{"kubernetes.io/service-name":"v6head"}},"addressType":"IPv6","ports":[{"name":"http","protocol":"TCP","port":8080}],"endpoints":[{"addresses":["2001:db8::2"],"zone":"us.a"}]},{"metadata":{"name":"dns","namespace":"prod","labels":{"kubernetes.io/service-name":"web"}},"addressType":"IPv4","endpoints":[{"addresses":["192.0.2.30"]}]},{"metadata":{"name":"duplicate-one","namespace":"prod","labels":{"kubernetes.io/service-name":"dupa"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"same"}]},{"metadata":{"name":"duplicate-two","namespace":"prod","labels":{"kubernetes.io/service-name":"dupa"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"same"}]},{"metadata":{"name":"other","namespace":"prod","labels":{"kubernetes.io/service-name":"dupb"}},"addressType":"IPv4","endpoints":[{"addresses":["10.0.1.4"],"hostname":"other"}]}]"#,
                     )
                 } else if request.contains("/api/v1/pods") {
@@ -182,6 +183,7 @@ async fn services_scenario() {
     lifecycle.run(Phase::Startup).await.unwrap();
     assert!(readiness.ready());
     let root: Name = ".".parse().unwrap();
+    // KEP-563 §CoreDNS Operation: Dual-stack Services publish both supported IP families.
     for (name, kind, code, answers, extra) in [
         ("web.prod.svc.cluster.local.", Type::A, Rcode::NOERROR, 1, 0),
         ("1.0.0.10.in-addr.arpa.", Type::PTR, Rcode::NOERROR, 1, 0),
@@ -391,6 +393,7 @@ async fn services_scenario() {
             0,
         ),
         (
+            // RFC 4343 §3: DNS name lookup compares ASCII letters without case sensitivity.
             "WEB.prod.svc.cluster.local.",
             Type::AAAA,
             Rcode::NOERROR,
@@ -398,6 +401,7 @@ async fn services_scenario() {
             0,
         ),
         (
+            // k8s-dns §2.3.2: Named Service ports have service, namespace, and protocol SRVs.
             "_http._tcp.web.prod.svc.cluster.local.",
             Type::SRV,
             Rcode::NOERROR,
@@ -597,6 +601,7 @@ async fn services_scenario() {
             0,
         ),
         (
+            // RFC 2308 §2.2: Existing names without the requested RRset return empty NOERROR.
             "web.prod.svc.cluster.local.",
             Type::TXT,
             Rcode::NOERROR,
@@ -639,6 +644,7 @@ async fn services_scenario() {
             (code, answers, extra),
             "{name} {kind:?}"
         );
+        // RFC 1035 §4.1.1: AA marks an authoritative response for the queried domain.
         assert!(message.aa());
         let qname = name.to_string();
         // ExternalName rows: only the CNAME is checked.
@@ -653,6 +659,7 @@ async fn services_scenario() {
             );
             continue;
         }
+        // RFC 1035 §3.3.12: PTR RDATA contains a domain name.
         if kind == Type::PTR && answers == 1 {
             let Rdata::Ptr(target) = message.answers().next().unwrap().data().unwrap() else {
                 panic!("not PTR")
@@ -672,6 +679,7 @@ async fn services_scenario() {
             };
             assert_eq!(target.to_string(), expected);
         }
+        // RFC 2181 §5: Suppress duplicate records with identical owner, class, type, and data.
         if qname == "4.1.0.10.in-addr.arpa." {
             let mut targets: Vec<_> = message
                 .answers()
@@ -738,6 +746,7 @@ async fn services_scenario() {
                 name.to_string()
             );
         }
+        // RFC 1035 §3.3.11: NS RDATA contains the domain name of the name server.
         if kind == Type::NS && answers > 0 {
             let Rdata::Ns(ns) = message.answers().next().unwrap().data().unwrap() else {
                 panic!("not NS")
@@ -751,6 +760,7 @@ async fn services_scenario() {
                 }
             );
         }
+        // RFC 2782 §The format of the SRV RR: SRV carries priority, weight, port, and target.
         if kind == Type::SRV
             && answers > 0
             && !name.to_string().contains(".pod.")
@@ -799,6 +809,7 @@ async fn services_scenario() {
             };
             assert_eq!(target.to_string(), format!("{service}.{zone}"));
         }
+        // RFC 1035 §3.3.13: SOA RDATA contains the primary server, mailbox, serial, and timers.
         if kind == Type::SOA || message.answer_count() == 0 {
             let record = if kind == Type::SOA && message.answer_count() > 0 {
                 message.answers().next().unwrap()

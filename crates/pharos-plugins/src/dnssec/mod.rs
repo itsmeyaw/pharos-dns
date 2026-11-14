@@ -29,6 +29,7 @@ impl Plugin for Dnssec {
             self.zone_for(question.name)
                 .map(|zone| question.qtype == Type::DNSKEY && question.name == *zone)
         });
+        // RFC 4033 §9: DO queries in configured zones receive DNSSEC records.
         let do_bit = matching.is_some() && cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
         let intercepted = matching.unwrap_or(false);
         let outcome = if intercepted {
@@ -39,6 +40,7 @@ impl Plugin for Dnssec {
         } else {
             next.run(cx).await
         };
+        // RFC 4035 §3.1: DO responses from signed zones include required DNSSEC records.
         if do_bit && outcome == Outcome::Response {
             return match self.sign_response(cx) {
                 Ok(()) => Outcome::Response,
@@ -77,6 +79,7 @@ impl Dnssec {
                         .labels()
                         .skip(count - labels)
                         .zip(suffix.labels())
+                        // RFC 4343 §3: match DNS labels using ASCII case-insensitive comparison.
                         .all(|(a, b)| a.eq_ignore_ascii_case(b))
             })
             .max_by_key(|zone| zone.label_count())

@@ -100,6 +100,7 @@ impl DynUpdate {
     }
 
     async fn update(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        // RFC 3007 §1.1: UPDATE prerequisites and changes apply to one configured Zone.
         let mut questions = cx.query.questions();
         let Some(question) = questions.next() else {
             return reply(cx, Rcode::FORMERR);
@@ -111,9 +112,11 @@ impl DynUpdate {
         if question.name != self.config.origin {
             return reply(cx, Rcode::NOTAUTH);
         }
+        // RFC 3007 §2: Only a validated TSIG from a configured key may update.
         let Some(key) = cx.metadata.validated_tsig().map(|name| name.to_name()) else {
             return reply(cx, Rcode::REFUSED);
         };
+        // RFC 3007 §2: Refuse updates from authenticated keys without authority.
         if !self.config.configured_key(&key) {
             return reply(cx, Rcode::REFUSED);
         }
@@ -139,6 +142,7 @@ impl DynUpdate {
             return reply(cx, Rcode::SERVFAIL);
         };
         let config = Arc::clone(&self.config);
+        // RFC 2136 §3.7: UPDATE transactions publish complete Zone snapshots atomically.
         let result =
             tokio::task::spawn_blocking(move || shared.transact(&config, &key, &prereqs, &updates))
                 .await;
@@ -152,6 +156,7 @@ impl DynUpdate {
                 let _ = changed;
                 code
             }
+            // RFC 1035 §4.1.1: SERVFAIL reports a server processing failure.
             _ => Rcode::SERVFAIL,
         };
         reply(cx, code)

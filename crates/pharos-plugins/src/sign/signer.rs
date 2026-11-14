@@ -93,9 +93,12 @@ pub(super) fn sign_with_owner(
         let mut dnskey = key.public.flags.to_be_bytes().to_vec();
         dnskey.extend_from_slice(&[key.public.protocol, key.public.algorithm]);
         dnskey.extend_from_slice(&key.public.public_key);
+        // RFC 4034 §3.1.6: The RRSIG key tag identifies the DNSKEY used to create the signature.
         let tag = key_tag(&dnskey).ok_or("invalid DNSKEY")?;
+        // RFC 9904 §4: Uses SHA-256, required for DNSSEC delegation.
         let cds = cds_rdata(key_owner, &dnskey, DigestType::Sha256).ok_or("invalid DNSKEY")?;
         // RFC 7344 §§4.1–4.2: CDS and CDNSKEY publish the child key's delegation data.
+        // RFC 8078 §2.1: publishing CDS and CDNSKEY tells the parent to synchronize the DS RRset.
         for (rtype, rdata) in [
             (Type::DNSKEY, dnskey.clone()),
             (Type::CDNSKEY, dnskey),
@@ -122,6 +125,7 @@ pub(super) fn sign_with_owner(
         .filter(|rr| rr.rtype == Type::NS && rr.owner != *apex)
         .map(|rr| rr.owner.clone())
         .collect();
+    // RFC 4034 §4.1.1: NSEC links exclude glue and other non-authoritative names.
     let authoritative = |name: &Name| {
         !cuts
             .iter()
@@ -129,10 +133,12 @@ pub(super) fn sign_with_owner(
     };
     let mut owners = BTreeMap::<Name, Vec<Type>>::new();
     for rr in &records {
+        // RFC 4035 §2.3: Create NSEC records at authoritative names and delegations.
         if authoritative(&rr.owner)
             && rr.rtype != Type::SOA
             && !(rr.owner == *apex && rr.rtype == Type::NS)
         {
+            // RFC 4034 §4.1.3: wildcard labels remain literal NSEC owner names.
             owners.entry(rr.owner.clone()).or_default().push(rr.rtype);
         }
     }
@@ -140,6 +146,7 @@ pub(super) fn sign_with_owner(
     // RFC 4034 §4.1: NSEC links authoritative names in canonical order and lists their types.
     for (index, (owner, types)) in names.iter().enumerate() {
         let mut types = types.clone();
+        // RFC 4035 §2.3: each NSEC type bitmap includes NSEC and its corresponding RRSIG.
         types.extend([Type::NSEC, Type::RRSIG]);
         if owner == apex {
             types.extend([Type::NS, Type::SOA]);
@@ -148,6 +155,7 @@ pub(super) fn sign_with_owner(
         rdata.extend_from_slice(&type_bitmap(&types).map_err(|e| e.to_string())?);
         records.push(ZoneRecord {
             owner: owner.clone(),
+            // RFC 4035 §2.3: NSEC TTL should equal the SOA minimum TTL.
             ttl: minimum,
             class: Class::IN,
             rtype: Type::NSEC,
@@ -155,10 +163,13 @@ pub(super) fn sign_with_owner(
         });
     }
 
+    // RFC 4035 §2.4: sign each DS RRset in the parent zone.
     let mut rrsets = BTreeMap::<(Name, u16, u16), Vec<usize>>::new();
     for (index, rr) in records.iter().enumerate() {
         if (rr.rtype == Type::SOA || authoritative(&rr.owner))
+            // RFC 4034 §3: Do not sign RRSIG records as zone data.
             && rr.rtype != Type::RRSIG
+            // RFC 5155 §6: Do not sign NS RRsets at non-apex delegation points.
             && (rr.rtype != Type::NS || rr.owner == *apex)
         {
             rrsets
@@ -174,6 +185,7 @@ pub(super) fn sign_with_owner(
         .wrapping_add(32 * 24 * 60 * 60)
         .wrapping_add(expiration_jitter);
     let mut signatures = Vec::new();
+    // RFC 4035 §2.2: Sign each authoritative RRset with its matching RRSIG fields and zone key.
     for ((owner, rtype, _), indices) in rrsets {
         let first = &records[indices[0]];
         let ttl = if owner == *apex && first.rtype == Type::NS {
@@ -195,7 +207,9 @@ pub(super) fn sign_with_owner(
             .collect::<Result<Vec<_>, String>>()?;
         // RFC 4034 §3.1.3: wildcard RRSIG labels exclude the wildcard label.
         let labels = owner.label_count() - usize::from(owner.as_wire().starts_with(&[1, b'*']));
+        // RFC 4035 §2.2: an RRset may have multiple associated RRSIG records.
         for (algorithm, tag, key) in &signers {
+            // RFC 4034 §3.1.1: Type Covered is the type of the RRset this RRSIG covers.
             let rrsig = Rdata::Rrsig {
                 type_covered: Type(rtype),
                 algorithm: *algorithm,
@@ -207,7 +221,7 @@ pub(super) fn sign_with_owner(
                 signer,
                 signature: &[],
             };
-            // RFC 4034 §3.1.8: sign the RRSIG prefix and the canonical RRset.
+            // RFC 4034 §3.1.8.1: Sign the RRSIG prefix and canonical RRset.
             let data = signed_data(&rrsig, &rrset).map_err(|e| e.to_string())?;
             let signature = key.sign(&data).map_err(|e| e.to_string())?;
             let mut rdata = canonical_rdata(&rrsig).map_err(|e| e.to_string())?;
@@ -215,6 +229,7 @@ pub(super) fn sign_with_owner(
             signatures.push(ZoneRecord {
                 owner: owner.clone(),
                 ttl,
+                // RFC 4034 §3: each RRSIG uses the class of its covered RRset.
                 class: first.class,
                 rtype: Type::RRSIG,
                 rdata,

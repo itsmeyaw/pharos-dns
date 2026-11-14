@@ -57,21 +57,25 @@ fn response(context: &mut Context<'_, '_>) -> Result<(), Error> {
         position += label.len();
     }
     let srv_name = NameRef::parse(&srv_name[..=position], 0).map_err(|_| Error::InvalidQuery)?;
+    // RFC 1035 §4.1.1: The response copies the query ID and opcode, and sets QR.
     let mut flags = 0x8400 | (context.query.flags() & 0x7800);
     if context.query.opcode() == Opcode::QUERY {
         flags |= context.query.flags() & 0x0110;
     }
     let mut builder = MessageBuilder::new(context.response, max_size, context.query.id(), flags)
         .map_err(Error::Build)?;
+    // RFC 1035 §4.1.2: The response repeats the single question from the query.
     if let Some(question) = question {
         builder
             .question(question.name, question.qtype, question.qclass)
             .map_err(Error::Build)?;
     }
+    // RFC 1035 §3.2.2: IPv4 client addresses use the A record type.
     match context.client.ip() {
         IpAddr::V4(ip) => {
             builder.record(Section::Additional, name, Type::A, class, 0, &ip.octets())
         }
+        // RFC 3596 §2.2: IPv6 address RDATA uses 128 bits in network byte order.
         IpAddr::V6(ip) => builder.record(
             Section::Additional,
             name,

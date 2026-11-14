@@ -19,9 +19,12 @@ struct Answer;
 impl Next for Answer {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
         let q = cx.query.questions().next().unwrap();
+        // RFC 1035 §4.1.1: The DNS header carries the response identifier and response flags.
         let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        // RFC 1035 §4.1.2: The question carries the queried name, type, and class.
         builder.question(q.name, q.qtype, q.qclass).unwrap();
         builder
+            // RFC 1035 §4.1.3: Resource records encode owner, type, class, TTL, and RDATA.
             .record(
                 Section::Answer,
                 q.name,

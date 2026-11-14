@@ -9,6 +9,7 @@ impl Transferer for DynUpdate {
     }
 
     fn transfer(&self, request: TransferRequest<'_>) -> Result<Option<Stream>, Error> {
+        // RFC 5936 §2.1.2: Serve transfers only for the configured zone name.
         if !NameRef::parse(self.config.origin.as_wire(), 0).is_ok_and(|name| name == request.zone) {
             return Ok(None);
         }

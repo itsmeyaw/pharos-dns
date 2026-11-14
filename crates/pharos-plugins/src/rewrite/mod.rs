@@ -258,6 +258,7 @@ impl Rewrite {
                         return Err(cursor.arg_err());
                     }
                     (3, EdnsValue::Nsid)
+                // RFC 7871 §2: ECS is added only when an operator configures a subnet rewrite.
                 } else if typ.eq_ignore_ascii_case("subnet") {
                     let (v4, v6) = match (action, rest) {
                         (EdnsAction::Unset, []) => (0, 0),
@@ -980,6 +981,7 @@ fn apply_rule(
         len: 0,
     };
     write!(name, "{}", question.name).map_err(|_| ServerError::InvalidQuery)?;
+    // RFC 4343 §3: Lowercase the query name so rule matching ignores ASCII letter case.
     name.bytes[..name.len].make_ascii_lowercase();
     let name =
         std::str::from_utf8(&name.bytes[..name.len]).map_err(|_| ServerError::InvalidQuery)?;
@@ -1230,6 +1232,7 @@ struct EdnsState<'a> {
     count: usize,
 }
 
+// RFC 7871 §6: ECS encodes family, source prefix, zero scope, and the truncated address.
 fn subnet_data(ip: std::net::IpAddr, v4: u8, v6: u8, output: &mut [u8; 20]) -> &[u8] {
     let (family, prefix, address): (u16, u8, [u8; 16]) = match ip {
         std::net::IpAddr::V4(ip) => {
@@ -1335,6 +1338,7 @@ impl<'a> EdnsState<'a> {
                 original[position + 2],
                 original[position + 3],
             ]));
+            // RFC 5001 §2.3: NSID uses option code 3 and carries an opaque byte string.
             tags[count] = match code {
                 3 => 1,
                 8 => 2,
@@ -1579,6 +1583,7 @@ fn build_cname_response(
     scratch[..cx.response.len()].copy_from_slice(cx.response);
     let response =
         Message::parse(&scratch[..cx.response.len()]).map_err(|_| ServerError::InvalidQuery)?;
+    // RFC 1035 §4.1.1: TC indicates that the response was truncated for the transport.
     let flags = (response.flags() & !0x0200) | (lookup.flags() & 0x0200);
     let mut builder = MessageBuilder::new(
         cx.response,
@@ -1592,6 +1597,7 @@ fn build_cname_response(
             .question(q.name, q.qtype, q.qclass)
             .map_err(ServerError::Build)?;
     }
+    // RFC 1035 §3.3.1: CNAME RDATA contains the canonical domain name for its alias owner.
     for rr in response.answers() {
         let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
         if let Rdata::Cname(value) = data {
@@ -1852,6 +1858,7 @@ fn build_reverted_response<'q>(
     scratch[..cx.response.len()].copy_from_slice(cx.response);
     let response =
         Message::parse(&scratch[..cx.response.len()]).map_err(|_| ServerError::InvalidQuery)?;
+    // RFC 1035 §4.1.2: Restore the original QNAME, QTYPE, and QCLASS in the response.
     let original = original_query
         .questions()
         .next()
@@ -1860,10 +1867,12 @@ fn build_reverted_response<'q>(
         cx.response,
         cx.max_response_size.max(512),
         response.id(),
+        // RFC 1035 §4.1.1: Replace only the four-bit header RCODE.
         (response.flags() & !0x000f) | (rcode & 0x000f),
     )
     .map_err(ServerError::Build)?;
     builder
+        // RFC 1035 §4.1.2: Encode the original QNAME, QTYPE, and QCLASS.
         .question(original.name, original.qtype, original.qclass)
         .map_err(ServerError::Build)?;
     for q in response.questions().skip(1) {
@@ -1877,6 +1886,7 @@ fn build_reverted_response<'q>(
         (Section::Authority, response.authorities()),
         (Section::Additional, response.additionals()),
     ] {
+        // RFC 1035 §4.1.3: Re-encode each resource record with its current fields.
         for rr in records {
             let mut ttl = rr.ttl;
             if rr.rtype == Type::OPT {
@@ -1884,6 +1894,7 @@ fn build_reverted_response<'q>(
                 // RFC 6891 §6.1.3: OPT carries the high RCODE bits, not an RR TTL.
                 ttl = (ttl & 0x00ff_ffff) | (u32::from(rcode >> 4) << 24);
             } else {
+                // RFC 2181 §5.2: Apply the same TTL clamp to each RRSet member.
                 for (index, rule) in rules[..end].iter().enumerate().rev() {
                     let active = recorded.map_or_else(
                         || active_at(rules, index, original_query, &cx.metadata, history),
@@ -1920,10 +1931,15 @@ fn build_reverted_response<'q>(
                 };
             }
             let data = match data {
+                // RFC 1035 §3.3.1: CNAME RDATA contains the canonical domain name.
                 Rdata::Cname(value) => Rdata::Cname(map!(value)),
+                // RFC 6672 §2.1: DNAME RDATA contains its fully qualified target name.
                 Rdata::Dname(value) => Rdata::Dname(map!(value)),
+                // RFC 1035 §3.3.11: NS RDATA names an authoritative host.
                 Rdata::Ns(value) => Rdata::Ns(map!(value)),
+                // RFC 1035 §3.3.12: PTR RDATA names a location in the domain name space.
                 Rdata::Ptr(value) => Rdata::Ptr(map!(value)),
+                // RFC 1035 §3.3.9: MX RDATA contains a preference and exchange domain name.
                 Rdata::Mx {
                     preference,
                     exchange,
@@ -1931,6 +1947,7 @@ fn build_reverted_response<'q>(
                     preference,
                     exchange: map!(exchange),
                 },
+                // RFC 1035 §3.3.13: SOA RDATA has MNAME, RNAME, and five numeric fields.
                 Rdata::Soa {
                     mname,
                     rname,
@@ -1948,6 +1965,7 @@ fn build_reverted_response<'q>(
                     expire,
                     minimum,
                 },
+                // RFC 2782 §The format of the SRV RR: SRV has priority, weight, port, and target.
                 Rdata::Srv {
                     priority,
                     weight,
@@ -1959,6 +1977,7 @@ fn build_reverted_response<'q>(
                     port,
                     target: map!(target),
                 },
+                // RFC 3403 §4.1: NAPTR RDATA ends with a fully qualified replacement name.
                 Rdata::Naptr {
                     order,
                     preference,
@@ -2163,6 +2182,7 @@ impl Plugin for Rewrite {
         {
             return Outcome::Error(error);
         }
+        // RFC 1034 §4.3.2: Include CNAME aliases and restart lookup at the canonical name.
         if outcome == Outcome::Response {
             for (index, rule) in self.rules[..end].iter().enumerate().rev() {
                 let Action::Cname(matcher, replacement) = &rule.action else {
@@ -2267,6 +2287,7 @@ impl Plugin for Rewrite {
             }
             let code = rewrite_rcode(code.0);
             // RFC 1035 §4.1.1: a Response copies the Query opcode, RD and CD bits.
+            // RFC 4035 §3.2.2: Copy the Query CD bit into the Response.
             let flags = 0x8000
                 | (original_query.flags() & 0x7800)
                 | if original_query.opcode() == pharos_proto::Opcode::QUERY {

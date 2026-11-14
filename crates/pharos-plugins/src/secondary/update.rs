@@ -46,6 +46,7 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
         (SocketAddr::V4(_), None) => true,
         (SocketAddr::V6(client), None) => client.scope_id() == 0,
         (SocketAddr::V6(client), Some(scope)) => {
+            // RFC 4007 §11.2: an interface-name zone matches only the peer's own interface.
             // RFC 4007 §11: a scoped IPv6 address identifies an interface zone.
             // CoreDNS compares the zone text Go renders: the interface name.
             client.scope_id() != 0
@@ -56,6 +57,7 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
     }
 }
 
+// RFC 1035 §4.1.1: DNS query IDs are 16-bit identifiers assigned by the query generator.
 fn random_id() -> u16 {
     let mut bytes = [0; 2];
     let _ = getrandom::getrandom(&mut bytes);
@@ -72,6 +74,7 @@ fn random_delay(_: u16) -> u16 {
     0
 }
 
+// RFC 1034 §2.4: name servers periodically refresh zones from master copies.
 pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::Result<()> {
     let mut error = io::Error::other("no Primary Server");
     for primary in &zone.config.from {
@@ -90,9 +93,10 @@ pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::
                 random_id(),
                 Duration::from_secs(5),
                 |message| {
+                    // RFC 5936 §3.5: retain occluded records when importing an AXFR snapshot.
                     for record in message.answers() {
                         let data = record.data().map_err(io::Error::other)?;
-                        // RFC 5936 §2.2: transferred names are expanded before storing a Zone snapshot.
+                        // RFC 5936 §3.4: re-encode RDATA without compressed names.
                         let mut wire = Vec::with_capacity(512);
                         let mut builder = MessageBuilder::new(&mut wire, 65535, 0, 0)
                             .map_err(io::Error::other)?;
@@ -132,6 +136,7 @@ pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::
             .await;
             match result {
                 Ok(()) => {
+                    // RFC 5936 §6: publish a validated Zone snapshot atomically after transfer.
                     let next = match crate::zone::Zone::from_records(
                         zone.config.apex.clone(),
                         records.clone(),
@@ -142,6 +147,7 @@ pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::
                             continue;
                         }
                     };
+                    // RFC 9432 §5.1: Apply catalog changes after each valid transfer.
                     let catalog = if zone.config.catalog.is_some() {
                         Some(
                             super::catalog::parse(&zone.config.apex, &records)
@@ -158,6 +164,7 @@ pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::
                     #[cfg(feature = "plugin-transfer")]
                     if let Some(notifier) = shared.notifier.get() {
                         // RFC 1996 §3.1: notify downstream Secondary Servers after a transfer.
+                        // RFC 1996 §4.2: Forward NOTIFY only after the Zone transfer succeeds.
                         if let Err(err) = notifier.notify(&zone.config.apex).await {
                             pharos_server::logging::log(
                                 "WARN",
@@ -175,6 +182,7 @@ pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::
     Err(error)
 }
 
+// RFC 1034 §4.3.5: poll the primary SOA serial to detect Zone changes.
 pub(super) async fn should_transfer(zone: &SecondaryZone) -> io::Result<bool> {
     let mut error = None;
     for primary in &zone.config.from {
@@ -185,6 +193,7 @@ pub(super) async fn should_transfer(zone: &SecondaryZone) -> io::Result<bool> {
             let mut builder =
                 MessageBuilder::new(&mut query, 512, id, 0).map_err(io::Error::other)?;
             builder
+                // RFC 1035 §4.1.2: The Question section carries QNAME, QTYPE, and QCLASS.
                 .question(
                     NameRef::parse(zone.config.apex.as_wire(), 0).map_err(io::Error::other)?,
                     Type::SOA,
@@ -192,6 +201,7 @@ pub(super) async fn should_transfer(zone: &SecondaryZone) -> io::Result<bool> {
                 )
                 .map_err(io::Error::other)?;
             let _ = builder.finish();
+            // RFC 1035 §4.2.2: TCP DNS messages use a two-octet length prefix.
             socket.write_u16(query.len() as u16).await?;
             socket.write_all(&query).await?;
             let len = socket.read_u16().await?;
@@ -273,6 +283,7 @@ impl Drop for AbortOnDrop {
     }
 }
 
+// RFC 5936 §1.2: maintain zone coherence through periodic AXFR and NOTIFY-triggered transfers.
 pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
     let notify_shared = Arc::clone(&shared);
     let notify_zone = Arc::clone(&zone);
@@ -284,6 +295,7 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                     while notify_zone.notify_pending.try_update(Ordering::Relaxed, Ordering::Relaxed, |pending| pending.checked_sub(1)).is_ok() {
                         let shared = Arc::clone(&notify_shared);
                         let zone = Arc::clone(&notify_zone);
+                        // RFC 1996 §3.7: A slave queries known masters after NOTIFY.
                         // RFC 1996 §3: process each NOTIFY outside the Query path.
                         checks.spawn(async move {
                             match should_transfer(&zone).await {
@@ -301,7 +313,9 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
         }
     }));
     let mut delay = Duration::from_millis(250);
+    // RFC 9432 §5.1: Retry transfers so catalog processing resumes after success.
     while let Err(error) = transfer(&shared, &zone).await {
+        // RFC 9432 §5.1: Log transfer failures with errors to identify broken catalogs.
         pharos_server::logging::log(
             "WARN",
             "secondary",

@@ -271,6 +271,7 @@ impl pharos_server::Plugin for Hosts {
         }
         let fallthrough = contains(key, &self.fallthrough_names);
         let entries = self.state.entries.load_full();
+        // RFC 1035 §3.5: reverse IPv4 addresses map to host names through PTR records.
         let ptr = if question.qtype == Type::PTR {
             reverse_address(question.name)
         } else {
@@ -293,6 +294,7 @@ impl pharos_server::Plugin for Hosts {
         let v6 = entries.lookup_key(key, false);
         let inline4 = self.inline_entries.lookup_key(key, true);
         let inline6 = self.inline_entries.lookup_key(key, false);
+        // RFC 1034 §4.3.2: Copy resource records matching QTYPE into the answer section.
         let ips = if question.qtype == Type::A {
             (v4, inline4)
         } else if question.qtype == Type::AAAA {
@@ -323,6 +325,7 @@ impl pharos_server::Plugin for Hosts {
                 return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
             }
         }
+        // RFC 1035 §4.1.1: Responses set QR and copy the query opcode and RD bit.
         let mut flags = 0x8400 | (cx.query.flags() & 0x7800);
         if cx.query.opcode() == Opcode::QUERY {
             flags |= cx.query.flags() & 0x0110;
@@ -331,8 +334,10 @@ impl pharos_server::Plugin for Hosts {
             let mut builder = MessageBuilder::new(cx.response, max, cx.query.id(), flags)
                 .map_err(pharos_server::Error::Build)?;
             builder
+                // RFC 1035 §4.1.2: The response repeats the query name, type, and class.
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(pharos_server::Error::Build)?;
+            // RFC 3596 §2: each IPv6 address is represented by a separate AAAA record.
             for ip in ips.0.iter().chain(ips.1) {
                 match ip {
                     // RFC 1035 §3.4.1: A RDATA carries a 32-bit Internet address.

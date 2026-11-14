@@ -143,6 +143,7 @@ impl External {
                     answers += 1;
                 }
             }
+            // RFC 2308 §3: Authoritative negative responses include the zone SOA.
             if answers == 0 {
                 write_soa(
                     &mut b,
@@ -287,6 +288,7 @@ impl External {
                     return Err(error);
                 }
             }
+            // RFC 3596 §3: SRV answers include available target addresses in Additional.
             if let Some(request) = request
                 && q.qtype == Type::SRV
             {
@@ -309,6 +311,7 @@ impl External {
                         self.config.headless,
                         kubernetes.endpoint_pod_names(),
                         snapshot,
+                        // KEP-752 §Endpoint Port: The EndpointSlice port applies to all endpoints.
                         |address, port, endpoint| {
                             if port.port < 0 || error.is_some() {
                                 return;
@@ -332,7 +335,7 @@ impl External {
                             if !scratch.srv.insert(key, b"", port.port as u16) {
                                 return;
                             }
-                            // RFC 2782 §3: SRV stores priority, weight, port, and target.
+                            // RFC 2782 §The format of the SRV RR: priority, weight, port, target.
                             match b.record_with(
                                 Section::Answer,
                                 q.name,
@@ -354,6 +357,7 @@ impl External {
                     );
                     let mut ordinal = 0usize;
                     let mut chased = chased.iter().peekable();
+                    // RFC 2782 §The format of the SRV RR: Add available target addresses.
                     lookup::snapshot_or_lookup(
                         index,
                         request,
@@ -441,6 +445,7 @@ impl External {
                     return Err(error);
                 }
             }
+            // RFC 2308 §3: Authoritative negative responses include the zone SOA.
             if answers == 0 {
                 write_soa(
                     &mut b,
@@ -683,6 +688,7 @@ impl Plugin for External {
 impl External {
     async fn answer(&self, cx: &mut Context<'_, '_>) -> Option<Outcome> {
         let q = cx.query.questions().next()?;
+        // RFC 1034 §4.3.2: Answer from the nearest authoritative ancestor zone.
         let zone = self
             .zones
             .iter()
@@ -705,6 +711,7 @@ impl External {
                 .unwrap_or_else(|| self.empty_store.clone());
             let mut wire = [0u8; 255];
             let mut n = 0;
+            // RFC 1035 §2.3.3: DNS name comparisons ignore ASCII letter case.
             for label in q.name.labels() {
                 wire[n] = label.len() as u8;
                 n += 1;
@@ -719,6 +726,7 @@ impl External {
             for (slot, label) in labels.iter_mut().zip(normalized.labels()) {
                 *slot = label;
             }
+            // RFC 1035 §3.5 and RFC 3596 §2.5: Reverse names encode octets or nibbles in reverse.
             let reverse_ip = if q.qtype == Type::PTR {
                 crate::kubernetes::reverse::address(&labels[..normalized.labels().count()])
                     .map(crate::kubernetes::scratch::IpText::new)
@@ -870,6 +878,7 @@ impl External {
                     |w| w.write_name(ns_ref),
                 )?;
                 let mut err = None;
+                // RFC 3596 §3: NS answers include available nameserver addresses in Additional.
                 store.with_read(|index| {
                     kubernetes.visit_external_ns(index, self.config.headless, |ip| {
                         let result = match ip {
@@ -948,7 +957,9 @@ impl External {
                 if let Some(error) = err {
                     return Err(error);
                 }
+                // RFC 2181 §7.1: Put an authoritative SOA in the Authority section.
                 if answers == 0 {
+                    // RFC 2308 §2.2.1: Authoritative NODATA includes SOA without NS records.
                     write_soa(
                         &mut b,
                         zone_ref,
@@ -960,6 +971,7 @@ impl External {
                     )?;
                 }
             } else {
+                // RFC 2308 §3: Authoritative negative responses include the zone SOA.
                 write_soa(
                     &mut b,
                     zone_ref,
@@ -1005,6 +1017,7 @@ fn write_soa(
     Ok(())
 }
 
+// RFC 1035 §2.3.3: DNS name comparisons ignore ASCII letter case.
 fn contains(name: NameRef<'_>, zone: &Name) -> bool {
     let parent = NameRef::parse(zone.as_wire(), 0).unwrap();
     let count = name.labels().count();

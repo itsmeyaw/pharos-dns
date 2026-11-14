@@ -52,6 +52,7 @@ async fn wildcard_whoami_preserves_native_client_addresses() {
         if source.starts_with('[') && !ipv6 {
             continue;
         }
+        // RFC 1035 §4.2.1: Send standard DNS queries over UDP.
         let udp = UdpSocket::bind(source).await.unwrap();
         udp.send_to(&query("a."), &destination).await.unwrap();
         let mut wire = [0; 512];
@@ -273,6 +274,7 @@ async fn corefile_routes_real_udp_and_tcp_queries() {
         let response = Message::parse(&buffer[..size]).unwrap();
         assert_eq!(response.rcode(), rcode);
         assert_eq!(response.questions().next().unwrap().name.to_string(), name);
+        // RFC 7766 §5: Support DNS over TCP and respond on the same connection.
         tcp.write_u16(wire.len() as u16).await.unwrap();
         tcp.write_all(&wire).await.unwrap();
         let size = timeout(Duration::from_secs(2), tcp.read_u16())

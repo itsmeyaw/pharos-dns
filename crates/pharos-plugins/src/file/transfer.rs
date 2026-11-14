@@ -9,6 +9,7 @@ impl Transferer for File {
     }
 
     fn transfer(&self, request: TransferRequest<'_>) -> Result<Option<Stream>, Error> {
+        // RFC 1995 §3: IXFR QNAME identifies the requested zone.
         let Some(loaded) = self.zones.iter().find(|zone| {
             NameRef::parse(zone.apex.as_wire(), 0).is_ok_and(|name| name == request.zone)
         }) else {

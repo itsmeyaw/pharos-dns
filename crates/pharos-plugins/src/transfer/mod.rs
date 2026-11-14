@@ -71,10 +71,12 @@ impl Transfer {
             return Ok(());
         };
         let mut errors = Vec::new();
+        // RFC 1996 §4.6: Send NOTIFY to each configured server destination.
         for destination in &rule.destinations {
             let Destination::Address { host, port } = destination else {
                 continue;
             };
+            // RFC 5952 §6: Bracket IPv6 literals when combining them with port numbers.
             let endpoint = if host.contains(':') {
                 format!("[{host}]:{port}")
             } else {
@@ -90,6 +92,7 @@ impl Transfer {
                 let mut random = [0; 2];
                 getrandom::getrandom(&mut random)
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
+                // RFC 1996 §3.1: Send SOA NOTIFY to configured secondary servers for this zone.
                 pharos_server::transfer::notify_from(
                     address,
                     rule.source,
@@ -147,6 +150,7 @@ impl Transfer {
                     _ => return Err(cursor.arg_err()),
                 }
             }
+            // RFC 5936 §5: Require an explicit transfer policy instead of open access.
             if destinations.is_empty() {
                 return Err(cursor.error("transfer requires to"));
             }
@@ -219,6 +223,7 @@ impl Transfer {
         if write!(client, "{ip}").is_err() {
             return Some(Outcome::Unanswered(Rcode::REFUSED));
         }
+        // RFC 5936 §5: Restrict AXFR access to explicitly configured client IP addresses.
         let allowed = rule
             .destinations
             .iter()
@@ -227,6 +232,7 @@ impl Transfer {
                 Destination::Address { host, .. } => host.as_bytes() == &client.bytes[..client.len],
             });
         if !allowed {
+            // RFC 1035 §4.1.1: REFUSED means policy prevents this transfer.
             return Some(Outcome::Unanswered(Rcode::REFUSED));
         }
         // RFC 1995 §3: an IXFR Query carries the current SOA in Authority.
@@ -279,7 +285,9 @@ impl std::fmt::Write for IpText {
     }
 }
 
+// RFC 5936 §5: An explicit wildcard permits AXFR access to all clients.
 fn destination(value: &str) -> Option<Destination> {
+    // RFC 5936 §5: Allow operators to explicitly open AXFR access to all clients.
     if value == "*" {
         return Some(Destination::All);
     }

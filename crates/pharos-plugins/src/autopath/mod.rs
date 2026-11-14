@@ -231,7 +231,9 @@ impl Plugin for AutoPath {
             wire[used..used + label.len()].copy_from_slice(label);
             used += label.len();
         }
+        // RFC 1035 §3.1: Skip search names that exceed the 255-octet wire-name limit.
         for suffix in paths.skip(1) {
+            // RFC 1035 §3.1: Skip search names whose combined wire length exceeds 255 octets.
             if used + suffix.len() > wire.len() {
                 continue;
             }
@@ -327,14 +329,17 @@ fn rebuild(cx: &mut Context<'_, '_>, response: &Message<'_>) -> Result<(), Serve
         }
     }
     // RFC 1035 §4.1.2: the Response retains the original Question.
+    // RFC 1035 §4.1.1: A response copies the query identifier to match the request.
     let mut b = MessageBuilder::new(cx.response, max, cx.query.id(), response.flags())
         .map_err(ServerError::Build)?;
     b.question(question.name, question.qtype, question.qclass)
         .map_err(ServerError::Build)?;
+    // RFC 1034 §4.3.2: Return a CNAME before records for its canonical name.
     if let Some(first) = response
         .answers()
         .find(|rr| different_name(rr.name, question.name))
     {
+        // RFC 1035 §3.3.1: CNAME RDATA names the canonical name for the alias.
         b.record_with(
             Section::Answer,
             question.name,

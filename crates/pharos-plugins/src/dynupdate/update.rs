@@ -43,6 +43,7 @@ pub(super) fn build_zone(
         remaining = remaining
             .checked_sub(size)
             .ok_or("Zone exceeds max_bytes")?;
+        // RFC 1035 §5.2: Validate the seed zone's class and apex SOA before serving it.
         if rr.class != Class::IN
             || !rr.owner.is_subdomain_of(&origin)
             || super::setup::unsupported(rr.rtype)
@@ -86,6 +87,7 @@ pub(super) fn build_zone(
 // RFC 2136 §3.4.1: prescan the complete Update section before changing the Zone.
 pub(super) fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
     for record in records {
+        // RFC 2136 §1.2: UPDATE owner names must be within the Zone named in the request.
         if !record.owner.is_subdomain_of(zone.apex()) {
             return Rcode::NOTZONE;
         }
@@ -98,6 +100,7 @@ pub(super) fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
                     return Rcode::FORMERR;
                 }
                 if record.rtype == Type::SOA {
+                    // RFC 1035 §5.2: The zone SOA must appear at the zone top.
                     // RFC 2136 §§4.2 and 7.11: require the apex and a nonzero SOA serial.
                     let serial = record
                         .rdata
@@ -126,6 +129,7 @@ pub(super) fn validate_updates(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
             }
             _ => return Rcode::FORMERR,
         }
+        // RFC 3007 §4.4: Dynamic updates must not modify NXT records.
         if super::setup::unsupported(record.rtype) {
             return Rcode::NOTIMP;
         }
@@ -146,7 +150,9 @@ pub(super) fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
         if super::setup::unsupported(record.rtype) {
             return Rcode::NOTIMP;
         }
+        // RFC 2136 §3.2.2: class ANY and NONE prerequisites need empty RDATA and a known type.
         match record.class {
+            // RFC 2136 §§2.4.1–2.4.5: ANY and NONE test existence with empty RDATA.
             Class::ANY | Class::NONE => {
                 if !record.rdata.is_empty()
                     || !known(record.rtype)
@@ -166,6 +172,7 @@ pub(super) fn prerequisites(zone: &Zone, records: &[ZoneRecord]) -> Rcode {
                     _ => {}
                 }
             }
+            // RFC 2136 §3.2.3: Group ZCLASS prerequisites by owner and type for comparison.
             Class::IN => {
                 if !known(record.rtype) || query_metatype(record.rtype) {
                     return Rcode::FORMERR;

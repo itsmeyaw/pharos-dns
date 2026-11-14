@@ -721,6 +721,7 @@ fn question_member<'a>(
     question: pharos_proto::Question<'a>,
     scratch: &mut Scratch<'_>,
 ) -> Result<ResultValue<'a>, fmt::Error> {
+    // RFC 1035 §4.1.2: Each question carries a domain name, QTYPE, and QCLASS.
     match member {
         super::QuestionMember::Name => {
             let start = scratch.len;

@@ -49,6 +49,7 @@ async fn view_routes_first_matching_block_and_falls_back() {
     ] {
         let name: Name = name.parse().unwrap();
         let mut wire = Vec::with_capacity(512);
+        // RFC 1035 §4.1.2: Encode QNAME, QTYPE, and QCLASS in the Question section.
         let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
         builder
             .question(
@@ -67,6 +68,7 @@ async fn view_routes_first_matching_block_and_falls_back() {
                 &mut response,
             )
             .await;
+        // RFC 1035 §3.4.1: A RDATA is a 32-bit Internet address.
         assert_eq!(
             Message::parse(&response)
                 .unwrap()

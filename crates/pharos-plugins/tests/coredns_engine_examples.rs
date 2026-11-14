@@ -8,6 +8,7 @@ use pharos_server::{Metadata, Protocol};
 #[test]
 fn view_readme_expressions_match_ipv4_ipv6_type_and_name() {
     // CoreDNS v1.15.0 plugin/view/README.md, Examples and Expressions.
+    // RFC 1035 §4.1.2: A DNS question carries a domain-name QNAME and a two-octet QTYPE.
     let wire = b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03Abc\x03www\x07Example\x03Com\x00\x00\x01\x00\x01";
     let message = Message::parse(wire).unwrap();
     let mut slots = [];
@@ -62,7 +63,9 @@ fn view_readme_expressions_match_ipv4_ipv6_type_and_name() {
             "{source} / {client}"
         );
     }
+    // RFC 1035 §3.2.3: QTYPE values include all resource-record TYPE values.
     let expression = Expression::compile("type() in ['A', 'AAAA']").unwrap();
+    // RFC 3596 §2.1: AAAA has assigned DNS TYPE value 28.
     for (qtype, expected) in [(28u16, true), (16, false)] {
         let mut wire = wire.to_vec();
         let offset = wire.len() - 4;
@@ -131,6 +134,7 @@ fn template_readme_record_examples_render_expected_records() {
     data.matches = &["example.com.dc1.example.com.", "dc1.example.com."];
     data.groups = &[("a", "10"), ("b", "11"), ("c", "12"), ("d", "13")];
     data.variables = &[("ip", Value::String("192.168.1.2"))];
+    // RFC 1035 §5.1: Master records have an owner, optional TTL and class, type, and RDATA.
     for (source, expected) in [
         (
             "invalid. 60 {{ .Class }} SOA ns.invalid. hostmaster.invalid. (1 60 60 60 60)",

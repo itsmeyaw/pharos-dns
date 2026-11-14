@@ -40,6 +40,7 @@ fn shared_listener_sheds_only_matching_blocks() {
     let peer = "127.0.0.1:1234".parse().unwrap();
     for (name, expected) in [("one.example.", true), ("two.example.", false)] {
         let name: pharos_proto::Name = name.parse().unwrap();
+        // RFC 1035 §4.1.2: Encode QNAME, QTYPE, and QCLASS in the Question section.
         let mut wire = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
         wire.extend_from_slice(name.as_wire());
         wire.extend_from_slice(&[0, 1, 0, 1]);

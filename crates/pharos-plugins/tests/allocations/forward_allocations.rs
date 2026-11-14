@@ -35,6 +35,7 @@ fn check_forward(protocol: Protocol, failover: bool) {
     let mut addresses = Vec::new();
     let mut threads = Vec::new();
     for index in 0..if failover { 2 } else { 1 } {
+        // RFC 1035 §4.1.1: RCODE 2 denotes server failure.
         let rcode = if failover && index == 0 { 2 } else { 0 };
         if protocol == Protocol::Tcp {
             let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -46,6 +47,7 @@ fn check_forward(protocol: Protocol, failover: bool) {
                     .unwrap();
                 let mut wire = [0; 512];
                 for _ in 0..20 {
+                    // RFC 1035 §4.2.2: TCP DNS messages use a two-byte length prefix.
                     let mut size = [0; 2];
                     stream.read_exact(&mut size).unwrap();
                     let len = usize::from(u16::from_be_bytes(size));
@@ -99,7 +101,9 @@ fn check_forward(protocol: Protocol, failover: bool) {
                 server.handle(&query, peer, protocol, &mut response).await,
                 Action::Respond
             );
+            // RFC 1035 §4.1.1: Copy the query ID into its corresponding response.
             assert_eq!(&response[..2], &query[..2]);
+            // RFC 1035 §4.1.1: RCODE 0 denotes no error condition.
             assert_eq!(
                 pharos_proto::Message::parse(&response).unwrap().rcode(),
                 pharos_proto::Rcode::NOERROR

@@ -2,6 +2,7 @@ use std::net::IpAddr;
 
 pub(crate) fn contains(network: IpAddr, prefix: u8, client: IpAddr) -> bool {
     // RFC 4632 §3.1 and RFC 4291 §2.3: CIDR prefixes identify leading address bits.
+    // RFC 4632 §3.1 and RFC 4291 §2.5: IPv6 unicast prefixes can use arbitrary bit lengths.
     match (network, client) {
         (IpAddr::V4(net), IpAddr::V4(ip)) => {
             let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);

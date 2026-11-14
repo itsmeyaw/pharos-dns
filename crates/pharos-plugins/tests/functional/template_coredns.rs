@@ -631,7 +631,7 @@ async fn coredns_runtime_errors_do_not_fall_through() {
     assert!(wire.is_empty());
 }
 
-// RFC 8914 §4: extended errors carry a two-octet code and optional text.
+// RFC 8914 §2: Extended errors carry a two-octet code and optional text.
 #[tokio::test]
 async fn coredns_extended_error_in_negative_response() {
     let chain = chain(

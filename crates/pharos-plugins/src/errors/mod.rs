@@ -140,6 +140,7 @@ impl Plugin for Errors {
                     return outcome;
                 }
             }
+            // RFC 1035 §4.1.1: Log errors as RCODE 2 because the plugin contract carries no RCODE.
             if let Some(question) = cx.query.questions().next() {
                 let name = question.name.to_string().to_lowercase();
                 pharos_server::logging::log(

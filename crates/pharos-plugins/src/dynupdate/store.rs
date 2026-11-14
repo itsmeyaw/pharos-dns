@@ -31,7 +31,7 @@ impl Shared {
         }
     }
 
-    // RFC 2136 §3.2: serialize prerequisites with the durable UPDATE they guard.
+    // RFC 2136 §3.7: Serialize transactions with dependent prerequisites or updates.
     pub(super) fn transact(
         &self,
         config: &Config,
@@ -39,6 +39,7 @@ impl Shared {
         prereqs: &[ZoneRecord],
         updates: &[ZoneRecord],
     ) -> io::Result<(Rcode, bool)> {
+        // RFC 3007 §3: Refuse updates unless the authenticated key has configured permission.
         if !config.configured_key(key)
             || prereqs
                 .len()
@@ -49,12 +50,15 @@ impl Shared {
         }
         let mut db = self.db.lock().map_err(invalid)?;
         let zone = self.current.load_full();
+        // RFC 2136 §3.2: Check prerequisites against the transaction's current Zone snapshot.
         let code = super::update::prerequisites(&zone, prereqs);
         if code != Rcode::NOERROR {
             return Ok((code, false));
         }
+        // RFC 3007 §3: Require an explicit configured permission for every update.
         if updates
             .iter()
+            // RFC 2136 §3.3: Check requestor permission before applying the Update section.
             .any(|rr| !config.allows(key, &rr.owner, rr.rtype))
         {
             return Ok((Rcode::REFUSED, false));
@@ -77,6 +81,7 @@ impl Shared {
             )?;
         }
         self.current.store(Arc::new(candidate));
+        // RFC 2136 §3.4.2.5: Return NOERROR after all Update operations succeed.
         Ok((Rcode::NOERROR, true))
     }
 }

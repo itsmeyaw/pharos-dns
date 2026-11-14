@@ -139,6 +139,7 @@ struct Subnet {
 }
 
 impl Subnet {
+    // RFC 4632 §3.1: Parse prefixes and reject counts above the address width.
     fn parse(value: &str) -> Option<Self> {
         let (address, prefix) = value.split_once('/')?;
         let mut address: IpAddr = address.parse().ok()?;
@@ -170,6 +171,7 @@ impl Subnet {
             .to_canonical(),
             _ => return false,
         };
+        // RFC 4632 §3.1: Match addresses by the significant bits of the CIDR prefix.
         match (self.address, address) {
             (IpAddr::V4(network), IpAddr::V4(ip)) => {
                 let mask = u32::MAX.checked_shl(32 - self.prefix).unwrap_or(0);
@@ -327,6 +329,7 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
         };
         // RFC 8945 §4.3.2: a TSIG MAC covers the DNS message in wire format.
         if message.rcode() != Rcode::NOERROR
+            // RFC 5936 §2.2: Preserve transfer ordering by skipping AXFR responses.
             || message
                 .questions()
                 .next()
@@ -352,6 +355,7 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
             direct,
             labels,
         } = &mut *scratch;
+        // RFC 1035 §4.1.3: Each RR occupies at least 11 bytes.
         // Every RR occupies at least 11 bytes; no valid DNS Message can exceed this bound.
         let mut sections = [(0usize, 0usize); 3];
         let mut count = 0;
@@ -374,6 +378,7 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
                     destination: (rr.ttl_offset - 4 - rr.name.wire_len()) as u16,
                     sequence: 0,
                     group: match rr.rtype {
+                        // RFC 1034 §4.3.1: Recursive answers may start with CNAME records.
                         Type::CNAME => 0,
                         Type::A | Type::AAAA => 2,
                         Type::MX => 3,
@@ -391,6 +396,7 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
             }
             sections[section] = (first, count);
         }
+        // RFC 2181 §5.1: return every RR in the RRSet.
         order[..count].copy_from_slice(&records[..count]);
         for (section, (first, end)) in sections.into_iter().enumerate() {
             if end <= first + 1 || (weights.is_some() && section == 1) {
@@ -402,6 +408,7 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
                 continue;
             }
             // The original offset preserves order within each category without allocation.
+            // RFC 1034 §3.6: Resource record order within a set is not significant.
             items.sort_unstable_by_key(|item| (item.group, item.start));
             for group in [2, 3] {
                 let first = items

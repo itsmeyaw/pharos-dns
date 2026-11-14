@@ -15,6 +15,7 @@ pub(crate) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
         return None;
     }
     let (kind, body) = body.split_last()?;
+    // Kubernetes DNS spec 1.1.0 §2.4.3: IPv4 PTR names reverse octets before in-addr.arpa.
     // RFC 1035 §3.5: IPv4 reverse names use four reversed decimal octets without leading zeros.
     if kind.eq_ignore_ascii_case(b"in-addr") {
         if body.len() != 4 {
@@ -32,6 +33,7 @@ pub(crate) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
         }
         return Some(Ipv4Addr::from(octets).into());
     }
+    // Kubernetes DNS spec 1.1.0 §2.4.3: IPv6 PTR names reverse 32 nibbles before ip6.arpa.
     // RFC 3596 §2.5: IPv6 reverse names encode 32 nibbles; extra labels are accepted here.
     if !kind.eq_ignore_ascii_case(b"ip6") || !(32..=35).contains(&body.len()) {
         return None;

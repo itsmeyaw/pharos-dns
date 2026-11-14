@@ -49,9 +49,11 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, server_keys: &[&str]) -> Result<Con
     let mut config = Config {
         zones,
         success_capacity: 10_000,
+        // RFC 9520 §3.2: bound failure-cache memory with a configurable capacity.
         denial_capacity: 10_000,
         success_max_ttl: Duration::from_secs(3600),
         success_min_ttl: Duration::from_secs(5),
+        // RFC 2308 §5: negative-cache lifetime defaults below positive TTL and stays configurable.
         denial_max_ttl: Duration::from_secs(1800),
         denial_min_ttl: Duration::from_secs(5),
         prefetch_amount: 0,
@@ -198,6 +200,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, server_keys: &[&str]) -> Result<Con
                 }
                 config.prefer_positive = true;
             }
+            // RFC 9520 §3.2: let operators configure the cache duration for resolution failures.
             "servfail" => {
                 if args.len() != 1 {
                     return Err(cursor.arg_err());

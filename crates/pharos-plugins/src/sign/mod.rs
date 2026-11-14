@@ -43,6 +43,7 @@ impl Running {
 }
 
 impl Signer {
+    // RFC 4033 §8.2: refresh signed zones before their RRSIGs expire.
     fn refresh(&self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

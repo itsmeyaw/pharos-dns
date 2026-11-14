@@ -123,6 +123,7 @@ fn normalize_address(value: &str) -> Option<String> {
     };
     host.split('%').next()?.parse::<std::net::IpAddr>().ok()?;
     let port = if port.is_empty() { "53" } else { port };
+    // RFC 5952 §6: Normalize IPv6 endpoints to bracketed address-and-port syntax.
     Some(if host.contains(':') {
         format!("[{host}]:{port}")
     } else {

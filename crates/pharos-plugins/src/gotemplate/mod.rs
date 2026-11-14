@@ -433,6 +433,7 @@ fn render_parts(
                         dot,
                         (output, state),
                     )?,
+                    // RFC 1035 §4.1.2: QDCOUNT questions contain QNAME, QTYPE, and QCLASS.
                     pipeline::RangeValue::Questions(questions) => {
                         let mut any = false;
                         for (index, question) in questions
@@ -1180,6 +1181,7 @@ fn question_name<'a>(data: &'a Data<'_, '_>) -> Result<NameRef<'a>, fmt::Error> 
     Ok(question(data)?.name)
 }
 
+// RFC 1035 §4.1.2: Each question entry contains QNAME, QTYPE, and QCLASS.
 fn question<'a>(data: &'a Data<'_, '_>) -> Result<Question<'a>, fmt::Error> {
     data.message
         .ok_or(fmt::Error)?

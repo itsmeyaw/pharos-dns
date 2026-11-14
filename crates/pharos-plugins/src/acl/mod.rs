@@ -101,9 +101,11 @@ impl Acl {
                                 all_networks = true;
                                 break;
                             }
+                            // RFC 4632 §3.1: Parse CIDR; default to full address width.
                             let (ip, prefix) = token
                                 .split_once('/')
                                 .map_or((token.as_str(), None), |(ip, prefix)| (ip, Some(prefix)));
+                            // RFC 4291 §2.2: Parse conventional IPv6 address text.
                             let ip: IpAddr = ip
                                 .parse()
                                 .map_err(|_| cursor.error("invalid acl network"))?;
@@ -232,6 +234,7 @@ impl Plugin for Acl {
             let action = rule
                 .policies
                 .iter()
+                // RFC 5936 §5: ACL rules can restrict AXFR to configured client address ranges.
                 .find(|policy| {
                     (policy.types.contains(&Type::NONE) || policy.types.contains(&question.qtype))
                         && (policy.networks.is_empty()
@@ -265,6 +268,7 @@ impl Plugin for Acl {
                         // RFC 1035 §4.1.1: set QR and copy opcode, RD and CD for QUERY.
                         let mut flags =
                             0x8000 | (cx.query.flags() & 0x7800) | if blocked { 5 } else { 0 };
+                        // RFC 4035 §3.2.2: Copy the query's CD bit into the response.
                         if cx.query.opcode() == Opcode::QUERY {
                             flags |= cx.query.flags() & 0x0110;
                         }
@@ -272,11 +276,13 @@ impl Plugin for Acl {
                             MessageBuilder::new(cx.response, max, cx.query.id(), flags)
                                 .map_err(pharos_server::Error::Build)?;
                         builder
+                            // RFC 1035 §4.1.2: Copy QNAME, QTYPE, and QCLASS.
                             .question(question.name, question.qtype, question.qclass)
                             .map_err(pharos_server::Error::Build)?;
                         // RFC 8914 §4: EDE 15 and 17 indicate Blocked and Filtered respectively.
                         let ede = [0, 15, 0, 2, 0, if blocked { 15 } else { 17 }];
                         builder
+                            // RFC 6891 §6.1.1, §6.1.2: Return one root-name OPT RR.
                             .record(
                                 Section::Additional,
                                 NameRef::parse(&[0], 0).unwrap(),

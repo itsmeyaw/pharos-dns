@@ -9,6 +9,7 @@ use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // CoreDNS v1.15.0 plugin/k8s_external/external_test.go fixtures.
+// KEP-563 §Proposal > kube-proxy Operation: Services can expose ExternalIPs over IPv4 and IPv6.
 const SERVICES: &str = r#"[
  {"metadata":{"name":"svc1","namespace":"testns"},"spec":{"type":"ClusterIP","clusterIP":"10.0.0.1","externalIPs":["1.2.3.4"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"svc6","namespace":"testns"},"spec":{"type":"ClusterIP","clusterIP":"10.0.0.3","externalIPs":["1:2::5"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
@@ -21,6 +22,7 @@ const SERVICES: &str = r#"[
 
 async fn api(local: IpAddr) -> (String, tokio::task::JoinHandle<()>) {
     let family = if local.is_ipv4() { "IPv4" } else { "IPv6" };
+    // KEP-752 §Proposal > EndpointSlice API: Endpoints have addresses and optional hostnames.
     let endpoints = format!(
         r#"[
      {{"metadata":{{"name":"svc-headless-slice","namespace":"testns","labels":{{"kubernetes.io/service-name":"svc-headless"}}}},"addressType":"IPv4","ports":[{{"name":"http","protocol":"TCP","port":80}}],"endpoints":[{{"addresses":["1.2.3.4"],"hostname":"endpoint-svc-0","nodeName":"test-node","targetRef":{{"name":"endpoint-svc-0"}}}},{{"addresses":["1.2.3.5"],"hostname":"endpoint-svc-1","nodeName":"test-node","targetRef":{{"name":"endpoint-svc-1"}}}}]}},
@@ -85,7 +87,7 @@ fn local_ip() -> IpAddr {
 }
 
 fn record(rr: Record<'_>) -> String {
-    // RFC 1035 §3.2.1 and RFC 2782 §3: check RR class, TTL, and SRV fields.
+    // RFC 1035 §3.2.1 and RFC 2782 §The format of the SRV RR: Check RR fields.
     assert_eq!(rr.class, Class::IN);
     assert_eq!(rr.ttl, 5);
     let data = match rr.data().unwrap() {
@@ -209,7 +211,9 @@ async fn coredns_scenario() {
             .unwrap();
     lifecycle.run(Phase::Startup).await.unwrap();
     let (_, server) = configured.drain().next().unwrap();
+    // RFC 2308 §3: authoritative NXDOMAIN and NODATA responses include the zone SOA in Authority.
     let cases = [
+        // RFC 1035 §3.3.12: PTR RDATA identifies another domain name.
         case!(
             "4.3.2.1.in-addr.arpa.",
             PTR,
@@ -313,6 +317,7 @@ async fn coredns_scenario() {
             [],
             ["svc11.testns.example.com. A 2.3.4.5"]
         ),
+        // RFC 1035 §3.3.1: CNAME RDATA names the canonical name.
         case!(
             "svc12.testns.example.com.",
             A,

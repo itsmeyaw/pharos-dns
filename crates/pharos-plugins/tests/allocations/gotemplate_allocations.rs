@@ -152,6 +152,7 @@ fn borrowed_question_fields_render_without_allocating() {
         return;
     }
     let wire =
+        // RFC 1035 §4.1.1: QDCOUNT specifies the number of question entries.
         b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
     let message = pharos_proto::Message::parse(wire).unwrap();
     let mut slots = [];
@@ -177,6 +178,7 @@ fn calling_a_bound_query_function_does_not_allocate() {
         return;
     }
     let wire =
+        // RFC 1035 §4.1.2: QNAME is a length-prefixed label sequence terminated by the root label.
         b"\x04\x1d\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07Example\x03Org\x00\x00\x01\x00\x01";
     let message = pharos_proto::Message::parse(wire).unwrap();
     let query = Query::new(

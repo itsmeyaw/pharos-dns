@@ -48,8 +48,10 @@ fn expand(
                 if let Some(ip) = ip {
                     let mut address = ip.to_string();
                     // RFC 4007 §11.2: interface names can identify scoped IPv6 zones.
+                    // RFC 9844 §5: Interface selection supplies the IPv6 zone identifier.
                     if let IpAddr::V6(v6) = ip
                         && (v6.is_unicast_link_local()
+                            // RFC 4291 §2.7: multicast scope value 2 denotes link-local scope.
                             || (v6.is_multicast() && v6.segments()[0] & 0xf == 2))
                     {
                         address.push('%');

@@ -38,6 +38,7 @@ async fn routed_shuffled_hosts_hit() {
     lifecycle.run(Phase::Startup).await.unwrap();
     let (_, server) = servers.drain().next().unwrap();
     let mut queries = Vec::new();
+    // RFC 1035 §4.1.2: Each question carries QNAME, QTYPE, and QCLASS.
     for (name, kind) in [
         ("www.example.com.", Type::A),
         ("www.example.com.", Type::AAAA),

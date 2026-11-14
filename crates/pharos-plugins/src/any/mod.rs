@@ -25,16 +25,20 @@ impl Plugin for Any {
                     return Err(Error::ResponseBufferTooSmall);
                 }
             }
+            // RFC 8482 §4: Copy the query ID, opcode, RD, and CD and echo the question.
             let mut flags = 0x8000 | (cx.query.flags() & 0x7800);
             if cx.query.opcode() == Opcode::QUERY {
+                // RFC 4035 §3.2.2: Copy the query's Checking Disabled bit into the response.
                 flags |= cx.query.flags() & 0x0110;
             }
             let mut builder = MessageBuilder::new(cx.response, max_size, cx.query.id(), flags)
                 .map_err(Error::Build)?;
+            // RFC 1035 §4.1.2: Echo the query question in the response.
             builder
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(Error::Build)?;
             // RFC 8482 §4.2: synthesize an HINFO record for an ANY Query.
+            // RFC 1035 §3.3.2: HINFO RDATA contains CPU and OS character-strings.
             builder
                 .record(
                     Section::Answer,

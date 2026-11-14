@@ -158,6 +158,7 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
             "fallthrough" => config
                 .fallthrough
                 .set_domains_from_args(&args.iter().map(String::as_str).collect::<Vec<_>>()),
+            // RFC 2181 §8: Limit configured TTL to 0..=3600.
             "ttl" => {
                 let value = args.first().ok_or_else(|| cursor.arg_err())?;
                 let ttl: i64 = value.parse().map_err(|_| cursor.error("invalid ttl"))?;

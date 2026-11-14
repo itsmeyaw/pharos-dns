@@ -5,6 +5,7 @@ use pharos_proto::{Message, Name};
 use pharos_server::{Context, Metadata, Protocol, Transport};
 
 fn with_context(test: impl FnOnce(&Context<'_, '_>)) {
+    // RFC 1035 §4.1.2: Encode QNAME, QTYPE, and QCLASS in the Question section.
     let wire =
         b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
     let domain: Name = ".".parse().unwrap();
@@ -79,6 +80,7 @@ fn coredns_view_delegates_to_next() {
             Outcome::Unanswered(pharos_proto::Rcode::REFUSED)
         }
     }
+    // RFC 1035 §4.1.2: Encode QNAME, QTYPE, and QCLASS in the Question section.
     let wire =
         b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
     let domain: Name = ".".parse().unwrap();
@@ -111,6 +113,7 @@ fn coredns_view_delegates_to_next() {
 
 #[test]
 fn readme_cidr_filters_ipv4_and_ipv6_clients() {
+    // RFC 1035 §4.1.2: Encode QNAME, QTYPE, and QCLASS in the Question section.
     let wire =
         b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01";
     let domain: Name = ".".parse().unwrap();

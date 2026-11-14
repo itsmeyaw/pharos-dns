@@ -40,6 +40,7 @@ impl HealthConfig {
     pub fn new(address: SocketAddr, max_fails: u32) -> Self {
         Self {
             address,
+            // RFC 1035 §4.1.2: The default health query asks about the root domain.
             domain: ".".parse().expect("root is a valid DNS name"),
             recursive: true,
             force_tcp: false,
@@ -181,7 +182,9 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
     let mut query = Vec::with_capacity(12 + config.domain.as_wire().len() + 4);
     query.extend_from_slice(&id);
     // RFC 1035 §4.1.1: RD requests recursive query processing.
+    // RFC 9619 §4: A QUERY message contains no more than one question.
     query.extend_from_slice(&[u8::from(config.recursive), 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+    // RFC 1035 §4.1.2: Encode the configured domain as the DNS QNAME.
     query.extend_from_slice(config.domain.as_wire());
     // RFC 1035 §3.2.2: NS has type 2.
     // RFC 1035 §3.2.4: IN has class 1.
@@ -214,6 +217,7 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
         };
         let socket = timeout(DIAL_TIMEOUT, async {
             let socket =
+                // RFC 5452 §9.2: Bind port 0 for an ephemeral UDP source port.
                 UdpSocket::bind(SocketAddr::new(config.source_address.unwrap_or(ip), 0)).await?;
             super::enable_recv_err(&socket, config.address);
             socket.connect(config.address).await?;

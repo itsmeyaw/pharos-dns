@@ -31,6 +31,7 @@ fn labels(name: &Name) -> Vec<Vec<u8>> {
 }
 
 fn target(record: &ZoneRecord) -> Result<Name, &'static str> {
+    // RFC 9432 §4.1: Member-zone names are carried in PTR record RDATA.
     let target = NameRef::parse(&record.rdata, 0).map_err(|_| "invalid catalog target")?;
     target
         .to_name()
@@ -60,7 +61,9 @@ pub(super) fn parse(origin: &Name, records: &[ZoneRecord]) -> Result<Catalog, &'
     let mut ptr: HashMap<Vec<u8>, Vec<Name>> = HashMap::new();
     let mut coo: HashMap<Vec<u8>, Vec<Name>> = HashMap::new();
     let mut groups: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+    // RFC 9432 §4.1: Catalog RR TTL values have no meaning and are ignored.
     for record in records {
+        // RFC 9432 §4.1: Every resource record in a catalog zone uses class IN.
         if record.class != Class::IN {
             return Err("catalog record is not IN");
         }
@@ -73,9 +76,12 @@ pub(super) fn parse(origin: &Name, records: &[ZoneRecord]) -> Result<Catalog, &'
             continue;
         }
         let prefix = &owner[..owner.len() - origin_labels.len()];
+        // RFC 9432 §3: Ignore catalog records with no supported processing rule.
         if record.rtype == Type::TXT && prefix.len() == 1 && prefix[0] == b"version" {
             version.push(text(&record.rdata)?);
+        // RFC 9432 §4.3.2: Store group values opaque; this consumer recognizes none.
         } else if record.rtype == Type::TXT
+            // RFC 9432 §4.3.2: The group property is TXT data handled by the consumer.
             && prefix.len() == 3
             && prefix[0] == b"group"
             && prefix[2] == b"zones"
@@ -84,11 +90,14 @@ pub(super) fn parse(origin: &Name, records: &[ZoneRecord]) -> Result<Catalog, &'
                 .entry(prefix[1].clone())
                 .or_default()
                 .push(text(&record.rdata)?);
+        // RFC 9432 §4.1: each member is one PTR record under a uniquely tagged member node.
         } else if record.rtype == Type::PTR {
+            // RFC 9432 §4.1: Member nodes are direct children of the zones label.
             if prefix.len() == 2 && prefix[1] == b"zones" {
                 ptr.entry(prefix[0].clone())
                     .or_default()
                     .push(target(record)?);
+            // RFC 9432 §4.3.1: a member's coo property names its prospective new catalog.
             } else if prefix.len() == 3 && prefix[0] == b"coo" && prefix[2] == b"zones" {
                 coo.entry(prefix[1].clone())
                     .or_default()
@@ -96,12 +105,13 @@ pub(super) fn parse(origin: &Name, records: &[ZoneRecord]) -> Result<Catalog, &'
             }
         }
     }
-    // RFC 9432 §§4.1, 5.1: a catalog has SOA, NS, and one supported version.
+    // RFC 9432 §§4, 4.2.1: A catalog requires apex SOA and NS records and version "2".
     if !soa || !ns || version.len() != 1 || version[0] != b"2" {
         return Err("invalid catalog version or apex");
     }
     let mut seen = HashSet::new();
     let mut members = Vec::new();
+    // RFC 9432 §4.1: Each member PTR has one target, unique within the catalog.
     for (id, zones) in ptr {
         if zones.len() != 1 || !seen.insert(zones[0].clone()) {
             return Err("duplicate catalog member");
@@ -149,6 +159,7 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
             .find(|zone| zone.config.apex == member.zone)
             .cloned();
         let mut preserve = None;
+        // RFC 9432 §5.2: Ignore member-name clashes unless old coo signals migration.
         if let Some(existing) = existing {
             let Some((owner, id)) = state.dynamic.get(&member.zone) else {
                 continue;
@@ -156,6 +167,7 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
             if owner == origin && id == &member.id {
                 continue;
             }
+            // RFC 9432 §5.5: Move a member only when the old catalog sets coo.
             if owner != origin {
                 let source_member = state.catalogs.get(owner).and_then(|catalog| {
                     catalog.members.iter().find(|item| item.zone == member.zone)
@@ -163,10 +175,12 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
                 if !source_member.is_some_and(|item| item.coo.as_ref() == Some(origin)) {
                     continue;
                 }
+                // RFC 9432 §§4.3.1, 7: Preserve state only when member labels match.
                 if source_member.is_some_and(|item| item.id == member.id && id == &member.id) {
                     preserve = Some(Arc::clone(&existing));
                 }
             }
+            // RFC 9432 §§5.4, 5.6: Remove old state before re-adding a changed label.
             if let Some(task) = existing.task.lock().unwrap().take() {
                 task.abort();
             }
@@ -194,6 +208,7 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
                 member.groups.len()
             ),
         );
+        // RFC 9432 §5.1: apply valid catalog changes automatically to the running server.
         zones.push(Arc::clone(&zone));
         let task = tokio::spawn(update::run(Arc::clone(shared), Arc::clone(&zone)));
         *zone.task.lock().unwrap() = Some(task.abort_handle());
@@ -203,6 +218,7 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
         .members
         .insert(origin.clone(), admitted.clone())
         .unwrap_or_default();
+    // RFC 9432 §5.3: Remove a member and its associated state only when this catalog owns it.
     for removed in previous.difference(&admitted) {
         if state
             .dynamic

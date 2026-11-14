@@ -101,6 +101,7 @@ async fn apex_ns_with_injected_loopback_matches_coredns() {
     assert!(
         matches!(message.answers().next().unwrap().data().unwrap(), Rdata::Ns(name) if name.to_string() == "ns.dns.interwebs.test.")
     );
+    // RFC 1034 §4.3.2: Include available NS target addresses as glue in the Additional section.
     assert!(
         matches!(message.additionals().next().unwrap().data().unwrap(), Rdata::A(ip) if ip.octets() == [127, 0, 0, 1])
     );

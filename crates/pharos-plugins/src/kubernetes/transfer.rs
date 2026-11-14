@@ -153,6 +153,7 @@ impl Snapshot<'_> {
         let mut scratch = [0; 1024];
         let mut wire = FixedBuffer::new(&mut scratch);
         // RFC 5936 §2.2: AXFR Messages are authoritative and echo the Question.
+        // RFC 5936 §2: Normal AXFR Messages leave TC clear.
         let mut builder = MessageBuilder::new(
             &mut wire,
             1024,
@@ -204,6 +205,7 @@ impl Snapshot<'_> {
         self.address_with_ttl(owner, ip, self.ttl)
     }
 
+    // KEP-563 §CoreDNS Operation: Encode service and endpoint addresses by IP family.
     fn address_with_ttl(&mut self, owner: NameRef<'_>, ip: &str, ttl: u32) -> Result<bool, Error> {
         let Ok(ip) = ip.parse::<IpAddr>() else {
             return Ok(false);
@@ -229,7 +231,7 @@ impl Snapshot<'_> {
         port: i32,
         weight: u16,
     ) -> Result<(), Error> {
-        // RFC 2782 §3: SRV RDATA is priority, weight, port, and uncompressed target.
+        // RFC 2782 §The format of the SRV RR: SRV RDATA has priority, weight, port, and target.
         self.record(owner, Type::SRV, self.ttl, |w| {
             w.write_bytes(&0u16.to_be_bytes())?;
             w.write_bytes(&weight.to_be_bytes())?;
@@ -238,6 +240,7 @@ impl Snapshot<'_> {
         })
     }
 
+    // Kubernetes DNS spec 1.1.0 §2.4.2: Headless SRV records use named endpoint ports.
     fn ports(
         &mut self,
         base: NameRef<'_>,
@@ -258,6 +261,7 @@ impl Snapshot<'_> {
             if port.name.len() >= 63 || port.protocol.len() >= 63 {
                 continue;
             }
+            // RFC 2782 §The format of the SRV RR: Service and Proto labels use lowercase and _.
             name[0] = b'_';
             protocol[0] = b'_';
             for (out, b) in name[1..].iter_mut().zip(port.name.bytes()) {
@@ -281,6 +285,7 @@ impl Snapshot<'_> {
         Ok(())
     }
 
+    // KEP-752 §Proposal > EndpointSlice API: SRV ports come from EndpointSlice ports.
     fn endpoints(
         &mut self,
         base: NameRef<'_>,
@@ -308,6 +313,7 @@ impl Snapshot<'_> {
         Ok(())
     }
 
+    // Kubernetes DNS spec 1.1.0 §2.3.1: ClusterIP transfers include service addresses.
     fn service(
         &mut self,
         index: &Index,
@@ -456,6 +462,7 @@ fn generate(
                     &mut wire,
                 ) {
                     // RFC 1034 §3.6.2: ExternalName is represented by a CNAME.
+                    // Kubernetes DNS spec 1.1.0 §2.5: ExternalName transfers use CNAME records.
                     snapshot.record(base, Type::CNAME, snapshot.ttl, |w| w.write_name(target))?;
                 }
             } else if matches!(
@@ -507,6 +514,7 @@ impl crate::transfer::Transferer for Kubernetes {
             .store
             .clone()
             .unwrap_or_else(|| self.state.empty_store.clone());
+        // RFC 5936 §3: Encode records from one immutable Store snapshot.
         let bytes = store.with_read(|index| {
             // CoreDNS xfr.go calls SOA with an empty request, selecting the internal serial.
             let current = index.serial();

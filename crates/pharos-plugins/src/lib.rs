@@ -399,6 +399,7 @@ pub fn servers_with_registry(
             for address in &addresses {
                 let socket = if address.is_empty() {
                     SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port)
+                // RFC 4007 §11.2: Map a textual zone identifier to a local socket scope ID.
                 } else if let Some((ip, interface)) = address.split_once('%') {
                     let ip: Ipv6Addr = ip.parse().map_err(|_| {
                         io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener address")
@@ -595,9 +596,12 @@ pub fn servers_with_registry(
                 }
                 let server =
                     pharos_server::http::Listener::bind_with_methods(&address, |_, path| {
+                        // RFC 9110 §9.3.1: GET /health returns the health representation.
                         Some(if path == "/health" {
+                            // RFC 9110 §5.6.3: Media-type parameter OWS uses one SP.
                             (200, "text/plain; charset=utf-8", "OK".into())
                         } else {
+                            // RFC 9110 §15.5.5: Unknown health paths have no representation.
                             (
                                 404,
                                 "text/plain; charset=utf-8",
@@ -652,6 +656,7 @@ pub fn servers_with_registry(
                 let server =
                     pharos_server::http::Listener::bind_with_status(&address, move |path| {
                         (path == "/ready").then(|| {
+                            // RFC 9110 §9.3.1: GET /ready returns the readiness representation.
                             let (status, body) = state.response();
                             (status, "text/plain; charset=utf-8", body)
                         })
@@ -701,7 +706,9 @@ pub fn servers_with_registry(
                         return None;
                     }
                     let mut body = String::new();
+                    // RFC 9110 §9.3.1: GET /metrics returns the current metrics representation.
                     registry.encode(&mut body);
+                    // RFC 9110 §5.6.3: Media-type parameter OWS uses one SP for readability.
                     Some(("text/plain; version=0.0.4; charset=utf-8", body))
                 })
                 .await?;

@@ -11,9 +11,12 @@ use pharos_corefile::{Cursor, Error as CorefileError};
 use pharos_proto::{Class, MessageBuilder, NameRef, Opcode, Section, Type};
 use pharos_server::{Context, Error, Next, Outcome, Plugin, Protocol, metrics::Registry};
 
+// RFC 6303 §3: Set the SOA minimum (negative-cache TTL) equal to the record TTL.
 const TTL: u32 = 604_800;
 const LOCALHOST: &[u8] = b"\x09localhost\0";
 // RFC 1035 §3.3.13: SOA RDATA contains MNAME, RNAME and five 32-bit values.
+// RFC 6303 §3: Serve localhost SOA and NS data to identify empty-zone answers.
+// RFC 6303 §3: Set SOA MNAME to the local NS target.
 const SOA: &[u8] =
     b"\x09localhost\0\x04root\x09localhost\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
 
@@ -70,7 +73,7 @@ impl Local {
             labels[count] = label;
             count += 1;
         }
-        // RFC 4343 §2: compare DNS labels without ASCII case sensitivity.
+        // RFC 4343 §3: compare DNS labels without ASCII case sensitivity.
         let eq = |i: usize, value: &[u8]| labels[i].eq_ignore_ascii_case(value);
         // RFC 6761 §6.3: localhost and its subdomains resolve to loopback.
         let special =
@@ -124,6 +127,7 @@ impl Local {
                 Type::NS | Type::SOA if !special => Some(question.qtype),
                 _ => None,
             }
+        // RFC 6303 §3: Answer NS and SOA at the zone apex for UPDATE zone discovery.
         } else if apex && matches!(question.qtype, Type::NS | Type::SOA) {
             Some(question.qtype)
         } else if reverse_ptr && question.qtype == Type::PTR {
@@ -158,7 +162,7 @@ impl Local {
                     return Err(Error::ResponseBufferTooSmall);
                 }
             }
-            // RFC 1035 §4.1.1 and RFC 4035 §3.2.1: mark a Response and copy opcode, RD and CD.
+            // RFC 1035 §4.1.1 and RFC 4035 §3.2.2: mark a Response and copy opcode, RD and CD.
             let mut flags = 0x8000 | (cx.query.flags() & 0x7800) | if nxdomain { 3 } else { 0 };
             if cx.query.opcode() == Opcode::QUERY {
                 flags |= cx.query.flags() & 0x0110;
@@ -168,13 +172,16 @@ impl Local {
             builder
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(Error::Build)?;
+            // RFC 6303 §3: Include SOA records for negative caching and update discovery.
             let rtype = answer_type.unwrap_or(Type::SOA);
+            // RFC 1035 §3.4.1 and RFC 3596 §2.2: encode A and AAAA loopback addresses.
             let rdata: &[u8] = match rtype {
                 Type::A => &[127, 0, 0, 1],
                 Type::AAAA => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
                 Type::NS | Type::PTR => LOCALHOST,
                 _ => SOA,
             };
+            // RFC 2181 §7.2: SOA answers retain a nonzero TTL instead of forcing TTL zero.
             builder
                 .record(
                     if answer_type.is_some() {

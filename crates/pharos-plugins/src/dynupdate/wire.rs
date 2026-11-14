@@ -17,6 +17,7 @@ fn uncompressed_name(data: &[u8], offset: usize) -> io::Result<usize> {
         .ok_or_else(invalid)
 }
 
+// RFC 1035 §3.3.13: SOA RDATA is two names followed by five 32-bit fields.
 fn validate_names(kind: Type, data: &[u8]) -> io::Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -33,6 +34,7 @@ fn validate_names(kind: Type, data: &[u8]) -> io::Result<()> {
         | Type::MR
         | Type::NSAP_PTR => (0, 1, Some(0)),
         Type::MINFO | Type::RP => (0, 2, Some(0)),
+        // RFC 1035 §3.3.13: SOA RDATA has two domain names followed by five 32-bit values.
         Type::SOA => (0, 2, Some(20)),
         Type::MX | Type::AFSDB | Type::RT | Type::KX | Type::LP => (2, 1, Some(0)),
         Type::PX => (2, 2, Some(0)),

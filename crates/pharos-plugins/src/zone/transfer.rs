@@ -24,6 +24,7 @@ impl Zone {
             .ok_or(Error::InvalidQuery)?;
         let current = zone.serial().ok_or(Error::InvalidQuery)?;
         // RFC 1995 §2: an up-to-date IXFR returns only the current SOA.
+        // RFC 1995 §6: An unknown requested version falls back to a full TCP zone transfer.
         let only_soa = request.qtype == Type::IXFR
             && (request.protocol == Protocol::Udp
                 || request.serial != 0 && request.serial == current);
@@ -34,6 +35,7 @@ impl Zone {
         let qclass = request.qclass;
         let mut question = [0u8; 255];
         let mut question_len = 0;
+        // RFC 5936 §2.2.2: the first Message copies the query Question.
         if preserve_question {
             for label in request.zone.labels() {
                 question[question_len] = label.len() as u8;
@@ -47,6 +49,7 @@ impl Zone {
         let mut index = 0usize;
         // RFC 5936 §2.2: the Zone snapshot is bounded by matching SOA records.
         // shortcut: Stream allocates once per Zone Transfer; see #50.
+        // RFC 5936 §3: serve one immutable Zone version for this transfer.
         Ok(Stream::new(move |response| {
             if phase == 4 {
                 return Ok(false);
@@ -56,6 +59,7 @@ impl Zone {
             }
             let apex = NameRef::parse(zone.apex.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
             // RFC 8945 §5.3: reserve room for Listener-applied TSIG on each Message.
+            // RFC 5936 §2.2.1: AXFR sets QR and AA and echoes ID, RD and CD.
             let mut builder = MessageBuilder::new(
                 response,
                 64500,
@@ -68,18 +72,24 @@ impl Zone {
             } else {
                 apex
             };
+            // RFC 5936 §2.2.2: subsequent Transfer Messages may repeat the Question.
             builder
                 .question(qname, qtype, qclass)
                 .map_err(Error::Build)?;
+            // RFC 5936 §7.1: Send multiple resource records per response by default.
             let mut size = 0usize;
             loop {
                 let previous = (phase, index);
+                // RFC 3225 §3: include DNSSEC RRsets in zone transfers regardless of DO.
                 let next = loop {
+                    // RFC 4035 §3.1.5: zone transfers include authoritative DNSSEC records.
                     match phase {
                         0 => {
+                            // RFC 1995 §4: full-zone IXFR starts and ends with the SOA.
                             phase = if only_soa { 4 } else { 1 };
                             break Some(&zone.records[soa]);
                         }
+                        // RFC 5936 §3.5: AXFR includes occluded names in the Zone snapshot.
                         1 | 2 => {
                             let rr = zone.records.get(index);
                             index += 1;
@@ -112,14 +122,17 @@ impl Zone {
                 let Some(rr) = next else {
                     break;
                 };
+                // RFC 5936 §2.2: include as many RRs per message as fit to amortize overhead.
                 // RFC 1035 §§4.1.3, 4.2.2: keep RR batches within the TCP Message limit.
                 let estimate = rr.owner.as_wire().len() + 10 + rr.rdata.len();
                 if size > 0 && size + estimate > 63000 {
                     (phase, index) = previous;
                     break;
                 }
+                // RFC 5936 §2.2.3: each zone RR is written into the Answer section.
                 let owner =
                     NameRef::parse(rr.owner.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
+                // RFC 5936 §3.4: AXFR RDATA names are emitted without added compression.
                 if !builder
                     .record(
                         Section::Answer,

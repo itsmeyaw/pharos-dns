@@ -34,6 +34,7 @@ struct Shard {
     random: u64,
 }
 
+// RFC 9520 §3.2: Bound cached resolution failures by configured cache capacity.
 pub(super) struct Store {
     shards: [Mutex<Shard>; 256],
     capacity: usize,
@@ -91,6 +92,7 @@ impl Store {
             .is_some_and(|item| item.stored == stored)
     }
 
+    // RFC 2181 §5.4: replace a complete cached Response; never merge data from separate Responses.
     pub(super) fn insert(
         &self,
         key: u64,
@@ -117,6 +119,7 @@ impl Store {
             }
         }
         let mut evicted = false;
+        // RFC 9520 §3.2: evict entries when a bounded cache shard reaches capacity.
         if shard.items.len() >= self.capacity && !exists {
             let mut random = shard.random;
             random ^= random << 13;
@@ -160,6 +163,7 @@ impl Store {
         {
             return None;
         }
+        // RFC 8020 §2: Cached denials expire at their TTL.
         let now = Instant::now();
         let elapsed = now.duration_since(item.stored).as_secs();
         // RFC 8767 §5: limit serving expired data to the configured maximum stale interval.
@@ -176,6 +180,7 @@ impl Store {
             }
             output.reserve(item.wire.len().saturating_sub(output.len()));
         }
+        // RFC 8767 §4: Set the response TTL for served stale records.
         let ttl = if stale && !config.stale_ttl.is_zero() {
             config.stale_ttl.as_secs() as u32
         } else if config.keepttl {
@@ -187,9 +192,12 @@ impl Store {
             item.ttl - elapsed as u32
         };
         output.clear();
+        // RFC 5155 §9.1: Return complete responses with required NSEC3 records.
         output.extend_from_slice(&item.wire);
+        // RFC 1035 §4.1.1: Copy the query ID into the response.
         output[..2].copy_from_slice(&query.id().to_be_bytes());
         let original = u16::from_be_bytes([output[2], output[3]]);
+        // RFC 6604 §2.2: Retain upstream AD only for authenticated response data.
         let mut flags = 0x8000 | (original & 0x04af) | (query.flags() & 0x0110);
         // RFC 6840 §5.8: only signal AD when the query requested AD or DO.
         if !query.ad() && !query.opt().is_some_and(|opt| opt.dnssec_ok()) {
@@ -283,6 +291,7 @@ impl Store {
 }
 
 impl Item {
+    // RFC 2181 §5.4.1: Preserve sections so additional data cannot become an answer.
     fn new(response: &Message<'_>, ttl: u32) -> Option<Self> {
         if response.question_count() != 1 {
             return None;
@@ -304,6 +313,7 @@ impl Item {
             .chain(response.additionals())
             .last()
             .map_or(12 + raw_len + 4, |rr| rr.rdata_offset + rr.rdata.len());
+        // RFC 6891 §6.2.1: Cached Responses omit the OPT record.
         if let Some(opt) = response.additionals().find(|rr| rr.rtype == Type::OPT) {
             let opt_end = opt.rdata_offset + opt.rdata.len();
             if response.additionals().last()?.rdata_offset != opt.rdata_offset {
@@ -314,6 +324,7 @@ impl Item {
                 return None;
             }
         }
+        // RFC 2308 §6: cached negative responses retain SOA and denial records.
         let ttl_offsets: Box<[_]> = response
             .answers()
             .chain(response.authorities())
@@ -321,6 +332,7 @@ impl Item {
             .filter(|rr| rr.rtype != Type::OPT)
             .map(|rr| rr.ttl_offset)
             .collect();
+        // RFC 7871 §7.3.1: Store the response wire, keeping each RRSIG with the RRset it signs.
         let mut wire = response.as_wire()[..end].to_vec();
         if response.opt().is_some() {
             let count = response.additional_count() - 1;

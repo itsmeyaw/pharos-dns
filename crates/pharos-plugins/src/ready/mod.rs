@@ -92,9 +92,12 @@ impl State {
                 }
             }
         }
+        // RFC 9110 §15.3.1: A 200 readiness response reports ready state with its representation.
         if not_ready.is_empty() {
+            // RFC 9110 §15.3.1: 200 means the readiness request succeeded.
             (200, "OK".into())
         } else {
+            // RFC 9110 §15.6.4: Return 503 when readiness is unavailable.
             (503, not_ready.join(","))
         }
     }

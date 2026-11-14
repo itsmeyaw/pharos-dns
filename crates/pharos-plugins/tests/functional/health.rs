@@ -31,13 +31,16 @@ async fn health_answers_all_methods_and_only_its_path() {
     lifecycle.run(Phase::Startup).await.unwrap();
     for method in ["GET", "POST", "PUT"] {
         let response = request(address, method, "/health?check=1").await;
+        // RFC 9110 §15.3.1: 200 indicates that the request succeeded.
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
         assert!(response.ends_with("\r\n\r\nOK"), "{response}");
     }
+    // RFC 9110 §9.3.2: HEAD responses omit representation content.
     let response = request(address, "HEAD", "/health").await;
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     assert!(response.ends_with("\r\n\r\n"), "{response}");
     let response = request(address, "GET", "/other").await;
+    // RFC 9110 §15.5.5: 404 means no current representation exists for the target resource.
     assert!(
         response.starts_with("HTTP/1.1 404 Not Found\r\n"),
         "{response}"

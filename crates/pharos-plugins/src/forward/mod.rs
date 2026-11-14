@@ -109,6 +109,7 @@ fn contains(name: NameRef<'_>, domain: &Name) -> bool {
             .labels()
             .skip(count - suffix)
             .zip(domain.labels())
+            // RFC 4343 §3: ASCII letters in DNS names compare without regard to case.
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
@@ -146,6 +147,7 @@ impl Forward {
                 .collect::<Result<Vec<_>, _>>()?;
             let domain = parse_name(&config.health_domain)?;
             let mut proxies = Vec::new();
+            // RFC 1034 §5.3.1: Stub forwarding delegates resolution to configured servers.
             for target in config.upstreams {
                 let address = match target {
                     setup::Target::Address(address) => address,
@@ -219,6 +221,7 @@ impl Forward {
     }
 }
 
+// RFC 6761 §6.2: Explicit forward zones enable upstream lookup for test names.
 impl Plugin for Forward {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let root = [0];
@@ -226,6 +229,7 @@ impl Plugin for Forward {
             || NameRef::parse(&root, 0).expect("root"),
             |question| question.name,
         );
+        // RFC 6761 §6.5: Forward example names like other DNS names.
         for (index, stanza) in self.stanzas.iter().enumerate() {
             if !contains(name, &stanza.from)
                 || (name != stanza.from
@@ -240,6 +244,7 @@ impl Plugin for Forward {
                     if let Some(metrics) = &self.metrics {
                         metrics.concurrent_reject();
                     }
+                    // RFC 1035 §4.1.1: Return REFUSED when local policy rejects a query.
                     return Outcome::Unanswered(Rcode::REFUSED);
                 }
                 Some(guard)
@@ -250,11 +255,13 @@ impl Plugin for Forward {
             let count = stanza.proxies.len();
             let mut buffer = self.buffers.get();
             let (order, wire, query_buffer) = buffer.parts();
+            // RFC 1034 §4.3.1: Forward RD unchanged so recursion occurs only on request.
             let original_query = cx.query.as_wire();
             let query_wire = if cx.query.wire_changed() {
                 if cx.query.flags() != u16::from_be_bytes([original_query[2], original_query[3]])
                     && !cx.query.can_change_flags_in_wire()
                 {
+                    // RFC 1035 §4.1.1: Return FORMERR when the query cannot be interpreted.
                     return Outcome::Unanswered(Rcode::FORMERR);
                 }
                 if cx.query.copy_wire_checked(query_buffer).is_err() {
@@ -285,6 +292,7 @@ impl Plugin for Forward {
                 }
                 Policy::Sequential => {}
             }
+            // RFC 1035 §4.2.1: Retry lost UDP queries after timeout, trying other servers first.
             let deadline = Instant::now() + Duration::from_secs(5);
             let max_attempts = stanza
                 .max_connect_attempts
@@ -294,6 +302,7 @@ impl Plugin for Forward {
             let mut fails = 0;
             let mut failovers = 0;
             let mut try_next = false;
+            // RFC 7766 §5: Forward DNS queries using the selected UDP or TCP transport.
             let protocol = if cx.protocol == Protocol::Tcp {
                 proxy::Transport::Tcp
             } else {
@@ -337,6 +346,7 @@ impl Plugin for Forward {
                         proxy.exchange(query_wire, wire, protocol, stanza.options),
                     )
                     .await;
+                    // RFC 7766 §6.2.4: Retry unanswered queries after a connection closes.
                     if matches!(result, Ok(Err(proxy::Error::CachedClosed))) {
                         continue;
                     }
@@ -392,10 +402,13 @@ impl Plugin for Forward {
                     try_next = true;
                     break;
                 }
+                // RFC 7871 §7.2.2: Return an answer with SCOPE longer than SOURCE unchanged.
                 cx.response.clear();
+                // RFC 5625 §4.3: return Responses without filtering RRs by TYPE or CLASS.
                 cx.response.extend_from_slice(answer);
                 return Outcome::Response;
             }
+            // RFC 1034 §5.2.3: Temporary resolution failures return SERVFAIL.
             if !try_next {
                 return Outcome::Unanswered(Rcode::SERVFAIL);
             }

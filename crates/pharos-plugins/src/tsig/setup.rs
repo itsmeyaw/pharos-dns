@@ -96,6 +96,7 @@ fn add_secret(
     if plugin.secrets.iter().any(|existing| existing.name == name) {
         return Err(cursor.error("key redefined"));
     }
+    // RFC 8945 §6: Support the mandatory HMAC-SHA1 and HMAC-SHA256 TSIG algorithms.
     let keys = pharos_proto::decode_secret(secret).ok().map(|secret| {
         [
             TsigAlgorithm::Sha1,

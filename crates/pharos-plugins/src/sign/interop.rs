@@ -45,16 +45,21 @@ fn free_port() -> u16 {
 fn query(name: &str, kind: Type) -> Vec<u8> {
     let name: Name = name.parse().unwrap();
     let mut wire = Vec::new();
+    // RFC 1035 §4.1.1: Encode a DNS message with valid header fields and section counts.
     let mut builder = MessageBuilder::new(&mut wire, 4096, 42, 0).unwrap();
     builder
+        // RFC 1035 §4.1.2: Encode QNAME, QTYPE, and QCLASS in the question section.
         .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
         .unwrap();
     builder
+        // RFC 6891 §6.1.1: Add one OPT pseudo-RR to the additional section of a request.
         .record(
             Section::Additional,
             NameRef::parse(&[0], 0).unwrap(),
             Type::OPT,
+            // RFC 6891 §6.2.5: Advertise a 4096-octet UDP payload size.
             Class(4096),
+            // RFC 3225 §3: Set DO to signal support for DNSSEC security records.
             0x8000,
             &[],
         )
@@ -76,6 +81,7 @@ fn records(wire: &[u8], authority: bool) -> Vec<(Name, u16, u16, u32, Vec<u8>)> 
             rr.rtype.0,
             rr.class.0,
             rr.ttl,
+            // RFC 4034 §6.2: Canonicalize RDATA before comparing response records.
             canonical_rdata(&rr.data().unwrap()).unwrap(),
         )
     })
@@ -107,7 +113,9 @@ fn verify_answers(wire: &[u8], key: &KeyPair) {
                 data: other.data().unwrap(),
             })
             .collect();
+        // RFC 4035 §5.3.3: Verify each response signature over reconstructed signed data.
         let data = signed_data(&sig, &rrset).unwrap();
+        // RFC 8080 §4: Verify each Ed25519 RRSIG with the DNSKEY public key.
         UnparsedPublicKey::new(&ED25519, &key.public.public_key)
             .verify(&data, signature)
             .unwrap();

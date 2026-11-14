@@ -54,6 +54,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
     if args.len() < 2 {
         return Err(cursor.arg_err());
     }
+    // RFC 1034 §3.1: Configured complete domain names use absolute presentation form.
     let from = normalize_domain(&args[0])
         .into_iter()
         .next()

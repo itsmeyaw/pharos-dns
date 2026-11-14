@@ -120,6 +120,7 @@ impl Tsig {
         }
     }
 
+    // RFC 5936 §5: TSIG can authenticate AXFR clients for transfer access control.
     async fn signed<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let wire = cx.query.as_wire();
         let Ok(record) = TsigRecord::parse(wire) else {
@@ -135,6 +136,7 @@ impl Tsig {
             .find(|(key, _)| *key == listener)
             .and_then(|(_, ring)| ring.get())
             .unwrap_or(&self.secrets);
+        // RFC 8945 §5.2.1: An unknown key gets an unsigned NOTAUTH/BADKEY response.
         let Some(secret) = secrets.iter().find(|secret| record.owner == secret.name) else {
             return tsig_error(cx, &record, 17, None, 0);
         };
@@ -159,8 +161,10 @@ impl Tsig {
             .map_or(0, |d| d.as_secs());
         match key.verify(wire, now, None, 0) {
             Ok(_) => {}
+            // RFC 8945 §5.2.3: Sign BADTIME with the key, request time, server time, and fudge.
             Err(TsigError::BadTime) => return tsig_error(cx, &record, 18, Some(key), now),
             Err(TsigError::Format) => return Outcome::Unanswered(Rcode::FORMERR),
+            // RFC 8945 §5.2.2: A failed MAC gets unsigned NOTAUTH/BADSIG.
             Err(_) => return tsig_error(cx, &record, 16, None, 0),
         }
         cx.metadata.set_validated_tsig(&secret.name);
@@ -174,6 +178,7 @@ impl Tsig {
                 fudge: record.fudge,
                 reserved: size,
             });
+        // RFC 8945 §4.1: Discard the TSIG RR after authenticating its DNS transaction.
         let query = cx.query.without_final_tsig().expect("verified TSIG");
         cx.run_with_query_view(query, next).await
     }
@@ -210,6 +215,7 @@ fn tsig_error(
         return Outcome::Error(Error::ResponseBufferTooSmall);
     }
     let _ = builder.finish();
+    // RFC 8945 §5.2.3: Sign BADTIME with the validated key and include server time.
     cx.metadata
         .set_tsig_signing(pharos_server::TsigSigning::Error {
             key: key.cloned(),

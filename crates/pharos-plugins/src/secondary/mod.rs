@@ -143,6 +143,7 @@ impl Secondary {
         let name = &wire[..len + 1];
         let zone = self
             .shared
+            // RFC 1034 §4.3.2: Select the authoritative zone nearest to QNAME.
             .zones
             .load()
             .iter()
@@ -177,6 +178,7 @@ impl Secondary {
                     return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
                 }
             }
+            // RFC 1996 §4.7: Acknowledge primary NOTIFY with its ID, opcode, and question.
             let result = (|| {
                 let mut builder = MessageBuilder::new(
                     cx.response,

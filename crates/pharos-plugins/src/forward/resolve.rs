@@ -59,8 +59,10 @@ fn lookup(name: &Name, resolver: SocketAddr, qtype: Type) -> io::Result<Vec<IpAd
     getrandom::getrandom(&mut id).map_err(|_| io::Error::other("random ID generation failed"))?;
     let id = u16::from_ne_bytes(id);
     let mut query = Vec::new();
+    // RFC 1035 §4.2.1: UDP messages are limited to 512 octets.
     // RFC 6891 §4.3: traditional DNS messages over UDP are limited to 512 octets.
     let mut builder = MessageBuilder::new(&mut query, 512, id, 0x0100).map_err(io::Error::other)?;
+    // RFC 1035 §4.1.2: Encode the name, type, and class in the Question section.
     builder
         .question(
             NameRef::parse(name.as_wire(), 0).map_err(io::Error::other)?,
@@ -74,6 +76,7 @@ fn lookup(name: &Name, resolver: SocketAddr, qtype: Type) -> io::Result<Vec<IpAd
     } else {
         "[::]:0"
     };
+    // RFC 5452 §9.2: Bind port 0 so the OS picks an ephemeral source port per query.
     let socket = UdpSocket::bind(bind)?;
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;

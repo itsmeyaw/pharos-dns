@@ -27,6 +27,7 @@ pub struct Siit {
 impl Siit {
     pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Self, Error> {
         let mut result = Self {
+            // RFC 6052 §2.1: The default algorithmic-mapping prefix is 64:ff9b::/96.
             prefix: "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets(),
             prefix_len: 96,
             eam: Vec::new(),
@@ -44,6 +45,7 @@ impl Siit {
                         let (ip, len) = value
                             .split_once('/')
                             .ok_or_else(|| cursor.error("invalid prefix"))?;
+                        // RFC 4291 §2.2: IPv6 uses conventional textual address forms.
                         let ip: Ipv6Addr =
                             ip.parse().map_err(|_| cursor.error("invalid prefix"))?;
                         let len: u8 = len.parse().map_err(|_| cursor.error("invalid prefix"))?;
@@ -59,6 +61,7 @@ impl Siit {
                         result.prefix = bytes;
                         result.prefix_len = len;
                     }
+                    // RFC 7757 §3.2: Bare EAM addresses use /32 for IPv4 and /128 for IPv6.
                     "eam" => {
                         let args = cursor.remaining_args();
                         let [v4, v6] = args.as_slice() else {
@@ -99,6 +102,7 @@ impl Siit {
         }
     }
 
+    // RFC 6147 §5.2: Recover IPv4 from its IPv6 representation using the same algorithm.
     fn translate(&self, bytes: &[u8]) -> Option<[u8; 4]> {
         let addr: [u8; 16] = bytes.try_into().ok()?;
         let ip = Ipv6Addr::from(addr);
@@ -109,11 +113,13 @@ impl Siit {
         if let Some((_, v4)) = self.eam.iter().find(|(v6, _)| *v6 == ip) {
             return Some(v4.octets());
         }
+        // RFC 6052 §3.3: Match IPv4-translatable addresses against the configured prefix.
         let prefix_len = usize::from(self.prefix_len / 8);
         // RFC 6052 §2.2: the reserved u octet must be zero.
         if addr[..prefix_len] != self.prefix[..prefix_len] || addr[8] != 0 {
             return None;
         }
+        // RFC 6052 §2.2: Ignore suffix bits when extracting the embedded IPv4 address.
         let mut v4 = [0; 4];
         let mut index = prefix_len;
         for byte in &mut v4 {
@@ -198,11 +204,14 @@ impl Plugin for Siit {
                     0
                 }
                 | (response.flags() & 0x068f);
+            // RFC 1035 §4.1.1: Retain the client's transaction ID in the response.
             let mut builder = MessageBuilder::new(cx.response, max, cx.query.id(), flags)
                 .map_err(ServerError::Build)?;
+            // RFC 1035 §4.1.2: Copy the original question into the response.
             builder
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(ServerError::Build)?;
+            // RFC 6147 §5.3.2: Pass additional-section records unchanged during synthesis.
             for (section, records) in [
                 (Section::Answer, response.answers()),
                 (Section::Authority, response.authorities()),

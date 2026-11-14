@@ -44,10 +44,12 @@ async fn kubernetes_metadata_is_collected_before_the_chain() {
             ],
         ),
         (
+            // Kubernetes DNS spec 1.1.0 §2.3.1: Service DNS names use <service>.<ns>.svc.<zone>.
             "s.ns.svc.cluster.local.",
             vec![("kind", "svc"), ("service", "s"), ("namespace", "ns")],
         ),
         (
+            // KEP-1645 §Design Details > ClusterSet Service Behavior Expectations > DNS: Endpoint.
             "ep.c1.s.ns.svc.clusterset.local.",
             vec![
                 ("cluster", "c1"),
@@ -57,6 +59,7 @@ async fn kubernetes_metadata_is_collected_before_the_chain() {
             ],
         ),
         (
+            // Kubernetes DNS spec 1.1.0 §2.3.2: _<port>._<proto>.<service>.<ns>.svc.<zone>.
             "_http._tcp.s.ns.svc.cluster.local.",
             vec![
                 ("port-name", "http"),

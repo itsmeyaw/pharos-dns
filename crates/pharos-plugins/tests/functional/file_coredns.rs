@@ -46,6 +46,7 @@ async fn query(
     builder
         .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
         .unwrap();
+    // RFC 3225 §3: The DO bit requests DNSSEC records in the response.
     if dnssec {
         builder
             .record(
@@ -140,8 +141,10 @@ fn assert_records<'a>(records: impl Iterator<Item = pharos_proto::Record<'a>>, e
     assert_eq!(actual, expected);
 }
 
+// RFC 1035 §3.3.13: SOA RDATA contains a 32-bit serial and four 32-bit timers.
 // Derived from CoreDNS file_test.go TestParseNoSOA, TestParseSyntaxError,
 // TestParseMalformedSOA, and TestParseSOASerialTooLarge.
+// RFC 1035 §5.1: Zone master files encode resource records and control entries.
 #[test]
 fn coredns_rejects_invalid_zone_input() {
     for input in [
@@ -155,6 +158,7 @@ fn coredns_rejects_invalid_zone_input() {
     }
 }
 
+// RFC 1035 §3.3: Name-bearing RDATA contains a complete domain name.
 #[test]
 fn reusable_zone_rejects_trailing_name_only_rdata() {
     use pharos_proto::zone::ZoneRecord;
@@ -193,6 +197,7 @@ fn reusable_zone_rejects_trailing_name_only_rdata() {
 }
 
 // Derived from CoreDNS file_test.go TestParseSOAOrigin.
+// RFC 1035 §5.1: Relative owner names resolve against the current origin.
 #[test]
 fn coredns_soa_owner_origin_cases() {
     for (origin, prefix, owner, valid) in [
@@ -265,6 +270,7 @@ fn coredns_include_loads_relative_zone_file() {
 }
 
 // Derived from CoreDNS escape_test.go TestLookupOwnerNameWithDecimalEscape and TestCanonicalEscape.
+// RFC 4343 §2.1: Decimal escapes represent one octet in a DNS label.
 #[tokio::test]
 async fn coredns_decimal_escape_lookup() {
     let input = "campus.edu. 500 IN SOA ns1.outside.edu. root.campus.edu. 8 6048 4000 2419200 6048\ncampus.edu. 500 IN NS ns1.outside.edu.\nhas\\046dot.campus.edu. 500 IN A 192.0.2.2\n";
@@ -289,6 +295,7 @@ async fn coredns_decimal_escape_lookup() {
 }
 
 // Adapted from CoreDNS zone_test.go TestNameFromRight through public lookup.
+// RFC 1034 §4.3.2: Authoritative lookup matches QNAME label by label.
 #[tokio::test]
 async fn coredns_right_to_left_name_traversal() {
     let input = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\na 60 IN A 192.0.2.1\na.b 60 IN A 192.0.2.2\n";
@@ -310,6 +317,7 @@ async fn coredns_right_to_left_name_traversal() {
 }
 
 // Derived from CoreDNS zone_test.go TestInsertPreservesSRVCase.
+// RFC 4343 §4.1: DNS name output preserves stored label case where possible.
 #[test]
 fn coredns_srv_owner_and_target_keep_case() {
     let input = "@ 60 IN SOA ns.home.arpa. hostmaster.home.arpa. 1 2 3 4 5\nHome\\032Media._smb._tcp.home.arpa. 5 IN SRV 0 0 445 samba.home.arpa.\n";
@@ -547,6 +555,7 @@ async fn coredns_default_and_configured_reload_intervals() {
 }
 
 // Derived from CoreDNS reload_test.go TestZoneReloadSOAChange and TestZoneReloadSOAOrigin.
+// RFC 1982 §3.2: SOA serial numbers use sequence-space comparison.
 #[tokio::test(start_paused = true)]
 async fn coredns_serial_reload_retains_zone_until_valid_change() {
     use std::time::Duration;
@@ -897,6 +906,7 @@ async fn coredns_missing_zone_and_later_zone_recover_by_mtime() {
 }
 
 // Derived from CoreDNS ent_test.go TestLookupEnt and closest_test.go TestClosestEncloser.
+// RFC 4592 §2.2.2: Empty non-terminals exist and block wildcard synthesis.
 #[tokio::test]
 async fn coredns_empty_nonterminal_and_closest_encloser_proofs() {
     let zone = zone(
@@ -941,6 +951,7 @@ async fn coredns_empty_nonterminal_and_closest_encloser_proofs() {
             )));
         }
     }
+    // RFC 4035 §3.1.3.2: NXDOMAIN proofs deny both the queried name and its wildcard.
     for (name, expected_nsec) in [
         ("blaat.a.miek.nl.", vec!["a.miek.nl."]),
         ("blaat.z.a.miek.nl.", vec!["a.miek.nl."]),
@@ -1068,6 +1079,7 @@ fn coredns_record_removal_builds_new_immutable_snapshots() {
 }
 
 // Derived from CoreDNS delegation_test.go TestLookupDelegation and ds_test.go TestLookupDS.
+// RFC 1034 §4.3.2: A delegation returns its NS RRset and available glue.
 #[tokio::test]
 async fn coredns_unsigned_delegation_and_ds_queries() {
     let zone = zone(
@@ -1141,6 +1153,7 @@ async fn coredns_unsigned_delegation_and_ds_queries() {
 }
 
 // Derived from CoreDNS delegation_test.go TestLookupSecureDelegation.
+// RFC 4035 §3.1.4: Secure referrals include DS and its RRSIG with the NS RRset.
 #[tokio::test]
 async fn coredns_secure_delegation_and_ds_at_cut() {
     let zone = zone(
@@ -1209,6 +1222,7 @@ async fn coredns_secure_delegation_and_ds_at_cut() {
 }
 
 // Derived from CoreDNS wildcard_test.go TestLookupApexWildcard and TestLookupMultiWildcard.
+// RFC 4592 §3.3.1: The closest encloser determines wildcard synthesis.
 #[tokio::test]
 async fn coredns_apex_and_nested_wildcards() {
     for (fixture, cases) in [
@@ -1242,6 +1256,7 @@ async fn coredns_apex_and_nested_wildcards() {
 }
 
 // Derived from CoreDNS svcb_test.go TestSVCBTargetNormalization.
+// RFC 9460 §4.1: Authoritative servers SHOULD return in-zone SVCB target data.
 #[tokio::test]
 async fn coredns_svcb_target_is_normalized_and_has_glue() {
     let input = "$TTL 30M\n$ORIGIN example.com.\n@ IN SOA ns.example.com. admin.example.com. 2024010100 14400 3600 604800 14400\n@ IN NS ns.example.com.\nns IN A 192.0.2.1\nsvc IN A 192.0.2.10\n_foo IN SVCB 1 SVC.Example.COM. alpn=h2\n";
@@ -1258,6 +1273,7 @@ async fn coredns_svcb_target_is_normalized_and_has_glue() {
 }
 
 // Derived from CoreDNS lookup_test.go TestLookUpNoDataResult and TestLookupFallthrough.
+// RFC 2308 §2.2: Missing data at an existing name is a NOERROR NODATA response.
 #[tokio::test]
 async fn coredns_nodata_and_scoped_fallthrough() {
     let zone = zone(
@@ -1327,6 +1343,7 @@ async fn coredns_missing_zone_is_servfail() {
 }
 
 // Derived from CoreDNS lookup_test.go TestLookup.
+// RFC 1034 §3.6.2: Follow CNAME targets unless the query asks for CNAME.
 #[tokio::test]
 async fn coredns_lookup_records_and_negative_responses() {
     let zone = zone(
@@ -1445,6 +1462,7 @@ async fn coredns_lookup_records_and_negative_responses() {
             &[],
         ),
         (
+            // RFC 6672 §2.2: DNAME substitution replaces a descendant name's owner suffix.
             "foo.dname.miek.nl.",
             Type::CNAME,
             Rcode::NOERROR,
@@ -1480,11 +1498,13 @@ async fn coredns_lookup_records_and_negative_responses() {
             &[],
         ),
     ];
+    // RFC 1035 §4.1.1: RCODE identifies the result of a DNS response.
     for (name, kind, rcode, answer, authority, additional) in cases {
         let (outcome, wire) = query(&zone, name, *kind, false, &[]).await;
         assert_eq!(outcome, Outcome::Response, "{name}");
         let response = Message::parse(&wire).unwrap();
         assert_eq!(response.rcode(), *rcode, "{name}");
+        // RFC 1035 §4.1.3: Records occupy the Answer, Authority, and Additional sections.
         assert_records(response.answers(), answer);
         assert_records(response.authorities(), authority);
         assert_records(response.additionals(), additional);
@@ -1541,6 +1561,7 @@ async fn coredns_refused_target_keeps_alias_and_noerror() {
 }
 
 // Derived from CoreDNS xfr_test.go TestAXFRWithOutTransferPlugin and TestTransferRequiresExactZone.
+// RFC 5936 §2.1.2: AXFR queries identify the transferred zone at its apex.
 #[tokio::test]
 async fn coredns_axfr_requires_transfer_and_exact_apex() {
     let path = concat!(
@@ -1664,6 +1685,7 @@ async fn coredns_reload_and_lookup_keep_one_zone_generation() {
 }
 
 // Derived from CoreDNS dnssec_test.go TestLookupDNSSEC.
+// RFC 4035 §3.1.1: DO-enabled responses include signatures for signed answer RRsets.
 #[tokio::test]
 async fn coredns_signed_lookup_and_denial_cases() {
     let zone = zone(
@@ -1848,6 +1870,7 @@ async fn coredns_apex_ns_includes_signed_glue() {
 }
 
 // Derived from CoreDNS alias_delegation_test.go TestAliasToDelegation.
+// RFC 6604 §2.1: AA reflects authority for the first answer owner in an xNAME chain.
 #[tokio::test]
 async fn coredns_aliases_to_delegated_zones() {
     let zone = zone(
@@ -2018,6 +2041,7 @@ async fn coredns_signed_aliases_to_delegated_zones() {
 }
 
 // Derived from CoreDNS wildcard_test.go TestLookupWildcard.
+// RFC 4035 §3.1.3.3: Wildcard answers include a proof that no closer name exists.
 #[tokio::test]
 async fn coredns_signed_wildcard_and_nodata_cases() {
     let zone = zone(
@@ -2065,6 +2089,7 @@ async fn coredns_signed_wildcard_and_nodata_cases() {
             }
         }
     }
+    // RFC 4035 §3.1.3.4: Wildcard NODATA proofs deny the queried type and closer names.
     for dnssec in [false, true] {
         let (outcome, wire) = query(&zone, "wild.dnssex.nl.", Type::SRV, dnssec, &[]).await;
         assert_eq!(outcome, Outcome::Response);
@@ -2208,6 +2233,7 @@ async fn coredns_empty_nonterminal_wildcard_cases() {
 }
 
 // Derived from CoreDNS svcb_test.go TestLookupSVCB and TestSVCBPrivateKeys.
+// RFC 9460 §4.1: SVCB and HTTPS answers may include in-zone target addresses.
 #[tokio::test]
 async fn coredns_svcb_and_https_cases() {
     let zone = zone(
@@ -2284,6 +2310,7 @@ async fn coredns_svcb_and_https_cases() {
 }
 
 // Derived from CoreDNS lookup_test.go TestAdditionalSectionDeduplication and TestAdditionalSectionDeduplicationMixedCase.
+// RFC 2782 §2: SRV target addresses may be returned in Additional.
 #[tokio::test]
 async fn coredns_additional_processing_deduplicates_targets() {
     let zone = zone(
@@ -2383,6 +2410,7 @@ async fn coredns_additional_processing_deduplicates_targets() {
 }
 
 // CoreDNS tsig README: require signatures for IXFR as well as AXFR.
+// RFC 8945 §5.3.1: TSIG authenticates DNS messages on TCP streams.
 #[cfg(all(feature = "plugin-transfer", feature = "plugin-tsig"))]
 #[tokio::test]
 async fn coredns_tsig_readme_requires_signed_ixfr() {
@@ -2474,6 +2502,7 @@ async fn coredns_tsig_readme_requires_signed_ixfr() {
         socket.read_exact(&mut response).await.unwrap();
         let message = Message::parse(&response).unwrap();
         if signed {
+            // RFC 1995 §2: An up-to-date IXFR response contains the current SOA.
             assert_eq!(message.rcode(), Rcode::NOERROR);
             assert_eq!(message.answer_count(), 1);
             assert_eq!(message.answers().next().unwrap().rtype, Type::SOA);

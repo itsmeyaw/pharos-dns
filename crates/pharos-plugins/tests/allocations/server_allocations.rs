@@ -107,6 +107,7 @@ async fn check_routed_udp_queries_of_type(corefile: &str, qtype: u8) {
         for _ in 0..201 {
             socket.send_to(&query, address).unwrap();
             let (n, _) = socket.recv_from(&mut buf).unwrap();
+            // RFC 1035 §4.1.1: QR marks a response and RCODE 0 means no error.
             let response = Message::parse(&buf[..n]).unwrap();
             assert!(response.qr());
             assert_eq!(response.rcode(), Rcode::NOERROR);

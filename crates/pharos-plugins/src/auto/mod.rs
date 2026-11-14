@@ -161,6 +161,7 @@ impl Auto {
         next: N,
         has_next: bool,
     ) -> Outcome {
+        // RFC 1035 §4.1.1: REFUSED denies queries; SERVFAIL reports server failure.
         match self.select(cx, has_next) {
             Selection::Next => next.run(cx).await,
             Selection::Refused => Outcome::Unanswered(Rcode::REFUSED),
@@ -175,12 +176,14 @@ impl Auto {
         let Some(question) = cx.query.questions().next() else {
             return Selection::Next;
         };
+        // RFC 1035 §2.3.4: DNS names are limited to 255 octets on the wire.
         let mut wire = [0u8; 255];
         let mut len = 0;
         for label in question.name.labels() {
             wire[len] = label.len() as u8;
             len += 1;
             wire[len..len + label.len()].copy_from_slice(label);
+            // RFC 4343 §3: DNS name lookup matches ASCII letters without case sensitivity.
             wire[len..len + label.len()].make_ascii_lowercase();
             len += label.len();
         }
@@ -225,6 +228,7 @@ impl std::fmt::Write for NameText {
 impl Shared {
     fn find(&self, mut name: &[u8]) -> Option<Arc<Entry>> {
         let zones = self.zones.load();
+        // RFC 4592 §3.1: Select the nearest ancestor Zone for the response.
         // RFC 1034 §4.3.2: choose the closest enclosing authoritative Zone.
         loop {
             if let Some(entry) = zones.canonical.get(name) {

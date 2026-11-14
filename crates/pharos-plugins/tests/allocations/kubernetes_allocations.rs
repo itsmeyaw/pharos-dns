@@ -92,6 +92,7 @@ async fn routed_kubernetes_cluster_ip_queries() {
         ("web.prod.svc.clusterset.local.", Type::A),
     ] {
         let name: Name = name.parse().unwrap();
+        // RFC 1035 §4.1.2: DNS questions carry QNAME, QTYPE, and QCLASS.
         let mut query = Vec::with_capacity(512);
         let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x0100).unwrap();
         builder
@@ -120,19 +121,23 @@ async fn routed_kubernetes_cluster_ip_queries() {
         };
         assert_eq!(answer.name.to_string(), expected_name);
         match index {
+            // RFC 1035 §3.4.1: A RDATA carries one 32-bit IPv4 address.
             0 => assert_eq!(
                 answer.data().unwrap(),
                 Rdata::A("10.0.0.1".parse().unwrap())
             ),
+            // RFC 3596 §2.1-2.3: AAAA queries return the requested IPv6 address records.
             1 => assert_eq!(
                 answer.data().unwrap(),
                 Rdata::Aaaa("2001:db8::1".parse().unwrap())
             ),
+            // KEP-1645 §Design Details > ClusterSet Service Behavior Expectations > DNS: IPs.
             3 => assert_eq!(
                 answer.data().unwrap(),
                 Rdata::A("10.0.0.2".parse().unwrap())
             ),
             _ => {
+                // k8s-dns §2.3.2: Named Service ports produce SRV records with the Service target.
                 let Rdata::Srv {
                     priority,
                     weight,

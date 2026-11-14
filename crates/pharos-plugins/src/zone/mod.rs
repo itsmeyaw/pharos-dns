@@ -101,6 +101,7 @@ impl Zone {
         parser.set_include_allowed(true);
         let mut records = Vec::new();
         let mut seen_soa = false;
+        // RFC 1035 §5.2: Reject a zone load when any master-file entry is invalid.
         for record in parser {
             let record = record.map_err(|error| error.to_string())?;
             if record.rtype == Type::SOA {
@@ -112,9 +113,11 @@ impl Zone {
                 }
                 seen_soa = true;
             }
+            // RFC 5155 §7.4: Reject NSEC3 zones because no NSEC3 hash is served.
             if matches!(record.rtype, Type::NSEC3 | Type::NSEC3PARAM) {
                 return Err("NSEC3 zone is not supported".into());
             }
+            // RFC 8976 §2.1: Keep non-apex ZONEMD records as ordinary records.
             records.push(record);
         }
         Self::from_records(apex, records)
@@ -142,6 +145,7 @@ impl Zone {
             .parse()
             .map_err(|error: pharos_proto::NameError| error.to_string())?;
         let mut soa = false;
+        // RFC 4592 §2: Wildcard owners use ordinary resource-record syntax.
         for record in &mut records {
             if record.rtype != Type::SRV {
                 record.owner = record
@@ -150,6 +154,7 @@ impl Zone {
                     .parse()
                     .map_err(|error: pharos_proto::NameError| error.to_string())?;
             }
+            // RFC 4592 §4.1: A wildcard SOA owner must be the zone apex.
             if record.rtype == Type::SOA {
                 if record.owner != apex {
                     return Err("SOA owner does not match Zone apex".into());
@@ -170,6 +175,7 @@ impl Zone {
                 Type::SRV => Some((6, false)),
                 _ => None,
             };
+            // RFC 4592 §2.3: An asterisk label in resource data is treated literally.
             if let Some((offset, lowercase)) = offset {
                 let end = normalize_rdata_name(&mut record.rdata, offset, lowercase)?;
                 // RFC 1035 §§3.3.1, 3.3.11 and RFC 6672 §2.1: these RDATA fields contain only one name.
@@ -198,6 +204,7 @@ impl Zone {
         });
         let mut nodes: BTreeMap<Name, ZoneNode> = BTreeMap::new();
         // RFC 1034 §3.1: ancestors may exist as empty nonterminals.
+        // RFC 4592 §2.2.2: A node with descendants exists even without RRsets.
         for (index, record) in records.iter().enumerate() {
             let apex_record = record.owner == apex
                 && (matches!(record.rtype, Type::SOA | Type::NS)
@@ -206,6 +213,7 @@ impl Zone {
                             covered == Type::SOA.0.to_be_bytes()
                                 || covered == Type::NS.0.to_be_bytes()
                         }));
+            // RFC 4592 §2.1.3: Wildcard names may have descendants and nested asterisks.
             let mut suffix = record.owner.as_wire();
             loop {
                 let name = NameRef::parse(suffix, 0)
@@ -254,6 +262,7 @@ impl Zone {
         &self.records
     }
 
+    // RFC 1712 §5: Return GPOS data only when stored for the queried owner.
     /// Find the records at an owner and type, without allocating.
     pub fn rrset(&self, name: NameRef<'_>, kind: Type) -> impl Iterator<Item = &ZoneRecord> {
         let mut wire = [0u8; 255];
@@ -267,6 +276,7 @@ impl Zone {
         self.records_at(&wire[..len + 1], kind)
     }
 
+    // RFC 4343 §3: Owner lookup compares labels with ASCII case folding.
     fn node(&self, name: &[u8]) -> Option<&ZoneNode> {
         self.names
             .binary_search_by(|node| canonical_cmp(node.name.as_wire(), name))
@@ -294,6 +304,7 @@ impl Zone {
         self.node(name).is_some_and(|node| node.tree)
     }
 
+    // RFC 5936 §3.5: Find the enclosing delegation cut for potentially occluded names.
     pub(crate) fn cut(&self, name: &[u8], kind: Type) -> Option<&ZoneRecord> {
         if !contains_wire(name, self.apex.as_wire()) {
             return None;
@@ -301,6 +312,7 @@ impl Zone {
         let mut suffix = name;
         let mut cut = None;
         while !suffix.eq_ignore_ascii_case(self.apex.as_wire()) {
+            // RFC 4035 §3.1.4.1: DS RRsets belong to the parent side of a zone cut.
             if !(kind == Type::DS && suffix.len() == name.len())
                 && let Some(rr) = self.records_at(suffix, Type::NS).next()
             {
@@ -430,6 +442,7 @@ fn canonical_cmp(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
     let mut b = [&[][..]; 127];
     let ac = labels(left, &mut a);
     let bc = labels(right, &mut b);
+    // RFC 4343 §3: DNS name lookup matches ASCII letters without regard to case.
     for (a, b) in a[..ac].iter().rev().zip(b[..bc].iter().rev()) {
         let order = a
             .iter()
@@ -451,11 +464,14 @@ fn write_set(
     section: Section,
     dnssec: bool,
 ) -> Result<(), pharos_server::Error> {
+    // RFC 2181 §10.2: PTR RRsets may contain multiple records.
     for rr in zone.records_at(source, kind) {
         builder
             .record(section, owner, rr.rtype, rr.class, rr.ttl, &rr.rdata)
             .map_err(pharos_server::Error::Build)?;
     }
+    // RFC 9460 §4.3: Include DNSSEC records with Additional RRsets when DO is set.
+    // RFC 4592 §4.8: Include a wildcard RRset's RRSIG with synthesized data when DO is set.
     // RFC 4035 §3.1.1: include matching RRSIG records when DO is set.
     if dnssec && kind != Type::RRSIG {
         for rr in zone
@@ -523,6 +539,7 @@ impl Zone {
             return Outcome::Drop;
         }
         // RFC 1034 §4.3.2: return the first Zone Cut between the apex and QNAME.
+        // RFC 2181 §6.1: A parent zone stops authoritative answers at each child cut.
         let cut = if case_mismatch
             && !(question.qtype == Type::DS && name.eq_ignore_ascii_case(zone.apex.as_wire()))
         {
@@ -530,7 +547,7 @@ impl Zone {
         } else {
             zone.cut(name, question.qtype)
         };
-        // RFC 6672 §3.2: DNAME applies to strict descendants of its owner.
+        // RFC 6672 §2.3: DNAME redirects strict descendants, not its owner.
         let dname = zone
             .dname(name)
             .filter(|rr| cut.is_none_or(|cut| rr.owner.label_count() <= cut.owner.label_count()));
@@ -538,7 +555,9 @@ impl Zone {
         let mut wildcard = [0u8; 255];
         let mut dname_target = [0u8; 255];
         let mut source = name;
+        // RFC 8020 §3.1: An existing empty non-terminal returns NOERROR with no answer.
         let exists = zone.exists(name);
+        // RFC 4592 §2.3: An asterisk in QNAME matches only an existing asterisk label.
         let exact = zone.exact(name)
             || name.eq_ignore_ascii_case(zone.apex.as_wire())
                 && matches!(question.qtype, Type::SOA | Type::NS);
@@ -549,6 +568,7 @@ impl Zone {
             } else {
                 &rr.rdata
             };
+            // RFC 6672 §2.2: Replace only whole labels matching the DNAME owner suffix.
             let prefix = name.len() - rr.owner.as_wire().len();
             let len = prefix + target.len();
             if len > dname_target.len() {
@@ -560,16 +580,20 @@ impl Zone {
             if source.eq_ignore_ascii_case(name) {
                 return Outcome::Unanswered(Rcode::SERVFAIL);
             }
+        // RFC 4592 §4.5: Wildcard synthesis matches the RR owner, not the SRV Name field.
         } else if !exact && cut.is_none() {
+            // RFC 1183 §3.3: Wildcard RT records use the same matching as MX records.
             // RFC 4592 §3.3.1: the closest encloser determines wildcard synthesis.
             let mut parent = if name[0] == 0 {
                 name
             } else {
                 &name[1 + usize::from(name[0])..]
             };
+            // RFC 4592 §2.2: An existing intervening name blocks wildcard synthesis.
             while parent[0] != 0 && !zone.exists(parent) {
                 parent = &parent[1 + usize::from(parent[0])..];
             }
+            // RFC 4592 §2.1.1: An asterisk label is encoded as 0x01 0x2a on the wire.
             if parent.len() + 2 <= wildcard.len() {
                 wildcard[0] = 1;
                 wildcard[1] = b'*';
@@ -605,11 +629,13 @@ impl Zone {
             cut = zone.cut(target, question.qtype);
         }
         // DNAME NS targets without a Referral use Self Lookup instead of local alias walking.
+        // RFC 1034 §3.6.2: CNAME queries do not restart at the canonical name.
         if cut.is_none()
             && question.qtype != Type::CNAME
             && !(dname.is_some() && question.qtype == Type::NS)
         {
-            // RFC 1034 §3.6.2: follow a CNAME before answering the original QTYPE.
+            // RFC 1034 §4.3.2: Follow a matched CNAME and restart lookup at its target.
+            // RFC 2181 §10.2: PTR lookup names may alias even though PTR targets may not.
             while let Some(alias) = zone.records_at(target, Type::CNAME).next() {
                 if count == chain.len() {
                     chain_limited = true;
@@ -661,6 +687,7 @@ impl Zone {
             None
         };
         let external = lookup.as_ref().and_then(|wire| Message::parse(wire).ok());
+        // RFC 7344 §3.1: CDS is served as a regular resource record type.
         let found = dname.is_some()
             || count > 0
             || zone.records_at(target, question.qtype).next().is_some();
@@ -673,6 +700,7 @@ impl Zone {
         {
             return next.run(cx).await;
         }
+        // RFC 6604 §3: The xNAME-chain response RCODE reflects the final query cycle.
         let rcode = if lookup_failed || lookup.is_some() && external.is_none() {
             Rcode::SERVFAIL
         } else if let Some(response) = external {
@@ -681,6 +709,7 @@ impl Zone {
                 Rcode::NXDOMAIN => Rcode::NXDOMAIN,
                 _ => Rcode::NOERROR,
             }
+        // RFC 8659 §6.2: An unknown RR type at an existing name returns RCODE 0.
         } else if exists || synthesized || cut.is_some() || dname.is_some() || found {
             Rcode::NOERROR
         } else {
@@ -697,6 +726,8 @@ impl Zone {
         let result = (|| -> Result<(), pharos_server::Error> {
             // RFC 1035 §4.1.1: authoritative Responses preserve Query flags and ID.
             // RFC 1035 §4.1.1: OPCODE identifies the operation; RD is a Query flag.
+            // RFC 4035 §3.1.6: Do not set AD without secure provenance and explicit policy.
+            // RFC 2181 §6.1: Clear AA on pure referrals at a zone cut.
             let mut builder = MessageBuilder::new(
                 cx.response,
                 max,
@@ -724,6 +755,7 @@ impl Zone {
             builder
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(pharos_server::Error::Build)?;
+            // RFC 6672 §3.1: Include the DNAME and synthesized CNAME in the answer.
             if let Some(rr) = dname {
                 let owner = NameRef::parse(rr.owner.as_wire(), 0)
                     .map_err(|_| pharos_server::Error::InvalidQuery)?;
@@ -736,6 +768,7 @@ impl Zone {
                     Section::Answer,
                     dnssec,
                 )?;
+                // RFC 6672 §3.1: The synthesized CNAME uses QNAME and the DNAME TTL.
                 builder
                     .record(
                         Section::Answer,
@@ -785,6 +818,8 @@ impl Zone {
                     }
                 }
             }
+            // RFC 4431 §2: DLV may be served at the apex as an ordinary record.
+            // RFC 6672 §3.1: Answer synthesized CNAME queries in the DNAME branch.
             if cut.is_none()
                 && !chain_limited
                 && lookup.is_none()
@@ -794,11 +829,13 @@ impl Zone {
                 let owner = if count == 0 && synthesized {
                     question.name
                 } else if let Some(rr) = zone.records_at(target, question.qtype).next() {
+                    // RFC 9460 §2.3: SVCB answers retain the target RRset owner after CNAME.
                     NameRef::parse(rr.owner.as_wire(), 0)
                         .map_err(|_| pharos_server::Error::InvalidQuery)?
                 } else {
                     NameRef::parse(target, 0).map_err(|_| pharos_server::Error::InvalidQuery)?
                 };
+                // RFC 3225 §3: Return explicitly queried DNSSEC RRsets regardless of DO.
                 write_set(
                     &mut builder,
                     zone,
@@ -824,7 +861,8 @@ impl Zone {
                         .map_err(pharos_server::Error::Build)?;
                 }
             }
-            // RFC 2308 §3: negative Responses include the Zone SOA.
+            // RFC 2308 §2.1.1: Authoritative NXDOMAIN responses use SOA without NS records.
+            // RFC 2181 §7.1: Place an SOA added to an authoritative answer in Authority.
             let authority_type = if rcode == Rcode::NXDOMAIN
                 || external.is_some_and(|response| {
                     response.rcode() == Rcode::NOERROR && response.answer_count() == 0
@@ -842,6 +880,7 @@ impl Zone {
             {
                 let owner = NameRef::parse(authority_owner, 0)
                     .map_err(|_| pharos_server::Error::InvalidQuery)?;
+                // RFC 9471 §3.3: Referral responses copy delegated NS records to Authority.
                 write_set(
                     &mut builder,
                     zone,
@@ -911,6 +950,7 @@ impl Zone {
                     proof[0] = 1;
                     proof[1] = b'*';
                     proof[2..2 + parent.len()].copy_from_slice(parent);
+                    // RFC 4035 §3.1.3.2: Include a shared NSEC proof only once in Authority.
                     if let Some(rr) = zone.previous_nsec(&proof[..2 + parent.len()])
                         && first.is_none_or(|first| first.owner != rr.owner)
                     {
@@ -947,6 +987,7 @@ impl Zone {
                     true,
                 )?;
             }
+            // RFC 4035 §3.1.4: DNSSEC referrals include parent-side DS and its RRSIG.
             if dnssec && let Some(cut) = cut {
                 let owner = NameRef::parse(cut.owner.as_wire(), 0)
                     .map_err(|_| pharos_server::Error::InvalidQuery)?;
@@ -962,6 +1003,7 @@ impl Zone {
             }
             // RFC 1034 §4.3.2: Referrals include available address glue.
             if let Some(cut) = cut {
+                // RFC 2181 §6.1: Referrals carry delegation NS and needed A/AAAA glue.
                 for ns in zone.records_at(cut.owner.as_wire(), Type::NS) {
                     if !contains_wire(&ns.rdata, ns.owner.as_wire()) {
                         continue;
@@ -982,8 +1024,11 @@ impl Zone {
                 }
             }
             // RFC 1035 §3.3: MX and NS targets and RFC 2782 §3: SRV targets may have address glue.
+            // RFC 3596 §2.3: AAAA queries do not trigger additional section processing.
             if cut.is_none() {
+                // RFC 1706 §5: NSAP answers do not trigger additional address processing.
                 let offset = match question.qtype {
+                    // RFC 9460 §6: SVCB and HTTPS share Additional processing.
                     Type::MX | Type::SVCB | Type::HTTPS => Some(2),
                     Type::SRV => Some(6),
                     Type::NS if source.eq_ignore_ascii_case(zone.apex.as_wire()) => Some(0),

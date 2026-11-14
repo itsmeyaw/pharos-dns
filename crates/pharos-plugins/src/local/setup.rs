@@ -4,6 +4,7 @@ pub(crate) fn setup(
 ) -> Result<(), pharos_corefile::Error> {
     use crate::local;
 
+    // RFC 6303 §3: Enable local zones only when the local block is configured.
     block.config.local = Some(local::Local::parse(cursor)?);
     Ok(())
 }

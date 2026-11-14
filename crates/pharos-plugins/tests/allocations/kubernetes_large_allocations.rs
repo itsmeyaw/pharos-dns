@@ -134,6 +134,7 @@ async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
         ("weight.prod.svc.cluster.local.", Type::SRV),
         ("1.0.9.10.in-addr.arpa.", Type::PTR),
         (
+            // RFC 3596 §2.5: IPv6 reverse names use reversed hexadecimal nibbles.
             "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.",
             Type::PTR,
         ),
@@ -168,6 +169,7 @@ async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
         let message = Message::parse(&response).unwrap();
         assert_eq!(message.rcode(), Rcode::NOERROR);
         match index {
+            // k8s-dns §2.4.1: Headless Services return endpoint address records.
             0 => {
                 assert_eq!(message.answer_count(), 100);
                 for (i, rr) in message.answers().enumerate() {
@@ -217,6 +219,7 @@ async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
                 }
             }
             4 => {
+                // k8s-dns §2.4.3: Headless endpoint reverse records map ready IPs to names.
                 assert_eq!(message.answer_count(), 1);
                 assert!(matches!(
                     message.answers().next().unwrap().data().unwrap(),
@@ -237,11 +240,13 @@ async fn large_endpoints_preserve_records_and_do_not_allocate_after_warmup() {
                         format!("node{i}.dns.prod.svc.cluster.local.")
                     );
                 }
+                // RFC 1034 §4.3.2: Add locally available useful records to Additional.
                 for rr in message.additionals() {
                     assert_eq!(rr.data().unwrap(), Rdata::A(local_ip.unwrap()));
                 }
             }
             6 | 7 => {
+                // RFC 2181 §5.1: Mark a response truncated when the full RRset does not fit.
                 assert!(message.tc());
                 assert!(message.answer_count() > 0);
             }

@@ -7,6 +7,7 @@ pub(crate) fn name_len(name: NameRef<'_>) -> usize {
 pub(crate) fn message_len(message: Message<'_>) -> usize {
     let questions = message
         .questions()
+        // RFC 1035 §4.1.2: A Question contains QNAME, QTYPE, and QCLASS.
         .map(|q| name_len(q.name) + 4)
         .sum::<usize>();
     let records = message
@@ -40,8 +41,10 @@ pub(crate) fn message_len(message: Message<'_>) -> usize {
                 // shortcut: unsupported or malformed name-bearing RDATA stays encoded; extend pharos-proto to decode it.
                 _ => {}
             }
+            // RFC 1035 §4.1.3: An RR has NAME, TYPE, CLASS, TTL, RDLENGTH, and RDATA.
             name_len(record.name) + 10 + size.unwrap_or(record.rdata.len())
         })
         .sum::<usize>();
+    // RFC 1035 §4.1.1: A DNS Message header is 12 octets.
     12 + questions + records
 }

@@ -55,6 +55,7 @@ async fn generated_chain_tries_transferers_in_order() {
             answer: second,
             calls: calls.clone(),
         });
+        // RFC 5936 §2.1.2: The AXFR query names the zone and carries QTYPE AXFR and class.
         let wire = [0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 252, 0, 1];
         let domain: Name = ".".parse().unwrap();
         let mut response = Vec::new();

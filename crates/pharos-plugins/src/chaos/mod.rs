@@ -70,10 +70,11 @@ impl Plugin for Chaos {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
+        // RFC 1035 §3.2.5: QCLASS CH selects the Chaos class this plugin answers.
         if question.qclass != Class::CH || question.qtype != Type::TXT {
             return next.run(cx).await;
         }
-        // RFC 4343 §2: DNS labels are compared without ASCII case sensitivity.
+        // RFC 4343 §3: DNS labels are compared without ASCII case sensitivity.
         let mut labels = question.name.labels();
         let (Some(first), Some(second), None) = (labels.next(), labels.next(), labels.next())
         else {
@@ -134,6 +135,7 @@ impl Plugin for Chaos {
                 rdata[0] = len;
                 rdata[1..1 + value.len()].copy_from_slice(value);
                 if !builder
+                    // RFC 1035 §3.2.4: CH identifies the CHAOS DNS class.
                     .record(
                         Section::Answer,
                         question.name,

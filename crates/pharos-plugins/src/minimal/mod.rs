@@ -47,6 +47,7 @@ impl Plugin for Minimal {
         {
             return outcome;
         }
+        // RFC 1034 §4.3.2: Positive responses retain Answer and may drop Authority and Additional.
         // RFC 1035 §4.1.1: section counts describe the records in each Message section.
         let end = message
             .authorities()

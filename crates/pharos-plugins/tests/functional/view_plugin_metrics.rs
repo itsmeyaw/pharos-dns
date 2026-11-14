@@ -11,6 +11,7 @@ use pharos_proto::{Name, Type};
 use pharos_server::{Handler, Protocol};
 
 fn query(name: &str, kind: Type) -> Vec<u8> {
+    // RFC 1035 §4.1.2: Encode QNAME, QTYPE, and QCLASS in the Question section.
     let mut wire = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
     wire.extend_from_slice(name.parse::<Name>().unwrap().as_wire());
     wire.extend_from_slice(&kind.0.to_be_bytes());

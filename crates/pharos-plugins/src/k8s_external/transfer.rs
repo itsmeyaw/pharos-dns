@@ -118,6 +118,7 @@ impl Snapshot<'_> {
         let mut scratch = [0; 1024];
         let mut wire = FixedBuffer::new(&mut scratch);
         // RFC 5936 §2.2: AXFR Messages are authoritative and echo the Question.
+        // RFC 5936 §2.2.4: Authority stays empty; only Question and Answer are written.
         let mut b = MessageBuilder::new(
             &mut wire,
             1024,
@@ -195,7 +196,7 @@ impl Snapshot<'_> {
         port: i32,
         weight: u16,
     ) -> Result<(), Error> {
-        // RFC 2782 §3: SRV contains priority, weight, port, and an uncompressed target.
+        // RFC 2782 §The format of the SRV RR: u16 priority, weight, port; uncompressed target.
         self.record(owner, Type::SRV, self.service_ttl, |w| {
             w.write_bytes(&0u16.to_be_bytes())?;
             w.write_bytes(&weight.to_be_bytes())?;
@@ -216,6 +217,7 @@ fn named_owner<'a>(
     }
     let mut p = [0; 64];
     let mut proto = [0; 64];
+    // RFC 2782 §The format of the SRV RR: Service and Proto use underscores and ignore case.
     p[0] = b'_';
     proto[0] = b'_';
     for (dst, src) in p[1..].iter_mut().zip(port.bytes()) {
@@ -299,6 +301,7 @@ fn entries<'a>(
 #[derive(Clone, Copy)]
 struct CaseInsensitive<'a>(&'a str);
 
+// RFC 1035 §2.3.3: DNS service and protocol labels compare case-insensitively.
 impl PartialEq for CaseInsensitive<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.0.eq_ignore_ascii_case(other.0)
@@ -597,6 +600,7 @@ fn generate<'a>(
     if soa_only(snapshot.request, current) {
         return Ok(());
     }
+    // RFC 1995 §6: An unknown requested version falls back to a full zone transfer.
     let ns = snapshot.ns;
     snapshot.record(snapshot.request.zone, Type::NS, snapshot.ttl, |w| {
         w.write_name(ns)
@@ -640,6 +644,7 @@ fn generate<'a>(
             }
         }
     }
+    // RFC 5936 §2.2: end the AXFR response with the same SOA that begins it.
     snapshot.soa(current)
 }
 
@@ -704,6 +709,7 @@ impl Transferer for External {
         let store = kubernetes
             .store()
             .unwrap_or_else(|| self.empty_store.clone());
+        // RFC 5936 §3: encode records from one immutable Store snapshot.
         let bytes = store.with_read(|index| encode(self, kubernetes, zone, index, request))?;
         Ok(Some(stream_snapshot(bytes)))
     }

@@ -31,6 +31,7 @@ pub(super) fn parse_multicluster<'a>(
     let Some((&kind, remaining)) = labels.split_last() else {
         return Some(request);
     };
+    // RFC 1035 §3.1: Compare DNS labels without regard to ASCII letter case.
     if !kind.eq_ignore_ascii_case(b"pod") && !kind.eq_ignore_ascii_case(b"svc") {
         return None;
     }
@@ -43,16 +44,19 @@ pub(super) fn parse_multicluster<'a>(
         return Some(request);
     };
     request.service = service;
-    // Kubernetes DNS spec 1.1.0 §2.3.2: SRV names contain port and protocol labels.
-    // KEP-1645 MCS DNS spec §2.4.1: headless endpoint names include hostname and cluster ID.
+    // Kubernetes DNS spec 1.1.0 §2.4.2: Headless SRV names contain port and protocol labels.
+    // KEP-1645 §Design Details > ClusterSet Service Behavior Expectations > DNS: host+cluster ID.
     match remaining {
         [] => {}
+        // Kubernetes DNS spec 1.1.0 §2.4.1: Headless endpoint names prepend the hostname.
         [endpoint] => request.endpoint = endpoint,
         [port, protocol] => {
+            // KEP-1645 §Design Details > ClusterSet Service Behavior Expectations > DNS: host+ID.
             if multicluster && !port.starts_with(b"_") && !protocol.starts_with(b"_") {
                 request.endpoint = port;
                 request.cluster = protocol;
             } else {
+                // RFC 2782 §The format of the SRV RR: Service and Proto labels use underscores.
                 request.port = port.strip_prefix(b"_").unwrap_or(port);
                 request.protocol = protocol.strip_prefix(b"_").unwrap_or(protocol);
             }

@@ -43,12 +43,15 @@ impl TestPlugin {
         if response.rcode() != Rcode::NOERROR {
             return Outcome::Error(pharos_server::Error::InvalidQuery);
         }
+        // RFC 1035 §4.1.2: A DNS question carries QNAME, QTYPE, and QCLASS.
         let question = cx.query.questions().next().unwrap();
+        // RFC 1035 §4.1.1: DNS messages carry an identifier, flags, and section counts.
         let mut builder = MessageBuilder::new(cx.response, 65535, cx.query.id(), 0x8400).unwrap();
         builder
             .question(question.name, question.qtype, question.qclass)
             .unwrap();
         let target = NameRef::parse(target.as_wire(), 0).unwrap();
+        // RFC 1035 §3.3.1: CNAME RDATA identifies the canonical name for its alias owner.
         builder
             .record_with(
                 Section::Answer,
@@ -59,6 +62,7 @@ impl TestPlugin {
                 |writer| writer.write_name(target),
             )
             .unwrap();
+        // RFC 1034 §4.3.2: Recursive answers include intermediate CNAMEs and resolved data.
         for answer in response.answers() {
             let data = answer.data().unwrap();
             builder
@@ -79,7 +83,9 @@ impl TestPlugin {
 
 async fn request(address: std::net::SocketAddr) -> Vec<u8> {
     let query = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\0\x01a\x07example\0\0\x01\0\x01";
+    // RFC 7766 §5: General-purpose DNS implementations must support TCP transport.
     let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    // RFC 1035 §4.2.2: TCP DNS messages have a two-byte length prefix excluding itself.
     stream.write_u16(query.len() as u16).await.unwrap();
     stream.write_all(query).await.unwrap();
     let len = stream.read_u16().await.unwrap();
@@ -129,6 +135,7 @@ async fn stale_refresh_self_lookup_caches_chased_cname() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(message.rcode(), Rcode::NOERROR);
     assert_eq!(message.answer_count(), 2);
+    // RFC 1035 §3.2.1: TTL limits how long a record may be cached before refresh.
     assert_eq!(
         message.answers().next().unwrap().ttl,
         1,

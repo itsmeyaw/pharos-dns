@@ -149,6 +149,7 @@ impl Dnssec {
             None
         };
         // RFC 4470 §3: synthetic NSEC proves nonexistence without disclosing Zone contents.
+        // RFC 6604 §2.2: Preserve AD from the response without asserting authenticity.
         let flags = if denial {
             message.flags() & !0xf
         } else {
@@ -184,6 +185,7 @@ impl Dnssec {
                 && (!referral || (section == Section::Authority && rtype == Type::DS))
                 && (!denial || section == Section::Authority)
         };
+        // RFC 4035 §3.1.1: Place each RRSIG in the same section as its covered RRset.
         for (section, records) in [
             (Section::Answer, message.answers()),
             (Section::Authority, message.authorities()),
@@ -217,6 +219,7 @@ impl Dnssec {
                                     && other.rtype == covered
                             })
                     });
+                // RFC 4035 §2.2: RRSIG TTLs with a common owner may differ across RRsets.
                 // RFC 4034 §3: RRSIG TTLs may differ when they cover different RRsets.
                 let ttl = match data {
                     _ if !signed => rr.ttl,
@@ -231,6 +234,7 @@ impl Dnssec {
                     })
                     .map_err(Error::Build)?;
             }
+            // RFC 4033 §3.1: Sign RRsets to verify DNS data origin and integrity.
             for (i, rr) in records.iter().enumerate() {
                 if !signs_section(section, rr.rtype) {
                     continue;
@@ -249,6 +253,7 @@ impl Dnssec {
                     .copied()
                     .filter(|r| same_rrset(r, rr))
                     .collect();
+                // RFC 4035 §3.1.1: Include each RRSIG in its covered RRset's section.
                 signed_sets += usize::from(self.sign_set(
                     &mut builder,
                     section,
@@ -259,6 +264,7 @@ impl Dnssec {
                 )?);
                 attempted_sets += 1;
             }
+            // RFC 9824 §3.1: A QNAME-matching denial NSEC can appear in Authority.
             if let Some(lie) = &lie
                 && section
                     == if special_nsec {
@@ -333,7 +339,9 @@ impl Dnssec {
             SignMode::All(ttl) => (ttl, false),
             SignMode::Last => (first.ttl, true),
         };
+        // RFC 4034 §3.1.7: The Signer's Name identifies the zone of the covered RRset.
         let signer = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
+        // RFC 6781 §3.2.3: SEP flags distinguish KSKs from ZSKs for signing operations.
         // RFC 4034 §2.1.1: the SEP bit (257) marks a KSK; the Zone Key bit alone (256) marks a ZSK.
         let has_ksk = self.keys.iter().any(|k| k.public.flags & 257 == 257);
         let has_zsk = self.keys.iter().any(|k| k.public.flags & 257 == 256);
@@ -369,7 +377,7 @@ impl Dnssec {
             // RFC 4034 §3.1.3: a leading wildcard label is not counted in Labels.
             let labels = first.name.labels().count()
                 - usize::from(first.name.labels().next() == Some(b"*".as_slice()));
-            // RFC 4034 §3.1.8: the signature covers the RRSIG prefix and canonical RRset.
+            // RFC 4034 §3.1.8.1: The signature covers the RRSIG prefix and canonical RRset.
             let mut sig = Rdata::Rrsig {
                 type_covered: first.rtype,
                 algorithm: key.public.algorithm,
@@ -378,11 +386,13 @@ impl Dnssec {
                 original_ttl: ttl,
                 expiration: now.wrapping_add(8 * 86400) as u32,
                 inception: now.saturating_sub(3 * 3600) as u32,
+                // RFC 4034 §3.1.6: The Key Tag identifies the validating DNSKEY.
                 key_tag: key_tag(public).ok_or(Error::InvalidQuery)?,
                 signer,
                 signature: &[],
             };
             let data = signed_data(&sig, &canonical).map_err(|_| Error::InvalidQuery)?;
+            // RFC 3007 §4.3: Sign RRSIGs using online zone private keys.
             let der = key
                 .private
                 .to_pkcs8_der()

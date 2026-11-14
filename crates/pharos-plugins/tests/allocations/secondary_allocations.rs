@@ -14,16 +14,20 @@ async fn secondary_queries_do_not_allocate() {
     let address = listener.local_addr().unwrap();
     let primary = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
+        // RFC 1035 §4.2.2: TCP DNS messages use a two-octet length prefix excluding the message.
         let length = socket.read_u16().await.unwrap();
         let mut query = vec![0; usize::from(length)];
         socket.read_exact(&mut query).await.unwrap();
         let query = Message::parse(&query).unwrap();
         let question = query.questions().next().unwrap();
         let mut response = Vec::with_capacity(512);
+        // RFC 5936 §2.2.1: A successful AXFR response copies the query ID and normally sets AA.
         let mut builder = MessageBuilder::new(&mut response, 512, query.id(), 0x8400).unwrap();
         builder
+            // RFC 5936 §2.2.2: The first AXFR response copies the query question.
             .question(question.name, question.qtype, question.qclass)
             .unwrap();
+        // RFC 5936 §2.2.3: The AXFR answer carries the transferred zone records.
         let mut soa = vec![0, 0];
         for value in [1u32, 3600, 600, 86400, 60] {
             soa.extend_from_slice(&value.to_be_bytes());
@@ -38,6 +42,7 @@ async fn secondary_queries_do_not_allocate() {
                 &soa,
             )
             .unwrap();
+        // RFC 1035 §3.4.1: An A record carries a 32-bit Internet address.
         let www: Name = "www.example.org.".parse().unwrap();
         builder
             .record(
