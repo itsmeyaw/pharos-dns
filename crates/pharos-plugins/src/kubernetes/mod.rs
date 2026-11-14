@@ -329,6 +329,7 @@ fn child<'a>(prefix: &[&[u8]], zone: NameRef<'_>, wire: &'a mut [u8; 255]) -> Op
     NameRef::parse(&wire[..n + 1], 0).ok()
 }
 
+// KEP-1645 §2.4.1: source-cluster IDs use one or two DNS labels.
 fn cluster_id_parts(id: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
     let Some(dot) = id.iter().position(|&byte| byte == b'.') else {
         return (!id.is_empty()).then_some((id, None));
@@ -339,6 +340,7 @@ fn cluster_id_parts(id: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
         .then_some((first, Some(second)))
 }
 
+// RFC 1035 §3.1 and KEP-1645 §2.4.1: compare source-cluster labels case-insensitively.
 fn cluster_id_matches(labels: &[&[u8]], id: &str) -> bool {
     let mut id_labels = id.split('.');
     labels.iter().all(|label| {

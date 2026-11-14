@@ -507,7 +507,7 @@ async fn run_group_on_stack_with_fixtures(
 }
 
 #[tokio::test]
-async fn multicluster_answers_service_and_cluster_qualified_endpoint() {
+async fn multicluster_ignore_empty_keeps_cluster_set_ip_records() {
     let zone = "clusterset.local.";
     run_group(
         "multicluster clusterset.local\n ignore empty_service",
