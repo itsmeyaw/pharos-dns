@@ -218,7 +218,7 @@ impl Dnssec {
             (Section::Additional, message.additionals()),
         ] {
             let records: Vec<_> = records.collect();
-            // RFC 4035 §3.1.3.1: Put denial proofs and their signatures in Authority, not Answer.
+            // RFC 4035 §3.1.3: Put denial proofs and their signatures in Authority, not Answer.
             if section == Section::Authority
                 && let Some(lie) = &lie
             {
@@ -504,7 +504,7 @@ impl Dnssec {
         let apex_dnskey = first.rtype == Type::DNSKEY && first.name == apex;
         // RFC 6840 §5.11: Track KSK/ZSK roles per algorithm without query-path allocation.
         let mut roles_by_algorithm = [0u8; 16];
-        // RFC 4034 §3.1.8.1; RFC 9904 §3: Supported signing algorithms fit this role table.
+        // RFC 9904 §3: Store role bits for supported DNSSEC signing algorithms.
         for key in self.keys.iter().filter(|key| key.public.owner == *zone) {
             if let Some(roles) = roles_by_algorithm.get_mut(usize::from(key.public.algorithm)) {
                 *roles |= match key.public.flags & 257 {

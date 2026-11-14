@@ -86,7 +86,7 @@ pub(crate) fn setup(
             return Err(cursor.error("DNSKEY owner must match a configured DNSSEC zone"));
         }
     }
-    // RFC 4035 §2.1: Prepare each zone private key that signs authoritative RRsets.
+    // RFC 4035 §2.1: Prepare private keys used to sign this zone's authoritative RRsets.
     let signers = keys
         .iter()
         .map(|key| {
