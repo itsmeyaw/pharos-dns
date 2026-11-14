@@ -177,7 +177,7 @@ async fn query_rules_reach_forward_upstream() {
     let task = tokio::spawn(async move {
         let mut wire = [0; 512];
         let (len, peer) = upstream.recv_from(&mut wire).await.unwrap();
-        assert_eq!(Message::parse(&wire[..len]).unwrap().flags(), 0x480);
+        assert_eq!(Message::parse(&wire[..len]).unwrap().flags(), 0x80);
         wire[2] |= 0x80;
         upstream.send_to(&wire[..len], peer).await.unwrap();
     });
