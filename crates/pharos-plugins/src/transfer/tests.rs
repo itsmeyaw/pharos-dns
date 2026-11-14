@@ -12,6 +12,38 @@ fn ixfr_serial_order_uses_rfc1982_half_space() {
     assert!(!serial_at_least(1 << 31, 0));
 }
 
+#[test]
+fn transfer_cidr_matches_ipv4_and_ipv6_prefixes() {
+    use super::in_network;
+
+    assert!(in_network(
+        "192.0.2.42".parse().unwrap(),
+        "192.0.2.0".parse().unwrap(),
+        24
+    ));
+    assert!(!in_network(
+        "192.0.3.42".parse().unwrap(),
+        "192.0.2.0".parse().unwrap(),
+        24
+    ));
+    assert!(in_network(
+        "2001:db8::42".parse().unwrap(),
+        "2001:db8::".parse().unwrap(),
+        32
+    ));
+    assert!(!in_network(
+        "2001:db9::42".parse().unwrap(),
+        "2001:db8::".parse().unwrap(),
+        32
+    ));
+    assert!(in_network(
+        "192.0.2.42".parse().unwrap(),
+        "203.0.113.0".parse().unwrap(),
+        0
+    ));
+    assert!(super::destination("192.0.2.0/33").is_none());
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Answer {
     None,

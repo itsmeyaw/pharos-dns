@@ -151,6 +151,49 @@ async fn acl_does_not_normalize_configured_ipv6_text() {
     );
 }
 
+#[tokio::test]
+async fn transfer_acl_accepts_cidr_ranges() {
+    let blocks = parse("Corefile", ". {\n transfer {\n to 192.0.2.0/24\n }\n}").unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = ".".parse().unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AXFR,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "192.0.2.42:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &name,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    for (client, allowed) in [("192.0.2.42:1234", true), ("192.0.3.42:1234", false)] {
+        cx.client = client.parse().unwrap();
+        let outcome = chain
+            .transfer
+            .as_ref()
+            .unwrap()
+            .serve_with(&mut cx, DropNext, Some(&Provider))
+            .await;
+        assert_eq!(matches!(outcome, Outcome::Stream(_)), allowed);
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/transfer/notify_test.go, TestNotifyMultipleFailures.
 #[tokio::test]
 async fn notify_reports_each_secondary_failure() {

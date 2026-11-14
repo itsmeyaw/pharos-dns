@@ -54,6 +54,7 @@ pub(crate) struct TransferZone {
 pub(crate) enum Destination {
     All,
     Address { host: String, port: String },
+    Network { address: IpAddr, prefix: u8 },
 }
 
 impl Transfer {
@@ -235,6 +236,9 @@ impl Transfer {
             .any(|destination| match destination {
                 Destination::All => true,
                 Destination::Address { host, .. } => host.as_bytes() == &client.bytes[..client.len],
+                Destination::Network { address, prefix } => {
+                    in_network(ip, *address, *prefix)
+                }
             });
         if !allowed {
             // RFC 1035 §4.1.1: REFUSED means policy prevents this transfer.
@@ -300,6 +304,13 @@ fn destination(value: &str) -> Option<Destination> {
     if value == "*" {
         return Some(Destination::All);
     }
+    // RFC 5936 §5: A configured network prefix authorizes clients in that range.
+    if let Some((address, prefix)) = value.rsplit_once('/') {
+        let address = address.parse::<IpAddr>().ok()?;
+        let prefix = prefix.parse::<u8>().ok()?;
+        let max = if address.is_ipv4() { 32 } else { 128 };
+        return (prefix <= max).then_some(Destination::Network { address, prefix });
+    }
     let (host, port) = if let Some(rest) = value.strip_prefix('[') {
         let (host, port) = rest.split_once("]:")?;
         (host, if port.is_empty() { "53" } else { port })
@@ -318,6 +329,25 @@ fn destination(value: &str) -> Option<Destination> {
 
 fn ip_without_zone(host: &str) -> &str {
     host.rsplit_once('%').map_or(host, |(address, _)| address)
+}
+
+// RFC 5936 §5: Match transfer clients against configured network prefixes.
+fn in_network(address: IpAddr, network: IpAddr, prefix: u8) -> bool {
+    match (address, network) {
+        (IpAddr::V4(address), IpAddr::V4(network)) if prefix <= 32 => {
+            let mask = u32::MAX
+                .checked_shl(32 - u32::from(prefix))
+                .unwrap_or_default();
+            u32::from(address) & mask == u32::from(network) & mask
+        }
+        (IpAddr::V6(address), IpAddr::V6(network)) if prefix <= 128 => {
+            let mask = u128::MAX
+                .checked_shl(128 - u32::from(prefix))
+                .unwrap_or_default();
+            u128::from(address) & mask == u128::from(network) & mask
+        }
+        _ => false,
+    }
 }
 
 impl Plugin for Transfer {
