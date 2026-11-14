@@ -149,6 +149,7 @@ fn endpoint_ready(index: usize, unready_percent: usize) -> bool {
     index % 100 >= unready_percent
 }
 
+// KEP-1672 §Design Details: model EndpointSlice readiness with a bounded fixture percentage.
 fn unready_percent() -> usize {
     let value = std::env::var("PHAROS_MEMORY_UNREADY_PERCENT")
         .unwrap_or_else(|_| "0".into())
@@ -231,6 +232,7 @@ async fn client(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let counts = controller.store().with_read(|index| index.counts());
     assert_eq!(counts, (SERVICES, SERVICES, SERVICES * 3, 0, 1));
+    let (service_count, slice_count, endpoint_count, pod_count, namespace_count) = counts;
     let after_heap = live_heap_bytes(GLOBAL.stats());
     let after_rss = rss_kib()?;
     println!(
@@ -243,13 +245,13 @@ async fn client(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "services: {}; slices: {}; endpoints: {}; pods: {}; namespaces: {}",
-        counts.0, counts.1, counts.2, counts.3, counts.4
+        service_count, slice_count, endpoint_count, pod_count, namespace_count
     );
     let unready_percent = unready_percent();
     println!(
         "unready endpoints: {}/{} ({unready_percent}%)",
-        counts.2 * unready_percent / 100,
-        counts.2
+        endpoint_count * unready_percent / 100,
+        endpoint_count
     );
     controller.stop().await;
     Ok(())
