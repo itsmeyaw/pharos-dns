@@ -117,6 +117,33 @@ fn response_existing_opt_keeps_its_options_and_high_flags() {
 }
 
 #[test]
+fn response_with_existing_opt_adds_query_ecs_when_upstream_omits_it() {
+    let query = Opt::new(
+        512,
+        0,
+        0,
+        0,
+        EdnsOptions::parse(&[0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2]).unwrap(),
+    );
+    let existing = Opt::new(
+        1232,
+        0,
+        0,
+        0,
+        EdnsOptions::parse(&[0, 3, 0, 1, b'x']).unwrap(),
+    );
+    let response = query.response(Some(existing), &[], Rcode::NOERROR);
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x8000).unwrap();
+    builder.reserve_response_opt(&response).unwrap();
+    let message = Message::parse(builder.finish_with_response_opt(&response).unwrap()).unwrap();
+    assert_eq!(
+        message.opt().unwrap().options().as_bytes(),
+        &[0, 3, 0, 1, b'x', 0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2]
+    );
+}
+
+#[test]
 fn response_opt_keeps_registered_options_and_fits_after_truncation() {
     let options = EdnsOptions::parse(&[
         0, 3, 0, 1, 42, 0, 10, 0, 1, 43, 0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2,

@@ -64,7 +64,7 @@ pub struct Opt<'a> {
 }
 
 impl<'a> Opt<'a> {
-    /// The fresh OPT CoreDNS uses for a BADVERS Response, including its zero UDP size.
+    /// CoreDNS's initial BADVERS OPT; `response` applies the advertised server payload size.
     #[must_use]
     pub fn badvers() -> Opt<'static> {
         Opt::new(0, 1, 0, 0, EdnsOptions::parse(&[]).expect("empty options"))
@@ -146,7 +146,7 @@ impl<'a> Opt<'a> {
 
     // RFC 6891 §6.1.3: responses use the highest EDNS version implemented by the responder.
     /// Applies CoreDNS SizeAndDo to an optional existing Response OPT.
-    /// Only registered option codes are copied when the Response had no OPT.
+    /// Only registered options and required ECS are copied when the Response had no OPT.
     /// The Response version is reset to zero, even for an existing OPT.
     #[must_use]
     pub fn response<'b>(
@@ -155,10 +155,7 @@ impl<'a> Opt<'a> {
         supported: &'b [u16],
         rcode: Rcode,
     ) -> ResponseOpt<'a, 'b> {
-        let echo_ecs = self
-            .options
-            .iter()
-            .any(|option| matches!(option, EdnsOption::ClientSubnet(_)));
+        let query_ecs = find_ecs_option(self.options.as_bytes());
         let mut source = existing.unwrap_or(self);
         source.size = RESPONSE_UDP_PAYLOAD_SIZE;
         // RFC 6891 §6.1.3: responses carry version 0, the highest EDNS version implemented here.
@@ -170,7 +167,7 @@ impl<'a> Opt<'a> {
             supported,
             copy_all: existing.is_some(),
             registered: false,
-            echo_ecs,
+            query_ecs,
         }
     }
 
@@ -194,27 +191,37 @@ pub struct ResponseOpt<'a, 'b> {
     supported: &'b [u16],
     copy_all: bool,
     registered: bool,
-    echo_ecs: bool,
+    query_ecs: Option<&'a [u8]>,
 }
 
 impl ResponseOpt<'_, '_> {
     // RFC 6891 §6.1.2: selected options retain received order, though their order has no meaning.
     fn selected(&self) -> impl Iterator<Item = &[u8]> {
         let mut rest = self.source.options.as_bytes();
+        let mut query_ecs = self.query_ecs;
+        let mut found_ecs = false;
         std::iter::from_fn(move || {
             while !rest.is_empty() {
                 let code = u16::from_be_bytes([rest[0], rest[1]]);
                 let len = usize::from(u16::from_be_bytes([rest[2], rest[3]])) + 4;
                 let (option, tail) = rest.split_at(len);
                 rest = tail;
-                if (self.copy_all && (code != 8 || self.echo_ecs))
+                if code == 8 {
+                    if self.query_ecs.is_none() {
+                        continue;
+                    }
+                    found_ecs = true;
+                    return Some(option);
+                }
+                if self.copy_all
                     || self.supported.contains(&code)
-                    // RFC 7871 §7.2.2: include ECS in the response to an ECS Query.
-                    || (self.echo_ecs && code == 8)
                     || (self.registered && edns_option_registered(code))
                 {
                     return Some(option);
                 }
+            }
+            if !found_ecs {
+                return query_ecs.take();
             }
             None
         })
@@ -237,6 +244,19 @@ impl ResponseOpt<'_, '_> {
         }
         Ok(())
     }
+}
+
+fn find_ecs_option(options: &[u8]) -> Option<&[u8]> {
+    let mut rest = options;
+    while !rest.is_empty() {
+        let size = usize::from(u16::from_be_bytes([rest[2], rest[3]])) + 4;
+        if u16::from_be_bytes([rest[0], rest[1]]) == 8 {
+            // RFC 7871 §7.2.2: preserve the Query's ECS option when the upstream omitted OPT.
+            return Some(&rest[..size]);
+        }
+        rest = &rest[size..];
+    }
+    None
 }
 
 impl fmt::Display for Opt<'_> {
