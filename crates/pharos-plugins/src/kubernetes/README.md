@@ -5,7 +5,7 @@
 ## kubernetes
 
 - The Kubernetes data crate ignores addresses in EndpointSlices with address types other than IPv4 or IPv6; CoreDNS retains them.
-- The accepted `ignore empty_service` option is a no-op for ClusterIP and ClusterSetIP records; service IPs remain visible without endpoints.
+- The accepted `ignore empty_service` option does not suppress ClusterIP or ClusterSetIP records without endpoints; empty headless Services naturally expose no endpoint records.
 - `service.alpha.kubernetes.io/tolerate-unready-endpoints=true` makes unready EndpointSlice addresses eligible for DNS answers and transfers.
 - With `namespace_labels` and `multicluster`, Pharos watches all ServiceImports and exposes those in matching Namespaces; CoreDNS matches the ServiceImports' own labels against `namespace_labels`, hiding imports in exposed Namespaces.
 - As in CoreDNS v1.15.0, Kubernetes NS discovery snapshots local addresses per Plugin instance.
