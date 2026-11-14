@@ -195,3 +195,21 @@ fn accepts_trailing_bytes_like_coredns() {
     assert_eq!(message.question_count(), 0);
     assert_eq!(message.answer_count(), 0);
 }
+
+#[test]
+fn rejects_multiple_tkey_records_in_one_message() {
+    let mut wire = [0; 12];
+    for count in [1_u16, 2] {
+        wire[6..8].copy_from_slice(&count.to_be_bytes());
+        let mut message = wire[..12].to_vec();
+        for _ in 0..count {
+            message.extend_from_slice(&[0, 0, 249, 0, 1, 0, 0, 0, 0, 0, 17]);
+            message.extend([0; 17]);
+        }
+        if count == 1 {
+            assert!(Message::parse(&message).is_ok());
+        } else {
+            assert!(Message::parse(&message).is_err());
+        }
+    }
+}

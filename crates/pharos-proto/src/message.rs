@@ -16,6 +16,8 @@ pub enum MessageError {
     Name(NameError),
     /// Invalid OPT placement, owner, multiplicity or option data (FORMERR).
     InvalidOpt,
+    /// Multiple TKEY records in one DNS Message.
+    InvalidTkey,
 }
 
 impl fmt::Display for MessageError {
@@ -24,6 +26,7 @@ impl fmt::Display for MessageError {
             Self::Truncated => f.write_str("truncated DNS Message"),
             Self::Name(err) => write!(f, "invalid name: {err}"),
             Self::InvalidOpt => f.write_str("invalid EDNS OPT record"),
+            Self::InvalidTkey => f.write_str("multiple TKEY records"),
         }
     }
 }
@@ -229,6 +232,7 @@ impl<'a> Message<'a> {
         let mut starts = [0; 4];
         let mut offset = HEADER_LEN;
         let mut has_opt = false;
+        let mut has_tkey = false;
         for section in 0..4 {
             starts[section] = offset;
             for _ in 0..counts[section] {
@@ -238,6 +242,13 @@ impl<'a> Message<'a> {
                     let (rr, next) = record(wire, offset)?;
                     // RFC 6891 §6.1.1: OPT appears at most once in the additional section.
                     // RFC 6891 §6.1.2: the OPT owner is the root and its RDATA holds options.
+                    // RFC 2930 §3: a DNS Message contains no more than one TKEY RR.
+                    if rr.rtype == Type::TKEY {
+                        if has_tkey {
+                            return Err(MessageError::InvalidTkey);
+                        }
+                        has_tkey = true;
+                    }
                     if rr.rtype == Type::OPT {
                         if section != 3
                             || has_opt
