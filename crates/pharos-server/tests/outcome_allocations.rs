@@ -58,7 +58,7 @@ fn edns_finalization_preserves_existing_options_without_allocating() {
             Action::Respond
         );
         let opt = Message::parse(&response).unwrap().opt().unwrap();
-        assert_eq!(opt.udp_payload_size(), 1232);
+        assert_eq!(opt.udp_payload_size(), 4096);
         assert!(opt.dnssec_ok());
         assert_eq!(opt.options().as_bytes(), &[0xfd, 0xe9, 0, 2, 0xc0, 1]);
     }

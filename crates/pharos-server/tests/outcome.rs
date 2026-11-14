@@ -87,7 +87,7 @@ fn edns_response_opt_is_copied_and_small_response_is_unchanged() {
     let message = Message::parse(&response).unwrap();
     assert!(response.len() <= 1232);
     assert!(message.tc());
-    assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
     assert!(message.opt().unwrap().dnssec_ok());
 
     let wire = self::query(false);
@@ -183,7 +183,7 @@ fn nonfinal_opt_keeps_its_options_and_discards_following_records() {
     assert!(!message.tc());
     assert_eq!(message.additional_count(), 1);
     let opt = message.opt().unwrap();
-    assert_eq!(opt.udp_payload_size(), 1232);
+    assert_eq!(opt.udp_payload_size(), 4096);
     assert_eq!(opt.options().as_bytes(), &[0, 3, 0, 1, b'x']);
 }
 
@@ -209,7 +209,7 @@ fn response_opt_is_removed_when_query_has_no_edns() {
 }
 
 #[test]
-fn response_opt_echoes_client_payload_limit() {
+fn response_opt_advertises_server_capacity_and_respects_client_limit() {
     let mut wire = query(true);
     wire[22..24].copy_from_slice(&512_u16.to_be_bytes());
     let query = Message::parse(&wire).unwrap();
@@ -223,15 +223,26 @@ fn response_opt_echoes_client_payload_limit() {
     );
     let message = Message::parse(&response).unwrap();
     assert!(response.len() <= 512);
-    assert_eq!(message.opt().unwrap().udp_payload_size(), 512);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
 }
 
 #[test]
-fn udp_response_limit_never_exceeds_server_capacity() {
-    let mut wire = query(true);
-    wire[22..24].copy_from_slice(&u16::MAX.to_be_bytes());
-    let query = Message::parse(&wire).unwrap();
-    assert_eq!(response_limit(query, Protocol::Udp), 4096);
+fn udp_response_limit_honors_client_and_server_caps() {
+    for (edns, requested, expected) in [
+        (false, 0, 512),
+        (true, 128, 512),
+        (true, 1232, 1232),
+        (true, u16::MAX, 4096),
+    ] {
+        let mut wire = query(edns);
+        if edns {
+            wire[22..24].copy_from_slice(&requested.to_be_bytes());
+        }
+        assert_eq!(
+            response_limit(Message::parse(&wire).unwrap(), Protocol::Udp),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -273,7 +284,7 @@ fn unanswered_tcp_response_can_append_edns_to_an_empty_buffer() {
     assert!(!logged);
     let message = Message::parse(&response).unwrap();
     assert_eq!(message.rcode(), Rcode::REFUSED);
-    assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
 }
 
 #[test]

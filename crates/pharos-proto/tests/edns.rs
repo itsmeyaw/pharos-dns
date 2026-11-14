@@ -56,7 +56,7 @@ fn response_opt_can_be_appended_to_an_existing_message() {
         .unwrap();
     wire[11] = 1;
     let parsed = Message::parse(&wire).unwrap();
-    assert_eq!(parsed.opt().unwrap().udp_payload_size(), 1232);
+    assert_eq!(parsed.opt().unwrap().udp_payload_size(), 4096);
     assert!(parsed.opt().unwrap().dnssec_ok());
 }
 
@@ -170,7 +170,7 @@ fn response_opt_keeps_registered_options_and_fits_after_truncation() {
     let message = Message::parse(builder.finish_with_response_opt(&response).unwrap()).unwrap();
     assert!(message.tc());
     let opt = message.opt().unwrap();
-    assert_eq!(opt.udp_payload_size(), 512);
+    assert_eq!(opt.udp_payload_size(), 4096);
     assert_eq!(opt.version(), 0);
     assert_eq!(opt.flags(), 0x8000);
     assert_eq!(

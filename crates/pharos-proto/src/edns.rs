@@ -173,8 +173,8 @@ impl<'a> Opt<'a> {
         // RFC 7871 §7.2.2: retain Query ECS for a Response when the upstream omits it.
         let query_ecs = find_ecs_option(self.options.as_bytes());
         let mut source = existing.unwrap_or(self);
-        // RFC 6891 §§6.2.3–6.2.5: cap the echoed requestor size at responder capacity.
-        source.size = self.response_udp_payload_size();
+        // RFC 6891 §6.2.3 and RFC 3226 §3: advertise the responder's own UDP payload capacity.
+        source.size = Self::RESPONSE_UDP_PAYLOAD_SIZE;
         // RFC 6891 §6.1.3: responses carry version 0, the highest EDNS version implemented here.
         // RFC 9824 §5.1: preserve CO; clear other reserved flags and copy DO from the Query.
         source.ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
@@ -213,7 +213,7 @@ pub struct ResponseOpt<'a, 'b> {
 }
 
 impl ResponseOpt<'_, '_> {
-    /// The normalized requestor size, capped at the responder's supported payload.
+    /// The responder's advertised UDP payload capacity.
     #[must_use]
     pub const fn udp_payload_size(&self) -> u16 {
         self.source.size

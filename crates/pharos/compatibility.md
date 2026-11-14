@@ -260,7 +260,7 @@
 - The DNS Listener ignores the reserved header Z bit on receipt, as RFC 6895 §2.1 recommends, and clears it in generated Responses.
 - Zero-question QUERY Messages route to the root Server Block when configured; CoreDNS's standard query path also permits QDCOUNT=0.
 - For DS at a configured zone cut, Pharos uses the parent Server Block; if no parent is configured, it routes to the child and returns authoritative NODATA, as RFC 4035 §3.1.4.1 requires.
-- Response OPT advertises the requestor's normalized payload size, capped at 4096; the `bufsize` Plugin's reduced size is echoed for UDP and TCP. This differs from always advertising Pharos's 4096-octet capacity.
+- Response OPT advertises Pharos's 4096-octet responder capacity, as RFC 6891 §6.2.3 and RFC 3226 §3 recommend. The UDP send limit remains the normalized request size capped at 4096 (512 when OPT is absent). CoreDNS `bufsize` echoes its reduced size in the response OPT; Pharos keeps server capacity in the OPT instead.
 - AD is preserved on ordinary upstream and local Responses. When a valid client TSIG is re-signed after forwarding, the Listener clears AD as RFC 8945 §5.5 requires; the `forward` Plugin has no upstream TSIG mode.
 - RRSIG inception and expiration use RFC 4034 §3.1.5 serial arithmetic from RFC 1982 §3.2; this corrects implementations that compare wrapped values as ordinary integers.
 - DNS RCODE 16 metrics use BADVERS. TSIG Error 16 is BADSIG and is not a DNS RCODE label (RFC 6895 §2.3; RFC 8945 §3).
