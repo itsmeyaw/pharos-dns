@@ -185,6 +185,10 @@ impl Zone {
             {
                 continue;
             }
+            // RFC 4034 §3.1: RRSIG Type Covered occupies the first two octets.
+            if record.rtype == Type::RRSIG && record.rdata.len() < 2 {
+                return Err("invalid RRSIG RDATA".into());
+            }
             let offset = match record.rtype {
                 Type::NS | Type::CNAME | Type::SOA | Type::DNAME => Some(0),
                 Type::MX | Type::SVCB | Type::HTTPS => Some(2),
@@ -268,7 +272,7 @@ impl Zone {
                     .rdata
                     .get(..2)
                     .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
-                    .unwrap_or(0)
+                    .unwrap_or(record.rtype.0)
             } else {
                 0
             }
@@ -461,6 +465,10 @@ impl Zone {
     #[must_use]
     pub fn apex(&self) -> &Name {
         &self.apex
+    }
+
+    pub(crate) fn class(&self) -> Class {
+        self.class
     }
 
     /// Return the Zone's immutable records.
@@ -1362,6 +1370,7 @@ impl Zone {
                     Type::NS if source.eq_ignore_ascii_case(zone.apex.as_wire()) => Some(0),
                     _ => None,
                 };
+                // RFC 1035 §§3.3.9, 3.3.11; RFC 2782 §3; RFC 1183 §§1, 3.3; RFC 2230 §3.1; RFC 9460 §4.1: Select target data types.
                 let additional_types: &[Type] = match question.qtype {
                     Type::MX | Type::AFSDB => &[Type::A, Type::AAAA],
                     Type::RT => &[Type::A, Type::AAAA, Type::X25, Type::ISDN],

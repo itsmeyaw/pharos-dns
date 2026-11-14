@@ -366,7 +366,7 @@ async fn zone_preserves_case_and_normalizes_duplicate_rrsets() {
 #[tokio::test]
 async fn served_signatures_use_their_covered_rrset_ttl() {
     let apex: Name = "example.org.".parse().unwrap();
-    let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\n@ 60 IN A 192.0.2.1\n@ 3600 IN RRSIG A 8 2 3600 20300101000000 20200101000000 12345 example.org. AQID\n@ 30 IN RRSIG A 8 2 3600 20300101000000 20200101000000 54321 example.org. BAUG\n";
+    let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\n@ 60 IN A 192.0.2.1\n@ 300 IN A 192.0.2.2\n@ 3600 IN RRSIG A 8 2 3600 20300101000000 20200101000000 12345 example.org. AQID\n@ 30 IN RRSIG A 8 2 3600 20300101000000 20200101000000 54321 example.org. BAUG\n";
     let records = ZoneParser::new(text.as_bytes(), apex.clone(), "rrsig-ttl.zone")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -379,8 +379,12 @@ async fn served_signatures_use_their_covered_rrset_ttl() {
         .answers()
         .collect::<Vec<_>>();
     assert_eq!(
-        answers.iter().find(|rr| rr.rtype == Type::A).unwrap().ttl,
-        60
+        answers
+            .iter()
+            .filter(|rr| rr.rtype == Type::A)
+            .map(|rr| rr.ttl)
+            .collect::<Vec<_>>(),
+        [60, 60]
     );
     assert_eq!(
         answers
@@ -390,6 +394,26 @@ async fn served_signatures_use_their_covered_rrset_ttl() {
             .collect::<Vec<_>>(),
         [60, 60]
     );
+}
+
+#[test]
+fn zone_rejects_rrsig_without_a_covered_type() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let mut records = ZoneParser::new(
+        b"@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\n".as_slice(),
+        apex.clone(),
+        "short-rrsig.zone",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    records.push(pharos_proto::zone::ZoneRecord {
+        owner: apex.clone(),
+        class: Class::IN,
+        rtype: Type::RRSIG,
+        ttl: 60,
+        rdata: vec![0],
+    });
+    assert!(Zone::from_records(apex, records).is_err());
 }
 
 #[test]
@@ -1066,7 +1090,6 @@ fn zone_file_rejects_multiple_soa_records() {
     let _cleanup = RemoveFiles(vec![path.clone()]);
     std::fs::write(&path, text).unwrap();
     assert!(Zone::load(apex, &path).is_err());
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -1094,7 +1117,6 @@ fn zero_serial_is_valid_at_file_setup() {
     let corefile = format!("example.org:53 {{\n file {}\n}}", path.display());
     let blocks = pharos_corefile::parse("Corefile", &corefile).unwrap();
     assert!(pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).is_ok());
-    std::fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]
@@ -1145,7 +1167,6 @@ fn serial_reload_retains_old_zone_on_unchanged_or_invalid_data() {
     std::fs::write(&path, original.replace(" 1 7200", " 2 7200")).unwrap();
     assert!(loaded.reload());
     assert_eq!(loaded.current.load().as_ref().unwrap().serial(), Some(2));
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -1168,7 +1189,6 @@ fn mtime_reload_accepts_unchanged_serial() {
     };
     assert!(loaded.reload());
     assert!(!loaded.reload());
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -1210,7 +1230,6 @@ fn reload_uses_path_mtime_sampled_before_open() {
     assert_eq!(*loaded.modified.lock().unwrap(), Some(observed_time));
     assert!(loaded.reload());
     assert_eq!(*loaded.modified.lock().unwrap(), Some(new_time));
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -1251,7 +1270,6 @@ fn mtime_reload_keeps_previous_zone_and_timestamp_on_errors() {
     );
     assert_eq!(*loaded.modified.lock().unwrap(), Some(old_time));
     assert_eq!(loaded.current.load().as_ref().unwrap().serial(), Some(1));
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -1285,7 +1303,6 @@ fn reload_gate_prevents_overlapping_blocking_reload_generations() {
     drop(gate);
     assert!(worker.join().unwrap());
     assert_eq!(loaded.current.load().as_ref().unwrap().serial(), Some(3));
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -1322,7 +1339,6 @@ fn parse_opened_file_keeps_its_version_after_path_replacement() {
             .serial(),
         Some(2)
     );
-    std::fs::remove_file(path).unwrap();
 }
 
 // Derived from CoreDNS TestFileParseReloadByMtimeUsesOpenedFileMtime.
@@ -1368,7 +1384,6 @@ fn setup_uses_opened_file_snapshot_before_path_replacement() {
     assert!(zone.reload());
     assert_eq!(zone.current.load().as_ref().unwrap().serial(), Some(2));
     assert_eq!(*zone.modified.lock().unwrap(), Some(new_time));
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -1405,7 +1420,6 @@ fn setup_parses_opened_zone_before_options() {
     let error =
         pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap_err();
     assert!(error.message.contains("invalid record header"), "{error}");
-    std::fs::remove_file(path).unwrap();
 }
 
 // Derived from CoreDNS TestFileParseReloadByMtimeRecoversLaterZoneAfterMissingFile.
