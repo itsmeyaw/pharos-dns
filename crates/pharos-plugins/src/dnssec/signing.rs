@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use pharos_dnssec::{
     canonical::{CanonicalRecord, signed_data},
@@ -38,30 +41,109 @@ impl CacheEntry {
     }
 }
 
+// Budget for retained Responses; 65,535-octet Responses fit, larger entries are never cached.
+const CACHE_BYTES: usize = 32 << 20;
+// Approximate per-entry cost of the key allocation, map slot and `CacheEntry` fields.
+const ENTRY_OVERHEAD: usize = 128;
+
+/// Whole-Response signature cache bounded by entry count and bytes; totals are kept
+/// incrementally so metric updates never scan the map.
+#[derive(Debug, Default)]
+pub(super) struct SigCache {
+    map: HashMap<Vec<u8>, CacheEntry>,
+    sets: usize,
+    bytes: usize,
+}
+
+impl SigCache {
+    fn cost(key: &[u8], entry: &CacheEntry) -> usize {
+        key.len() + entry.wire.len() + ENTRY_OVERHEAD
+    }
+
+    fn remove(&mut self, key: &[u8]) {
+        if let Some(old) = self.map.remove(key) {
+            self.sets -= old.sets;
+            self.bytes -= Self::cost(key, &old);
+        }
+    }
+
+    /// Insert `entry`, evicting arbitrary entries until count and bytes fit; returns false if it can never fit.
+    fn insert(&mut self, key: &[u8], entry: CacheEntry, capacity: usize) -> bool {
+        let cost = Self::cost(key, &entry);
+        if cost > CACHE_BYTES || capacity == 0 {
+            return false;
+        }
+        self.remove(key);
+        while self.map.len() >= capacity || self.bytes + cost > CACHE_BYTES {
+            let Some(victim) = self.map.keys().next().cloned() else {
+                break;
+            };
+            self.remove(&victim);
+        }
+        self.sets += entry.sets;
+        self.bytes += cost;
+        self.map.insert(key.to_vec(), entry);
+        true
+    }
+}
+
+/// One RRset of a Response: its lowest TTL and the Sections holding its records.
+struct RrSet<'a> {
+    name: NameRef<'a>,
+    class: Class,
+    rtype: Type,
+    ttl: u32,
+    sections: u8,
+}
+
+const SECTIONS: [(u8, Section); 3] = [
+    (1, Section::Answer),
+    (2, Section::Authority),
+    (4, Section::Additional),
+];
+
+// One pass over the Message replaces a full rescan per record.
+// RFC 2181 §5.2: records in one RRset use the lowest received TTL.
+// RFC 4034 §3: a covering RRSIG joins the RRset it covers, sharing its TTL without extending its lifetime.
+// shortcut: lookup is linear in the RRset count; hash by owner if Responses carry many RRsets.
+fn rrsets<'a>(message: &Message<'a>) -> Result<Vec<RrSet<'a>>, Error> {
+    let mut sets: Vec<RrSet<'a>> = Vec::new();
+    for (bit, records) in [
+        (SECTIONS[0].0, message.answers()),
+        (SECTIONS[1].0, message.authorities()),
+        (SECTIONS[2].0, message.additionals()),
+    ] {
+        for rr in records {
+            let (rtype, sections) = match rr.data().map_err(|_| Error::InvalidQuery)? {
+                Rdata::Rrsig { type_covered, .. } => (type_covered, 0),
+                _ => (rr.rtype, bit),
+            };
+            match find_set(&sets, rr.name, rr.class, rtype) {
+                Some(index) => {
+                    sets[index].ttl = sets[index].ttl.min(rr.ttl);
+                    sets[index].sections |= sections;
+                }
+                None => sets.push(RrSet {
+                    name: rr.name,
+                    class: rr.class,
+                    rtype,
+                    ttl: rr.ttl,
+                    sections,
+                }),
+            }
+        }
+    }
+    Ok(sets)
+}
+
+fn find_set(sets: &[RrSet<'_>], name: NameRef<'_>, class: Class, rtype: Type) -> Option<usize> {
+    sets.iter()
+        .position(|set| set.name == name && set.class == class && set.rtype == rtype)
+}
+
 fn same_rrset(left: &Record<'_>, right: &Record<'_>) -> bool {
     // RFC 2181 §5: an RRset shares its owner, class and type.
     left.name == right.name && left.rtype == right.rtype && left.class == right.class
-}
-
-fn rrset_ttl(message: &Message<'_>, rr: &Record<'_>, covered: Option<Type>) -> u32 {
-    // RFC 2181 §5.2: records in one RRset use the lowest received TTL.
-    // RFC 4034 §3: a covering RRSIG shares that TTL without extending its lifetime.
-    // shortcut: scans the Message for each RR on a cache miss; index RRsets if miss cost becomes significant.
-    let target = covered.unwrap_or(rr.rtype);
-    message
-        .answers()
-        .chain(message.authorities())
-        .chain(message.additionals())
-        .filter(|other| {
-            other.name == rr.name
-                && other.class == rr.class
-                && ((other.rtype == target && target != Type::RRSIG)
-                    || (other.rtype == Type::RRSIG
-                        && matches!(other.data(), Ok(Rdata::Rrsig { type_covered, .. }) if type_covered == target)))
-        })
-        .map(|other| other.ttl)
-        .min()
-        .unwrap_or(rr.ttl)
 }
 
 impl Dnssec {
@@ -79,7 +161,7 @@ impl Dnssec {
         {
             let cache = self.cache.lock().map_err(|_| Error::PluginPanic)?;
             // RFC 4034 §3.1.4: a signature's Original TTL belongs to its covered RRset.
-            if let Some(entry) = cache.get(cx.response.get(2..).ok_or(Error::InvalidQuery)?)
+            if let Some(entry) = cache.map.get(cx.response.get(2..).ok_or(Error::InvalidQuery)?)
                 && entry.valid(now, cx.max_response_size)
             {
                 if let Some(metrics) = metrics {
@@ -177,6 +259,8 @@ impl Dnssec {
                 )
                 .map_err(Error::Build)?;
         }
+        let sets = rrsets(&message)?;
+        let set_of = |name, class, rtype| find_set(&sets, name, class, rtype).map(|index| &sets[index]);
         let mut signed_sets = 0;
         let mut attempted_sets = 0;
         // RFC 4035 §3.1.4: Referral signatures cover DS, not delegation NS or glue.
@@ -202,31 +286,20 @@ impl Dnssec {
                     _ => rr.rtype,
                 };
                 // RFC 2181 §5.2: use one TTL for each RRset selected for signing.
+                let set = set_of(rr.name, rr.class, covered);
                 let signed = !self.keys.is_empty()
                     && !matches!(covered, Type::RRSIG | Type::OPT | Type::TSIG)
                     && self.zone_for(rr.name).is_some()
-                    && [
-                        (Section::Answer, message.answers()),
-                        (Section::Authority, message.authorities()),
-                        (Section::Additional, message.additionals()),
-                    ]
-                    .into_iter()
-                    .any(|(section, mut records)| {
-                        signs_section(section, covered)
-                            && records.any(|other| {
-                                other.name == rr.name
-                                    && other.class == rr.class
-                                    && other.rtype == covered
-                            })
+                    && set.is_some_and(|set| {
+                        SECTIONS
+                            .iter()
+                            .any(|&(bit, section)| set.sections & bit != 0 && signs_section(section, covered))
                     });
                 // RFC 4035 §2.2: RRSIG TTLs with a common owner may differ across RRsets.
                 // RFC 4034 §3: RRSIG TTLs may differ when they cover different RRsets.
-                let ttl = match data {
-                    _ if !signed => rr.ttl,
-                    Rdata::Rrsig { type_covered, .. } => {
-                        rrset_ttl(&message, rr, Some(type_covered))
-                    }
-                    _ => rrset_ttl(&message, rr, None),
+                let ttl = match set {
+                    Some(set) if signed => set.ttl,
+                    _ => rr.ttl,
                 };
                 builder
                     .record_with(section, rr.name, rr.rtype, rr.class, ttl, |writer| {
@@ -235,32 +308,33 @@ impl Dnssec {
                     .map_err(Error::Build)?;
             }
             // RFC 4033 §3.1: Sign RRsets to verify DNS data origin and integrity.
-            for (i, rr) in records.iter().enumerate() {
-                if !signs_section(section, rr.rtype) {
-                    continue;
+            let mut groups: Vec<Vec<Record<'_>>> = Vec::new();
+            for rr in &records {
+                match groups.iter_mut().find(|group| same_rrset(&group[0], rr)) {
+                    Some(group) => group.push(*rr),
+                    None => groups.push(vec![*rr]),
                 }
+            }
+            for group in &groups {
+                let rr = group[0];
                 // RFC 4035 §2.2: an RRSIG RR is never signed; OPT and TSIG are not zone data.
-                if matches!(rr.rtype, Type::RRSIG | Type::OPT | Type::TSIG)
-                    || records[..i].iter().any(|r| same_rrset(r, rr))
+                if !signs_section(section, rr.rtype)
+                    || matches!(rr.rtype, Type::RRSIG | Type::OPT | Type::TSIG)
                 {
                     continue;
                 }
                 let Some(zone) = self.zone_for(rr.name) else {
                     continue;
                 };
-                let group: Vec<_> = records
-                    .iter()
-                    .copied()
-                    .filter(|r| same_rrset(r, rr))
-                    .collect();
+                let ttl = set_of(rr.name, rr.class, rr.rtype).map_or(rr.ttl, |set| set.ttl);
                 // RFC 4035 §3.1.1: Include each RRSIG in its covered RRset's section.
                 signed_sets += usize::from(self.sign_set(
                     &mut builder,
                     section,
-                    &group,
+                    group,
                     zone,
                     now,
-                    SignMode::All(rrset_ttl(&message, rr, None)),
+                    SignMode::All(ttl),
                 )?);
                 attempted_sets += 1;
             }
@@ -302,14 +376,8 @@ impl Dnssec {
         // CoreDNS plugin/dnssec: cache only RRsets that produced signatures.
         if signed_sets > 0 {
             let mut cache = self.cache.lock().map_err(|_| Error::PluginPanic)?;
-            if cache.len() >= self.capacity
-                && !cache.contains_key(&original[2..])
-                && let Some(key) = cache.keys().next().cloned()
-            {
-                cache.remove(&key);
-            }
             cache.insert(
-                original[2..].to_vec(),
+                &original[2..],
                 CacheEntry {
                     wire: cx.response.clone(),
                     max_size: cx.max_response_size,
@@ -317,9 +385,10 @@ impl Dnssec {
                     inception: now.saturating_sub(3 * 3600) as u32,
                     sets: signed_sets,
                 },
+                self.capacity,
             );
             if let Some(metrics) = metrics {
-                metrics.entries(cache.values().map(|entry| entry.sets).sum());
+                metrics.entries(cache.sets);
             }
         }
         Ok(())
@@ -524,7 +593,7 @@ mod tests {
             assert!(
                 matches!(sig.data().unwrap(), Rdata::Rrsig { original_ttl, .. } if original_ttl == ttl)
             );
-            assert_eq!(dnssec.cache.lock().unwrap().len(), expected_entries);
+            assert_eq!(dnssec.cache.lock().unwrap().map.len(), expected_entries);
             if first.is_empty() {
                 first = cx.response.clone();
             } else if ttl == 120 {
@@ -587,9 +656,46 @@ mod tests {
             dnssec.sign_response(&mut cx).unwrap();
         }
         let cache = dnssec.cache.lock().unwrap();
-        assert_eq!(cache.len(), 1);
-        let cached = Message::parse(&cache.values().next().unwrap().wire).unwrap();
+        assert_eq!(cache.map.len(), 1);
+        let cached = Message::parse(&cache.map.values().next().unwrap().wire).unwrap();
         assert!(cached.answers().any(|rr| rr.rtype == Type::RRSIG));
+    }
+
+    fn entry(len: usize, sets: usize) -> CacheEntry {
+        CacheEntry {
+            wire: vec![0; len],
+            max_size: 512,
+            expires: 0,
+            inception: 0,
+            sets,
+        }
+    }
+
+    #[test]
+    fn cache_evicts_to_stay_within_byte_budget_for_max_size_responses() {
+        use super::{CACHE_BYTES, SigCache};
+        let mut cache = SigCache::default();
+        for i in 0..(2 * CACHE_BYTES / 65_535) as u32 {
+            assert!(cache.insert(&i.to_be_bytes(), entry(65_535, 2), usize::MAX));
+            assert!(cache.bytes <= CACHE_BYTES);
+        }
+        assert_eq!(cache.sets, 2 * cache.map.len());
+        assert!(cache.map.len() >= CACHE_BYTES / (65_535 + 256) - 1);
+    }
+
+    #[test]
+    fn cache_tracks_sets_on_replace_and_rejects_entries_over_budget() {
+        use super::{CACHE_BYTES, SigCache};
+        let mut cache = SigCache::default();
+        assert!(cache.insert(b"a", entry(10, 3), 4));
+        assert!(cache.insert(b"a", entry(20, 1), 4));
+        assert_eq!((cache.map.len(), cache.sets), (1, 1));
+        assert!(!cache.insert(b"b", entry(CACHE_BYTES, 1), 4));
+        assert_eq!((cache.map.len(), cache.sets), (1, 1));
+        for key in [b"c", b"d", b"e", b"f"] {
+            cache.insert(key, entry(1, 1), 4);
+        }
+        assert_eq!((cache.map.len(), cache.sets), (4, 4));
     }
 
     #[test]
