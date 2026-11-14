@@ -6,7 +6,11 @@ disable-model-invocation: true
 
 # Conformance audit
 
-You are the **orchestrator** (level 0). You write no verdicts yourself: you build the inventory, dispatch a swarm of subagents in levels, check their coverage, and merge their output into `docs/conformance.md`. The audit is **relentless**: every section of every in-scope document, and every protocol-relevant line of code, ends up in a row or a coverage-ledger line of the fragments under `target/conformance/`. `docs/conformance.md` publishes only the rows that are not conformant. Use `caveman` skill. No compile or live testing, code-based only. Long-running task.
+You are the **orchestrator** (level 0). You write no verdicts yourself: you build the inventory, dispatch a swarm of subagents in levels, check their coverage, and merge their output into `docs/conformance.md`. The audit is **relentless**: every section of every in-scope document, and every protocol-relevant line of code, ends up in a row or a coverage-ledger line of the fragments under `target/conformance/`. `docs/conformance.md` publishes only the rows that are not conformant.
+
+- Every agent (you and all subagents) loads the `caveman` skill.
+- Verdicts come from reading code only: no builds, tests or live servers. The single exception is the `cargo check` in step 7, after citations are added.
+- This is a long-running task; don't stop between steps.
 
 Two sweeps run in parallel and meet in the merge:
 
@@ -44,6 +48,19 @@ Subagents return full rows only for verdicts that are not conformant (**Deviatio
 | §4.1.1 RCODE | `crates/pharos-proto/src/header.rs:88-104` | **Partial**: … | Yes |
 ```
 
+- **Section**: section number and title. One row per normative requirement (MUST/SHOULD/MAY or equivalent prose), so a section can span several rows.
+- **Code location**: `path:line` or `path:start-end`, repo-relative; several locations comma-separated; `—` when nothing implements it.
+- **Explanation**: starts with one verdict, then one or two sentences of evidence.
+  - **Conformant**: code does what the text requires.
+  - **Deviation**: differs on purpose; name the ADR (`docs/adr/`) or plugin README that justifies it (ADR 0002 allows CoreDNS-compatible behaviour).
+  - **Violation**: differs with no recorded justification.
+  - **Partial**: some of the requirement is met; say what is missing.
+  - **Missing**: requirement applies to Pharos but no code implements it.
+  - **N/A**: does not apply to Pharos (say why), or informative text.
+- **Documented**: `Yes` when a citation comment at the code location names this document and section (AGENTS.md rule, e.g. `RFC 1034 §4.3.2: …`) or a plugin README / ADR records it; otherwise `No`. A citation naming the wrong section is `No`, with the miscitation stated in Explanation.
+
+### Coverage ledger
+
 **Conformant** and **N/A** requirements get no row. Instead, every subagent appends a coverage ledger, one line per section or file it checked, so coverage stays provable without the text:
 
 ```markdown
@@ -58,17 +75,6 @@ Coverage
 - File lines: the sections the file was mapped to, or `Unmapped code` (any unmapped behaviour also gets a full row).
 - Cite lines: one per **Conformant** requirement whose code carries no citation, or a citation naming the wrong section: the line the logic starts on, and the exact comment to put above it. The comment follows the house style already in the code: `// <document> §<section>: <what this code does, one sentence>.`, where `<document>` is `RFC NNNN`, `KEP-NNNN`, or `Kubernetes DNS spec <version>`. A miscited line replaces the wrong comment instead of adding one.
 
-- **Section**: section number and title. One row per normative requirement (MUST/SHOULD/MAY or equivalent prose), so a section can span several rows.
-- **Code location**: `path:line` or `path:start-end`, repo-relative; several locations comma-separated; `—` when nothing implements it.
-- **Explanation**: starts with one verdict, then one or two sentences of evidence.
-  - **Conformant**: code does what the text requires.
-  - **Deviation**: differs on purpose; name the ADR (`docs/adr/`) or plugin README that justifies it (ADR 0002 allows CoreDNS-compatible behaviour).
-  - **Violation**: differs with no recorded justification.
-  - **Partial**: some of the requirement is met; say what is missing.
-  - **Missing**: requirement applies to Pharos but no code implements it.
-  - **N/A**: does not apply to Pharos (say why), or informative text.
-- **Documented**: `Yes` when a citation comment at the code location names this document and section (AGENTS.md rule, e.g. `RFC 1034 §4.3.2: …`) or a plugin README / ADR records it; otherwise `No`. A citation naming the wrong section is `No`, with the miscitation stated in Explanation.
-
 ## Levels
 
 ### Level 1: leads
@@ -77,6 +83,8 @@ One **document lead** per in-scope document, one **code lead** per crate (plus o
 
 - Document lead: reads the document, its errata, and its updating RFCs from the spec library; lists every section from the table of contents down to the deepest numbered subsection; groups them into chunks of about 5 sections; dispatches one level-2 auditor per chunk.
 - Code lead: lists every source file in its crate; groups them into chunks of about 3 files (one large file alone); dispatches one level-2 sweeper per chunk.
+
+A lead without the subagent tool returns its chunk plan (chunk list, each with its sections or files) as its whole result and audits nothing itself; you then dispatch level 2 for each chunk directly, writing to `target/conformance/<doc-or-crate>/<chunk>.md`, and merge the chunks into the lead's fragment.
 
 ### Level 2: workers
 
@@ -90,8 +98,6 @@ After merge, one **verifier** per document fragment re-reads every row in the fr
 ### Level 4: citers
 
 After the report is written, one **citer** per crate (plus one for `xtask/` + `tests/`) applies that crate's Cite lines, so no two citers touch the same file. It works file by file from the bottom line up, so earlier line numbers stay valid, and matches the indentation of the line below. It edits comments only; it reports any Cite line whose target line no longer holds the described logic, without applying it.
-
-A lead without the subagent tool returns its chunk plan (chunk list, each with its sections or files) as its whole result and audits nothing itself; you then dispatch level 2 for each chunk directly, writing to `target/conformance/<doc-or-crate>/<chunk>.md`, and merge the chunks into the lead's fragment.
 
 ## Steps
 
