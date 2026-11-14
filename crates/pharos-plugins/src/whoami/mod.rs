@@ -36,6 +36,7 @@ fn response(context: &mut Context<'_, '_>) -> Result<(), Error> {
         || NameRef::parse(&[0], 0).expect("root name"),
         |question| question.name,
     );
+    // RFC 1034 §4.3.1 and RFC 3596 §2.1: these diagnostic address RRs use class IN.
     let class = Class::IN;
     let max_size = context.max_response_size.max(512);
     if context.response.capacity() < max_size {

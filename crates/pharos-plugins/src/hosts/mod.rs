@@ -314,6 +314,7 @@ impl pharos_server::Plugin for Hosts {
             && v6.is_empty()
             && inline4.is_empty()
             && inline6.is_empty();
+        // RFC 1034 §4.3.2: continue to the next handler when local fallthrough applies.
         if missing && fallthrough {
             return next.run(cx).await;
         }

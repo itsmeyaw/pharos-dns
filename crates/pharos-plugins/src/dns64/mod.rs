@@ -92,7 +92,7 @@ fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Erro
     let len: u8 = len
         .parse()
         .map_err(|_| cursor.error("invalid dns64 prefix"))?;
-    // RFC 6052 §2.2: only these six prefix lengths are defined.
+    // RFC 6052 §2.2: these six defined lengths are the only valid synthesis prefixes.
     if !matches!(len, 32 | 40 | 48 | 56 | 64 | 96) {
         return Err(cursor.error("invalid dns64 prefix length"));
     }

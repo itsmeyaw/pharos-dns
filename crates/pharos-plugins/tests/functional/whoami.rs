@@ -154,7 +154,12 @@ fn whoami_passes_non_in_questions_to_next_plugin() {
         max_response_size: 512,
     };
     assert_eq!(
-        run(configured[0].config.whoami.as_ref().unwrap().serve(&mut context, NextDrop)),
+        run(configured[0]
+            .config
+            .whoami
+            .as_ref()
+            .unwrap()
+            .serve(&mut context, NextDrop)),
         Outcome::Drop
     );
     assert!(response.is_empty());

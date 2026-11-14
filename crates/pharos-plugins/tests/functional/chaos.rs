@@ -150,7 +150,7 @@ async fn coredns_trims_and_deduplicates_setup_values() {
 
 #[cfg(feature = "plugin-whoami")]
 #[tokio::test]
-async fn chaos_enables_non_in_for_all_blocks_on_listener() {
+async fn chaos_enables_non_in_only_for_the_chaos_block() {
     use pharos_plugins::servers;
     use pharos_server::{Action, Handler};
     let source = "version.bind:53 {\n chaos v1 author\n}\nother.example:53 {\n whoami\n}";
@@ -184,10 +184,7 @@ async fn chaos_enables_non_in_for_all_blocks_on_listener() {
                 .await,
             Action::Respond
         );
-        assert_eq!(
-            Message::parse(&response).unwrap().rcode(),
-            expected_rcode
-        );
+        assert_eq!(Message::parse(&response).unwrap().rcode(), expected_rcode);
     }
 }
 

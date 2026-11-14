@@ -64,7 +64,11 @@ async fn unmapped_name_without_fallthrough_returns_authoritative_nxdomain() {
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
     builder
-        .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN)
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
         .unwrap();
     let _ = builder.finish();
     let root: Name = ".".parse().unwrap();
@@ -81,7 +85,10 @@ async fn unmapped_name_without_fallthrough_returns_authoritative_nxdomain() {
         response: &mut response,
         max_response_size: 512,
     };
-    assert_eq!(configured[0].config.serve(&mut context).await, Outcome::Response);
+    assert_eq!(
+        configured[0].config.serve(&mut context).await,
+        Outcome::Response
+    );
     let response = Message::parse(&response).unwrap();
     assert!(response.aa());
     assert_eq!(response.rcode(), pharos_proto::Rcode::NXDOMAIN);

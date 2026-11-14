@@ -25,12 +25,7 @@ async fn query(chain: &Chain, name: &str, qtype: Type) -> (Outcome, Vec<u8>) {
     query_class(chain, name, qtype, Class::IN).await
 }
 
-async fn query_class(
-    chain: &Chain,
-    name: &str,
-    qtype: Type,
-    qclass: Class,
-) -> (Outcome, Vec<u8>) {
+async fn query_class(chain: &Chain, name: &str, qtype: Type, qclass: Class) -> (Outcome, Vec<u8>) {
     let name: Name = name.parse().unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 123, 0x0110).unwrap();
@@ -224,7 +219,11 @@ async fn coredns_local_cases() {
                 );
             }
             if qtype == Type::SOA {
-                assert!(rr.rdata.windows(16).any(|bytes| bytes == b"\x06nobody\x07invalid\0"));
+                assert!(
+                    rr.rdata
+                        .windows(16)
+                        .any(|bytes| bytes == b"\x06nobody\x07invalid\0")
+                );
             }
         }
     }
@@ -234,7 +233,9 @@ async fn coredns_local_cases() {
 async fn local_passes_non_in_questions_to_next_plugin() {
     let chain = configured("local").unwrap();
     assert_eq!(
-        query_class(&chain, "localhost.", Type::A, Class::CH).await.0,
+        query_class(&chain, "localhost.", Type::A, Class::CH)
+            .await
+            .0,
         Outcome::Drop
     );
 }
