@@ -257,7 +257,7 @@ fn malformed_update_formerr_preserves_opcode() {
 }
 
 #[test]
-fn malformed_update_without_enabled_handler_returns_formerr() {
+fn malformed_update_without_enabled_handler_returns_notimp() {
     let mut wire = valid();
     wire[2] = 0x28;
     wire[5] = 2;
@@ -268,5 +268,5 @@ fn malformed_update_without_enabled_handler_returns_formerr() {
     ));
     let message = Message::parse(&response).unwrap();
     assert_eq!(message.opcode().0, 5);
-    assert_eq!(message.rcode(), Rcode::FORMERR);
+    assert_eq!(message.rcode(), Rcode::NOTIMP);
 }

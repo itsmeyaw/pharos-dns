@@ -115,6 +115,17 @@ impl Chain for UpdateProbe {
     }
 }
 
+struct TkeyProbe(Arc<AtomicUsize>);
+impl Chain for TkeyProbe {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Outcome::Unanswered(Rcode::REFUSED)
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
 #[tokio::test]
 async fn update_admission_is_listener_and_block_scoped() {
     let key = ListenerKey {
@@ -191,7 +202,13 @@ async fn tkey_query_returns_notimp_without_running_chain() {
         address: "127.0.0.1:53".parse().unwrap(),
     };
     let mut router = Router::default();
-    router.add(key, ".".parse().unwrap(), Some(UpdateProbe(true)), vec![]);
+    let chain_calls = Arc::new(AtomicUsize::new(0));
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(TkeyProbe(Arc::clone(&chain_calls))),
+        vec![],
+    );
     let server = Server::new(router, key);
     let name: Name = "example.".parse().unwrap();
     let mut wire = Vec::with_capacity(512);
@@ -217,6 +234,7 @@ async fn tkey_query_returns_notimp_without_running_chain() {
         Action::Respond
     );
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTIMP);
+    assert_eq!(chain_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

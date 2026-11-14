@@ -496,14 +496,7 @@ impl<C: Chain> Server<C> {
         let mut error_logged = false;
         let mut tsig_signing = None;
         let mut forwarded_response = false;
-        let outcome = if query.opcode() == pharos_proto::Opcode::QUERY
-            && query
-                .questions()
-                .any(|question| question.qtype == pharos_proto::Type::TKEY)
-        {
-            // RFC 2930 §3: TKEY Query is NOTIMP when no TKEY service is implemented.
-            Outcome::Unanswered(Rcode::NOTIMP)
-        } else if let Some(block) = block {
+        let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
                 // RFC 2136 §3: Return NOTIMP when UPDATE is not implemented.
                 if query.opcode() == pharos_proto::Opcode::UPDATE && !chain.accepts_update() {

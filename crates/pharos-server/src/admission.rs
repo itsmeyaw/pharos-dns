@@ -38,22 +38,6 @@ pub fn admit_with_update<'a>(
     // RFC 6895 §2.1: Do not reject the reserved DNS header Z bit.
     let opcode = Opcode(((flags >> 11) & 15) as u8);
     let count = |i| u16::from_be_bytes([wire[i], wire[i + 1]]);
-    let update_query = if opcode == Opcode::UPDATE {
-        // RFC 2136 §2.2: malformed UPDATEs receive FORMERR even when UPDATE is disabled.
-        if count(4) != 1 {
-            header_error(wire, response, Rcode::FORMERR);
-            return Admission::Respond;
-        }
-        match Message::parse(wire) {
-            Ok(query) if !query.has_nonfinal_tsig() => Some(query),
-            _ => {
-                header_error(wire, response, Rcode::FORMERR);
-                return Admission::Respond;
-            }
-        }
-    } else {
-        None
-    };
     // RFC 8490 §§5.4.1, 5.4.3: DSO unidirectional Messages have ID zero and no Response.
     if opcode == Opcode::STATEFUL {
         if is_dso_unidirectional(wire) {
@@ -73,12 +57,29 @@ pub fn admit_with_update<'a>(
         && opcode != Opcode::NOTIFY
         && !(opcode == Opcode::UPDATE && allow_update)
     {
+        // RFC 2136 §3: An unimplemented UPDATE receives NOTIMP before message validation.
         header_error(wire, response, Rcode::NOTIMP);
         return Admission::Respond;
     }
+    let update_query = if opcode == Opcode::UPDATE {
+        // RFC 2136 §2.3: The UPDATE Zone Section contains exactly one record.
+        if count(4) != 1 {
+            header_error(wire, response, Rcode::FORMERR);
+            return Admission::Respond;
+        }
+        match Message::parse(wire) {
+            Ok(query) => Some(query),
+            _ => {
+                // RFC 1035 §4.1.1; RFC 2136 §3.1.1: Malformed accepted UPDATEs receive FORMERR.
+                header_error(wire, response, Rcode::FORMERR);
+                return Admission::Respond;
+            }
+        }
+    } else {
+        None
+    };
     // RFC 9619 §4: QUERY permits zero questions and requires FORMERR above one.
     // RFC 2136 §§2.4–2.5: UPDATE prerequisite and update sections may contain multiple records.
-    // RFC 2136 §2.3: The UPDATE Zone section contains exactly one record.
     // RFC 1996 §§3.7, 3.9: NOTIFY requires at least one Question and ignores other sections.
     if (opcode == Opcode::NOTIFY && count(4) == 0)
         || (opcode != Opcode::UPDATE && opcode != Opcode::NOTIFY && count(4) > 1)
@@ -90,30 +91,28 @@ pub fn admit_with_update<'a>(
         return Admission::Respond;
     }
     // RFC 6891 §6.1.1: Message parsing rejects duplicate OPT records.
-    let query = if let Some(query) = update_query {
-        query
-    } else {
-        let Ok(query) = Message::parse(wire) else {
-            header_error(wire, response, Rcode::FORMERR);
-            return Admission::Respond;
-        };
-        query
+    let Some(query) = update_query.or_else(|| Message::parse(wire).ok()) else {
+        header_error(wire, response, Rcode::FORMERR);
+        return Admission::Respond;
     };
     if query.has_nonfinal_tsig() {
         // RFC 8945 §5.2: a misplaced TSIG requires FORMERR even without a TSIG Plugin.
         header_error(wire, response, Rcode::FORMERR);
         return Admission::Respond;
     }
-    // RFC 1996 §3.9: hide ignored Authority and Additional records from handlers.
-    let query = query.ignore_notify_sections();
-    // RFC 2930 §3: TKEY Queries use QCLASS ANY and must reach the NOTIMP handler.
-    let tkey_query = query.opcode() == Opcode::QUERY
+    // RFC 2930 §3: TKEY Queries use QCLASS ANY and receive NOTIMP without Plugin dispatch.
+    if query.opcode() == Opcode::QUERY
         && query
             .questions()
-            .any(|question| question.qtype == Type::TKEY);
+            .any(|question| question.qtype == Type::TKEY)
+    {
+        write_error(query, response, Rcode::NOTIMP);
+        return Admission::Respond;
+    }
+    // RFC 1996 §3.9: hide ignored Authority and Additional records from handlers.
+    let query = query.ignore_notify_sections();
     // RFC 1035 §4.1.1: RCODE 5 refuses an operation for policy reasons.
     if !allow_non_in
-        && !tkey_query
         && query
             .questions()
             .next()
