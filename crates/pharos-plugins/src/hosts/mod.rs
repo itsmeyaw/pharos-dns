@@ -9,7 +9,7 @@ use std::{
 };
 
 use pharos_corefile::{Cursor, Error, Fallthrough, origins_from_args_or_server_block};
-use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Rcode, Section, Type};
+use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Section, Type};
 use pharos_server::{Context, Next, Outcome, Protocol};
 
 mod data;
@@ -302,20 +302,16 @@ impl pharos_server::Plugin for Hosts {
         } else {
             (&[][..], &[][..])
         };
-        if ips.0.is_empty()
+        let missing = ips.0.is_empty()
             && ips.1.is_empty()
             && names1.is_none()
             && names2.is_none()
             && v4.is_empty()
             && v6.is_empty()
             && inline4.is_empty()
-            && inline6.is_empty()
-        {
-            return if fallthrough {
-                next.run(cx).await
-            } else {
-                Outcome::Unanswered(Rcode::SERVFAIL)
-            };
+            && inline6.is_empty();
+        if missing && fallthrough {
+            return next.run(cx).await;
         }
         let max = cx.max_response_size.max(512);
         if cx.response.capacity() < max {
@@ -326,7 +322,8 @@ impl pharos_server::Plugin for Hosts {
             }
         }
         // RFC 1035 §4.1.1: Responses set QR and copy the query opcode and RD bit.
-        let mut flags = 0x8400 | (cx.query.flags() & 0x7800);
+        // RFC 1034 §4.3.2: return an authoritative NXDOMAIN for an unmapped owner.
+        let mut flags = 0x8400 | (cx.query.flags() & 0x7800) | if missing { 3 } else { 0 };
         if cx.query.opcode() == Opcode::QUERY {
             flags |= cx.query.flags() & 0x0110;
         }

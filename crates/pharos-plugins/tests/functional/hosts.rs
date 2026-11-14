@@ -54,3 +54,36 @@ async fn inline_answers_nodata_and_fallthrough() {
         }
     }
 }
+
+#[tokio::test]
+async fn unmapped_name_without_fallthrough_returns_authoritative_nxdomain() {
+    let text = ".:53 {\n hosts /nonexistent example.org {\n 192.0.2.1 present.example.org\n }\n}";
+    let blocks = parse("Corefile", text).unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let name: Name = "absent.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN)
+        .unwrap();
+    let _ = builder.finish();
+    let root: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [None; 8];
+    let mut context = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(configured[0].config.serve(&mut context).await, Outcome::Response);
+    let response = Message::parse(&response).unwrap();
+    assert!(response.aa());
+    assert_eq!(response.rcode(), pharos_proto::Rcode::NXDOMAIN);
+    assert_eq!(response.answer_count(), 0);
+}
