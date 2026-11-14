@@ -219,11 +219,10 @@ async fn coredns_local_cases() {
                 );
             }
             if qtype == Type::SOA {
-                assert!(
-                    rr.rdata
-                        .windows(16)
-                        .any(|bytes| bytes == b"\x06nobody\x07invalid\0")
-                );
+                let mname = NameRef::parse(rr.rdata, 0).unwrap();
+                assert_eq!(mname.to_string(), "ns.localhost.");
+                let rname = NameRef::parse(rr.rdata, mname.wire_len()).unwrap();
+                assert_eq!(rname.to_string(), "nobody.invalid.");
             }
         }
     }
