@@ -38,6 +38,35 @@ fn rdata_can_disable_compression_for_zone_storage() {
 }
 
 #[test]
+fn raw_lp_rdata_rejects_compressed_target_names() {
+    // RFC 6742 §2.4.1.2: LP TargetName is not compressed on the wire.
+    let owner = name("example.");
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+    assert_eq!(
+        builder.record(
+            Section::Answer,
+            borrowed(&owner),
+            Type::LP,
+            Class::IN,
+            60,
+            &[0, 1, 0xc0, 12]
+        ),
+        Err(BuildError::InvalidRdata)
+    );
+    assert!(builder
+        .record(
+            Section::Answer,
+            borrowed(&owner),
+            Type::LP,
+            Class::IN,
+            60,
+            b"\x00\x01\x03foo\x00"
+        )
+        .unwrap());
+}
+
+#[test]
 fn fixed_storage_builds_questions_and_compressed_rdata() {
     use pharos_proto::{FixedBuffer, Rdata};
     let n = name("www.example.com.");

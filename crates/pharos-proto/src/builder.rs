@@ -249,6 +249,12 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
         if self.stopped {
             return Ok(false);
         }
+        // RFC 6742 §2.4.1.2: LP TargetName must be an uncompressed wire name.
+        if rtype == Type::LP
+            && (rdata.len() < 3 || crate::name::check_uncompressed(&rdata[2..]).is_err())
+        {
+            return Err(BuildError::InvalidRdata);
+        }
         if rdata.len() > usize::from(u16::MAX) {
             return Err(BuildError::RdataTooLong);
         }

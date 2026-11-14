@@ -107,8 +107,13 @@ impl Name {
                     byte = u8::try_from(number).map_err(|_| NameError::InvalidEscape)?;
                     position += 3;
                 } else {
+                    if !byte.is_ascii() {
+                        return Err(NameError::InvalidEscape);
+                    }
                     position += 1;
                 }
+            } else if !byte.is_ascii() {
+                return Err(NameError::InvalidEscape);
             }
             // RFC 1035 §2.3.4: Limit labels to 63 octets and full names to 255 octets.
             if len - label > MAX_LABEL_LEN {
@@ -250,10 +255,14 @@ impl Name {
                         label.push(u8::try_from(number).map_err(|_| NameError::InvalidEscape)?);
                         position += 3;
                     } else {
+                        if !escaped.is_ascii() {
+                            return Err(NameError::InvalidEscape);
+                        }
                         label.push(*escaped);
                         position += 1;
                     }
                 }
+                byte if !byte.is_ascii() => return Err(NameError::InvalidEscape),
                 // RFC 6895 §3.3.1: Text labels can contain any octet, including zero.
                 byte => {
                     label.push(byte);
@@ -636,7 +645,7 @@ fn check_message_name(
 
 // RFC 6895 §3.3.2: The zero-length root label terminates each name.
 // RFC 1035 §3.1: Wire names use length-prefixed labels ending in the root label.
-fn check_uncompressed(wire: &[u8]) -> Result<(), NameError> {
+pub(crate) fn check_uncompressed(wire: &[u8]) -> Result<(), NameError> {
     if wire.len() > MAX_NAME_LEN {
         return Err(NameError::NameTooLong);
     }

@@ -47,6 +47,17 @@ fn parses_and_prints_miekg_escapes() {
 }
 
 #[test]
+fn presentation_parsers_require_escapes_for_non_ascii_octets() {
+    // RFC 4343 §2.1: Non-ASCII octets in ASCII presentation use escapes.
+    let origin = name("example.");
+    assert!(Name::parse("é.", &origin).is_err());
+    assert!(Name::parse("é", &origin).is_err());
+    assert_eq!(Name::parse(r"\195\169.", &origin).unwrap().as_wire(), &[2, 0xc3, 0xa9, 0]);
+    let mut buffer = [0; 255];
+    assert!(Name::parse_absolute_into("é.", &mut buffer).is_err());
+}
+
+#[test]
 fn prints_miekg_special_characters() {
     let wire = [9, b'.', b' ', b'\'', b'@', b';', b'(', b')', b'"', b'\\', 0];
     let borrowed = NameRef::parse(&wire, 0).unwrap();
