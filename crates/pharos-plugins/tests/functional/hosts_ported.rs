@@ -68,11 +68,15 @@ fn chain(file: &HostsFile, options: &str) -> Chain {
 }
 
 async fn query(chain: &Chain, qname: &str, qtype: Type) -> (Outcome, Vec<u8>) {
+    query_class(chain, qname, qtype, Class::IN).await
+}
+
+async fn query_class(chain: &Chain, qname: &str, qtype: Type, qclass: Class) -> (Outcome, Vec<u8>) {
     let name: Name = qname.parse().unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 0x1234, 0x0100).unwrap();
     builder
-        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, Class::IN)
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, qclass)
         .unwrap();
     let _ = builder.finish();
     let domain: Name = ".".parse().unwrap();
@@ -91,6 +95,17 @@ async fn query(chain: &Chain, qname: &str, qtype: Type) -> (Outcome, Vec<u8>) {
     };
     let outcome = chain.serve(&mut context).await;
     (outcome, response)
+}
+
+#[tokio::test]
+async fn non_in_questions_pass_through_to_next_plugin() {
+    let file = HostsFile::new();
+    let chain = chain(&file, "");
+    chain.lifecycle.run(Phase::Startup).await.unwrap();
+    let (outcome, wire) = query_class(&chain, "example.org.", Type::A, Class::CH).await;
+    assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
+    assert!(wire.is_empty());
+    chain.lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 
 // CoreDNS TestLookupA: values, owners, classes, TTLs, and reverse aliases.

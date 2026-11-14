@@ -252,6 +252,10 @@ impl pharos_server::Plugin for Hosts {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
+        // RFC 1034 §4.3.1: answer only Internet-class Questions with IN records.
+        if question.qclass != Class::IN {
+            return next.run(cx).await;
+        }
         // RFC 1035 §3.1: wire names are at most 255 octets and end with a zero-length label.
         let mut wire = [0u8; 255];
         let mut len = 0;
