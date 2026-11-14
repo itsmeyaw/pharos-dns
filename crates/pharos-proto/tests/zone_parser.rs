@@ -42,6 +42,52 @@ fn known_type_mnemonic_accepts_generic_rdata() {
 }
 
 #[test]
+fn rejects_invalid_class_and_odd_generic_rdata_words() {
+    // RFC 3597 §5: CLASS codes are decimal and each generic hexadecimal word has even length.
+    for input in [
+        "a 60 CLASS+1 A 192.0.2.1\n".to_owned(),
+        r"a 60 TYPE65000 \# 1 A A".to_owned() + "\n",
+    ] {
+        assert!(
+            ZoneParser::new(Cursor::new(input.as_bytes()), ".".parse().unwrap(), "strict")
+                .collect::<Result<Vec<_>, _>>()
+                .is_err(),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_svcparam_digit_escapes_and_empty_alpn() {
+    // RFC 9460 §§2.1, 7.1.1: digit escapes use exactly three digits and alpn lists are nonempty.
+    for input in [
+        r"a 60 SVCB 1 . key9=\9".to_owned() + "\n",
+        r"a 60 SVCB 1 . key9=\99".to_owned() + "\n",
+        r"a 60 SVCB 1 . key9=\12x".to_owned() + "\n",
+        "a 60 SVCB 1 . alpn=\n".to_owned(),
+        "a 60 SVCB 1 . alpn\n".to_owned(),
+    ] {
+        assert!(
+        ZoneParser::new(Cursor::new(input.as_bytes()), ".".parse().unwrap(), "strict")
+                .collect::<Result<Vec<_>, _>>()
+                .is_err(),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_non_utf8_naptr_character_strings() {
+    // RFC 3403 §3: NAPTR flags, services, and regexp values are UTF-8.
+    let input = "a 60 NAPTR 1 1 \"U\" \"\\255\" \"\" .\n";
+    assert!(
+        ZoneParser::new(Cursor::new(input), ".".parse().unwrap(), "strict")
+            .collect::<Result<Vec<_>, _>>()
+            .is_err()
+    );
+}
+
+#[test]
 fn tsig_presentation_is_rejected_like_miekg() {
     let input = "example. 3600 IN TSIG hmac. 1 300 0 42 0 0\n";
     let parser = ZoneParser::new(Cursor::new(input), ".".parse().unwrap(), "tsig");

@@ -698,16 +698,19 @@ fn has_invalid_digit_escape(value: &str) -> bool {
     false
 }
 
-// RFC 9460 §2.1: SvcParam decimal escapes must encode a single octet.
+// RFC 9460 §2.1: Digit escapes require three decimal digits and one octet value.
 fn invalid_svc_escape(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            if let Some(digits) = bytes
-                .get(i + 1..i + 4)
-                .filter(|d| d.iter().all(u8::is_ascii_digit))
-            {
+            if bytes[i + 1].is_ascii_digit() {
+                let Some(digits) = bytes
+                    .get(i + 1..i + 4)
+                    .filter(|d| d.iter().all(u8::is_ascii_digit))
+                else {
+                    return true;
+                };
                 let number = u16::from(digits[0] - b'0') * 100
                     + u16::from(digits[1] - b'0') * 10
                     + u16::from(digits[2] - b'0');
@@ -969,7 +972,13 @@ fn parse_class(value: &str) -> Option<Class> {
         "CS" => Class::CS,
         "NONE" => Class::NONE,
         "ANY" => Class::ANY,
-        _ => Class(upper.strip_prefix("CLASS")?.parse().ok()?),
+        _ => {
+            let digits = upper.strip_prefix("CLASS")?;
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            Class(digits.parse().ok()?)
+        }
     })
 }
 

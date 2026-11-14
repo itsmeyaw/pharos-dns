@@ -161,9 +161,13 @@ fn legacy_security_and_opaque_data() {
     );
     assert_eq!(
         parse(Type::NXT, &["next.", "A", "NS"]).unwrap(),
-        b"\x04next\0\0\x01\x60"
+        b"\x04next\0\x60"
     );
     assert_eq!(parse(Type::NXT, &["next."]).unwrap(), b"\x04next\0");
+    let last_legacy_type = parse(Type::NXT, &["next.", "TYPE127"]).unwrap();
+    assert_eq!(&last_legacy_type[6..21], &[0; 15]);
+    assert_eq!(last_legacy_type[21], 1);
+    assert!(parse(Type::NXT, &["next.", "TYPE128"]).is_err());
     assert_eq!(
         parse(
             Type::SIG,

@@ -278,6 +278,7 @@ fn gateway_variants() {
     );
     assert!(parse(Type::IPSECKEY, &["10", "99", "2"]).is_err());
     assert!(parse(Type::AMTRELAY, &["10", "0", "99"]).is_err());
+    assert!(parse(Type::AMTRELAY, &["10", "0", "128"]).is_err());
     assert!(parse(Type::AMTRELAY, &["10", "2", "0", "."]).is_err());
     assert_eq!(
         parse(Type::IPSECKEY, &["10", "2", "2", "::1"]).unwrap()[3..],

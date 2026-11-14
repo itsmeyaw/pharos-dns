@@ -1,7 +1,7 @@
 use crate::{Name, Type};
 
 use super::{
-    base64, bitmap, character_string, count, dnssec_algorithm, hex, length_bytes, name, number,
+    base64, character_string, count, dnssec_algorithm, hex, length_bytes, name, number,
     put16, put32, type_code, unescape,
 };
 
@@ -253,18 +253,25 @@ pub(super) fn parse(
                 })?;
                 out.extend(binary(fields, 8, true, out.len(), &mut index)?);
             }
-            // RFC 4034 §4.1.2: miekg encodes NXT using NSEC's windowed bitmap.
-            // RFC 2535 §7.3: NXT presentation is the next name followed by type mnemonics.
+            // RFC 2535 §§5.2, 7.3: NXT uses an unwindowed bitmap for types 0 through 127.
             Type::NXT => {
                 if fields.is_empty() {
                     index = fields.len();
                     return Err("missing NXT name".into());
                 }
                 at!(0, name(&mut out, fields[0], origin))?;
+                let mut bitmap = [0; 16];
+                let mut bitmap_len = 0;
                 for (i, field) in fields.iter().enumerate().skip(1) {
-                    at!(i, type_code(field))?;
+                    let ty = at!(i, type_code(field))?;
+                    if ty > 127 {
+                        return Err("NXT bitmap type must be at most 127".into());
+                    }
+                    let octet = usize::from(ty / 8);
+                    bitmap[octet] |= 0x80 >> (ty % 8);
+                    bitmap_len = bitmap_len.max(octet + 1);
                 }
-                bitmap(&mut out, &fields[1..])?;
+                out.extend_from_slice(&bitmap[..bitmap_len]);
             }
             // RFC 1035 §3.2.1: RDATA is an octet sequence; Nimrod presents these fields as hex.
             Type::EID | Type::NIMLOC => out.extend(binary(fields, 0, false, 0, &mut index)?),

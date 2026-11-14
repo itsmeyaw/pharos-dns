@@ -183,7 +183,7 @@ fn tsig_and_validation() {
         .is_err()
     );
     assert!(parse(Type::CAA, &["0", "bad-tag", "x"]).is_err());
-    assert_eq!(parse(Type::NSEC, &["next."]).unwrap(), b"\x04next\0");
+    assert!(parse(Type::NSEC, &["next."]).is_err());
     assert_eq!(
         parse(Type::ZONEMD, &["1", "1", "0", "ABCD"]).unwrap(),
         [0, 0, 0, 1, 1, 0, 0xab, 0xcd]
