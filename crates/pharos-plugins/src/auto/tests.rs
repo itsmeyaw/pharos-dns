@@ -432,6 +432,35 @@ fn coredns_walk_rejects_wrong_soa_then_loads_corrected_zone() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn initial_zone_with_serial_zero_loads() {
+    let root = std::env::temp_dir().join(format!("pharos-auto-zero-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("db.example.org"),
+        "@ 60 IN SOA ns. hostmaster. 0 2 3 4 5\n",
+    )
+    .unwrap();
+    let auto = Auto::new(
+        vec![".".parse().unwrap()],
+        root.clone(),
+        regex::Regex::new(r"^db\.(.*)$").unwrap(),
+        "${1}".into(),
+        Duration::ZERO,
+    );
+    auto.shared.scan();
+    let zone = auto.shared.zones.load();
+    assert_eq!(
+        zone.origins.get("example.org.").and_then(|entry| entry
+            .current
+            .load()
+            .as_ref()
+            .and_then(|zone| zone.serial())),
+        Some(0)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn watcher_started_after_shutdown_exits() {
     let root = std::env::temp_dir().join(format!("pharos-auto-stopped-{}", std::process::id()));
@@ -664,6 +693,65 @@ fn coredns_most_specific_zone_and_template_captures() {
             expected
         );
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "plugin-transfer")]
+#[tokio::test]
+async fn newly_scanned_zone_notifies_once() {
+    let root = std::env::temp_dir().join(format!("pharos-auto-new-notify-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("db.example.org"),
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+    )
+    .unwrap();
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let corefile = format!(
+        "example.org:53 {{\n transfer {{\n to {}\n }}\n}}",
+        socket.local_addr().unwrap()
+    );
+    let blocks = pharos_corefile::parse("Corefile", &corefile).unwrap();
+    let configured =
+        pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+    let auto = Auto::new(
+        vec![".".parse().unwrap()],
+        root.clone(),
+        regex::Regex::new(r"db\.(.*)").unwrap(),
+        "${1}".into(),
+        Duration::ZERO,
+    );
+    auto.shared
+        .notifier
+        .bind(configured[0].config.transfer.as_ref());
+    let loaded = auto.shared.scan();
+    assert_eq!(loaded, ["example.org.".parse().unwrap()]);
+    let shared = Arc::clone(&auto.shared);
+    let notifying = tokio::spawn(async move { notify_zones(&shared, &loaded).await });
+    let mut wire = [0; 512];
+    let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+    assert_eq!(
+        pharos_proto::Message::parse(&wire[..len])
+            .unwrap()
+            .questions()
+            .next()
+            .unwrap()
+            .name
+            .to_name()
+            .to_string(),
+        "example.org."
+    );
+    wire[2] |= 0x80;
+    socket.send_to(&wire[..len], peer).await.unwrap();
+    notifying.await.unwrap();
+    let unchanged = auto.shared.scan();
+    assert!(unchanged.is_empty());
+    notify_zones(&auto.shared, &unchanged).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), socket.recv_from(&mut wire))
+            .await
+            .is_err()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -2,11 +2,12 @@ use super::*;
 use std::{io::BufReader, path::Path};
 
 impl Shared {
-    pub(super) fn scan(&self) {
+    pub(super) fn scan(&self) -> Vec<Name> {
         let _gate = self.scan_gate.lock().unwrap();
         let old = self.zones.load_full();
         let mut zones = HashMap::new();
         let mut seen = HashMap::new();
+        let mut added = Vec::new();
         let root =
             std::fs::canonicalize(&self.directory).unwrap_or_else(|_| self.directory.clone());
         visit(&root, &mut |path| {
@@ -45,11 +46,12 @@ impl Shared {
                 let result = std::fs::File::open(path)
                     .map_err(|error| error.to_string())
                     .and_then(|file| {
+                        // RFC 1982 §2: Serial zero is an ordinary initial SOA value.
                         Zone::load_reader_with_serial(
                             apex.clone(),
                             path,
                             BufReader::new(file),
-                            Some(0),
+                            None,
                         )
                     });
                 match result {
@@ -59,6 +61,7 @@ impl Shared {
                             "auto",
                             &format!("Inserting Zone {origin} from {}", path.display()),
                         );
+                        added.push(apex.clone());
                         let case_mismatch = origin.bytes().any(|byte| byte.is_ascii_uppercase());
                         zones.insert(
                             origin.clone(),
@@ -105,6 +108,7 @@ impl Shared {
             origins: zones,
             canonical,
         }));
+        added
     }
 }
 
