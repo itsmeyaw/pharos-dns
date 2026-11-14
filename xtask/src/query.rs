@@ -240,6 +240,10 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
     if !query.additions.is_empty() && query.opcode != 5 {
         return Err("+add requires UPDATE".into());
     }
+    // RFC 8490 §4.2: DSO uses TCP or TLS, never UDP.
+    if query.opcode == 6 && query.transport == Transport::Udp {
+        return Err("DSO requires TCP".into());
+    }
     Ok(query)
 }
 
@@ -288,6 +292,14 @@ impl Query {
             if !record.mac.is_empty() || !record.other.is_empty() {
                 return Err("authentication error has nonempty MAC or other data".into());
             }
+            // RFC 8945 §5.4: unsigned BADKEY and BADSIG are valid only with NOTAUTH.
+            if pharos_proto::Message::parse(response)
+                .map_err(|error| error.to_string())?
+                .rcode()
+                != pharos_proto::Rcode::NOTAUTH
+            {
+                return Err("unsigned BADKEY/BADSIG response is not NOTAUTH".into());
+            }
         } else {
             if (expected == 18 && record.other.len() != 6)
                 || (expected == 0 && !record.other.is_empty())
@@ -320,8 +332,13 @@ impl Query {
     }
     pub(crate) fn wire(&self) -> Result<Vec<u8>, String> {
         let mut wire = Vec::new();
-        // RFC 1035 §4.1.1: Query headers set opcode and RD, leaving QR 0.
-        let flags = (u16::from(self.opcode) << 11) | if self.recursion { 0x0100 } else { 0 };
+        // RFC 1035 §4.1.1 and RFC 1996 §3.2: NOTIFY requests set RD to zero.
+        let flags = (u16::from(self.opcode) << 11)
+            | if self.recursion && self.opcode != 4 {
+                0x0100
+            } else {
+                0
+            };
         let mut builder =
             MessageBuilder::new(&mut wire, 65535, 0, flags).map_err(|err| err.to_string())?;
         let name = NameRef::parse(self.name.as_wire(), 0).map_err(|err| err.to_string())?;
@@ -519,6 +536,60 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_badkey_and_badsig_responses_require_notauth() {
+        use pharos_proto::{Class, MessageBuilder, NameRef, Section};
+
+        fn error_response(query: &[u8], error: u16, rcode: u16) -> Vec<u8> {
+            let request = pharos_proto::TsigRecord::parse(query).unwrap();
+            let request_message = Message::parse(query).unwrap();
+            let question = request_message.questions().next().unwrap();
+            let mut wire = Vec::new();
+            let mut builder =
+                MessageBuilder::new(&mut wire, 65535, request.original_id, 0x8000 | rcode).unwrap();
+            builder
+                .question(question.name, question.qtype, question.qclass)
+                .unwrap();
+            let algorithm = request.algorithm.to_name();
+            let mut rdata = algorithm.as_wire().to_vec();
+            rdata.extend_from_slice(&request.time_signed.to_be_bytes()[2..]);
+            rdata.extend_from_slice(&request.fudge.to_be_bytes());
+            rdata.extend_from_slice(&0_u16.to_be_bytes());
+            rdata.extend_from_slice(&request.original_id.to_be_bytes());
+            rdata.extend_from_slice(&error.to_be_bytes());
+            rdata.extend_from_slice(&0_u16.to_be_bytes());
+            let owner_name = request.owner.to_name();
+            let owner = NameRef::parse(owner_name.as_wire(), 0).unwrap();
+            builder
+                .record(
+                    Section::Additional,
+                    owner,
+                    Type::TSIG,
+                    Class::ANY,
+                    0,
+                    &rdata,
+                )
+                .unwrap();
+            let _ = builder.finish();
+            wire
+        }
+
+        for (mode, error) in [("badkey", 17), ("badsig", 16)] {
+            let query = parse(&format!("example. A IN udp +tsig=key.:c2VjcmV0:{mode}")).unwrap();
+            let request = query.wire().unwrap();
+            assert!(
+                query
+                    .check_response_tsig(&request, &error_response(&request, error, 0))
+                    .is_err()
+            );
+            assert!(
+                query
+                    .check_response_tsig(&request, &error_response(&request, error, 9))
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
     fn builds_queries_with_custom_edns_options() {
         let query = parse("example. A IN udp +ednsoption=65518:61626364").unwrap();
         let wire = query.wire().unwrap();
@@ -594,6 +665,15 @@ mod tests {
             assert_eq!(question.qtype, expected);
             assert_eq!(question.qclass, Class::CH);
         }
+    }
+
+    #[test]
+    fn notify_clears_recursion_and_dso_requires_tcp() {
+        let notify = parse("example. SOA IN udp +opcode=NOTIFY").unwrap();
+        assert!(!Message::parse(&notify.wire().unwrap()).unwrap().rd());
+        assert!(parse("example. SOA IN udp +opcode=NOTIFY +norec").is_ok());
+        assert!(parse("example. A IN udp +opcode=stateful").is_err());
+        assert!(parse("example. A IN tcp +opcode=stateful").is_ok());
     }
 
     #[test]
