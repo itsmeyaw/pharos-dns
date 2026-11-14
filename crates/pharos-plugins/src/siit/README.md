@@ -4,6 +4,7 @@
 
 ## siit
 
+- Rejects non-/96 use of the RFC 6052 Well-Known Prefix (RFC 6052 §2.1).
 - AAAA Self Lookup allocates per Query; issue #86 tracks allocation-free Self
   Lookup. Queries that do not need it do not allocate in this Plugin.
 - Self Lookup uses Listener size and EDNS handling, which can truncate the

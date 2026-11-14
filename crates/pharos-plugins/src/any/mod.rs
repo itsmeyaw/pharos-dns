@@ -20,14 +20,13 @@ impl Any {
             [key, value] if key == "ttl" => value.parse().map_err(|_| cursor.arg_err())?,
             _ => return Err(cursor.arg_err()),
         };
-        // RFC 2181 §8: TTL values with the high bit set are treated as zero.
+        // RFC 2181 §8: reject configured TTLs receivers would interpret as zero.
         if ttl > i32::MAX as u32 {
             return Err(cursor.error("invalid TTL"));
         }
         if cursor.next_arg() {
             return Err(cursor.arg_err());
         }
-        // RFC 8482 §4.2: operators can tune the synthesized HINFO TTL.
         Ok(Self { ttl })
     }
 }
@@ -40,7 +39,7 @@ impl Plugin for Any {
         if question.qtype != Type::ANY {
             return next.run(cx).await;
         }
-        // RFC 8482 §4.2: synthesize the minimal answer only for IN-class ANY queries.
+        // RFC 1034 §4.3.1: synthesize answers only for IN-class ANY queries.
         if question.qclass != Class::IN {
             return next.run(cx).await;
         }
