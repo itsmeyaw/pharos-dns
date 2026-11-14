@@ -217,7 +217,6 @@ impl External {
                 let mut scratch = scratch::lease();
                 store.with_read(|index| {
                     let mut ordinal = 0usize;
-                    let mut chased_entries = chased.iter().peekable();
                     lookup::snapshot_or_lookup(
                         index,
                         request,
@@ -227,7 +226,7 @@ impl External {
                         |address, _, _| {
                             let current = ordinal;
                             ordinal += 1;
-                            let entry = chased_at(&mut chased_entries, current, address);
+                            let entry = chased_at(chased, current, address);
                             if error.is_some() {
                                 return;
                             }
@@ -238,6 +237,17 @@ impl External {
                                 Ok(ip) => ip,
                                 Err(_) => {
                                     if let Some(entry) = entry {
+                                        let mut key = [0; 2048];
+                                        let Some(key) =
+                                            target_key(request, None, address, zone_ref, &mut key)
+                                        else {
+                                            return;
+                                        };
+                                        // RFC 1034 §3.6.2: emit one CNAME RR per target name.
+                                        if !scratch.srv.insert(key, &entry.ordinal.to_be_bytes(), 0)
+                                        {
+                                            return;
+                                        }
                                         truncated |= entry.answers.iter().flatten().any(|wire| {
                                             pharos_proto::Message::parse(wire)
                                                 .is_ok_and(|message| message.tc())
@@ -317,7 +327,6 @@ impl External {
                     );
                     let weight = (100 / count.max(1)).max(1) as u16;
                     let mut ordinal = 0usize;
-                    let mut chased_entries = chased.iter().peekable();
                     lookup::snapshot_or_lookup(
                         index,
                         request,
@@ -329,7 +338,7 @@ impl External {
                         |address, port, endpoint| {
                             let current = ordinal;
                             ordinal += 1;
-                            let entry = chased_at(&mut chased_entries, current, address);
+                            let entry = chased_at(chased, current, address);
                             if !port.has_srv()
                                 || !has_address_target(address, entry)
                                 || error.is_some()
@@ -376,7 +385,6 @@ impl External {
                         },
                     );
                     let mut ordinal = 0usize;
-                    let mut chased = chased.iter().peekable();
                     // RFC 2782 §The format of the SRV RR: Add available target addresses.
                     lookup::snapshot_or_lookup(
                         index,
@@ -387,7 +395,7 @@ impl External {
                         |address, port, endpoint| {
                             let current = ordinal;
                             ordinal += 1;
-                            let entry = chased_at(&mut chased, current, address);
+                            let entry = chased_at(chased, current, address);
                             if !port.has_srv()
                                 || !has_address_target(address, entry)
                                 || error.is_some()
@@ -509,32 +517,26 @@ fn final_rcode(initial: Rcode, chased: &[Chased]) -> Rcode {
     })
 }
 
-fn chased_at<'a>(
-    chased: &mut std::iter::Peekable<std::slice::Iter<'a, Chased>>,
-    ordinal: usize,
-    address: &str,
-) -> Option<&'a Chased> {
-    while chased.peek().is_some_and(|entry| entry.ordinal < ordinal) {
-        chased.next();
-    }
-    if chased.peek().is_some_and(|entry| entry.ordinal == ordinal) {
-        chased.next().filter(|entry| {
-            let mut wire = [0; 255];
-            let Ok(expected) = NameRef::parse(entry.name.as_wire(), 0) else {
-                return false;
-            };
-            // RFC 4343 §3.1: compare DNS labels with ASCII-only case folding.
-            hostname(address, &mut wire).is_some_and(|target| {
-                target.labels().count() == expected.labels().count()
-                    && target
-                        .labels()
-                        .zip(expected.labels())
-                        .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
-            })
-        })
-    } else {
-        None
-    }
+fn chased_matches(address: &str, name: &Name) -> bool {
+    let mut wire = [0; 255];
+    let Ok(expected) = NameRef::parse(name.as_wire(), 0) else {
+        return false;
+    };
+    // RFC 4343 §3.1: compare DNS labels with ASCII-only case folding.
+    hostname(address, &mut wire).is_some_and(|target| {
+        target.labels().count() == expected.labels().count()
+            && target
+                .labels()
+                .zip(expected.labels())
+                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn chased_at<'a>(chased: &'a [Chased], ordinal: usize, address: &str) -> Option<&'a Chased> {
+    chased
+        .iter()
+        .filter(|entry| chased_matches(address, &entry.name))
+        .min_by_key(|entry| entry.ordinal.abs_diff(ordinal))
 }
 
 // RFC 2782 §The format of the SRV RR: SRV Target must resolve to addresses and not be an alias.
@@ -801,7 +803,7 @@ impl External {
             }
             let request = lookup::parse(&labels[..relative]);
             // shortcut: hostname targets and Self Lookups allocate per Query until #86 pools buffers and futures.
-            let mut chased = Vec::new();
+            let mut chased: Vec<Chased> = Vec::new();
             let (snapshot, code) = match &request {
                 Ok(request) if matches!(q.qtype, Type::A | Type::AAAA | Type::SRV) => store
                     .with_read(|index| {
@@ -1297,8 +1299,7 @@ mod tests {
             name: "MiXeD.example.net.".parse().unwrap(),
             answers: [None, None],
         }];
-        let mut entries = chased.iter().peekable();
-        assert!(chased_at(&mut entries, 0, "mixed.example.net").is_some());
+        assert!(chased_at(&chased, 0, "mixed.example.net").is_some());
     }
 
     #[test]
@@ -1959,6 +1960,7 @@ mod tests {
                 ("web.prod.example.com.".into(), 80),
                 ("web.prod.example.com.".into(), 443),
                 ("lb.example.net.".into(), 80),
+                ("lb.example.net.".into(), 443),
             ]
         );
         let extra: Vec<_> = message
@@ -2046,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    fn chased_ordinals_reject_changed_or_missing_hosts() {
+    fn chased_targets_match_across_callback_ordinals() {
         let chased = [
             Chased {
                 ordinal: 1,
@@ -2064,16 +2066,46 @@ mod tests {
                 answers: [None, None],
             },
         ];
-        let mut cursor = chased.iter().peekable();
-        assert!(chased_at(&mut cursor, 1, "new.example").is_none());
-        assert!(chased_at(&mut cursor, 4, "other.example").is_none());
+        assert!(chased_at(&chased, 1, "new.example").is_none());
+        assert!(chased_at(&chased, 4, "other.example").is_none());
         assert_eq!(
-            chased_at(&mut cursor, 5, "later.example")
+            chased_at(&chased, 5, "later.example")
                 .unwrap()
                 .name
                 .to_string(),
             "later.example."
         );
+        assert_eq!(chased_at(&chased, 20, "same.example").unwrap().ordinal, 3);
+    }
+
+    #[test]
+    fn one_hostname_chase_serves_each_service_port() {
+        let chased = [Chased {
+            ordinal: 2,
+            name: "lb.example.net.".parse().unwrap(),
+            answers: [None, None],
+        }];
+        assert!(chased_at(&chased, 2, "lb.example.net").is_some());
+        assert!(chased_at(&chased, 3, "lb.example.net").is_some());
+    }
+
+    #[test]
+    fn hostname_chase_survives_interleaved_target_callbacks() {
+        let chased = [
+            Chased {
+                ordinal: 0,
+                name: "lb-a.example.net.".parse().unwrap(),
+                answers: [None, None],
+            },
+            Chased {
+                ordinal: 1,
+                name: "lb-b.example.net.".parse().unwrap(),
+                answers: [None, None],
+            },
+        ];
+        assert!(chased_at(&chased, 0, "lb-a.example.net").is_some());
+        assert!(chased_at(&chased, 1, "lb-b.example.net").is_some());
+        assert!(chased_at(&chased, 2, "lb-a.example.net").is_some());
     }
 
     #[test]
@@ -2083,7 +2115,7 @@ mod tests {
             name: r"a\.b.Example.".parse().unwrap(),
             answers: [None, None],
         }];
-        let matches = |address| chased_at(&mut chased.iter().peekable(), 0, address).is_some();
+        let matches = |address| chased_at(&chased, 0, address).is_some();
         assert!(matches(r"a\.b.Example"));
         assert!(matches(r"a\046b.Example."));
         assert!(!matches(r"a.b.Example"));
@@ -2110,10 +2142,9 @@ mod tests {
                 answers: [None, None],
             },
         ];
-        let mut cursor = chased.iter().peekable();
-        assert!(chased_at(&mut cursor, 0, &escaped).is_some());
-        assert!(chased_at(&mut cursor, 1, &host).is_some());
-        assert!(chased_at(&mut chased.iter().peekable(), 0, &"x".repeat(8192)).is_none());
+        assert!(chased_at(&chased, 0, &escaped).is_some());
+        assert!(chased_at(&chased, 1, &host).is_some());
+        assert!(chased_at(&chased, 0, &"x".repeat(8192)).is_none());
     }
 
     #[test]
