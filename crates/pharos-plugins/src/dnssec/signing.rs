@@ -61,6 +61,16 @@ impl SigCache {
         }
     }
 
+    fn remove_any(&mut self) -> bool {
+        // Avoid cloning the eviction key when cache pressure requires removal.
+        let Some((key, old)) = self.map.extract_if(|_, _| true).next() else {
+            return false;
+        };
+        self.sets -= old.sets;
+        self.bytes -= Self::cost(&key, &old);
+        true
+    }
+
     /// Insert `entry`, evicting arbitrary entries until count and bytes fit; returns false if it can never fit.
     fn insert(&mut self, key: &[u8], entry: CacheEntry, capacity: usize) -> bool {
         let cost = Self::cost(key, &entry);
@@ -69,10 +79,9 @@ impl SigCache {
         }
         self.remove(key);
         while self.map.len() >= capacity || self.bytes + cost > CACHE_BYTES {
-            let Some(victim) = self.map.keys().next().cloned() else {
+            if !self.remove_any() {
                 break;
-            };
-            self.remove(&victim);
+            }
         }
         self.sets += entry.sets;
         self.bytes += cost;
