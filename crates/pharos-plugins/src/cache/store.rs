@@ -49,7 +49,7 @@ struct Item {
     negative: bool,
     failure: bool,
     wire: Box<[u8]>,
-    rr_ttls: Box<[(usize, u32)]>,
+    ttl_offsets: Box<[u32]>,
     ttl: u32,
     stored: Instant,
     hits: i64,
@@ -228,7 +228,15 @@ impl Store {
         }
         // RFC 2308 §5: Reused NXDOMAIN entries echo the current QTYPE.
         output[position + 1..position + 3].copy_from_slice(&question.qtype.0.to_be_bytes());
-        for &(offset, record_ttl) in &item.rr_ttls {
+        for &offset in &item.ttl_offsets {
+            let offset = offset as usize;
+            // RFC 2181 §5.2: Read the normalized RRset TTL from cached wire data.
+            let record_ttl = u32::from_be_bytes([
+                output[offset],
+                output[offset + 1],
+                output[offset + 2],
+                output[offset + 3],
+            ]);
             let ttl = if stale {
                 // RFC 8767 §4: Stale records always carry a positive TTL.
                 config.stale_ttl.as_secs().max(1) as u32
@@ -345,11 +353,12 @@ impl Item {
             .or_else(|| response.answers().last())
             .map_or(12 + raw_len + 4, |rr| rr.rdata_offset + rr.rdata.len());
         // RFC 2181 §5.4.1: Cache only Answer and Authority data, never untrusted Additional data.
-        let rr_ttls: Box<[_]> = response
+        let ttl_offsets: Box<[u32]> = response
             .answers()
             .chain(response.authorities())
-            .map(|rr| (rr.ttl_offset, rr.ttl))
-            .collect();
+            .map(|rr| u32::try_from(rr.ttl_offset).ok())
+            .collect::<Option<Vec<_>>>()?
+            .into_boxed_slice();
         // RFC 2181 §5.4.1: Drop Additional records by ending cached wire after Authority.
         let mut wire = response.as_wire()[..end].to_vec();
         wire[10..12].copy_from_slice(&0_u16.to_be_bytes());
@@ -361,7 +370,7 @@ impl Item {
             negative: response.rcode() == Rcode::NXDOMAIN || !super::answers_question(response),
             failure: super::is_resolution_failure(response.rcode()),
             wire: wire.into_boxed_slice(),
-            rr_ttls,
+            ttl_offsets,
             ttl,
             stored: Instant::now(),
             hits: 0,
