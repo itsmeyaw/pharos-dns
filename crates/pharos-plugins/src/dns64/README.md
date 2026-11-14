@@ -5,8 +5,10 @@
 ## dns64
 
 - Rejects non-/96 use of the RFC 6052 Well-Known Prefix and nonzero /96 reserved octets (RFC 6052 §2.1–2.2).
+- Synthesizes with the Well-Known Prefix only for globally reachable IPv4 addresses (RFC 6052 §3.1).
 - Synthesized responses use AA/RA from the initial AAAA response and TC/RCODE from the A lookup (RFC 6147 §5.4).
 - A successful empty A lookup leaves the original AAAA response unchanged (RFC 6147 §5.4).
+- A CNAME-only A lookup follows at most eight targets; exceeding the bound returns SERVFAIL (RFC 6147 §5.1.5).
 - AAAA synthesis uses a Self Lookup that allocates per Query; issue #86 tracks
   allocation-free Self Lookup. Queries that do not require synthesis do not
   allocate in this Plugin.
