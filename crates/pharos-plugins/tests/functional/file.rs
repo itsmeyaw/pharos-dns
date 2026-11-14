@@ -437,26 +437,21 @@ async fn overlong_dname_with_self_lookup_returns_one_dname() {
 
 #[cfg(feature = "plugin-transfer")]
 #[tokio::test]
-async fn axfr_class_mismatch_is_refused_on_wire() {
-    use pharos_server::{Action, Handler, ListenerKey, Router, Server};
-    use std::sync::Arc;
+async fn axfr_class_mismatch_returns_notauth_on_wire() {
+    use pharos_plugins::servers;
+    use pharos_server::{Action, Handler};
 
     let zonefile = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/file/coredns-miek.zone"
     );
-    let corefile = format!("miek.nl:53 {{\n file {zonefile}\n transfer miek.nl {{\n to *\n }}\n}}");
-    let chain = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives())
-        .unwrap()
-        .remove(0)
-        .config;
-    let key = ListenerKey {
-        transport: Transport::Dns,
-        address: "127.0.0.1:53".parse().unwrap(),
-    };
-    let mut router = Router::default();
-    router.add(key, "miek.nl.".parse().unwrap(), Some(chain), vec![]);
-    let server = Arc::new(Server::new(router, key));
+    let corefile = format!(
+        "miek.nl:53 {{\n chaos v1 author\n file {zonefile}\n transfer miek.nl {{\n to *\n }}\n}}"
+    );
+    let (servers, _) =
+        servers(configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap())
+            .unwrap();
+    let server = servers.values().next().unwrap();
     let apex: Name = "miek.nl.".parse().unwrap();
     let mut query = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
@@ -464,23 +459,23 @@ async fn axfr_class_mismatch_is_refused_on_wire() {
         .question(
             NameRef::parse(apex.as_wire(), 0).unwrap(),
             Type::AXFR,
-            Class(3),
+            Class::CH,
         )
         .unwrap();
     let _ = builder.finish();
     let mut response = Vec::with_capacity(512);
     assert_eq!(
-        Handler::handle_shared(
-            &server,
-            &query,
-            "127.0.0.1:1234".parse().unwrap(),
-            Protocol::Tcp,
-            &mut response,
-        )
-        .await,
+        server
+            .handle(
+                &query,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Tcp,
+                &mut response,
+            )
+            .await,
         Action::Respond
     );
-    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTAUTH);
 }
 
 async fn external_alias_test() {

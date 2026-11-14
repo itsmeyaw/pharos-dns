@@ -782,12 +782,33 @@ impl Zone {
         }
         let zone = self;
         if matches!(question.qtype, Type::AXFR | Type::IXFR) {
-            // RFC 5936 §2.2.1: A class mismatch means this server is not authoritative for the transfer.
-            return Outcome::Unanswered(if question.qclass == self.class {
-                Rcode::REFUSED
-            } else {
-                Rcode::NOTAUTH
-            });
+            if question.qclass != zone.class {
+                // RFC 5936 §2.2.1 Note e: A server without authority returns NOTAUTH.
+                let max = cx.max_response_size.max(512);
+                if cx.response.capacity() < max {
+                    if cx.protocol == Protocol::Tcp {
+                        cx.response.reserve(max.saturating_sub(cx.response.len()));
+                    } else {
+                        return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
+                    }
+                }
+                let result = (|| -> Result<(), pharos_server::Error> {
+                    let mut builder = MessageBuilder::new(
+                        cx.response,
+                        max,
+                        cx.query.id(),
+                        0x8000 | (cx.query.flags() & 0x0100) | Rcode::NOTAUTH.0,
+                    )
+                    .map_err(pharos_server::Error::Build)?;
+                    builder
+                        .question(question.name, question.qtype, question.qclass)
+                        .map_err(pharos_server::Error::Build)?;
+                    let _ = builder.finish();
+                    Ok(())
+                })();
+                return result.map_or_else(Outcome::Error, |_| Outcome::Response);
+            }
+            return Outcome::Unanswered(Rcode::REFUSED);
         }
         // RFC 1035 §3.7.1: A zone answers only queries for its class.
         if question.qclass != self.class && question.qclass != Class::ANY {
