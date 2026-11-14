@@ -1,4 +1,4 @@
-use pharos_proto::{Message, Rdata, Record, Type};
+use pharos_proto::{Message, NameRef, Rdata, Record, Type};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum RrsigMask {
@@ -46,12 +46,6 @@ pub(crate) fn compare_with_soa_serial(
     mask_rrsig: impl Into<RrsigMask>,
 ) -> Result<(), String> {
     let mask_rrsig = mask_rrsig.into();
-    let questions = |message: &Message<'_>| {
-        message
-            .questions()
-            .map(|q| format!(";{}\t{}\t{}", q.name, q.qclass, q.qtype))
-            .collect::<Vec<_>>()
-    };
     let mut differences = Vec::new();
     if pharos.flags() != coredns.flags() {
         differences.push(format!(
@@ -60,8 +54,13 @@ pub(crate) fn compare_with_soa_serial(
             coredns.flags()
         ));
     }
-    let (left, right) = (questions(pharos), questions(coredns));
-    if left != right {
+    let same_questions = pharos.question_count() == coredns.question_count()
+        && pharos
+            .questions()
+            .zip(coredns.questions())
+            .all(|(a, b)| name_equal(a.name, b.name) && a.qclass == b.qclass && a.qtype == b.qtype);
+    if !same_questions {
+        let (left, right) = (question_lines(pharos), question_lines(coredns));
         differences.push(format!(
             ";; QUESTION SECTION:\n{}",
             diff_lines(&left, &right)
@@ -151,6 +150,95 @@ pub(crate) fn compare_with_soa_serial(
     }
 }
 
+// RFC 5936 §2.2: AXFR records may span Messages, and clients ignore duplicate RRs.
+pub(crate) fn compare_axfr(
+    left: &[Vec<u8>],
+    right: &[Vec<u8>],
+    tolerance: u32,
+    mask_soa_serial: bool,
+    mask_rrsig: impl Into<RrsigMask>,
+) -> Result<(), String> {
+    fn parse<'a>(messages: &'a [Vec<u8>]) -> Result<Vec<Message<'a>>, String> {
+        messages
+            .iter()
+            .map(|wire| Message::parse(wire).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()
+    }
+    fn collect<'a>(messages: &[Message<'a>]) -> Vec<pharos_proto::Record<'a>> {
+        let mut records = Vec::new();
+        for record in messages.iter().flat_map(Message::answers) {
+            if record.rtype != Type::TSIG && !records.iter().any(|seen| same_rr(seen, &record)) {
+                records.push(record);
+            }
+        }
+        records
+    }
+    let (left_messages, right_messages) = (parse(left)?, parse(right)?);
+    let (Some(left_first), Some(right_first)) = (left_messages.first(), right_messages.first())
+    else {
+        return Err("AXFR stream has no response Messages".into());
+    };
+    let mut differences = Vec::new();
+    if left_first.flags() != right_first.flags() {
+        differences.push(format!(
+            ";; HEADER flags:\n- 0x{:04x}\n+ 0x{:04x}",
+            left_first.flags(),
+            right_first.flags()
+        ));
+    }
+    if left_first.question_count() != right_first.question_count()
+        || !left_first
+            .questions()
+            .zip(right_first.questions())
+            .all(|(a, b)| name_equal(a.name, b.name) && a.qclass == b.qclass && a.qtype == b.qtype)
+    {
+        differences.push(format!(
+            ";; QUESTION SECTION:\n{}",
+            diff_lines(&question_lines(left_first), &question_lines(right_first))
+        ));
+    }
+    let (left_records, right_records) = (collect(&left_messages), collect(&right_messages));
+    let mut unmatched = right_records.clone();
+    let mask_rrsig = mask_rrsig.into();
+    let matches = left_records.iter().all(|a| {
+        if let Some(index) = unmatched.iter().position(|b| {
+            record_equal(
+                a,
+                b,
+                (left_first, right_first),
+                tolerance,
+                false,
+                mask_soa_serial,
+                mask_rrsig,
+            )
+        }) {
+            unmatched.remove(index);
+            true
+        } else {
+            false
+        }
+    }) && unmatched.is_empty();
+    if !matches {
+        differences.push(format!(
+            ";; ANSWER SECTION:\n{}",
+            diff_lines(
+                &left_records.iter().map(record_line).collect::<Vec<_>>(),
+                &right_records.iter().map(record_line).collect::<Vec<_>>(),
+            )
+        ));
+    }
+    if differences.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "--- pharos\n{}\n+++ coredns\n{}\n;; differences\n{}",
+            display_message(left_first),
+            display_message(right_first),
+            differences.join("\n"),
+        ))
+    }
+}
+
 fn display_message(message: &Message<'_>) -> String {
     let mut result = format!(
         ";; opcode: {}, status: {}, flags: 0x{:04x}\n;; QUESTION SECTION:\n",
@@ -191,6 +279,219 @@ fn record_line(record: &Record<'_>) -> String {
     )
 }
 
+fn question_lines(message: &Message<'_>) -> Vec<String> {
+    message
+        .questions()
+        .map(|q| format!(";{}\t{}\t{}", q.name, q.qclass, q.qtype))
+        .collect()
+}
+
+// RFC 4343 §3: DNS names compare case-insensitively for ASCII letters only.
+fn name_equal(a: NameRef<'_>, b: NameRef<'_>) -> bool {
+    let (mut a, mut b) = (a.labels(), b.labels());
+    loop {
+        match (a.next(), b.next()) {
+            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+fn same_rr(a: &Record<'_>, b: &Record<'_>) -> bool {
+    name_equal(a.name, b.name)
+        && a.rtype == b.rtype
+        && a.class == b.class
+        && a.ttl == b.ttl
+        && rdata_equal(
+            a.data().unwrap_or(Rdata::Unknown(a.rtype, a.rdata)),
+            b.data().unwrap_or(Rdata::Unknown(b.rtype, b.rdata)),
+        )
+}
+
+fn rdata_equal(a: Rdata<'_>, b: Rdata<'_>) -> bool {
+    match (&a, &b) {
+        (Rdata::Ns(a), Rdata::Ns(b))
+        | (Rdata::Cname(a), Rdata::Cname(b))
+        | (Rdata::Dname(a), Rdata::Dname(b))
+        | (Rdata::Ptr(a), Rdata::Ptr(b)) => name_equal(*a, *b),
+        (
+            Rdata::Mx {
+                preference: ap,
+                exchange: a,
+            },
+            Rdata::Mx {
+                preference: bp,
+                exchange: b,
+            },
+        ) => ap == bp && name_equal(*a, *b),
+        (
+            Rdata::Soa {
+                mname: am,
+                rname: ar,
+                serial: aserial,
+                refresh: arefresh,
+                retry: aretry,
+                expire: aexpire,
+                minimum: aminimum,
+            },
+            Rdata::Soa {
+                mname: bm,
+                rname: br,
+                serial: bserial,
+                refresh: brefresh,
+                retry: bretry,
+                expire: bexpire,
+                minimum: bminimum,
+            },
+        ) => {
+            name_equal(*am, *bm)
+                && name_equal(*ar, *br)
+                && aserial == bserial
+                && arefresh == brefresh
+                && aretry == bretry
+                && aexpire == bexpire
+                && aminimum == bminimum
+        }
+        (
+            Rdata::Srv {
+                priority: ap,
+                weight: aw,
+                port: aport,
+                target: a,
+            },
+            Rdata::Srv {
+                priority: bp,
+                weight: bw,
+                port: bport,
+                target: b,
+            },
+        ) => ap == bp && aw == bw && aport == bport && name_equal(*a, *b),
+        (
+            Rdata::Naptr {
+                order: ao,
+                preference: ap,
+                flags: af,
+                services: aservices,
+                regexp: aregexp,
+                replacement: a,
+            },
+            Rdata::Naptr {
+                order: bo,
+                preference: bp,
+                flags: bf,
+                services: bservices,
+                regexp: bregexp,
+                replacement: b,
+            },
+        ) => {
+            ao == bo
+                && ap == bp
+                && af == bf
+                && aservices == bservices
+                && aregexp == bregexp
+                && name_equal(*a, *b)
+        }
+        (
+            Rdata::Svcb {
+                priority: ap,
+                target: a,
+                params: av,
+            },
+            Rdata::Svcb {
+                priority: bp,
+                target: b,
+                params: bv,
+            },
+        )
+        | (
+            Rdata::Https {
+                priority: ap,
+                target: a,
+                params: av,
+            },
+            Rdata::Https {
+                priority: bp,
+                target: b,
+                params: bv,
+            },
+        ) => ap == bp && av == bv && name_equal(*a, *b),
+        (
+            Rdata::Rrsig {
+                type_covered: at,
+                algorithm: aa,
+                labels: al,
+                original_ttl: attl,
+                expiration: ae,
+                inception: ai,
+                key_tag: akt,
+                signer: a,
+                signature: asig,
+            },
+            Rdata::Rrsig {
+                type_covered: bt,
+                algorithm: ba,
+                labels: bl,
+                original_ttl: bttl,
+                expiration: be,
+                inception: bi,
+                key_tag: bkt,
+                signer: b,
+                signature: bsig,
+            },
+        ) => {
+            at == bt
+                && aa == ba
+                && al == bl
+                && attl == bttl
+                && ae == be
+                && ai == bi
+                && akt == bkt
+                && asig == bsig
+                && name_equal(*a, *b)
+        }
+        (
+            Rdata::Nsec {
+                next: a,
+                bitmap: av,
+            },
+            Rdata::Nsec {
+                next: b,
+                bitmap: bv,
+            },
+        ) => av == bv && name_equal(*a, *b),
+        (
+            Rdata::Tsig {
+                algorithm: a,
+                time_signed: at,
+                fudge: af,
+                mac: am,
+                original_id: ao,
+                error: ae,
+                other: ax,
+            },
+            Rdata::Tsig {
+                algorithm: b,
+                time_signed: bt,
+                fudge: bf,
+                mac: bm,
+                original_id: bo,
+                error: be,
+                other: bx,
+            },
+        ) => {
+            at == bt
+                && af == bf
+                && am == bm
+                && ao == bo
+                && ae == be
+                && ax == bx
+                && name_equal(*a, *b)
+        }
+        _ => a == b,
+    }
+}
+
 fn whoami_srv(record: &Record<'_>, message: &Message<'_>) -> bool {
     let mut labels = record.name.labels();
     if !matches!(labels.next(), Some(b"_udp" | b"_tcp")) {
@@ -214,7 +515,7 @@ fn record_equal(
     mask_soa_serial: bool,
     mask_rrsig: RrsigMask,
 ) -> bool {
-    if a.name.to_string() != b.name.to_string()
+    if !name_equal(a.name, b.name)
         || a.rtype != b.rtype
         || a.class != b.class
         || if a.rtype == Type::OPT {
@@ -281,13 +582,13 @@ fn record_equal(
         *asig = &[];
         *bsig = &[];
     }
-    a_data == b_data && a_data.to_string() == b_data.to_string()
+    rdata_equal(a_data, b_data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::compare;
-    use pharos_proto::Message;
+    use pharos_proto::{Message, Type};
 
     fn compare_with_soa_serial(
         left: &Message<'_>,
@@ -686,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn compares_compressed_typed_names_without_ignoring_case() {
+    fn compares_question_owner_and_typed_names_case_insensitively() {
         let compressed = [
             0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 1, b'a', 0, 0, 2, 0, 1, 0xc0, 12, 0, 2, 0, 1,
             0, 0, 0, 60, 0, 2, 0xc0, 12,
@@ -712,7 +1013,50 @@ mod tests {
                 0,
                 false
             )
-            .is_err()
+            .is_ok()
         );
+        plain[13] = b'A';
+        assert!(
+            compare(
+                &Message::parse(&compressed).unwrap(),
+                &Message::parse(&plain).unwrap(),
+                0,
+                false
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn axfr_comparison_accepts_multiple_messages_and_ignores_duplicate_records() {
+        use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section};
+
+        fn response(question: bool, address: u8) -> Vec<u8> {
+            let mut wire = Vec::new();
+            let name: Name = "example.org.".parse().unwrap();
+            let name = NameRef::parse(name.as_wire(), 0).unwrap();
+            let mut builder = MessageBuilder::new(&mut wire, 65535, 1, 0x8400).unwrap();
+            if question {
+                builder.question(name, Type::AXFR, Class::IN).unwrap();
+            }
+            builder
+                .record(
+                    Section::Answer,
+                    name,
+                    Type::A,
+                    Class::IN,
+                    60,
+                    &[192, 0, 2, address],
+                )
+                .unwrap();
+            let _ = builder.finish();
+            wire
+        }
+
+        let left = [response(true, 1), response(false, 1)];
+        let right = [response(true, 1)];
+        assert!(super::compare_axfr(&left, &right, 0, false, false).is_ok());
+        let different = [response(true, 2)];
+        assert!(super::compare_axfr(&left, &different, 0, false, false).is_err());
     }
 }
