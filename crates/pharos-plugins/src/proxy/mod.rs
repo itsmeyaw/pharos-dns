@@ -308,22 +308,26 @@ fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
     })
 }
 
-fn sanitize_edns(wire: &mut [u8], length: usize, transport: Transport, remove_ecs: bool) -> usize {
-    let (start, old_len) = {
-        let Ok(message) = Message::parse(&wire[..length]) else {
-            return length;
-        };
-        let Some(record) = message
-            .additionals()
-            .find(|record| record.rtype == Type::OPT)
-        else {
-            return length;
-        };
-        // RFC 6891 §6.1.2: Parsed OPT RDATA borrows from this validated wire slice.
-        (
-            record.rdata.as_ptr() as usize - wire.as_ptr() as usize,
-            record.rdata.len(),
-        )
+fn opt_rdata_range(message: &Message<'_>, wire: &[u8]) -> Option<(usize, usize)> {
+    let record = message
+        .additionals()
+        .find(|record| record.rtype == Type::OPT)?;
+    // RFC 6891 §6.1.2: Parsed OPT RDATA borrows from this validated wire slice.
+    Some((
+        record.rdata.as_ptr() as usize - wire.as_ptr() as usize,
+        record.rdata.len(),
+    ))
+}
+
+fn sanitize_edns(
+    wire: &mut [u8],
+    length: usize,
+    transport: Transport,
+    remove_ecs: bool,
+    opt_range: Option<(usize, usize)>,
+) -> usize {
+    let Some((start, old_len)) = opt_range else {
+        return length;
     };
     let old_end = start + old_len;
     let mut read = start;
@@ -380,9 +384,10 @@ pub(crate) fn without_ecs(
     {
         return Ok(None);
     }
+    let opt_range = opt_rdata_range(&message, query);
     output.clear();
     output.extend_from_slice(query);
-    let len = sanitize_edns(output, query.len(), transport, true);
+    let len = sanitize_edns(output, query.len(), transport, true, opt_range);
     Ok(Some(len))
 }
 
@@ -734,10 +739,11 @@ impl Proxy {
         // RFC 5625 §4.3: Proxy Queries regardless of QTYPE and QCLASS.
         response[..query.len()].copy_from_slice(query);
         response[..2].copy_from_slice(&id);
+        let opt_range = opt_rdata_range(&request, query);
         let outgoing_len = if signed {
             query.len()
         } else {
-            sanitize_edns(response, query.len(), transport, false)
+            sanitize_edns(response, query.len(), transport, false, opt_range)
         };
         let local_addr = socket.local_addr()?;
         let sent = timeout(READ_TIMEOUT, socket.send(&response[..outgoing_len]))
@@ -887,7 +893,8 @@ mod tests {
     fn sanitizes_tcp_keepalive_and_ecs_scope_in_queries() {
         let mut wire = query_with_options(KEEPALIVE_AND_ECS);
         let len = wire.len();
-        let new_len = sanitize_edns(&mut wire, len, Transport::Tcp, false);
+        let opt_range = opt_rdata_range(&Message::parse(&wire).unwrap(), &wire);
+        let new_len = sanitize_edns(&mut wire, len, Transport::Tcp, false, opt_range);
         let message = Message::parse(&wire[..new_len]).unwrap();
         let options: Vec<_> = message.opt().unwrap().options().iter().collect();
         assert_eq!(options[0], EdnsOption::TcpKeepalive(None));
@@ -901,7 +908,8 @@ mod tests {
     fn removes_udp_keepalive_without_losing_ecs() {
         let mut wire = query_with_options(KEEPALIVE_AND_ECS);
         let len = wire.len();
-        let new_len = sanitize_edns(&mut wire, len, Transport::Udp, false);
+        let opt_range = opt_rdata_range(&Message::parse(&wire).unwrap(), &wire);
+        let new_len = sanitize_edns(&mut wire, len, Transport::Udp, false, opt_range);
         let message = Message::parse(&wire[..new_len]).unwrap();
         let options: Vec<_> = message.opt().unwrap().options().iter().collect();
         assert_eq!(options.len(), 1);
