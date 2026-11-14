@@ -690,11 +690,17 @@ impl Plugin for Template {
         let result = (|| -> Result<(), Error> {
             // RFC 1035 §4.1.1: copy the Query ID, opcode and recursion-desired flag into the Response.
             // RFC 1035 §4.1.1: propagate TC when a followed lookup is truncated.
-            let truncated = lookups
+            let chased = lookups
                 .last()
-                .and_then(|(_, wire)| Message::parse(wire).ok())
-                .is_some_and(|message| message.tc());
-            // RFC 1035 §4.1.1: Set AA and the configured response code.
+                .and_then(|(_, wire)| Message::parse(wire).ok());
+            let truncated = chased.as_ref().is_some_and(|message| message.tc());
+            // RFC 6604 §3: A chased CNAME uses the terminal lookup's RCODE unless configured otherwise.
+            let rcode = if hit.rule.rcode == Rcode::NOERROR {
+                chased.map_or(Rcode::NOERROR, |message| message.rcode())
+            } else {
+                hit.rule.rcode
+            };
+            // RFC 1035 §4.1.1: Set AA and the selected response code.
             let flags = 0x8400
                 | (query.flags() & 0x7800)
                 | if query.opcode() == pharos_proto::Opcode::QUERY {
@@ -702,8 +708,8 @@ impl Plugin for Template {
                 } else {
                     0
                 }
-                // RFC 1035 §4.1.1: The response RCODE reports the configured result code.
-                | (hit.rule.rcode.0 & 0xf)
+                // RFC 1035 §4.1.1: The response RCODE reports the selected result code.
+                | (rcode.0 & 0xf)
                 | if truncated { 0x0200 } else { 0 };
             let mut builder =
                 MessageBuilder::new(cx.response, max, query.id(), flags).map_err(Error::Build)?;
@@ -748,6 +754,12 @@ impl Plugin for Template {
                 }
             }
             if let Some((code, reason)) = &hit.rule.ederror {
+                // RFC 8914 §4.1: Add explanatory text when code 0 has no configured reason.
+                let reason = if *code == 0 && reason.is_empty() {
+                    "Other error"
+                } else {
+                    reason.as_str()
+                };
                 let option_len = u16::try_from(reason.len().saturating_add(2))
                     .map_err(|_| Error::ResponseBufferTooSmall)?;
                 // RFC 8914 §2: OPTION-CODE 15 carries INFO-CODE and EXTRA-TEXT.
