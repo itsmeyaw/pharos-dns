@@ -12,15 +12,15 @@ async fn inline_answers_nodata_and_fallthrough() {
     let blocks = parse("Corefile", text).unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let root: Name = ".".parse().unwrap();
-    for (name, kind, answers, additional) in [
-        ("ONE.example.org.", Type::A, 1, 0),
-        ("one.example.org.", Type::AAAA, 0, 0),
-        ("one.example.org.", Type::TXT, 0, 0),
-        ("two.example.org.", Type::AAAA, 1, 0),
-        ("1.2.0.192.in-addr.arpa.", Type::PTR, 1, 0),
-        ("2.2.0.192.in-addr.arpa.", Type::PTR, 0, 2),
-        ("absent.example.org.", Type::A, 0, 2),
-        ("outside.test.", Type::A, 0, 2),
+    for (name, kind, answers, authority, additional) in [
+        ("ONE.example.org.", Type::A, 1, 0, 0),
+        ("one.example.org.", Type::AAAA, 0, 1, 0),
+        ("one.example.org.", Type::TXT, 0, 1, 0),
+        ("two.example.org.", Type::AAAA, 1, 0, 0),
+        ("1.2.0.192.in-addr.arpa.", Type::PTR, 1, 0, 0),
+        ("2.2.0.192.in-addr.arpa.", Type::PTR, 0, 0, 2),
+        ("absent.example.org.", Type::A, 0, 0, 2),
+        ("outside.test.", Type::A, 0, 0, 2),
     ] {
         let name: Name = name.parse().unwrap();
         let name_ref = NameRef::parse(name.as_wire(), 0).unwrap();
@@ -48,9 +48,16 @@ async fn inline_answers_nodata_and_fallthrough() {
         let response = Message::parse(&response).unwrap();
         assert!(response.aa());
         assert_eq!(response.answer_count(), answers);
+        assert_eq!(response.authority_count(), authority);
         assert_eq!(response.additional_count(), additional);
         if answers > 0 {
             assert_eq!(response.answers().next().unwrap().ttl, 60);
+        }
+        if authority > 0 {
+            let soa = response.authorities().next().unwrap();
+            assert_eq!(soa.rtype, Type::SOA);
+            assert_eq!(soa.name.to_string(), "example.org.");
+            assert_eq!(soa.ttl, 60);
         }
     }
 }
@@ -93,4 +100,7 @@ async fn unmapped_name_without_fallthrough_returns_authoritative_nxdomain() {
     assert!(response.aa());
     assert_eq!(response.rcode(), pharos_proto::Rcode::NXDOMAIN);
     assert_eq!(response.answer_count(), 0);
+    let soa = response.authorities().next().unwrap();
+    assert_eq!(soa.rtype, Type::SOA);
+    assert_eq!(soa.name.to_string(), "example.org.");
 }

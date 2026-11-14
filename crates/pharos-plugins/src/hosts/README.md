@@ -4,7 +4,8 @@
 
 ## hosts
 
-- An unmapped name without fallthrough gets authoritative NXDOMAIN rather than CoreDNS's SERVFAIL (RFC 1034 §4.3.2).
+- An unmapped name without fallthrough gets authoritative NXDOMAIN and a synthetic SOA, rather than CoreDNS's SERVFAIL (RFC 1034 §4.3.2; RFC 2308 §3).
+- Authoritative NODATA includes a synthetic SOA for negative caching (RFC 2308 §3).
 - Non-IN Questions pass through rather than receiving IN-class host records (RFC 1034 §4.3.1).
 - Pharos discards names that are not valid DNS names or UTF-8; CoreDNS retains arbitrary fields in its hosts maps.
 - Pharos lowercases ASCII name bytes, while CoreDNS applies Go's Unicode lowercasing.

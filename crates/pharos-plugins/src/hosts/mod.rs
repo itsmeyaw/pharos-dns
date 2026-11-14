@@ -14,6 +14,8 @@ use pharos_server::{Context, Next, Outcome, Protocol};
 
 mod data;
 
+const SOA_RNAME: &[u8] = b"\x0ahostmaster\x07invalid\0";
+
 #[derive(Debug, Default)]
 struct State {
     entries: arc_swap::ArcSwap<data::Map>,
@@ -309,15 +311,23 @@ impl pharos_server::Plugin for Hosts {
         // RFC 1034 §4.3.2: distinguish missing owners from existing NODATA owners.
         let missing = ips.0.is_empty()
             && ips.1.is_empty()
-            && names1.is_none()
-            && names2.is_none()
             && v4.is_empty()
             && v6.is_empty()
             && inline4.is_empty()
-            && inline6.is_empty();
+            && inline6.is_empty()
+            && names1.is_none()
+            && names2.is_none();
+        let negative = ips.0.is_empty() && ips.1.is_empty() && names1.is_none() && names2.is_none();
         if missing && fallthrough {
             return next.run(cx).await;
         }
+        let soa_owner = negative.then(|| {
+            self.domain_names
+                .iter()
+                .filter(|domain| contains(key, std::slice::from_ref(*domain)))
+                .max_by_key(|domain| domain.as_wire().len())
+                .expect("matched hosts domain")
+        });
         let max = cx.max_response_size.max(512);
         if cx.response.capacity() < max {
             if cx.protocol == Protocol::Tcp {
@@ -377,6 +387,29 @@ impl pharos_server::Plugin for Hosts {
                         Class::IN,
                         self.ttl,
                         name.as_wire(),
+                    )
+                    .map_err(pharos_server::Error::Build)?;
+            }
+            if let Some(owner) = soa_owner {
+                // RFC 2308 §3: authoritative NXDOMAIN and NODATA need SOA for negative caching.
+                let mut rdata = [0u8; 255 + 20 + 20];
+                let mut len = owner.as_wire().len();
+                rdata[..len].copy_from_slice(owner.as_wire());
+                rdata[len..len + SOA_RNAME.len()].copy_from_slice(SOA_RNAME);
+                len += SOA_RNAME.len();
+                for value in [1u32, 3600, 600, 604_800, self.ttl] {
+                    rdata[len..len + 4].copy_from_slice(&value.to_be_bytes());
+                    len += 4;
+                }
+                builder
+                    .record(
+                        Section::Authority,
+                        NameRef::parse(owner.as_wire(), 0)
+                            .map_err(|_| pharos_server::Error::InvalidQuery)?,
+                        Type::SOA,
+                        Class::IN,
+                        self.ttl,
+                        &rdata[..len],
                     )
                     .map_err(pharos_server::Error::Build)?;
             }

@@ -178,7 +178,8 @@ async fn coredns_lookup_cases() {
         assert_eq!(response.rcode(), Rcode::NOERROR);
         assert!(response.aa());
         assert_eq!(response.answer_count(), 0);
-        assert_eq!(response.authority_count(), 0);
+        assert_eq!(response.authority_count(), 1);
+        assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
         assert_eq!(response.additional_count(), 0);
     }
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
@@ -196,6 +197,7 @@ async fn coredns_wildcard_parent_case() {
     assert!(response.aa());
     assert_eq!(response.rcode(), Rcode::NXDOMAIN);
     assert_eq!(response.answer_count(), 0);
+    assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 
@@ -233,7 +235,8 @@ async fn coredns_fallthrough_unsupported_cases() {
             assert_eq!(response.rcode(), Rcode::NOERROR);
             assert!(response.aa());
             assert_eq!(response.answer_count(), 0);
-            assert_eq!(response.authority_count(), 0);
+            assert_eq!(response.authority_count(), 1);
+            assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
             assert_eq!(response.additional_count(), 0);
         }
         chain.lifecycle.run(Phase::Shutdown).await.unwrap();
