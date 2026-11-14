@@ -159,7 +159,8 @@ pub(super) fn parse(
                 num!(0, put32(&mut out, field!(0, "missing CSYNC serial")))?;
                 // RFC 7477 §2.1.1.2: the Flags field occupies 16 bits.
                 let flags: u16 = num!(1, number(field!(1, "missing CSYNC flags")))?;
-                if flags & !1 != 0 {
+                // RFC 7477 §2.1.1.2: IMMEDIATE and SOAMINIMUM are the two defined flags.
+                if flags & !3 != 0 {
                     index = 1;
                     return Err("invalid CSYNC flags".into());
                 }
@@ -182,6 +183,7 @@ pub(super) fn parse(
                 out.push(num!(0, number(field!(0, "missing gateway precedence")))?);
                 let (kind, gateway) = if rtype == Type::IPSECKEY {
                     let kind = num!(1, number(field!(1, "missing gateway type")))?;
+                    // RFC 4025 §2.1: IPSECKEY gateway types are 0 through 3.
                     if kind > 3 {
                         index = 1;
                         return Err("invalid IPSECKEY gateway type".into());
@@ -203,6 +205,7 @@ pub(super) fn parse(
                     };
                     // RFC 8777 §4.2.3: The relay type selects the AMTRELAY relay-field encoding.
                     let kind: u8 = num!(2, number(field!(2, "missing gateway type")))?;
+                    // RFC 8777 §4.2.3: AMTRELAY relay types are 0 through 3.
                     if kind > 3 {
                         index = 2;
                         return Err("invalid AMTRELAY gateway type".into());
@@ -353,8 +356,10 @@ fn coordinate(
         }
         *i += 1;
         *error_index = *i;
-        let sec = loc_float(fields.get(*i).ok_or("missing LOC seconds")?)?;
-        if sec < 0.0 || sec >= 60.0 {
+        let seconds = fields.get(*i).ok_or("missing LOC seconds")?;
+        let sec = loc_float(seconds)?;
+        // RFC 1876 §3: Seconds must be finite and in the range [0, 60).
+        if !sec.is_finite() || sec < 0.0 || sec >= 60.0 {
             return Err("invalid LOC seconds".into());
         }
         if min == 0 {
@@ -364,7 +369,7 @@ fn coordinate(
         let millis = sec * 1000.0;
         value += min * 60_000
             + if round_away {
-                millis.ceil() as u32
+                loc_decimal_millis_ceil(seconds).unwrap_or_else(|| millis.ceil() as u32)
             } else {
                 millis as u32
             };
@@ -384,6 +389,47 @@ fn coordinate(
     } else {
         Err("invalid LOC direction".into())
     }
+}
+
+// RFC 1876 §2: Preserve decimal seconds before rounding longitude outward to milliseconds.
+fn loc_decimal_millis_ceil(field: &str) -> Option<u32> {
+    let field = field.replace('_', "");
+    let unsigned = field.strip_prefix(['+', '-']).unwrap_or(&field);
+    if unsigned.starts_with("0x") || unsigned.starts_with("0X") {
+        return None;
+    }
+    let (mantissa, exponent) = unsigned.split_once(['e', 'E']).unwrap_or((unsigned, "0"));
+    let exponent = exponent.parse::<i64>().ok()?;
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    let mut digits = String::with_capacity(whole.len() + fraction.len());
+    digits.push_str(whole);
+    digits.push_str(fraction);
+    let leading_zeroes = digits.bytes().take_while(|byte| *byte == b'0').count();
+    if leading_zeroes == digits.len() {
+        return Some(0);
+    }
+    let point = i64::try_from(whole.len())
+        .ok()?
+        .checked_add(exponent)?
+        .checked_add(3)?
+        .checked_sub(i64::try_from(leading_zeroes).ok()?)?;
+    let digits = &digits[leading_zeroes..];
+    if point <= 0 {
+        return Some(1);
+    }
+    let point = usize::try_from(point).ok()?;
+    let whole_len = point.min(digits.len());
+    let mut value = digits[..whole_len].parse::<u32>().ok()?;
+    if point > digits.len() {
+        value =
+            value.checked_mul(10_u32.checked_pow(u32::try_from(point - digits.len()).ok()?)?)?;
+    } else if digits[point..].bytes().any(|byte| byte != b'0') {
+        value = value.checked_add(1)?;
+    }
+    Some(value)
 }
 
 // RFC 1876 §3: miekg reads coordinates and altitude using Go's floating-point syntax.

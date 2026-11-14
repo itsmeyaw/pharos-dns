@@ -285,6 +285,7 @@
 - A Zone file without a final newline is parsed as if it had one. miekg/dns treats an incomplete last line differently at end of file: it accepts `www` or `www IN A ` (dropping the line or emitting empty RDATA) and rejects `www IN A`, the reverse of its result when the line ends with a newline. Complete last lines parse the same. miekg/dns re-parses each `$GENERATE` template the same way, so it also accepts incomplete templates such as `$GENERATE 1-1 a\\` that Pharos rejects.
 - Unlike miekg/dns, incomplete typed records are rejected rather than accepted as partial values.
 - Pharos rejects a zero-length TXT RDATA, which lacks the required character string; miekg/dns accepts it. TXT strings of length zero are accepted.
+- SPF (TYPE99) and DLV (TYPE32769) zone records remain accepted for compatibility: live miekg/dns v1.1.74-0.20261103100211-b2d6c9f4480a accepts both, despite RFC 7208 §14.1 and RFC 8749 §4 discouraging or retiring these types.
 - Pharos rejects empty and non-alphanumeric CAA tags as required by RFC 8659; miekg/dns accepts them.
 - CAA and URI presentation follows miekg/dns's octet-string escaping, including its interpretation of backslashes in wire values, which can make the displayed value differ from the original octets.
 - SRV targets and NAPTR replacements may be decoded from compressed names, but are always written uncompressed. RRSIG signer names and NSEC next names have the same behavior.

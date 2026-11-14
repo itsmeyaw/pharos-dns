@@ -266,10 +266,11 @@ fn parse_rdata_inner(
                 return Err("invalid DNSKEY flags".into());
             }
             out.extend(flags.to_be_bytes());
-            out.push(num!(1, number(fields[1]))?);
-            if fields[1] != "3" {
+            let protocol: u8 = num!(1, number(fields[1]))?;
+            if protocol != 3 {
                 return Err("DNSKEY protocol must be 3".into());
             }
+            out.push(protocol);
             out.push(num!(2, dnssec_algorithm(fields[2], true))?);
             out.extend(at!(
                 base64_error_index(fields, 3),
@@ -372,6 +373,7 @@ fn parse_rdata_inner(
             length_bytes(&mut out, &salt)?;
             if rtype == Type::NSEC3 {
                 let hash = at!(4, base32hex(fields[4]))?;
+                // RFC 5155 §3.1.6: Next Hashed Owner Name length is 1–255 octets.
                 if hash.is_empty() || hash.len() > usize::from(u8::MAX) {
                     return Err("invalid NSEC3 next hash length".into());
                 }
@@ -456,8 +458,8 @@ fn parse_rdata_inner(
 
 // RFC 3597 §5: known RDATA is unpacked and re-encoded in its type's wire format.
 fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
-    // RFC 7477 §2.1.1.2: CSYNC has only one defined flag and needs a bitmap block.
-    if rtype == Type::CSYNC && (data.len() <= 6 || u16::from_be_bytes([data[4], data[5]]) & !1 != 0)
+    // RFC 7477 §2.1.1.2: CSYNC has two defined flags and needs a bitmap block.
+    if rtype == Type::CSYNC && (data.len() <= 6 || u16::from_be_bytes([data[4], data[5]]) & !3 != 0)
     {
         return Err("invalid generic CSYNC".into());
     }
@@ -540,6 +542,7 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
             b'a' | b'v' => {
                 let n = if field == b'a' { 4 } else { 16 };
                 if missing {
+                    // RFC 3597 §5: Known generic address fields are required.
                     return Err("missing generic address".into());
                 }
                 out.extend_from_slice(remaining.get(..n).ok_or("truncated generic address")?);
@@ -547,6 +550,7 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
             }
             b'n' => {
                 if missing {
+                    // RFC 3597 §5: Known generic name fields are required.
                     return Err("missing generic name".into());
                 }
                 pos = generic_name(data, pos, &mut out)?;
@@ -599,6 +603,7 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                 }
             }
             b'p' => {
+                // RFC 9460 §2.2: SvcParams require valid ordered keys and values.
                 let params_start = out.len();
                 let mut last = None;
                 while pos < data.len() {
@@ -729,6 +734,7 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                     };
                     let prefix = usize::from(h[2]);
                     let size = usize::from(h[3] & 0x7f);
+                    // RFC 3123 §5: Prefix length cannot exceed address-family width.
                     if prefix > max * 8 || size > max {
                         return Err("invalid generic APL prefix".into());
                     }
@@ -942,9 +948,6 @@ fn unescape(value: &str) -> Result<Vec<u8>, String> {
             let n = u16::from(digits[0] - b'0') * 100
                 + u16::from(digits[1] - b'0') * 10
                 + u16::from(digits[2] - b'0');
-            if n > 255 {
-                return Err(INVALID_ESCAPE.into());
-            }
             if n > 255 {
                 return Err(INVALID_ESCAPE.into());
             }

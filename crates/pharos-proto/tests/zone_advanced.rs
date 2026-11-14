@@ -92,6 +92,14 @@ fn loc_defaults_precision_and_bounds() {
         parse(Type::LOC, &["0", "S", "0", "W", "-100000"]).unwrap()[12..],
         [0, 0, 0, 0]
     );
+    assert_eq!(
+        parse(
+            Type::LOC,
+            &["0", "S", "0", "W", "-100000", ".01m", "0.1m", "90000000m"]
+        )
+        .unwrap()[1..4],
+        [0x10, 0x11, 0x99]
+    );
     assert!(parse(Type::LOC, &["0", "N", "0", "E", "-100000.02"]).is_err());
     assert!(parse(Type::LOC, &["0", "N", "0", "E", "42849673"]).is_err());
     for fields in [
@@ -120,6 +128,79 @@ fn loc_altitude_range_and_longitude_rounding() {
     let wire = parse(Type::LOC, &["0", "N", "0", "0", "0.0001", "E", "0"]).unwrap();
     assert_eq!(&wire[8..12], &0x8000_0001u32.to_be_bytes());
     assert!(parse(Type::LOC, &["0", "N", "0", "E", "0", "1", "2", "3", "4"]).is_err());
+}
+
+// RFC 1876 §3: Preserve miekg-compatible float parsing and centimeter conversion.
+#[test]
+fn loc_float_values_match_miekg() {
+    for (alt, expected) in [
+        ("0", 10_000_000),
+        ("-100000", 0),
+        ("42849672.95", u32::MAX),
+        ("1e-999", 10_000_000),
+        ("0x1p+2", 10_000_400),
+        ("0x1.8p2", 10_000_600),
+        ("-0x1.8p2", 9_999_400),
+        ("0x_1p2", 10_000_400),
+        ("1_0", 10_001_000),
+        ("0x1p-1075", 10_000_000),
+        ("0x1.8p-1075", 10_000_000),
+        ("1.25", 10_000_125),
+    ] {
+        let wire = parse(Type::LOC, &["0", "N", "0", "E", alt]).unwrap();
+        assert_eq!(&wire[12..], &expected.to_be_bytes(), "altitude {alt}");
+    }
+    for alt in [
+        "+NaN",
+        "-NaN",
+        "1e309",
+        "-1e309",
+        "0x1p1024",
+        "0x1.fffffffffffff8p1023",
+        "1__0",
+        "1_e2",
+        "0x1._8p2",
+    ] {
+        assert!(
+            parse(Type::LOC, &["0", "N", "0", "E", alt]).is_err(),
+            "{alt}"
+        );
+    }
+    for (seconds, expected) in [
+        ("-0", 0),
+        ("1e-999", 0),
+        ("0x1p+2", 4_000),
+        ("0x1.8p2", 6_000),
+        ("1_0", 10_000),
+        ("59.9999", 59_999),
+    ] {
+        let wire = parse(Type::LOC, &["0", "0", seconds, "N", "0", "E", "0"]).unwrap();
+        assert_eq!(
+            &wire[4..8],
+            &(0x8000_0000u32 + expected).to_be_bytes(),
+            "seconds {seconds}"
+        );
+    }
+    for seconds in [
+        "NaN", "nan", "+NaN", "-NaN", "+Inf", "-Inf", "1e309", "1e308", "60", "-0.001",
+    ] {
+        assert!(
+            parse(Type::LOC, &["0", "0", seconds, "N", "0", "E", "0"]).is_err(),
+            "seconds {seconds}"
+        );
+    }
+}
+
+#[test]
+fn loc_longitude_decimal_rounding_is_exact() {
+    for (seconds, expected) in [("12.345", 12_345), ("0.0001", 1), ("1e-999", 1)] {
+        let wire = parse(Type::LOC, &["0", "N", "0", "0", seconds, "E", "0"]).unwrap();
+        assert_eq!(
+            &wire[8..12],
+            &(0x8000_0000u32 + expected).to_be_bytes(),
+            "seconds {seconds}"
+        );
+    }
 }
 
 // RFC 8005 §5 and RFC 4398 §2: HIP and CERT encode their keys in binary.
@@ -157,6 +238,13 @@ fn csync_bitmap_must_not_be_empty() {
     );
     assert!(parse(Type::CSYNC, &["0", "0"]).is_err());
     assert!(parse(Type::CSYNC, &["0", "0", "NOTATYPE"]).is_err());
+    for flags in ["2", "3"] {
+        assert_eq!(
+            &parse(Type::CSYNC, &["66", flags, "A"]).unwrap()[4..6],
+            &flags.parse::<u16>().unwrap().to_be_bytes()
+        );
+    }
+    assert!(parse(Type::CSYNC, &["66", "4", "A"]).is_err());
 }
 
 // RFC 4025 §2 and RFC 8777 §4: gateways are selected by their type.

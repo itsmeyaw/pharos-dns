@@ -808,8 +808,8 @@ impl<'a> Rdata<'a> {
             Type::CAA => {
                 let (&flags, rest) = bytes.split_first().ok_or(RdataError)?;
                 let (tag, value) = character_string(rest)?;
-                if flags & 0x7f != 0 || tag.is_empty() || !tag.iter().all(u8::is_ascii_alphanumeric)
-                {
+                // RFC 8659 §4.1: Ignore reserved flag bits on receipt.
+                if tag.is_empty() || !tag.iter().all(u8::is_ascii_alphanumeric) {
                     return Err(RdataError);
                 }
                 Ok(Self::Caa { flags, tag, value })
@@ -923,13 +923,10 @@ impl<'a> Rdata<'a> {
             // RFC 4034 §2.1: DNSKEY has flags, protocol, algorithm, and public key.
             // RFC 7344 §3.2: CDNSKEY RDATA has the DNSKEY field layout.
             Type::DNSKEY | Type::CDNSKEY => {
+                // RFC 4034 §§2.1.1–2.1.2: Ignore reserved flags and protocol values on receipt.
                 let h = bytes.get(..4).ok_or(RdataError)?;
                 let (flags, protocol, algorithm, public_key) =
                     (u16::from_be_bytes([h[0], h[1]]), h[2], h[3], &bytes[4..]);
-                // RFC 4034 §§2.1.1-2: reserved DNSKEY flag bits are zero and Protocol is 3.
-                if flags & !0x0181 != 0 || protocol != 3 {
-                    return Err(RdataError);
-                }
                 Ok(if rtype == Type::DNSKEY {
                     Self::Dnskey {
                         flags,
@@ -1000,6 +997,7 @@ impl<'a> Rdata<'a> {
                     })
                 } else {
                     // RFC 5155 §3.1.7: The next owner stores the binary hash, not the zone.
+                    // RFC 5155 §3.1.6: Next Hashed Owner Name length is 1–255 octets.
                     let (next_owner, bitmap) = character_string(rest)?;
                     if next_owner.is_empty() {
                         return Err(RdataError);
@@ -1015,12 +1013,12 @@ impl<'a> Rdata<'a> {
                     })
                 }
             }
-            // RFC 7477 §§2.1.1.2-.2.1.1.2.1: CSYNC flags and NSEC bitmap are constrained.
+            // RFC 7477 §2.1.1.2: IMMEDIATE and SOAMINIMUM are the two defined flags.
             Type::CSYNC => {
                 let header = bytes.get(..6).ok_or(RdataError)?;
                 let flags = u16::from_be_bytes([header[4], header[5]]);
                 let bitmap = bytes.get(6..).ok_or(RdataError)?;
-                if flags & !1 != 0 {
+                if flags & !3 != 0 {
                     return Err(RdataError);
                 }
                 valid_nsec_bitmap(bitmap)?;
@@ -1338,6 +1336,7 @@ impl<'a> Rdata<'a> {
                 // RFC 5155 §3.2: NSEC3 fields use wire order and network-byte-order integers.
                 valid_bitmap(bitmap).map_err(|_| BuildError::InvalidRdata)?;
                 // RFC 5155 §3.1.2: only the Opt-Out flag bit is defined.
+                // RFC 5155 §3.1.6: Next Hashed Owner Name length is 1–255 octets.
                 if *flags & !1 != 0 || next_owner.is_empty() {
                     return Err(BuildError::InvalidRdata);
                 }
@@ -1354,6 +1353,7 @@ impl<'a> Rdata<'a> {
                 iterations,
                 salt,
             } => {
+                // RFC 5155 §4.2: NSEC3PARAM carries algorithm, flags, iterations, and salt.
                 // RFC 5155 §4.1.2: NSEC3PARAM flags are reserved and MUST be zero.
                 if *flags != 0 {
                     return Err(BuildError::InvalidRdata);
@@ -1481,10 +1481,10 @@ impl<'a> Rdata<'a> {
             {
                 Err(BuildError::InvalidRdata)
             }
-            // RFC 7477 §2.1.1.2: CSYNC permits only its defined flag bit and a nonempty bitmap.
+            // RFC 7477 §2.1.1.2: CSYNC permits its two defined flags and a nonempty bitmap.
             Self::Unknown(rtype, bytes) if *rtype == Type::CSYNC => {
                 if bytes.len() < 7
-                    || u16::from_be_bytes([bytes[4], bytes[5]]) & !1 != 0
+                    || u16::from_be_bytes([bytes[4], bytes[5]]) & !3 != 0
                     || valid_nsec_bitmap(&bytes[6..]).is_err()
                 {
                     return Err(BuildError::InvalidRdata);

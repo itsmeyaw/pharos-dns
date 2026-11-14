@@ -29,7 +29,7 @@ fn base64_matches_go_wire_decoding() {
 }
 
 #[test]
-fn zonemd_packs_any_hex_digest_length() {
+fn zonemd_packs_unknown_hash_digest_lengths() {
     assert_eq!(
         parse(Type::ZONEMD, &["1", "2", "3", "AABB"]).unwrap(),
         [0, 0, 0, 1, 2, 3, 0xaa, 0xbb]
@@ -78,7 +78,7 @@ fn rrsig_dates_use_miekg_serial_arithmetic() {
 }
 
 #[test]
-fn generic_known_types_unpack_like_miekg() {
+fn generic_known_types_follow_wire_layouts() {
     for (rtype, length, data, expected) in [
         (Type::A, "4", "7f000001", vec![127, 0, 0, 1]),
         (Type::NS, "3", "016100", vec![1, b'a', 0]),
@@ -261,17 +261,25 @@ fn sha256_ds_digest_requires_32_octets() {
 }
 
 #[test]
-fn eui_wire_lengths_and_csync_fields_are_checked() {
+fn eui_wire_lengths_and_csync_flags_are_checked() {
     assert!(parse(Type::EUI48, &[r"\#", "0"]).is_err());
     assert!(parse(Type::EUI64, &[r"\#", "6", "000000000000"]).is_err());
     assert!(parse(Type::CSYNC, &[r"\#", "6", "000000000000"]).is_err());
-    assert!(parse(Type::CSYNC, &[r"\#", "8", "0000000000020040"]).is_err());
+    assert_eq!(
+        parse(Type::CSYNC, &[r"\#", "9", "000000000002000140"]).unwrap(),
+        [0, 0, 0, 0, 0, 2, 0, 1, 0x40]
+    );
+    assert!(parse(Type::CSYNC, &[r"\#", "9", "000000000004000140"]).is_err());
 }
 
 #[test]
 fn dnskey_accepts_registered_algorithm_mnemonic() {
     assert_eq!(
         parse(Type::DNSKEY, &["257", "3", "RSASHA256", "AQID"]).unwrap(),
+        [1, 1, 3, 8, 1, 2, 3]
+    );
+    assert_eq!(
+        parse(Type::DNSKEY, &["257", "03", "RSASHA256", "AQID"]).unwrap(),
         [1, 1, 3, 8, 1, 2, 3]
     );
 }
