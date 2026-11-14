@@ -589,6 +589,37 @@ mod tests {
         assert!(headers.contains("200 OK"));
         let list: Value = serde_json::from_str(body).unwrap();
         assert_eq!(names(&list), ["default"]);
+
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .write_all(
+                b"POST /api/v1/services HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+            "{response}"
+        );
+        assert!(response.contains("allow: GET, HEAD\r\n"), "{response}");
+
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .write_all(
+                b"HEAD /api/v1/services HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.ends_with("\r\n\r\n"), "{response}");
         server.abort();
     }
 }
