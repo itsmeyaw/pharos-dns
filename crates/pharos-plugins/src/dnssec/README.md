@@ -14,6 +14,10 @@
 - RSASHA512 (algorithm 10) is refused for signing under RFC 9904 §3. RSA modulus and exponent values above 4096 bits are rejected (RFC 3110 §2; RFC 5702 §§2.1–2.2).
 - P-256/P-384/Ed25519 sign with aws-lc-rs (RustCrypto was tried and reverted, see [#106](https://github.com/itsmeyaw/pharos-dns/issues/106)). A signature costs one Rust-heap allocation (ECDSA also allocates inside aws-lc-rs); RSA allocates an intermediate signature buffer. C-heap use is not measured.
 - Each loaded DNSKEY is bound to its owner zone and cannot sign another configured zone (RFC 4035 §2.1).
+- Apex DNSKEY interception matches only QCLASS IN and ANY; other classes pass to Next, but DO Responses in signed zones are still signed. CoreDNS intercepts DNSKEY without the class gate (RFC 2181 §5.1).
+- In split-key mode, Pharos signs only the apex DNSKEY RRset with the KSK and signs non-apex DNSKEY RRsets with the ZSK. CoreDNS uses the KSK for all DNSKEY RRsets (RFC 6781 §3.1).
+- Calendar RRSIG dates at least 2^31 seconds from now are rejected; miekg/dns wraps them into 32-bit timestamps (RFC 4034 §3.1.5; RFC 1982 §3.2).
+- RSA DNSKEY parsing rejects leading zero octets and the extended exponent-length form for exponents shorter than 256 octets; miekg/dns accepts them (RFC 3110 §2).
 - A configured zone without a matching key passes DNSKEY and DO queries through unchanged.
 - Negative NXDOMAIN/NODATA answers return NOERROR with synthetic NXNAME NSEC in Authority. CoreDNS also maps NXDOMAIN to NOERROR, but puts its black-lie NSEC in Answer.
 - A DO negative response without SOA fails with SERVFAIL; Pharos does not return an unsigned denial. CoreDNS returns the upstream negative response.

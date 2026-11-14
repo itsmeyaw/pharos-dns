@@ -15,6 +15,9 @@
 - The source file's SOA owner must match the configured origin; otherwise signing fails because the RRSIG Signer's Name would identify a different zone (RFC 4034 §3.1.7).
 - Offline RRSIG TTL and Original TTL use the covered RRset's minimum TTL; mixed-TTL RRsets are normalized to that value (RFC 2181 §5.2).
 - Offline NSEC TTL is `min(SOA TTL, SOA.MINIMUM)` (RFC 9077 §3.1); apex NS RRSIG TTL matches the NS RRset TTL (RFC 4034 §3).
+- Zone-file RRSIG calendar times at the RFC 1982 half-range (±2^31 seconds) from now are rejected; miekg/dns wraps them into 32 bits (RFC 4034 §3.1.5).
+- The shared key loader rejects noncanonical RSA DNSKEY exponent/modulus encodings, which miekg/dns accepts (RFC 3110 §2; see the `dnssec` README).
+- If Unix time is not newer than the input SOA serial under RFC 1982 arithmetic, the offline signer advances the existing serial by one. CoreDNS assigns Unix time directly, which can repeat or move the serial backward (RFC 1982 §3.2; RFC 4033 §8.2).
 
 ## Sources
 
