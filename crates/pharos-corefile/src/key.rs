@@ -45,6 +45,7 @@ pub fn normalize_key(key: &str) -> Result<Vec<ServerBlockKey>, String> {
         }
         None => vec![fqdn(host)],
     };
+    // RFC 1035 §4.2.2: DNS messages sent over TCP use server port 53.
     let port = if port.is_empty() {
         match transport {
             "dns" => "53",
@@ -173,6 +174,7 @@ fn reverse_domains(ip: IpAddr, prefix: u32) -> Vec<String> {
         IpAddr::V4(ip) => (u128::from(u32::from(ip)), 32, 8, "in-addr.arpa."),
         IpAddr::V6(ip) => (u128::from(ip), 128, 4, "ip6.arpa."),
     };
+    // RFC 4291 §2.3: CIDR prefixes identify the leftmost contiguous address bits.
     let rounded = prefix.div_ceil(step) * step;
     let network = if prefix == 0 {
         0

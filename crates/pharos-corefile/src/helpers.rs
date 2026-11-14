@@ -54,6 +54,7 @@ impl Fallthrough {
             if domain == "." {
                 return true;
             }
+            // RFC 1034 §3.1: A domain includes names ending in its labels.
             let Some(prefix) = name.len().checked_sub(domain.len()) else {
                 return false;
             };
@@ -64,10 +65,12 @@ impl Fallthrough {
             if prefix == 0 {
                 return true;
             }
+            // RFC 1034 §3.1: A subdomain is matched by its complete label suffix.
             let bytes = name.as_bytes();
             if bytes[prefix - 1] != b'.' {
                 return false;
             }
+            // RFC 1035 §5.1: An escaped dot is data within a label, not a name separator.
             let escapes = bytes[..prefix - 1]
                 .iter()
                 .rev()
