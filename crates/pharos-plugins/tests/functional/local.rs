@@ -125,6 +125,13 @@ async fn coredns_local_cases() {
             Some("127.in-addr.arpa."),
         ),
         (
+            "127.in-addr.arpa.",
+            Type::NS,
+            Rcode::NOERROR,
+            Some(("127.in-addr.arpa.", Type::NS)),
+            None,
+        ),
+        (
             "localhost.",
             Type::MX,
             Rcode::NOERROR,
@@ -210,6 +217,12 @@ async fn coredns_local_cases() {
         );
         for rr in msg.answers().chain(msg.authorities()) {
             assert_eq!((rr.class, rr.ttl), (Class::IN, 604800));
+            if qtype == Type::NS {
+                assert_eq!(
+                    NameRef::parse(rr.rdata, 0).unwrap().to_string(),
+                    name.to_string()
+                );
+            }
             if qtype == Type::SOA {
                 assert!(rr.rdata.windows(16).any(|bytes| bytes == b"\x06nobody\x07invalid\0"));
             }

@@ -189,7 +189,9 @@ impl Local {
             let rdata: &[u8] = match rtype {
                 Type::A => &[127, 0, 0, 1],
                 Type::AAAA => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-                Type::NS | Type::PTR => LOCALHOST,
+                // RFC 6303 §3: the local zone apex names itself as its NS target.
+                Type::NS => &origin[..=len],
+                Type::PTR => LOCALHOST,
                 _ => SOA,
             };
             // RFC 2181 §7.2: SOA answers retain a nonzero TTL instead of forcing TTL zero.
