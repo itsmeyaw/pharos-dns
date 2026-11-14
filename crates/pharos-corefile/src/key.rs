@@ -76,7 +76,7 @@ pub fn normalize_key(key: &str) -> Result<Vec<ServerBlockKey>, String> {
 }
 
 fn go_lowercase(c: char) -> char {
-    // RFC 4343 §3 / ADR 0003: preserve CoreDNS v1.15.0's Unicode strings.ToLower.
+    // RFC 4343 §3 / ADR 0003: match CoreDNS Go 1.26.0 ToLower; recheck on Go upgrade.
     match c {
         '\u{1c89}'
         | '\u{a7cb}'
@@ -219,7 +219,7 @@ fn reverse_domains(ip: IpAddr, prefix: u32) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerBlockKey, normalize_key};
+    use super::{ServerBlockKey, go_lowercase, normalize_key};
 
     fn key(transport: &str, domain: &str, port: &str) -> ServerBlockKey {
         ServerBlockKey {
@@ -319,6 +319,26 @@ mod tests {
     }
 
     #[test]
+    fn go_lowercase_preserves_all_coredns_unicode_exclusions() {
+        let mut codepoints = vec![
+            0x1c89, 0xa7cb, 0xa7cc, 0xa7ce, 0xa7d2, 0xa7d4, 0xa7da, 0xa7dc,
+        ];
+        codepoints.extend(0x10d50..=0x10d65);
+        codepoints.extend(0x16ea0..=0x16eb8);
+        assert_eq!(codepoints.len(), 55);
+
+        for codepoint in codepoints {
+            let character = char::from_u32(codepoint).unwrap();
+            assert_ne!(
+                character.to_lowercase().next(),
+                Some(character),
+                "U+{codepoint:04X}"
+            );
+            assert_eq!(go_lowercase(character), character, "U+{codepoint:04X}");
+        }
+    }
+
+    #[test]
     fn trailing_dot_and_invalid_cidr_remain_domains() {
         for (input, domain) in [
             ("10.0.0.0/8.", "10.0.0.0/8."),
@@ -353,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn name_limits_count_wire_octets_not_presentation_escapes() {
+    fn enforces_corefile_presentation_cap_and_wire_limits() {
         let escaped = |lengths: &[usize]| {
             lengths
                 .iter()
@@ -389,6 +409,9 @@ mod tests {
         ]
         .join(".");
         assert!(normalize_key(&overlong_wire_name).is_err());
+
+        let wire_257_name = vec!["a".repeat(63); 4].join(".");
+        assert!(normalize_key(&wire_257_name).is_err());
 
         // ADR 0003: CoreDNS rejects long presentation strings before counting wire octets.
         assert!(normalize_key(&escaped(&[63, 63, 63, 61])).is_err());

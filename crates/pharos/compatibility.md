@@ -188,10 +188,11 @@
 
 ## General
 
-- CoreDNS v1.15.0 uses miekg/dns v1.1.73, whose `IsDomainName` permits a computed 256-octet name (`defaults.go` checks `off > 256`). Pharos rejects it under RFC 1035 §2.3.4; no DNS Message can carry that name.
-- CoreDNS v1.15.0's `plugin.SplitHostPort` caps server-block key presentation at 255 bytes before DNS wire-length validation (`plugin/normalize.go`, `core/dnsserver/register.go`). Pharos preserves this ADR 0003 behavior, so some RFC 1035 §2.3.4-valid escaped names with longer presentation remain rejected.
-- CoreDNS v1.15.0 normalizes server-block names with Go `strings.ToLower` and rejects IPv6 CIDRs beginning with `:` or `0` followed by `:` (`plugin/normalize.go`). Pharos preserves those Corefile behaviors for ADR 0003, despite RFC 4343 §3 and RFC 4291 §2.3.
-- CoreDNS v1.15.0's caddy v1.1.4 import parser rejects patterns with multiple `*` or `?` wildcards and all bracket expressions (`caddyfile/parse.go`); Pharos preserves those limits.
+- Deviation policy: ADR 0003 governs Corefile key/import semantics (CoreDNS behavior wins); ADR 0002 governs RFC behavior (RFCs win unless deployment reliance is evidenced).
+- CoreDNS v1.15.0 uses miekg/dns v1.1.73, whose `IsDomainName` accepts four 63-octet labels with `off == 256`; `off` excludes root, so wire name is 257 octets (`defaults.go`). Pharos rejects it under RFC 1035 §2.3.4 per ADR 0002; no DNS Message can carry it.
+- CoreDNS v1.15.0's `plugin.SplitHostPort` caps server-block key presentation at 255 bytes before DNS wire-length validation (`plugin/normalize.go`, `core/dnsserver/register.go`). Pharos preserves this under ADR 0003 (CoreDNS wins), so some RFC 1035 §2.3.4-valid escaped names with longer presentation remain rejected.
+- CoreDNS v1.15.0 normalizes server-block names with Go `strings.ToLower` and rejects IPv6 CIDRs beginning with `:` or `0` followed by `:` (`plugin/normalize.go`). Pharos preserves those Corefile behaviors under ADR 0003 (CoreDNS wins), despite RFC 4343 §3 and RFC 4291 §2.3.
+- CoreDNS v1.15.0's caddy v1.1.4 import parser rejects patterns with multiple `*` or `?` wildcards and all bracket expressions (`caddyfile/parse.go`); Pharos preserves those limits under ADR 0003 (CoreDNS wins).
 - Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `auto`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `dnssec`, `errors`, `erratic`, `file`, `forward`, `header`, `health`, `hosts`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `metadata`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `secondary`, `siit`, `sign`, `template`, `transfer`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
 - A first Zone record with an omitted owner is rejected: miekg/dns accepts it with an empty owner, which cannot be encoded as a valid DNS name without inventing one.
@@ -257,7 +258,7 @@
 - Pharos rejects compression pointers that do not point backwards, while miekg/dns follows them until its hop limit.
 - Pharos also rejects targets whose encoding overlaps the pointer; miekg/dns accepts them.
 - Pharos permits up to 255 pointer hops; miekg/dns permits 126.
-- Pharos also rejects decimal name escapes above 255 instead of wrapping them to an octet as miekg/dns does.
+- Pharos rejects decimal name escapes above 255 instead of wrapping them to an octet as miekg/dns does; RFC 1035 §5.1 governs per ADR 0002.
 - The protocol parser rejects duplicate OPT records, OPT records outside Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
 - The DNS Listener returns FORMERR for these malformed Messages and drops short headers. CoreDNS v1.15.0 accepts them when its header-count policy allows them, and selects the last OPT in Additional.
 - CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC report transport errors.
