@@ -13,11 +13,10 @@ async fn zone_response(
     name: &Name,
     kind: Type,
     class: Class,
-    flags: u16,
     dnssec: bool,
 ) -> (Outcome, Vec<u8>) {
     let mut query = Vec::with_capacity(1232);
-    let mut builder = MessageBuilder::new(&mut query, 1232, 1, flags).unwrap();
+    let mut builder = MessageBuilder::new(&mut query, 1232, 1, 0).unwrap();
     builder
         .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, class)
         .unwrap();
@@ -306,11 +305,11 @@ fn records_construct_a_reusable_zone_with_indexed_names_and_types() {
 #[test]
 fn zone_preserves_case_and_normalizes_duplicate_rrsets() {
     let apex: Name = "example.org.".parse().unwrap();
-    let text = "@ 3600 IN SOA Ns.Example.Org. Host.Example.Org. 1 2 3 4 60\n@ 3600 IN NS Ns.Example.Org.\nWWW.Example.Org. 300 IN A 192.0.2.1\nwww.example.org. 60 IN A 192.0.2.1\nWwW.Example.Org. 120 IN A 192.0.2.2\n";
+    let text = "@ 3600 IN SOA Ns.Example.Org. Host.Example.Org. 1 2 3 4 60\n@ 300 IN NS Ns.Example.Org.\n@ 60 IN NS ns.example.org.\nWWW.Example.Org. 300 IN A 192.0.2.1\nwww.example.org. 60 IN A 192.0.2.1\nWwW.Example.Org. 120 IN A 192.0.2.2\n";
     let records = ZoneParser::new(text.as_bytes(), apex.clone(), "case.zone")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    let zone = Zone::from_records(apex, records).unwrap();
+    let zone = Zone::from_records(apex.clone(), records).unwrap();
     let first = zone
         .records()
         .iter()
@@ -324,6 +323,17 @@ fn zone_preserves_case_and_normalizes_duplicate_rrsets() {
         .unwrap();
     let rdata = NameRef::parse(&soa.rdata, 0).unwrap();
     assert_eq!(rdata.to_string(), "Ns.Example.Org.");
+    let rname = NameRef::parse(&soa.rdata, rdata.wire_len()).unwrap();
+    assert_eq!(rname.to_string(), "Host.Example.Org.");
+    let ns = zone
+        .rrset(NameRef::parse(apex.as_wire(), 0).unwrap(), Type::NS)
+        .collect::<Vec<_>>();
+    assert_eq!(ns.len(), 1);
+    assert_eq!(
+        NameRef::parse(&ns[0].rdata, 0).unwrap().to_string(),
+        "Ns.Example.Org."
+    );
+    assert_eq!(ns[0].ttl, 60);
     let owner = NameRef::parse(first.owner.as_wire(), 0).unwrap();
     let answers = zone.rrset(owner, Type::A).collect::<Vec<_>>();
     assert_eq!(answers.len(), 2);
@@ -383,7 +393,7 @@ fn zone_rejects_mixed_classes_and_cname_coexistence() {
 }
 
 #[test]
-fn zone_rejects_duplicate_zonemd_tuples_and_mixed_svcb_modes() {
+fn zone_rejects_mixed_svcb_modes() {
     let apex: Name = "example.org.".parse().unwrap();
     let base = || {
         ZoneParser::new(
@@ -395,25 +405,6 @@ fn zone_rejects_duplicate_zonemd_tuples_and_mixed_svcb_modes() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
     };
-    let mut zonemd = base();
-    zonemd.extend([
-        pharos_proto::zone::ZoneRecord {
-            owner: apex.clone(),
-            class: Class::IN,
-            rtype: Type::ZONEMD,
-            ttl: 60,
-            rdata: [0, 0, 0, 1, 1, 1, 0xaa].into(),
-        },
-        pharos_proto::zone::ZoneRecord {
-            owner: apex.clone(),
-            class: Class::IN,
-            rtype: Type::ZONEMD,
-            ttl: 60,
-            rdata: [0, 0, 0, 1, 1, 1, 0xbb].into(),
-        },
-    ]);
-    assert!(Zone::from_records(apex.clone(), zonemd).is_err());
-
     let owner: Name = "svc.example.org.".parse().unwrap();
     let mut svcb = base();
     svcb.extend([
@@ -456,6 +447,13 @@ fn zone_rejects_alias_targets_and_wildcard_dname() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert!(Zone::from_records(apex, records).is_err());
+
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nd.example.org. 60 IN DNAME target.example.org.\nchild.d.example.org. 60 IN A 192.0.2.1\n";
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "dname-descendant.zone")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(Zone::from_records(apex, records).is_err());
 }
 
 #[tokio::test]
@@ -466,18 +464,18 @@ async fn apex_nodata_uses_negative_ttl_and_class_any_clears_aa() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let zone = Zone::from_records(apex.clone(), records).unwrap();
-    let (outcome, response) = zone_response(&zone, &apex, Type::A, Class::IN, 0, false).await;
+    let (outcome, response) = zone_response(&zone, &apex, Type::A, Class::IN, false).await;
     assert_eq!(outcome, Outcome::Response);
     let response = Message::parse(&response).unwrap();
     assert_eq!(response.rcode(), Rcode::NOERROR);
     assert_eq!(response.answers().count(), 0);
     assert_eq!(response.authorities().next().unwrap().ttl, 30);
 
-    let (outcome, response) = zone_response(&zone, &apex, Type::A, Class::ANY, 0, false).await;
+    let (outcome, response) = zone_response(&zone, &apex, Type::A, Class::ANY, false).await;
     assert_eq!(outcome, Outcome::Response);
     assert_eq!(Message::parse(&response).unwrap().flags() & 0x0400, 0);
 
-    let (outcome, _) = zone_response(&zone, &apex, Type::A, Class(3), 0, false).await;
+    let (outcome, _) = zone_response(&zone, &apex, Type::A, Class(3), false).await;
     assert_eq!(outcome, Outcome::Drop);
 }
 
@@ -490,7 +488,7 @@ async fn empty_nonterminal_blocks_ancestor_wildcard() {
         .unwrap();
     let zone = Zone::from_records(apex, records).unwrap();
     let ent: Name = "empty.example.org.".parse().unwrap();
-    let (outcome, response) = zone_response(&zone, &ent, Type::A, Class::IN, 0, false).await;
+    let (outcome, response) = zone_response(&zone, &ent, Type::A, Class::IN, false).await;
     assert_eq!(outcome, Outcome::Response);
     let response = Message::parse(&response).unwrap();
     assert_eq!(response.rcode(), Rcode::NOERROR);
@@ -525,6 +523,20 @@ async fn legacy_and_modern_service_targets_get_required_additional_records() {
             ttl: 60,
             rdata: [0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10].into(),
         },
+        pharos_proto::zone::ZoneRecord {
+            owner: host.clone(),
+            class: Class::IN,
+            rtype: Type::X25,
+            ttl: 60,
+            rdata: vec![1],
+        },
+        pharos_proto::zone::ZoneRecord {
+            owner: host.clone(),
+            class: Class::IN,
+            rtype: Type::ISDN,
+            ttl: 60,
+            rdata: vec![2],
+        },
     ]);
     let mut host_rdata = vec![0, 1];
     host_rdata.extend_from_slice(host.as_wire());
@@ -547,7 +559,7 @@ async fn legacy_and_modern_service_targets_get_required_additional_records() {
             class: Class::IN,
             rtype: Type::SVCB,
             ttl: 60,
-            rdata: vec![0, 1, 0],
+            rdata: vec![0, 1, 0, 0, 1, 3, 2, b'h', b'2'],
         },
         pharos_proto::zone::ZoneRecord {
             owner: service.clone(),
@@ -565,12 +577,23 @@ async fn legacy_and_modern_service_targets_get_required_additional_records() {
         ("service.example.org.", Type::SVCB, service.clone()),
     ] {
         let owner: Name = owner.parse().unwrap();
-        let (outcome, response) = zone_response(&zone, &owner, kind, Class::IN, 0, false).await;
+        let (outcome, response) = zone_response(&zone, &owner, kind, Class::IN, false).await;
         assert_eq!(outcome, Outcome::Response);
-        assert!(Message::parse(&response).unwrap().additionals().any(|rr| {
-            rr.name.to_string() == expected_target.to_string()
-                && matches!(rr.rtype, Type::A | Type::AAAA)
-        }));
+        let additional = Message::parse(&response)
+            .unwrap()
+            .additionals()
+            .filter(|rr| rr.name.to_string() == expected_target.to_string())
+            .map(|rr| rr.rtype)
+            .collect::<Vec<_>>();
+        assert!(additional.contains(&Type::A));
+        match kind {
+            Type::RT => {
+                assert!(additional.contains(&Type::X25));
+                assert!(additional.contains(&Type::ISDN));
+            }
+            Type::KX => assert!(additional.contains(&Type::AAAA)),
+            _ => {}
+        }
     }
 }
 
@@ -583,7 +606,7 @@ async fn referral_includes_available_sibling_nameserver_glue() {
         .unwrap();
     let zone = Zone::from_records(apex, records).unwrap();
     let query: Name = "www.child.example.org.".parse().unwrap();
-    let (outcome, response) = zone_response(&zone, &query, Type::A, Class::IN, 0, false).await;
+    let (outcome, response) = zone_response(&zone, &query, Type::A, Class::IN, false).await;
     assert_eq!(outcome, Outcome::Response);
     assert!(
         Message::parse(&response)
@@ -620,7 +643,7 @@ async fn overlong_dname_substitution_returns_yxdomain_with_dname() {
     let query: Name = format!("{long}.{long}.{long}.d.example.org.")
         .parse()
         .unwrap();
-    let (outcome, response) = zone_response(&zone, &query, Type::A, Class::IN, 0, false).await;
+    let (outcome, response) = zone_response(&zone, &query, Type::A, Class::IN, false).await;
     assert_eq!(outcome, Outcome::Response);
     let response = Message::parse(&response).unwrap();
     assert_eq!(response.rcode(), Rcode::YXDOMAIN);
@@ -648,7 +671,7 @@ async fn wildcard_cname_signature_uses_expanded_owner() {
     });
     let zone = Zone::from_records(apex, records).unwrap();
     let query: Name = "www.example.org.".parse().unwrap();
-    let (outcome, response) = zone_response(&zone, &query, Type::A, Class::IN, 0, true).await;
+    let (outcome, response) = zone_response(&zone, &query, Type::A, Class::IN, true).await;
     assert_eq!(outcome, Outcome::Response);
     assert!(
         Message::parse(&response)
@@ -676,7 +699,7 @@ async fn wildcard_nsec_is_not_synthesized_at_expanded_owner() {
     });
     let zone = Zone::from_records(apex, records).unwrap();
     let query: Name = "www.example.org.".parse().unwrap();
-    let (outcome, response) = zone_response(&zone, &query, Type::NSEC, Class::IN, 0, true).await;
+    let (outcome, response) = zone_response(&zone, &query, Type::NSEC, Class::IN, true).await;
     assert_eq!(outcome, Outcome::Response);
     let response = Message::parse(&response).unwrap();
     assert!(!response.answers().any(|rr| rr.rtype == Type::NSEC));
@@ -704,7 +727,7 @@ async fn dnssec_referral_without_ds_includes_nsec_and_signature() {
     });
     let zone = Zone::from_records(apex, records).unwrap();
     let query: Name = "host.child.example.org.".parse().unwrap();
-    let (outcome, response) = zone_response(&zone, &query, Type::A, Class::IN, 0, true).await;
+    let (outcome, response) = zone_response(&zone, &query, Type::A, Class::IN, true).await;
     assert_eq!(outcome, Outcome::Response);
     let response = Message::parse(&response).unwrap();
     assert!(

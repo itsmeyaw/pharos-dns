@@ -109,6 +109,7 @@ impl Zone {
                 if record.owner != apex {
                     return Err("SOA owner does not match Zone apex".into());
                 }
+                // RFC 1035 §5.2: A master-file zone has one SOA RR.
                 if seen_soa {
                     return Err("Zone has multiple SOA records".into());
                 }
@@ -199,7 +200,8 @@ impl Zone {
                     return Err("trailing name-only RDATA".into());
                 }
                 if record.rtype == Type::SOA {
-                    let end = normalize_rdata_name(&mut record.rdata, end, true)?;
+                    // RFC 4343 §4.2: Preserve case in the SOA RNAME field too.
+                    let end = normalize_rdata_name(&mut record.rdata, end, false)?;
                     if record.rdata.len() != end + 20 {
                         return Err("invalid SOA RDATA".into());
                     }
@@ -224,8 +226,25 @@ impl Zone {
         for record in records.drain(..) {
             let mut rdata = record.rdata.clone();
             // RFC 4343 §3: Name-bearing RDATA compares without ASCII case.
-            if !rdata.is_empty() && matches!(record.rtype, Type::CNAME | Type::DNAME) {
-                normalize_rdata_name(&mut rdata, 0, true)?;
+            if !rdata.is_empty()
+                && let Some(offset) = match record.rtype {
+                    Type::NS | Type::CNAME | Type::DNAME | Type::PTR | Type::NSEC => Some(0),
+                    Type::MX | Type::AFSDB | Type::RT | Type::KX | Type::SVCB | Type::HTTPS => {
+                        Some(2)
+                    }
+                    Type::SRV => Some(6),
+                    Type::SOA => Some(0),
+                    _ => None,
+                }
+            {
+                let end = normalize_rdata_name(&mut rdata, offset, true);
+                // RFC 2136 §2.5: Empty update RDATA retains its special wire meaning.
+                if end.is_err()
+                    || record.rtype == Type::SOA
+                        && end.is_ok_and(|end| normalize_rdata_name(&mut rdata, end, true).is_err())
+                {
+                    rdata.clone_from(&record.rdata);
+                }
             }
             let key = (record.owner.clone(), record.rtype.0, record.class.0, rdata);
             if let Some(index) = unique.get(&key) {
@@ -248,10 +267,9 @@ impl Zone {
         }
         // RFC 2181 §10.1: A CNAME owner has no ordinary data or competing targets.
         let mut cnames = std::collections::HashMap::new();
-        let mut ordinary = std::collections::HashSet::new();
+        let mut other_type_owners = std::collections::HashSet::new();
         let mut dnames = std::collections::HashMap::new();
         let mut ns_owners = std::collections::HashSet::new();
-        let mut zonemd_tuples = std::collections::HashSet::new();
         let mut svcb_modes = std::collections::HashMap::new();
         for record in &records {
             match record.rtype {
@@ -281,14 +299,7 @@ impl Zone {
                 record.rtype,
                 Type::CNAME | Type::RRSIG | Type::SIG | Type::NSEC | Type::NXT | Type::KEY
             ) {
-                ordinary.insert(record.owner.clone());
-            }
-            // RFC 8976 §2.5: A ZONEMD owner has one RR per scheme and hash algorithm.
-            if record.rtype == Type::ZONEMD
-                && let Some(tuple) = record.rdata.get(4..6)
-                && !zonemd_tuples.insert((record.owner.clone(), tuple[0], tuple[1]))
-            {
-                return Err("duplicate ZONEMD scheme and hash algorithm".into());
+                other_type_owners.insert(record.owner.clone());
             }
             // RFC 9460 §2.4.1: An RRset must not mix AliasMode and ServiceMode records.
             if matches!(record.rtype, Type::SVCB | Type::HTTPS)
@@ -303,7 +314,7 @@ impl Zone {
                 }
             }
         }
-        if cnames.keys().any(|owner| ordinary.contains(owner)) {
+        if cnames.keys().any(|owner| other_type_owners.contains(owner)) {
             return Err("CNAME coexists with other data".into());
         }
         // RFC 6672 §2.4: DNAME RRsets are singleton and cannot coexist with CNAME.
@@ -312,6 +323,14 @@ impl Zone {
             .any(|owner| cnames.contains_key(owner) || owner != &apex && ns_owners.contains(owner))
         {
             return Err("DNAME conflicts with other data".into());
+        }
+        // RFC 6672 §2.4: A DNAME owner cannot have data at any descendant.
+        if dnames.keys().any(|owner| {
+            records
+                .iter()
+                .any(|record| record.owner != *owner && contains(record.owner.as_wire(), owner))
+        }) {
+            return Err("Zone data exists below DNAME owner".into());
         }
         for record in &records {
             let (offset, error) = match record.rtype {
@@ -506,7 +525,7 @@ fn soa_serial(soa: &ZoneRecord) -> Option<u32> {
 
 fn rdata_target(record: &ZoneRecord, offset: usize) -> Option<&[u8]> {
     let bytes = record.rdata.get(offset..)?;
-    if bytes == [0] && matches!(record.rtype, Type::SVCB | Type::HTTPS) {
+    if bytes.first() == Some(&0) && matches!(record.rtype, Type::SVCB | Type::HTTPS) {
         return Some(record.owner.as_wire());
     }
     let len = NameRef::parse(bytes, 0).ok()?.wire_len();
@@ -623,6 +642,7 @@ fn write_set(
                 .and_then(negative_soa_ttl)
         })
         .flatten();
+    let output_ttl = |ttl: u32| ttl_cap.map_or(ttl, |cap| ttl.min(cap));
     // RFC 2181 §10.2: PTR RRsets may contain multiple records.
     for rr in zone.records_at(source, kind) {
         builder
@@ -631,7 +651,7 @@ fn write_set(
                 owner,
                 rr.rtype,
                 rr.class,
-                ttl_cap.map_or(rr.ttl, |cap| rr.ttl.min(cap)),
+                output_ttl(rr.ttl),
                 &rr.rdata,
             )
             .map_err(pharos_server::Error::Build)?;
@@ -650,7 +670,7 @@ fn write_set(
                     owner,
                     rr.rtype,
                     rr.class,
-                    ttl_cap.map_or(rr.ttl, |cap| rr.ttl.min(cap)),
+                    output_ttl(rr.ttl),
                     &rr.rdata,
                 )
                 .map_err(pharos_server::Error::Build)?;
@@ -864,8 +884,9 @@ impl Zone {
             None
         };
         let external = lookup.as_ref().and_then(|wire| Message::parse(wire).ok());
-        // RFC 7344 §3.1: CDS is served as a regular resource record type.
+        // RFC 4592 §4.7: Never synthesize an NSEC RR at a wildcard-expanded owner.
         let wildcard_nsec = synthesized && question.qtype == Type::NSEC;
+        // RFC 7344 §3.1: CDS is served as a regular resource record type.
         let found = dname.is_some()
             || count > 0
             || !wildcard_nsec && zone.records_at(target, question.qtype).next().is_some();
@@ -1234,7 +1255,7 @@ impl Zone {
                     Type::NS if source.eq_ignore_ascii_case(zone.apex.as_wire()) => Some(0),
                     _ => None,
                 };
-                let kinds: &[Type] = match question.qtype {
+                let additional_types: &[Type] = match question.qtype {
                     Type::MX | Type::AFSDB => &[Type::A, Type::AAAA],
                     Type::RT => &[Type::A, Type::AAAA, Type::X25, Type::ISDN],
                     Type::KX | Type::SVCB | Type::HTTPS | Type::SRV | Type::NS => {
@@ -1261,7 +1282,7 @@ impl Zone {
                         }
                         let owner = NameRef::parse(address, 0)
                             .map_err(|_| pharos_server::Error::InvalidQuery)?;
-                        for &kind in kinds {
+                        for &kind in additional_types {
                             write_set(
                                 &mut builder,
                                 zone,
