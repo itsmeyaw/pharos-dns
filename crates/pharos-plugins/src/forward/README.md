@@ -22,6 +22,7 @@
 - Upstream Metadata uses the normalized numeric socket address, which may differ from CoreDNS's configured address text.
 - Health checks start on exchange failure, and proxy connections and checks are stopped on Shutdown.
 - Forward reuses Upstream Response buffers from a pool; a new buffer is allocated when concurrent Queries exceed the pool's previous high-water mark, and the pool retains that peak allocation until the Plugin is dropped.
+- Per-upstream attempt counters and RRset sort scratch grow to their observed high-water sizes; the ECS fallback buffer grows only when a REFUSED retry needs it. Buffers are reused after growth; warmed forwarding remains allocation-free.
 
 ## Standards and compatibility notes
 
