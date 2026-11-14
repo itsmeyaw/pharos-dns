@@ -11,9 +11,5 @@ workspace = true
 
 [dependencies]
 aws-lc-rs = "1.19"
-ed25519-dalek = { version = "2", default-features = false, features = ["pkcs8"] }
-p256 = { version = "0.13", default-features = false, features = ["digest", "ecdsa", "pkcs8"] }
-p384 = { version = "0.13", default-features = false, features = ["digest", "ecdsa", "pkcs8"] }
-sha2 = { version = "0.10", default-features = false }
 base64 = "0.22"
 pharos-proto = { version = "0.1.0", path = "../pharos-proto" }
