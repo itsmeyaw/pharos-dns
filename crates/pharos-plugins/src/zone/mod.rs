@@ -71,6 +71,7 @@ struct ZoneNode {
     types: BTreeMap<u16, Vec<usize>>,
     tree: bool,
     tree_exists: bool,
+    alias_modes: u8,
 }
 
 impl Zone {
@@ -324,18 +325,6 @@ impl Zone {
             ) {
                 other_type_owners.insert(record.owner.clone());
             }
-            // RFC 9460 §2.4.1: An RRset must not mix AliasMode and ServiceMode records.
-            if matches!(record.rtype, Type::SVCB | Type::HTTPS)
-                && let Some(priority) = record.rdata.get(..2)
-            {
-                let alias_mode = priority == [0, 0];
-                let mode = svcb_modes
-                    .entry((record.owner.clone(), record.rtype.0))
-                    .or_insert(alias_mode);
-                if *mode != alias_mode {
-                    return Err("SVCB RRset mixes AliasMode and ServiceMode".into());
-                }
-            }
         }
         if cnames.keys().any(|owner| other_type_owners.contains(owner)) {
             return Err("CNAME coexists with other data".into());
@@ -396,11 +385,23 @@ impl Zone {
                     types: BTreeMap::new(),
                     tree: false,
                     tree_exists: false,
+                    alias_modes: 0,
                 });
                 node.tree_exists |= !apex_record;
                 if suffix.len() == record.owner.as_wire().len() {
                     node.types.entry(record.rtype.0).or_default().push(index);
                     node.tree |= !apex_record;
+                    if record
+                        .rdata
+                        .get(..2)
+                        .is_some_and(|priority| priority == [0, 0])
+                    {
+                        node.alias_modes |= match record.rtype {
+                            Type::SVCB => 1,
+                            Type::HTTPS => 2,
+                            _ => 0,
+                        };
+                    }
                 }
                 if suffix[0] == 0 {
                     break;
@@ -417,6 +418,7 @@ impl Zone {
         Ok(Self {
             apex,
             class,
+            negative_ttl,
             records,
             names,
             tree,
@@ -462,11 +464,24 @@ impl Zone {
         name: &[u8],
         kind: Type,
     ) -> impl Iterator<Item = &'a ZoneRecord> + use<'a> {
-        self.node(name)
-            .and_then(|node| node.types.get(&kind.0))
+        let node = self.node(name);
+        let ignore_service_mode = node.is_some_and(|node| match kind {
+            Type::SVCB => node.alias_modes & 1 != 0,
+            Type::HTTPS => node.alias_modes & 2 != 0,
+            _ => false,
+        });
+        node.and_then(|node| node.types.get(&kind.0))
             .map_or(&[][..], Vec::as_slice)
             .iter()
             .map(|index| &self.records[*index])
+            // RFC 9460 §2.4.1: Ignore ServiceMode RRs when an AliasMode RR exists.
+            .filter(move |record| {
+                !ignore_service_mode
+                    || record
+                        .rdata
+                        .get(..2)
+                        .is_some_and(|priority| priority == [0, 0])
+            })
     }
 
     // RFC 8020 §3.1: The apex exists even when only its SOA and NS define it.
@@ -548,7 +563,13 @@ fn soa_serial(soa: &ZoneRecord) -> Option<u32> {
 
 fn rdata_target(record: &ZoneRecord, offset: usize) -> Option<&[u8]> {
     let bytes = record.rdata.get(offset..)?;
-    if bytes.first() == Some(&0) && matches!(record.rtype, Type::SVCB | Type::HTTPS) {
+    if bytes.first() == Some(&0)
+        && matches!(record.rtype, Type::SVCB | Type::HTTPS)
+        && record
+            .rdata
+            .get(..2)
+            .is_some_and(|priority| priority != [0, 0])
+    {
         return Some(record.owner.as_wire());
     }
     let len = NameRef::parse(bytes, 0).ok()?.wire_len();

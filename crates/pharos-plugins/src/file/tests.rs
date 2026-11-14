@@ -681,7 +681,13 @@ async fn overlong_dname_substitution_returns_yxdomain_with_dname() {
     assert_eq!(outcome, Outcome::Response);
     let response = Message::parse(&response).unwrap();
     assert_eq!(response.rcode(), Rcode::YXDOMAIN);
-    assert!(response.answers().any(|rr| rr.rtype == Type::DNAME));
+    assert_eq!(
+        response
+            .answers()
+            .filter(|rr| rr.rtype == Type::DNAME)
+            .count(),
+        1
+    );
     assert!(!response.answers().any(|rr| rr.rtype == Type::CNAME));
 }
 
