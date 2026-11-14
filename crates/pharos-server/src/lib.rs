@@ -876,7 +876,7 @@ impl Listener {
         bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
         bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
     ) -> io::Result<Self> {
-        // RFC 1035 §4.2.1: A DNS Listener supports Queries over UDP.
+        // RFC 1035 §4.2.1: Retain one worker so the Listener can serve UDP Queries.
         let workers = workers.max(1);
         let wildcard = address.is_ipv6() && address.ip().is_unspecified();
         let mut ipv4_only = false;
