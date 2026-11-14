@@ -147,7 +147,7 @@ pub async fn axfr(
     axfr_inner(address, zone, id, deadline, None, on_message).await
 }
 
-/// Receive an AXFR through the legacy CoreDNS-named API with strict validation.
+/// Compatibility alias for [`axfr`] that retains the legacy public name.
 pub async fn axfr_coredns(
     address: SocketAddr,
     zone: &Name,
