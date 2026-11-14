@@ -127,6 +127,29 @@ async fn update_admission_is_listener_and_block_scoped() {
 }
 
 #[tokio::test]
+async fn zero_question_query_is_not_rejected_as_malformed() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let server = Server::new(Router::<LocalProbe>::default(), key);
+    let query = [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &query,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+}
+
+#[tokio::test]
 async fn notify_reaches_the_plugin_chain_over_udp_and_tcp() {
     let key = ListenerKey {
         transport: Transport::Dns,
