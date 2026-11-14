@@ -452,6 +452,7 @@ async fn axfr_class_mismatch_returns_notauth_on_wire() {
         servers(configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap())
             .unwrap();
     let server = servers.values().next().unwrap();
+    assert!(server.allow_non_in);
     let apex: Name = "miek.nl.".parse().unwrap();
     let mut query = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
