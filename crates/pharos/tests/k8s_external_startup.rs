@@ -174,6 +174,7 @@ fn missing_kubernetes_on_reload_keeps_old_dns_configuration() {
         assert!(len > 12);
         response[3] & 15
     };
+    // RFC 1035 §4.1.1: RCODE 0 means the response has no error condition.
     assert_eq!(ask(), 0);
     fs::write(
         &corefile,

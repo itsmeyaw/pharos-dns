@@ -19,6 +19,7 @@ impl Drop for Process {
     }
 }
 
+// RFC 1035 §4.2.2: TCP DNS messages use a two-octet length excluding the prefix.
 fn tcp_query(stream: &mut TcpStream, query: &[u8]) -> Vec<u8> {
     stream
         .write_all(&(query.len() as u16).to_be_bytes())
@@ -35,10 +36,12 @@ fn try_scrape(port: u16) -> Option<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     stream
+        // RFC 9110 §7.2: HTTP/1.1 request includes Host to identify the target authority.
         .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .ok()?;
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
+    // RFC 9110 §15.3.1: 200 indicates that the metrics request succeeded.
     response.starts_with("HTTP/1.1 200").then_some(response)
 }
 
@@ -139,6 +142,7 @@ fn sigusr1_reloads_without_reload_directive() {
     socket
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
+    // RFC 1035 §4.1.2: Query asks for A/IN records for the name a.
     let query = [
         0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1,
     ];
@@ -370,6 +374,7 @@ fn reload_directive_polls_for_changed_corefile() {
             .recv_from(&mut response)
             .expect("unanswered UDP Query during Reload");
         assert_eq!(peer.port(), port);
+        // RFC 1035 §4.1.1: QR marks responses, IDs match queries, and RCODE reports status.
         assert!(length >= 12 && response[2] & 0x80 != 0);
         assert_eq!(response[..2], query[..2]);
         if response[3] & 15 == 2 {

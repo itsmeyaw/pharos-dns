@@ -49,6 +49,7 @@ fn multisocket_serves_udp_and_tcp() {
         assert!(Instant::now() < deadline, "server did not start");
         thread::sleep(Duration::from_millis(20));
     }
+    // RFC 1035 §4.1.1: The query sets opcode QUERY and QDCOUNT to one.
     let query = [
         0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1,
     ];
@@ -87,6 +88,7 @@ fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
         stream
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
+        // RFC 9110 §7.2: HTTP/1.1 requests include Host to identify the target authority.
         write!(
             stream,
             "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
@@ -128,6 +130,7 @@ fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
         assert!(Instant::now() < deadline, "server did not start");
         thread::sleep(Duration::from_millis(20));
     }
+    // RFC 9110 §15.3.1: 200 indicates that the request succeeded.
     assert!(http(ready, "/ready").starts_with("HTTP/1.1 200"));
     assert!(
         Command::new("kill")
@@ -139,6 +142,7 @@ fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         let response = http(ready, "/ready");
+        // RFC 9110 §15.6.4: 503 indicates temporary inability to handle a request.
         if response.starts_with("HTTP/1.1 503") {
             assert!(response.ends_with("\r\n\r\nShutting down"));
             break;

@@ -19,6 +19,7 @@ impl Drop for Process {
     }
 }
 
+// RFC 1035 §4.2.1: Standard DNS queries use UDP transport.
 fn answers(address: SocketAddr) -> bool {
     let source = if address.is_ipv4() {
         "127.0.0.1:0"
@@ -36,6 +37,7 @@ fn answers(address: SocketAddr) -> bool {
     let mut response = [0; 1024];
     socket
         .recv(&mut response)
+        // RFC 1035 §4.1.1: QR marks a response and RCODE 0 means no error condition.
         .is_ok_and(|len| len > 12 && response[2] & 0x80 != 0 && response[3] & 15 == 0)
 }
 

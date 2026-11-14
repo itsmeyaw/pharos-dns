@@ -76,10 +76,12 @@ fn unsigned_listener_matches_pre_tsig_udp_and_tcp_wire() {
         } else {
             b"one".as_slice()
         };
+        // RFC 1035 §4.1.2: Questions carry a label-encoded QNAME and two-octet QTYPE and QCLASS.
         query.push(label.len() as u8);
         query.extend_from_slice(label);
         query.extend_from_slice(b"\x07example\0\0\x01\0\x01");
         if edns {
+            // RFC 6891 §6.1.3: OPT TTL carries the extended RCODE, EDNS version, and flags.
             query.extend_from_slice(&[0, 0, 41, 2, 0, 0, 0, 0x80, 0, 0, 0]);
         }
         let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
@@ -88,6 +90,7 @@ fn unsigned_listener_matches_pre_tsig_udp_and_tcp_wire() {
             .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect();
+        // RFC 1035 §4.2.2: TCP DNS messages use a two-octet length excluding the prefix.
         let actual = if tcp {
             let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
             socket
@@ -114,6 +117,7 @@ fn unsigned_listener_matches_pre_tsig_udp_and_tcp_wire() {
             response
         };
         assert_eq!(actual, expected, "{case}");
+        // RFC 1035 §4.2.1: UDP payloads over 512 octets here are truncated with TC set.
         assert_eq!(actual[2] & 0x02 != 0, large && !tcp, "{case}");
         cases += 1;
     }

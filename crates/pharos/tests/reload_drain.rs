@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+// RFC 1035 §4.1.2: Query asks for A/IN records for the name a.
 const QUERY: &[u8] = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\0\x01a\0\0\x01\0\x01";
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -75,6 +76,7 @@ impl Fixture {
             assert!(Instant::now() < deadline, "startup timed out");
             std::thread::sleep(Duration::from_millis(10));
         }
+        // RFC 1035 §4.2.2: TCP DNS messages use a two-octet length excluding the prefix.
         let mut query = TcpStream::connect(("127.0.0.1", port)).unwrap();
         query
             .write_all(&(QUERY.len() as u16).to_be_bytes())

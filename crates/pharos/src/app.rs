@@ -39,6 +39,7 @@ fn configuration(options: &Options) -> Result<(String, String), String> {
 }
 
 fn default_corefile(options: &Options) -> String {
+    // RFC 1035 §4.2: DNS uses server port 53 over UDP and TCP.
     format!(".:{} {{\nwhoami\nlog\n}}\n", options.port.unwrap_or(53))
 }
 
@@ -104,6 +105,7 @@ fn prepare_blocks(
 > {
     let hash = corefile_hash(&blocks);
     for block in &mut blocks {
+        // RFC 1035 §4.2: DNS uses server port 53 over UDP and TCP.
         block.set_default_dns_port(options.port.unwrap_or(53));
     }
     let blocks = pharos_corefile::configure(&blocks, pharos_plugins::directives())

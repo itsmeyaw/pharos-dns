@@ -84,6 +84,7 @@ fn non_looping_whoami_keeps_serving() {
         socket.send_to(&query, ("127.0.0.1", port)).unwrap();
         let mut response = [0; 512];
         if let Ok((len, _)) = socket.recv_from(&mut response) {
+            // RFC 1035 §4.1.1: QR set to 1 identifies a DNS response.
             assert!(len > 12 && response[2] & 0x80 != 0);
             break;
         }
