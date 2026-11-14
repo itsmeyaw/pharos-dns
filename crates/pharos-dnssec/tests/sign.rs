@@ -68,6 +68,12 @@ fn ecdsa_signatures_are_fixed_width_dns_wire_format() {
             &signed
         ));
         assert!(!pharos_dnssec::sign::verify_ecdsa(
+            number,
+            &public_key.as_ref()[1..],
+            MESSAGE,
+            &signed[..signed.len() - 1]
+        ));
+        assert!(!pharos_dnssec::sign::verify_ecdsa(
             8,
             &public_key.as_ref()[1..],
             MESSAGE,

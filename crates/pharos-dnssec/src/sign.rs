@@ -33,6 +33,7 @@ impl fmt::Display for SignError {
 impl std::error::Error for SignError {}
 
 /// Verifies an RFC 6605 DNSSEC ECDSA signature against DNSKEY `x || y` public bytes.
+/// Returns `false` for unsupported algorithms, malformed input, or failed verification.
 #[must_use]
 pub fn verify_ecdsa(algorithm: u8, public_key: &[u8], data: &[u8], signature: &[u8]) -> bool {
     // RFC 6605 §4: DNSKEY stores x || y; RRSIG stores fixed-width r || s.
