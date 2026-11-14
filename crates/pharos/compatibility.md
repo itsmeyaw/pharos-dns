@@ -251,15 +251,24 @@
 - TSIG Response signing and verification require a valid-length Query MAC. The RFC 8945 exception for a signed Response to an unsigned TKEY Query is not supported by this API; miekg/dns allows generating a Response without a Query MAC.
 - Pharos rejects compression pointers that do not point backwards, while miekg/dns follows them until its hop limit.
 - Pharos also rejects targets whose encoding overlaps the pointer; miekg/dns accepts them.
-- Pharos permits up to 255 pointer hops; miekg/dns permits 126.
+- Pharos permits up to 255 pointer hops per name and 8192 aggregate pointer hops across Message QNAME/owner-name parsing; miekg/dns permits 126 per name.
 - Pharos also rejects decimal name escapes above 255 instead of wrapping them to an octet as miekg/dns does.
+- SIG(0) and TSIG must be the final Additional RR; OPT may precede them (RFCs 6891 §6.1.1, 2931 §3.1, 8945 §§5.1–5.2).
 - The protocol parser rejects duplicate OPT records, OPT records outside Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
-- The DNS Listener returns FORMERR for these malformed Messages and drops short headers. CoreDNS v1.15.0 accepts them when its header-count policy allows them, and selects the last OPT in Additional.
+- The DNS Listener returns FORMERR for malformed Messages with at least four octets and drops shorter datagrams. CoreDNS v1.15.0 accepts malformed OPTs when its header-count policy allows them, and selects the last OPT in Additional.
+- The DNS Listener ignores the reserved header Z bit on receipt, as RFC 6895 §2.1 recommends, and clears it in generated Responses.
+- Zero-question QUERY Messages route to the root Server Block when configured; CoreDNS's standard query path also permits QDCOUNT=0.
+- For DS at a configured zone cut, Pharos uses the parent Server Block; if no parent is configured, it routes to the child and returns authoritative NODATA, as RFC 4035 §3.1.4.1 requires.
+- Response OPT advertises the requestor's normalized payload size, capped at 4096; the `bufsize` Plugin's reduced size is echoed for UDP and TCP. This differs from always advertising Pharos's 4096-octet capacity.
+- Ordinary and validating Plugin Responses retain AD. The Listener clears AD only when appending a TSIG to a signed exchange (RFC 8945 §5.5); the current API does not expose whether the upstream exchange itself had transaction security.
+- RRSIG inception and expiration use RFC 4034 §3.1.5 serial arithmetic from RFC 1982 §3.2; this corrects implementations that compare wrapped values as ordinary integers.
+- DNS RCODE 16 metrics use BADVERS. TSIG Error 16 is BADSIG and is not a DNS RCODE label (RFC 6895 §2.3; RFC 8945 §3).
 - CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC report transport errors.
 - Pharos returns a header-only FORMERR for malformed Messages, whereas CoreDNS may retain a partially decoded Question.
 - For a header-only Message claiming one Question, Pharos returns FORMERR; CoreDNS returns SERVFAIL.
 - For pass-through Responses, Pharos truncates the encoded Message without recompression; CoreDNS may fit more records by recompressing first.
-- If an OPT precedes other Additional records, Pharos drops the following records and sets TC rather than shifting their compression pointers.
+- If an OPT precedes other Additional records, Pharos drops the following records rather than shifting their compression pointers; omitting only optional Additional data does not set TC (RFC 2181 §9).
+- TC is set when truncation omits required Answer or Authority data; RRset completeness limits remain as recorded in the RFC conformance table.
 - Pharos removes OPT from a Response to a non-EDNS Query, as RFC 6891 requires; CoreDNS may preserve a Plugin-supplied OPT in that case.
 - Pharos answers Plugin errors with SERVFAIL. CoreDNS ignores returned errors and bases the Response on the separately returned RCODE; without `errors` it does not log ordinary chain errors. Pharos likewise logs those errors only when `errors` is configured, while logging recovered panics at the Listener.
 - A UDP IXFR that reaches a Zone Transfer stream returns the current SOA only, following RFC 1995 §2; CoreDNS's `transfer` returns REFUSED instead.
