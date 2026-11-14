@@ -165,13 +165,12 @@ fn whoami_passes_non_in_questions_to_next_plugin() {
     assert!(response.is_empty());
 }
 
-#[cfg(feature = "plugin-forward")]
 #[tokio::test]
-async fn non_in_whoami_query_errors_on_shared_listener() {
+async fn non_in_whoami_query_passes_through_shared_listener() {
     use pharos_plugins::servers;
     use pharos_server::{Action, Handler};
 
-    let text = "example.:0 {\n forward . 127.0.0.1:53\n}\nother.:0 {\n whoami\n}";
+    let text = "example.:0 {\n whoami\n}\nother.:0 {\n whoami\n}";
     let blocks = configure::<Chain>(&parse("Corefile", text).unwrap(), directives()).unwrap();
     let (mut listeners, _) = servers(blocks).unwrap();
     let (_, server) = listeners.drain().next().unwrap();
@@ -189,7 +188,10 @@ async fn non_in_whoami_query_errors_on_shared_listener() {
         Action::Respond
     );
     let reply = Message::parse(&response).unwrap();
-    assert_eq!(reply.rcode(), pharos_proto::Rcode::SERVFAIL);
+    assert_eq!(reply.rcode(), pharos_proto::Rcode::REFUSED);
+    let question = reply.questions().next().unwrap();
+    assert_eq!(question.name.to_string(), "www.other.");
+    assert_eq!(question.qclass, Class::CH);
     assert_eq!(reply.additional_count(), 0);
 }
 
