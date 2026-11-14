@@ -12,6 +12,9 @@ fn valid() -> Vec<u8> {
 #[test]
 fn rejects_invalid_queries_and_honors_class_flag() {
     let mut response = Vec::with_capacity(512);
+    for wire in [&[][..], &[0][..], &[0, 1][..], &[0, 1, 1][..]] {
+        assert!(matches!(admit(wire, false, &mut response), Admission::Drop));
+    }
     assert!(matches!(
         admit(&[0; 11], false, &mut response),
         Admission::Respond

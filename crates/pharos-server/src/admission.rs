@@ -23,9 +23,12 @@ pub fn admit_with_update<'a>(
     allow_update: bool,
     response: &mut Vec<u8>,
 ) -> Admission<'a> {
-    // RFC 1035 §4.1.1: the DNS header consists of six 16-bit fields.
+    // RFC 1035 §4.1: drop datagrams too short to contain the Message ID and QR bit.
+    if wire.len() < 4 {
+        return Admission::Drop;
+    }
     // RFC 1035 §4.1.1: QR=1 identifies a Response, not a request.
-    if wire.len() >= 4 && wire[2] & 0x80 != 0 {
+    if wire[2] & 0x80 != 0 {
         return Admission::Drop;
     }
     if wire.len() < 12 {
@@ -43,10 +46,6 @@ pub fn admit_with_update<'a>(
         return Admission::Respond;
     }
     let flags = u16::from_be_bytes([wire[2], wire[3]]);
-    // RFC 1035 §4.1.1: QR distinguishes responses from queries.
-    if flags & 0x8000 != 0 {
-        return Admission::Drop;
-    }
     let opcode = Opcode(((flags >> 11) & 15) as u8);
     let count = |i| u16::from_be_bytes([wire[i], wire[i + 1]]);
     // RFC 8490 §§5.4.1, 5.4.3: DSO unidirectional Messages have ID zero and no Response.
@@ -158,7 +157,7 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode) {
     } else if let Some((_, opt_flags)) = raw_opt {
         // RFC 6891 §7: preserve EDNS's presence on FORMERR, even when option parsing failed.
         let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
-            // RFC 9824 §9: preserve CO; reserved EDNS flag bits remain zero.
+            // RFC 9824 §5.1: preserve CO; reserved EDNS flag bits remain zero.
             | u32::from(opt_flags & 0x4000)
             | if opt_flags & 0x8000 != 0 { 0x8000 } else { 0 };
         let mut opt = [0; 11];

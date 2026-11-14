@@ -205,7 +205,7 @@ fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
-    // RFC 3339 §5.6: clamp out-of-range dates to the four-digit year range.
+    // RFC 3339 §5.6: saturate out-of-range dates at year bounds; output no longer represents input time.
     let (year, month, day, day_seconds) = if year > 9999 {
         (9999, 12, 31, 86_399)
     } else if year < 0 {

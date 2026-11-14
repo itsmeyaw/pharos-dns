@@ -202,7 +202,7 @@ impl<C> Router<C> {
             }
             if ds_at_cut && count == labels {
                 if VIEW && question.name == block.domain && matches(block) {
-                    // RFC 4035 §3.1.4.1: collect child-view metadata; answer from the parent zone.
+                    // RFC 4035 §3.1.4.1: only the exact child cut contributes its View metadata.
                     child_at_cut = Some(block);
                 }
                 continue;

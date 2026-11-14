@@ -42,6 +42,28 @@ impl Chain for NotifyProbe {
     }
 }
 
+struct ChildNodata;
+impl Chain for ChildNodata {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        let question = cx.query.questions().next().unwrap();
+        assert_eq!(question.qtype, Type::DS);
+        let apex: Name = "child.example.org.".parse().unwrap();
+        let apex = NameRef::parse(apex.as_wire(), 0).unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8400).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(Section::Authority, apex, Type::SOA, Class::IN, 60, &[0; 22])
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
 struct UpdateProbe(bool);
 impl Chain for UpdateProbe {
     async fn serve(&self, context: &mut Context<'_, '_>) -> Outcome {
@@ -147,6 +169,50 @@ async fn zero_question_query_is_not_rejected_as_malformed() {
         Action::Respond
     );
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+}
+
+#[tokio::test]
+async fn child_only_authority_answers_ds_nodata_from_child_zone() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        key,
+        "child.example.org.".parse().unwrap(),
+        Some(ChildNodata),
+        vec![],
+    );
+    let server = Server::new(router, key);
+    let name: Name = "child.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::DS,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.rcode(), Rcode::NOERROR);
+    assert!(message.aa());
+    assert_eq!(message.answer_count(), 0);
+    assert_eq!(message.authorities().next().unwrap().rtype, Type::SOA);
 }
 
 #[tokio::test]

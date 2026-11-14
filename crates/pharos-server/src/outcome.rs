@@ -296,9 +296,7 @@ fn scrub(
         // RFC 6891 §§6.2.3–6.2.5: echo the normalized request size up to responder capacity.
         wire[end + 3..end + 5].copy_from_slice(
             &normalized_udp_size(
-                query_opt
-                    .udp_payload_size()
-                    .min(RESPONSE_UDP_PAYLOAD_SIZE),
+                query_opt.udp_payload_size().min(RESPONSE_UDP_PAYLOAD_SIZE),
                 false,
             )
             .to_be_bytes(),
