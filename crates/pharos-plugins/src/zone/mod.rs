@@ -274,13 +274,16 @@ impl Zone {
         let rrset_key = |record: &ZoneRecord| {
             (
                 record.owner.clone(),
-                record.rtype.0,
+                if record.rtype == Type::RRSIG {
+                    covered_type(record)
+                } else {
+                    record.rtype.0
+                },
                 record.class.0,
-                covered_type(record),
             )
         };
         let mut rrset_ttls =
-            std::collections::HashMap::<(Name, u16, u16, u16), u32>::with_capacity(records.len());
+            std::collections::HashMap::<(Name, u16, u16), u32>::with_capacity(records.len());
         for record in &records {
             let ttl = rrset_ttls.entry(rrset_key(record)).or_insert(record.ttl);
             *ttl = (*ttl).min(record.ttl);
