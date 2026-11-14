@@ -127,6 +127,13 @@ async fn coredns_local_cases() {
             None,
         ),
         (
+            "127.in-addr.arpa.",
+            Type::SOA,
+            Rcode::NOERROR,
+            Some(("127.in-addr.arpa.", Type::SOA)),
+            None,
+        ),
+        (
             "localhost.",
             Type::MX,
             Rcode::NOERROR,
@@ -220,7 +227,7 @@ async fn coredns_local_cases() {
             }
             if qtype == Type::SOA {
                 let mname = NameRef::parse(rr.rdata, 0).unwrap();
-                assert_eq!(mname.to_string(), "ns.localhost.");
+                assert_eq!(mname.to_string(), name);
                 let rname = NameRef::parse(rr.rdata, mname.wire_len()).unwrap();
                 assert_eq!(rname.to_string(), "nobody.invalid.");
             }
@@ -250,6 +257,16 @@ async fn coredns_localhost_prefix_and_next() {
     for name in ["a.localhost.", "a.LOCALHOST."] {
         assert_eq!(query(&off, name, Type::AAAA).await.0, Outcome::Response);
     }
+    let (outcome, wire) = query(&on, "localhost.example.net.", Type::MX).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(response.aa());
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    let soa = response.authorities().next().unwrap();
+    assert_eq!(
+        NameRef::parse(soa.rdata, 0).unwrap().to_string(),
+        "localhost."
+    );
     for name in [
         "example.net.",
         "notlocalhost.",

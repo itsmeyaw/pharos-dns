@@ -16,10 +16,8 @@ const TTL: u32 = 604_800;
 const LOCALHOST: &[u8] = b"\x09localhost\0";
 // RFC 1035 §3.3.13: SOA RDATA contains MNAME, RNAME and five 32-bit values.
 // RFC 6303 §3: Serve localhost SOA and NS data to identify empty-zone answers.
-// RFC 2181 §7.3: identify the local primary server in SOA MNAME.
 // RFC 6303 §3: Use nobody.invalid. as the SOA RNAME.
-const SOA: &[u8] =
-    b"\x02ns\x09localhost\0\x06nobody\x07invalid\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
+const SOA_TAIL: &[u8] = b"\x06nobody\x07invalid\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
 
 #[derive(Debug)]
 pub struct Local {
@@ -150,13 +148,17 @@ impl Local {
         // RFC 1035 §3.1: encode Domain names as length-prefixed labels ending in zero.
         let mut origin = [0u8; 255];
         let mut len = 0;
-        if !special {
-            for label in &labels[zone_start.unwrap()..count] {
+        if let Some(start) = zone_start {
+            for label in &labels[start..count] {
                 origin[len] = label.len() as u8;
                 len += 1;
                 origin[len..len + label.len()].copy_from_slice(label);
                 len += label.len();
             }
+        } else {
+            // RFC 6761 §6.3: localhost-prefix aliases use localhost. as their local zone.
+            origin[..LOCALHOST.len()].copy_from_slice(LOCALHOST);
+            len = LOCALHOST.len() - 1;
         }
         let owner = if special || apex {
             question.name
@@ -186,13 +188,19 @@ impl Local {
             // RFC 6303 §3: Include SOA records for negative caching and update discovery.
             let rtype = answer_type.unwrap_or(Type::SOA);
             // RFC 1035 §3.4.1 and RFC 3596 §2.2: encode A and AAAA loopback addresses.
+            let mut soa = [0u8; 255 + 36];
             let rdata: &[u8] = match rtype {
                 Type::A => &[127, 0, 0, 1],
                 Type::AAAA => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
                 // RFC 6303 §3: the local zone apex names itself as its NS target.
                 Type::NS => &origin[..=len],
                 Type::PTR => LOCALHOST,
-                _ => SOA,
+                _ => {
+                    // RFC 2181 §7.3: use the same target for SOA MNAME and local apex NS.
+                    soa[..=len].copy_from_slice(&origin[..=len]);
+                    soa[len + 1..len + 1 + SOA_TAIL.len()].copy_from_slice(SOA_TAIL);
+                    &soa[..=len + SOA_TAIL.len()]
+                }
             };
             // RFC 2181 §7.2: SOA answers retain a nonzero TTL instead of forcing TTL zero.
             builder

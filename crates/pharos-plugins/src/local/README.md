@@ -4,6 +4,9 @@
 
 ## local
 
+- Non-IN Questions pass through; CoreDNS emits this plugin's IN-class answers for them (RFC 1034 §4.3.1).
+- Pharos sets AA on every intercepted local answer, including NXDOMAIN (RFC 1034 §4.3.2).
+- SOA MNAME and apex NS target both use the local zone apex; SOA RNAME is `nobody.invalid.` (RFC 2181 §7.3; RFC 6303 §3).
 - The localhost interception debug log can be enabled through the process logging API; the `debug` Directive is not implemented yet. Unlike CoreDNS, logged Query names retain their original case.
 - UDP callers must supply a sufficiently large Response buffer.
 - DNS names are matched as wire labels with ASCII case folding, rather than CoreDNS's lowercased presentation strings.
