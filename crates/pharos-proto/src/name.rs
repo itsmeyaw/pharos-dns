@@ -113,6 +113,7 @@ impl Name {
                     position += 1;
                 }
             } else if !byte.is_ascii() {
+                // RFC 4343 §2.1: Non-ASCII octets require escapes in ASCII presentation.
                 return Err(NameError::InvalidEscape);
             }
             // RFC 1035 §2.3.4: Limit labels to 63 octets and full names to 255 octets.
@@ -262,7 +263,10 @@ impl Name {
                         position += 1;
                     }
                 }
-                byte if !byte.is_ascii() => return Err(NameError::InvalidEscape),
+                byte if !byte.is_ascii() => {
+                    // RFC 4343 §2.1: Non-ASCII octets require escapes in ASCII presentation.
+                    return Err(NameError::InvalidEscape);
+                }
                 // RFC 6895 §3.3.1: Text labels can contain any octet, including zero.
                 byte => {
                     label.push(byte);

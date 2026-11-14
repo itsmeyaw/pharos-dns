@@ -138,7 +138,7 @@ fn check_accepts_upstream_default_corefiles() {
             &[
                 "Negative Responses use the SOA MINIMUM",
                 "API client creation and kubeconfig validation",
-                "Pharos discards names that are not valid DNS names or UTF-8",
+                "Invalid entries are logged and skipped",
             ][..],
         ),
     ] {

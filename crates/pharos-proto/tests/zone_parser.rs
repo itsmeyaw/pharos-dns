@@ -20,6 +20,29 @@ fn parses_origin_ttl_and_inherited_owner() {
 }
 
 #[test]
+fn owner_names_escape_non_ascii_wire_octets() {
+    // RFC 4343 §2.1: Raw non-ASCII bytes are not ASCII DNS presentation.
+    let origin: Name = ".".parse().unwrap();
+    assert!(
+        ZoneParser::new(
+            Cursor::new("tést.example. 60 IN A 192.0.2.1\n"),
+            origin.clone(),
+            "unicode.zone"
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .is_err()
+    );
+    let records = ZoneParser::new(
+        Cursor::new(r"t\195\169st.example. 60 IN A 192.0.2.1".to_owned() + "\n"),
+        origin,
+        "escaped.zone",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    assert_eq!(records[0].owner.to_string(), r"t\195\169st.example.");
+}
+
+#[test]
 fn any_class_matches_miekg_rejection() {
     let parser = ZoneParser::new(
         Cursor::new("a 60 ANY A 192.0.2.1\n"),

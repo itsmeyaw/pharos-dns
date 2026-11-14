@@ -11,8 +11,8 @@ fn parser(input: &[u8]) -> ZoneParser<BufReader<Cursor<&[u8]>>> {
 }
 
 #[test]
-fn arbitrary_octets_are_preserved_in_names_and_character_strings() {
-    let input = b"$ORIGIN \xff. ; \xfe\n$TTL 60\n\xc3\xa9 IN CNAME \\\xff\n  TXT ( \"a\xff\" ; \x80\n \"b\\\xfe\" \"\\255\" )\n";
+fn escaped_name_octets_and_quoted_character_strings_are_preserved() {
+    let input = b"$ORIGIN \\255. ; \xfe\n$TTL 60\n\\195\\169 IN CNAME \\255\n  TXT ( \"a\xff\" ; \x80\n \"b\\\xfe\" \"\\255\" )\n";
     let records = parser(input).collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(records[0].owner.as_wire(), b"\x02\xc3\xa9\x01\xff\0");
     assert_eq!(records[0].rdata, b"\x01\xff\x01\xff\0");
@@ -154,7 +154,7 @@ fn errors_identify_the_offending_token_in_bytes() {
         (b"$TTL nope\n", 1, 6),
         (b"$ORIGIN a..\n", 1, 9),
         (b"$TTL 60\na IN BOGUS data\n", 2, 6),
-        (b"$TTL 60\n\xff A nope\n", 2, 5),
+        (b"$TTL 60\n\xff A nope\n", 2, 1),
         (b"$TTL 60\na SOA ( ns. host. 1\n  2 bad 4 5 )\n", 3, 5),
         (b"$TTL 60\na MX 10 bad..\n", 2, 9),
         (b"$TTL 60\na SRV 0 0 999999 bad..\n", 2, 11),
@@ -265,7 +265,7 @@ fn ttl_unit_segments_match_and_integer_overflow_is_rejected() {
 }
 
 #[test]
-fn generate_modifier_error_points_to_dollar() {
+fn generate_errors_point_to_the_offending_token() {
     let input = b"@ IN SOA ns.test. hostmaster.test. ( 1 8h 2h 7d 1d )\n$GENERATE 0-1 dhcp-${0,4,dd} A 10.0.0.$\n";
     let mut p = parser(input);
     p.next().unwrap().unwrap();

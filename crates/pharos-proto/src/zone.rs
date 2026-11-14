@@ -346,6 +346,9 @@ impl<R: BufRead> ZoneParser<R> {
                     return Err(err_at(2, "invalid origin"));
                 }
                 reject_quote(&tokens[1])?;
+                if has_raw_non_ascii(&tokens[1].raw) {
+                    return Err(err_at(1, "non-ASCII octet must be escaped"));
+                }
                 self.origin = Name::parse(&normalize_escapes(&tokens[1]), &self.origin)
                     .map_err(|e| err_at(1, &e.to_string()))?;
             // RFC 2308 §4: $TTL sets the default TTL for following non-SIG records without one.
@@ -388,6 +391,9 @@ impl<R: BufRead> ZoneParser<R> {
                 };
                 let file = File::open(&path).map_err(|e| err_at(1, &e.to_string()))?;
                 let origin = if tokens.len() == 3 {
+                    if has_raw_non_ascii(&tokens[2].raw) {
+                        return Err(err_at(2, "non-ASCII octet must be escaped"));
+                    }
                     Name::parse(&normalize_escapes(&tokens[2]), &self.origin)
                         .map_err(|e| err_at(2, &e.to_string()))?
                 } else {
@@ -438,6 +444,14 @@ impl<R: BufRead> ZoneParser<R> {
                 });
             }
             return Ok(None);
+        }
+        // RFC 4343 §2.1: Unquoted DNS presentation tokens must escape non-ASCII octets.
+        if let Some((index, _)) = tokens
+            .iter()
+            .enumerate()
+            .find(|(_, token)| token.quotes.is_empty() && has_raw_non_ascii(&token.raw))
+        {
+            return Err(err_at(index, "non-ASCII octet must be escaped"));
         }
         // RFC 1035 §5.1: blank owners inherit, and omitted classes reuse the prior explicit class.
         let mut i = 0;
@@ -693,6 +707,21 @@ fn has_invalid_digit_escape(value: &str) -> bool {
             i += 4;
         } else {
             i += 2;
+        }
+    }
+    false
+}
+
+// RFC 4343 §2.1: Raw non-ASCII octets are not ASCII DNS presentation escapes.
+fn has_raw_non_ascii(value: &[u8]) -> bool {
+    let mut i = 0;
+    while i < value.len() {
+        if value[i] == b'\\' {
+            i += 2;
+        } else if value[i] >= 128 {
+            return true;
+        } else {
+            i += 1;
         }
     }
     false
