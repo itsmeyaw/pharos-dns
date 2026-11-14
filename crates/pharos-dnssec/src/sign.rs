@@ -32,6 +32,27 @@ impl fmt::Display for SignError {
 
 impl std::error::Error for SignError {}
 
+/// Verifies an RFC 6605 DNSSEC ECDSA signature against DNSKEY `x || y` public bytes.
+#[must_use]
+pub fn verify_ecdsa(algorithm: u8, public_key: &[u8], data: &[u8], signature: &[u8]) -> bool {
+    // RFC 6605 §4: DNSKEY stores x || y; RRSIG stores fixed-width r || s.
+    let (algorithm, coordinate_len, signature_len) = match algorithm {
+        13 => (&signature::ECDSA_P256_SHA256_FIXED, 32, 64),
+        14 => (&signature::ECDSA_P384_SHA384_FIXED, 48, 96),
+        _ => return false,
+    };
+    if public_key.len() != coordinate_len * 2 || signature.len() != signature_len {
+        return false;
+    }
+    let mut point = [0; 97];
+    point[0] = 4;
+    let point_len = public_key.len() + 1;
+    point[1..point_len].copy_from_slice(public_key);
+    signature::UnparsedPublicKey::new(algorithm, &point[..point_len])
+        .verify(data, signature)
+        .is_ok()
+}
+
 enum Key {
     Rsa(RsaKeyPair, &'static dyn signature::RsaEncoding),
     Ecdsa(EcdsaKeyPair),
