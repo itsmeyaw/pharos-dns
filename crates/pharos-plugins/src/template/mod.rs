@@ -673,7 +673,7 @@ impl Plugin for Template {
                 && let Ok(target) = NameRef::parse(&rr.rdata, 0)
             {
                 // RFC 1034 §3.6.2: a CNAME answer restarts the lookup at its target.
-                // shortcut: Self Lookup allocates; remove when #86 makes it allocation-free.
+                // shortcut: Every non-CNAME QTYPE can allocate one Self Lookup per answer CNAME; #86 removes it.
                 if let Ok(response) = cx.self_lookup(&target.to_name(), question.qtype).await {
                     lookups.push((index, response));
                 }
