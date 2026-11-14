@@ -192,14 +192,15 @@ impl Local {
             let rdata: &[u8] = match rtype {
                 Type::A => &[127, 0, 0, 1],
                 Type::AAAA => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-                // RFC 6303 §3: the local zone apex names itself as its NS target.
-                Type::NS => &origin[..=len],
+                // RFC 6303 §3: use resolvable localhost. as the local NS target.
+                Type::NS => LOCALHOST,
                 Type::PTR => LOCALHOST,
                 _ => {
-                    // RFC 2181 §7.3: use the same target for SOA MNAME and local apex NS.
-                    soa[..=len].copy_from_slice(&origin[..=len]);
-                    soa[len + 1..len + 1 + SOA_TAIL.len()].copy_from_slice(SOA_TAIL);
-                    &soa[..=len + SOA_TAIL.len()]
+                    // RFC 2181 §7.3: make SOA MNAME match the resolvable local NS target.
+                    soa[..LOCALHOST.len()].copy_from_slice(LOCALHOST);
+                    soa[LOCALHOST.len()..LOCALHOST.len() + SOA_TAIL.len()]
+                        .copy_from_slice(SOA_TAIL);
+                    &soa[..LOCALHOST.len() + SOA_TAIL.len()]
                 }
             };
             // RFC 2181 §7.2: SOA answers retain a nonzero TTL instead of forcing TTL zero.

@@ -222,12 +222,12 @@ async fn coredns_local_cases() {
             if qtype == Type::NS {
                 assert_eq!(
                     NameRef::parse(rr.rdata, 0).unwrap().to_string(),
-                    name.to_string()
+                    "localhost."
                 );
             }
             if qtype == Type::SOA {
                 let mname = NameRef::parse(rr.rdata, 0).unwrap();
-                assert_eq!(mname.to_string(), name);
+                assert_eq!(mname.to_string(), "localhost.");
                 let rname = NameRef::parse(rr.rdata, mname.wire_len()).unwrap();
                 assert_eq!(rname.to_string(), "nobody.invalid.");
             }
