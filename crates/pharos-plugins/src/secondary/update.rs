@@ -320,7 +320,7 @@ pub(super) fn timers(zone: &SecondaryZone) -> (Duration, Duration, Duration) {
         .as_ref()
         .and_then(|zone| zone.records().iter().find(|rr| rr.rtype == Type::SOA));
     let value = |offset: usize| {
-        // RFC 1034 §4.3.5: Keep zero timer values; they schedule immediate work.
+        // RFC 1034 §4.3.5: shortcut: Keep a 1s floor to prevent zero SOA timers from tight-polling primaries.
         soa.and_then(|rr| {
             rr.rdata
                 .get(rr.rdata.len().checked_sub(20)? + offset..)?
@@ -329,6 +329,7 @@ pub(super) fn timers(zone: &SecondaryZone) -> (Duration, Duration, Duration) {
         .and_then(|bytes| bytes.try_into().ok())
         .map(u32::from_be_bytes)
         .unwrap_or(1)
+        .max(1)
     };
     (
         Duration::from_secs(u64::from(value(4))),
@@ -393,24 +394,19 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
     }
     'restart: loop {
         let (refresh, retry, expire) = timers(&zone);
-        let mut refresh_at = tokio::time::Instant::now() + refresh;
-        let mut retry_at = tokio::time::Instant::now() + retry;
-        let mut expire_at = tokio::time::Instant::now() + expire;
+        let mut refresh = tokio::time::interval_at(tokio::time::Instant::now() + refresh, refresh);
+        let mut retry = tokio::time::interval_at(tokio::time::Instant::now() + retry, retry);
+        let mut expire = tokio::time::interval_at(tokio::time::Instant::now() + expire, expire);
         let mut retry_active = false;
         loop {
             let jitter = tokio::select! {
-                _ = tokio::time::sleep_until(refresh_at), if !retry_active => {
-                    refresh_at = tokio::time::Instant::now() + refresh;
-                    if refresh.is_zero() { 0 } else { 5000 }
-                },
-                _ = tokio::time::sleep_until(retry_at), if retry_active => {
-                    retry_at = tokio::time::Instant::now() + retry;
-                    if retry.is_zero() { 0 } else { 2000 }
-                },
-                _ = tokio::time::sleep_until(expire_at), if retry_active && !zone.expired.load(Ordering::Relaxed) => {
-                    expire_at = tokio::time::Instant::now() + expire;
-                    zone.expired.store(true, Ordering::Relaxed);
-                    super::catalog::invalidate(&shared, &zone);
+                _ = refresh.tick(), if !retry_active => 5000,
+                _ = retry.tick(), if retry_active => 2000,
+                _ = expire.tick() => {
+                    if retry_active && !zone.expired.load(Ordering::Relaxed) {
+                        zone.expired.store(true, Ordering::Relaxed);
+                        super::catalog::invalidate(&shared, &zone);
+                    }
                     continue;
                 }
             };
@@ -425,7 +421,6 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                             "secondary",
                             &format!("Transfer {}: {error}", zone.config.apex),
                         );
-                        retry_at = tokio::time::Instant::now() + retry;
                         retry_active = true;
                         continue;
                     }
@@ -437,7 +432,6 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                         "secondary",
                         &format!("SOA check {}: {error}", zone.config.apex),
                     );
-                    retry_at = tokio::time::Instant::now() + retry;
                     retry_active = true;
                     continue;
                 }

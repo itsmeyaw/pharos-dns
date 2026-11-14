@@ -451,12 +451,31 @@ async fn secondary_rejects_malformed_notify_and_non_soa_question() {
         };
         assert_eq!(secondary.serve_with(&mut cx, TestNext, true).await, outcome);
     }
+    let mut query = Vec::with_capacity(512);
+    let builder = MessageBuilder::new(&mut query, 512, 7, 0x2400).unwrap();
+    let _ = builder.finish();
+    let mut slots = [None; 8];
+    let mut cx = Context {
+        query: Message::parse(&query).unwrap(),
+        client: "127.0.0.2:1000".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &apex,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        secondary.serve_with(&mut cx, TestNext, true).await,
+        Outcome::Drop
+    );
     let zone = &secondary.shared.zones.load()[0];
     assert!(zone.notify_source.lock().unwrap().is_none());
 }
 
 #[test]
-fn zero_soa_timers_remain_zero() {
+fn zero_soa_timers_use_one_second_floor() {
     let zone = SecondaryZone::new(ZoneConfig {
         apex: "example.org.".parse().unwrap(),
         from: vec![],
@@ -475,9 +494,9 @@ fn zero_soa_timers_remain_zero() {
     assert_eq!(
         update::timers(&zone),
         (
-            std::time::Duration::ZERO,
-            std::time::Duration::ZERO,
-            std::time::Duration::ZERO
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1)
         )
     );
 }
@@ -536,7 +555,7 @@ async fn failed_refresh_expires_the_zone() {
     while zone.current.load().is_none() {
         tokio::task::yield_now().await;
     }
-    // RFC 1034 §4.3.5: Zero REFRESH checks immediately and zero EXPIRE expires after failure.
+    // RFC 1034 §4.3.5: The one-second floor keeps zero timers from tight-polling the primary.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !zone.expired.load(Ordering::Relaxed) {
         assert!(

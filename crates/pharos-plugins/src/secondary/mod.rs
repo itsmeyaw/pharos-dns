@@ -131,6 +131,19 @@ impl Secondary {
         has_next: bool,
     ) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
+            if cx.query.opcode() == Opcode::NOTIFY {
+                // RFC 1996 §3.10: Drop NOTIFY without a Question from unknown peers.
+                if self.shared.zones.load().iter().all(|zone| {
+                    !zone
+                        .config
+                        .from
+                        .iter()
+                        .any(|address| update::primary_matches(address, cx.client))
+                }) {
+                    return Outcome::Drop;
+                }
+                return Outcome::Unanswered(Rcode::FORMERR);
+            }
             return next.run(cx).await;
         };
         let mut wire = [0u8; 255];
@@ -175,9 +188,6 @@ impl Secondary {
 }
 
 fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
-    let Some(question) = cx.query.questions().next() else {
-        return Outcome::Unanswered(Rcode::FORMERR);
-    };
     // RFC 1996 §3.10: Ignore NOTIFY from unconfigured Primary Servers.
     if !zone
         .config
@@ -187,6 +197,9 @@ fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
     {
         return Outcome::Drop;
     }
+    let Some(question) = cx.query.questions().next() else {
+        return Outcome::Unanswered(Rcode::FORMERR);
+    };
     // RFC 1996 §§3.2, 3.3: NOTIFY uses AA, one IN SOA Question, and zero undefined fields.
     if cx.query.flags() & 0x83ff != 0
         || cx.query.flags() & 0x0400 == 0
