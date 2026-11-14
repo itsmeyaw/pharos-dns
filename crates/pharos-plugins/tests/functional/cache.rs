@@ -557,7 +557,7 @@ async fn caches_servfail_and_can_disable_it() {
 }
 
 #[tokio::test]
-async fn uncached_other_errors_use_coredns_fallback_ttl() {
+async fn refused_is_cached_with_fallback_failure_ttl() {
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
     let chain = cache();
     let calls = AtomicUsize::new(0);
@@ -573,7 +573,7 @@ async fn uncached_other_errors_use_coredns_fallback_ttl() {
             5
         );
     }
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
