@@ -210,6 +210,9 @@ async fn coredns_local_cases() {
         );
         for rr in msg.answers().chain(msg.authorities()) {
             assert_eq!((rr.class, rr.ttl), (Class::IN, 604800));
+            if qtype == Type::SOA {
+                assert!(rr.rdata.windows(16).any(|bytes| bytes == b"\x06nobody\x07invalid\0"));
+            }
         }
     }
 }

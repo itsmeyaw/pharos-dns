@@ -17,8 +17,9 @@ const LOCALHOST: &[u8] = b"\x09localhost\0";
 // RFC 1035 §3.3.13: SOA RDATA contains MNAME, RNAME and five 32-bit values.
 // RFC 6303 §3: Serve localhost SOA and NS data to identify empty-zone answers.
 // RFC 6303 §3: Set SOA MNAME to the local NS target.
+// RFC 6303 §3: Use nobody.invalid. as the SOA RNAME.
 const SOA: &[u8] =
-    b"\x09localhost\0\x04root\x09localhost\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
+    b"\x09localhost\0\x06nobody\x07invalid\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
 
 #[derive(Debug)]
 pub struct Local {
