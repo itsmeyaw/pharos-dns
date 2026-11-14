@@ -19,6 +19,7 @@
 ## bind
 
 - [bind Plugin notes](../crates/pharos-plugins/src/bind/README.md)
+- RFC 5625 §6.2: the default listener uses an unspecified address and can expose a `forward` proxy on every interface; configure `bind` to restrict listener addresses.
 
 ## bufsize
 
