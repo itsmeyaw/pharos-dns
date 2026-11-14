@@ -157,6 +157,17 @@ impl Name {
         &self.wire
     }
 
+    /// Borrows this validated uncompressed name as a Message name view.
+    #[must_use]
+    pub fn as_name_ref(&self) -> NameRef<'_> {
+        // RFC 1035 §2.3.4: `Name` stores the validated uncompressed wire encoding.
+        NameRef {
+            message: &self.wire,
+            offset: 0,
+            wire_len: self.wire.len(),
+        }
+    }
+
     /// Returns the number of non-root labels.
     #[must_use]
     pub fn label_count(&self) -> usize {
@@ -333,6 +344,7 @@ impl<'a> NameRef<'a> {
         offset: usize,
         pointer_budget: &mut usize,
     ) -> Result<Self, NameError> {
+        // RFC 1035 §4.1.4: reject forward pointers; the shared budget also bounds parser work.
         let wire_len = check_message_name(message, offset, pointer_budget)?;
         Ok(Self {
             message,

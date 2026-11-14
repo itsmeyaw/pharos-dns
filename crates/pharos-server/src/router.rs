@@ -257,9 +257,7 @@ fn domain_matches(name: NameRef<'_>, labels: usize, domain: &Name) -> bool {
     if count > labels {
         return false;
     }
-    let Ok(domain) = NameRef::parse(domain.as_wire(), 0) else {
-        return false;
-    };
+    let domain = domain.as_name_ref();
     name.labels()
         .skip(labels - count)
         .zip(domain.labels())

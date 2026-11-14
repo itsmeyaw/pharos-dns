@@ -31,6 +31,15 @@ fn parses_absolute_names_into_caller_buffer() {
 }
 
 #[test]
+fn borrowed_name_view_matches_wire_parsing() {
+    let value = name("www.example.com.");
+    assert_eq!(
+        value.as_name_ref(),
+        NameRef::parse(value.as_wire(), 0).unwrap()
+    );
+}
+
+#[test]
 fn parses_and_prints_miekg_escapes() {
     let value = name(r"a\.b.\\.\001.");
 
