@@ -140,6 +140,159 @@ fn hostile_counts_and_compression_are_rejected() {
 }
 
 #[test]
+fn sig0_is_last_after_opt_and_notify_ignores_trailing_sections() {
+    use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
+    let name: Name = ".".parse().unwrap();
+    let root = NameRef::parse(name.as_wire(), 0).unwrap();
+    let mut opt_then_sig0 = Vec::new();
+    let mut builder = MessageBuilder::new(&mut opt_then_sig0, 512, 1, 0).unwrap();
+    builder
+        .record(Section::Additional, root, Type::OPT, Class(1232), 0, &[])
+        .unwrap();
+    builder
+        .record(Section::Additional, root, Type::SIG, Class::IN, 0, &[0, 0])
+        .unwrap();
+    let opt_then_sig0 = builder.finish();
+    assert!(Message::parse(opt_then_sig0).is_ok());
+
+    let mut sig0_then_opt = Vec::new();
+    let mut builder = MessageBuilder::new(&mut sig0_then_opt, 512, 1, 0).unwrap();
+    builder
+        .record(Section::Additional, root, Type::SIG, Class::IN, 0, &[0, 0])
+        .unwrap();
+    builder
+        .record(Section::Additional, root, Type::OPT, Class(1232), 0, &[])
+        .unwrap();
+    assert!(Message::parse(builder.finish()).is_err());
+
+    let notify = b"\0\x01\x20\0\0\x01\0\0\0\x01\0\x01\x01a\0\0\x06\0\x01\xff";
+    assert_eq!(Message::parse(notify).unwrap().authority_count(), 0);
+
+    let mut notify_response = Vec::new();
+    let mut builder = MessageBuilder::new(&mut notify_response, 512, 1, 0xa000).unwrap();
+    let a: Name = "a.".parse().unwrap();
+    let a = NameRef::parse(a.as_wire(), 0).unwrap();
+    builder.question(a, Type::SOA, Class::IN).unwrap();
+    builder
+        .record(Section::Authority, a, Type::NS, Class::IN, 0, &[0])
+        .unwrap();
+    assert_eq!(
+        Message::parse(builder.finish()).unwrap().authority_count(),
+        1
+    );
+}
+
+#[test]
+fn notify_requests_hide_valid_authority_and_additional_records() {
+    use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
+
+    let name: Name = "a.".parse().unwrap();
+    let name = NameRef::parse(name.as_wire(), 0).unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2000).unwrap();
+    builder.question(name, Type::SOA, Class::IN).unwrap();
+    builder
+        .record(
+            Section::Authority,
+            name,
+            Type::A,
+            Class::IN,
+            0,
+            &[192, 0, 2, 1],
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            name,
+            Type::A,
+            Class::IN,
+            0,
+            &[192, 0, 2, 2],
+        )
+        .unwrap();
+    let message = Message::parse(builder.finish())
+        .unwrap()
+        .ignore_notify_sections();
+
+    // RFC 1996 §3.9: NOTIFY requests ignore Authority and Additional records.
+    assert_eq!(message.authority_count(), 0);
+    assert_eq!(message.additional_count(), 0);
+}
+
+#[test]
+fn notify_request_view_retains_tsig_for_authentication() {
+    use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
+
+    let name: Name = ".".parse().unwrap();
+    let name = NameRef::parse(name.as_wire(), 0).unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2000).unwrap();
+    builder.question(name, Type::SOA, Class::IN).unwrap();
+    builder
+        .record(
+            Section::Additional,
+            name,
+            Type::A,
+            Class::IN,
+            0,
+            &[192, 0, 2, 1],
+        )
+        .unwrap();
+    builder
+        .record(Section::Additional, name, Type::OPT, Class(1232), 0, &[])
+        .unwrap();
+    builder
+        .record(Section::Additional, name, Type::TSIG, Class::ANY, 0, &[0])
+        .unwrap();
+    let message = Message::parse(builder.finish())
+        .unwrap()
+        .ignore_notify_sections();
+
+    assert_eq!(message.additional_count(), 1);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
+    assert_eq!(
+        message
+            .additionals()
+            .map(|record| record.rtype)
+            .collect::<Vec<_>>(),
+        [Type::TSIG]
+    );
+    let unsigned = message.without_final_tsig().unwrap();
+    assert_eq!(unsigned.additional_count(), 0);
+    assert_eq!(unsigned.additionals().count(), 0);
+}
+
+#[test]
+fn parses_large_pointer_compressed_response_within_budget() {
+    use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
+
+    let name: Name = "a.".parse().unwrap();
+    let name = NameRef::parse(name.as_wire(), 0).unwrap();
+    let mut wire = Vec::with_capacity(usize::from(u16::MAX));
+    let mut builder = MessageBuilder::new(&mut wire, usize::from(u16::MAX), 1, 0x8180).unwrap();
+    builder.question(name, Type::A, Class::IN).unwrap();
+    for _ in 0..4000 {
+        assert!(
+            builder
+                .record(
+                    Section::Answer,
+                    name,
+                    Type::A,
+                    Class::IN,
+                    60,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap()
+        );
+    }
+    let _ = builder.finish();
+    let message = Message::parse(&wire).unwrap();
+    assert_eq!(message.answer_count(), 4000);
+    assert_eq!(message.answers().count(), 4000);
+}
+
+#[test]
 fn reads_flags_counts_and_record_offsets() {
     let wire = b"\xab\xcd\xff\xff\x00\x01\x00\x01\x00\x01\x00\x01\x01x\0\x00\x01\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x78\x00\x04\x7f\x00\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x01\x00\x00\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00";
     let message = Message::parse(wire).unwrap();
@@ -168,7 +321,26 @@ fn reads_flags_counts_and_record_offsets() {
 }
 
 #[test]
-fn rejects_compression_bombs() {
+fn message_parser_consumes_a_shared_pointer_budget() {
+    let wire = [
+        0x12, 0x34, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0xc0, 0x0c, 0, 1, 0, 1,
+    ];
+    let mut budget = 1;
+    let message = Message::parse_with_pointer_budget(&wire, &mut budget).unwrap();
+    assert_eq!(message.question_count(), 2);
+    assert_eq!(budget, 0);
+
+    let mut exhausted = 0;
+    assert!(matches!(
+        Message::parse_with_pointer_budget(&wire, &mut exhausted),
+        Err(pharos_proto::MessageError::Name(
+            pharos_proto::NameError::PointerLimit
+        ))
+    ));
+}
+
+#[test]
+fn rejects_backward_pointer_chains_over_255_hops() {
     let mut wire = vec![0; 12];
     wire[7] = 2; // Answer count
     wire.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 0, 0, 2, 0]); // root, RR header, 512-byte RDATA
@@ -180,7 +352,39 @@ fn rejects_compression_bombs() {
     let target = 23 + 2 * 255;
     wire.extend_from_slice(&[0xc0 | (target >> 8) as u8, target as u8]);
     wire.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
-    assert!(Message::parse(&wire).is_err());
+    assert!(matches!(
+        Message::parse(&wire),
+        Err(pharos_proto::MessageError::Name(
+            pharos_proto::NameError::PointerLimit
+        ))
+    ));
+}
+
+#[test]
+fn bounds_aggregate_pointer_work_in_large_messages() {
+    let mut wire = vec![0; 12];
+    wire[6..8].copy_from_slice(&1001_u16.to_be_bytes());
+    wire.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 0, 0, 0xc3, 0x50]);
+    let chain_start = wire.len();
+    wire.push(0);
+    let mut last_pointer = chain_start;
+    for _ in 0..200 {
+        wire.extend_from_slice(&[0xc0 | ((last_pointer >> 8) as u8), last_pointer as u8]);
+        last_pointer = wire.len() - 2;
+    }
+    wire.resize(chain_start + 50_000, 0);
+    for _ in 0..1000 {
+        wire.extend_from_slice(&[0xc0 | ((last_pointer >> 8) as u8), last_pointer as u8]);
+        wire.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
+    }
+
+    assert!(wire.len() < 65_535);
+    assert!(matches!(
+        Message::parse(&wire),
+        Err(pharos_proto::MessageError::Name(
+            pharos_proto::NameError::PointerLimit
+        ))
+    ));
 }
 
 proptest::proptest! {

@@ -12,6 +12,7 @@ struct Backend<'a> {
     calls: &'a AtomicUsize,
     rcode: u16,
     truncated: bool,
+    cname: bool,
 }
 
 struct Unanswered<'a>(&'a AtomicUsize);
@@ -279,6 +280,19 @@ impl Next for Backend<'_> {
             .question(question.name, question.qtype, question.qclass)
             .unwrap();
         if self.rcode == 3 {
+            if self.cname {
+                let target: Name = "missing.example.net.".parse().unwrap();
+                builder
+                    .record(
+                        Section::Answer,
+                        question.name,
+                        Type::CNAME,
+                        question.qclass,
+                        30,
+                        target.as_wire(),
+                    )
+                    .unwrap();
+            }
             // SOA with root MNAME/RNAME and MINIMUM 3.
             builder
                 .record(
@@ -855,6 +869,17 @@ async fn query(
     rcode: u16,
     truncated: bool,
 ) -> Vec<u8> {
+    query_with_cname(chain, wire, calls, rcode, truncated, false).await
+}
+
+async fn query_with_cname(
+    chain: &Chain,
+    wire: &[u8],
+    calls: &AtomicUsize,
+    rcode: u16,
+    truncated: bool,
+    cname: bool,
+) -> Vec<u8> {
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::with_capacity(512);
     let mut slots = [];
@@ -879,7 +904,8 @@ async fn query(
                 Backend {
                     calls,
                     rcode,
-                    truncated
+                    truncated,
+                    cname,
                 }
             )
             .await,
@@ -906,6 +932,27 @@ async fn query_with<N: Next + Send>(chain: &Chain, wire: &[u8], next: N) -> (Out
     let outcome = chain.cache.as_ref().unwrap().serve(&mut cx, next).await;
     drop(cx);
     (outcome, response)
+}
+
+#[tokio::test]
+async fn caches_nxdomain_with_cname_answer() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let first = query_with_cname(&chain, wire, &calls, 3, false, true).await;
+    let hit = query_with_cname(&chain, wire, &calls, 3, false, true).await;
+    for response in [&first, &hit] {
+        let message = Message::parse(response).unwrap();
+        assert_eq!(message.rcode().0, 3);
+        assert_eq!(
+            message
+                .answers()
+                .filter(|rr| rr.rtype == Type::CNAME)
+                .count(),
+            1
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

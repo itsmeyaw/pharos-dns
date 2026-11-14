@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     Action, Admission, Context, Error, Handler, ListenerKey, Metadata, Outcome, Protocol, Router,
-    admit_with_update, finish_outcome_signed,
+    TsigSigning, admit_with_update, finish_outcome_signed,
     metrics::{BlockMetrics, Registry},
     response_limit,
 };
@@ -495,6 +495,7 @@ impl<C: Chain> Server<C> {
         let mut error_plugin = None;
         let mut error_logged = false;
         let mut tsig_signing = None;
+        let mut forwarded_response = false;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
                 // RFC 2136 §3: Return NOTIMP when UPDATE is not implemented.
@@ -514,6 +515,8 @@ impl<C: Chain> Server<C> {
                         )
                         .await
                     };
+                    // RFC 8945 §5.5: forwarded Responses need the forwarding-specific TSIG AD rule.
+                    forwarded_response = context.metadata.is_forwarded_response();
                     if let Some(opt) = context.query.opt() {
                         query = query.with_udp_payload_limit(opt.udp_payload_size());
                     }
@@ -537,12 +540,35 @@ impl<C: Chain> Server<C> {
                     outcome
                 }
             } else {
-                Outcome::Unanswered(Rcode::REFUSED)
+                // RFC 2136 §3.1.1: an UPDATE handler that is absent gets NOTIMP.
+                if query.opcode() == pharos_proto::Opcode::UPDATE {
+                    Outcome::Unanswered(Rcode::NOTIMP)
+                } else {
+                    Outcome::Unanswered(Rcode::REFUSED)
+                }
             }
         } else {
-            // RFC 1035 §4.1.1: REFUSED means the server declines the requested operation.
-            Outcome::Unanswered(Rcode::REFUSED)
+            if query.opcode() == pharos_proto::Opcode::UPDATE
+                && self.router.has_unhandled_zone(&self.key, query)
+            {
+                // RFC 2136 §3.1.1: a zone with no UPDATE handler gets NOTIMP.
+                Outcome::Unanswered(Rcode::NOTIMP)
+            } else if query.opcode() == pharos_proto::Opcode::UPDATE {
+                // RFC 2136 §3.1.1: UPDATE outside server authority gets NOTAUTH.
+                Outcome::Unanswered(Rcode::NOTAUTH)
+            } else {
+                // RFC 1035 §4.1.1: REFUSED means the server declines the requested operation.
+                Outcome::Unanswered(Rcode::REFUSED)
+            }
         };
+        if outcome == Outcome::Response
+            && forwarded_response
+            && matches!(&tsig_signing, Some(TsigSigning::Signed { .. }))
+            && response.len() >= 4
+        {
+            // RFC 8945 §5.5: Forward lacks upstream TSIG; clear AD before re-signing its Response.
+            response[3] &= !0x20;
+        }
         let recorded_size = if outcome == Outcome::Response {
             response.len()
         } else {

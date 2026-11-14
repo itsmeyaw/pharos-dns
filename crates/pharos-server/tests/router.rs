@@ -106,7 +106,7 @@ fn views_preserve_block_order_and_empty_domains_refuse() {
 }
 
 #[test]
-fn ds_search_follows_coredns_to_the_last_matching_non_root_domain() {
+fn ds_at_zone_cut_uses_parent_but_other_ds_names_use_closest_zone() {
     let mut router = Router::default();
     for (domain, chain) in [
         (".", "root"),
@@ -118,10 +118,25 @@ fn ds_search_follows_coredns_to_the_last_matching_non_root_domain() {
     }
     assert_eq!(
         lookup(&router, &key(53), "child.example.org.", 43),
-        Some("grandparent")
+        Some("parent")
     );
     assert_eq!(
         lookup(&router, &key(53), "www.child.example.org.", 43),
-        Some("grandparent")
+        Some("child")
+    );
+}
+
+#[test]
+fn ds_at_cut_uses_child_authority_when_parent_is_not_configured() {
+    let mut router = Router::default();
+    router.add(
+        key(53),
+        "child.example.org.".parse().unwrap(),
+        Some("child"),
+        vec![],
+    );
+    assert_eq!(
+        lookup(&router, &key(53), "child.example.org.", 43),
+        Some("child")
     );
 }

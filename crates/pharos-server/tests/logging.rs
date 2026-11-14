@@ -32,3 +32,10 @@ fn json_log_is_one_line_and_escapes_control_characters() {
         "{\"timestamp\":\"1970-01-01T00:00:00Z\",\"level\":\"INFO\",\"plugin\":\"x\\\"y\",\"message\":\"a\\n\\t\\\\b\"}\n"
     );
 }
+
+#[test]
+fn timestamps_keep_rfc3339_year_at_four_digits() {
+    let time = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
+    let line = format_line(LogFormat::Text, time, "INFO", "", "future");
+    assert!(line.starts_with("9999-12-31T23:59:59Z"));
+}

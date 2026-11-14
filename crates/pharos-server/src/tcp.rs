@@ -197,6 +197,13 @@ async fn serve<H: Handler>(
                 }
             }
         };
+        if crate::admission::is_dso_unidirectional(&query) {
+            // RFC 8490 §5.4.1: a DSO protocol error forcibly aborts the connection.
+            queries.abort_all();
+            *writer.lock().await = None;
+            let _ = stop.send(true);
+            break;
+        }
         count += 1;
 
         while let Some(result) = queries.try_join_next() {

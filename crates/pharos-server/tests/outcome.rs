@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use pharos_proto::{Class, Message, MessageBuilder, NameRef, Rcode, Section, Type};
-use pharos_server::{Action, Error, Outcome, Protocol, finish_outcome};
+use pharos_server::{Action, Error, Outcome, Protocol, finish_outcome, response_limit};
 
 fn query(edns: bool) -> Vec<u8> {
     let mut wire = vec![
@@ -87,7 +87,7 @@ fn edns_response_opt_is_copied_and_small_response_is_unchanged() {
     let message = Message::parse(&response).unwrap();
     assert!(response.len() <= 1232);
     assert!(message.tc());
-    assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
     assert!(message.opt().unwrap().dnssec_ok());
 
     let wire = self::query(false);
@@ -180,10 +180,10 @@ fn nonfinal_opt_keeps_its_options_and_discards_following_records() {
         Action::Respond
     );
     let message = Message::parse(&response).unwrap();
-    assert!(message.tc());
+    assert!(!message.tc());
     assert_eq!(message.additional_count(), 1);
     let opt = message.opt().unwrap();
-    assert_eq!(opt.udp_payload_size(), 1232);
+    assert_eq!(opt.udp_payload_size(), 4096);
     assert_eq!(opt.options().as_bytes(), &[0, 3, 0, 1, b'x']);
 }
 
@@ -209,6 +209,64 @@ fn response_opt_is_removed_when_query_has_no_edns() {
 }
 
 #[test]
+fn response_opt_advertises_server_capacity_and_respects_client_limit() {
+    let mut wire = query(true);
+    wire[22..24].copy_from_slice(&512_u16.to_be_bytes());
+    let query = Message::parse(&wire).unwrap();
+    let mut response = response(0);
+    finish_outcome(
+        query,
+        Protocol::Udp,
+        Outcome::Response,
+        &mut response,
+        |_| panic!(),
+    );
+    let message = Message::parse(&response).unwrap();
+    assert!(response.len() <= 512);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
+}
+
+#[test]
+fn udp_response_limit_honors_client_and_server_caps() {
+    for (edns, requested, expected) in [
+        (false, 0, 512),
+        (true, 128, 512),
+        (true, 1232, 1232),
+        (true, u16::MAX, 4096),
+    ] {
+        let mut wire = query(edns);
+        if edns {
+            wire[22..24].copy_from_slice(&requested.to_be_bytes());
+        }
+        assert_eq!(
+            response_limit(Message::parse(&wire).unwrap(), Protocol::Udp),
+            expected
+        );
+    }
+}
+
+#[test]
+fn echoes_ecs_and_preserves_requested_upstream_ad() {
+    let mut wire = query(true);
+    let ecs = [0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2];
+    wire[28..30].copy_from_slice(&(ecs.len() as u16).to_be_bytes());
+    wire.extend_from_slice(&ecs);
+    let query = Message::parse(&wire).unwrap();
+    let mut response = response(0);
+    response[3] |= 0x20;
+    finish_outcome(
+        query,
+        Protocol::Udp,
+        Outcome::Response,
+        &mut response,
+        |_| panic!(),
+    );
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.opt().unwrap().options().as_bytes(), &ecs);
+    assert!(message.ad());
+}
+
+#[test]
 fn unanswered_tcp_response_can_append_edns_to_an_empty_buffer() {
     let mut wire = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 14];
     wire.extend_from_slice(b"abcdefghijklmn");
@@ -226,7 +284,7 @@ fn unanswered_tcp_response_can_append_edns_to_an_empty_buffer() {
     assert!(!logged);
     let message = Message::parse(&response).unwrap();
     assert_eq!(message.rcode(), Rcode::REFUSED);
-    assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
 }
 
 #[test]
@@ -244,6 +302,7 @@ fn signed_response_reserves_room_before_truncation() {
     let mac = key.verify(&wire, 1_000, None, 0).unwrap().mac;
     let query = Message::parse(&wire).unwrap();
     let mut response = response(8);
+    response[3] |= 0x20;
     let signing = TsigSigning::Signed {
         key: Arc::clone(&key),
         time: 1_000,
@@ -265,6 +324,7 @@ fn signed_response_reserves_room_before_truncation() {
     assert!(Message::parse(&response).unwrap().tc());
     assert_eq!(Message::parse(&response).unwrap().answer_count(), 0);
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    assert!(Message::parse(&response).unwrap().ad());
     key.verify(&response, 1_000, Some(mac), 0).unwrap();
 }
 
@@ -320,7 +380,7 @@ fn unsigned_finalization_still_removes_tsig_following_opt() {
         |e| panic!("{e}"),
     );
     let message = Message::parse(&response).unwrap();
-    assert!(message.tc());
+    assert!(!message.tc());
     assert_eq!(message.additional_count(), 1);
     assert!(message.opt().is_some());
 }

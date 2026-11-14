@@ -31,6 +31,15 @@ fn parses_absolute_names_into_caller_buffer() {
 }
 
 #[test]
+fn borrowed_name_view_matches_wire_parsing() {
+    let value = name("www.example.com.");
+    assert_eq!(
+        value.as_name_ref(),
+        NameRef::parse(value.as_wire(), 0).unwrap()
+    );
+}
+
+#[test]
 fn parses_and_prints_miekg_escapes() {
     let value = name(r"a\.b.\\.\001.");
 
@@ -206,11 +215,14 @@ fn rejects_hostile_wire_names() {
         (truncated_label.as_slice(), 0),
         (long_label.as_slice(), 0),
         (long_name.as_slice(), 0),
-        (pointer_chain.as_slice(), pointer_chain.len() - 2),
         (&[][..], 0),
     ] {
         assert!(NameRef::parse(message, offset).is_err());
     }
+    assert_eq!(
+        NameRef::parse(&pointer_chain, pointer_chain.len() - 2).unwrap_err(),
+        NameError::PointerLimit
+    );
 }
 
 #[test]
@@ -235,9 +247,9 @@ fn compares_borrowed_names_without_copying() {
 }
 
 #[test]
-fn bounds_compression_hops_and_cycles() {
+fn bounds_compression_chains_by_wire_and_expanded_name_size() {
     let mut message = vec![0];
-    for index in 0..256 {
+    for index in 0..512 {
         let target = if index == 0 { 0 } else { 1 + 2 * (index - 1) };
         message.push(0xc0 | ((target >> 8) as u8));
         message.push(target as u8);

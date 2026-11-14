@@ -124,6 +124,32 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
     }
 }
 
+#[tokio::test]
+async fn zero_question_query_runs_through_whoami_chain() {
+    use pharos_plugins::servers;
+    use pharos_server::{Action, Handler};
+
+    let blocks = parse("Corefile", ".:53 {\n whoami\n}").unwrap();
+    let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let server = servers.values().next().unwrap();
+    let query = [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &query,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let reply = Message::parse(&response).unwrap();
+    assert_eq!(reply.question_count(), 0);
+    assert_eq!(reply.additional_count(), 2);
+}
+
 #[test]
 fn whoami_passes_non_in_questions_to_next_plugin() {
     let blocks = parse("Corefile", ".:53 {\n whoami\n}").unwrap();

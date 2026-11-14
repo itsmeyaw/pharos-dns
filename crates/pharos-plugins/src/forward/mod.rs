@@ -168,13 +168,6 @@ fn primary_attempt_limit(configured: Option<u32>, reserve_ecs_retry: bool) -> u8
     }
 }
 
-fn clear_ad_after_tsig_strip(validated_tsig: bool, response: &mut [u8]) {
-    if validated_tsig && response.len() >= 4 {
-        // RFC 8945 §5.5: Clear AD when forwarding without transaction security.
-        response[3] &= !0x20;
-    }
-}
-
 struct InFlight<'a>(&'a AtomicUsize);
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
@@ -532,7 +525,8 @@ impl Plugin for Forward {
                     break;
                 }
                 if use_refused_fallback {
-                    clear_ad_after_tsig_strip(cx.metadata.validated_tsig().is_some(), cx.response);
+                    // RFC 8945 §5.5: Listener clears AD if it re-signs this forwarded Response.
+                    cx.metadata.mark_forwarded_response();
                     return Outcome::Response;
                 }
                 let answer = &wire[..exchange.len];
@@ -540,7 +534,8 @@ impl Plugin for Forward {
                 cx.response.clear();
                 // RFC 5625 §4.3: return Responses without filtering RRs by TYPE or CLASS.
                 cx.response.extend_from_slice(answer);
-                clear_ad_after_tsig_strip(cx.metadata.validated_tsig().is_some(), cx.response);
+                // RFC 8945 §5.5: Listener clears AD if it re-signs this forwarded Response.
+                cx.metadata.mark_forwarded_response();
                 return Outcome::Response;
             }
             // RFC 1034 §5.2.3: Temporary resolution failures return SERVFAIL.
@@ -555,8 +550,7 @@ impl Plugin for Forward {
 #[cfg(test)]
 mod tests {
     use super::{
-        BufferPool, MAX_IDLE_SCRATCH, clear_ad_after_tsig_strip, max_attempts,
-        primary_attempt_limit,
+        BufferPool, MAX_IDLE_SCRATCH, max_attempts, primary_attempt_limit,
     };
 
     #[test]
@@ -590,15 +584,4 @@ mod tests {
         assert_eq!(primary_attempt_limit(Some(3), false), 3);
     }
 
-    #[test]
-    fn clears_ad_only_when_verified_tsig_was_stripped() {
-        let mut response = [0, 0, 0x81, 0xa0];
-        clear_ad_after_tsig_strip(false, &mut response);
-        assert_eq!(response[3], 0xa0);
-        clear_ad_after_tsig_strip(true, &mut response);
-        assert_eq!(response[3], 0x80);
-        response[3] = 0xa0;
-        clear_ad_after_tsig_strip(false, &mut response);
-        assert_eq!(response[3], 0xa0);
-    }
 }

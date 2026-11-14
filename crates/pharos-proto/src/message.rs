@@ -67,6 +67,9 @@ pub struct Message<'a> {
     question_class: Option<Class>,
     question_name: [u8; 255],
     question_name_len: usize,
+    ignore_notify_sections: bool,
+    notify_tsig_count: u16,
+    nonfinal_tsig: bool,
 }
 
 // RFC 1034 §3.7.1: queries select resource data by QTYPE and QCLASS.
@@ -127,9 +130,27 @@ impl<'a> Record<'a> {
 }
 
 fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), MessageError> {
+    // RFC 1035 §4.1.2: section iterators reuse the QNAME validated by Message::parse.
+    let (name, offset) = NameRef::from_validated(wire, offset).ok_or(MessageError::Truncated)?;
+    question_after_name(wire, name, offset)
+}
+
+fn question_with_budget<'a>(
+    wire: &'a [u8],
+    offset: usize,
+    pointer_budget: &mut usize,
+) -> Result<(Question<'a>, usize), MessageError> {
     // RFC 1035 §4.1.2: a question consists of QNAME, QTYPE, and QCLASS.
-    let name = NameRef::parse(wire, offset)?;
-    let offset = offset + name.wire_len();
+    let name = NameRef::parse_with_budget(wire, offset, pointer_budget)?;
+    question_after_name(wire, name, offset + name.wire_len())
+}
+
+fn question_after_name<'a>(
+    wire: &'a [u8],
+    name: NameRef<'a>,
+    offset: usize,
+) -> Result<(Question<'a>, usize), MessageError> {
+    // RFC 1035 §4.1.2: read the fixed Question fields after its bounded QNAME.
     let result = Question {
         name,
         qtype: Type(read_u16(wire, offset)?),
@@ -140,10 +161,28 @@ fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), Message
 }
 // RFC 6698 §2: record class and TTL are parsed with no TLSA-specific restriction.
 fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageError> {
+    // RFC 1035 §4.1.3: section iterators reuse the NAME validated by Message::parse.
+    let (name, offset) = NameRef::from_validated(wire, offset).ok_or(MessageError::Truncated)?;
+    record_after_name(wire, name, offset)
+}
+
+fn record_with_budget<'a>(
+    wire: &'a [u8],
+    offset: usize,
+    pointer_budget: &mut usize,
+) -> Result<(Record<'a>, usize), MessageError> {
     // RFC 6895 §3: each RR has NAME, TYPE, CLASS, TTL, RDLENGTH, and variable RDATA.
     // RFC 1035 §4.1.3: RDLENGTH bounds the RDATA following the fixed RR fields.
-    let name = NameRef::parse(wire, offset)?;
-    let offset = offset + name.wire_len();
+    let name = NameRef::parse_with_budget(wire, offset, pointer_budget)?;
+    record_after_name(wire, name, offset + name.wire_len())
+}
+
+fn record_after_name<'a>(
+    wire: &'a [u8],
+    name: NameRef<'a>,
+    offset: usize,
+) -> Result<(Record<'a>, usize), MessageError> {
+    // RFC 6895 §3: decode fixed RR fields and bounded RDATA after its validated NAME.
     let rtype = Type(read_u16(wire, offset)?);
     // RFC 8162 §2: the record class is read per record, so SMIMEA is class independent.
     let class = Class(read_u16(wire, offset + 2)?);
@@ -225,31 +264,85 @@ impl<'a> Message<'a> {
         self.wire
     }
 
+    /// Return a NOTIFY request view that hides ordinary Authority and Additional records.
+    // RFC 1996 §3.9 ignores those sections; RFC 8945 §5.2 still processes request TSIG.
+    #[must_use]
+    pub fn ignore_notify_sections(mut self) -> Self {
+        if self.opcode() == Opcode::NOTIFY && self.flags & 0x8000 == 0 {
+            self.ignore_notify_sections = true;
+        }
+        self
+    }
+
     // RFC 1035 §4.1: Header is followed by Question, Answer, Authority, and Additional sections.
-    /// Validates all section boundaries and names before exposing the view.
+    /// Validates sections and names; malformed NOTIFY ancillary sections are ignored.
     /// Bytes after the declared sections are ignored, as in CoreDNS.
     pub fn parse(wire: &'a [u8]) -> Result<Self, MessageError> {
+        let mut pointer_budget = NameRef::MAX_MESSAGE_POINTER_HOPS;
+        Self::parse_with_pointer_budget(wire, &mut pointer_budget)
+    }
+
+    /// Parse while consuming a caller-shared compression-pointer budget.
+    pub fn parse_with_pointer_budget(
+        wire: &'a [u8],
+        pointer_budget: &mut usize,
+    ) -> Result<Self, MessageError> {
+        // RFC 1035 §4.1.4: share pointer work across every name in the Message.
         if wire.len() < HEADER_LEN {
             return Err(MessageError::Truncated);
         }
         // RFC 1035 §4.1.1: the four header counts describe the following sections.
-        let counts = [
+        let mut counts = [
             read_u16(wire, 4)?,
             read_u16(wire, 6)?,
             read_u16(wire, 8)?,
             read_u16(wire, 10)?,
         ];
+        let opcode = Opcode(((u16::from_be_bytes([wire[2], wire[3]]) >> 11) & 15) as u8);
+        // RFC 1996 §3.9 applies to requests; NOTIFY Responses parse their sections normally.
+        let notify = opcode == Opcode::NOTIFY && wire[2] & 0x80 == 0;
         let mut starts = [0; 4];
         let mut offset = HEADER_LEN;
         let mut has_opt = false;
         let mut has_tkey = false;
-        for section in 0..4 {
+        let mut has_sig0 = false;
+        let mut notify_tsig_count = 0;
+        let mut nonfinal_tsig = false;
+        'sections: for section in 0..4 {
             starts[section] = offset;
-            for _ in 0..counts[section] {
+            let wire_count = counts[section];
+            for record_index in 0..wire_count {
                 offset = if section == 0 {
-                    question(wire, offset)?.1
+                    question_with_budget(wire, offset, pointer_budget)?.1
                 } else {
-                    let (rr, next) = record(wire, offset)?;
+                    let (rr, next) = match record_with_budget(wire, offset, pointer_budget) {
+                        Ok(record) => record,
+                        Err(_) if notify && section >= 2 => {
+                            // RFC 1996 §3.9: malformed ignored sections cannot reject NOTIFY.
+                            counts[section] = 0;
+                            if section == 2 {
+                                counts[3] = 0;
+                            }
+                            notify_tsig_count = 0;
+                            break 'sections;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if section == 3 && rr.rtype == Type::TSIG && record_index + 1 != wire_count {
+                        // RFC 8945 §5.2: retain placement status so Listener admission can FORMERR.
+                        nonfinal_tsig = true;
+                    }
+                    // RFC 2931 §3.1: SIG(0) uses SIG with the Type Covered field set to zero.
+                    let sig0 =
+                        section == 3 && rr.rtype == Type::SIG && rr.rdata.starts_with(&[0, 0]);
+                    // RFC 8945 §5.2: retain TSIG count for the authenticated NOTIFY view.
+                    if notify && section == 3 && rr.rtype == Type::TSIG {
+                        notify_tsig_count += 1;
+                    }
+                    // RFC 6891 §6.1.1 and RFC 2931 §3.1: SIG(0) is the final Additional RR.
+                    if section == 3 && has_sig0 && !notify {
+                        return Err(MessageError::InvalidOpt);
+                    }
                     // RFC 6891 §6.1.1: OPT appears at most once in the additional section.
                     // RFC 6891 §6.1.2: the OPT owner is the root and its RDATA holds options.
                     // RFC 2930 §3: a DNS Message contains no more than one TKEY RR.
@@ -259,15 +352,25 @@ impl<'a> Message<'a> {
                         }
                         has_tkey = true;
                     }
-                    if rr.rtype == Type::OPT {
+                    // RFC 1996 §3.9: Ignore OPT records in the ignored Authority section.
+                    if rr.rtype == Type::OPT && !(notify && section == 2) {
                         if section != 3
                             || has_opt
                             || rr.name.labels().next().is_some()
                             || EdnsOptions::parse(rr.rdata).is_err()
                         {
+                            if notify && section == 3 {
+                                // RFC 1996 §3.9: ignore malformed Additional data on NOTIFY.
+                                counts[3] = 0;
+                                notify_tsig_count = 0;
+                                break 'sections;
+                            }
                             return Err(MessageError::InvalidOpt);
                         }
                         has_opt = true;
+                    }
+                    if sig0 {
+                        has_sig0 = true;
                     }
                     next
                 };
@@ -283,6 +386,9 @@ impl<'a> Message<'a> {
             question_class: None,
             question_name: [0; 255],
             question_name_len: 0,
+            ignore_notify_sections: false,
+            notify_tsig_count,
+            nonfinal_tsig,
         })
     }
     // RFC 1035 §4.1.1: ID is the 16-bit transaction identifier copied into the response.
@@ -510,9 +616,15 @@ impl<'a> Message<'a> {
     /// Returns the validated OPT from the Additional section, if present.
     #[must_use]
     pub fn opt(&self) -> Option<Opt<'a>> {
-        self.additionals()
+        // RFC 6891 §6.1.1: keep EDNS control visible on NOTIFY views that hide ordinary Additionals.
+        self.raw_records(3)
             .find(|rr| rr.rtype == Type::OPT)
             .map(Opt::from_record)
+    }
+    /// Whether any TSIG record is not the final Additional RR.
+    #[must_use]
+    pub const fn has_nonfinal_tsig(&self) -> bool {
+        self.nonfinal_tsig
     }
     #[must_use]
     pub const fn question_count(&self) -> u16 {
@@ -524,22 +636,35 @@ impl<'a> Message<'a> {
     }
     #[must_use]
     pub const fn authority_count(&self) -> u16 {
-        self.counts[2]
+        // RFC 1996 §3.9: hide the Authority section on a NOTIFY request view.
+        if self.ignore_notify_sections {
+            0
+        } else {
+            self.counts[2]
+        }
     }
     #[must_use]
     pub const fn additional_count(&self) -> u16 {
-        self.counts[3]
+        // RFC 1996 §3.9 and RFC 8945 §5.2: hide data but retain TSIG for authentication.
+        if self.ignore_notify_sections {
+            self.notify_tsig_count
+        } else {
+            self.counts[3]
+        }
     }
 
     /// Return a view with its final TSIG removed, retaining the borrowed wire bytes.
     pub fn without_final_tsig(mut self) -> Option<Self> {
-        let last = self.additionals().last()?;
+        let last = self.raw_records(3).last()?;
         if last.rtype != Type::TSIG {
             return None;
         }
         // RFC 8945 §4.3.2: the Message excludes the last TSIG and decrements ARCOUNT.
         self.wire = &self.wire[..last.name.offset()];
         self.counts[3] -= 1;
+        if self.ignore_notify_sections {
+            self.notify_tsig_count -= 1;
+        }
         Some(self)
     }
     #[must_use]
@@ -569,10 +694,31 @@ impl<'a> Message<'a> {
         self.records(3)
     }
     fn records(&self, section: usize) -> Records<'a> {
+        // RFC 1996 §3.9: hide both sections; RFC 8945 §5.2 retains TSIG for authentication.
+        let remaining = if self.ignore_notify_sections && section >= 2 {
+            if section == 3 {
+                self.counts[section]
+            } else {
+                0
+            }
+        } else {
+            self.counts[section]
+        };
+        Records {
+            wire: self.wire,
+            offset: self.starts[section],
+            remaining,
+            tsig_only: self.ignore_notify_sections && section == 3,
+            udp_payload_limit: self.udp_payload_limit,
+        }
+    }
+    fn raw_records(&self, section: usize) -> Records<'a> {
+        // RFC 8945 §5.2: TSIG processing needs the original Additional sequence.
         Records {
             wire: self.wire,
             offset: self.starts[section],
             remaining: self.counts[section],
+            tsig_only: false,
             udp_payload_limit: self.udp_payload_limit,
         }
     }
@@ -630,23 +776,28 @@ pub struct Records<'a> {
     wire: &'a [u8],
     offset: usize,
     remaining: u16,
+    tsig_only: bool,
     udp_payload_limit: Option<u16>,
 }
 impl<'a> Iterator for Records<'a> {
     type Item = Record<'a>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
+        // RFC 1996 §3.9 ignores ancillary RRs; RFC 8945 §5.2 still processes TSIG.
+        while self.remaining != 0 {
+            let (mut item, next) = record(self.wire, self.offset).ok()?;
+            self.remaining -= 1;
+            self.offset = next;
+            if self.tsig_only && item.rtype != Type::TSIG {
+                continue;
+            }
+            if item.rtype == Type::OPT
+                && let Some(limit) = self.udp_payload_limit
+            {
+                item.class.0 = item.class.0.min(limit);
+            }
+            return Some(item);
         }
-        let (mut item, next) = record(self.wire, self.offset).ok()?;
-        if item.rtype == Type::OPT
-            && let Some(limit) = self.udp_payload_limit
-        {
-            item.class.0 = item.class.0.min(limit);
-        }
-        self.remaining -= 1;
-        self.offset = next;
-        Some(item)
+        None
     }
 }
 

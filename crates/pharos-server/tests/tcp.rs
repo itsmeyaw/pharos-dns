@@ -46,6 +46,33 @@ async fn tcp_writes_every_transfer_message_on_the_same_connection() {
     listener.shutdown().await.unwrap();
 }
 
+struct NoDso;
+
+impl Handler for NoDso {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        panic!("DSO unidirectional Message must not reach the handler")
+    }
+}
+
+#[tokio::test]
+async fn dso_unidirectional_message_closes_the_tcp_connection_without_response() {
+    let (listener, mut stream) = connect(NoDso).await;
+    stream.write_u16(12).await.unwrap();
+    stream
+        .write_all(&[0, 0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+    let mut byte = [0];
+    assert_eq!(
+        timeout(TEST_TIMEOUT, stream.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    listener.shutdown().await.unwrap();
+}
+
 struct LargeTransfer(Arc<AtomicUsize>);
 
 impl Handler for LargeTransfer {

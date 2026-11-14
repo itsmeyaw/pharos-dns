@@ -1,6 +1,4 @@
-use pharos_proto::{
-    Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type, normalized_udp_size,
-};
+use pharos_proto::{Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type};
 use std::sync::Arc;
 
 use crate::{Action, Error, Outcome, Protocol, admission::write_error};
@@ -21,15 +19,16 @@ pub enum TsigSigning {
     },
 }
 
-/// Maximum Response size requested by the client for this protocol.
+/// Maximum Response size allowed for this Query and protocol.
 // RFC 4033 §9: Honor the requester's EDNS UDP payload size for DNSSEC responses.
 pub fn response_limit(query: Message<'_>, protocol: Protocol) -> usize {
-    // RFC 6891 §6.2.3: EDNS advertises a UDP payload size, with a 512-octet minimum.
-    usize::from(normalized_udp_size(
-        query.opt().map_or(512, |opt| opt.udp_payload_size()),
+    if protocol == Protocol::Tcp {
         // RFC 1035 §4.2.2: TCP response size is limited by the two-octet length prefix.
-        protocol == Protocol::Tcp,
-    ))
+        usize::from(u16::MAX)
+    } else {
+        // RFC 6891 §§6.2.3–6.2.5: cap UDP Responses at requester size and responder capacity.
+        usize::from(query.opt().map_or(512, Opt::response_udp_payload_size))
+    }
 }
 
 /// Finish a Plugin outcome, reporting Plugin and malformed Response errors.
@@ -78,9 +77,10 @@ pub fn finish_outcome_signed(
             }
         }
         Outcome::Unanswered(code) => {
+            // RFC 2136 §3.1.1: NOTAUTH reports an UPDATE outside server authority.
             if !matches!(
                 code,
-                Rcode::SERVFAIL | Rcode::REFUSED | Rcode::FORMERR | Rcode::NOTIMP
+                Rcode::SERVFAIL | Rcode::REFUSED | Rcode::FORMERR | Rcode::NOTIMP | Rcode::NOTAUTH
             ) {
                 return Action::Drop;
             }
@@ -227,6 +227,8 @@ fn scrub(
     let response_opt = query
         .opt()
         .map(|opt| opt.response_registered(existing, rcode));
+    // RFC 6891 §§6.2.3–6.2.5: retain the same capped payload value for OPT and truncation.
+    let response_udp_size = response_opt.map(|opt| opt.udp_payload_size());
     let opt_len = response_opt.map_or(0, |opt| opt.wire_len());
     // RFC 6891 §7: a truncated EDNS response must retain the question and OPT record.
     let budget = limit
@@ -272,7 +274,8 @@ fn scrub(
             break;
         }
     }
-    let truncated = counts != original;
+    // RFC 2181 §9 and RFC 4035 §3.1.1: optional Additional omissions alone do not set TC.
+    let truncated = counts[1..3] != original[1..3];
     let existing_flags = existing.map(Opt::flags);
     if end + opt_len > wire.capacity() {
         if protocol == Protocol::Udp {
@@ -280,16 +283,20 @@ fn scrub(
         }
         wire.reserve((end + opt_len).saturating_sub(wire.len()));
     }
-    if let (Some((offset, len)), Some(query_opt)) = (existing_options, query.opt()) {
+    if let (Some((offset, len)), Some(query_opt), Some(response_udp_size)) =
+        (existing_options, query.opt(), response_udp_size)
+    {
         // RFC 6891 §6.1.2: preserve Response options while relocating the OPT record.
         wire.resize(wire.len().max(end + opt_len), 0);
         wire.copy_within(offset..offset + len, end + 11);
         wire.truncate(end + opt_len);
         wire[end..end + 3].copy_from_slice(&[0, 0, 41]);
-        wire[end + 3..end + 5].copy_from_slice(&query_opt.udp_payload_size().to_be_bytes());
+        // RFC 6891 §§6.2.3–6.2.5: echo normalized request size up to responder capacity.
+        wire[end + 3..end + 5].copy_from_slice(&response_udp_size.to_be_bytes());
         // RFC 3225 §3: Copy the query's DO bit into the response.
         let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
-            | u32::from(existing_flags.unwrap_or_default() & 0xff00)
+            // RFC 9824 §5.1: preserve CO, but clear reserved EDNS bits.
+            | u32::from(existing_flags.unwrap_or_default() & 0x4000)
             | if query_opt.dnssec_ok() { 0x8000 } else { 0 };
         wire[end + 5..end + 9].copy_from_slice(&ttl.to_be_bytes());
         wire[end + 9..end + 11].copy_from_slice(&(len as u16).to_be_bytes());

@@ -44,7 +44,7 @@ fn coredns_setup_and_boundaries() {
 
 #[cfg(feature = "plugin-whoami")]
 #[tokio::test]
-async fn listener_uses_clamped_opt_for_udp_and_tcp_responses() {
+async fn listener_advertises_server_capacity_in_udp_and_tcp_responses() {
     use pharos_plugins::servers;
     use pharos_server::{Action, Handler};
 
@@ -52,7 +52,7 @@ async fn listener_uses_clamped_opt_for_udp_and_tcp_responses() {
     let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let server = servers.values().next().unwrap();
     for protocol in [Protocol::Udp, Protocol::Tcp] {
-        for (size, expected) in [(4096_u16, 1232), (1024, 1024)] {
+        for size in [4096_u16, 1024] {
             let mut wire = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 41];
             wire.extend_from_slice(&size.to_be_bytes());
             wire.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
@@ -74,7 +74,7 @@ async fn listener_uses_clamped_opt_for_udp_and_tcp_responses() {
                     .opt()
                     .unwrap()
                     .udp_payload_size(),
-                expected
+                4096
             );
         }
     }
@@ -82,7 +82,7 @@ async fn listener_uses_clamped_opt_for_udp_and_tcp_responses() {
 
 #[cfg(feature = "plugin-hosts")]
 #[tokio::test]
-async fn clamped_udp_response_truncates_but_tcp_does_not() {
+async fn response_limit_truncates_udp_but_tcp_does_not() {
     use pharos_plugins::servers;
     use pharos_server::{Action, Handler};
 
@@ -109,7 +109,7 @@ async fn clamped_udp_response_truncates_but_tcp_does_not() {
             Action::Respond
         );
         let message = Message::parse(&response).unwrap();
-        assert_eq!(message.opt().unwrap().udp_payload_size(), 512);
+        assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
         assert_eq!(message.tc(), protocol == Protocol::Udp);
         assert_eq!(response.len() <= 512, protocol == Protocol::Udp);
     }

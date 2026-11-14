@@ -14,6 +14,7 @@ struct ScriptedChain {
     initial_rcode: u16,
     initial_aa_ra: u16,
     initial_soa: bool,
+    initial_cname: bool,
     fallback_rcode: u16,
     fallback_answers: bool,
     truncated: bool,
@@ -52,6 +53,19 @@ impl Next for ScriptedNext<'_> {
             };
         let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), flags).unwrap();
         builder.question(q.name, q.qtype, q.qclass).unwrap();
+        if !fallback && self.0.initial_cname {
+            let target: Name = "missing.example.net.".parse().unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    q.name,
+                    Type::CNAME,
+                    q.qclass,
+                    30,
+                    target.as_wire(),
+                )
+                .unwrap();
+        }
         if fallback && self.0.fallback_answers {
             builder
                 .record(
@@ -118,6 +132,7 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
             initial_rcode: initial,
             initial_aa_ra: role_flags,
             initial_soa: soa,
+            initial_cname: false,
             fallback_rcode: fallback,
             fallback_answers: answers,
             truncated,
@@ -170,6 +185,71 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
             assert_eq!(message.authorities().next().unwrap().ttl, 3600);
         }
     }
+}
+
+#[tokio::test]
+async fn nxdomain_with_cname_does_not_trigger_dns64_synthesis() {
+    let blocks = parse("Corefile", ".:53 {\n dns64\n}").unwrap();
+    let mut config = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let chain = ScriptedChain {
+        dns64: config.dns64.take().unwrap(),
+        initial_rcode: 3,
+        initial_soa: false,
+        initial_cname: true,
+        fallback_rcode: 0,
+        fallback_answers: true,
+        truncated: false,
+    };
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(key, ".".parse().unwrap(), Some(chain), vec![]);
+    let server = pharos_server::Server::new(router, key);
+    let name: Name = "alias.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AAAA,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    // RFC 6604 §3: NXDOMAIN may accompany a CNAME chain to a nonexistent target.
+    assert_eq!(message.rcode(), Rcode::NXDOMAIN);
+    assert_eq!(
+        message
+            .answers()
+            .filter(|rr| rr.rtype == Type::CNAME)
+            .count(),
+        1
+    );
+    assert_eq!(
+        message
+            .answers()
+            .filter(|rr| rr.rtype == Type::AAAA)
+            .count(),
+        0
+    );
 }
 
 struct FakeNext {

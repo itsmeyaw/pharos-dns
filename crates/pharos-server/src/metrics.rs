@@ -37,7 +37,7 @@ const TYPES: &[(u16, &str)] = &[
     (255, "ANY"),
 ];
 const RESPONSE_CODES: usize = 4096;
-// RFC 6895 §2.3 and IANA DNS Parameters: assigned RCODEs fit in 0 through 23.
+// RFC 7873 §8: BADCOOKIE is RCODE 23; keep dense counters through its assigned value.
 const DENSE_RESPONSE_CODES: usize = 24;
 pub const WRITER_METADATA: &str = "prometheus/writer";
 const TIME_BUCKETS: &[f64] = &[
@@ -1859,7 +1859,8 @@ fn rcode(code: u16) -> String {
         10 => "NOTZONE",
         // RFC 8490 §5.4.1: RCODE 11 is DSOTYPENI for DSO responses.
         11 => "DSOTYPENI",
-        16 => "BADSIG",
+        // RFC 6895 §2.3 and RFC 8945 §3: DNS RCODE 16 is BADVERS; TSIG Error 16 is BADSIG.
+        16 => "BADVERS",
         17 => "BADKEY",
         18 => "BADTIME",
         19 => "BADMODE",
@@ -1895,6 +1896,20 @@ mod tests {
                 .sum::<u64>(),
             4
         );
+    }
+
+    #[test]
+    fn response_metrics_keep_tsig_badsig_out_of_dns_rcode_labels() {
+        use pharos_proto::Message;
+
+        let mut wire = vec![0, 1, 0x80, 9, 0, 0, 0, 0, 0, 0, 0, 1];
+        wire.extend_from_slice(&[0, 0, 250, 0, 255, 0, 0, 0, 0, 0, 17]);
+        wire.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0]);
+        let response = Message::parse(&wire).unwrap();
+
+        // RFC 6895 §2.3: DNS RCODE 16 is BADVERS; TSIG Error 16 is BADSIG.
+        assert_eq!(super::rcode(response.rcode().0), "NOTAUTH");
+        assert_eq!(super::rcode(16), "BADVERS");
     }
 
     #[test]

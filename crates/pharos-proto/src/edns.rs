@@ -60,10 +60,20 @@ pub struct Opt<'a> {
 }
 
 impl<'a> Opt<'a> {
-    /// The fresh OPT CoreDNS uses for a BADVERS Response, including its zero UDP size.
+    /// Largest UDP payload advertised in Responses by Pharos.
+    // RFC 3226 §3: DNSSEC-aware servers SHOULD advertise at least 4000 octets.
+    pub const RESPONSE_UDP_PAYLOAD_SIZE: u16 = 4096;
+
+    /// CoreDNS's initial BADVERS OPT, advertising the server's supported payload size.
     #[must_use]
     pub fn badvers() -> Opt<'static> {
-        Opt::new(0, 1, 0, 0, EdnsOptions::parse(&[]).expect("empty options"))
+        Opt::new(
+            Self::RESPONSE_UDP_PAYLOAD_SIZE,
+            1,
+            0,
+            0,
+            EdnsOptions::parse(&[]).expect("empty options"),
+        )
     }
 
     /// Creates an OPT from its wire fields and validated option data.
@@ -94,6 +104,15 @@ impl<'a> Opt<'a> {
     #[must_use]
     pub const fn udp_payload_size(self) -> u16 {
         self.size
+    }
+    /// The normalized UDP size available for this request's Response.
+    // RFC 6891 §§6.2.3–6.2.5: cap the requester size at responder capacity and a 512-octet minimum.
+    #[must_use]
+    pub fn response_udp_payload_size(self) -> u16 {
+        normalized_udp_size(
+            self.udp_payload_size().min(Self::RESPONSE_UDP_PAYLOAD_SIZE),
+            false,
+        )
     }
     #[must_use]
     pub const fn extended_rcode(self) -> u8 {
@@ -142,7 +161,7 @@ impl<'a> Opt<'a> {
 
     // RFC 6891 §6.1.3: responses use the highest EDNS version implemented by the responder.
     /// Applies CoreDNS SizeAndDo to an optional existing Response OPT.
-    /// Only registered option codes are copied when the Response had no OPT.
+    /// Only registered options and required ECS are copied when the Response had no OPT.
     /// The Response version is reset to zero, even for an existing OPT.
     #[must_use]
     pub fn response<'b>(
@@ -151,17 +170,22 @@ impl<'a> Opt<'a> {
         supported: &'b [u16],
         rcode: Rcode,
     ) -> ResponseOpt<'a, 'b> {
+        // RFC 7871 §7.2.2: retain Query ECS for a Response when the upstream omits it.
+        let query_ecs = find_ecs_option(self.options.as_bytes());
         let mut source = existing.unwrap_or(self);
-        source.size = self.size;
+        // RFC 6891 §6.2.3 and RFC 3226 §3: advertise the responder's own UDP payload capacity.
+        source.size = Self::RESPONSE_UDP_PAYLOAD_SIZE;
         // RFC 6891 §6.1.3: responses carry version 0, the highest EDNS version implemented here.
+        // RFC 9824 §5.1: preserve CO; clear other reserved flags and copy DO from the Query.
         source.ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
-            | (source.ttl & 0xff00)
+            | (source.ttl & 0x4000)
             | if self.dnssec_ok() { 0x8000 } else { 0 };
         ResponseOpt {
             source,
             supported,
             copy_all: existing.is_some(),
             registered: false,
+            query_ecs,
         }
     }
 
@@ -185,24 +209,45 @@ pub struct ResponseOpt<'a, 'b> {
     supported: &'b [u16],
     copy_all: bool,
     registered: bool,
+    query_ecs: Option<&'a [u8]>,
 }
 
 impl ResponseOpt<'_, '_> {
+    /// The responder's advertised UDP payload capacity.
+    #[must_use]
+    pub const fn udp_payload_size(&self) -> u16 {
+        self.source.size
+    }
+
     // RFC 6891 §6.1.2: selected options retain received order, though their order has no meaning.
     fn selected(&self) -> impl Iterator<Item = &[u8]> {
         let mut rest = self.source.options.as_bytes();
+        let mut query_ecs = self.query_ecs;
+        let mut found_ecs = false;
         std::iter::from_fn(move || {
             while !rest.is_empty() {
                 let code = u16::from_be_bytes([rest[0], rest[1]]);
                 let len = usize::from(u16::from_be_bytes([rest[2], rest[3]])) + 4;
                 let (option, tail) = rest.split_at(len);
                 rest = tail;
+                if code == 8 {
+                    // RFC 7871 §7.2.2: echo ECS only when the Query supplied a valid option.
+                    if self.query_ecs.is_none() {
+                        continue;
+                    }
+                    found_ecs = true;
+                    return Some(option);
+                }
                 if self.copy_all
                     || self.supported.contains(&code)
                     || (self.registered && edns_option_registered(code))
                 {
                     return Some(option);
                 }
+            }
+            if !found_ecs {
+                // RFC 7871 §7.2.2: preserve Query ECS when the upstream Response omits it.
+                return query_ecs.take();
             }
             None
         })
@@ -227,6 +272,20 @@ impl ResponseOpt<'_, '_> {
     }
 }
 
+fn find_ecs_option(options: &[u8]) -> Option<&[u8]> {
+    // RFC 7871 §7.2.2: Preserve original ECS bytes; typed decoding may normalize its address.
+    let mut rest = options;
+    while !rest.is_empty() {
+        let size = usize::from(u16::from_be_bytes([rest[2], rest[3]])) + 4;
+        if u16::from_be_bytes([rest[0], rest[1]]) == 8 {
+            // RFC 7871 §6: ECS uses EDNS option code 8.
+            return Some(&rest[..size]);
+        }
+        rest = &rest[size..];
+    }
+    None
+}
+
 impl fmt::Display for Opt<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -237,7 +296,7 @@ impl fmt::Display for Opt<'_> {
         if self.dnssec_ok() {
             f.write_str(" do")?;
         }
-        // RFC 9824 §9: CO is the allocated EDNS flag bit 1.
+        // RFC 9824 §5.1: CO is EDNS flag bit 1.
         if self.flags() & 0x4000 != 0 {
             f.write_str(" co")?;
         }

@@ -155,11 +155,23 @@ impl<C> Router<C> {
         query: Message<'_>,
         mut matches: impl FnMut(&'a ServerBlock<C>) -> bool,
     ) -> Option<&'a ServerBlock<C>> {
-        let question = query.questions().next()?;
         let blocks = self.listeners.get(key)?;
+        let Some(question) = query.questions().next() else {
+            // RFC 9619 §4: route zero-question Queries to the root Server Block.
+            return blocks
+                .iter()
+                .filter(|block| block.domain.label_count() == 0 && block.chain.is_some())
+                .find(|block| matches(block));
+        };
         // RFC 4035 §3.1.4.1: Answer DS queries at a zone cut from the parent zone's side.
         let ds = query.opcode() == Opcode::QUERY && question.qtype == Type::DS;
         let labels = question.name.labels().count();
+        // RFC 4035 §3.1.4.1: A DS QNAME matching a child apex marks a parent-side zone cut.
+        let ds_at_cut = ds
+            && labels != 0
+            && blocks
+                .iter()
+                .any(|block| block.domain.label_count() == labels && question.name == block.domain);
         if VIEW && labels == 0 {
             let mut selected = None;
             for block in blocks
@@ -177,6 +189,9 @@ impl<C> Router<C> {
             return selected;
         }
         let mut selected = None;
+        let mut selected_labels = None;
+        let mut child_at_cut = None;
+        // RFC 4035 §3.1.4.1: route DS at a cut to the closest matching parent zone.
         // RFC 1034 §4.3.2: Select the nearest ancestor zone for QNAME.
         for block in blocks
             .iter()
@@ -186,27 +201,48 @@ impl<C> Router<C> {
             if count > labels {
                 continue;
             }
-            let domain = NameRef::parse(block.domain.as_wire(), 0).expect("validated Domain");
-            // RFC 4343 §3: DNS lookup compares ASCII letters case-insensitively.
-            if !question
-                .name
-                .labels()
-                .skip(labels - count)
-                .zip(domain.labels())
-                .all(|(a, b)| a.eq_ignore_ascii_case(b))
-            {
+            if ds_at_cut && count == labels {
+                if VIEW && question.name == block.domain && matches(block) {
+                    // RFC 4035 §3.1.4.1: only the exact child cut contributes its View metadata.
+                    child_at_cut = Some(block);
+                }
+                continue;
+            }
+            if selected_labels.is_some_and(|selected| count < selected) {
+                // RFC 1034 §4.3.2: Stop after leaving the nearest matching ancestor Zone.
+                break;
+            }
+            if !domain_matches(question.name, labels, &block.domain) {
                 continue;
             }
             block.chain.as_ref()?;
             if matches(block) {
-                if !ds {
+                if !ds_at_cut {
                     return Some(block);
                 }
                 selected = Some(block);
+                selected_labels = Some(count);
             }
         }
         if selected.is_some() {
             return selected;
+        }
+        if ds_at_cut {
+            if VIEW {
+                if child_at_cut.is_some() {
+                    return child_at_cut;
+                }
+            } else if let Some(child) = blocks
+                .iter()
+                .filter(|block| {
+                    block.domain.label_count() == labels && question.name == block.domain
+                })
+                .filter(|block| block.chain.is_some())
+                .find(|block| matches(block))
+            {
+                // RFC 4035 §3.1.4.1: without parent authority, return child-apex DS NODATA.
+                return Some(child);
+            }
         }
         blocks
             .iter()
@@ -215,7 +251,46 @@ impl<C> Router<C> {
     }
 }
 
+// RFC 1034 §4.3.2: A Zone matches only when its Domain is a label-boundary suffix of QNAME.
+fn domain_matches(name: NameRef<'_>, labels: usize, domain: &Name) -> bool {
+    let count = domain.label_count();
+    if count > labels {
+        return false;
+    }
+    let domain = domain.as_name_ref();
+    name.labels()
+        .skip(labels - count)
+        .zip(domain.labels())
+        // RFC 4343 §3: DNS lookup compares ASCII letters case-insensitively.
+        .all(|(left, right)| left.eq_ignore_ascii_case(right))
+}
+
 impl<C: Chain> Router<C> {
+    // RFC 2136 §3.1.1: distinguish a configured zone with no chain from no authority.
+    pub(crate) fn has_unhandled_zone(&self, key: &ListenerKey, query: Message<'_>) -> bool {
+        let Some(question) = query.questions().next() else {
+            return false;
+        };
+        let Some(blocks) = self.listeners.get(key) else {
+            return false;
+        };
+        let labels = question.name.labels().count();
+        let nearest = blocks
+            .iter()
+            .filter(|block| domain_matches(question.name, labels, &block.domain))
+            .map(|block| block.domain.label_count())
+            .max();
+        nearest.is_some_and(|nearest| {
+            blocks
+                .iter()
+                .filter(|block| {
+                    block.domain.label_count() == nearest
+                        && domain_matches(question.name, labels, &block.domain)
+                })
+                .all(|block| block.chain.is_none())
+        })
+    }
+
     pub(crate) fn accepts_update(&self, key: &ListenerKey) -> bool {
         self.listeners.get(key).is_some_and(|blocks| {
             blocks

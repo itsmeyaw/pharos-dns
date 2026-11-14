@@ -11,6 +11,7 @@ struct Scripted {
     initial: u16,
     initial_tc: bool,
     initial_a: bool,
+    initial_cname: bool,
     secondary: u16,
     secondary_flags: u16,
     addresses: Vec<std::net::Ipv6Addr>,
@@ -71,6 +72,17 @@ impl Next for Backend<'_> {
                 )
                 .unwrap();
             }
+        } else if self.0.initial_cname {
+            let target: Name = "missing.example.net.".parse().unwrap();
+            b.record(
+                Section::Answer,
+                q.name,
+                Type::CNAME,
+                Class::IN,
+                60,
+                target.as_wire(),
+            )
+            .unwrap();
         } else if self.0.initial_a {
             b.record(
                 Section::Answer,
@@ -106,6 +118,30 @@ async fn query(
     secondary_flags: u16,
     addresses: &[&str],
 ) -> Vec<u8> {
+    query_with_cname(
+        settings,
+        initial,
+        initial_tc,
+        initial_a,
+        secondary,
+        secondary_flags,
+        addresses,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn query_with_cname(
+    settings: &str,
+    initial: u16,
+    initial_tc: bool,
+    initial_a: bool,
+    secondary: u16,
+    secondary_flags: u16,
+    addresses: &[&str],
+    initial_cname: bool,
+) -> Vec<u8> {
     let text = format!(".:53 {{\n siit {{\n {settings}\n }}\n}}");
     let mut chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives())
         .unwrap()
@@ -116,6 +152,7 @@ async fn query(
         initial,
         initial_tc,
         initial_a,
+        initial_cname,
         secondary,
         secondary_flags,
         addresses: addresses.iter().map(|s| s.parse().unwrap()).collect(),
@@ -150,6 +187,35 @@ async fn query(
         Action::Respond
     );
     response
+}
+
+#[tokio::test]
+async fn nxdomain_with_cname_suppresses_siit_translation() {
+    let wire = query_with_cname(
+        "",
+        3,
+        false,
+        false,
+        0,
+        0x0480,
+        &["64:ff9b::192.0.2.42"],
+        true,
+    )
+    .await;
+    let message = Message::parse(&wire).unwrap();
+    // RFC 6604 §3: NXDOMAIN may accompany a CNAME chain to a nonexistent target.
+    assert_eq!(message.rcode(), Rcode::NXDOMAIN);
+    assert_eq!(
+        message
+            .answers()
+            .filter(|rr| rr.rtype == Type::CNAME)
+            .count(),
+        1
+    );
+    assert_eq!(
+        message.answers().filter(|rr| rr.rtype == Type::A).count(),
+        0
+    );
 }
 
 // Derived from CoreDNS v1.15.0 plugin/siit/siit_test.go.

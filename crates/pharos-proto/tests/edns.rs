@@ -41,7 +41,7 @@ fn size_and_version_follow_coredns() {
     assert!(!Opt::new(512, 0, 0, 0, empty).bad_version());
     assert!(Opt::new(512, 0, 1, 0, empty).bad_version());
     let badvers = Opt::badvers();
-    assert_eq!(badvers.udp_payload_size(), 0);
+    assert_eq!(badvers.udp_payload_size(), 4096);
     assert_eq!(badvers.extended_rcode(), 1);
     assert_eq!(badvers.version(), 0);
     assert_eq!(badvers.flags(), 0);
@@ -56,7 +56,7 @@ fn response_opt_can_be_appended_to_an_existing_message() {
         .unwrap();
     wire[11] = 1;
     let parsed = Message::parse(&wire).unwrap();
-    assert_eq!(parsed.opt().unwrap().udp_payload_size(), 1232);
+    assert_eq!(parsed.opt().unwrap().udp_payload_size(), 4096);
     assert!(parsed.opt().unwrap().dnssec_ok());
 }
 
@@ -77,7 +77,7 @@ fn badvers_response_preserves_question_and_query_flags() {
     let opt = response.opt().unwrap();
     assert_eq!(
         (opt.udp_payload_size(), opt.version(), opt.flags()),
-        (0, 0, 0)
+        (4096, 0, 0)
     );
 
     let no_opt = [0; 12];
@@ -98,7 +98,7 @@ fn response_existing_opt_keeps_its_options_and_high_flags() {
         4,
         9,
         0xc1ff,
-        EdnsOptions::parse(&[0, 3, 0, 1, b'x']).unwrap(),
+        EdnsOptions::parse(&[0, 3, 0, 1, b'x', 0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2]).unwrap(),
     );
     let response = query.response(Some(existing), &[], Rcode::BADVERS);
     let mut wire = Vec::new();
@@ -108,17 +108,47 @@ fn response_existing_opt_keeps_its_options_and_high_flags() {
     assert_eq!(msg.rcode(), Rcode::BADVERS);
     let opt = msg.opt().unwrap();
     assert_eq!(opt.udp_payload_size(), 4096);
-    assert_eq!(opt.flags(), 0xc100);
+    assert_eq!(opt.flags(), 0x4000);
     assert_eq!(opt.options().as_bytes(), &[0, 3, 0, 1, b'x']);
     assert_eq!(
         opt.to_string(),
-        "\n;; OPT PSEUDOSECTION:\n; EDNS: version 0; flags: do co; MBZ: 0x0100, udp: 4096\n; NSID: 78  (x)"
+        "\n;; OPT PSEUDOSECTION:\n; EDNS: version 0; flags: co; udp: 4096\n; NSID: 78  (x)"
+    );
+}
+
+#[test]
+fn response_with_existing_opt_adds_query_ecs_when_upstream_omits_it() {
+    let query = Opt::new(
+        512,
+        0,
+        0,
+        0,
+        EdnsOptions::parse(&[0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2]).unwrap(),
+    );
+    let existing = Opt::new(
+        1232,
+        0,
+        0,
+        0,
+        EdnsOptions::parse(&[0, 3, 0, 1, b'x']).unwrap(),
+    );
+    let response = query.response(Some(existing), &[], Rcode::NOERROR);
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x8000).unwrap();
+    builder.reserve_response_opt(&response).unwrap();
+    let message = Message::parse(builder.finish_with_response_opt(&response).unwrap()).unwrap();
+    assert_eq!(
+        message.opt().unwrap().options().as_bytes(),
+        &[0, 3, 0, 1, b'x', 0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2]
     );
 }
 
 #[test]
 fn response_opt_keeps_registered_options_and_fits_after_truncation() {
-    let options = EdnsOptions::parse(&[0, 3, 0, 1, 42, 0, 10, 0, 1, 43]).unwrap();
+    let options = EdnsOptions::parse(&[
+        0, 3, 0, 1, 42, 0, 10, 0, 1, 43, 0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2,
+    ])
+    .unwrap();
     let query = Opt::new(400, 0, 1, 0x80ff, options);
     let response = query.response(None, &[10], Rcode::NOERROR);
     let mut wire = Vec::new();
@@ -140,10 +170,13 @@ fn response_opt_keeps_registered_options_and_fits_after_truncation() {
     let message = Message::parse(builder.finish_with_response_opt(&response).unwrap()).unwrap();
     assert!(message.tc());
     let opt = message.opt().unwrap();
-    assert_eq!(opt.udp_payload_size(), 400);
+    assert_eq!(opt.udp_payload_size(), 4096);
     assert_eq!(opt.version(), 0);
     assert_eq!(opt.flags(), 0x8000);
-    assert_eq!(opt.options().as_bytes(), &[0, 10, 0, 1, 43]);
+    assert_eq!(
+        opt.options().as_bytes(),
+        &[0, 10, 0, 1, 43, 0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2]
+    );
 }
 
 #[test]

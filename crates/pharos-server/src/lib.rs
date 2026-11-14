@@ -198,6 +198,7 @@ pub struct Metadata<'a> {
     validated_tsig: [u8; 255],
     validated_tsig_len: usize,
     tsig_signing: Option<TsigSigning>,
+    forwarded_response: bool,
     source: Option<Arc<dyn MetadataSource>>,
     view_name: Option<Arc<str>>,
     metric_view: &'a str,
@@ -218,6 +219,7 @@ impl<'a> Metadata<'a> {
             validated_tsig: [0; 255],
             validated_tsig_len: 0,
             tsig_signing: None,
+            forwarded_response: false,
             source: None,
             view_name: None,
             metric_view: "",
@@ -246,6 +248,7 @@ impl<'a> Metadata<'a> {
         self.source = None;
         self.view_name = None;
         self.enabled = true;
+        self.forwarded_response = false;
     }
 
     /// Retain an existing shared source of Metadata without allocating per Query.
@@ -292,6 +295,16 @@ impl<'a> Metadata<'a> {
     /// Defer authentication until the Listener has finalized the Response.
     pub fn set_tsig_signing(&mut self, signing: TsigSigning) {
         self.tsig_signing = Some(signing);
+    }
+
+    /// Mark a Response as forwarded without upstream transaction security.
+    // RFC 8945 §5.5: downstream TSIG re-signing must clear AD on forwarded Responses.
+    pub fn mark_forwarded_response(&mut self) {
+        self.forwarded_response = true;
+    }
+
+    pub(crate) const fn is_forwarded_response(&self) -> bool {
+        self.forwarded_response
     }
 
     /// Take the pending Response authentication request.
@@ -879,11 +892,13 @@ impl Listener {
         bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
         bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
     ) -> io::Result<Self> {
+        // RFC 1035 §4.2.1: Retain one worker so the Listener can serve UDP Queries.
+        let workers = workers.max(1);
         let wildcard = address.is_ipv6() && address.ip().is_unspecified();
         let mut ipv4_only = false;
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
         let mut attempts = if address.port() == 0 { 16 } else { 1 };
-        // RFC 7766 §5: general-purpose DNS implementations support both UDP and TCP.
+        // RFC 1035 §§4.2.1–4.2.2 and RFC 7766 §5: DNS servers support UDP and TCP.
         // RFC 5625 §4.4.1: Accept DNS Queries over TCP as well as UDP.
         let (tcp, address, sockets) = loop {
             let tcp = if wildcard && !ipv4_only {
@@ -1087,6 +1102,27 @@ mod wildcard_tests {
         .await
         .unwrap();
         assert_eq!(BINDS.load(Ordering::SeqCst), 3);
+        listener.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_keeps_one_udp_worker_when_zero_is_configured() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static BINDS: AtomicUsize = AtomicUsize::new(0);
+        fn counting_bind(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
+            BINDS.fetch_add(1, Ordering::SeqCst);
+            udp::bind(address)
+        }
+        let listener = Listener::bind_with_ipv6(
+            "127.0.0.1:0".parse().unwrap(),
+            Echo,
+            0,
+            bind_ipv6_dual,
+            counting_bind,
+        )
+        .await
+        .unwrap();
+        assert_eq!(BINDS.load(Ordering::SeqCst), 1);
         listener.shutdown().await.unwrap();
     }
 

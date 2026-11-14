@@ -20,7 +20,7 @@ proptest! {
         }
         let message = Message::parse(builder.finish()).unwrap();
         prop_assert_eq!(message.id(), id);
-        prop_assert_eq!(message.flags(), flags);
+        prop_assert_eq!(message.flags(), flags & !0x0040);
         let question = message.questions().next().unwrap();
         prop_assert_eq!(question.name, name.clone());
         prop_assert_eq!(question.qtype, Type(qtype));

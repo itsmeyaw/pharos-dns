@@ -288,7 +288,47 @@ impl Next for Negative {
     }
 }
 
+struct NegativeCname;
+impl Next for NegativeCname {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let question = cx.query.questions().next().unwrap();
+        let target: Name = "missing.example.net.".parse().unwrap();
+        let mut builder =
+            MessageBuilder::new(cx.response, cx.max_response_size, cx.query.id(), 0x8403).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        // RFC 6604 §3: A final CNAME chain may carry NXDOMAIN for its target.
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::CNAME,
+                Class::IN,
+                60,
+                target.as_wire(),
+            )
+            .unwrap();
+        let apex = NameRef::parse(cx.domain.as_wire(), 0).unwrap();
+        builder
+            .record(
+                Section::Authority,
+                apex,
+                Type::SOA,
+                Class::IN,
+                60,
+                &[
+                    0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
+                ],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
 // RFC 4035 §3.1.3.1: NSEC denial proofs and signatures belong in Authority.
+// CoreDNS v1.15.0 plugin/dnssec/dnssec.go: NSEC queries move only the final two records.
 #[tokio::test]
 async fn negative_nsec_proof_is_in_authority_for_any_key_count() {
     let base = concat!(
@@ -643,6 +683,35 @@ async fn nxdomain_gets_signed_black_lie_and_nodata_rcode() {
             2
         );
     }
+    assert_eq!(
+        chain[0]
+            .config
+            .dnssec
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, NegativeCname)
+            .await,
+        Outcome::Response
+    );
+    let reply = Message::parse(cx.response).unwrap();
+    assert_eq!(reply.rcode(), pharos_proto::Rcode::NOERROR);
+    assert_eq!(
+        reply.answers().filter(|rr| rr.rtype == Type::CNAME).count(),
+        1
+    );
+    assert_eq!(
+        reply
+            .authorities()
+            .filter(|rr| rr.rtype == Type::NSEC)
+            .count(),
+        1
+    );
+    verify_signatures(
+        &reply
+            .answers()
+            .chain(reply.authorities())
+            .collect::<Vec<_>>(),
+    );
     cx.query = cx.query.with_question_type(Type::NSEC);
     assert_eq!(
         chain[0]

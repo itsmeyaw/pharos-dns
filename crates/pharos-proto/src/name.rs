@@ -8,8 +8,9 @@ use std::{
 // RFC 1035 §2.3.4: wire names are at most 255 octets and labels at most 63 octets.
 const MAX_NAME_LEN: usize = 255;
 const MAX_LABEL_LEN: usize = 63;
-const MAX_POINTER_HOPS: usize = 255;
 const MAX_LABELS: usize = 127;
+// RFC 1035 §4.1.4 requires backward targets; local per-name and per-Message caps bound parser work.
+const MAX_POINTER_HOPS_PER_NAME: usize = 255;
 
 /// An absolute domain name used in configuration and authoritative data.
 #[derive(Clone, Debug)]
@@ -153,6 +154,17 @@ impl Name {
     #[must_use]
     pub fn as_wire(&self) -> &[u8] {
         &self.wire
+    }
+
+    /// Borrows this validated uncompressed name as a Message name view.
+    #[must_use]
+    pub fn as_name_ref(&self) -> NameRef<'_> {
+        // RFC 1035 §2.3.4: `Name` stores the validated uncompressed wire encoding.
+        NameRef {
+            message: &self.wire,
+            offset: 0,
+            wire_len: self.wire.len(),
+        }
     }
 
     /// Returns the number of non-root labels.
@@ -320,14 +332,69 @@ impl PartialOrd for Name {
 }
 
 impl<'a> NameRef<'a> {
+    /// Maximum aggregate compression-pointer steps allowed for one DNS Message.
+    // RFC 1035 §4.1.4: local parser budget bounds work on backward pointers.
+    pub const MAX_MESSAGE_POINTER_HOPS: usize = 8192;
+
     /// Validates and borrows the name at `offset` in a DNS message.
     pub fn parse(message: &'a [u8], offset: usize) -> Result<Self, NameError> {
-        let wire_len = check_message_name(message, offset)?;
+        let mut pointer_budget = MAX_POINTER_HOPS_PER_NAME;
+        Self::parse_with_budget(message, offset, &mut pointer_budget)
+    }
+
+    /// Validates a name while consuming the caller's aggregate pointer-work budget.
+    pub fn parse_with_budget(
+        message: &'a [u8],
+        offset: usize,
+        pointer_budget: &mut usize,
+    ) -> Result<Self, NameError> {
+        // RFC 1035 §4.1.4: reject forward pointers; the shared budget also bounds parser work.
+        let wire_len = check_message_name(message, offset, pointer_budget)?;
         Ok(Self {
             message,
             offset,
             wire_len,
         })
+    }
+
+    /// Rebuilds a borrowed view from the physical encoding of an already-validated name.
+    pub(crate) fn from_validated(message: &'a [u8], offset: usize) -> Option<(Self, usize)> {
+        // RFC 1035 §4.1.4: find the encoded boundary without following validated pointers again.
+        let mut position = offset;
+        loop {
+            let length = *message.get(position)?;
+            match length {
+                0 => {
+                    let end = position + 1;
+                    return Some((
+                        Self {
+                            message,
+                            offset,
+                            wire_len: end - offset,
+                        },
+                        end,
+                    ));
+                }
+                1..=63 => {
+                    let start = position + 1;
+                    position = start + usize::from(length);
+                    message.get(start..position)?;
+                }
+                0xc0..=0xff => {
+                    let end = position + 2;
+                    message.get(position + 1..end)?;
+                    return Some((
+                        Self {
+                            message,
+                            offset,
+                            wire_len: end - offset,
+                        },
+                        end,
+                    ));
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// Returns the encoded length at the original message offset.
@@ -348,6 +415,7 @@ impl<'a> NameRef<'a> {
         NameWireParts {
             message: self.message,
             position: Some(self.offset),
+            remaining_hops: MAX_POINTER_HOPS_PER_NAME,
         }
     }
 
@@ -357,7 +425,7 @@ impl<'a> NameRef<'a> {
         NameRefLabels {
             message: self.message,
             position: self.offset,
-            remaining_hops: MAX_POINTER_HOPS,
+            remaining_hops: MAX_POINTER_HOPS_PER_NAME,
             done: false,
         }
     }
@@ -390,6 +458,7 @@ pub enum NameWirePart {
 pub struct NameWireParts<'a> {
     message: &'a [u8],
     position: Option<usize>,
+    remaining_hops: usize,
 }
 
 impl Iterator for NameWireParts<'_> {
@@ -408,10 +477,20 @@ impl Iterator for NameWireParts<'_> {
                 self.position = Some(offset + len);
                 Some(NameWirePart::Label { offset, len })
             }
-            _ => {
+            0xc0..=0xff => {
+                // RFC 1035 §4.1.4: bound pointer traversal on every validated-name walk.
+                if self.remaining_hops == 0 {
+                    self.position = None;
+                    return None;
+                }
                 let target = usize::from(byte & 0x3f) << 8 | usize::from(self.message[offset + 1]);
                 self.position = Some(target);
+                self.remaining_hops -= 1;
                 Some(NameWirePart::Pointer { offset, target })
+            }
+            _ => {
+                self.position = None;
+                None
             }
         }
     }
@@ -437,7 +516,7 @@ impl PartialEq for NameRef<'_> {
 
 impl Eq for NameRef<'_> {}
 
-/// An allocation-free iterator over labels in a borrowed message name.
+/// An allocation-free iterator over a message name validated by `NameRef::parse`.
 pub struct NameRefLabels<'a> {
     message: &'a [u8],
     position: usize,
@@ -448,48 +527,53 @@ pub struct NameRefLabels<'a> {
 impl<'a> Iterator for NameRefLabels<'a> {
     type Item = &'a [u8];
 
+    // RFC 1035 §4.1.4: only validated, bounded compression chains reach this iterator.
     // RFC 4343 §4: Preserve input label octets where convenient.
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-        let length = *self.message.get(self.position)?;
-        match length {
-            0 => {
-                self.done = true;
-                None
-            }
-            1..=63 => {
-                let start = self.position + 1;
-                let label = self.message.get(start..start + usize::from(length))?;
-                self.position = start + usize::from(length);
-                Some(label)
-            }
-            // RFC 4343 §3.1: Compression pointers expand before case-insensitive comparison.
-            0xc0..=0xff => {
-                if self.remaining_hops == 0 {
+        while !self.done {
+            let length = *self.message.get(self.position)?;
+            match length {
+                0 => {
                     self.done = true;
                     return None;
                 }
-                let target = usize::from(length & 0x3f) << 8
-                    | usize::from(*self.message.get(self.position + 1)?);
-                self.position = target;
-                self.remaining_hops -= 1;
-                self.next()
-            }
-            _ => {
-                self.done = true;
-                None
+                1..=63 => {
+                    let start = self.position + 1;
+                    let label = self.message.get(start..start + usize::from(length))?;
+                    self.position = start + usize::from(length);
+                    return Some(label);
+                }
+                // RFC 4343 §3.1: Compression pointers expand before case-insensitive comparison.
+                0xc0..=0xff => {
+                    // RFC 1035 §4.1.4: bound pointer traversal on every validated-name walk.
+                    if self.remaining_hops == 0 {
+                        self.done = true;
+                        return None;
+                    }
+                    let target = usize::from(length & 0x3f) << 8
+                        | usize::from(*self.message.get(self.position + 1)?);
+                    self.position = target;
+                    self.remaining_hops -= 1;
+                }
+                _ => {
+                    self.done = true;
+                    return None;
+                }
             }
         }
+        None
     }
 }
 
-fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError> {
+fn check_message_name(
+    message: &[u8],
+    offset: usize,
+    pointer_budget: &mut usize,
+) -> Result<usize, NameError> {
     let mut position = offset;
     let mut wire_len = 0;
     let mut expanded_len = 0;
-    let mut hops = 0;
+    let mut pointer_hops = 0;
     let mut jumped = false;
     let mut pointer_limit = message.len();
     loop {
@@ -523,6 +607,10 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
                 position = end;
             }
             0xc0..=0xff => {
+                // RFC 1035 §4.1.4: targets must be prior; local hop caps bound adversarial parsing work.
+                if pointer_hops == MAX_POINTER_HOPS_PER_NAME || *pointer_budget == 0 {
+                    return Err(NameError::PointerLimit);
+                }
                 if jumped && position + 2 > pointer_limit {
                     return Err(NameError::PointerNotBackwards);
                 }
@@ -532,14 +620,12 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
                 if target >= position {
                     return Err(NameError::PointerNotBackwards);
                 }
-                hops += 1;
-                if hops > MAX_POINTER_HOPS {
-                    return Err(NameError::PointerLimit);
-                }
                 if !jumped {
                     wire_len += 2;
                     jumped = true;
                 }
+                pointer_hops += 1;
+                *pointer_budget -= 1;
                 pointer_limit = position;
                 position = target;
             }
