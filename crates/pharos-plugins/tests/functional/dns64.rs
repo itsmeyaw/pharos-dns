@@ -38,6 +38,7 @@ impl Next for ScriptedNext<'_> {
             self.0.initial_rcode
         };
         let flags = 0x8100
+            | if fallback { 0x0480 } else { 0 }
             | code
             | if fallback && self.0.truncated {
                 0x0200
@@ -149,6 +150,10 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
         assert_eq!(message.questions().next().unwrap().qtype, Type::AAAA);
         assert_eq!(message.rcode(), Rcode(expected_code));
         assert_eq!(message.tc(), truncated);
+        if !expected_ttls.is_empty() {
+            assert!(message.aa());
+            assert!(message.ra());
+        }
         assert_eq!(
             message.answers().map(|rr| rr.ttl).collect::<Vec<_>>(),
             expected_ttls

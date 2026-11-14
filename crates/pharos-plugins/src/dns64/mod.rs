@@ -179,7 +179,8 @@ impl Plugin for Dns64 {
                 } else {
                     0
                 }
-                | (response.flags() & 0x020f);
+                // RFC 6147 §5.4: retain AA, RA, TC, and RCODE from the A response.
+                | (response.flags() & 0x068f);
             let mut builder = MessageBuilder::new(cx.response, max, cx.query.id(), flags)
                 .map_err(ServerError::Build)?;
             builder
