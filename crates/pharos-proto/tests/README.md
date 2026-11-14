@@ -19,3 +19,10 @@ The type-name fixture `corpus/miekg-types.txt` derives from miekg/dns v1.1.73
 covered in `rdata_unknown.rs`.
 Differential RDATA tests use NLnet Labs' domain as a reference. Licenses are
 listed in the repository's `THIRD_PARTY_NOTICES`.
+
+## Live zone oracle
+
+`zone_differential_live.rs` needs Go on `PATH` and `PHAROS_MIEKG_DNS_DIR` pointed
+at a miekg/dns v1.1.73 checkout. Set `PHAROS_REQUIRE_INTEROP=1` so a missing Go
+toolchain fails instead of silently skipping the oracle. `xtask` sets this flag
+for its Cargo commands; CI must provide Go and the miekg source directory.

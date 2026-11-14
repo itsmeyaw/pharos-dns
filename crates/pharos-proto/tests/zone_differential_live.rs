@@ -669,6 +669,45 @@ fn rust_result(case: &Case) -> String {
     }
 }
 
+fn documented_generic_divergence(case: &Case, miekg: &str, pharos: &str) -> Option<&'static str> {
+    if !case.name.starts_with("generic-") || !miekg.starts_with("accept\n") || pharos != "reject\n"
+    {
+        return None;
+    }
+    let (rtype, mutation) = case.name.strip_prefix("generic-")?.split_once('-')?;
+    let rtype = rtype.parse::<u16>().ok()?;
+    if let Some(mutation) = mutation.strip_prefix("derived-") {
+        if matches!(rtype, 3 | 4) && mutation == "valid" {
+            return Some("RFC 1035 §3.3.4: Pharos rejects obsolete MD/MF zone records.");
+        }
+        if rtype == 63 {
+            return Some("RFC 8976 §2.2.3: Pharos enforces SHA-384 ZONEMD digest length.");
+        }
+        if rtype == 249 {
+            return Some("RFC 2930 §3: Pharos rejects transient TKEY zone records.");
+        }
+        if mutation == "extra" {
+            return Some("RFC 3597 §5: Pharos rejects trailing octets after known RDATA layouts.");
+        }
+        if (rtype, mutation) == (51, "truncated") {
+            return Some("RFC 5155 §4.2: Pharos rejects truncated NSEC3PARAM salt data.");
+        }
+        if (rtype, mutation) == (260, "pointer") {
+            return Some("RFC 8777 §4.2.3: Pharos rejects trailing AMTRELAY data.");
+        }
+        return None;
+    }
+    let kind = mutation;
+    if matches!(kind, "empty" | "octet" | "bad-length" | "truncated-pointer")
+        || kind.starts_with("pointer-")
+        || kind.starts_with("edns-")
+        || kind == "mx-pointer-forward"
+    {
+        return Some("RFC 3597 §5: Pharos rejects malformed known-type generic wire layouts.");
+    }
+    None
+}
+
 fn escaped_input(case: &Case) -> String {
     case.zone
         .iter()
@@ -1023,22 +1062,6 @@ fn miekg_live_differential() {
     let mut empty_owners = 0;
     for (case, expected) in cases.iter().zip(&results) {
         let actual = rust_result(case);
-        // RFC 3597 §5: Compare valid generic layouts; miekg normalizes malformed records.
-        if case.name.starts_with("generic-") {
-            let rtype = case
-                .name
-                .strip_prefix("generic-")
-                .and_then(|name| name.split_once('-'))
-                .and_then(|(rtype, _)| rtype.parse::<u16>().ok());
-            if !case.name.ends_with("-derived-valid") {
-                continue;
-            }
-            // RFC 1035 §3.3.4 / RFC 2930 §3: Keep MD/MF and TKEY zone policy strict.
-            // RFC 8976 §2.2.3: Keep SHA-384 ZONEMD lengths strict.
-            if matches!(rtype, Some(3 | 4 | 63 | 249)) {
-                continue;
-            }
-        }
         // RFC 1035 §5.1: Reject malformed decimal escapes that miekg treats as literal text.
         if matches!(
             case.name.as_str(),
@@ -1073,17 +1096,20 @@ fn miekg_live_differential() {
         }
         // RFC 5155 §3.1.6 permits 1–255 octets; miekg pads short SHA-1 hashes to 20.
         if case.name == "rr-edge-NSEC3-short-hash" {
-            assert!(expected.starts_with("accept\n"), "{expected}");
-            assert!(actual.starts_with("accept\n"), "{actual}");
+            let owner = "067265636f7264076578616d706c6500";
+            assert_eq!(
+                expected.as_str(),
+                format!("accept\n{owner}\t60\t1\t50\t0100000102aabb1400000140\n")
+            );
+            assert_eq!(
+                actual,
+                format!("accept\n{owner}\t60\t1\t50\t0100000102aabb0100000140\n")
+            );
             continue;
         }
         if matches!(case.name.as_str(), "rr-valid-SPF" | "rr-valid-DLV") {
-            assert!(
-                expected.starts_with("accept\n"),
-                "{}: {expected}",
-                case.name
-            );
-            assert!(actual.starts_with("accept\n"), "{}: {actual}", case.name);
+            assert_eq!(expected, &actual, "{}: wire output", case.name);
+            continue;
         }
         // RFC 1035 §5.1: the unescaped '(' in sequence 2 is zone syntax, not a label octet.
         let malformed_bytes = case.name.starts_with("byte-") && case.name.ends_with("-sequence-2");
@@ -1146,13 +1172,17 @@ fn miekg_live_differential() {
             continue;
         }
         if *expected != actual {
-            mismatches.push(format!(
-                "{}: input=\"{}\"\nGo: {}Rust: {}",
-                case.name,
-                escaped_input(case),
-                expected,
-                actual
-            ));
+            if let Some(reason) = documented_generic_divergence(case, expected, &actual) {
+                eprintln!("{}: documented miekg divergence: {reason}", case.name);
+            } else {
+                mismatches.push(format!(
+                    "{}: input=\"{}\"\nGo: {}Rust: {}",
+                    case.name,
+                    escaped_input(case),
+                    expected,
+                    actual
+                ));
+            }
         }
     }
     assert_eq!(
