@@ -61,7 +61,6 @@ pub(super) fn parse(
                         })
                         .collect::<Result<Vec<Name>, Error>>()?;
                     match &mut catalog {
-                        Some(existing) if existing.is_empty() => *existing = names,
                         Some(existing) => {
                             for name in names {
                                 if !existing.contains(&name) {

@@ -57,6 +57,21 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
     }
 }
 
+// RFC 1996 §3.11: Keep the notifying primary IP and use its configured service port.
+pub(super) fn primary_address(address: &str, client: SocketAddr) -> Option<SocketAddr> {
+    if !primary_matches(address, client) {
+        return None;
+    }
+    let port = if let Some(value) = address.strip_prefix('[') {
+        value.split_once(']')?.1.strip_prefix(':')?.parse().ok()?
+    } else {
+        address.rsplit_once(':')?.1.parse().ok()?
+    };
+    let mut primary = client;
+    primary.set_port(port);
+    Some(primary)
+}
+
 // RFC 1035 §4.1.1: DNS query IDs are 16-bit identifiers assigned by the query generator.
 fn random_id() -> u16 {
     let mut bytes = [0; 2];
@@ -320,7 +335,7 @@ pub(super) fn timers(zone: &SecondaryZone) -> (Duration, Duration, Duration) {
         .as_ref()
         .and_then(|zone| zone.records().iter().find(|rr| rr.rtype == Type::SOA));
     let value = |offset: usize| {
-        // RFC 1034 §4.3.5: shortcut: Keep a 1s floor to prevent zero SOA timers from tight-polling primaries.
+        // RFC 1034 §4.3.5: shortcut: 1s floor avoids hot polling; upgrade after a bounded zero-timer policy exists.
         soa.and_then(|rr| {
             rr.rdata
                 .get(rr.rdata.len().checked_sub(20)? + offset..)?
@@ -396,17 +411,16 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
         let (refresh, retry, expire) = timers(&zone);
         let mut refresh = tokio::time::interval_at(tokio::time::Instant::now() + refresh, refresh);
         let mut retry = tokio::time::interval_at(tokio::time::Instant::now() + retry, retry);
-        let mut expire = tokio::time::interval_at(tokio::time::Instant::now() + expire, expire);
+        // RFC 1034 §4.3.5: EXPIRE is measured from the last successful SOA check.
+        let expire_at = tokio::time::Instant::now() + expire;
         let mut retry_active = false;
         loop {
             let jitter = tokio::select! {
                 _ = refresh.tick(), if !retry_active => 5000,
                 _ = retry.tick(), if retry_active => 2000,
-                _ = expire.tick() => {
-                    if retry_active && !zone.expired.load(Ordering::Relaxed) {
-                        zone.expired.store(true, Ordering::Relaxed);
-                        super::catalog::invalidate(&shared, &zone);
-                    }
+                _ = tokio::time::sleep_until(expire_at), if retry_active && !zone.expired.load(Ordering::Relaxed) => {
+                    zone.expired.store(true, Ordering::Relaxed);
+                    super::catalog::invalidate(&shared, &zone);
                     continue;
                 }
             };
@@ -425,7 +439,8 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                         continue;
                     }
                 }
-                Ok(false) => {}
+                // RFC 1034 §4.3.5: A successful unchanged SOA check renews this secondary copy.
+                Ok(false) => zone.expired.store(false, Ordering::Relaxed),
                 Err(error) => {
                     pharos_server::logging::log(
                         "WARN",

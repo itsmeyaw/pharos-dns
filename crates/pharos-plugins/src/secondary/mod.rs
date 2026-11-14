@@ -132,17 +132,8 @@ impl Secondary {
     ) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
             if cx.query.opcode() == Opcode::NOTIFY {
-                // RFC 1996 §3.10: Drop NOTIFY without a Question from unknown peers.
-                if self.shared.zones.load().iter().all(|zone| {
-                    !zone
-                        .config
-                        .from
-                        .iter()
-                        .any(|address| update::primary_matches(address, cx.client))
-                }) {
-                    return Outcome::Drop;
-                }
-                return Outcome::Unanswered(Rcode::FORMERR);
+                // RFC 1996 §3.2: Ignore malformed NOTIFY requests without a Question.
+                return Outcome::Drop;
             }
             return next.run(cx).await;
         };
@@ -189,16 +180,16 @@ impl Secondary {
 
 fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
     // RFC 1996 §3.10: Ignore NOTIFY from unconfigured Primary Servers.
-    if !zone
+    let Some(primary) = zone
         .config
         .from
         .iter()
-        .any(|address| update::primary_matches(address, cx.client))
-    {
+        .find_map(|address| update::primary_address(address, cx.client))
+    else {
         return Outcome::Drop;
-    }
+    };
     let Some(question) = cx.query.questions().next() else {
-        return Outcome::Unanswered(Rcode::FORMERR);
+        return Outcome::Drop;
     };
     // RFC 1996 §§3.2, 3.3: NOTIFY uses AA, one IN SOA Question, and zero undefined fields.
     if cx.query.flags() & 0x83ff != 0
@@ -208,7 +199,7 @@ fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
         || question.qclass != Class::IN
         || question.name != zone.config.apex
     {
-        return Outcome::Unanswered(Rcode::FORMERR);
+        return Outcome::Drop;
     }
     let max = cx.max_response_size.max(512);
     if cx.response.capacity() < max {
@@ -228,7 +219,7 @@ fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
     if result.is_ok() {
         let mut pending = zone.notify_source.lock().unwrap();
         if pending.is_none() {
-            *pending = Some(cx.client);
+            *pending = Some(primary);
             zone.notify.notify_one();
         }
     }
