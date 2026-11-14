@@ -89,6 +89,24 @@ async fn udp_fake(rcode: u8, answer: Option<u8>) -> Fake {
     Fake { addr, count, task }
 }
 
+async fn udp_mismatch_fake() -> Fake {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        loop {
+            let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+            seen.fetch_add(1, Ordering::SeqCst);
+            wire[2] |= 0x80;
+            wire[len - 4..len - 2].copy_from_slice(&28_u16.to_be_bytes());
+            socket.send_to(&wire[..len], peer).await.unwrap();
+        }
+    });
+    Fake { addr, count, task }
+}
+
 async fn tcp_fake(fail_first: usize) -> Fake {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -344,6 +362,32 @@ async fn default_attempt_cap_applies_per_upstream() {
     .unwrap();
     assert_eq!(query(&chain).await.0, Outcome::Unanswered(Rcode::SERVFAIL));
     assert_eq!(counts(&[&a, &b, &c]), vec![2, 2, 2]);
+}
+
+// RFC 9520 §3.1: Per-upstream caps leave later configured servers reachable.
+#[tokio::test]
+async fn default_attempts_reach_fourth_upstream_after_three_mismatches() {
+    let first = udp_mismatch_fake().await;
+    let second = udp_mismatch_fake().await;
+    let third = udp_mismatch_fake().await;
+    let last = udp_fake(Rcode::NOERROR.0 as u8, Some(42)).await;
+    let chain = configure_chain(&format!(
+        "forward . {} {} {} {} {{\npolicy sequential\n}}",
+        first.addr, second.addr, third.addr, last.addr
+    ))
+    .unwrap();
+    let (outcome, response) = query(&chain).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata[3],
+        42
+    );
+    assert_eq!(counts(&[&first, &second, &third, &last]), [1, 1, 1, 1]);
 }
 
 // CoreDNS setup_test.go TestNextAlternate, exercised with actual responses.
