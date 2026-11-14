@@ -13,6 +13,7 @@ fn compatibility_document_has_parseable_sections() {
         "Metrics",
         "Server",
         "Kubernetes API",
+        "Conformance branch compatibility notes",
     ];
     let mut in_section = false;
     let mut in_bullet = false;

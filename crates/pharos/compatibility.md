@@ -19,7 +19,7 @@
 ## bind
 
 - [bind Plugin notes](../crates/pharos-plugins/src/bind/README.md)
-- RFC 5625 §6.2: the default listener uses an unspecified address and can expose a `forward` proxy on every interface; configure `bind` to restrict listener addresses.
+- RFC 5625 §6.2: the default listener uses an unspecified address and can expose a `forward` proxy on every interface; configure `bind` to restrict listener addresses (conf/infra #105).
 
 ## bufsize
 
@@ -197,7 +197,7 @@
 - Deviation policy: ADR 0003 governs Corefile key/import semantics (CoreDNS behavior wins); ADR 0002 governs RFC behavior (RFCs win unless deployment reliance is evidenced).
 - CoreDNS v1.15.0 uses miekg/dns v1.1.73, whose `IsDomainName` accepts four 63-octet labels with `off == 256`; `off` excludes root, so wire name is 257 octets (`defaults.go`). Pharos rejects it under RFC 1035 §2.3.4 per ADR 0002; no DNS Message can carry it.
 - CoreDNS v1.15.0's `plugin.SplitHostPort` caps server-block key presentation at 255 bytes before DNS wire-length validation (`plugin/normalize.go`, `core/dnsserver/register.go`). Pharos preserves this under ADR 0003 (CoreDNS wins), so some RFC 1035 §2.3.4-valid escaped names with longer presentation remain rejected.
-- CoreDNS v1.15.0 normalizes server-block names with Go `strings.ToLower` and rejects IPv6 CIDRs beginning with `:` or `0` followed by `:` (`plugin/normalize.go`). Pharos preserves those Corefile behaviors under ADR 0003 (CoreDNS wins), despite RFC 4343 §3 and RFC 4291 §2.3.
+- CoreDNS v1.15.0 normalizes server-block names with Go 1.26.0 `strings.ToLower` and rejects IPv6 CIDRs beginning with `:` or `0` followed by `:` (`plugin/normalize.go`). Pharos preserves those Corefile behaviors under ADR 0003 (CoreDNS wins), despite RFC 4343 §3 and RFC 4291 §2.3.
 - CoreDNS v1.15.0's caddy v1.1.4 import parser rejects patterns with multiple `*` or `?` wildcards and all bracket expressions (`caddyfile/parse.go`); Pharos preserves those limits under ADR 0003 (CoreDNS wins).
 - Only `root`, `cancel`, `timeouts`, `debug`, `shed`, `acl`, `any`, `auto`, `autopath`, `bind`, `bufsize`, `cache`, `chaos`, `dns64`, `dnssec`, `errors`, `erratic`, `file`, `forward`, `header`, `health`, `hosts`, `k8s_external`, `kubernetes`, `loadbalance`, `local`, `log`, `loop`, `metadata`, `minimal`, `multisocket`, `nsid`, `prometheus`, `ready`, `reload`, `rewrite`, `secondary`, `siit`, `sign`, `template`, `transfer`, `tsig`, `view` and `whoami` are implemented. Other built-in Directives are disabled by default; explicitly enabling their Cargo features makes setup fail with a not-implemented error rather than accepting their configuration.
 - CoreDNS v1.15.0 (coredns/caddy v1.1.4) re-scans a token after each `{$VAR}` / `{%VAR%}` replacement, so a value that contains its own reference loops forever. Pharos reports an error instead, and also stops after 10,000 replacements or 16 MiB of expanded text.
@@ -270,13 +270,13 @@
 - The protocol parser rejects duplicate OPT records, OPT records outside Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
 - DSO session Primary TLVs are unsupported; the Listener suppresses ID-zero DSO requests without inspecting their Primary TLV (RFC 8490 §5.4.1).
 - The DNS Listener returns FORMERR for malformed Messages with at least four octets and drops shorter datagrams. CoreDNS v1.15.0 accepts malformed OPTs when its header-count policy allows them, and selects the last OPT in Additional.
-- The DNS Listener ignores the reserved header Z bit on receipt, as RFC 6895 §2.1 recommends, and clears it in generated Responses.
-- Zero-question QUERY Messages route to the root Server Block when configured; CoreDNS's standard query path also permits QDCOUNT=0.
-- For DS at a configured zone cut, Pharos uses the parent Server Block; if no parent is configured, it routes to the child and returns authoritative NODATA, as RFC 4035 §3.1.4.1 requires.
-- Response OPT advertises Pharos's 4096-octet responder capacity, as RFC 6891 §6.2.3 and RFC 3226 §3 recommend. The UDP send limit remains the normalized request size capped at 4096 (512 when OPT is absent). CoreDNS `bufsize` echoes its reduced size in the response OPT; Pharos keeps server capacity in the OPT instead.
+- The DNS Listener ignores the reserved header Z bit on receipt, as RFC 6895 §2.1 recommends, and clears it in generated Responses (conf/server #101).
+- Zero-question QUERY Messages route to the root Server Block when configured; CoreDNS's standard query path also permits QDCOUNT=0 (RFC 9619 §4; conf/server #101).
+- For DS at a configured zone cut, Pharos uses the parent Server Block; if no parent is configured, it routes to the child and returns authoritative NODATA, as RFC 4035 §3.1.4.1 requires (conf/server #101).
+- Response OPT advertises Pharos's 4096-octet responder capacity, as RFC 6891 §§6.2.3–6.2.4 and RFC 3226 §3 recommend. The UDP send limit remains the normalized request size capped at 4096 (512 when OPT is absent). CoreDNS `bufsize` echoes its reduced size in the response OPT; Pharos keeps server capacity in the OPT instead (conf/server #101).
 - AD is preserved on ordinary upstream and local Responses. When a valid client TSIG is re-signed after forwarding, the Listener clears AD as RFC 8945 §5.5 requires; the `forward` Plugin has no upstream TSIG mode.
-- RRSIG inception and expiration use RFC 4034 §3.1.5 serial arithmetic from RFC 1982 §3.2; this corrects implementations that compare wrapped values as ordinary integers.
-- DNS RCODE 16 metrics use BADVERS. TSIG Error 16 is BADSIG and is not a DNS RCODE label (RFC 6895 §2.3; RFC 8945 §3).
+- Message-level RRSIG inception and expiration validation uses RFC 4034 §3.1.5 serial arithmetic from RFC 1982 §3.2; logging and offline signer refresh comparisons remain open (conf/server #101).
+- DNS RCODE 16 metrics use BADVERS. TSIG Error 16 is BADSIG and is not a DNS RCODE label (RFC 6895 §2.3; RFC 8945 §3; conf/server #101).
 - CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC report transport errors.
 - Pharos returns a header-only FORMERR for malformed Messages, whereas CoreDNS may retain a partially decoded Question.
 - For a header-only Message claiming one Question, Pharos returns FORMERR; CoreDNS returns SERVFAIL.
@@ -329,11 +329,9 @@
 
 ## Conformance branch compatibility notes
 
-These entries document behavior changed or explicitly retained by conformance branches. Source evidence is included when reports provide it; unsupported CoreDNS comparisons are omitted.
+- These entries document behavior changed or explicitly retained by conformance branches. Source evidence is included when reports provide it; unsupported CoreDNS comparisons are omitted.
 
-- Deviation policy: ADR 0003 governs Corefile key/import semantics (CoreDNS behavior wins); ADR 0002 governs RFC behavior (RFCs win unless deployment reliance is evidenced).
-
-### Zone and file
+- **Zone and file**
 
 - The apex remains an existing name when it lacks the queried QTYPE, so lookup returns NOERROR/NODATA under RFC 2308 §2.2 (conf/zone #95).
 - Primary Zone loading rejects multiple SOAs, multi-target CNAME RRsets, and DNAME descendant data (RFC 1035 §5.2; RFC 2181 §10.1; RFC 6672 §§2.3–2.4). The offline signer retains the last SOA to match CoreDNS v1.15.0 `plugin/sign`; the primary Zone path rejects it.
@@ -341,7 +339,7 @@ These entries document behavior changed or explicitly retained by conformance br
 - Overlong DNAME substitution returns YXDOMAIN with one DNAME and no Self Lookup (RFC 6672 §2.2). The earlier Pharos path returned SERVFAIL and could recurse through Self Lookup.
 - Zone RRset TTLs are normalized to the minimum, duplicate RRs are suppressed, and available sibling nameserver glue is included (RFC 2181 §§5.1–5.2; RFC 9471 §3.2).
 
-### Cache
+- **Cache**
 
 - A positive configured minimum TTL raises zero-TTL records before cache admission; default is five seconds. This retains the selected minimum-TTL compatibility policy despite RFC 1035 §3.2.1 and RFC 8767 §4 (ADR 0002; conf/cache #97).
 - `denial_min_ttl` is accepted for configuration compatibility but ignored, because RFC 2308 §3 does not permit raising a negative TTL above its SOA-derived lifetime.
@@ -354,7 +352,7 @@ These entries document behavior changed or explicitly retained by conformance br
 - Expired resolution failures are never served stale (RFC 9520 §3.2; conf/cache #97).
 - The #97 report contains no before/after `pharos-bench` run for `ndots` amplification; p99 latency and negative-cache hit throughput remain unverified.
 
-### DNSSEC
+- **DNSSEC**
 
 - SPF (TYPE99) and DLV (TYPE32769) remain accepted in zone files for migration compatibility. CoreDNS v1.15.0, using miekg/dns v1.1.73 (`go.mod`), loaded sample records and answered `TYPE99` and `TYPE32769` UDP queries with RCODE 0 and one Answer (RFC 7208 §14.1; RFC 8749 §4).
 - Dynamic UPDATE rejects SPF (TYPE99) even though ordinary zone-file data remains accepted, following RFC 7208 §14.1; the proto decision retains static-zone compatibility only (conf/dynupdate #96; conf/proto #99).
@@ -369,26 +367,14 @@ These entries document behavior changed or explicitly retained by conformance br
 - Signing cache-miss and RSA allocations remain open in issue #106; cache memory budget and miss-path scans remain open in issue #107.
 - NSEC3 chain construction requires zero iterations and empty salt. Full end-to-end NSEC3 zone signing remains unsupported (RFC 9276 §3.1; conf/dnssec #100).
 
-### Server and protocol
+- **Server and protocol**
 
-- Response OPT advertises Pharos's 4096-octet capacity; UDP send limit remains `min(request size, 4096)` or 512 without OPT. CoreDNS v1.15.0 `plugin/bufsize/README.md` describes echoing its reduced size in Response OPT (RFC 6891 §6.2.4; RFC 3226 §3; conf/server #101).
-- DS queries at a zone cut use the parent when configured; child-only authority returns authoritative NODATA (RFC 4035 §3.1.4.1).
-- Reserved DNS header Z is ignored on receipt and cleared in generated Responses (RFC 6895 §2.1).
-- DNS RCODE 16 metrics use BADVERS; BADSIG is a TSIG error, not a DNS RCODE label (RFC 6895 §2.3; RFC 8945 §3).
-- Shared Response RRSIG inception/expiration validation uses 32-bit RFC 1982 serial arithmetic; logging and offline signer refresh comparisons remain open (RFC 4034 §3.1.5; RFC 1982 §3.2; conf/server #101).
-- DSO Primary-TLV parsing remains unsupported; ID-zero DSO requests are suppressed without inspecting Primary TLVs (RFC 8490 §5.4.1).
+- DSO Primary-TLV parsing remains unsupported; ID-zero DSO requests are suppressed without inspecting Primary TLVs (RFC 8490 §5.4.1; conf/server #101).
 - Secondary SOA timers retain a one-second floor to prevent an immediate refresh/retry loop; zero-timer semantics remain deferred (RFC 1034 §4.3.5; conf/secondary #98).
-- The default listener binds an unspecified dual-stack address and can expose a `forward` proxy on every interface; configure `bind` to restrict it (RFC 5625 §6.2; conf/infra #105).
-- Ordinary local and unsigned upstream Responses preserve AD. The Listener clears AD only when it strips a verified client TSIG and re-signs without upstream transaction security (RFC 8945 §5.5).
-- QDCOUNT=0 QUERY is permitted and routes to the root Server Block when configured (RFC 9619 §4); CoreDNS v1.15.0 also permits it.
 - When the DNSSEC plugin is in-chain, any explicit QTYPE 128 receives FORMERR, including names outside signed zones (RFC 9824 §3.5).
 
-### Corefile and plugin behavior
+- **Corefile and plugin behavior**
 
-- CoreDNS v1.15.0 `plugin.SplitHostPort` caps server-block-key presentation at 255 bytes before wire-length validation (`plugin/normalize.go`, `core/dnsserver/register.go`); Pharos preserves this cap under ADR 0003. Some RFC 1035 §2.3.4-valid escaped names longer than 255 presentation bytes remain rejected.
-- CoreDNS v1.15.0 miekg/dns v1.1.73 `IsDomainName` accepts four 63-octet labels with `off == 256`; because `off` excludes root, this is 257 wire octets (`defaults.go`). Pharos rejects it under RFC 1035 §2.3.4 and ADR 0002; no DNS Message can carry that name.
-- CoreDNS v1.15.0 `plugin/normalize.go` uses Go 1.26.0 `strings.ToLower` and rejects IPv6 CIDRs beginning with `:` or `0` followed by `:`. Pharos preserves those Corefile behaviors under ADR 0003 despite RFC 4343 §3 and RFC 4291 §2.3.
-- CoreDNS caddy v1.1.4 `caddyfile/parse.go` `doImport` rejects patterns with multiple `*` or `?` and all bracket expressions; Pharos retains these import-glob limits under ADR 0003.
 - `any` uses CPU `RFC8482`; its OS remains `See RFC 8482` for CoreDNS compatibility (RFC 8482 §4.2; CoreDNS v1.15.0 `plugin/any`).
 - `any` passes non-IN ANY questions through rather than returning IN HINFO; local, hosts, and whoami also pass through non-IN questions (RFC 1034 §4.3.1; CoreDNS v1.15.0 plugin READMEs).
 - `any` synthesizes HINFO before checking CNAME and cannot sign the generated answer when DO=1 (RFC 8482 §4.2); CoreDNS v1.15.0 `plugin/any` has the same behavior.
@@ -400,7 +386,7 @@ These entries document behavior changed or explicitly retained by conformance br
 - A successful empty A lookup returns the original AAAA response (RFC 6147 §5.4); this differs from the former Pharos behavior.
 - The `header` plugin can override AA on Queries and non-authoritative Responses; this retains CoreDNS v1.15.0 `plugin/header` behavior (RFC 1035 §4.1.1).
 
-### Kubernetes and forwarding
+- **Kubernetes and forwarding**
 
 - Kubernetes ExternalName returns a CNAME for every QTYPE; CoreDNS limits it to CNAME/A/AAAA (Kubernetes DNS spec §2.5).
 - Unnamed Service ports produce no SRV records in Kubernetes and k8s_external queries or AXFR; CoreDNS v1.15.0 behavior differs (Kubernetes DNS spec §2.3.2; `plugin/kubernetes/kubernetes.go`, `plugin/kubernetes/transfer.go`).
