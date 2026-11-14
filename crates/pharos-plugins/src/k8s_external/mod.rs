@@ -859,7 +859,7 @@ impl External {
             for (slot, label) in labels.iter_mut().zip(normalized.labels()) {
                 *slot = label;
             }
-            // RFC 1035 §3.5 and RFC 3596 §2.5: Reverse names encode octets or nibbles in reverse.
+            // RFC 1034 §3.5 and RFC 3596 §2.5: Reverse names encode octets or nibbles in reverse.
             let reverse_ip = if q.qtype == Type::PTR {
                 crate::kubernetes::reverse::address(&labels[..normalized.labels().count()])
                     .map(crate::kubernetes::scratch::IpText::new)
