@@ -82,7 +82,12 @@ fn generic_known_types_follow_wire_layouts() {
     for (rtype, length, data, expected) in [
         (Type::A, "4", "7f000001", vec![127, 0, 0, 1]),
         (Type::NS, "3", "016100", vec![1, b'a', 0]),
-        (Type::NXT, "7", "046e6578740060", b"\x04next\0\x60".to_vec()),
+        (
+            Type::NXT,
+            "10",
+            "046e6578740060000002",
+            b"\x04next\0\x60\0\0\x02".to_vec(),
+        ),
         (
             Type::ZONEMD,
             "18",
@@ -102,6 +107,12 @@ fn generic_known_types_follow_wire_layouts() {
             "000800050001010080",
             vec![0, 8, 0, 5, 0, 1, 1, 0, 128],
         ),
+        (
+            Type::OPT,
+            "7",
+            "000f00030001ff",
+            vec![0, 15, 0, 3, 0, 1, 0xff],
+        ),
         (Type(65000), "1", "ff", vec![255]),
     ] {
         assert_eq!(
@@ -114,8 +125,9 @@ fn generic_known_types_follow_wire_layouts() {
         (Type::A, "0", ""),
         (Type::NSAP, "2", "4701"),
         (Type::NSEC, "6", "046e65787400"),
+        (Type::NXT, "7", "046e6578740060"),
+        (Type::NXT, "11", "046e657874006000000200"),
         (Type::URI, "4", "00000000"),
-        (Type::OPT, "7", "000f00030001ff"),
         (Type::A, "5", "7f000001ff"),
         (Type::MX, "2", "000a"),
         (Type::DS, "2", "0001"),

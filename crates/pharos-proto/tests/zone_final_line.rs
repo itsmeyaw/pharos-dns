@@ -190,7 +190,9 @@ fn type_bitmaps_require_type_mnemonics() {
         parse(b"n IN NXT 0 TYPE0\n"),
         Ok(vec![(
             30,
-            vec![1, b'0', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0, 128]
+            vec![
+                1, b'0', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0, 128, 0, 0, 2
+            ]
         )])
     );
 }

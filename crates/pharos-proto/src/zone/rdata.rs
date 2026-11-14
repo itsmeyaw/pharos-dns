@@ -354,7 +354,7 @@ fn parse_rdata_inner(
                 base64(&fields[8..].concat())
             )?);
         }
-        // RFC 4034 §4.1.2 and RFC 5155 §3.2: NSEC bitmaps use ordered windows.
+        // RFC 4034 §4.1.2: NSEC Type Bit Maps contain one or more nonempty ordered windows.
         Type::NSEC => {
             if fields.len() < 2 {
                 *index = fields.len();
@@ -610,7 +610,7 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                 }
             }
             b'b' => {
-                // RFC 4034 §4.1.2: An NSEC must contain at least one type-bitmap block.
+                // RFC 4034 §4.1.2: NSEC requires at least one type-bitmap window.
                 if rtype == Type::NSEC && pos == data.len() {
                     return Err("empty generic NSEC bitmap".into());
                 }
@@ -633,9 +633,12 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                 }
             }
             b'u' => {
-                // RFC 2535 §5.2: NXT's unwindowed type bitmap covers at most 128 types.
-                if remaining.len() > 16 {
-                    return Err("generic NXT bitmap exceeds 16 octets".into());
+                // RFC 2535 §5.2: NXT includes TYPE30, has 4–16 octets, and omits trailing zeros.
+                if !(4..=16).contains(&remaining.len())
+                    || remaining[3] & 0x02 == 0
+                    || remaining.last() == Some(&0)
+                {
+                    return Err("invalid generic NXT bitmap".into());
                 }
                 out.extend_from_slice(remaining);
                 pos = data.len();

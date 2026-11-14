@@ -271,6 +271,9 @@ pub(super) fn parse(
                     bitmap[octet] |= 0x80 >> (ty % 8);
                     bitmap_len = bitmap_len.max(octet + 1);
                 }
+                // RFC 2535 §5.2: NXT is present in its own bitmap, requiring four octets.
+                bitmap[3] |= 0x02;
+                bitmap_len = bitmap_len.max(4);
                 out.extend_from_slice(&bitmap[..bitmap_len]);
             }
             // RFC 1035 §3.2.1: RDATA is an octet sequence; Nimrod presents these fields as hex.
