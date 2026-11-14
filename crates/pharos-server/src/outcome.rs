@@ -242,6 +242,7 @@ fn scrub(
     if end > budget {
         return Err(Error::ResponseBufferTooSmall);
     }
+    let question_end = end;
     let mut counts = [message.question_count(), 0, 0, 0];
     let original = [
         message.question_count(),
@@ -250,7 +251,8 @@ fn scrub(
         message.additional_count() - u16::from(existing.is_some()),
     ];
     let mut stopped = false;
-    // RFC 1035 §6.2: Truncate from the end to preserve earlier Answer and Authority records.
+    let mut required_truncated = false;
+    // RFC 1035 §4.1.1: Walk sections in wire order before setting TC for omitted records.
     for (section, records) in [
         (1, message.answers()),
         (2, message.authorities()),
@@ -265,6 +267,7 @@ fn scrub(
             let next = record.rdata_offset + record.rdata.len();
             if next > budget {
                 stopped = true;
+                required_truncated = section != 3;
                 break;
             }
             end = next;
@@ -273,6 +276,11 @@ fn scrub(
         if stopped {
             break;
         }
+    }
+    if required_truncated {
+        // RFC 2181 §9: Do not emit a partial Answer or Authority RRset.
+        end = question_end;
+        counts[1..].fill(0);
     }
     // RFC 2181 §9 and RFC 4035 §3.1.1: optional Additional omissions alone do not set TC.
     let truncated = counts[1..3] != original[1..3];

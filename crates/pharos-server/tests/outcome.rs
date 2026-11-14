@@ -46,7 +46,7 @@ fn response(count: usize) -> Vec<u8> {
 }
 
 #[test]
-fn truncates_at_record_boundary_and_preserves_compression() {
+fn truncation_does_not_emit_a_partial_required_rrset() {
     let wire = query(false);
     let query = Message::parse(&wire).unwrap();
     let mut response = response(8);
@@ -63,10 +63,9 @@ fn truncates_at_record_boundary_and_preserves_compression() {
     let message = Message::parse(&response).unwrap();
     assert!(response.len() <= 512);
     assert!(message.tc());
-    assert_eq!(message.answer_count(), 3);
+    assert_eq!(message.answer_count(), 0);
     assert_eq!(message.authority_count(), 0);
     assert_eq!(message.additional_count(), 0);
-    assert!(message.answers().all(|rr| rr.name.to_string() == "a."));
 }
 
 #[test]
