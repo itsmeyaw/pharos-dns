@@ -288,6 +288,39 @@ impl Next for Negative {
     }
 }
 
+struct ExistingNoData;
+impl Next for ExistingNoData {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        use pharos_dnssec::denial::type_bitmap;
+
+        let q = cx.query.questions().next().unwrap();
+        let mut builder =
+            MessageBuilder::new(cx.response, cx.max_response_size, cx.query.id(), 0x8400).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        let apex = NameRef::parse(cx.domain.as_wire(), 0).unwrap();
+        builder
+            .record(
+                Section::Authority,
+                apex,
+                Type::SOA,
+                Class::IN,
+                60,
+                &[
+                    0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
+                ],
+            )
+            .unwrap();
+        let next: Name = "zzz.miek.nl.".parse().unwrap();
+        let mut nsec = next.as_wire().to_vec();
+        nsec.extend_from_slice(&type_bitmap(&[Type::A, Type::NSEC, Type::RRSIG]).unwrap());
+        builder
+            .record(Section::Authority, q.name, Type::NSEC, Class::IN, 60, &nsec)
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
 struct NegativeCname;
 impl Next for NegativeCname {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
@@ -733,6 +766,74 @@ async fn nxdomain_gets_signed_black_lie_and_nodata_rcode() {
         1
     );
     verify_signatures(&reply.authorities().collect::<Vec<_>>());
+}
+
+// RFC 4470 §3: Existing names use their real NSEC record for NODATA proofs.
+#[tokio::test]
+async fn existing_name_nodata_uses_the_real_nsec_record() {
+    let base = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+    );
+    let text = format!("miek.nl {{\n dnssec {{\n key file {base}\n }}\n}}");
+    let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let domain: Name = "miek.nl.".parse().unwrap();
+    let name: Name = "www.miek.nl.".parse().unwrap();
+    let mut wire = Vec::with_capacity(1232);
+    let mut builder = MessageBuilder::new(&mut wire, 1232, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AAAA,
+            Class::IN,
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(1232),
+            0x8000,
+            &[],
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(1232);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 1232,
+    };
+
+    assert_eq!(
+        chain[0]
+            .config
+            .dnssec
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, ExistingNoData)
+            .await,
+        Outcome::Response
+    );
+    let reply = Message::parse(cx.response).unwrap();
+    let nsecs: Vec<_> = reply
+        .authorities()
+        .filter(|rr| rr.rtype == Type::NSEC)
+        .collect();
+    assert_eq!(nsecs.len(), 1);
+    assert_eq!(nsecs[0].name.to_name(), name);
+    assert!(matches!(
+        nsecs[0].data().unwrap(),
+        pharos_proto::Rdata::Nsec { next, .. } if next.to_name().to_string() == "zzz.miek.nl."
+    ));
 }
 
 #[tokio::test]
