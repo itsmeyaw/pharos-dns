@@ -53,7 +53,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, server_keys: &[&str]) -> Result<Con
         denial_capacity: 10_000,
         success_max_ttl: Duration::from_secs(3600),
         success_min_ttl: Duration::from_secs(5),
-        // RFC 2308 §5: negative-cache lifetime defaults below positive TTL and stays configurable.
+        // RFC 2308 §3: Retain denial_min_ttl for syntax compatibility; response lifetime never uses it.
         denial_max_ttl: Duration::from_secs(1800),
         denial_min_ttl: Duration::from_secs(5),
         prefetch_amount: 0,

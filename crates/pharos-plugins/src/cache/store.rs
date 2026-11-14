@@ -154,15 +154,24 @@ impl Store {
 
     pub(super) fn serve(
         &self,
-        key: u64,
+        keys: super::CacheKeys,
         query: &Message<'_>,
         output: &mut Vec<u8>,
         config: &super::setup::Config,
         answering_only: bool,
         can_grow: bool,
     ) -> Option<Hit> {
+        let key = keys.exact;
+        let alternate_key = keys.allow_nxdomain.then_some(keys.nxdomain);
+        debug_assert!(alternate_key.is_none_or(|alternate| alternate & 255 == key & 255));
         let mut shard = self.shards[key as usize & 255].lock().unwrap();
-        let item = shard.items.get_mut(&key)?;
+        let (item_key, item) = match shard.items.get_mut(&key) {
+            Some(item) => (key, item),
+            None => {
+                let alternate_key = alternate_key?;
+                (alternate_key, shard.items.get_mut(&alternate_key)?)
+            }
+        };
         let generation = item.stored;
         let question = query.questions().next()?;
         let item = if answering_only && !item.answering {
@@ -181,7 +190,7 @@ impl Store {
         let elapsed = now.duration_since(item.stored).as_secs();
         // RFC 8767 §5: limit serving expired data to the configured maximum stale interval.
         let stale = elapsed >= u64::from(item.ttl);
-        // RFC 9520 §3.2: Do not serve expired resolution failures beyond their bounded cache TTL.
+        // RFC 9520 §3.2 caps failure caching at 5 minutes; do not extend it by serving stale.
         if stale && item.failure {
             return None;
         }
@@ -221,7 +230,7 @@ impl Store {
         // RFC 6604 §2.2: Retain upstream AD only for authenticated response data.
         let mut flags = 0x8000 | (original & 0x04af) | (query.flags() & 0x0110);
         // RFC 6840 §5.8: only signal AD when the query requested AD or DO.
-        if !query.ad() && !query.opt().is_some_and(|opt| opt.dnssec_ok()) {
+        if !query.ad() && !keys.dnssec_ok {
             flags &= !0x20;
         }
         output[2..4].copy_from_slice(&flags.to_be_bytes());
@@ -262,7 +271,7 @@ impl Store {
                 None
             };
         Some(Hit {
-            key,
+            key: item_key,
             stale,
             refresh,
             generation,
@@ -322,13 +331,7 @@ impl Item {
         }
         let question = response.questions().next()?;
         // RFC 2930 §3: TKEY transactions are transient and must not enter the cache.
-        if question.qtype == Type::TKEY
-            || response
-                .answers()
-                .chain(response.authorities())
-                .chain(response.additionals())
-                .any(|record| record.rtype == Type::TKEY)
-        {
+        if question.qtype == Type::TKEY || super::has_record_type(response, Type::TKEY) {
             return None;
         }
         // shortcut: compressed Questions and non-final OPTs need safe re-encoding before caching.
@@ -435,6 +438,10 @@ mod tests {
         super::super::setup::parse(&mut Cursor::new("Corefile", &tokens), &["."]).unwrap()
     }
 
+    fn keys(query: &Message<'_>) -> super::super::CacheKeys {
+        super::super::cache_keys(query, query.opt())
+    }
+
     #[test]
     fn map_hash_keeps_bucket_entropy_within_one_shard() {
         let buckets = (0..256_u64)
@@ -448,17 +455,23 @@ mod tests {
     }
 
     #[test]
+    fn cached_item_stays_within_the_entry_size_budget() {
+        assert!(std::mem::size_of::<super::Item>() <= 160);
+    }
+
+    #[test]
     fn stale_response_ttl_never_zero() {
         let query_wire = message(Type::A, 0x0100, false);
         let query = Message::parse(&query_wire).unwrap();
         let response_wire = message(Type::A, 0x8000, false);
         let response = Message::parse(&response_wire).unwrap();
         let store = Store::new(1024);
-        store.insert(1, &response, 0, false, false).unwrap();
+        let key = keys(&query).exact;
+        store.insert(key, &response, 0, false, false).unwrap();
         let mut output = Vec::with_capacity(128);
         store
             .serve(
-                1,
+                keys(&query),
                 &query,
                 &mut output,
                 &config("cache {\nserve_stale 1h immediate 0\n}"),
@@ -477,18 +490,19 @@ mod tests {
         let response_wire = message(Type::A, 0x8003, true);
         let response = Message::parse(&response_wire).unwrap();
         let store = Store::new(1024);
-        store.insert(2, &response, 30, false, false).unwrap();
-        store.shards[2]
+        let key = keys(&query).exact;
+        store.insert(key, &response, 30, false, false).unwrap();
+        store.shards[key as usize & 255]
             .lock()
             .unwrap()
             .items
-            .get_mut(&2)
+            .get_mut(&key)
             .unwrap()
             .stored = Instant::now() - Duration::from_secs(4);
         let mut output = Vec::with_capacity(128);
         store
             .serve(
-                2,
+                keys(&query),
                 &query,
                 &mut output,
                 &config("cache {\nkeepttl\n}"),
@@ -508,12 +522,25 @@ mod tests {
         let query_a = Message::parse(&query_a_wire).unwrap();
         let query_aaaa = Message::parse(&query_aaaa_wire).unwrap();
         let response = Message::parse(&response_wire).unwrap();
-        let key = super::super::nxdomain_key(&query_a);
+        let a_keys = keys(&query_a);
+        let query_keys = keys(&query_aaaa);
         let store = Store::new(1024);
-        store.insert(key, &response, 30, false, false).unwrap();
+        store
+            .insert(a_keys.nxdomain, &response, 30, false, false)
+            .unwrap();
         let mut output = Vec::with_capacity(128);
         store
-            .serve(key, &query_aaaa, &mut output, &config("cache"), false, true)
+            .serve(
+                super::super::CacheKeys {
+                    allow_nxdomain: true,
+                    ..query_keys
+                },
+                &query_aaaa,
+                &mut output,
+                &config("cache"),
+                false,
+                true,
+            )
             .unwrap();
         assert_eq!(
             Message::parse(&output)
@@ -555,12 +582,13 @@ mod tests {
         let query = Message::parse(&query_wire).unwrap();
         let response = Message::parse(&response_wire).unwrap();
         let store = Store::new(1024);
-        store.insert(5, &response, 0, false, false).unwrap();
+        let key = keys(&query).exact;
+        store.insert(key, &response, 0, false, false).unwrap();
         let mut output = Vec::with_capacity(128);
         assert!(
             store
                 .serve(
-                    5,
+                    keys(&query),
                     &query,
                     &mut output,
                     &config("cache {\nserve_stale 1h\n}"),
