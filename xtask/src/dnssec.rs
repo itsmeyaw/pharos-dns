@@ -50,6 +50,11 @@ pub(crate) fn validate_response(
             // RFC 4035 §5.3.1: Signer, key tag, algorithm, validity, and RRset must agree.
             // RFC 4034 §B: Key tags narrow candidates but do not uniquely identify a DNSKEY.
             if signer != key.owner
+                // RFC 4034 §3.1.7: The Signer's Name must be an ancestor of the covered owner.
+                || !rr
+                    .name
+                    .to_name()
+                    .is_subdomain_of(&signer.to_name())
                 || key_tag != tag
                 || algorithm != key.algorithm
                 || !signature_valid_at(inception, expiration, now)
@@ -165,6 +170,26 @@ mod tests {
             .unwrap();
         let _ = builder.finish();
         assert!(super::validate_response(&Message::parse(&wire).unwrap(), &key, 1500).is_ok());
+
+        let outside: Name = "other.net.".parse().unwrap();
+        let outside = NameRef::parse(outside.as_wire(), 0).unwrap();
+        let mut outside_wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut outside_wire, 65535, 0, 0x8400).unwrap();
+        builder
+            .record_with(Section::Answer, outside, Type::A, Class::IN, 60, |w| {
+                record.write(w)
+            })
+            .unwrap();
+        builder
+            .record_with(Section::Answer, outside, Type::RRSIG, Class::IN, 60, |w| {
+                sig.write(w)
+            })
+            .unwrap();
+        let _ = builder.finish();
+        assert!(
+            super::validate_response(&Message::parse(&outside_wire).unwrap(), &key, 1500).is_err()
+        );
+
         assert!(super::validate_response(&Message::parse(&wire).unwrap(), &key, 2500).is_err());
         *wire.last_mut().unwrap() ^= 1;
         assert!(super::validate_response(&Message::parse(&wire).unwrap(), &key, 1500).is_err());
