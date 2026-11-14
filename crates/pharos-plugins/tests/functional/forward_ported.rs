@@ -6,14 +6,14 @@ use pharos_plugins::{Chain, directives};
 use pharos_proto::{Message, Name, Rcode};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 use std::{
-    io::{Read as StdRead, Write as StdWrite},
+    io::{ErrorKind, Read as StdRead, Write as StdWrite},
     net::SocketAddr,
     net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -412,9 +412,11 @@ async fn resolver_expands_hostname_and_deduplicates_numeric_address() {
     assert_eq!(counts(&[&first, &second]), vec![1, 2]);
 }
 
+// RFC 1035 §§4.1.1, 4.1.4, 4.2.2; RFC 7766 §5: encode TC, compressed RRs, and TCP frames.
 #[tokio::test]
 async fn configured_resolver_retries_truncated_udp_over_tcp() {
     let tcp = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    tcp.set_nonblocking(true).unwrap();
     let resolver_address = tcp.local_addr().unwrap();
     let udp = StdUdpSocket::bind(resolver_address).unwrap();
     udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -435,7 +437,21 @@ async fn configured_resolver_retries_truncated_udp_over_tcp() {
         truncated[2..4].copy_from_slice(&0x8380_u16.to_be_bytes());
         udp.send_to(&truncated, peer).unwrap();
 
-        let (mut stream, _) = tcp.accept().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (mut stream, _) = loop {
+            match tcp.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("TCP resolver accept failed: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
         let mut frame = [0; 2];
         stream.read_exact(&mut frame).unwrap();
         let mut query = vec![0; usize::from(u16::from_be_bytes(frame))];
