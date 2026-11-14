@@ -47,6 +47,7 @@ async fn no_do_and_warmed_signature_hits() {
                     .additionals()
                     .any(|rr| rr.rtype == pharos_proto::Type::RRSIG)
             );
+            assert!(!message.tc());
         }
         if query == signed_dnskey {
             let message = pharos_proto::Message::parse(&response).unwrap();
@@ -135,7 +136,7 @@ async fn warmed_black_lie_hit_does_not_allocate() {
         );
         let reply = Message::parse(cx.response).unwrap();
         assert!(reply.authorities().any(|rr| rr.rtype == Type::NSEC));
-        assert!(reply.authorities().filter(|rr| rr.rtype == Type::RRSIG).all(|rr| matches!(rr.data().unwrap(), pharos_proto::Rdata::Rrsig { original_ttl, .. } if original_ttl == ttl)));
+        assert!(reply.authorities().filter(|rr| rr.rtype == Type::RRSIG).all(|rr| matches!(rr.data().unwrap(), pharos_proto::Rdata::Rrsig { type_covered: Type::SOA, original_ttl, .. } if original_ttl == ttl) || matches!(rr.data().unwrap(), pharos_proto::Rdata::Rrsig { type_covered: Type::NSEC, original_ttl: 5, .. })));
         let before = crate::GLOBAL.stats();
         for _ in 0..100 {
             assert_eq!(

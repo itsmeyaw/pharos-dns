@@ -55,6 +55,9 @@ enum Reply {
     ReferralTtl,
     ExistingSignatures,
     Large,
+    Priority,
+    AdditionalLarge,
+    DnameWithRealCname,
 }
 
 impl Next for Reply {
@@ -265,10 +268,207 @@ impl Next for Reply {
                     );
                 }
             }
+            Self::Priority => {
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::A,
+                    Class::IN,
+                    1800,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+                for i in 0..20 {
+                    let owner: Name = format!("n{i}.miek.nl.").parse().unwrap();
+                    if !b
+                        .record(
+                            Section::Answer,
+                            NameRef::parse(owner.as_wire(), 0).unwrap(),
+                            Type::TXT,
+                            Class::IN,
+                            1800,
+                            b"\x01x",
+                        )
+                        .unwrap()
+                    {
+                        break;
+                    }
+                }
+            }
+            Self::AdditionalLarge => {
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::A,
+                    Class::IN,
+                    1800,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+                for i in 0..20 {
+                    assert!(
+                        b.record(
+                            Section::Additional,
+                            q.name,
+                            Type::A,
+                            Class::IN,
+                            1800,
+                            &[192, 0, 2, i],
+                        )
+                        .unwrap()
+                    );
+                }
+            }
+            Self::DnameWithRealCname => {
+                let dname: Name = "dname.miek.nl.".parse().unwrap();
+                let target: Name = "a.target.miek.nl.".parse().unwrap();
+                let canonical: Name = "www.miek.nl.".parse().unwrap();
+                b.record(
+                    Section::Answer,
+                    NameRef::parse(dname.as_wire(), 0).unwrap(),
+                    Type::DNAME,
+                    Class::IN,
+                    1800,
+                    target.as_wire(),
+                )
+                .unwrap();
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::CNAME,
+                    Class::IN,
+                    1800,
+                    target.as_wire(),
+                )
+                .unwrap();
+                b.record(
+                    Section::Answer,
+                    NameRef::parse(target.as_wire(), 0).unwrap(),
+                    Type::CNAME,
+                    Class::IN,
+                    1800,
+                    canonical.as_wire(),
+                )
+                .unwrap();
+                b.record(
+                    Section::Answer,
+                    NameRef::parse(canonical.as_wire(), 0).unwrap(),
+                    Type::A,
+                    Class::IN,
+                    1800,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+            }
         }
         let _ = b.finish();
         Outcome::Response
     }
+}
+
+#[tokio::test]
+async fn answer_rrsig_precedes_later_answer_rrsets() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(&dnssec, &q, Reply::Priority, Protocol::Udp, 512, 512).await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    let records: Vec<_> = msg.answers().collect();
+    let signature = records
+        .iter()
+        .position(|rr| {
+            matches!(
+                rr.data(),
+                Ok(Rdata::Rrsig {
+                    type_covered: Type::A,
+                    ..
+                })
+            )
+        })
+        .unwrap();
+    let later_rrset = records.iter().position(|rr| rr.rtype == Type::TXT).unwrap();
+    assert!(signature < later_rrset);
+}
+
+#[tokio::test]
+async fn dname_suppresses_only_the_synthesized_cname_signature() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("a.dname.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(
+        &dnssec,
+        &q,
+        Reply::DnameWithRealCname,
+        Protocol::Udp,
+        4096,
+        4096,
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    let mut covered = covered(msg.answers());
+    covered.sort();
+    assert_eq!(covered, [Type::A, Type::CNAME, Type::DNAME]);
+    let signatures: Vec<_> = msg
+        .answers()
+        .filter_map(|rr| match rr.data().unwrap() {
+            Rdata::Rrsig {
+                type_covered: Type::CNAME,
+                ..
+            } => Some(rr.name.to_name().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signatures, ["a.target.miek.nl."]);
+}
+
+#[tokio::test]
+async fn authority_rrsig_precedes_later_authority_rrsets() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("missing.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(
+        &dnssec,
+        &q,
+        Reply::Negative {
+            nxdomain: false,
+            extra: true,
+        },
+        Protocol::Udp,
+        4096,
+        4096,
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    let records: Vec<_> = msg.authorities().collect();
+    let soa_signature = records
+        .iter()
+        .position(|rr| {
+            matches!(
+                rr.data(),
+                Ok(Rdata::Rrsig {
+                    type_covered: Type::SOA,
+                    ..
+                })
+            )
+        })
+        .unwrap();
+    let ns = records.iter().position(|rr| rr.rtype == Type::NS).unwrap();
+    assert!(soa_signature < ns);
+}
+
+#[tokio::test]
+async fn additional_rrsig_overflow_does_not_set_tc() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(&dnssec, &q, Reply::AdditionalLarge, Protocol::Udp, 512, 512).await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    assert!(!msg.tc());
+    assert_eq!(
+        msg.additionals().filter(|rr| rr.rtype == Type::A).count(),
+        20
+    );
+    assert!(!msg.additionals().any(|rr| rr.rtype == Type::RRSIG));
 }
 
 async fn serve(
@@ -490,11 +690,18 @@ async fn rrset_ttl_is_normalized_across_response_sections() {
     let mut point = vec![4];
     point.extend_from_slice(&key.public_key);
     let verifier = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point);
-    for records in [msg.answers(), msg.authorities(), msg.additionals()] {
+    for (section, records) in [
+        (Section::Answer, msg.answers()),
+        (Section::Authority, msg.authorities()),
+        (Section::Additional, msg.additionals()),
+    ] {
         let records: Vec<_> = records.collect();
         let rr = records.iter().find(|rr| rr.rtype == Type::A).unwrap();
         assert_eq!(rr.ttl, 30);
-        let sig = records.iter().find(|rr| rr.rtype == Type::RRSIG).unwrap();
+        let Some(sig) = records.iter().find(|rr| rr.rtype == Type::RRSIG) else {
+            assert_eq!(section, Section::Additional);
+            continue;
+        };
         assert_eq!(sig.ttl, 30);
         let data = sig.data().unwrap();
         let Rdata::Rrsig {
@@ -679,8 +886,8 @@ async fn non_apex_dnskey_and_out_of_zone_do_pass_through() {
     }
 }
 
-// CoreDNS v1.15.0 plugin/dnssec/dnssec.go: negative Responses require exactly one SOA.
-async fn multiple_authorities_pass_through(nxdomain: bool) {
+// RFC 4035 §3.1.3: Negative Responses with extra Authority data retain denial proofs.
+async fn multiple_authorities_include_denial_proofs(nxdomain: bool) {
     let dnssec = plugin("miek.nl", KEY);
     let q = query("missing.miek.nl.", Type::A, 1, Some(true));
     let (outcome, wire) = serve(
@@ -697,28 +904,24 @@ async fn multiple_authorities_pass_through(nxdomain: bool) {
     .await;
     assert_eq!(outcome, Outcome::Response);
     let msg = Message::parse(&wire).unwrap();
-    assert_eq!(
-        msg.rcode(),
-        if nxdomain {
-            Rcode::NXDOMAIN
-        } else {
-            Rcode::NOERROR
-        }
-    );
-    assert_eq!(
-        msg.authorities().map(|rr| rr.rtype).collect::<Vec<_>>(),
-        [Type::SOA, Type::NS]
-    );
+    assert_eq!(msg.rcode(), Rcode::NOERROR);
+    let authorities: Vec<_> = msg.authorities().collect();
+    for rtype in [Type::SOA, Type::NS, Type::NSEC] {
+        assert!(authorities.iter().any(|rr| rr.rtype == rtype));
+    }
+    let mut signatures = covered(msg.authorities());
+    signatures.sort();
+    assert_eq!(signatures, [Type::NS, Type::SOA, Type::NSEC]);
 }
 
 #[tokio::test]
-async fn nodata_with_multiple_authority_records_passes_through() {
-    multiple_authorities_pass_through(false).await;
+async fn nodata_with_multiple_authority_records_includes_proofs() {
+    multiple_authorities_include_denial_proofs(false).await;
 }
 
 #[tokio::test]
-async fn nxdomain_with_multiple_authority_records_passes_through() {
-    multiple_authorities_pass_through(true).await;
+async fn nxdomain_with_multiple_authority_records_includes_proofs() {
+    multiple_authorities_include_denial_proofs(true).await;
 }
 
 // CoreDNS v1.15.0 plugin/dnssec/handler_test.go: positive DS and authority NS are signed.
@@ -840,13 +1043,13 @@ async fn mixed_case_owners_form_one_signed_rrset() {
         .unwrap();
 }
 
-// RFC 4343 §3: DNS name matching is case-insensitive; select the longest matching zone.
+// RFC 8080 §8: Select nested zones case-insensitively and never reuse parent keys for them.
 #[tokio::test]
 async fn nested_zone_selection_is_case_insensitive() {
     let dnssec = plugin("miek.nl sub.miek.nl", KEY);
     for (name, expected) in [
-        ("WWW.SuB.MiEk.Nl.", "sub.miek.nl."),
-        ("WWW.MiEk.Nl.", "miek.nl."),
+        ("WWW.SuB.MiEk.Nl.", None::<String>),
+        ("WWW.MiEk.Nl.", Some("miek.nl.".to_owned())),
     ] {
         let q = query(name, Type::A, 1, Some(true));
         let (outcome, wire) = serve(
@@ -860,13 +1063,10 @@ async fn nested_zone_selection_is_case_insensitive() {
         .await;
         assert_eq!(outcome, Outcome::Response);
         let msg = Message::parse(&wire).unwrap();
-        let signer = msg
-            .answers()
-            .find_map(|rr| match rr.data().unwrap() {
-                Rdata::Rrsig { signer, .. } => Some(signer.to_string()),
-                _ => None,
-            })
-            .unwrap();
+        let signer = msg.answers().find_map(|rr| match rr.data().unwrap() {
+            Rdata::Rrsig { signer, .. } => Some(signer.to_string()),
+            _ => None,
+        });
         assert_eq!(signer, expected);
     }
 }

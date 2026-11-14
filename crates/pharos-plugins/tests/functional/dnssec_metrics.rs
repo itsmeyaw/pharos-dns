@@ -50,7 +50,7 @@ async fn signature_cache_metrics_report_miss_and_hit() {
     }
 }
 
-// CoreDNS plugin/dnssec TestCacheEmptySigsNotCached: keyless RRsets miss every time.
+// RFC 9824 §3.1: Without a signing key, do not synthesize unsigned denial records.
 #[tokio::test]
 async fn keyless_rrsets_never_produce_cache_hits_or_entries() {
     let text = "miek.nl:53 {\n dnssec\n whoami\n}";
@@ -77,7 +77,7 @@ async fn keyless_rrsets_never_produce_cache_hits_or_entries() {
     for expected in [
         "pharos_dnssec_cache_entries{server=\"dns://:53\",type=\"signature\"} 0",
         "pharos_dnssec_cache_hits_total{server=\"dns://:53\"} 0",
-        "pharos_dnssec_cache_misses_total{server=\"dns://:53\"} 4",
+        "pharos_dnssec_cache_misses_total{server=\"dns://:53\"} 0",
     ] {
         assert!(output.contains(expected), "{output}");
     }

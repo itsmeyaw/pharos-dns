@@ -18,6 +18,8 @@ pub enum DenialError {
     OutOfZone,
     MissingApex,
     InvalidType,
+    NonzeroIterations,
+    NonemptySalt,
     SaltTooLong,
     NameTooLong,
     HashCollision,
@@ -29,6 +31,8 @@ impl fmt::Display for DenialError {
             Self::OutOfZone => "owner name is outside the Zone",
             Self::MissingApex => "Zone Apex is missing",
             Self::InvalidType => "meta-type or QTYPE cannot appear in a type bitmap",
+            Self::NonzeroIterations => "NSEC3 iteration count must be zero",
+            Self::NonemptySalt => "NSEC3 salt must be empty",
             Self::SaltTooLong => "NSEC3 salt exceeds 255 octets",
             Self::NameTooLong => "generated domain name is too long",
             Self::HashCollision => "NSEC3 hash collision; choose a different salt",
@@ -153,6 +157,7 @@ pub fn nsec_chain(apex: &Name, names: &[ZoneName]) -> Result<Vec<Nsec>, DenialEr
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlackLieKind {
     Negative,
+    NameError,
     Referral,
 }
 
@@ -171,28 +176,36 @@ pub fn black_lie(
     }
     let at_apex = qname == apex;
     let zone_cut = !at_apex && (kind == BlackLieKind::Referral || qtype == Type::DS);
-    let mut types = vec![
-        Type::A,
-        Type::HINFO,
-        Type::TXT,
-        Type::AAAA,
-        Type::LOC,
-        Type::SRV,
-        Type::CERT,
-        Type::SSHFP,
-        Type::RRSIG,
-        Type::NSEC,
-        Type::TLSA,
-        Type::HIP,
-        Type::OPENPGPKEY,
-        Type::SPF,
-    ];
-    if at_apex {
+    let mut types = if kind == BlackLieKind::NameError {
+        // RFC 9824 §3.1: NXDOMAIN compact denial bitmap contains only RRSIG, NSEC, and NXNAME.
+        vec![Type::RRSIG, Type::NSEC, Type::NXNAME]
+    } else {
+        vec![
+            Type::A,
+            Type::HINFO,
+            Type::TXT,
+            Type::AAAA,
+            Type::LOC,
+            Type::SRV,
+            Type::CERT,
+            Type::SSHFP,
+            Type::RRSIG,
+            Type::NSEC,
+            Type::TLSA,
+            Type::HIP,
+            Type::OPENPGPKEY,
+            Type::SPF,
+        ]
+    };
+    // RFC 9824 §3.1: A nonexistent-name bitmap stays compact, even at malformed apex input.
+    if at_apex && kind != BlackLieKind::NameError {
         types.extend([Type::NS, Type::SOA, Type::MX, Type::DNSKEY]);
-    } else if zone_cut {
+    // RFC 9824 §3.1: NXNAME compact-denial bitmaps never assert delegation NS data.
+    } else if zone_cut && kind != BlackLieKind::NameError {
         types.push(Type::NS);
     }
-    if !zone_cut && kind == BlackLieKind::Negative && qtype != Type::NSEC {
+    // RFC 4470 §3: Keep the RRSIG bitmap bit when RRSIG itself is the queried missing type.
+    if !zone_cut && kind == BlackLieKind::Negative && qtype != Type::RRSIG {
         types.retain(|t| *t != qtype);
     }
     // RFC 4470 §3: synthetic NSEC spans must not cover existing names.
@@ -309,8 +322,16 @@ pub fn nsec3_chain(
     iterations: u16,
     salt: &[u8],
 ) -> Result<Vec<Nsec3>, DenialError> {
+    // RFC 9276 §3.1: Publishers using NSEC3 MUST use zero iterations.
+    if iterations != 0 {
+        return Err(DenialError::NonzeroIterations);
+    }
     if salt.len() > 255 {
         return Err(DenialError::SaltTooLong);
+    }
+    // RFC 9276 §3.1: Operators SHOULD NOT use a salt; require the recommended empty value.
+    if !salt.is_empty() {
+        return Err(DenialError::NonemptySalt);
     }
     let mut owners = zone_names(apex, names)?;
     if !owners.contains_key(apex) {

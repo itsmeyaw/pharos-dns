@@ -78,11 +78,20 @@ fn nsec_chain_uses_canonical_order_merges_names_and_wraps() {
 #[test]
 fn black_lies_match_coredns_denial_and_referral() {
     let qname = name("www.example.");
-    let lie = black_lie(&qname, &name("example."), Type::A, BlackLieKind::Negative).unwrap();
+    let lie = black_lie(&qname, &name("example."), Type::A, BlackLieKind::NameError).unwrap();
     assert_eq!(lie.owner, qname);
     assert_eq!(lie.next, name("\\000.www.example."));
     assert!(!lie.bitmap_contains(Type::A));
     assert!(lie.bitmap_contains(Type::NSEC));
+    assert!(lie.bitmap_contains(Type::NXNAME));
+    let rrsig_nodata = black_lie(
+        &qname,
+        &name("example."),
+        Type::RRSIG,
+        BlackLieKind::Negative,
+    )
+    .unwrap();
+    assert!(rrsig_nodata.bitmap_contains(Type::RRSIG));
     let referral = black_lie(
         &name("child.example."),
         &name("example."),
@@ -177,6 +186,14 @@ fn nsec3_chain_has_empty_nonterminals_and_wraps_in_hash_order() {
         nsec3_chain(&apex, &[entry("x.example.", &[Type::A])], 0, &[]),
         Err(DenialError::MissingApex)
     );
+    assert_eq!(
+        nsec3_chain(&apex, &[entry("example.", &[Type::SOA])], 1, &[]),
+        Err(DenialError::NonzeroIterations)
+    );
+    assert_eq!(
+        nsec3_chain(&apex, &[entry("example.", &[Type::SOA])], 0, &[1]),
+        Err(DenialError::NonemptySalt)
+    );
 }
 
 #[test]
@@ -189,12 +206,12 @@ fn generated_denial_rdata_is_accepted_by_proto() {
     let records = nsec3_chain(
         &name("example."),
         &[entry("example.", &[Type::SOA])],
-        12,
-        &[1, 2],
+        0,
+        &[],
     )
     .unwrap();
     let record = &records[0];
-    let mut wire = vec![1, 0, 0, 12, 2, 1, 2, 20];
+    let mut wire = vec![1, 0, 0, 0, 0, 20];
     wire.extend_from_slice(&record.next_hash);
     wire.extend_from_slice(&record.bitmap);
     assert_eq!(Rdata::parse(Type::NSEC3, &wire).unwrap(), record.rdata());

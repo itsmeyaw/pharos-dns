@@ -77,11 +77,13 @@ pub(crate) fn setup(
         }
     }
     for key in &keys {
-        if !zones
-            .iter()
-            .any(|zone| zone.is_subdomain_of(&key.public.owner))
-        {
-            return Err(cursor.error("DNSKEY owner cannot sign any configured domain"));
+        // RFC 4035 §2.1: A key that signs zone data MUST have the Zone Key bit set.
+        if key.public.flags & 0x0100 == 0 {
+            return Err(cursor.error("DNSKEY Zone Key bit must be set"));
+        }
+        // RFC 8080 §8: A DNSSEC private key belongs only to its own zone.
+        if !zones.iter().any(|zone| zone == &key.public.owner) {
+            return Err(cursor.error("DNSKEY owner must match a configured DNSSEC zone"));
         }
     }
     // RFC 4034 §2.1: DNSKEY RDATA is flags, protocol, algorithm, then the public key.
@@ -117,6 +119,21 @@ fn load_file(base: &Path) -> Result<KeyPair, String> {
 #[cfg(test)]
 mod tests {
     use pharos_corefile::{configure, parse};
+
+    #[test]
+    fn keeps_a_key_bound_to_its_zone_in_multi_zone_setup() {
+        let base = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+        );
+        let text = format!("miek.nl example.org {{\n dnssec {{\n key file {base}\n }}\n}}");
+        let blocks = parse("Corefile", &text).unwrap();
+        let chain = configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+        let dnssec = chain[0].config.dnssec.as_ref().unwrap();
+        assert_eq!(dnssec.zones.len(), 2);
+        assert_eq!(dnssec.keys.len(), 1);
+        assert_eq!(dnssec.keys[0].public.owner.to_string(), "miek.nl.");
+    }
 
     #[test]
     fn cache_capacity_matches_coredns_effective_shard_capacity() {
