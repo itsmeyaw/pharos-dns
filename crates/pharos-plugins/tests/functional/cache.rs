@@ -803,7 +803,7 @@ async fn ttl_caps_and_negative_soa_minimum_apply_on_miss_and_hit() {
         );
     }
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    let chain = cache_with("cache {\n denial 1024 30 5\n}");
+    let chain = cache_with("cache {\n denial 1024 30 0\n}");
     let calls = AtomicUsize::new(0);
     for _ in 0..2 {
         let response = query(&chain, wire, &calls, 3, false).await;
@@ -817,6 +817,24 @@ async fn ttl_caps_and_negative_soa_minimum_apply_on_miss_and_hit() {
             3
         );
     }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn denial_minimum_does_not_raise_negative_soa_ttl() {
+    let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
+    let chain = cache_with("cache {\n denial 1024 30 5\n}");
+    let calls = AtomicUsize::new(0);
+    let response = query(&chain, wire, &calls, 3, false).await;
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .authorities()
+            .next()
+            .unwrap()
+            .ttl,
+        3
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
@@ -1016,6 +1034,27 @@ async fn referral_lifetime_uses_ns_ttl() {
             .ttl,
         1
     );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn referral_ttl_uses_positive_minimum_floor() {
+    let chain = cache_with("cache {\nsuccess 1024 60 5\n}");
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let calls = AtomicUsize::new(0);
+    for _ in 0..2 {
+        let (outcome, response) = query_with(&chain, &query, Referral(&calls)).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(
+            Message::parse(&response)
+                .unwrap()
+                .authorities()
+                .next()
+                .unwrap()
+                .ttl,
+            5
+        );
+    }
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 

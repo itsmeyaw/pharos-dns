@@ -24,6 +24,7 @@
 - If a UDP caller's Response buffer is too small for a cached Message, Pharos falls through to Next instead of growing it on the hit.
 - TSIG-signed Queries and Responses bypass caching so that ID, flags and TTL rewrites cannot invalidate their signatures.
 - SERVFAIL, REFUSED, and internal resolution errors use the `servfail` TTL (default 5 seconds); repeated failures back off exponentially to 5 minutes, and expired failures are not served stale (RFC 9520 §3.2). `servfail 0` disables this cache, and sub-second values truncate to zero for CoreDNS compatibility.
+- REFUSED responses are cached as resolution failures per RFC 9520 §§2.2 and 3.2; this differs from the previous CoreDNS-compatible behavior (ADR 0002).
 - Known gap: failure entries use QNAME, QTYPE, QCLASS, DO, and CD but omit upstream server address, contrary to RFC 2308 §7.1.
 - Wildcard source Metadata is not saved with cache entries.
 - Background refreshes use a fresh Metadata map and retain Listener state for Self Lookup.
