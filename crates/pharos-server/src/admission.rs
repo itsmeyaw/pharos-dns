@@ -1,5 +1,4 @@
-use crate::RESPONSE_UDP_PAYLOAD_SIZE;
-use pharos_proto::{Class, Message, MessageBuilder, NameRef, Opcode, Rcode, Type};
+use pharos_proto::{Class, Message, MessageBuilder, NameRef, Opcode, Opt, Rcode, Type};
 
 /// Query admission result. `Respond` writes to the supplied Response buffer.
 // Keep the Message inline: boxing it would allocate for every Query.
@@ -161,7 +160,7 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode) {
             | if opt_flags & 0x8000 != 0 { 0x8000 } else { 0 };
         let mut opt = [0; 11];
         opt[1..3].copy_from_slice(&41_u16.to_be_bytes());
-        opt[3..5].copy_from_slice(&RESPONSE_UDP_PAYLOAD_SIZE.to_be_bytes());
+        opt[3..5].copy_from_slice(&Opt::RESPONSE_UDP_PAYLOAD_SIZE.to_be_bytes());
         opt[5..9].copy_from_slice(&ttl.to_be_bytes());
         if builder.reserve(opt.len()).is_ok() {
             let _ = builder.finish_with_opt(&opt);

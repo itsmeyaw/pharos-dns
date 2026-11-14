@@ -277,6 +277,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
             Ok(())
         })();
         let added = self.finish_entry(index, start, slots, result)?;
+        // RFC 6891 §6.1.1: Track OPT uniqueness only after the complete record was added.
         self.has_opt |= added && rtype == Type::OPT;
         Ok(added)
     }
@@ -286,6 +287,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
     /// On error, the buffer contains the completed Message without the OPT.
     // RFC 6891 §6.1.2: OPT uses root NAME, TYPE 41, and RDLENGTH-bounded option data.
     pub fn finish_with_opt(mut self, opt: &[u8]) -> Result<&'a mut B, BuildError> {
+        // RFC 6891 §6.1.1: one OPT record is allowed per DNS Message.
         let error = if self.has_opt {
             Some(BuildError::InvalidRdata)
         } else if opt.len() > self.reserved {
@@ -406,6 +408,7 @@ impl<'a> MessageBuilder<'a, Vec<u8>> {
         mut self,
         opt: &ResponseOpt<'_, '_>,
     ) -> Result<&'a mut Vec<u8>, BuildError> {
+        // RFC 6891 §6.1.1: one OPT record is allowed per DNS Message.
         let error = if self.has_opt {
             Some(BuildError::InvalidRdata)
         } else if opt.wire_len() > self.reserved {

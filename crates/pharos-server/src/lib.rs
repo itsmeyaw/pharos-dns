@@ -33,8 +33,6 @@ mod panic;
 mod process_metrics;
 mod quota;
 pub use admission::{Admission, admit, admit_with_update};
-// RFC 4035 §3.1: DNSSEC servers should support UDP payloads of at least 4000 octets.
-pub(crate) const RESPONSE_UDP_PAYLOAD_SIZE: u16 = 4096;
 pub use lifecycle::{Lifecycle, Phase};
 pub use outcome::{TsigSigning, finish_outcome, finish_outcome_signed, response_limit};
 pub use panic::{contain_panic, panics_total};
@@ -878,13 +876,13 @@ impl Listener {
         bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
         bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
     ) -> io::Result<Self> {
-        // RFC 7766 §5: a DNS Listener must provide UDP as well as TCP service.
+        // RFC 1035 §4.2.1: A DNS Listener supports Queries over UDP.
         let workers = workers.max(1);
         let wildcard = address.is_ipv6() && address.ip().is_unspecified();
         let mut ipv4_only = false;
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
         let mut attempts = if address.port() == 0 { 16 } else { 1 };
-        // RFC 7766 §5: general-purpose DNS implementations support both UDP and TCP.
+        // RFC 1035 §§4.2.1–4.2.2 and RFC 7766 §5: DNS servers support UDP and TCP.
         // RFC 5625 §4.4.1: Accept DNS Queries over TCP as well as UDP.
         let (tcp, address, sockets) = loop {
             let tcp = if wildcard && !ipv4_only {

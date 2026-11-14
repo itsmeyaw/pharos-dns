@@ -7,10 +7,6 @@ use crate::{BuildError, EdnsOption, EdnsOptions, Message, MessageBuilder, Opcode
 
 static REGISTERED_OPTIONS: [AtomicU64; 1024] = [const { AtomicU64::new(0) }; 1024];
 
-/// Maximum UDP payload size advertised in Responses by Pharos.
-// RFC 3226 §3: DNSSEC-aware servers SHOULD advertise at least 4000 octets.
-pub const RESPONSE_UDP_PAYLOAD_SIZE: u16 = 4096;
-
 /// Register an EDNS option for copying from Queries to Responses across Server Blocks.
 pub fn register_edns_option(code: u16) {
     let code = usize::from(code);
@@ -64,11 +60,15 @@ pub struct Opt<'a> {
 }
 
 impl<'a> Opt<'a> {
+    /// Largest UDP payload advertised in Responses by Pharos.
+    // RFC 3226 §3: DNSSEC-aware servers SHOULD advertise at least 4000 octets.
+    pub const RESPONSE_UDP_PAYLOAD_SIZE: u16 = 4096;
+
     /// CoreDNS's initial BADVERS OPT, advertising the server's supported payload size.
     #[must_use]
     pub fn badvers() -> Opt<'static> {
         Opt::new(
-            RESPONSE_UDP_PAYLOAD_SIZE,
+            Self::RESPONSE_UDP_PAYLOAD_SIZE,
             1,
             0,
             0,
@@ -165,7 +165,7 @@ impl<'a> Opt<'a> {
         let mut source = existing.unwrap_or(self);
         // RFC 6891 §§6.2.3–6.2.5: cap the echoed requestor size at responder capacity.
         source.size = normalized_udp_size(
-            self.udp_payload_size().min(RESPONSE_UDP_PAYLOAD_SIZE),
+            self.udp_payload_size().min(Self::RESPONSE_UDP_PAYLOAD_SIZE),
             false,
         );
         // RFC 6891 §6.1.3: responses carry version 0, the highest EDNS version implemented here.
@@ -206,6 +206,12 @@ pub struct ResponseOpt<'a, 'b> {
 }
 
 impl ResponseOpt<'_, '_> {
+    /// The normalized requestor size, capped at the responder's supported payload.
+    #[must_use]
+    pub const fn udp_payload_size(&self) -> u16 {
+        self.source.size
+    }
+
     // RFC 6891 §6.1.2: selected options retain received order, though their order has no meaning.
     fn selected(&self) -> impl Iterator<Item = &[u8]> {
         let mut rest = self.source.options.as_bytes();
@@ -259,6 +265,7 @@ impl ResponseOpt<'_, '_> {
 }
 
 fn find_ecs_option(options: &[u8]) -> Option<&[u8]> {
+    // RFC 7871 §7.2.2: Preserve original ECS bytes; typed decoding may normalize its address.
     let mut rest = options;
     while !rest.is_empty() {
         let size = usize::from(u16::from_be_bytes([rest[2], rest[3]])) + 4;

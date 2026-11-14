@@ -3,7 +3,7 @@ use pharos_proto::{
 };
 use std::sync::Arc;
 
-use crate::{Action, Error, Outcome, Protocol, RESPONSE_UDP_PAYLOAD_SIZE, admission::write_error};
+use crate::{Action, Error, Outcome, Protocol, admission::write_error};
 
 /// Per-Query TSIG request; keys are shared with the Listener's configuration.
 pub enum TsigSigning {
@@ -228,6 +228,7 @@ fn scrub(
     let response_opt = query
         .opt()
         .map(|opt| opt.response_registered(existing, rcode));
+    let response_udp_size = response_opt.map(|opt| opt.udp_payload_size());
     let opt_len = response_opt.map_or(0, |opt| opt.wire_len());
     // RFC 6891 §7: a truncated EDNS response must retain the question and OPT record.
     let budget = limit
@@ -282,20 +283,16 @@ fn scrub(
         }
         wire.reserve((end + opt_len).saturating_sub(wire.len()));
     }
-    if let (Some((offset, len)), Some(query_opt)) = (existing_options, query.opt()) {
+    if let (Some((offset, len)), Some(query_opt), Some(response_udp_size)) =
+        (existing_options, query.opt(), response_udp_size)
+    {
         // RFC 6891 §6.1.2: preserve Response options while relocating the OPT record.
         wire.resize(wire.len().max(end + opt_len), 0);
         wire.copy_within(offset..offset + len, end + 11);
         wire.truncate(end + opt_len);
         wire[end..end + 3].copy_from_slice(&[0, 0, 41]);
-        // RFC 6891 §§6.2.3–6.2.5: echo the normalized request size up to responder capacity.
-        wire[end + 3..end + 5].copy_from_slice(
-            &normalized_udp_size(
-                query_opt.udp_payload_size().min(RESPONSE_UDP_PAYLOAD_SIZE),
-                false,
-            )
-            .to_be_bytes(),
-        );
+        // RFC 6891 §§6.2.3–6.2.5: echo normalized request size up to responder capacity.
+        wire[end + 3..end + 5].copy_from_slice(&response_udp_size.to_be_bytes());
         // RFC 3225 §3: Copy the query's DO bit into the response.
         let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
             // RFC 9824 §5.1: preserve CO, but clear reserved EDNS bits.

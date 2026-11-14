@@ -212,7 +212,6 @@ impl<C> Router<C> {
                 // RFC 1034 §4.3.2: Stop after leaving the nearest matching ancestor Zone.
                 break;
             }
-            // RFC 4343 §3: DNS lookup compares ASCII letters case-insensitively.
             if !domain_matches(question.name, labels, &block.domain) {
                 continue;
             }
@@ -264,6 +263,7 @@ fn domain_matches(name: NameRef<'_>, labels: usize, domain: &Name) -> bool {
     name.labels()
         .skip(labels - count)
         .zip(domain.labels())
+        // RFC 4343 §3: DNS lookup compares ASCII letters case-insensitively.
         .all(|(left, right)| left.eq_ignore_ascii_case(right))
 }
 

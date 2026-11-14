@@ -110,6 +110,7 @@ pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType 
 
 // RFC 4034 §3.1.5 and RFC 1982 §3.2: compare RRSIG times with 32-bit serial arithmetic.
 fn signature_valid(inception: u32, expiration: u32, now: i64) -> bool {
+    // RFC 1982 §3.2: reduce Unix time to the 32-bit RRSIG serial space before comparison.
     let now = now as u32;
     let before_or_equal =
         |left: u32, right: u32| left == right || right.wrapping_sub(left) < (1_u32 << 31);

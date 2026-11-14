@@ -515,6 +515,7 @@ impl<C: Chain> Server<C> {
                         )
                         .await
                     };
+                    // RFC 8945 §5.5: forwarded Responses need the forwarding-specific TSIG AD rule.
                     forwarded_response =
                         context.metadata.get(crate::metrics::WRITER_METADATA) == Some("forward");
                     if let Some(opt) = context.query.opt() {
