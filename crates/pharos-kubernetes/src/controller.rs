@@ -264,6 +264,7 @@ impl Controller {
         self.tasks.push(tokio::spawn(async move {
             // shortcut: kube-runtime 5 retries a watch rejected with HTTP 410 using the same
             // expired resourceVersion; rebuild the watcher to relist until upstream fixes it.
+            // KEP-752 §Implementation > Requirements: Relist after a watcher restart.
             'relist: loop {
                 let stream = watcher::watcher(api.clone(), config.clone()).default_backoff();
                 pin_mut!(stream);

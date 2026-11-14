@@ -34,11 +34,13 @@ pub struct Service {
 }
 
 impl Service {
+    // Kubernetes DNS spec 1.1.0 §2.4: A headless Service has no ClusterIP.
     pub fn headless(&self) -> bool {
         self.cluster_ips.first().is_some_and(|ip| ip == "None")
     }
 }
 
+// Kubernetes DNS spec 1.1.0 §2.3-2.5: Service IPs, ports, and ExternalName supply DNS data.
 impl From<v1::Service> for Service {
     fn from(input: v1::Service) -> Self {
         let spec = input.spec.unwrap_or_default();
@@ -56,6 +58,7 @@ impl From<v1::Service> for Service {
                     .unwrap_or_default()
             }));
         }
+        // KEP-563 §Summary: Retain every configured Service IP.
         let cluster_ips = spec
             .cluster_ips
             .filter(|ips| !ips.is_empty())
@@ -102,6 +105,7 @@ impl ServiceImport {
     }
 }
 
+// KEP-1645 §Design Details > Importing Services: Import IPs, type, and ports.
 impl From<kube::core::DynamicObject> for ServiceImport {
     fn from(input: kube::core::DynamicObject) -> Self {
         let spec = &input.data["spec"];
@@ -158,6 +162,7 @@ pub struct Endpoints {
     pub zones: Option<Box<HashMap<String, String>>>,
 }
 
+// KEP-752 §Proposal > EndpointSlice API: Convert address type, endpoints, and ports.
 impl From<EndpointSlice> for Endpoints {
     fn from(input: EndpointSlice) -> Self {
         Self::from_slice(input, false)
@@ -170,6 +175,7 @@ impl Endpoints {
     }
 
     fn from_slice(input: EndpointSlice, with_zones: bool) -> Self {
+        // KEP-752 §Proposal > EndpointSlice API: Associate the slice with its Service by label.
         let service_name = input
             .metadata
             .labels
@@ -177,6 +183,7 @@ impl Endpoints {
             .and_then(|labels| labels.get("kubernetes.io/service-name"))
             .map_or("", String::as_str)
             .into();
+        // KEP-752 §Proposal > Endpoint Port: Slice ports apply to every endpoint.
         let mut ports: Vec<_> = input
             .ports
             .unwrap_or_default()
@@ -193,10 +200,12 @@ impl Endpoints {
         let mut addresses = Vec::new();
         let mut zones: Option<Box<HashMap<String, String>>> = None;
         for endpoint in input.endpoints.unwrap_or_default() {
+            // KEP-563 §Proposal: Accept IPv4 and IPv6 EndpointSlices.
             if input.address_type != "IPv4" && input.address_type != "IPv6" {
                 continue;
             }
             // Kubernetes DNS spec 1.1.0 §2.4.1: headless answers use ready endpoint addresses.
+            // KEP-1672 §Design Details: Treat unknown endpoint readiness as ready.
             if endpoint.conditions.and_then(|condition| condition.ready) == Some(false) {
                 continue;
             }
@@ -207,7 +216,9 @@ impl Endpoints {
                 .and_then(|target| target.name)
                 .filter(|name| name.len() < 64)
                 .unwrap_or_default();
+            // KEP-563 §Proposal: Retain every address of a dual-stack backend endpoint.
             for ip in endpoint.addresses {
+                // KEP-752 §Proposal > Zone (Per Endpoint): Retain endpoint zones.
                 if let Some(zone) = endpoint.zone.as_ref().filter(|_| with_zones) {
                     zones
                         .get_or_insert_with(Default::default)
@@ -272,6 +283,7 @@ pub struct Pod {
     pub deleting: bool,
 }
 
+// KEP-563 §Proposal > Awareness of Multiple IPs per Pod: Pod status tracks multiple IPs.
 impl From<v1::Pod> for Pod {
     fn from(input: v1::Pod) -> Self {
         Self {
@@ -279,6 +291,7 @@ impl From<v1::Pod> for Pod {
             name: input.metadata.name.unwrap_or_default().into(),
             namespace: input.metadata.namespace.unwrap_or_default().into(),
             labels: input.metadata.labels.unwrap_or_default(),
+            // KEP-563 §Proposal > Awareness of Multiple IPs per Pod: Retain all Pod IPs.
             ips: input
                 .status
                 .and_then(|status| status.pod_ips)

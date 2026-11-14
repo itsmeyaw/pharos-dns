@@ -1060,6 +1060,7 @@ impl Index {
     fn apply_multicluster_endpoints(&mut self, slice: MultiClusterEndpoints) {
         self.delete_multicluster_endpoints(&slice.endpoints.namespace, &slice.endpoints.name);
         let slice = Arc::new(slice);
+        // KEP-1645 §Using EndpointSlice objects to track endpoints: Group slices by import.
         self.multicluster_endpoints
             .entry(slice.endpoints.namespace.clone())
             .or_default()
@@ -1076,6 +1077,7 @@ impl Index {
     fn apply_service(&mut self, service: Service) {
         self.delete_service(&service.namespace, &service.name);
         // RFC 1034 §3.1: store ExternalName targets as absolute domain names.
+        // Kubernetes DNS spec 1.1.0 §2.5: Store ExternalName targets for CNAME answers.
         if service.service_type == "ExternalName" {
             let fqdn = if service.external_name.ends_with('.') {
                 service.external_name.clone()
@@ -1092,6 +1094,7 @@ impl Index {
             }
         }
         let service = Arc::new(service);
+        // KEP-563 §Proposal > CoreDNS Operation: Index ClusterIPs of either IP family.
         for ip in &service.cluster_ips {
             insert_reverse(&mut self.service_ips, ip, &service);
         }
@@ -1123,12 +1126,15 @@ impl Index {
             }
         }
     }
+    // KEP-752 §Proposal > Mapping: Keep multiple EndpointSlices grouped by Service.
     fn apply_endpoints(&mut self, slice: Endpoints) {
         self.delete_endpoints(&slice.namespace, &slice.name);
         let slice = Arc::new(slice);
+        // KEP-563 §Proposal > CoreDNS Operation: Index addresses of either IP family.
         for address in &slice.addresses {
             insert_reverse(&mut self.endpoint_ips, &address.ip, &slice);
         }
+        // KEP-752 §Proposal > Mapping: Group EndpointSlices by Service name.
         let slices = self
             .endpoints
             .entry(slice.namespace.clone())
@@ -1157,6 +1163,7 @@ impl Index {
         }
         self.delete_pod(&pod.namespace, &pod.name);
         let pod = Arc::new(pod);
+        // KEP-563 §Proposal > Awareness of Multiple IPs per Pod: Index every Pod IP.
         for ip in &pod.ips {
             insert_reverse(&mut self.pod_ips, ip, &pod);
         }
@@ -1187,6 +1194,7 @@ impl Store {
     pub fn with_read<R>(&self, read: impl FnOnce(&Index) -> R) -> R {
         read(&self.0.read().unwrap())
     }
+    // KEP-1645 §Design Details > Importing Services: Index imports by namespace and name.
     pub(crate) fn apply_service_import(&self, object: ServiceImport) {
         let mut index = self.0.write().unwrap();
         match by_name(&index.service_imports, &object.namespace, &object.name) {
@@ -1401,6 +1409,7 @@ impl Store {
         read: impl FnOnce(&Index) -> R,
     ) -> R {
         let mut index = self.0.write().unwrap();
+        // KEP-752 §Implementation > Requirements: Mark changed endpoints as modified.
         if index.slices.values().map(HashMap::len).sum::<usize>() != objects.len()
             || objects.iter().any(|object| {
                 endpoints_changed(

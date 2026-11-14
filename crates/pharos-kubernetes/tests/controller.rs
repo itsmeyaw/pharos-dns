@@ -214,6 +214,7 @@ impl FakeServer {
     }
 }
 
+// KEP-1645 §Design Details > Importing Services: An imported Service has a namespaced import.
 #[tokio::test]
 async fn multicluster_watches_gate_readiness_and_track_changes() {
     let server = FakeServer::start().await;
@@ -262,6 +263,7 @@ async fn multicluster_watches_gate_readiness_and_track_changes() {
         })
     })
     .await;
+    // KEP-1645 §Using EndpointSlice objects to track endpoints: Label the import and cluster.
     let slice = json!({"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSlice","metadata":{"name":"mc","namespace":"prod","resourceVersion":"2","labels":{"multicluster.kubernetes.io/service-name":"web","multicluster.kubernetes.io/source-cluster":"east"}},"addressType":"IPv4","endpoints":[{"addresses":["10.4.0.1"]}]});
     server.send(slices, "ADDED", slice.clone());
     until(|| store.with_read(|i| i.multicluster_endpoints("prod", "web").count() == 1)).await;
@@ -640,6 +642,7 @@ async fn max_inflight_limits_concurrent_api_requests() {
     }
 }
 
+// KEP-752 §Implementation > Requirements: Consumers can rebuild state after restart.
 #[tokio::test]
 async fn lifecycle_restart_failure_restarts_watchers_on_same_store() {
     let server = FakeServer::start().await;
@@ -751,6 +754,7 @@ async fn watch_start_gone_relists() {
     controller.stop().await;
 }
 
+// KEP-752 §Proposal > EndpointSlice API: Slices carry backend addresses and address type.
 #[tokio::test]
 async fn controller_applies_list_watch_updates_and_deletions() {
     let server = FakeServer::start().await;
@@ -809,6 +813,7 @@ async fn controller_applies_list_watch_updates_and_deletions() {
     controller.stop().await;
 }
 
+// KEP-752 §Proposal > Zone (Per Endpoint): An endpoint zone identifies its location.
 #[tokio::test]
 async fn zonal_watch_retains_zones_on_list_update_and_relist() {
     assert!(!WatchConfig::default().zonal);
@@ -1246,6 +1251,7 @@ async fn upstream_endpoint_latency_recorder_rows() {
     }
 }
 
+// KEP-752 §Proposal > Endpoint Port: Slice ports apply to its endpoints.
 #[tokio::test]
 async fn upstream_endpoint_equivalence_updates_serial_only_for_dns_changes() {
     let cases = [

@@ -130,6 +130,7 @@ fn api_response(path: &str, query: Option<&str>) -> Response<Body> {
             "/apis/discovery.k8s.io" => r#"{"kind":"APIGroup","apiVersion":"v1","name":"discovery.k8s.io","versions":[{"groupVersion":"discovery.k8s.io/v1","version":"v1"}],"preferredVersion":{"groupVersion":"discovery.k8s.io/v1","version":"v1"}}"#,
             "/apis/discovery.k8s.io/v1" => r#"{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"discovery.k8s.io/v1","resources":[{"name":"endpointslices","namespaced":true,"kind":"EndpointSlice","verbs":["get","list","watch"]}]}"#,
             "/healthz" | "/readyz" => "ok",
+            // RFC 9110 §15.5.5: A 404 response indicates no current representation.
             _ => return Response::builder().status(404).header("content-type", "application/json").body(full(r#"{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404}"#)).unwrap(),
         };
         (200, full(body))

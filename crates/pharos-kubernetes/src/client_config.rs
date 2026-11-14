@@ -144,6 +144,7 @@ impl ClientConfig {
             return Err(ClientConfigError::EmptyHost);
         }
         let port: u16 = port.parse().map_err(ClientConfigError::InvalidPort)?;
+        // RFC 5952 §6: Bracket IPv6 address literals in URI authorities.
         let host = match host.parse::<std::net::IpAddr>() {
             Ok(std::net::IpAddr::V6(ip)) => format!("[{ip}]"),
             _ => host.to_owned(),

@@ -312,6 +312,7 @@ fn api_response(path: &str, query: Option<&str>) -> Response<Body> {
     let Some((name, namespace)) = resource_path(path) else {
         return match discovery(path) {
             Some(body) => response(200, full(body.to_string())),
+            // RFC 9110 §15.5.5: A 404 response indicates no current representation.
             None => response(
                 404,
                 full(
@@ -328,6 +329,7 @@ fn api_response(path: &str, query: Option<&str>) -> Response<Body> {
         Ok::<_, ()>((query, labels, fields))
     })();
     let Ok((query, labels, fields)) = parsed else {
+        // RFC 9110 §15.5.1: A 400 response reports a request that cannot be processed.
         return response(
             400,
             full(
