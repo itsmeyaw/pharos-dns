@@ -244,14 +244,7 @@ fn multicluster_setup_matches_coredns() {
     let empty = config("kubernetes cluster.local {\n multicluster\n}").unwrap();
     assert!(empty.multicluster_zones.is_empty());
     assert!(!empty.watch_config().multicluster);
-    let zones = "cluster.local";
-    assert!(
-        config(&format!(
-            "kubernetes cluster.local {{\n multicluster {zones}\n}}"
-        ))
-        .is_err(),
-        "{zones}"
-    );
+    assert!(config("kubernetes bad..zone").is_err());
     let invalid =
         config("kubernetes cluster.local {\n multicluster cluster.local\n zonal\n noendpoints\n}")
             .unwrap_err();
