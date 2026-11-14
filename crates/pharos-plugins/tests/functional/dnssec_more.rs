@@ -67,6 +67,7 @@ enum Reply {
     Large,
     Priority,
     AdditionalLarge,
+    AdditionalExistingSignatures { large_second: bool },
     AdditionalSignatureLarge,
     DnameWithRealCname,
     AdditionalDataLarge,
@@ -81,7 +82,10 @@ impl Next for Reply {
             Self::ReferralTtl => 0x8000,
             _ => 0x8400,
         };
-        let response_limit = if matches!(self, Self::AdditionalDataLarge) {
+        let response_limit = if matches!(
+            self,
+            Self::AdditionalDataLarge | Self::AdditionalExistingSignatures { .. }
+        ) {
             65535
         } else {
             cx.max_response_size
@@ -337,6 +341,53 @@ impl Next for Reply {
                     );
                 }
             }
+            Self::AdditionalExistingSignatures { large_second } => {
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::A,
+                    Class::IN,
+                    1800,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+                for i in 0..20 {
+                    b.record(
+                        Section::Additional,
+                        q.name,
+                        Type::A,
+                        Class::IN,
+                        1800,
+                        &[192, 0, 2, i],
+                    )
+                    .unwrap();
+                }
+                let signer = NameRef::parse(cx.domain.as_wire(), 0).unwrap();
+                let large_signature = [2u8; 128];
+                for i in 0..if large_second { 2 } else { 1 } {
+                    let signature = if i == 0 { &[1u8][..] } else { &large_signature };
+                    let sig = Rdata::Rrsig {
+                        type_covered: Type::A,
+                        algorithm: 13,
+                        labels: 3,
+                        original_ttl: 1800,
+                        expiration: 4_000_000_000,
+                        inception: 1_000_000_000,
+                        key_tag: 59725,
+                        signer,
+                        signature,
+                    };
+                    b.record_with(
+                        Section::Additional,
+                        q.name,
+                        Type::RRSIG,
+                        Class::IN,
+                        1800,
+                        |writer| sig.write(writer),
+                    )
+                    .unwrap();
+                }
+            }
             Self::AdditionalSignatureLarge => {
                 b.record(
                     Section::Answer,
@@ -578,6 +629,49 @@ async fn additional_rrsig_overflow_does_not_set_tc() {
         20
     );
     assert!(!msg.additionals().any(|rr| rr.rtype == Type::RRSIG));
+}
+
+#[tokio::test]
+async fn existing_additional_signatures_are_omitted_as_a_group() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let (one_outcome, one_wire) = serve(
+        &dnssec,
+        &q,
+        Reply::AdditionalExistingSignatures {
+            large_second: false,
+        },
+        Protocol::Udp,
+        512,
+        512,
+    )
+    .await;
+    assert_eq!(one_outcome, Outcome::Response);
+    let one = Message::parse(&one_wire).unwrap();
+    assert!(!one.tc());
+    assert_eq!(
+        one.additionals().filter(|rr| rr.rtype == Type::A).count(),
+        20
+    );
+    assert!(one.additionals().any(|rr| rr.rtype == Type::RRSIG));
+
+    let (two_outcome, two_wire) = serve(
+        &dnssec,
+        &q,
+        Reply::AdditionalExistingSignatures { large_second: true },
+        Protocol::Udp,
+        512,
+        512,
+    )
+    .await;
+    assert_eq!(two_outcome, Outcome::Response);
+    let two = Message::parse(&two_wire).unwrap();
+    assert!(!two.tc());
+    assert_eq!(
+        two.additionals().filter(|rr| rr.rtype == Type::A).count(),
+        20
+    );
+    assert!(!two.additionals().any(|rr| rr.rtype == Type::RRSIG));
 }
 
 #[tokio::test]
