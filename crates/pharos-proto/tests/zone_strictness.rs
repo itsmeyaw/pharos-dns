@@ -155,6 +155,12 @@ fn generic_known_types_follow_wire_layouts() {
 }
 
 #[test]
+fn generic_nsec_rejects_an_all_zero_bitmap_window() {
+    // RFC 4034 §4.1.2: A type-bitmap window cannot be all zeroes.
+    assert!(parse(Type::NSEC, &[r"\#", "9", "046e65787400000100"]).is_err());
+}
+
+#[test]
 fn generic_opt_preserves_zero_keepalive() {
     assert_eq!(
         parse(Type::OPT, &[r"\#", "6", "000b00020000"]).unwrap(),
