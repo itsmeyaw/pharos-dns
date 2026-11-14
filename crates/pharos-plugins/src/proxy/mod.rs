@@ -204,26 +204,24 @@ fn same_ecs(request: &Message<'_>, response: &Message<'_>) -> bool {
 
 #[derive(Clone, Copy)]
 struct RecordIndex {
+    name_hash: u32,
+    ttl: u32,
     offset: u16,
+    rtype: u16,
+    class: u16,
     section: u8,
 }
 
-fn record_fields(wire: &[u8], index: RecordIndex) -> (NameRef<'_>, u16, u16, u32) {
-    // RFC 1035 §4.1.3: Decode RR fixed fields from a validated record offset.
-    let start = usize::from(index.offset);
-    let name = NameRef::parse(wire, start).expect("Message validated RR owner");
-    let fields = start + name.wire_len();
-    (
-        name,
-        u16::from_be_bytes([wire[fields], wire[fields + 1]]),
-        u16::from_be_bytes([wire[fields + 2], wire[fields + 3]]),
-        u32::from_be_bytes([
-            wire[fields + 4],
-            wire[fields + 5],
-            wire[fields + 6],
-            wire[fields + 7],
-        ]),
-    )
+fn name_hash(name: NameRef<'_>) -> u32 {
+    // RFC 4343 §3: Hash DNS labels without regard to ASCII letter case.
+    let mut hash = 0x811c_9dc5_u32;
+    for label in name.labels() {
+        hash = (hash ^ label.len() as u32).wrapping_mul(0x0100_0193);
+        for byte in label {
+            hash = (hash ^ u32::from(byte.to_ascii_lowercase())).wrapping_mul(0x0100_0193);
+        }
+    }
+    hash
 }
 
 fn compare_names(left: NameRef<'_>, right: NameRef<'_>) -> std::cmp::Ordering {
@@ -266,25 +264,46 @@ fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
                 else {
                     return false;
                 };
-                indexes.push(RecordIndex { offset, section });
+                indexes.push(RecordIndex {
+                    name_hash: name_hash(record.name),
+                    ttl: record.ttl,
+                    offset,
+                    rtype: record.rtype.0,
+                    class: record.class.0,
+                    section,
+                });
             }
         }
         indexes.sort_unstable_by(|left, right| {
-            let (left_name, left_type, left_class, left_ttl) = record_fields(wire, *left);
-            let (right_name, right_type, right_class, right_ttl) = record_fields(wire, *right);
-            compare_names(left_name, right_name)
-                .then(left_type.cmp(&right_type))
-                .then(left_class.cmp(&right_class))
+            left.name_hash
+                .cmp(&right.name_hash)
+                .then(left.rtype.cmp(&right.rtype))
+                .then(left.class.cmp(&right.class))
+                .then_with(|| {
+                    let same_name = NameRef::parse(wire, usize::from(left.offset))
+                        .expect("Message validated RR owner");
+                    let other_name = NameRef::parse(wire, usize::from(right.offset))
+                        .expect("Message validated RR owner");
+                    compare_names(same_name, other_name)
+                })
                 .then(left.section.cmp(&right.section))
-                .then(left_ttl.cmp(&right_ttl))
+                .then(left.ttl.cmp(&right.ttl))
         });
         indexes.windows(2).all(|pair| {
-            let (left_name, left_type, left_class, left_ttl) = record_fields(wire, pair[0]);
-            let (right_name, right_type, right_class, right_ttl) = record_fields(wire, pair[1]);
+            let left = pair[0];
+            let right = pair[1];
+            if left.name_hash != right.name_hash
+                || left.rtype != right.rtype
+                || left.class != right.class
+            {
+                return true;
+            }
+            let left_name =
+                NameRef::parse(wire, usize::from(left.offset)).expect("Message validated RR owner");
+            let right_name = NameRef::parse(wire, usize::from(right.offset))
+                .expect("Message validated RR owner");
             compare_names(left_name, right_name) != std::cmp::Ordering::Equal
-                || left_type != right_type
-                || left_class != right_class
-                || (pair[0].section == pair[1].section && left_ttl == right_ttl)
+                || (left.section == right.section && left.ttl == right.ttl)
         })
     })
 }
@@ -943,6 +962,17 @@ mod tests {
         wire[42] = 60;
         let message = Message::parse(&wire).unwrap();
         assert!(rrsets_valid(&message, &wire));
+    }
+
+    #[test]
+    fn compares_rrset_owners_without_ascii_case() {
+        let mut wire = vec![0, 1, 0x81, 0x80, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 1, 0, 1];
+        wire.extend_from_slice(&[
+            1, b'a', 0, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1, 1, b'A', 0, 0, 1, 0, 1, 0, 0,
+            0, 30, 0, 4, 192, 0, 2, 2,
+        ]);
+        let message = Message::parse(&wire).unwrap();
+        assert!(!rrsets_valid(&message, &wire));
     }
 
     #[test]
