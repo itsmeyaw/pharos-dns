@@ -73,6 +73,7 @@ impl Chain for ForwardAdProbe {
         let _ = cx
             .metadata
             .insert(pharos_server::metrics::WRITER_METADATA, "forward");
+        cx.metadata.mark_forwarded_response();
         let question = cx.query.questions().next().unwrap();
         let mut builder = MessageBuilder::new(cx.response, 1232, cx.query.id(), 0x80a0).unwrap();
         builder
@@ -312,6 +313,7 @@ impl Chain for ForwardSignedAdProbe {
         let _ = cx
             .metadata
             .insert(pharos_server::metrics::WRITER_METADATA, "forward");
+        cx.metadata.mark_forwarded_response();
         let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x80a0).unwrap();
         builder
             .question(question.name, question.qtype, question.qclass)

@@ -406,6 +406,7 @@ impl Plugin for Forward {
                 cx.response.clear();
                 // RFC 5625 §4.3: return Responses without filtering RRs by TYPE or CLASS.
                 cx.response.extend_from_slice(answer);
+                cx.metadata.mark_forwarded_response();
                 return Outcome::Response;
             }
             // RFC 1034 §5.2.3: Temporary resolution failures return SERVFAIL.
