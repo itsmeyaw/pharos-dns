@@ -12,6 +12,7 @@
 - On a cache miss, TTL normalization rescans the Response for each record; its cost grows quadratically with the record count.
 - Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as insecure. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
 - RSASHA512 (algorithm 10) is refused for signing under RFC 9904 §3. RSA modulus and exponent values above 4096 bits are rejected (RFC 3110 §2; RFC 5702 §§2.1–2.2).
+- P-256/P-384/Ed25519 use RustCrypto fixed-size signatures to avoid per-sign allocations; ECDSA signatures use deterministic nonces (RFC 6979 §3.3). RSA still allocates an intermediate signature buffer in aws-lc-rs; binary-size impact of the added crypto crates is unmeasured.
 - Each loaded DNSKEY is bound to its owner zone and cannot sign another configured zone (RFC 8080 §8).
 - A configured zone without a matching key passes DNSKEY and DO queries through unchanged.
 - Negative NXDOMAIN/NODATA answers return NOERROR with synthetic NXNAME NSEC in Authority. CoreDNS also maps NXDOMAIN to NOERROR, but puts its black-lie NSEC in Answer.
