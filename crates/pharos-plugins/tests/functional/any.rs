@@ -17,6 +17,7 @@ fn configured(text: &str) -> Result<Chain, String> {
 fn coredns_setup_accepts_any() {
     assert!(configured("any").is_ok());
     assert!(configured("any ttl 60").is_ok());
+    assert!(configured("any ttl 2147483647").is_ok());
 }
 
 #[test]
