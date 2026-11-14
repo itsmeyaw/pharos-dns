@@ -106,7 +106,8 @@ impl Dnssec {
         let denial = matches!(kind, ResponseType::NxDomain | ResponseType::NoData);
         let soa = message.authorities().find(|rr| rr.rtype == Type::SOA);
         if denial && soa.is_none() {
-            return Ok(());
+            // RFC 2308 §3: A negative answer without SOA cannot be returned as a valid denial.
+            return Err(Error::InvalidQuery);
         }
         let referral = kind == ResponseType::Referral && message.authority_count() > 0;
         let make_lie =
@@ -223,77 +224,58 @@ impl Dnssec {
             }
             if section == Section::Additional {
                 // RFC 4035 §3.1.1: Write all Additional data before optional signatures.
-                for (i, rr) in records.iter().enumerate() {
-                    if rr.rtype == Type::RRSIG
-                        || records[..i].iter().any(|previous| same_rrset(previous, rr))
-                    {
-                        continue;
-                    }
-                    let group: Vec<_> = records
-                        .iter()
-                        .copied()
-                        .filter(|member| same_rrset(member, rr))
-                        .collect();
+                for rr in records.iter().filter(|rr| rr.rtype != Type::RRSIG) {
+                    let data = rr.data().map_err(|_| Error::InvalidQuery)?;
                     let signed = !self.keys.is_empty()
                         && !matches!(rr.rtype, Type::OPT | Type::TSIG)
                         && self.zone_for(rr.name).is_some()
                         && signs_section(section, rr.rtype, rr.name);
                     // RFC 2181 §5.2: Normalize signed RRsets only; preserve TTLs on unsigned records.
-                    let normalized_ttl = if signed {
-                        Some(rrset_ttl(&message, rr, None))
+                    let ttl = if signed {
+                        rrset_ttl(&message, rr, None)
                     } else {
-                        None
+                        rr.ttl
                     };
-                    for member in &group {
-                        let data = member.data().map_err(|_| Error::InvalidQuery)?;
-                        let added = builder
-                            .record_with(
-                                section,
-                                member.name,
-                                member.rtype,
-                                member.class,
-                                normalized_ttl.unwrap_or(member.ttl),
-                                |writer| data.write(writer),
-                            )
-                            .map_err(Error::Build)?;
-                        if !added {
-                            additional_data_omitted = true;
-                            break;
-                        }
-                    }
-                    if additional_data_omitted {
+                    let added = builder
+                        .record_with(section, rr.name, rr.rtype, rr.class, ttl, |writer| {
+                            data.write(writer)
+                        })
+                        .map_err(Error::Build)?;
+                    if !added {
+                        additional_data_omitted = true;
                         break;
                     }
                 }
+                if additional_data_omitted {
+                    continue;
+                }
                 // RFC 4035 §3.1.1: Existing Additional RRSIGs are optional when space runs out.
-                if !additional_data_omitted {
-                    for rr in records.iter().filter(|rr| rr.rtype == Type::RRSIG) {
-                        let data = rr.data().map_err(|_| Error::InvalidQuery)?;
-                        let Rdata::Rrsig { type_covered, .. } = data else {
-                            continue;
-                        };
-                        let signed = !self.keys.is_empty()
-                            && self.zone_for(rr.name).is_some()
-                            && signs_section(section, type_covered, rr.name)
-                            && records.iter().any(|other| {
-                                other.name == rr.name
-                                    && other.class == rr.class
-                                    && other.rtype == type_covered
-                            });
-                        let ttl = if signed {
-                            rrset_ttl(&message, rr, Some(type_covered))
-                        } else {
-                            rr.ttl
-                        };
-                        let added = builder
-                            .record_with(section, rr.name, rr.rtype, rr.class, ttl, |writer| {
-                                data.write(writer)
-                            })
-                            .map_err(Error::Build)?;
-                        if !added {
-                            additional_signature_omitted = true;
-                            break;
-                        }
+                for rr in records.iter().filter(|rr| rr.rtype == Type::RRSIG) {
+                    let data = rr.data().map_err(|_| Error::InvalidQuery)?;
+                    let Rdata::Rrsig { type_covered, .. } = data else {
+                        continue;
+                    };
+                    let signed = !self.keys.is_empty()
+                        && self.zone_for(rr.name).is_some()
+                        && signs_section(section, type_covered, rr.name)
+                        && records.iter().any(|other| {
+                            other.name == rr.name
+                                && other.class == rr.class
+                                && other.rtype == type_covered
+                        });
+                    let ttl = if signed {
+                        rrset_ttl(&message, rr, Some(type_covered))
+                    } else {
+                        rr.ttl
+                    };
+                    let added = builder
+                        .record_with(section, rr.name, rr.rtype, rr.class, ttl, |writer| {
+                            data.write(writer)
+                        })
+                        .map_err(Error::Build)?;
+                    if !added {
+                        additional_signature_omitted = true;
+                        break;
                     }
                 }
                 if !additional_data_omitted && !additional_signature_omitted {

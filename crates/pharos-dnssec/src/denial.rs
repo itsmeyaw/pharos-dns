@@ -205,7 +205,7 @@ pub fn black_lie(
         types.push(Type::NS);
     }
     // RFC 4470 §3: Keep the RRSIG bitmap bit when RRSIG itself is the queried missing type.
-    if !zone_cut && kind == BlackLieKind::Negative && qtype != Type::RRSIG {
+    if !zone_cut && kind == BlackLieKind::Negative && qtype != Type::NSEC && qtype != Type::RRSIG {
         types.retain(|t| *t != qtype);
     }
     // RFC 4470 §3: synthetic NSEC spans must not cover existing names.

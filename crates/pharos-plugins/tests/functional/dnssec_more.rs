@@ -47,6 +47,7 @@ fn query(name: &str, qtype: Type, id: u16, opt: Option<bool>) -> Vec<u8> {
 #[derive(Clone, Copy)]
 enum Reply {
     Negative { nxdomain: bool, extra: bool },
+    NegativeNoSoa,
     Positive(Type),
     MixedCase,
     MixedTtl,
@@ -65,6 +66,7 @@ impl Next for Reply {
         let q = cx.query.questions().next().unwrap();
         let flags = match self {
             Self::Negative { nxdomain: true, .. } => 0x8403,
+            Self::NegativeNoSoa => 0x8403,
             Self::ReferralTtl => 0x8000,
             _ => 0x8400,
         };
@@ -90,6 +92,7 @@ impl Next for Reply {
                         .unwrap();
                 }
             }
+            Self::NegativeNoSoa => {}
             Self::Positive(rtype) => {
                 let ds = [
                     0, 1, 13, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -454,6 +457,14 @@ async fn authority_rrsig_precedes_later_authority_rrsets() {
         .unwrap();
     let ns = records.iter().position(|rr| rr.rtype == Type::NS).unwrap();
     assert!(soa_signature < ns);
+}
+
+#[tokio::test]
+async fn signed_negative_without_soa_fails_closed() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("missing.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, _) = serve(&dnssec, &q, Reply::NegativeNoSoa, Protocol::Udp, 4096, 4096).await;
+    assert_eq!(outcome, Outcome::Error(pharos_server::Error::InvalidQuery));
 }
 
 #[tokio::test]

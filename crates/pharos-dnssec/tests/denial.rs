@@ -92,6 +92,14 @@ fn black_lies_match_coredns_denial_and_referral() {
     )
     .unwrap();
     assert!(rrsig_nodata.bitmap_contains(Type::RRSIG));
+    let nsec_nodata = black_lie(
+        &qname,
+        &name("example."),
+        Type::NSEC,
+        BlackLieKind::Negative,
+    )
+    .unwrap();
+    assert!(nsec_nodata.bitmap_contains(Type::NSEC));
     let referral = black_lie(
         &name("child.example."),
         &name("example."),
