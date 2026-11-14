@@ -69,16 +69,15 @@ pub async fn notify_from(
         let result = timeout(deadline, async {
             socket.send(&query).await?;
             let len = socket.recv(&mut wire).await?;
-            let response =
-                Message::parse(&wire[..len]).map_err(|_| invalid("invalid NOTIFY Response"))?;
-            // RFC 1996 §3.6: a NOTIFY Response carries the request's ID.
-            if response.id() != id {
-                return Err(invalid("NOTIFY was not accepted"));
+            let response = notify_response(&wire[..len], id, zone)?;
+            if response == Rcode::NOTIMP {
+                // RFC 1996 §3.12: NOTIMP completes the NOTIFY transaction.
+                return Ok(());
             }
-            if response.rcode() != Rcode::NOERROR {
+            if response != Rcode::NOERROR {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("NOTIFY returned {}", response.rcode()),
+                    format!("NOTIFY returned {response}"),
                 ));
             }
             Ok(())
@@ -90,7 +89,58 @@ pub async fn notify_from(
             Err(error) => last_error = io::Error::new(io::ErrorKind::TimedOut, error),
         }
     }
-    Err(last_error)
+    notify_tcp(address, zone, id, deadline, &query)
+        .await
+        .map_err(|tcp_error| {
+            io::Error::new(
+                tcp_error.kind(),
+                format!(
+                    "TCP NOTIFY fallback failed ({tcp_error}); UDP retries failed ({last_error})"
+                ),
+            )
+        })
+}
+
+fn notify_response(wire: &[u8], id: u16, zone: &Name) -> io::Result<Rcode> {
+    let response = Message::parse(wire).map_err(|_| invalid("invalid NOTIFY Response"))?;
+    // RFC 1996 §§3.6, 4.7: Match response ID, Question, and NOTIFY response flags.
+    if response.id() != id
+        || response.flags() & 0xf800 != 0xa000
+        || response.question_count() != 1
+        || response.questions().next().is_none_or(|question| {
+            question.name != *zone || question.qtype != Type::SOA || question.qclass != Class::IN
+        })
+    {
+        return Err(invalid("NOTIFY Response does not match Query"));
+    }
+    Ok(response.rcode())
+}
+
+async fn notify_tcp(
+    address: SocketAddr,
+    zone: &Name,
+    id: u16,
+    deadline: Duration,
+    query: &[u8],
+) -> io::Result<()> {
+    // RFC 1996 §3.4: Use TCP when UDP cannot complete the NOTIFY transaction.
+    timeout(deadline, async {
+        let mut socket = TcpStream::connect(address).await?;
+        socket.write_u16(query.len() as u16).await?;
+        socket.write_all(query).await?;
+        let len = socket.read_u16().await?;
+        let mut wire = vec![0; usize::from(len)];
+        socket.read_exact(&mut wire).await?;
+        match notify_response(&wire, id, zone)? {
+            Rcode::NOERROR | Rcode::NOTIMP => Ok(()),
+            rcode => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("NOTIFY returned {rcode}"),
+            )),
+        }
+    })
+    .await
+    .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
 }
 
 /// Receive an AXFR incrementally. The callback must discard partial data on error.
@@ -101,10 +151,10 @@ pub async fn axfr(
     deadline: Duration,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(address, zone, id, deadline, None, false, on_message).await
+    axfr_inner(address, zone, id, deadline, None, on_message).await
 }
 
-/// Receive an AXFR using CoreDNS's miekg/dns stream acceptance rules.
+/// Compatibility alias for [`axfr`] that retains the legacy public name.
 pub async fn axfr_coredns(
     address: SocketAddr,
     zone: &Name,
@@ -112,7 +162,7 @@ pub async fn axfr_coredns(
     deadline: Duration,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(address, zone, id, deadline, None, true, on_message).await
+    axfr_inner(address, zone, id, deadline, None, on_message).await
 }
 
 /// Receive an authenticated AXFR incrementally. Discard partial data on error;
@@ -126,7 +176,7 @@ pub async fn axfr_signed(
     key: &TsigKey,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(address, zone, id, deadline, Some(key), false, on_message).await
+    axfr_inner(address, zone, id, deadline, Some(key), on_message).await
 }
 
 async fn axfr_inner(
@@ -135,7 +185,6 @@ async fn axfr_inner(
     id: u16,
     deadline: Duration,
     key: Option<&TsigKey>,
-    coredns: bool,
     mut on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
     // shortcut: buffers are allocated once per Zone Transfer; reuse across transfers when needed.
@@ -201,34 +250,6 @@ async fn axfr_inner(
                 .map_err(|_| invalid("invalid AXFR TSIG"))?;
         }
         let message = Message::parse(&wire).map_err(|_| invalid("invalid AXFR Message"))?;
-        if coredns {
-            // RFC 5936 §2.2: a Zone Transfer begins and ends with SOA.
-            if message.id() != id {
-                return Err(invalid("invalid AXFR Response ID"));
-            }
-            let first = opening.is_none();
-            if first {
-                if message.rcode() != Rcode::NOERROR
-                    || message
-                        .answers()
-                        .next()
-                        .is_none_or(|record| record.rtype != Type::SOA)
-                {
-                    return Err(invalid("AXFR must begin with SOA"));
-                }
-                opening = Some(Vec::new());
-            }
-            let done = (!first || message.answer_count() > 1)
-                && message
-                    .answers()
-                    .last()
-                    .is_some_and(|record| record.rtype == Type::SOA);
-            on_message(message)?;
-            if done {
-                return Ok(());
-            }
-            continue;
-        }
         // RFC 5936 §2.2: every Response belongs to the Query and carries its ID.
         // RFC 5936 §2: AXFR clients do not use the TC bit.
         if message.id() != id || message.flags() & 0x8000 == 0 || message.rcode() != Rcode::NOERROR

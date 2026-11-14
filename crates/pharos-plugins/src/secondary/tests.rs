@@ -1,6 +1,17 @@
 use super::*;
 use pharos_proto::zone::ZoneParser;
 
+struct TestNext;
+
+impl pharos_server::Next for TestNext {
+    fn run(
+        self,
+        _: &mut pharos_server::Context<'_, '_>,
+    ) -> impl std::future::Future<Output = pharos_server::Outcome> + Send {
+        std::future::ready(pharos_server::Outcome::Unanswered(Rcode::SERVFAIL))
+    }
+}
+
 fn catalog_records(text: &str) -> (Name, Vec<pharos_proto::zone::ZoneRecord>) {
     let origin: Name = "catalog.example.".parse().unwrap();
     let records = ZoneParser::new(text.as_bytes(), origin.clone(), "catalog")
@@ -19,11 +30,16 @@ fn coredns_catalog_requires_version_and_unique_members() {
         "version 60 IN TXT \"2\"\na.zones 60 IN PTR example.org.\nb.zones 60 IN PTR example.org.\n",
         "version 60 IN TXT \"2\"\na.zones 60 IN PTR example.org.\na.zones 60 IN PTR other.example.\n",
         "version 60 IN TXT \"2\"\na.zones 60 IN PTR example.org.\ncoo.a.zones 60 IN PTR one.example.\ncoo.a.zones 60 IN PTR two.example.\n",
+        "version 60 IN TXT \"2\"\ncoo.orphan.zones 60 IN PTR one.example.\ncoo.orphan.zones 60 IN PTR two.example.\n",
         "version 60 IN TXT \"2\"\na.zones 60 CH PTR example.org.\n",
     ] {
         let (origin, records) = catalog_records(&format!("{header}{invalid}"));
         assert!(catalog::parse(&origin, &records).is_err(), "{invalid}");
     }
+    let (origin, records) = catalog_records(&format!(
+        "{header}@ 60 IN SOA ns. hostmaster. 2 10 10 100 60\nversion 60 IN TXT \"2\"\n"
+    ));
+    assert!(catalog::parse(&origin, &records).is_err());
     let (origin, records) = catalog_records(&format!(
         "{header}version 60 IN TXT \"2\"\na.zones 60 IN PTR example.org.\ncoo.a.zones 60 IN PTR other.catalog.example.\n"
     ));
@@ -62,6 +78,10 @@ fn coredns_serial_comparison_wraps() {
 fn coredns_notify_checks_ip_spelling_and_scope() {
     let loopback = "[::1]:1234".parse().unwrap();
     assert!(update::primary_matches("[::1]:53", loopback));
+    assert_eq!(
+        update::primary_address("[::1]:5353", loopback),
+        Some("[::1]:5353".parse().unwrap())
+    );
     assert!(!update::primary_matches("[0:0:0:0:0:0:0:1]:53", loopback));
     // Index 1 names the first interface (lo0 or lo) on the supported hosts.
     let name = nix::net::if_::if_indextoname(1).unwrap();
@@ -77,7 +97,7 @@ fn coredns_notify_checks_ip_spelling_and_scope() {
 }
 
 #[tokio::test]
-async fn coredns_failed_primary_does_not_merge_partial_records() {
+async fn secondary_deduplicates_axfr_records_and_skips_failed_primary() {
     use pharos_proto::{Class, Message, MessageBuilder, Section};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     async fn primary(listener: tokio::net::TcpListener, mode: u8) {
@@ -114,6 +134,18 @@ async fn coredns_failed_primary_does_not_merge_partial_records() {
                 &[192, 0, 2, 1],
             )
             .unwrap();
+        if mode == 1 {
+            builder
+                .record(
+                    Section::Answer,
+                    NameRef::parse(owner.as_wire(), 0).unwrap(),
+                    Type::A,
+                    Class::IN,
+                    60,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+        }
         if mode == 2 {
             builder
                 .record(
@@ -172,13 +204,19 @@ async fn coredns_failed_primary_does_not_merge_partial_records() {
 }
 
 #[tokio::test]
-async fn coredns_should_transfer_checks_soa_serial_and_response_id() {
+async fn secondary_soa_check_matches_response_id_and_question() {
     use pharos_proto::{Message, MessageBuilder, Section};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        for wrong_id in [false, false, false, true] {
+        for (wrong_id, wrong_question) in [
+            (false, false),
+            (false, false),
+            (false, false),
+            (true, false),
+            (false, true),
+        ] {
             let (mut socket, _) = listener.accept().await.unwrap();
             let length = socket.read_u16().await.unwrap();
             let mut query = vec![0; usize::from(length)];
@@ -193,8 +231,14 @@ async fn coredns_should_transfer_checks_soa_serial_and_response_id() {
                 0x8400,
             )
             .unwrap();
+            let other: Name = "other.example.".parse().unwrap();
+            let name = if wrong_question {
+                NameRef::parse(other.as_wire(), 0).unwrap()
+            } else {
+                question.name
+            };
             builder
-                .question(question.name, question.qtype, question.qclass)
+                .question(name, question.qtype, question.qclass)
                 .unwrap();
             let mut soa = vec![0, 0];
             for value in [250u32, 0, 0, 0, 0] {
@@ -232,18 +276,91 @@ async fn coredns_should_transfer_checks_soa_serial_and_response_id() {
         assert_eq!(update::should_transfer(&zone).await.unwrap(), serial == 249);
     }
     assert!(update::should_transfer(&zone).await.is_err());
+    assert!(update::should_transfer(&zone).await.is_err());
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn notify_refresh_queries_the_sending_primary() {
+    use pharos_proto::{Message, MessageBuilder, Section};
+    use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source = listener.local_addr().unwrap();
+    let primary = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let len = socket.read_u16().await.unwrap();
+        let mut query = vec![0; usize::from(len)];
+        socket.read_exact(&mut query).await.unwrap();
+        let query = Message::parse(&query).unwrap();
+        let question = query.questions().next().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, query.id(), 0x8400).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        let mut soa = vec![0, 0];
+        for value in [2u32, 10, 10, 100, 60] {
+            soa.extend_from_slice(&value.to_be_bytes());
+        }
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::SOA,
+                Class::IN,
+                60,
+                &soa,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        socket.write_u16(wire.len() as u16).await.unwrap();
+        socket.write_all(&wire).await.unwrap();
+    });
+    let zone = SecondaryZone::new(ZoneConfig {
+        apex: "example.org.".parse().unwrap(),
+        from: vec![source.to_string()],
+        catalog: None,
+    });
+    let mut request = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut request, 512, 7, 0x2400).unwrap();
+    builder
+        .question(
+            NameRef::parse(zone.config.apex.as_wire(), 0).unwrap(),
+            Type::SOA,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [None; 8];
+    let mut cx = Context {
+        query: Message::parse(&request).unwrap(),
+        client: "127.0.0.1:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &zone.config.apex,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(handle_notify(&zone, &mut cx), Outcome::Response);
+    let target = zone.notify_source.lock().unwrap().take().unwrap();
+    assert_eq!(target, source);
+    assert!(update::should_transfer_from(&zone, target).await.unwrap());
+    primary.await.unwrap();
 }
 
 #[tokio::test]
 async fn coredns_notify_accepts_only_known_primary() {
     use pharos_proto::{Message, MessageBuilder};
     use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
-    let corefile = "example.org:53 {\n secondary {\n transfer from 127.0.0.1\n }\n}";
+    let corefile = "example.org:53 {\n secondary {\n transfer from 127.0.0.1:15353\n }\n}";
     let blocks = pharos_corefile::parse("Corefile", corefile).unwrap();
     let configured =
         pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
-    let chain = &configured[0].config;
+    let secondary = configured[0].config.secondary.as_ref().unwrap();
     let apex: Name = "example.org.".parse().unwrap();
     let mut query = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut query, 512, 7, 0x2400).unwrap();
@@ -268,24 +385,154 @@ async fn coredns_notify_accepts_only_known_primary() {
         response: &mut response,
         max_response_size: 512,
     };
-    assert_eq!(chain.serve(&mut cx).await, Outcome::Drop);
+    assert_eq!(
+        secondary.serve_with(&mut cx, TestNext, true).await,
+        Outcome::Drop
+    );
     cx.client = "127.0.0.1:1000".parse().unwrap();
-    assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    assert_eq!(
+        secondary.serve_with(&mut cx, TestNext, true).await,
+        Outcome::Response
+    );
     cx.protocol = Protocol::Tcp;
     cx.max_response_size = 65535;
-    assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    assert_eq!(
+        secondary.serve_with(&mut cx, TestNext, true).await,
+        Outcome::Response
+    );
     let response = Message::parse(&response).unwrap();
     assert_eq!(response.id(), 7);
+    assert_eq!(response.opcode(), Opcode::NOTIFY);
     assert!(response.aa());
-    let zone = &chain.secondary.as_ref().unwrap().shared.zones.load()[0];
-    assert_eq!(zone.notify_pending.load(Ordering::Relaxed), 2);
+    let zone = &secondary.shared.zones.load()[0];
+    assert_eq!(
+        *zone.notify_source.lock().unwrap(),
+        Some("127.0.0.1:15353".parse().unwrap())
+    );
     tokio::time::timeout(std::time::Duration::from_millis(10), zone.notify.notified())
         .await
         .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), zone.notify.notified())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn secondary_ignores_malformed_notify_and_non_soa_question() {
+    use pharos_proto::{Message, MessageBuilder};
+    use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
+    let corefile = "example.org:53 {\n secondary {\n transfer from 127.0.0.1:15353\n }\n}";
+    let blocks = pharos_corefile::parse("Corefile", corefile).unwrap();
+    let configured =
+        pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+    let secondary = configured[0].config.secondary.as_ref().unwrap();
+    let apex: Name = "example.org.".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    for (flags, qtype, qclass, qname, client, outcome) in [
+        (
+            0x2500,
+            Type::SOA,
+            Class::IN,
+            apex.clone(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Drop,
+        ),
+        (
+            0x2500,
+            Type::SOA,
+            Class::IN,
+            apex.clone(),
+            "127.0.0.2:1000".parse().unwrap(),
+            Outcome::Drop,
+        ),
+        (
+            0x2000,
+            Type::SOA,
+            Class::IN,
+            apex.clone(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Drop,
+        ),
+        (
+            0x2400,
+            Type::A,
+            Class::IN,
+            apex.clone(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Drop,
+        ),
+        (
+            0x2400,
+            Type::SOA,
+            Class::CH,
+            apex.clone(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Drop,
+        ),
+        (
+            0xa400,
+            Type::SOA,
+            Class::IN,
+            apex.clone(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Drop,
+        ),
+        (
+            0x2400,
+            Type::SOA,
+            Class::IN,
+            "child.example.org.".parse().unwrap(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Drop,
+        ),
+    ] {
+        let mut query = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut query, 512, 7, flags).unwrap();
+        builder
+            .question(NameRef::parse(qname.as_wire(), 0).unwrap(), qtype, qclass)
+            .unwrap();
+        let _ = builder.finish();
+        let mut slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client,
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &apex,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(secondary.serve_with(&mut cx, TestNext, true).await, outcome);
+    }
+    let mut query = Vec::with_capacity(512);
+    let builder = MessageBuilder::new(&mut query, 512, 7, 0x2400).unwrap();
+    let _ = builder.finish();
+    let mut slots = [None; 8];
+    let mut cx = Context {
+        query: Message::parse(&query).unwrap(),
+        client: "127.0.0.1:1000".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &apex,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        secondary.serve_with(&mut cx, TestNext, true).await,
+        Outcome::Drop
+    );
+    let zone = &secondary.shared.zones.load()[0];
+    assert!(zone.notify_source.lock().unwrap().is_none());
 }
 
 #[test]
-fn coredns_zero_soa_timers_use_one_second() {
+fn zero_soa_timers_use_one_second_floor() {
     let zone = SecondaryZone::new(ZoneConfig {
         apex: "example.org.".parse().unwrap(),
         from: vec![],
@@ -317,45 +564,48 @@ async fn failed_refresh_expires_the_zone() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let (release_recovery, wait_for_recovery) = tokio::sync::oneshot::channel();
     let primary = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let len = socket.read_u16().await.unwrap();
-        let mut query = vec![0; usize::from(len)];
-        socket.read_exact(&mut query).await.unwrap();
-        let query = Message::parse(&query).unwrap();
-        let question = query.questions().next().unwrap();
-        let mut response = Vec::with_capacity(512);
-        let mut builder = MessageBuilder::new(&mut response, 512, query.id(), 0x8400).unwrap();
-        builder
-            .question(question.name, question.qtype, question.qclass)
-            .unwrap();
-        let mut soa = vec![0, 0];
-        for value in [1u32, 1, 1, 1, 0] {
-            soa.extend_from_slice(&value.to_be_bytes());
+        let mut wait_for_recovery = Some(wait_for_recovery);
+        for attempt in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let len = socket.read_u16().await.unwrap();
+            let mut query = vec![0; usize::from(len)];
+            socket.read_exact(&mut query).await.unwrap();
+            let query = Message::parse(&query).unwrap();
+            let question = query.questions().next().unwrap();
+            let mut response = Vec::with_capacity(512);
+            let flags = if attempt == 1 { 0x8405 } else { 0x8400 };
+            let mut builder = MessageBuilder::new(&mut response, 512, query.id(), flags).unwrap();
+            builder
+                .question(question.name, question.qtype, question.qclass)
+                .unwrap();
+            if attempt != 1 {
+                if attempt == 2 {
+                    wait_for_recovery.take().unwrap().await.unwrap();
+                }
+                let mut soa = vec![0, 0];
+                for value in [1u32, 1, 3, 1, 0] {
+                    soa.extend_from_slice(&value.to_be_bytes());
+                }
+                let count = if attempt == 0 { 2 } else { 1 };
+                for _ in 0..count {
+                    builder
+                        .record(
+                            Section::Answer,
+                            question.name,
+                            Type::SOA,
+                            Class::IN,
+                            60,
+                            &soa,
+                        )
+                        .unwrap();
+                }
+            }
+            let _ = builder.finish();
+            socket.write_u16(response.len() as u16).await.unwrap();
+            socket.write_all(&response).await.unwrap();
         }
-        builder
-            .record(
-                Section::Answer,
-                question.name,
-                Type::SOA,
-                Class::IN,
-                60,
-                &soa,
-            )
-            .unwrap();
-        builder
-            .record(
-                Section::Answer,
-                question.name,
-                Type::SOA,
-                Class::IN,
-                60,
-                &soa,
-            )
-            .unwrap();
-        let _ = builder.finish();
-        socket.write_u16(response.len() as u16).await.unwrap();
-        socket.write_all(&response).await.unwrap();
     });
     let (shared, _, _) = catalog_shared();
     let zone = Arc::new(SecondaryZone::new(ZoneConfig {
@@ -364,12 +614,14 @@ async fn failed_refresh_expires_the_zone() {
         catalog: None,
     }));
     let task = tokio::spawn(update::run(shared, Arc::clone(&zone)));
-    primary.await.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while zone.current.load().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "initial transfer did not publish a zone"
+        );
         tokio::task::yield_now().await;
     }
-    // Jitter is pinned to zero in tests, so the 1 s refresh, retry, and expire timers fire on their own.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !zone.expired.load(Ordering::Relaxed) {
         assert!(
             std::time::Instant::now() < deadline,
@@ -377,21 +629,33 @@ async fn failed_refresh_expires_the_zone() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    release_recovery.send(()).unwrap();
+    while zone.expired.load(Ordering::Relaxed) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "zone stayed expired after a successful unchanged SOA check"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), primary)
+        .await
+        .expect("primary did not finish")
+        .unwrap();
     assert!(zone.current.load().is_some());
     task.abort();
     let _ = task.await;
 }
 
 fn catalog_shared() -> (Arc<Shared>, Arc<SecondaryZone>, Arc<SecondaryZone>) {
-    let source = |apex: &str, catalog| {
+    let source = |apex: &str| {
         Arc::new(SecondaryZone::new(ZoneConfig {
             apex: apex.parse().unwrap(),
             from: vec!["127.0.0.1:1".into()],
-            catalog,
+            catalog: Some(vec![".".parse().unwrap()]),
         }))
     };
-    let old = source("old.catalog.example.", Some(vec![]));
-    let new = source("new.catalog.example.", Some(vec![]));
+    let old = source("old.catalog.example.");
+    let new = source("new.catalog.example.");
     let shared = Arc::new(Shared {
         zones: arc_swap::ArcSwap::from_pointee(vec![Arc::clone(&old), Arc::clone(&new)]),
         tasks: Mutex::new(Vec::new()),
@@ -651,6 +915,63 @@ async fn catalog_migration_respects_restrictions_and_changed_identity() {
     for task in shared.tasks.lock().unwrap().drain(..) {
         task.abort();
     }
+}
+
+#[tokio::test]
+async fn broken_catalog_cannot_authorize_member_migration() {
+    let (shared, old, new) = catalog_shared();
+    catalog::apply(
+        &shared,
+        &old,
+        catalog_for(&old.config.apex, Some("a"), Some("new.catalog.example.")),
+    );
+    let member = shared
+        .zones
+        .load()
+        .iter()
+        .find(|zone| zone.config.apex.to_string() == "example.org.")
+        .unwrap()
+        .clone();
+    catalog::invalidate(&shared, &old);
+    catalog::apply(
+        &shared,
+        &new,
+        catalog_for(&new.config.apex, Some("a"), None),
+    );
+    assert!(Arc::ptr_eq(
+        &member,
+        shared
+            .zones
+            .load()
+            .iter()
+            .find(|zone| zone.config.apex == member.config.apex)
+            .unwrap()
+    ));
+    for task in shared.tasks.lock().unwrap().drain(..) {
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn empty_catalog_scope_rejects_all_members() {
+    let (shared, old, _) = catalog_shared();
+    let restricted = SecondaryZone::new(ZoneConfig {
+        apex: old.config.apex.clone(),
+        from: old.config.from.clone(),
+        catalog: Some(Vec::new()),
+    });
+    catalog::apply(
+        &shared,
+        &restricted,
+        catalog_for(&restricted.config.apex, Some("a"), None),
+    );
+    assert!(
+        shared
+            .zones
+            .load()
+            .iter()
+            .all(|zone| zone.config.apex != "example.org.".parse().unwrap())
+    );
 }
 
 #[tokio::test]

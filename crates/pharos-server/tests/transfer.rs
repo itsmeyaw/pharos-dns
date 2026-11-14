@@ -513,7 +513,7 @@ async fn axfr_client_rejects_a_different_closing_soa() {
 }
 
 #[tokio::test]
-async fn coredns_axfr_client_accepts_different_closing_soa() {
+async fn coredns_axfr_client_rejects_different_closing_soa() {
     let key = ListenerKey {
         transport: Transport::Dns,
         address: "127.0.0.1:53".parse().unwrap(),
@@ -523,7 +523,7 @@ async fn coredns_axfr_client_accepts_different_closing_soa() {
     let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
         .await
         .unwrap();
-    pharos_server::transfer::axfr_coredns(
+    let error = pharos_server::transfer::axfr_coredns(
         listener.local_addr(),
         &"a.".parse().unwrap(),
         1,
@@ -531,7 +531,8 @@ async fn coredns_axfr_client_accepts_different_closing_soa() {
         |_| Ok(()),
     )
     .await
-    .unwrap();
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     listener.shutdown().await.unwrap();
 }
 
@@ -583,14 +584,20 @@ async fn notify_sender_retries_refused_responses() {
 }
 
 #[tokio::test]
-async fn notify_accepts_noerror_without_qr_or_notify_opcode() {
+async fn notify_retries_response_without_qr_or_notify_opcode() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = socket.local_addr().unwrap();
     let responder = tokio::spawn(async move {
         let mut wire = [0; 512];
-        let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
-        wire[2] &= !0xf8;
-        socket.send_to(&wire[..len], peer).await.unwrap();
+        for attempt in 0..2 {
+            let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+            if attempt == 0 {
+                wire[2] &= !0xf8;
+            } else {
+                wire[2] |= 0xa0;
+            }
+            socket.send_to(&wire[..len], peer).await.unwrap();
+        }
     });
     pharos_server::transfer::notify(
         address,
@@ -600,6 +607,74 @@ async fn notify_accepts_noerror_without_qr_or_notify_opcode() {
     )
     .await
     .unwrap();
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn notify_uses_tcp_when_udp_does_not_reply() {
+    use pharos_proto::{Message, MessageBuilder};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = tcp.local_addr().unwrap();
+    let udp = UdpSocket::bind(address).await.unwrap();
+    let responder = tokio::spawn(async move {
+        let (mut socket, _) = tcp.accept().await.unwrap();
+        let len = socket.read_u16().await.unwrap();
+        let mut request = vec![0; usize::from(len)];
+        socket.read_exact(&mut request).await.unwrap();
+        let query = Message::parse(&request).unwrap();
+        let question = query.questions().next().unwrap();
+        let mut response = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut response, 512, query.id(), 0xa400).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        let _ = builder.finish();
+        socket.write_u16(response.len() as u16).await.unwrap();
+        socket.write_all(&response).await.unwrap();
+    });
+    pharos_server::transfer::notify(
+        address,
+        &"a.".parse().unwrap(),
+        42,
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap();
+    responder.await.unwrap();
+    drop(udp);
+}
+
+#[tokio::test]
+async fn notify_reports_tcp_fallback_error_after_udp_retries() {
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = udp.local_addr().unwrap();
+    let error = pharos_server::transfer::notify(
+        address,
+        &"a.".parse().unwrap(),
+        42,
+        Duration::from_millis(10),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("TCP NOTIFY fallback failed"));
+    assert!(error.to_string().contains("UDP retries failed"));
+}
+
+#[tokio::test]
+async fn notify_treats_notimp_as_transaction_complete() {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let responder = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+        wire[2] |= 0x80;
+        wire[3] = 4;
+        socket.send_to(&wire[..len], peer).await.unwrap();
+    });
+    pharos_server::transfer::notify(address, &"a.".parse().unwrap(), 42, Duration::from_secs(1))
+        .await
+        .unwrap();
     responder.await.unwrap();
 }
 
@@ -615,6 +690,7 @@ async fn notify_retries_response_with_wrong_id() {
             if attempt == 0 {
                 wire[1] ^= 1;
             }
+            wire[2] |= 0x80;
             socket.send_to(&wire[..len], peer).await.unwrap();
         }
     });

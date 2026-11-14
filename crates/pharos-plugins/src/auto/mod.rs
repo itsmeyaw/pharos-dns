@@ -116,13 +116,27 @@ impl Auto {
                                 _ = shutdown.changed() => break,
                             }
                             let worker = Arc::clone(&scan);
-                            let _ = tokio::task::spawn_blocking(move || worker.scan()).await;
+                            let added =
+                                match tokio::task::spawn_blocking(move || worker.scan()).await {
+                                    Ok(added) => added,
+                                    Err(error) => {
+                                        pharos_server::logging::log(
+                                            "ERROR",
+                                            "auto",
+                                            &format!("Zone scan failed: {error}"),
+                                        );
+                                        Vec::new()
+                                    }
+                                };
                             if *shutdown.borrow() {
                                 break;
                             }
+                            // RFC 1996 §4.1: Newly loaded zones notify their Secondary Servers.
                             scan.start_watchers(interval);
                             #[cfg(feature = "plugin-transfer")]
-                            notify_all(&scan).await;
+                            notify_zones(&scan, &added).await;
+                            #[cfg(not(feature = "plugin-transfer"))]
+                            drop(added);
                         }
                     });
                     shared.tasks.lock().unwrap().push(scan_task);
@@ -297,16 +311,21 @@ impl Plugin for Auto {
 
 #[cfg(feature = "plugin-transfer")]
 async fn notify_all(shared: &Shared) {
+    let zones = shared.zones.load_full();
+    let loaded: Vec<_> = zones
+        .origins
+        .values()
+        .map(|zone| zone.apex.clone())
+        .collect();
+    notify_zones(shared, &loaded).await;
+}
+
+#[cfg(feature = "plugin-transfer")]
+async fn notify_zones(shared: &Shared, zones: &[Name]) {
     if let Some(transfer) = shared.notifier.get() {
-        let zones = shared.zones.load_full();
-        for zone in zones.origins.values() {
-            // RFC 1996 §4.1: notify Secondary Servers when a Zone is loaded.
-            if let Err(error) = transfer.notify(&zone.apex).await {
-                pharos_server::logging::log(
-                    "WARN",
-                    "auto",
-                    &format!("NOTIFY {}: {error}", zone.apex),
-                );
+        for zone in zones {
+            if let Err(error) = transfer.notify(zone).await {
+                pharos_server::logging::log("WARN", "auto", &format!("NOTIFY {zone}: {error}"));
             }
         }
     }

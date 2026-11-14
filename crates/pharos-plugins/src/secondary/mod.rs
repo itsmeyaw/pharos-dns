@@ -12,9 +12,10 @@ use crate::zone::{ZoneHolder, contains};
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Rcode, Type};
 use pharos_server::{Context, Next, Outcome, Plugin};
+use std::net::SocketAddr;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 
 #[derive(Debug, Clone)]
@@ -30,7 +31,7 @@ struct SecondaryZone {
     current: ZoneHolder,
     expired: AtomicBool,
     notify: tokio::sync::Notify,
-    notify_pending: AtomicUsize,
+    notify_source: Mutex<Option<SocketAddr>>,
     task: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
@@ -41,7 +42,7 @@ impl SecondaryZone {
             current: ZoneHolder::empty(),
             expired: AtomicBool::new(false),
             notify: tokio::sync::Notify::new(),
-            notify_pending: AtomicUsize::new(0),
+            notify_source: Mutex::new(None),
             task: Mutex::new(None),
         }
     }
@@ -130,6 +131,10 @@ impl Secondary {
         has_next: bool,
     ) -> Outcome {
         let Some(question) = cx.query.questions().next() else {
+            if cx.query.opcode() == Opcode::NOTIFY {
+                // RFC 1996 §3.2: Ignore malformed NOTIFY requests without a Question.
+                return Outcome::Drop;
+            }
             return next.run(cx).await;
         };
         let mut wire = [0u8; 255];
@@ -157,45 +162,11 @@ impl Secondary {
                 Outcome::Unanswered(Rcode::REFUSED)
             };
         };
+        if cx.query.opcode() == Opcode::NOTIFY {
+            return handle_notify(&zone, cx);
+        }
         if matches!(question.qtype, Type::AXFR | Type::IXFR) {
             return Outcome::Unanswered(Rcode::REFUSED);
-        }
-        if cx.query.opcode() == Opcode::NOTIFY {
-            // RFC 1996 §3.10: ignore NOTIFY from unconfigured Primary Servers.
-            if !zone
-                .config
-                .from
-                .iter()
-                .any(|address| update::primary_matches(address, cx.client))
-            {
-                return Outcome::Drop;
-            }
-            let max = cx.max_response_size.max(512);
-            if cx.response.capacity() < max {
-                if cx.protocol == pharos_server::Protocol::Tcp {
-                    cx.response.reserve(max.saturating_sub(cx.response.len()));
-                } else {
-                    return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
-                }
-            }
-            // RFC 1996 §4.7: Acknowledge primary NOTIFY with its ID, opcode, and question.
-            let result = (|| {
-                let mut builder = MessageBuilder::new(
-                    cx.response,
-                    max,
-                    cx.query.id(),
-                    0x8400 | (cx.query.flags() & 0x7910),
-                )?;
-                builder.question(question.name, question.qtype, question.qclass)?;
-                let _ = builder.finish();
-                Ok::<(), pharos_proto::BuildError>(())
-            })();
-            zone.notify_pending.fetch_add(1, Ordering::Relaxed);
-            zone.notify.notify_one();
-            return result.map_or_else(
-                |error| Outcome::Error(pharos_server::Error::Build(error)),
-                |()| Outcome::Response,
-            );
         }
         if zone.expired.load(Ordering::Relaxed) {
             return Outcome::Unanswered(Rcode::SERVFAIL);
@@ -205,6 +176,57 @@ impl Secondary {
         };
         snapshot.lookup(cx, next, &self.fallthrough).await
     }
+}
+
+fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
+    // RFC 1996 §3.10: Ignore NOTIFY from unconfigured Primary Servers.
+    let Some(primary) = zone
+        .config
+        .from
+        .iter()
+        .find_map(|address| update::primary_address(address, cx.client))
+    else {
+        return Outcome::Drop;
+    };
+    let Some(question) = cx.query.questions().next() else {
+        return Outcome::Drop;
+    };
+    // RFC 1996 §§3.2, 3.3: NOTIFY uses AA, one IN SOA Question, and zero undefined fields.
+    if cx.query.flags() & 0x83ff != 0
+        || cx.query.flags() & 0x0400 == 0
+        || cx.query.question_count() != 1
+        || question.qtype != Type::SOA
+        || question.qclass != Class::IN
+        || question.name != zone.config.apex
+    {
+        return Outcome::Drop;
+    }
+    let max = cx.max_response_size.max(512);
+    if cx.response.capacity() < max {
+        if cx.protocol == pharos_server::Protocol::Tcp {
+            cx.response.reserve(max.saturating_sub(cx.response.len()));
+        } else {
+            return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
+        }
+    }
+    // RFC 1996 §4.7: Acknowledge valid NOTIFY with clean response flags and its Question.
+    let result = (|| {
+        let mut builder = MessageBuilder::new(cx.response, max, cx.query.id(), 0xa400)?;
+        builder.question(question.name, question.qtype, question.qclass)?;
+        let _ = builder.finish();
+        Ok::<(), pharos_proto::BuildError>(())
+    })();
+    if result.is_ok() {
+        let mut pending = zone.notify_source.lock().unwrap();
+        if pending.is_none() {
+            *pending = Some(primary);
+            zone.notify.notify_one();
+        }
+    }
+    result.map_or_else(
+        |error| Outcome::Error(pharos_server::Error::Build(error)),
+        |()| Outcome::Response,
+    )
 }
 
 impl Plugin for Secondary {
