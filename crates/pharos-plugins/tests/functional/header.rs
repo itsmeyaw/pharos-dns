@@ -63,11 +63,11 @@ async fn coredns_query_and_response_rules_and_precedence() {
         ("response", 0_u16, "set", "ra", 0x80),
         ("response", 0x80, "clear", "ra", 0),
         ("response", 0, "set", "rd", 0x100),
-        ("response", 0, "set", "aa", 0x400),
+        ("response", 0, "set", "aa", 0),
         ("query", 0, "set", "ra", 0x80),
         ("query", 0, "set", "rd", 0x100),
         ("query", 0x100, "clear", "rd", 0),
-        ("query", 0, "set", "aa", 0x400),
+        ("query", 0, "set", "aa", 0),
     ] {
         let directive = format!("header {{\n {selector} {action} {flag}\n}}");
         let chain = configured(&directive).unwrap();
@@ -157,7 +157,7 @@ async fn rules_are_ordered_and_non_response_outcomes_are_preserved() {
         assert_eq!(
             Message::parse(cx.response).unwrap().flags(),
             if outcome == Outcome::Response {
-                0x480
+                0x80
             } else {
                 0x80
             }

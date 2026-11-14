@@ -83,11 +83,21 @@ impl Header {
 
 impl Plugin for Header {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        cx.query = cx.query.with_flags(self.query.apply(cx.query.flags()));
+        // RFC 1035 §4.1.1: AA is response-only, so header rules cannot set it in a Query.
+        cx.query = cx
+            .query
+            .with_flags(self.query.apply(cx.query.flags()) & !0x0400);
         let outcome = next.run(cx).await;
         if outcome == Outcome::Response && cx.response.len() >= 4 {
             let flags = u16::from_be_bytes([cx.response[2], cx.response[3]]);
-            cx.response[2..4].copy_from_slice(&self.response.apply(flags).to_be_bytes());
+            // RFC 1035 §4.1.1: preserve AA unless Next marked the Response authoritative.
+            let flags = self.response.apply(flags)
+                & (if flags & 0x0400 == 0 {
+                    !0x0400
+                } else {
+                    u16::MAX
+                });
+            cx.response[2..4].copy_from_slice(&flags.to_be_bytes());
         }
         outcome
     }
