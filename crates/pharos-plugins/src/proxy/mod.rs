@@ -7,7 +7,7 @@
 pub mod health;
 pub use health::{Health, HealthConfig};
 
-use pharos_proto::{Message, MessageError, NameError, Rcode, Type};
+use pharos_proto::{ClientSubnet, EdnsOption, Message, MessageError, NameError, Rcode, Type};
 use pharos_server::{
     metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry},
     write_tcp_frame,
@@ -148,6 +148,153 @@ struct Cached {
 enum Socket {
     Udp(UdpSocket),
     Tcp(TcpStream),
+}
+
+fn ecs_option(message: &Message<'_>) -> Result<Option<ClientSubnet>, ()> {
+    let mut ecs = None;
+    for option in message
+        .opt()
+        .into_iter()
+        .flat_map(|opt| opt.options().iter())
+    {
+        if let EdnsOption::ClientSubnet(subnet) = option
+            && ecs.replace(subnet).is_some()
+        {
+            return Err(());
+        }
+    }
+    Ok(ecs)
+}
+
+fn keepalive_zero(message: &Message<'_>) -> bool {
+    message
+        .opt()
+        .into_iter()
+        .flat_map(|opt| opt.options().iter())
+        .any(|option| matches!(option, EdnsOption::TcpKeepalive(Some(0))))
+}
+
+fn same_ecs(request: &Message<'_>, response: &Message<'_>) -> bool {
+    match (ecs_option(request), ecs_option(response)) {
+        (Ok(Some(query)), Ok(Some(answer))) => {
+            // RFC 7871 §7.3: Responses echo ECS family, source prefix, and address.
+            query.family() == answer.family()
+                && query.source_prefix() == answer.source_prefix()
+                && query.address() == answer.address()
+                && answer.scope_prefix() <= answer.source_prefix()
+        }
+        (Ok(Some(_)), Ok(None)) if response.rcode() == Rcode::REFUSED => true,
+        (Ok(None), Ok(None)) => true,
+        _ => false,
+    }
+}
+
+fn rrset_ttls_match(message: &Message<'_>) -> bool {
+    message
+        .answers()
+        .chain(message.authorities())
+        .chain(message.additionals())
+        .all(|record| {
+            message
+                .answers()
+                .chain(message.authorities())
+                .chain(message.additionals())
+                .all(|other| {
+                    record.name != other.name
+                        || record.rtype != other.rtype
+                        || record.class != other.class
+                        || record.ttl == other.ttl
+                })
+        })
+}
+
+fn rrsets_stay_in_one_section(message: &Message<'_>) -> bool {
+    let repeats = |record: pharos_proto::Record<'_>, other: pharos_proto::Record<'_>| {
+        record.name == other.name && record.rtype == other.rtype && record.class == other.class
+    };
+    message.answers().all(|answer| {
+        message
+            .authorities()
+            .chain(message.additionals())
+            .all(|other| !repeats(answer, other))
+    }) && message.authorities().all(|authority| {
+        message
+            .additionals()
+            .all(|additional| !repeats(authority, additional))
+    })
+}
+
+fn sanitize_edns(wire: &mut [u8], length: usize, transport: Transport, remove_ecs: bool) -> usize {
+    let (start, old_len) = {
+        let Ok(message) = Message::parse(&wire[..length]) else {
+            return length;
+        };
+        let Some(record) = message
+            .additionals()
+            .find(|record| record.rtype == Type::OPT)
+        else {
+            return length;
+        };
+        (
+            record.rdata.as_ptr() as usize - wire.as_ptr() as usize,
+            record.rdata.len(),
+        )
+    };
+    let old_end = start + old_len;
+    let mut read = start;
+    let mut write = start;
+    while read < old_end {
+        let code = u16::from_be_bytes([wire[read], wire[read + 1]]);
+        let data_len = usize::from(u16::from_be_bytes([wire[read + 2], wire[read + 3]]));
+        let option_len = 4 + data_len;
+        if code == 11 && transport == Transport::Udp {
+            // RFC 7828 §3.2.1: Never send TCP keepalive over UDP.
+            read += option_len;
+            continue;
+        }
+        if code == 8 && remove_ecs {
+            // RFC 7871 §7.1.3: Retry REFUSED Queries without ECS.
+            read += option_len;
+            continue;
+        }
+        if code == 11 && transport == Transport::Tcp {
+            // RFC 7828 §3.2.1: TCP Queries carry a zero-length TIMEOUT option.
+            wire.copy_within(read..read + 4, write);
+            wire[write + 2..write + 4].fill(0);
+            write += 4;
+        } else {
+            wire.copy_within(read..read + option_len, write);
+            if code == 8 {
+                // RFC 7871 §6: ECS queries use SCOPE PREFIX-LENGTH zero.
+                wire[write + 7] = 0;
+            }
+            write += option_len;
+        }
+        read += option_len;
+    }
+    let new_len = write - start;
+    wire.copy_within(old_end..length, write);
+    wire[start - 2..start].copy_from_slice(&(new_len as u16).to_be_bytes());
+    length - old_len + new_len
+}
+
+/// Build one reusable retry Query without the client's ECS option.
+pub(crate) fn without_ecs(
+    query: &[u8],
+    output: &mut Vec<u8>,
+    transport: Transport,
+) -> Result<Option<usize>, Error> {
+    let message = Message::parse(query).map_err(|_| Error::InvalidRequest)?;
+    if !ecs_option(&message)
+        .map_err(|_| Error::InvalidRequest)?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    output.clear();
+    output.extend_from_slice(query);
+    let len = sanitize_edns(output, query.len(), transport, true);
+    Ok(Some(len))
 }
 
 impl Socket {
@@ -483,10 +630,10 @@ impl Proxy {
         };
         let mut id = [0; 2];
         // RFC 8945 §5.5: forward messages with unshared TSIG keys unchanged.
-        if request
+        let signed = request
             .additionals()
-            .any(|record| record.rtype == Type::TSIG)
-        {
+            .any(|record| record.rtype == Type::TSIG);
+        if signed {
             id.copy_from_slice(&query[..2]);
         } else {
             // RFC 5452 §9.2: outgoing queries use unpredictable IDs.
@@ -497,8 +644,13 @@ impl Proxy {
         // RFC 5625 §4.3: Proxy Queries regardless of QTYPE and QCLASS.
         response[..query.len()].copy_from_slice(query);
         response[..2].copy_from_slice(&id);
+        let outgoing_len = if signed {
+            query.len()
+        } else {
+            sanitize_edns(response, query.len(), transport, false)
+        };
         let local_addr = socket.local_addr()?;
-        let sent = timeout(READ_TIMEOUT, socket.send(&response[..query.len()]))
+        let sent = timeout(READ_TIMEOUT, socket.send(&response[..outgoing_len]))
             .await
             .map_err(|_| Error::Io(io::ErrorKind::TimedOut.into()))?;
         if let Err(err) = sent {
@@ -569,21 +721,31 @@ impl Proxy {
                 .get_or_init(|| metrics.proxy.request_duration(&Rcode(code).to_string()))
                 .observe(start.elapsed().as_secs_f64());
         }
-        // RFC 5452 §9.1: response names, classes, and types must match the query.
-        // RFC 1035 §7.3: Verify the echoed Question against the outstanding request.
+        // RFC 5452 §4.2: Response Question must match the outstanding Query.
         let same_questions = request.question_count() == answer.question_count()
             && request
                 .questions()
                 .zip(answer.questions())
                 .all(|(a, b)| a.name == b.name && a.qtype == b.qtype && a.qclass == b.qclass);
-        if !answer.qr() || !same_questions {
+        if !answer.qr() || !same_questions || !same_ecs(&request, &answer) {
             return Err(Error::Mismatch(length));
         }
+        // RFC 2181 §5.2: All records in each RRset must have one TTL.
+        if !rrset_ttls_match(&answer) {
+            return Err(Error::Io(io::ErrorKind::InvalidData.into()));
+        }
+        // RFC 2181 §5.5: An RRset must not be repeated in another section.
+        if !rrsets_stay_in_one_section(&answer) {
+            return Err(Error::Io(io::ErrorKind::InvalidData.into()));
+        }
+        let close_after = keepalive_zero(&answer);
         // RFC 1035 §4.1.1: the response ID matches the original query ID.
         response[..2].copy_from_slice(&query[..2]);
         {
             let mut queue = self.shards[protocol][shard].lock().unwrap();
-            if !self.stopped.load(Ordering::Acquire)
+            // RFC 7828 §3.2.2: TIMEOUT zero forbids reusing this TCP connection.
+            if (transport == Transport::Udp || !close_after)
+                && !self.stopped.load(Ordering::Acquire)
                 && self.idle[protocol]
                     .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                         (self.max_idle_conns == 0 || count < self.max_idle_conns).then(|| count + 1)
@@ -615,6 +777,17 @@ impl Drop for Proxy {
 mod tests {
     use super::*;
 
+    fn query_with_options(options: &[u8]) -> Vec<u8> {
+        let mut wire = vec![
+            0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 0,
+        ];
+        wire[26..28].copy_from_slice(&(options.len() as u16).to_be_bytes());
+        wire.extend_from_slice(options);
+        wire
+    }
+
+    const KEEPALIVE_AND_ECS: &[u8] = &[0, 11, 0, 2, 0, 100, 0, 8, 0, 7, 0, 1, 24, 8, 192, 0, 2];
+
     #[tokio::test]
     async fn tcp_upstream_connect_disables_nagle() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -622,6 +795,94 @@ mod tests {
             .await
             .unwrap();
         assert!(stream.nodelay().unwrap());
+    }
+
+    #[test]
+    fn sanitizes_tcp_keepalive_and_ecs_scope_in_queries() {
+        let mut wire = query_with_options(KEEPALIVE_AND_ECS);
+        let len = wire.len();
+        let new_len = sanitize_edns(&mut wire, len, Transport::Tcp, false);
+        let message = Message::parse(&wire[..new_len]).unwrap();
+        let options: Vec<_> = message.opt().unwrap().options().iter().collect();
+        assert_eq!(options[0], EdnsOption::TcpKeepalive(None));
+        assert!(
+            matches!(options[1], EdnsOption::ClientSubnet(subnet) if subnet.scope_prefix() == 0)
+        );
+        assert_eq!(new_len, len - 2);
+    }
+
+    #[test]
+    fn removes_udp_keepalive_without_losing_ecs() {
+        let mut wire = query_with_options(KEEPALIVE_AND_ECS);
+        let len = wire.len();
+        let new_len = sanitize_edns(&mut wire, len, Transport::Udp, false);
+        let message = Message::parse(&wire[..new_len]).unwrap();
+        let options: Vec<_> = message.opt().unwrap().options().iter().collect();
+        assert_eq!(options.len(), 1);
+        assert!(
+            matches!(options[0], EdnsOption::ClientSubnet(subnet) if subnet.scope_prefix() == 0)
+        );
+        assert_eq!(new_len, len - 6);
+    }
+
+    #[test]
+    fn strips_ecs_for_refused_retry_and_honors_zero_keepalive() {
+        let query = query_with_options(KEEPALIVE_AND_ECS);
+        let mut retry = Vec::new();
+        let len = without_ecs(&query, &mut retry, Transport::Tcp)
+            .unwrap()
+            .unwrap();
+        let message = Message::parse(&retry[..len]).unwrap();
+        assert_eq!(
+            message.opt().unwrap().options().iter().collect::<Vec<_>>(),
+            [EdnsOption::TcpKeepalive(None)]
+        );
+
+        let zero = query_with_options(&[0, 11, 0, 2, 0, 0]);
+        assert!(keepalive_zero(&Message::parse(&zero).unwrap()));
+    }
+
+    #[test]
+    fn accepts_ecs_response_scope_but_requires_query_fields() {
+        let request_wire = query_with_options(&KEEPALIVE_AND_ECS[6..]);
+        let request = Message::parse(&request_wire).unwrap();
+        let mut response_options = KEEPALIVE_AND_ECS[6..].to_vec();
+        response_options[7] = 16;
+        let response_wire = query_with_options(&response_options);
+        let response = Message::parse(&response_wire).unwrap();
+        assert!(same_ecs(&request, &response));
+        response_options[8] = 193;
+        let mismatched_wire = query_with_options(&response_options);
+        let mismatched = Message::parse(&mismatched_wire).unwrap();
+        assert!(!same_ecs(&request, &mismatched));
+        let mut refused_wire = query_with_options(&[]);
+        refused_wire[3] = 5;
+        let refused = Message::parse(&refused_wire).unwrap();
+        assert!(same_ecs(&request, &refused));
+    }
+
+    #[test]
+    fn rejects_mixed_ttl_rrsets() {
+        let mut wire = vec![0, 1, 0x81, 0x80, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 1, 0, 1];
+        wire.extend_from_slice(&[
+            0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0,
+            0, 30, 0, 4, 192, 0, 2, 2,
+        ]);
+        let message = Message::parse(&wire).unwrap();
+        assert!(!rrset_ttls_match(&message));
+        wire[42] = 60;
+        let message = Message::parse(&wire).unwrap();
+        assert!(rrset_ttls_match(&message));
+    }
+
+    #[test]
+    fn rejects_rrsets_repeated_across_sections() {
+        let mut wire = vec![0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 1];
+        let rr = [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1];
+        wire.extend_from_slice(&rr);
+        wire.extend_from_slice(&rr);
+        let message = Message::parse(&wire).unwrap();
+        assert!(!rrsets_stay_in_one_section(&message));
     }
 
     #[cfg(target_os = "linux")]
