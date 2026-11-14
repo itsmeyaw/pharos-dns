@@ -188,10 +188,12 @@ pub(crate) fn has_unsigned_ecs_message(message: &Message<'_>) -> bool {
             return false;
         }
         if record.rtype == Type::OPT {
-            let options = EdnsOptions::parse(record.rdata).expect("Message validated OPT options");
-            has_ecs |= options
-                .iter()
-                .any(|option| matches!(option, EdnsOption::ClientSubnet(_)));
+            // Untrusted wire data: malformed options carry no ECS instead of panicking the worker.
+            if let Ok(options) = EdnsOptions::parse(record.rdata) {
+                has_ecs |= options
+                    .iter()
+                    .any(|option| matches!(option, EdnsOption::ClientSubnet(_)));
+            }
         }
     }
     has_ecs
