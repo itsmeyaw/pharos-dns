@@ -165,6 +165,34 @@ fn whoami_passes_non_in_questions_to_next_plugin() {
     assert!(response.is_empty());
 }
 
+#[cfg(feature = "plugin-forward")]
+#[tokio::test]
+async fn non_in_whoami_query_errors_on_shared_listener() {
+    use pharos_plugins::servers;
+    use pharos_server::{Action, Handler};
+
+    let text = "example.:0 {\n forward . 127.0.0.1:53\n}\nother.:0 {\n whoami\n}";
+    let blocks = configure::<Chain>(&parse("Corefile", text).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    let query = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x03www\x05other\0\0\x01\0\x03";
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                query,
+                "127.0.0.1:1000".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let reply = Message::parse(&response).unwrap();
+    assert_eq!(reply.rcode(), pharos_proto::Rcode::SERVFAIL);
+    assert_eq!(reply.additional_count(), 0);
+}
+
 #[test]
 fn insufficient_preallocated_buffer_is_an_error() {
     let blocks = parse("Corefile", ". {\n whoami\n}").unwrap();
