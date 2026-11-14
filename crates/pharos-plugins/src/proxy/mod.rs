@@ -7,12 +7,15 @@
 pub mod health;
 pub use health::{Health, HealthConfig};
 
-use pharos_proto::{ClientSubnet, EdnsOption, Message, MessageError, NameError, Rcode, Type};
+use pharos_proto::{
+    ClientSubnet, EdnsOption, Message, MessageError, NameError, NameRef, Rcode, Type,
+};
 use pharos_server::{
     metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry},
     write_tcp_frame,
 };
 use std::{
+    cell::RefCell,
     collections::VecDeque,
     fmt, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -33,6 +36,7 @@ static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 thread_local! { static SHARD: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS; }
 const EXPIRE: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+thread_local! { static RRSET_SCRATCH: RefCell<Vec<RecordIndex>> = const { RefCell::new(Vec::new()) }; }
 
 #[cfg(target_os = "linux")]
 fn enable_recv_err(socket: &UdpSocket, address: SocketAddr) {
@@ -151,6 +155,7 @@ enum Socket {
 }
 
 fn ecs_option(message: &Message<'_>) -> Result<Option<ClientSubnet>, ()> {
+    // RFC 7871 §6: Read ECS fields from the validated option view.
     let mut ecs = None;
     for option in message
         .opt()
@@ -164,6 +169,14 @@ fn ecs_option(message: &Message<'_>) -> Result<Option<ClientSubnet>, ()> {
         }
     }
     Ok(ecs)
+}
+
+pub(crate) fn has_ecs(message: &Message<'_>) -> bool {
+    message.opt().is_some_and(|opt| {
+        opt.options()
+            .iter()
+            .any(|option| matches!(option, EdnsOption::ClientSubnet(_)))
+    })
 }
 
 fn keepalive_zero(message: &Message<'_>) -> bool {
@@ -183,44 +196,96 @@ fn same_ecs(request: &Message<'_>, response: &Message<'_>) -> bool {
                 && query.address() == answer.address()
                 && answer.scope_prefix() <= answer.source_prefix()
         }
-        (Ok(Some(_)), Ok(None)) if response.rcode() == Rcode::REFUSED => true,
+        (Ok(Some(_)), Ok(None)) => true,
         (Ok(None), Ok(None)) => true,
         _ => false,
     }
 }
 
-fn rrset_ttls_match(message: &Message<'_>) -> bool {
-    message
-        .answers()
-        .chain(message.authorities())
-        .chain(message.additionals())
-        .all(|record| {
-            message
-                .answers()
-                .chain(message.authorities())
-                .chain(message.additionals())
-                .all(|other| {
-                    record.name != other.name
-                        || record.rtype != other.rtype
-                        || record.class != other.class
-                        || record.ttl == other.ttl
-                })
-        })
+#[derive(Clone, Copy)]
+struct RecordIndex {
+    offset: u16,
+    section: u8,
 }
 
-fn rrsets_stay_in_one_section(message: &Message<'_>) -> bool {
-    let repeats = |record: pharos_proto::Record<'_>, other: pharos_proto::Record<'_>| {
-        record.name == other.name && record.rtype == other.rtype && record.class == other.class
-    };
-    message.answers().all(|answer| {
-        message
-            .authorities()
-            .chain(message.additionals())
-            .all(|other| !repeats(answer, other))
-    }) && message.authorities().all(|authority| {
-        message
-            .additionals()
-            .all(|additional| !repeats(authority, additional))
+fn record_fields(wire: &[u8], index: RecordIndex) -> (NameRef<'_>, u16, u16, u32) {
+    // RFC 1035 §4.1.3: Decode RR fixed fields from a validated record offset.
+    let start = usize::from(index.offset);
+    let name = NameRef::parse(wire, start).expect("Message validated RR owner");
+    let fields = start + name.wire_len();
+    (
+        name,
+        u16::from_be_bytes([wire[fields], wire[fields + 1]]),
+        u16::from_be_bytes([wire[fields + 2], wire[fields + 3]]),
+        u32::from_be_bytes([
+            wire[fields + 4],
+            wire[fields + 5],
+            wire[fields + 6],
+            wire[fields + 7],
+        ]),
+    )
+}
+
+fn compare_names(left: NameRef<'_>, right: NameRef<'_>) -> std::cmp::Ordering {
+    let mut left_labels = left.labels();
+    let mut right_labels = right.labels();
+    loop {
+        match (left_labels.next(), right_labels.next()) {
+            (Some(left), Some(right)) => {
+                let order = left
+                    .iter()
+                    .map(|byte| byte.to_ascii_lowercase())
+                    .cmp(right.iter().map(|byte| byte.to_ascii_lowercase()));
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+            }
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+        }
+    }
+}
+
+fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
+    RRSET_SCRATCH.with(|scratch| {
+        let Ok(mut indexes) = scratch.try_borrow_mut() else {
+            return false;
+        };
+        indexes.clear();
+        for (section, records) in [
+            (0, message.answers()),
+            (1, message.authorities()),
+            (2, message.additionals()),
+        ] {
+            for record in records {
+                let Some(offset) = record
+                    .rdata_offset
+                    .checked_sub(record.name.wire_len() + 10)
+                    .and_then(|offset| u16::try_from(offset).ok())
+                else {
+                    return false;
+                };
+                indexes.push(RecordIndex { offset, section });
+            }
+        }
+        indexes.sort_unstable_by(|left, right| {
+            let (left_name, left_type, left_class, left_ttl) = record_fields(wire, *left);
+            let (right_name, right_type, right_class, right_ttl) = record_fields(wire, *right);
+            compare_names(left_name, right_name)
+                .then(left_type.cmp(&right_type))
+                .then(left_class.cmp(&right_class))
+                .then(left.section.cmp(&right.section))
+                .then(left_ttl.cmp(&right_ttl))
+        });
+        indexes.windows(2).all(|pair| {
+            let (left_name, left_type, left_class, left_ttl) = record_fields(wire, pair[0]);
+            let (right_name, right_type, right_class, right_ttl) = record_fields(wire, pair[1]);
+            compare_names(left_name, right_name) != std::cmp::Ordering::Equal
+                || left_type != right_type
+                || left_class != right_class
+                || (pair[0].section == pair[1].section && left_ttl == right_ttl)
+        })
     })
 }
 
@@ -235,6 +300,7 @@ fn sanitize_edns(wire: &mut [u8], length: usize, transport: Transport, remove_ec
         else {
             return length;
         };
+        // RFC 6891 §6.1.2: Parsed OPT RDATA borrows from this validated wire slice.
         (
             record.rdata.as_ptr() as usize - wire.as_ptr() as usize,
             record.rdata.len(),
@@ -285,9 +351,13 @@ pub(crate) fn without_ecs(
     transport: Transport,
 ) -> Result<Option<usize>, Error> {
     let message = Message::parse(query).map_err(|_| Error::InvalidRequest)?;
-    if !ecs_option(&message)
-        .map_err(|_| Error::InvalidRequest)?
-        .is_some()
+    // RFC 8945 §5.5: An ECS-free retry cannot rewrite a signed Query.
+    if message
+        .additionals()
+        .any(|record| record.rtype == Type::TSIG)
+        || ecs_option(&message)
+            .map_err(|_| Error::InvalidRequest)?
+            .is_none()
     {
         return Ok(None);
     }
@@ -634,6 +704,7 @@ impl Proxy {
             .additionals()
             .any(|record| record.rtype == Type::TSIG);
         if signed {
+            // RFC 8945 §5.5: Keep signed Queries unchanged; shortcut: skip EDNS edits until TSIG re-signing exists.
             id.copy_from_slice(&query[..2]);
         } else {
             // RFC 5452 §9.2: outgoing queries use unpredictable IDs.
@@ -730,12 +801,8 @@ impl Proxy {
         if !answer.qr() || !same_questions || !same_ecs(&request, &answer) {
             return Err(Error::Mismatch(length));
         }
-        // RFC 2181 §5.2: All records in each RRset must have one TTL.
-        if !rrset_ttls_match(&answer) {
-            return Err(Error::Io(io::ErrorKind::InvalidData.into()));
-        }
-        // RFC 2181 §5.5: An RRset must not be repeated in another section.
-        if !rrsets_stay_in_one_section(&answer) {
+        // RFC 2181 §§5.2, 5.5: RRSets share TTLs and appear in one section only.
+        if !rrsets_valid(&answer, &response[..length]) {
             return Err(Error::Io(io::ErrorKind::InvalidData.into()));
         }
         let close_after = keepalive_zero(&answer);
@@ -855,6 +922,9 @@ mod tests {
         let mismatched_wire = query_with_options(&response_options);
         let mismatched = Message::parse(&mismatched_wire).unwrap();
         assert!(!same_ecs(&request, &mismatched));
+        let response_without_ecs_wire = query_with_options(&[]);
+        let response_without_ecs = Message::parse(&response_without_ecs_wire).unwrap();
+        assert!(same_ecs(&request, &response_without_ecs));
         let mut refused_wire = query_with_options(&[]);
         refused_wire[3] = 5;
         let refused = Message::parse(&refused_wire).unwrap();
@@ -869,10 +939,10 @@ mod tests {
             0, 30, 0, 4, 192, 0, 2, 2,
         ]);
         let message = Message::parse(&wire).unwrap();
-        assert!(!rrset_ttls_match(&message));
+        assert!(!rrsets_valid(&message, &wire));
         wire[42] = 60;
         let message = Message::parse(&wire).unwrap();
-        assert!(rrset_ttls_match(&message));
+        assert!(rrsets_valid(&message, &wire));
     }
 
     #[test]
@@ -882,7 +952,7 @@ mod tests {
         wire.extend_from_slice(&rr);
         wire.extend_from_slice(&rr);
         let message = Message::parse(&wire).unwrap();
-        assert!(!rrsets_stay_in_one_section(&message));
+        assert!(!rrsets_valid(&message, &wire));
     }
 
     #[cfg(target_os = "linux")]
