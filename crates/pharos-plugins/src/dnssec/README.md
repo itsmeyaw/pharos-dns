@@ -13,7 +13,7 @@
 - Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as insecure. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
 - RSASHA512 (algorithm 10) is refused for signing under RFC 9904 §3. RSA modulus and exponent values above 4096 bits are rejected (RFC 3110 §2; RFC 5702 §§2.1–2.2).
 - P-256/P-384/Ed25519 use RustCrypto fixed-size signatures; ECDSA uses deterministic nonces (RFC 6979 §3.3). `stats_alloc` measured zero Rust-heap allocations across 100 signatures per algorithm; the prior aws-lc-rs P-256 path allocated 300 times and Ed25519 100 times. RSA still allocates an intermediate signature buffer; C-heap use is not measured.
-- Against `main`, remote release `pharos` grows from 19,391,992 to 19,623,800 bytes (+231,808 bytes, +1.195%); `cargo tree` adds 29 unique runtime crate names.
+- Against `main`, remote release `pharos` grows from 19,391,992 to 19,622,680 bytes (+230,688 bytes, +1.190%); `cargo tree` adds 29 unique runtime crate names.
 - Each loaded DNSKEY is bound to its owner zone and cannot sign another configured zone (RFC 4035 §2.1).
 - A configured zone without a matching key passes DNSKEY and DO queries through unchanged.
 - Negative NXDOMAIN/NODATA answers return NOERROR with synthetic NXNAME NSEC in Authority. CoreDNS also maps NXDOMAIN to NOERROR, but puts its black-lie NSEC in Answer.
