@@ -157,6 +157,15 @@ struct Cached {
     uses: u32,
 }
 
+fn next_use_count(transport: Transport, uses: u32) -> u32 {
+    // RFC 5452 §9.2: Count UDP source-port reuse only; TCP sockets have no UDP budget.
+    if transport == Transport::Udp {
+        uses.saturating_add(1)
+    } else {
+        0
+    }
+}
+
 enum Socket {
     Udp(UdpSocket),
     Tcp(TcpStream),
@@ -939,7 +948,8 @@ impl Proxy {
         // RFC 1035 §4.1.1: the response ID matches the original query ID.
         response[..2].copy_from_slice(&query[..2]);
         // RFC 5452 §9.2: retire a UDP socket after its use budget so its source port changes.
-        let spent = transport == Transport::Udp && uses + 1 >= self.udp_max_uses;
+        let next_uses = next_use_count(transport, uses);
+        let spent = transport == Transport::Udp && next_uses >= self.udp_max_uses;
         let max_idle = match (transport, self.max_idle_conns) {
             (Transport::Udp, 0) => UDP_MAX_IDLE,
             (Transport::Udp, max) => max.min(UDP_MAX_IDLE),
@@ -960,7 +970,7 @@ impl Proxy {
                     socket,
                     created,
                     used: Instant::now(),
-                    uses: uses + 1,
+                    uses: next_uses,
                 });
             }
         }
@@ -982,6 +992,14 @@ impl Drop for Proxy {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn tcp_connections_do_not_consume_the_udp_socket_use_budget() {
+        // RFC 5452 §9.2: Source-port reuse limits apply to UDP sockets.
+        assert_eq!(next_use_count(Transport::Tcp, u32::MAX), 0);
+        assert_eq!(next_use_count(Transport::Udp, 7), 8);
+        assert_eq!(next_use_count(Transport::Udp, u32::MAX), u32::MAX);
+    }
 
     fn query_with_options(options: &[u8]) -> Vec<u8> {
         let mut wire = vec![
