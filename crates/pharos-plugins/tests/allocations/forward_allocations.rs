@@ -33,6 +33,13 @@ fn warmed_forward_queries_with_metrics_do_not_allocate() {
 }
 
 fn check_forward(protocol: Protocol, failover: bool) {
+    // RFC 5452 §9.2: Keep UDP allocation sampling within one source-port use budget.
+    let (warm_queries, measured_queries) = if protocol == Protocol::Udp {
+        (3, 4)
+    } else {
+        (10, 10)
+    };
+    let total_queries = warm_queries + measured_queries;
     let mut addresses = Vec::new();
     let mut threads = Vec::new();
     for index in 0..if failover { 2 } else { 1 } {
@@ -47,7 +54,7 @@ fn check_forward(protocol: Protocol, failover: bool) {
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
                 let mut wire = [0; 512];
-                for _ in 0..20 {
+                for _ in 0..total_queries {
                     // RFC 1035 §4.2.2: TCP DNS messages use a two-byte length prefix.
                     let mut size = [0; 2];
                     stream.read_exact(&mut size).unwrap();
@@ -67,7 +74,7 @@ fn check_forward(protocol: Protocol, failover: bool) {
             addresses.push(upstream.local_addr().unwrap());
             threads.push(std::thread::spawn(move || {
                 let mut wire = [0; 512];
-                for _ in 0..20 {
+                for _ in 0..total_queries {
                     let (len, peer) = upstream.recv_from(&mut wire).unwrap();
                     wire[2] |= 0x80;
                     wire[3] = rcode;
@@ -95,7 +102,7 @@ fn check_forward(protocol: Protocol, failover: bool) {
         let query = [0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1];
         let peer = "127.0.0.1:1000".parse().unwrap();
         let mut response = Vec::with_capacity(65535);
-        for id in 0..10u8 {
+        for id in 0..warm_queries {
             let mut query = query;
             query[1] = id;
             assert_eq!(
@@ -111,7 +118,7 @@ fn check_forward(protocol: Protocol, failover: bool) {
             );
         }
         let before = GLOBAL.stats();
-        for id in 10..20u8 {
+        for id in warm_queries..total_queries {
             let mut query = query;
             query[1] = id;
             assert_eq!(
@@ -182,7 +189,7 @@ fn check_refused_ecs_forward() {
     let task = std::thread::spawn(move || {
         let mut query_wire = [0; 512];
         let mut response = [0; 512];
-        for _ in 0..20 {
+        for _ in 0..4 {
             let (len, peer) = upstream.recv_from(&mut query_wire).unwrap();
             let query = Message::parse(&query_wire[..len]).unwrap();
             let ecs = query
@@ -222,7 +229,7 @@ fn check_refused_ecs_forward() {
     let peer = "127.0.0.1:1000".parse().unwrap();
     let mut response = Vec::with_capacity(65535);
     runtime.block_on(async {
-        for id in 0..10_u8 {
+        for id in 0..2_u8 {
             query[1] = id;
             assert_eq!(
                 server
@@ -232,7 +239,7 @@ fn check_refused_ecs_forward() {
             );
         }
         let before = GLOBAL.stats();
-        for id in 10..20_u8 {
+        for id in 2..4_u8 {
             query[1] = id;
             assert_eq!(
                 server

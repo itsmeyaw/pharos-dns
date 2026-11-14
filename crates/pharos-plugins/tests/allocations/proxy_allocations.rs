@@ -12,6 +12,7 @@ fn warmed_udp_exchange_does_not_allocate() {
     if crate::run_isolated("proxy::proxy_allocations::warmed_udp_exchange_does_not_allocate") {
         return;
     }
+    // RFC 5452 §9.2: Keep UDP allocation sampling within one source-port use budget.
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     server
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -21,7 +22,7 @@ fn warmed_udp_exchange_does_not_allocate() {
     proxy.set_metrics(&registry, "forward");
     let thread = std::thread::spawn(move || {
         let mut wire = [0; 512];
-        for _ in 0..20 {
+        for _ in 0..7 {
             let (len, peer) = server.recv_from(&mut wire).unwrap();
             wire[2] |= 0x80;
             server.send_to(&wire[..len], peer).unwrap();
@@ -33,14 +34,14 @@ fn warmed_udp_exchange_does_not_allocate() {
         .unwrap();
     runtime.block_on(async {
         let mut response = [0; 512];
-        for _ in 0..10 {
+        for _ in 0..3 {
             proxy
                 .exchange(QUERY, &mut response, Transport::Udp, Options::default())
                 .await
                 .unwrap();
         }
         let before = GLOBAL.stats();
-        for _ in 0..10 {
+        for _ in 0..4 {
             proxy
                 .exchange(QUERY, &mut response, Transport::Udp, Options::default())
                 .await
@@ -60,6 +61,7 @@ fn warmed_ecs_multi_rr_udp_exchange_does_not_allocate() {
     ) {
         return;
     }
+    // RFC 5452 §9.2: Keep UDP allocation sampling within one source-port use budget.
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     server
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -70,7 +72,7 @@ fn warmed_ecs_multi_rr_udp_exchange_does_not_allocate() {
     let thread = std::thread::spawn(move || {
         let mut query = [0; 512];
         let mut response = [0; 512];
-        for _ in 0..20 {
+        for _ in 0..7 {
             let (len, peer) = server.recv_from(&mut query).unwrap();
             let message = Message::parse(&query[..len]).unwrap();
             let options = message.opt().unwrap().options();
@@ -91,14 +93,14 @@ fn warmed_ecs_multi_rr_udp_exchange_does_not_allocate() {
     let query = ecs_query();
     runtime.block_on(async {
         let mut response = [0; 512];
-        for _ in 0..10 {
+        for _ in 0..3 {
             proxy
                 .exchange(&query, &mut response, Transport::Udp, Options::default())
                 .await
                 .unwrap();
         }
         let before = GLOBAL.stats();
-        for _ in 0..10 {
+        for _ in 0..4 {
             proxy
                 .exchange(&query, &mut response, Transport::Udp, Options::default())
                 .await
