@@ -1,5 +1,5 @@
 use super::*;
-use crate::transfer::TransferRequest;
+use crate::transfer::{TransferRequest, serial_at_least};
 use pharos_kubernetes::object::{Endpoints, Port};
 use pharos_proto::{FixedBuffer, Rdata};
 use pharos_server::{Error, Stream};
@@ -402,15 +402,15 @@ fn generate(
     current: u32,
     multi: bool,
 ) -> Result<(), Error> {
-    // RFC 5936 §2.2 and RFC 1995 §2: an AXFR is bracketed by SOA; a current IXFR has one SOA.
-    if serial != 0 && serial == current && snapshot.protocol == Protocol::Tcp {
+    // RFC 5936 §2.2 and RFC 1995 §2: AXFR is SOA-bracketed; equal or newer IXFR returns one SOA.
+    let soa_only = snapshot.qtype == Type::IXFR
+        && (snapshot.protocol == Protocol::Udp || serial_at_least(serial, current));
+    if soa_only && snapshot.protocol == Protocol::Tcp {
         snapshot.authoritative = false;
     }
     snapshot.soa(current)?;
     // RFC 1995 §2: UDP IXFR returns the current SOA to trigger TCP fallback.
-    if serial != 0 && serial == current
-        || snapshot.qtype == Type::IXFR && snapshot.protocol == Protocol::Udp
-    {
+    if soa_only {
         return Ok(());
     }
 
@@ -1182,6 +1182,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn ixfr_uses_rfc1982_order_across_serial_wraparound() {
+        let zone: Name = "cluster.local.".parse().unwrap();
+        for (serial, current, soa_only) in [(0, u32::MAX, true), (u32::MAX, 0, false)] {
+            let mut snapshot = snapshot(&zone);
+            snapshot.qtype = Type::IXFR;
+            generate(
+                &mut snapshot,
+                &Index::default(),
+                &plugin(),
+                serial,
+                current,
+                false,
+            )
+            .unwrap();
+            let bytes = snapshot.bytes.unwrap();
+            let messages = messages(&bytes);
+            assert_eq!(messages.len() == 1, soa_only);
+            assert_eq!(Message::parse(messages[0]).unwrap().answer_count(), 1);
+            assert_eq!(
+                Message::parse(messages[0]).unwrap().flags() & 0x0400 == 0,
+                soa_only
+            );
+        }
     }
 
     #[test]

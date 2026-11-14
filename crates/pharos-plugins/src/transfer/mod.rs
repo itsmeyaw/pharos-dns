@@ -33,6 +33,11 @@ pub struct TransferRequest<'a> {
     pub qclass: Class,
 }
 
+// RFC 1982 §3.2: Equal or forward serials are within the modulo half-space.
+pub(crate) fn serial_at_least(candidate: u32, current: u32) -> bool {
+    candidate.wrapping_sub(current) < (1 << 31)
+}
+
 #[derive(Clone, Debug)]
 pub struct Transfer {
     pub(crate) zones: Vec<TransferZone>,

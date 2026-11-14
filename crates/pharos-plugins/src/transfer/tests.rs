@@ -2,6 +2,16 @@ use super::*;
 use pharos_server::{Metadata, Transport};
 use std::sync::{Arc, Mutex};
 
+#[test]
+fn ixfr_serial_order_uses_rfc1982_half_space() {
+    use super::serial_at_least;
+
+    assert!(serial_at_least(7, 7));
+    assert!(serial_at_least(0, u32::MAX));
+    assert!(!serial_at_least(u32::MAX, 0));
+    assert!(!serial_at_least(1 << 31, 0));
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Answer {
     None,
