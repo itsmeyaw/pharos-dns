@@ -443,6 +443,7 @@ mod tests {
         assert!(rsa_public_der(&oversized_exponent).is_err());
     }
 
+    // RFC 3110 §2: Reject noncanonical exponent lengths and leading zero octets.
     #[test]
     fn rsa_dnskey_rejects_noncanonical_exponent_lengths_and_leading_zeroes() {
         let mut extended_short_exponent = vec![0, 0, 255];
