@@ -11,6 +11,7 @@
 ## auto
 
 - [auto Plugin notes](../crates/pharos-plugins/src/auto/README.md)
+- RFC 4343 §3: Uppercase discovered origins remain case-insensitive; Pharos no longer turns them into apex referrals.
 
 ## autopath
 
@@ -52,6 +53,7 @@
 ## dynupdate
 
 - [dynupdate Plugin notes](../crates/pharos-plugins/src/dynupdate/README.md)
+- Seed, stored, and candidate dynamic Zones require apex NS; deleting the final apex NS fails validation (RFC 2181 §6.1). CoreDNS v1.15.0's file parser only requires SOA.
 
 ## errors
 
@@ -65,6 +67,9 @@
 
 - [file Plugin notes](../crates/pharos-plugins/src/file/README.md)
 - Pharos intentionally differs from CoreDNS where RFC-conformant Zone behavior requires it:
+  - Zone construction requires apex NS and rejects out-of-zone owners, including secondary transfers and dynamic zones (RFC 2181 §6.1; RFC 1034 §4.2; RFC 5936 §3.1); CoreDNS v1.15.0's file parser checks SOA ownership but does not require apex NS.
+  - At an apex, conflicting ZONEMD records with the same Scheme/Hash Algorithm are rejected, while identical duplicates are deduplicated (RFC 8976 §2.5); CoreDNS v1.15.0 retains duplicate tree entries.
+  - QCLASS=ANY Zone replies can contain selected-class records but clear AA; CoreDNS v1.15.0 keeps file replies authoritative (RFC 1035 §6.2).
   - An apex query for an absent type returns NOERROR/NODATA with the SOA (RFC 2308 §2.2); CoreDNS v1.15.0 returns NXDOMAIN for an SOA/NS-only apex.
   - Master-file loading rejects multiple SOAs, CNAME RRsets with multiple targets, and DNAME descendant data; CoreDNS retains the last SOA and can retain conflicting aliases.
   - SOA serial 0 is valid for initial load and refresh (RFC 1982 §7); CoreDNS's file loader uses 0 as its initial no-change sentinel.
@@ -74,6 +79,7 @@
 ## secondary
 
 - [secondary Plugin notes](../crates/pharos-plugins/src/secondary/README.md)
+- AXFR snapshots without apex NS or with out-of-zone owners are rejected before publish (RFC 2181 §6.1; RFC 5936 §3.1); CoreDNS v1.15.0's file Zone insertion does not enforce those boundaries.
 
 ## forward
 
@@ -91,6 +97,7 @@
 
 - [hosts Plugin notes](../crates/pharos-plugins/src/hosts/README.md)
 - RFC 4592 §§2.2.1, 3.3: `hosts` replaces only the leftmost QNAME label for wildcard lookup and does not search closest-encloser ancestors, matching CoreDNS v1.15.0 (ADR 0002).
+- RFC 1035 §6.2: `hosts` answers QCLASS=ANY with selected IN data but clears AA; CoreDNS v1.15.0 leaves AA set.
 
 ## k8s_external
 
@@ -155,6 +162,7 @@
 ## sign
 
 - [sign Plugin notes](../crates/pharos-plugins/src/sign/README.md)
+- The signer rejects source Zones without apex NS or with out-of-zone owners, following the shared Zone invariant (RFC 2181 §6.1; RFC 1034 §4.2).
 
 ## tsig
 
@@ -179,6 +187,9 @@
 ## template
 
 - [template Plugin notes](../crates/pharos-plugins/src/template/README.md)
+- RFC 1034 §3.6.2: template CNAME targets restart for every non-CNAME QTYPE; CoreDNS v1.15.0 restarts only A/AAAA ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- RFC 2308 §3: an authoritative NXDOMAIN template SOA is placed in Authority even if configured as Answer; CoreDNS v1.15.0 keeps the configured section ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- RFC 1035 §6.2: QCLASS=ANY template replies can contain selected-class records but clear AA; CoreDNS v1.15.0 marks template replies authoritative.
 
 ## view
 
