@@ -12,6 +12,9 @@
 - CoreDNS checks SOA signature inception and expiration every five hours; it does not check whether the unsigned file changed. The actual expiration window is seven days, despite the upstream README saying 14 days. Like CoreDNS, `key directory` is not implemented.
 
 - CoreDNS shares key records across multiple origins in one Directive and leaves their owner set to the last origin. Pharos follows this behavior: earlier Zones may lack their apex DNSKEY and produce invalid DNSSEC. Configure one `sign` Directive per origin.
+- The source file's SOA owner must match the configured origin; otherwise signing fails because the RRSIG Signer's Name would identify a different zone (RFC 4034 §3.1.7).
+- Offline RRSIG TTL and Original TTL use the covered RRset's minimum TTL; mixed-TTL RRsets are normalized to that value (RFC 2181 §5.2).
+- Offline NSEC TTL is `min(SOA TTL, SOA.MINIMUM)` (RFC 9077 §3.1); apex NS RRSIG TTL matches the NS RRset TTL (RFC 4034 §3).
 
 ## Sources
 

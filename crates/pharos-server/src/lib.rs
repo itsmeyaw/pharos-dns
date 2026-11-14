@@ -155,6 +155,8 @@ pub enum Outcome {
 pub enum Error {
     Build(BuildError),
     InvalidQuery,
+    /// A plugin cannot safely complete the response from the available data.
+    Internal,
     ResponseBufferTooSmall,
     NotImplemented,
     NoNextPlugin,
@@ -169,6 +171,7 @@ impl fmt::Display for Error {
         match self {
             Self::Build(error) => write!(f, "{error}"),
             Self::InvalidQuery => f.write_str("invalid Query"),
+            Self::Internal => f.write_str("internal plugin error"),
             Self::ResponseBufferTooSmall => f.write_str("Response buffer too small"),
             Self::NotImplemented => f.write_str("plugin is not implemented"),
             Self::NoNextPlugin => f.write_str("no next plugin found"),

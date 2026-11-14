@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use pharos_corefile::{BlockContext, Cursor, Error};
-use pharos_dnssec::keys::KeyPair;
+use pharos_dnssec::{keys::KeyPair, sign::SigningKey};
 use pharos_proto::Name;
 
 use super::Dnssec;
@@ -77,13 +77,27 @@ pub(crate) fn setup(
         }
     }
     for key in &keys {
-        if !zones
-            .iter()
-            .any(|zone| zone.is_subdomain_of(&key.public.owner))
-        {
-            return Err(cursor.error("DNSKEY owner cannot sign any configured domain"));
+        // RFC 4035 §2.1: A key that signs zone data MUST have the Zone Key bit set.
+        if key.public.flags & 0x0100 == 0 {
+            return Err(cursor.error("DNSKEY Zone Key bit must be set"));
+        }
+        // RFC 4035 §2.1: A zone key signs only authoritative RRsets in its zone.
+        if !zones.iter().any(|zone| zone == &key.public.owner) {
+            return Err(cursor.error("DNSKEY owner must match a configured DNSSEC zone"));
         }
     }
+    // RFC 4035 §2.1: Prepare private keys used to sign this zone's authoritative RRsets.
+    let signers = keys
+        .iter()
+        .map(|key| {
+            let der = key
+                .private
+                .to_pkcs8_der()
+                .map_err(|error| cursor.error(error.to_string()))?;
+            SigningKey::from_pkcs8(key.public.algorithm, &der)
+                .map_err(|error| cursor.error(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     // RFC 4034 §2.1: DNSKEY RDATA is flags, protocol, algorithm, then the public key.
     let public = keys
         .iter()
@@ -97,6 +111,7 @@ pub(crate) fn setup(
     block.config.dnssec = Some(Dnssec {
         zones,
         keys,
+        signers,
         public,
         // CoreDNS plugin/pkg/cache: 256 shards each have at least four entries.
         capacity: ((capacity / 256).max(4) as usize) * 256,
@@ -117,6 +132,65 @@ fn load_file(base: &Path) -> Result<KeyPair, String> {
 #[cfg(test)]
 mod tests {
     use pharos_corefile::{configure, parse};
+    use std::{path::PathBuf, process};
+
+    struct TempKeyFiles {
+        key: PathBuf,
+        private: PathBuf,
+    }
+
+    impl Drop for TempKeyFiles {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.key);
+            let _ = std::fs::remove_file(&self.private);
+        }
+    }
+
+    #[test]
+    fn keeps_a_key_bound_to_its_zone_in_multi_zone_setup() {
+        let base = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+        );
+        let text = format!("miek.nl example.org {{\n dnssec {{\n key file {base}\n }}\n}}");
+        let blocks = parse("Corefile", &text).unwrap();
+        let chain = configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+        let dnssec = chain[0].config.dnssec.as_ref().unwrap();
+        assert_eq!(dnssec.zones.len(), 2);
+        assert_eq!(dnssec.keys.len(), 1);
+        assert_eq!(dnssec.keys[0].public.owner.to_string(), "miek.nl.");
+    }
+
+    #[test]
+    fn rejects_key_without_zone_key_bit_and_key_outside_configured_zone() {
+        let source = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+        );
+        let base =
+            std::env::temp_dir().join(format!("pharos-dnssec-invalid-key-{}", process::id()));
+        let files = TempKeyFiles {
+            key: base.with_extension("key"),
+            private: base.with_extension("private"),
+        };
+        let key = std::fs::read_to_string(format!("{source}.key")).unwrap();
+        let private = std::fs::read_to_string(format!("{source}.private")).unwrap();
+        std::fs::write(&files.private, private).unwrap();
+        for (zone, key_text, expected) in [
+            ("miek.nl", key.replace("257 3 13", "1 3 13"), "Zone Key"),
+            ("example.org", key.clone(), "configured DNSSEC zone"),
+        ] {
+            std::fs::write(&files.key, key_text).unwrap();
+            let text = format!(
+                "{zone} {{\n dnssec {{\n key file {}\n }}\n}}",
+                base.display()
+            );
+            let result =
+                configure::<crate::Chain>(&parse("Corefile", &text).unwrap(), crate::directives());
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
 
     #[test]
     fn cache_capacity_matches_coredns_effective_shard_capacity() {

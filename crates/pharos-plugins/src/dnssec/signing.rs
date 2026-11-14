@@ -4,20 +4,13 @@ use pharos_dnssec::{
     canonical::{CanonicalRecord, signed_data},
     denial::{BlackLieKind, black_lie},
     digest::key_tag,
-    sign::SigningKey,
 };
 use pharos_proto::{
-    Class, Message, MessageBuilder, NameRef, Rdata, Record, ResponseType, Section, Type,
-    typify_response,
+    Message, MessageBuilder, NameRef, Rdata, Record, ResponseType, Section, Type, typify_response,
 };
 use pharos_server::{Context, Error};
 
 use super::Dnssec;
-
-enum SignMode {
-    All(u32),
-    Last,
-}
 
 #[derive(Debug)]
 pub(super) struct CacheEntry {
@@ -41,6 +34,37 @@ impl CacheEntry {
 fn same_rrset(left: &Record<'_>, right: &Record<'_>) -> bool {
     // RFC 2181 §5: an RRset shares its owner, class and type.
     left.name == right.name && left.rtype == right.rtype && left.class == right.class
+}
+
+fn same_covered_signatures(left: &Record<'_>, right: &Record<'_>) -> bool {
+    // RFC 4035 §3.1.1: Keep each set of signatures for a covered RRset together.
+    left.name == right.name
+        && left.class == right.class
+        && matches!(
+            (left.data(), right.data()),
+            (
+                Ok(Rdata::Rrsig {
+                    type_covered: left_type,
+                    ..
+                }),
+                Ok(Rdata::Rrsig {
+                    type_covered: right_type,
+                    ..
+                })
+            ) if left_type == right_type
+        )
+}
+
+fn strict_subdomain(name: NameRef<'_>, parent: NameRef<'_>) -> bool {
+    // RFC 6672 §3: A synthesized CNAME owner is below its DNAME owner; compare labels without allocation.
+    let name_labels = name.labels().count();
+    let parent_labels = parent.labels().count();
+    name_labels > parent_labels
+        && name
+            .labels()
+            .skip(name_labels - parent_labels)
+            .zip(parent.labels())
+            .all(|(name, parent)| name.eq_ignore_ascii_case(parent))
 }
 
 fn rrset_ttl(message: &Message<'_>, rr: &Record<'_>, covered: Option<Type>) -> u32 {
@@ -93,26 +117,21 @@ impl Dnssec {
             }
         }
         // shortcut: concurrent misses can sign twice; add bounded single-flight when RRset caching is implemented.
-        // shortcut: cache misses allocate for canonical RRsets and signing; remove when signing accepts caller buffers.
+        // shortcut: cache misses allocate parser/canonical/cache buffers; reuse bounded scratch after measuring miss cost.
         let original = cx.response.clone();
         let message = Message::parse(&original).map_err(|_| Error::InvalidQuery)?;
         let kind = typify_response(Some(&message), now as i64);
         let denial = matches!(kind, ResponseType::NxDomain | ResponseType::NoData);
-        if denial
-            && (message.authority_count() != 1
-                || !message
-                    .authorities()
-                    .next()
-                    .is_some_and(|rr| rr.rtype == Type::SOA))
-        {
-            return Ok(());
+        let soa = message.authorities().find(|rr| rr.rtype == Type::SOA);
+        if denial && soa.is_none() {
+            // RFC 2308 §3: Missing SOA invalidates denial context; report internal response state, not bad query.
+            return Err(Error::Internal);
         }
         let referral = kind == ResponseType::Referral && message.authority_count() > 0;
         let make_lie =
             denial || (referral && !message.authorities().any(|rr| rr.rtype == Type::DS));
         let question = message.questions().next().ok_or(Error::InvalidQuery)?;
         let zone = self.zone_for(question.name).ok_or(Error::InvalidQuery)?;
-        let special_nsec = denial && question.qtype == Type::NSEC;
         let mut lie_wire = Vec::new();
         if make_lie {
             // shortcut: CoreDNS-style spans are not checked against zone inventory; validate when authoritative names are available.
@@ -122,12 +141,22 @@ impl Dnssec {
                 question.qtype,
                 if referral {
                     BlackLieKind::Referral
+                } else if kind == ResponseType::NxDomain {
+                    BlackLieKind::NameError
                 } else {
                     BlackLieKind::Negative
                 },
             )
             .map_err(|_| Error::InvalidQuery)?;
-            let ttl = message.authorities().next().ok_or(Error::InvalidQuery)?.ttl;
+            // RFC 9077 §3.2: Synthetic NSEC TTL is min(SOA TTL, SOA.MINIMUM).
+            let ttl = if let Some(soa) = soa {
+                match soa.data().map_err(|_| Error::InvalidQuery)? {
+                    Rdata::Soa { minimum, .. } => soa.ttl.min(minimum),
+                    _ => return Err(Error::InvalidQuery),
+                }
+            } else {
+                message.authorities().next().ok_or(Error::InvalidQuery)?.ttl
+            };
             let mut lie_builder =
                 MessageBuilder::new(&mut lie_wire, 65535, 0, 0).map_err(Error::Build)?;
             let owner = NameRef::parse(lie.owner.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
@@ -136,7 +165,7 @@ impl Dnssec {
                     Section::Answer,
                     owner,
                     Type::NSEC,
-                    Class::IN,
+                    question.qclass,
                     ttl,
                     |writer| lie.rdata().write(writer),
                 )
@@ -148,7 +177,7 @@ impl Dnssec {
         } else {
             None
         };
-        // RFC 4470 §3: synthetic NSEC proves nonexistence without disclosing Zone contents.
+        // RFC 4035 §3.1.3: Keep denial proofs in Authority; preserve the documented RCODE change.
         // RFC 6604 §2.2: Preserve AD from the response without asserting authenticity.
         let flags = if denial {
             message.flags() & !0xf
@@ -162,140 +191,273 @@ impl Dnssec {
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(Error::Build)?;
         }
-        // CoreDNS plugin/dnssec: without keys, the final pair is SOA and NSEC.
-        if special_nsec && self.keys.is_empty() {
-            let rr = message.authorities().next().ok_or(Error::InvalidQuery)?;
-            let data = rr.data().map_err(|_| Error::InvalidQuery)?;
-            builder
-                .record_with(
-                    Section::Answer,
-                    rr.name,
-                    rr.rtype,
-                    rr.class,
-                    rr.ttl,
-                    |writer| data.write(writer),
-                )
-                .map_err(Error::Build)?;
-        }
         let mut signed_sets = 0;
         let mut attempted_sets = 0;
+        // RFC 1035 §4.1.1: TC marks truncation of required message content.
+        let mut required_tc = message.flags() & 0x0200 != 0;
+        let mut additional_data_omitted = false;
+        let mut additional_signature_omitted = false;
         // RFC 4035 §3.1.4: Referral signatures cover DS, not delegation NS or glue.
-        let signs_section = |section, rtype| {
-            !special_nsec
-                && (!referral || (section == Section::Authority && rtype == Type::DS))
+        let dname_owner = message
+            .answers()
+            .find(|rr| rr.rtype == Type::DNAME)
+            .map(|rr| rr.name);
+        // RFC 6672 §5.3.1: A DNAME-synthesized CNAME is never signed.
+        let signs_section = |section, rtype, owner| {
+            (!referral || (section == Section::Authority && rtype == Type::DS))
                 && (!denial || section == Section::Authority)
+                && !(section == Section::Answer
+                    && rtype == Type::CNAME
+                    && owner == question.name
+                    && dname_owner.is_some_and(|dname| strict_subdomain(owner, dname)))
         };
-        // RFC 4035 §3.1.1: Place each RRSIG in the same section as its covered RRset.
+        // RFC 4035 §3.1.1: Keep each Answer/Authority signature beside its covered RRset.
         for (section, records) in [
             (Section::Answer, message.answers()),
             (Section::Authority, message.authorities()),
             (Section::Additional, message.additionals()),
         ] {
             let records: Vec<_> = records.collect();
-            for rr in &records {
-                if special_nsec && section == Section::Authority {
-                    continue;
-                }
+            // RFC 4035 §3.1.3: Put denial proofs and their signatures in Authority, not Answer.
+            if section == Section::Authority
+                && let Some(lie) = &lie
+            {
+                let rr = lie.answers().next().ok_or(Error::InvalidQuery)?;
                 let data = rr.data().map_err(|_| Error::InvalidQuery)?;
-                let covered = match data {
-                    Rdata::Rrsig { type_covered, .. } => type_covered,
-                    _ => rr.rtype,
-                };
-                // RFC 2181 §5.2: use one TTL for each RRset selected for signing.
-                let signed = !self.keys.is_empty()
-                    && !matches!(covered, Type::RRSIG | Type::OPT | Type::TSIG)
-                    && self.zone_for(rr.name).is_some()
-                    && [
-                        (Section::Answer, message.answers()),
-                        (Section::Authority, message.authorities()),
-                        (Section::Additional, message.additionals()),
-                    ]
-                    .into_iter()
-                    .any(|(section, mut records)| {
-                        signs_section(section, covered)
-                            && records.any(|other| {
-                                other.name == rr.name
-                                    && other.class == rr.class
-                                    && other.rtype == covered
-                            })
-                    });
-                // RFC 4035 §2.2: RRSIG TTLs with a common owner may differ across RRsets.
-                // RFC 4034 §3: RRSIG TTLs may differ when they cover different RRsets.
-                let ttl = match data {
-                    _ if !signed => rr.ttl,
-                    Rdata::Rrsig { type_covered, .. } => {
-                        rrset_ttl(&message, rr, Some(type_covered))
-                    }
-                    _ => rrset_ttl(&message, rr, None),
-                };
-                builder
-                    .record_with(section, rr.name, rr.rtype, rr.class, ttl, |writer| {
+                let added = builder
+                    .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
                         data.write(writer)
                     })
                     .map_err(Error::Build)?;
+                required_tc |= !added;
+                let (signed, omitted) =
+                    self.sign_set(&mut builder, section, &[rr], zone, now, rr.ttl)?;
+                required_tc |= omitted;
+                signed_sets += usize::from(signed);
+                attempted_sets += 1;
             }
-            // RFC 4033 §3.1: Sign RRsets to verify DNS data origin and integrity.
+            if section == Section::Additional {
+                // RFC 2181 §9: Emit each optional Additional RRset whole or omit it whole.
+                for (i, rr) in records.iter().enumerate() {
+                    if rr.rtype == Type::RRSIG
+                        || records[..i].iter().any(|previous| same_rrset(previous, rr))
+                    {
+                        continue;
+                    }
+                    let group = records.iter().filter(|member| same_rrset(member, rr));
+                    let signed = !self.keys.is_empty()
+                        && !matches!(rr.rtype, Type::OPT | Type::TSIG)
+                        && self.zone_for(rr.name).is_some()
+                        && signs_section(section, rr.rtype, rr.name);
+                    // RFC 2181 §5.2: Normalize signed RRsets only; preserve TTLs on unsigned records.
+                    let ttl = if signed {
+                        rrset_ttl(&message, rr, None)
+                    } else {
+                        rr.ttl
+                    };
+                    let added = builder.try_optional(|builder| {
+                        for member in group {
+                            let data = member.data().map_err(|_| Error::InvalidQuery)?;
+                            let member_ttl = if signed { ttl } else { member.ttl };
+                            if !builder
+                                .record_with(
+                                    section,
+                                    member.name,
+                                    member.rtype,
+                                    member.class,
+                                    member_ttl,
+                                    |writer| data.write(writer),
+                                )
+                                .map_err(Error::Build)?
+                            {
+                                return Ok(None);
+                            }
+                        }
+                        Ok(Some(()))
+                    })?;
+                    if added.is_none() {
+                        additional_data_omitted = true;
+                        break;
+                    }
+                }
+                if additional_data_omitted {
+                    continue;
+                }
+                // RFC 4035 §3.1.1: Existing Additional RRSIGs are optional when space runs out.
+                for (i, rr) in records.iter().enumerate() {
+                    if rr.rtype != Type::RRSIG
+                        || records[..i]
+                            .iter()
+                            .any(|previous| same_covered_signatures(previous, rr))
+                    {
+                        continue;
+                    }
+                    let group = records
+                        .iter()
+                        .filter(|member| same_covered_signatures(member, rr));
+                    let added = builder.try_optional(|builder| {
+                        for member in group {
+                            let data = member.data().map_err(|_| Error::InvalidQuery)?;
+                            let Rdata::Rrsig { type_covered, .. } = data else {
+                                continue;
+                            };
+                            let signed = !self.keys.is_empty()
+                                && self.zone_for(member.name).is_some()
+                                && signs_section(section, type_covered, member.name)
+                                && records.iter().any(|other| {
+                                    other.name == member.name
+                                        && other.class == member.class
+                                        && other.rtype == type_covered
+                                });
+                            let ttl = if signed {
+                                rrset_ttl(&message, member, Some(type_covered))
+                            } else {
+                                member.ttl
+                            };
+                            if !builder
+                                .record_with(
+                                    section,
+                                    member.name,
+                                    member.rtype,
+                                    member.class,
+                                    ttl,
+                                    |writer| data.write(writer),
+                                )
+                                .map_err(Error::Build)?
+                            {
+                                return Ok(None);
+                            }
+                        }
+                        Ok(Some(()))
+                    })?;
+                    if added.is_none() {
+                        additional_signature_omitted = true;
+                        break;
+                    }
+                }
+                if !additional_data_omitted && !additional_signature_omitted {
+                    for (i, rr) in records.iter().enumerate() {
+                        if matches!(rr.rtype, Type::RRSIG | Type::OPT | Type::TSIG)
+                            || records[..i].iter().any(|previous| same_rrset(previous, rr))
+                            || !signs_section(section, rr.rtype, rr.name)
+                        {
+                            continue;
+                        }
+                        let Some(zone) = self.zone_for(rr.name) else {
+                            continue;
+                        };
+                        let group: Vec<_> = records
+                            .iter()
+                            .copied()
+                            .filter(|member| same_rrset(member, rr))
+                            .collect();
+                        let signed = builder.try_optional(|builder| {
+                            let (signed, omitted) = self.sign_set(
+                                builder,
+                                section,
+                                &group,
+                                zone,
+                                now,
+                                rrset_ttl(&message, rr, None),
+                            )?;
+                            Ok(if omitted { None } else { Some(signed) })
+                        })?;
+                        attempted_sets += 1;
+                        let Some(signed) = signed else {
+                            additional_signature_omitted = true;
+                            break;
+                        };
+                        signed_sets += usize::from(signed);
+                    }
+                }
+                continue;
+            }
             for (i, rr) in records.iter().enumerate() {
-                if !signs_section(section, rr.rtype) {
+                if records[..i].iter().any(|previous| same_rrset(previous, rr)) {
                     continue;
                 }
-                // RFC 4035 §2.2: an RRSIG RR is never signed; OPT and TSIG are not zone data.
-                if matches!(rr.rtype, Type::RRSIG | Type::OPT | Type::TSIG)
-                    || records[..i].iter().any(|r| same_rrset(r, rr))
-                {
-                    continue;
-                }
-                let Some(zone) = self.zone_for(rr.name) else {
-                    continue;
-                };
                 let group: Vec<_> = records
                     .iter()
                     .copied()
                     .filter(|r| same_rrset(r, rr))
                     .collect();
-                // RFC 4035 §3.1.1: Include each RRSIG in its covered RRset's section.
-                signed_sets += usize::from(self.sign_set(
-                    &mut builder,
-                    section,
-                    &group,
-                    zone,
-                    now,
-                    SignMode::All(rrset_ttl(&message, rr, None)),
-                )?);
-                attempted_sets += 1;
-            }
-            // RFC 9824 §3.1: A QNAME-matching denial NSEC can appear in Authority.
-            if let Some(lie) = &lie
-                && section
-                    == if special_nsec {
-                        Section::Answer
-                    } else {
-                        Section::Authority
+                let mut rrset_complete = true;
+                let normalized_ttl =
+                    (rr.rtype != Type::RRSIG).then(|| rrset_ttl(&message, rr, None));
+                for member in &group {
+                    let data = member.data().map_err(|_| Error::InvalidQuery)?;
+                    let covered = match data {
+                        Rdata::Rrsig { type_covered, .. } => type_covered,
+                        _ => member.rtype,
+                    };
+                    // RFC 2181 §5.2: use one TTL for each RRset selected for signing.
+                    let signed = !self.keys.is_empty()
+                        && !matches!(covered, Type::RRSIG | Type::OPT | Type::TSIG)
+                        && self.zone_for(member.name).is_some()
+                        && signs_section(section, covered, member.name)
+                        && (member.rtype != Type::RRSIG
+                            || message
+                                .answers()
+                                .chain(message.authorities())
+                                .chain(message.additionals())
+                                .any(|other| {
+                                    other.name == member.name
+                                        && other.class == member.class
+                                        && other.rtype == covered
+                                }));
+                    // RFC 4035 §2.2: RRSIG TTLs with a common owner may differ across RRsets.
+                    let ttl = match data {
+                        _ if !signed => member.ttl,
+                        Rdata::Rrsig { type_covered, .. } => {
+                            rrset_ttl(&message, member, Some(type_covered))
+                        }
+                        _ => normalized_ttl.unwrap_or(member.ttl),
+                    };
+                    let added = builder
+                        .record_with(
+                            section,
+                            member.name,
+                            member.rtype,
+                            member.class,
+                            ttl,
+                            |writer| data.write(writer),
+                        )
+                        .map_err(Error::Build)?;
+                    if !added {
+                        required_tc = true;
                     }
-            {
-                let rr = lie.answers().next().ok_or(Error::InvalidQuery)?;
-                signed_sets += usize::from(self.sign_set(
-                    &mut builder,
-                    section,
-                    &[rr],
-                    zone,
-                    now,
-                    if special_nsec {
-                        SignMode::Last
-                    } else {
-                        SignMode::All(rr.ttl)
-                    },
-                )?);
-                attempted_sets += 1;
-                let data = rr.data().map_err(|_| Error::InvalidQuery)?;
-                builder
-                    .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
-                        data.write(writer)
-                    })
-                    .map_err(Error::Build)?;
+                    rrset_complete &= added;
+                }
+                // RFC 4035 §2.2: RRSIG, OPT, and TSIG are not signed as zone data.
+                if rrset_complete
+                    && !matches!(rr.rtype, Type::RRSIG | Type::OPT | Type::TSIG)
+                    && signs_section(section, rr.rtype, rr.name)
+                    && let Some(zone) = self.zone_for(rr.name)
+                {
+                    let (signed, omitted) = self.sign_set(
+                        &mut builder,
+                        section,
+                        &group,
+                        zone,
+                        now,
+                        rrset_ttl(&message, rr, None),
+                    )?;
+                    signed_sets += usize::from(signed);
+                    required_tc |= omitted;
+                    attempted_sets += 1;
+                }
             }
         }
+        let clear_additional_tc = !required_tc;
         let _ = builder.finish();
+        if clear_additional_tc {
+            // RFC 2181 §9: Omission of optional Additional data must not set TC.
+            cx.response[2] &= !0x02;
+        }
+        if signed_sets > 0 {
+            // RFC 4035 §3.1.6: Clear CD on a signed authoritative response.
+            cx.response[3] &= !0x10;
+        }
         if let Some(metrics) = metrics {
             metrics.miss(attempted_sets);
         }
@@ -332,19 +494,26 @@ impl Dnssec {
         records: &[Record<'_>],
         zone: &pharos_proto::Name,
         now: u64,
-        mode: SignMode,
-    ) -> Result<bool, Error> {
+        ttl: u32,
+    ) -> Result<(bool, bool), Error> {
         let first = records.first().ok_or(Error::InvalidQuery)?;
-        let (ttl, last_only) = match mode {
-            SignMode::All(ttl) => (ttl, false),
-            SignMode::Last => (first.ttl, true),
-        };
         // RFC 4034 §3.1.7: The Signer's Name identifies the zone of the covered RRset.
         let signer = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
-        // RFC 6781 §3.2.3: SEP flags distinguish KSKs from ZSKs for signing operations.
-        // RFC 4034 §2.1.1: the SEP bit (257) marks a KSK; the Zone Key bit alone (256) marks a ZSK.
-        let has_ksk = self.keys.iter().any(|k| k.public.flags & 257 == 257);
-        let has_zsk = self.keys.iter().any(|k| k.public.flags & 257 == 256);
+        // RFC 6840 §5.11: each DNSKEY algorithm signs every required RRset.
+        let apex = signer;
+        let apex_dnskey = first.rtype == Type::DNSKEY && first.name == apex;
+        // RFC 6840 §5.11: Track KSK/ZSK roles per algorithm without query-path allocation.
+        let mut roles_by_algorithm = [0u8; 16];
+        // RFC 9904 §3: Store role bits for supported DNSSEC signing algorithms.
+        for key in self.keys.iter().filter(|key| key.public.owner == *zone) {
+            if let Some(roles) = roles_by_algorithm.get_mut(usize::from(key.public.algorithm)) {
+                *roles |= match key.public.flags & 257 {
+                    257 => 1,
+                    256 => 2,
+                    _ => 0,
+                };
+            }
+        }
         let canonical: Vec<_> = records
             .iter()
             .map(|rr| {
@@ -355,25 +524,28 @@ impl Dnssec {
                 })
             })
             .collect::<Result<_, Error>>()?;
-        let keys = self.keys.iter().zip(&self.public).filter(|(key, _)| {
-            !(has_ksk
-                && has_zsk
-                && (key.public.flags & 257
-                    != if first.rtype == Type::DNSKEY {
-                        257
-                    } else {
-                        256
-                    }))
-        });
-        // CoreDNS plugin/dnssec: special NSEC replies retain only the last signature.
-        let last_key = last_only
-            .then(|| keys.clone().next_back().map(|(key, _)| key))
-            .flatten();
+        let keys = self
+            .keys
+            .iter()
+            .zip(&self.public)
+            .zip(&self.signers)
+            .filter(|((key, _), _)| {
+                // RFC 4035 §2.1: A zone's private key must not sign another zone's data.
+                if key.public.owner != *zone {
+                    return false;
+                }
+                let roles = roles_by_algorithm
+                    .get(usize::from(key.public.algorithm))
+                    .copied()
+                    .unwrap_or_default();
+                // RFC 6781 §3.1: In split-key signing, KSKs sign only the apex DNSKEY RRset.
+                roles != 3 || (key.public.flags & 257 == if apex_dnskey { 257 } else { 256 })
+            });
         let mut signed = false;
-        for (key, public) in keys {
-            if last_only && !last_key.is_some_and(|last| std::ptr::eq(last, key)) {
-                continue;
-            }
+        let mut signature_omitted = false;
+        // RFC 3110 §2; RFC 5702 §2.2: 4096-bit RSA signatures fit 512 octets.
+        let mut signature_bytes = [0u8; 512];
+        for ((key, public), prepared_signer) in keys {
             // RFC 4034 §3.1.3: a leading wildcard label is not counted in Labels.
             let labels = first.name.labels().count()
                 - usize::from(first.name.labels().next() == Some(b"*".as_slice()));
@@ -392,22 +564,18 @@ impl Dnssec {
                 signature: &[],
             };
             let data = signed_data(&sig, &canonical).map_err(|_| Error::InvalidQuery)?;
-            // RFC 3007 §4.3: Sign RRSIGs using online zone private keys.
-            let der = key
-                .private
-                .to_pkcs8_der()
+            // RFC 4034 §3.1.8.1: Sign canonical RRSIG data with the prepared zone key.
+            let signature_len = prepared_signer
+                .sign_into(&data, &mut signature_bytes)
                 .map_err(|_| Error::InvalidQuery)?;
-            let key = SigningKey::from_pkcs8(key.public.algorithm, &der)
-                .map_err(|_| Error::InvalidQuery)?;
-            let bytes = key.sign(&data).map_err(|_| Error::InvalidQuery)?;
             if let Rdata::Rrsig {
                 ref mut signature, ..
             } = sig
             {
-                *signature = &bytes;
+                *signature = &signature_bytes[..signature_len];
             }
             // RFC 4034 §3: the RRSIG RR's TTL matches the covered RRset's TTL.
-            builder
+            let included = builder
                 .record_with(
                     section,
                     first.name,
@@ -417,9 +585,10 @@ impl Dnssec {
                     |writer| sig.write(writer),
                 )
                 .map_err(Error::Build)?;
-            signed = true;
+            signed |= included;
+            signature_omitted |= !included;
         }
-        Ok(signed)
+        Ok((signed, signature_omitted))
     }
 }
 

@@ -106,7 +106,10 @@ fn verify_answers(wire: &[u8], key: &KeyPair) {
         let sig = rr.data().unwrap();
         let rrset: Vec<_> = records
             .iter()
-            .filter(|other| other.name == rr.name && other.rtype == type_covered)
+            .filter(|other| {
+                // RFC 4034 §3.1.8.1: The signed RRset includes only records of the same class.
+                other.name == rr.name && other.class == rr.class && other.rtype == type_covered
+            })
             .map(|other| CanonicalRecord {
                 owner: other.name,
                 class: other.class,

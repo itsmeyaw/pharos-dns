@@ -192,12 +192,6 @@ fn loads_generated_rsa_bind_and_pkcs8() {
     let loaded = parse_key_pair(&public, &private).unwrap();
     assert!(parse_pkcs8(&public, encoded.as_ref()).is_ok());
     assert!(parse_pkcs8(&public, &loaded.private.to_pkcs8_der().unwrap()).is_ok());
-    for algorithm in [8, 10] {
-        let public = public.replace(" 3 8 ", &format!(" 3 {algorithm} "));
-        let private = private.replace("Algorithm: 8", &format!("Algorithm: {algorithm}"));
-        assert!(parse_key_pair(&public, &private).is_ok());
-        assert!(parse_pkcs8(&public, encoded.as_ref()).is_ok());
-    }
     let PrivateKey::Rsa(key) = loaded.private else {
         panic!("RSA expected")
     };
@@ -278,4 +272,19 @@ fn sha1_algorithms_are_refused_with_rollover_hint() {
             assert!(error.contains("rollover"), "{error}");
         }
     }
+}
+
+#[test]
+fn rejects_rsa_sha512_and_reserved_dnskey_flags() {
+    let public = "example.org. 3600 IN DNSKEY 257 3 10 AwEAAQ==";
+    let private = "Private-key-format: v1.3\nAlgorithm: 10 (RSASHA512)\n";
+    let expected = "DNSSEC algorithm 10 must not be used for signing (RFC 9904 §3)";
+    assert_eq!(
+        parse_key_pair(public, private).unwrap_err().to_string(),
+        expected
+    );
+    assert_eq!(parse_pkcs8(public, b"").unwrap_err().to_string(), expected);
+
+    let public = PUBLIC.replace("257 3 13", "259 3 13");
+    assert!(parse_key_pair(&public, PRIVATE).is_err());
 }

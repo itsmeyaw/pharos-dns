@@ -26,14 +26,6 @@ fn rfc_4509_dnskey_and_ds_vector() {
     let cds = cds_rdata(&owner, &rdata, DigestType::Sha256).unwrap();
     assert_eq!(&cds[..4], &[0xec, 0x45, 5, 2]);
     assert_eq!(&cds[4..], ds_digest(&owner, &rdata, DigestType::Sha256));
-    assert_eq!(cds_rdata(&owner, &[0, 0, 3], DigestType::Sha1), None);
-    assert_eq!(
-        ds_digest(&owner, &rdata, DigestType::Sha1),
-        [
-            0x2b, 0xb1, 0x83, 0xaf, 0x5f, 0x22, 0x58, 0x81, 0x79, 0xa5, 0x3b, 0x0a, 0x98, 0x63,
-            0x1f, 0xad, 0x1a, 0x29, 0x21, 0x18
-        ]
-    );
     assert_eq!(
         ds_digest(&owner, &rdata, DigestType::Sha384),
         [

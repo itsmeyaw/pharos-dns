@@ -11,11 +11,23 @@
 - The signature cache key includes the Response's TTLs. RRsets whose TTL counts down behind `cache` or `forward` can miss more often than in CoreDNS.
 - On a cache miss, TTL normalization rescans the Response for each record; its cost grows quadratically with the record count.
 - Keys with RSASHA1 or RSASHA1-NSEC3-SHA1 (algorithms 5 and 7) are refused at startup: RFC 9905 §2 says they MUST NOT be used for signing, and validating resolvers treat such Zones as insecure. CoreDNS signs with them. Roll over to algorithm 8, 13 or 15 before migrating (RFC 6781 §4.1.4).
+- RSASHA512 (algorithm 10) is refused for signing under RFC 9904 §3. RSA modulus and exponent values above 4096 bits are rejected (RFC 3110 §2; RFC 5702 §§2.1–2.2).
+- P-256/P-384/Ed25519 use RustCrypto fixed-size signatures; ECDSA uses deterministic nonces (RFC 6979 §3.3). `stats_alloc` measured zero Rust-heap allocations across 100 signatures per algorithm; the prior aws-lc-rs P-256 path allocated 300 times and Ed25519 100 times. RSA still allocates an intermediate signature buffer; C-heap use is not measured.
+- Against `main`, remote release `pharos` grows from 19,391,992 to 19,622,680 bytes (+230,688 bytes, +1.190%); `cargo tree` adds 29 unique runtime crate names.
+- Each loaded DNSKEY is bound to its owner zone and cannot sign another configured zone (RFC 4035 §2.1).
+- A configured zone without a matching key passes DNSKEY and DO queries through unchanged.
+- Negative NXDOMAIN/NODATA answers return NOERROR with synthetic NXNAME NSEC in Authority. CoreDNS also maps NXDOMAIN to NOERROR, but puts its black-lie NSEC in Answer.
+- A DO negative response without SOA fails with SERVFAIL; Pharos does not return an unsigned denial. CoreDNS returns the upstream negative response.
+- Any explicit QTYPE 128 query receives FORMERR when the dnssec plugin is in the chain, regardless of QNAME, as RFC 9824 §3.5 requires of implementing servers.
+- Only a DNAME-synthesized CNAME is unsigned; real CNAME RRsets in the same response remain signed (RFC 6672 §5.3.1).
+- A sole apex CDS/CDNSKEY delete signal is retained and signed; CoreDNS drops it while replacing publication records (RFC 8078 §4).
 - RSA private keys below 2048 bits are rejected by aws-lc-rs; CoreDNS accepts them.
 - Key files currently require a standalone DNSKEY record with an absolute owner, IN class if specified, and a numeric TTL; the complete zone-file grammar is not supported.
 - Canonical signing rejects A6 and legacy name-bearing RDATA that `pharos-proto` cannot safely relocate, rather than signing them as CoreDNS does.
 - Constructing a black-lie NSEC allocates. Direct `black_lie` library callers must ensure its span does not cover existing names and convert NXDOMAIN to NODATA. The plugin matches CoreDNS's synthetic spans and converts NXDOMAIN, but has no authoritative zone inventory to validate spans; in particular, a referral span can include descendant names.
 - The signature cache stores complete signed Responses rather than independent RRsets. Changed Responses miss even when an RRset is unchanged; `cache_capacity` limits Responses rather than RRsets and the cache metrics count signed RRsets within those Responses. The global limit is `max(capacity / 256, 4) * 256` with integer division, matching CoreDNS's effective capacity but not its per-shard eviction. The default 10,000 therefore permits 9,984 Responses. At the 65,535-byte TCP message limit, each entry can retain up to 65,533 key bytes plus 65,535 signed bytes: about 1.22 GiB total before map, allocation and other overhead. Signing a cache miss allocates; Queries without DO and cache hits do not. Concurrent misses may sign the same data more than once instead of sharing CoreDNS's single-flight operation.
+- Cache-miss/RSA allocation removal is tracked in [#106](https://github.com/itsmeyaw/pharos-dns/issues/106).
+- Cache byte budget, mutex gauge scan, RRset TTL rescans, and Additional grouping scans are tracked in [#107](https://github.com/itsmeyaw/pharos-dns/issues/107).
 - Unlike CoreDNS's periodic cleanup, expired cache entries remain until the same Response is re-signed or arbitrary eviction removes them.
 - Signing errors return a plugin error, which the Listener turns into SERVFAIL. CoreDNS ignores `d.sign` errors and can return unsigned or partially signed Responses instead.
 - RRsets are grouped by case-insensitive owner, class and type (RFC 2181 §5; RFC 4343 §3). CoreDNS groups by case-sensitive owner and type, so mixed-class or mixed-case Responses can differ.

@@ -96,7 +96,7 @@ async fn apex_dnskey_without_do_is_authoritative() {
     let domain: Name = "miek.nl.".parse().unwrap();
     let name = NameRef::parse(domain.as_wire(), 0).unwrap();
     let mut wire = Vec::with_capacity(512);
-    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x110).unwrap();
     builder.question(name, Type::DNSKEY, Class::IN).unwrap();
     let _ = builder.finish();
     let mut response = Vec::with_capacity(512);
@@ -115,6 +115,7 @@ async fn apex_dnskey_without_do_is_authoritative() {
     assert_eq!(chain[0].config.serve(&mut cx).await, Outcome::Response);
     let reply = Message::parse(&response).unwrap();
     assert!(reply.aa());
+    assert_eq!(reply.flags() & 0x0010, 0);
     assert_eq!(
         reply.answers().map(|rr| rr.rtype).collect::<Vec<_>>(),
         [Type::DNSKEY]
@@ -287,9 +288,9 @@ impl Next for Negative {
     }
 }
 
-// CoreDNS v1.15.0 plugin/dnssec/dnssec.go: NSEC queries move only the final two records.
+// RFC 4035 §3.1.3.1: NSEC denial proofs and signatures belong in Authority.
 #[tokio::test]
-async fn negative_nsec_returns_last_two_records_for_any_key_count() {
+async fn negative_nsec_proof_is_in_authority_for_any_key_count() {
     let base = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
@@ -351,26 +352,30 @@ async fn negative_nsec_returns_last_two_records_for_any_key_count() {
             Outcome::Response
         );
         let reply = Message::parse(cx.response).unwrap();
-        assert_eq!(reply.authority_count(), 0);
-        let types: Vec<_> = reply.answers().map(|rr| rr.rtype).collect();
-        assert_eq!(
-            types,
-            if keys.is_empty() {
-                vec![Type::SOA, Type::NSEC]
-            } else {
-                vec![Type::RRSIG, Type::NSEC]
-            },
-            "{keys}"
-        );
+        if keys.is_empty() {
+            assert_eq!(reply.rcode(), pharos_proto::Rcode::NXDOMAIN);
+            assert!(!reply.authorities().any(|rr| rr.rtype == Type::NSEC));
+            assert!(!reply.authorities().any(|rr| rr.rtype == Type::RRSIG));
+            continue;
+        }
+        assert_eq!(reply.answer_count(), 0);
+        let records: Vec<_> = reply.authorities().collect();
+        assert!(records.iter().any(|rr| rr.rtype == Type::SOA), "{keys}");
+        assert!(records.iter().any(|rr| rr.rtype == Type::NSEC), "{keys}");
         if !keys.is_empty() {
-            verify_signatures(&reply.answers().collect::<Vec<_>>());
-            if keys.contains(other) {
-                let signature = reply.answers().find(|rr| rr.rtype == Type::RRSIG).unwrap();
-                assert!(matches!(
-                    signature.data().unwrap(),
-                    pharos_proto::Rdata::Rrsig { algorithm: 15, .. }
-                ));
-            }
+            verify_signatures(&records);
+            let algorithms: Vec<_> = records
+                .iter()
+                .filter_map(|rr| match rr.data().unwrap() {
+                    pharos_proto::Rdata::Rrsig {
+                        type_covered: Type::NSEC,
+                        algorithm,
+                        ..
+                    } => Some(algorithm),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(algorithms.len(), if keys.contains(other) { 2 } else { 1 });
         }
     }
 }
@@ -603,12 +608,26 @@ async fn nxdomain_gets_signed_black_lie_and_nodata_rcode() {
         let reply = Message::parse(cx.response).unwrap();
         verify_signatures(&reply.authorities().collect::<Vec<_>>());
         assert_eq!(reply.rcode(), pharos_proto::Rcode::NOERROR);
-        assert!(
-            reply
-                .authorities()
-                .filter(|rr| rr.rtype == Type::RRSIG)
-                .all(|rr| rr.ttl == 60)
-        );
+        let signatures: Vec<_> = reply
+            .authorities()
+            .filter(|rr| rr.rtype == Type::RRSIG)
+            .collect();
+        assert!(signatures.iter().any(|rr| matches!(
+            rr.data().unwrap(),
+            pharos_proto::Rdata::Rrsig {
+                type_covered: Type::SOA,
+                original_ttl: 60,
+                ..
+            }
+        )));
+        assert!(signatures.iter().any(|rr| matches!(
+            rr.data().unwrap(),
+            pharos_proto::Rdata::Rrsig {
+                type_covered: Type::NSEC,
+                original_ttl: 5,
+                ..
+            }
+        )));
         assert_eq!(
             reply
                 .authorities()
@@ -636,12 +655,15 @@ async fn nxdomain_gets_signed_black_lie_and_nodata_rcode() {
         Outcome::Response
     );
     let reply = Message::parse(cx.response).unwrap();
-    assert_eq!(reply.authority_count(), 0);
+    assert!(reply.authority_count() > 0);
     assert_eq!(
-        reply.answers().filter(|rr| rr.rtype == Type::NSEC).count(),
+        reply
+            .authorities()
+            .filter(|rr| rr.rtype == Type::NSEC)
+            .count(),
         1
     );
-    verify_signatures(&reply.answers().collect::<Vec<_>>());
+    verify_signatures(&reply.authorities().collect::<Vec<_>>());
 }
 
 #[tokio::test]

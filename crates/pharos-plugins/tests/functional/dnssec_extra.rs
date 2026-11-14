@@ -236,10 +236,7 @@ async fn cname_signs_only_owners_in_configured_zones() {
         ),
         (
             "db.example.org.",
-            vec![
-                (Type::CNAME, "miek.nl.".to_string()),
-                (Type::A, "example.org.".to_string()),
-            ],
+            vec![(Type::CNAME, "miek.nl.".to_string())],
         ),
     ] {
         let wire = query("www.miek.nl.", Type::A, Downstream::Alias(target)).await;
@@ -253,26 +250,30 @@ async fn cname_signs_only_owners_in_configured_zones() {
 }
 
 #[tokio::test]
-async fn dname_and_synthesized_cname_are_signed() {
+async fn dname_is_signed_but_synthesized_cname_is_not() {
     let wire = query("a.dname.miek.nl.", Type::A, Downstream::Dname).await;
     let msg = Message::parse(&wire).unwrap();
     let mut actual = signatures(&msg.answers().collect::<Vec<_>>());
     actual.sort();
-    let mut expected = [Type::CNAME, Type::A, Type::DNAME].map(|t| (t, "miek.nl.".to_string()));
+    let mut expected = [Type::A, Type::DNAME].map(|t| (t, "miek.nl.".to_string()));
     expected.sort();
     assert_eq!(actual, expected);
 }
 
 #[tokio::test]
 async fn black_lie_nsec_queries_have_apex_and_non_apex_bitmaps() {
-    for (name, apex) in [("miek.nl.", true), ("www.miek.nl.", false)] {
+    for name in ["miek.nl.", "www.miek.nl."] {
         let wire = query(name, Type::NSEC, Downstream::Negative(true)).await;
         let msg = Message::parse(&wire).unwrap();
         assert_eq!(msg.rcode(), Rcode::NOERROR);
-        assert_eq!(msg.authority_count(), 0);
-        let answers = msg.answers().collect::<Vec<_>>();
-        assert_eq!(signatures(&answers), [(Type::NSEC, "miek.nl.".to_string())]);
-        let nsec = answers.iter().find(|rr| rr.rtype == Type::NSEC).unwrap();
+        assert_eq!(msg.answer_count(), 0);
+        let authority = msg.authorities().collect::<Vec<_>>();
+        let mut expected = [Type::SOA, Type::NSEC].map(|t| (t, "miek.nl.".to_string()));
+        expected.sort();
+        let mut actual = signatures(&authority);
+        actual.sort();
+        assert_eq!(actual, expected);
+        let nsec = authority.iter().find(|rr| rr.rtype == Type::NSEC).unwrap();
         let expected_owner: Name = name.parse().unwrap();
         assert_eq!(
             nsec.name,
@@ -286,13 +287,15 @@ async fn black_lie_nsec_queries_have_apex_and_non_apex_bitmaps() {
         assert_eq!(next, NameRef::parse(&next_wire, 0).unwrap());
         assert!(has_type(bitmap, Type::NSEC));
         assert!(has_type(bitmap, Type::RRSIG));
-        assert_eq!(has_type(bitmap, Type::SOA), apex);
+        assert!(!has_type(bitmap, Type::SOA));
+        assert!(has_type(bitmap, Type::NXNAME));
+        assert!(!has_type(bitmap, Type::A));
     }
 }
 
 #[tokio::test]
-async fn black_lie_ds_bitmaps_distinguish_apex_and_delegation() {
-    for (name, apex) in [("miek.nl.", true), ("sub.miek.nl.", false)] {
+async fn black_lie_name_errors_use_compact_bitmap_for_ds_queries() {
+    for name in ["miek.nl.", "sub.miek.nl."] {
         let wire = query(name, Type::DS, Downstream::Negative(true)).await;
         let msg = Message::parse(&wire).unwrap();
         assert_eq!(msg.rcode(), Rcode::NOERROR);
@@ -309,10 +312,11 @@ async fn black_lie_ds_bitmaps_distinguish_apex_and_delegation() {
         let Rdata::Nsec { bitmap, .. } = nsec.data().unwrap() else {
             panic!("expected NSEC")
         };
-        for t in [Type::NS, Type::NSEC, Type::RRSIG] {
+        for t in [Type::NXNAME, Type::NSEC, Type::RRSIG] {
             assert!(has_type(bitmap, t), "{name}: {t:?}");
         }
-        assert_eq!(has_type(bitmap, Type::SOA), apex);
+        assert!(!has_type(bitmap, Type::NS));
+        assert!(!has_type(bitmap, Type::SOA));
         assert!(!has_type(bitmap, Type::DS));
     }
 }
