@@ -30,7 +30,7 @@
 - Mismatched Upstream responses are discarded and retried; if no usable answer arrives, the client receives SERVFAIL, not FORMERR.
 - Configured resolver lookups follow CNAMEs up to 16 hops and retry TC responses over TCP.
 - Verified TSIG is stripped before forwarding. The forwarder clears AD on the response before it is TSIG-signed for the client.
-- ECS response FAMILY, SOURCE and ADDRESS must match when ECS is returned; longer SCOPE is accepted. ECS SCOPE is zeroed in upstream Queries. TSIG-signed Queries are not rewritten and do not get the ECS REFUSED retry, preserving their MAC.
+- ECS response FAMILY, SOURCE and ADDRESS must match when ECS is returned; mismatch discards the response and tries the next upstream. Longer SCOPE is accepted. ECS SCOPE is zeroed in upstream Queries. TSIG-signed Queries are not rewritten and do not get the ECS REFUSED retry, preserving their MAC.
 - Mixed-TTL RRsets are normalized to the lowest TTL per RFC 2181 §5.2. Repeated RRsets across sections are relayed unchanged; RFC 2181 §5.5 says they SHOULD NOT be repeated.
 - EDNS option 11 is removed from unsigned UDP Queries. On TCP, Query option data is zero-length; a response TIMEOUT of zero closes the connection after that response. TSIG-signed Queries remain byte-identical, so option 11 is not rewritten on that path.
 - Health probes require matching ID, QR, opcode, and exactly one echoed Question with matching name/type/class; answer RDATA is not decoded. Dead-server state expires and re-arms after 300 seconds.
