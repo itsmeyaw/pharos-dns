@@ -368,7 +368,9 @@ fn rsa_public_der(public: &[u8]) -> Result<Vec<u8>, KeyError> {
     }
     // RFC 3110 §2: The exponent and modulus are unsigned and have no leading zero octets.
     if public[start] == 0 || public[end] == 0 {
-        return Err(invalid("RSA DNSKEY exponent or modulus has a leading zero octet"));
+        return Err(invalid(
+            "RSA DNSKEY exponent or modulus has a leading zero octet",
+        ));
     }
     // RFC 3110 §2 and RFC 5702 §§2.1–2.2: RSA exponent and modulus are at most 4096 bits.
     if significant_octets(&public[start..end]) > 512 || significant_octets(&public[end..]) > 512 {

@@ -335,10 +335,8 @@ async fn split_keys_use_zsk_for_non_apex_dnskey_rrsets() {
         Outcome::Response
     );
     let reply = Message::parse(cx.response).unwrap();
-    let zsk = pharos_dnssec::keys::parse_dnskey(include_str!(
-        "../fixtures/dnssec/miek-zsk.key"
-    ))
-    .unwrap();
+    let zsk =
+        pharos_dnssec::keys::parse_dnskey(include_str!("../fixtures/dnssec/miek-zsk.key")).unwrap();
     let mut zsk_rdata = zsk.flags.to_be_bytes().to_vec();
     zsk_rdata.extend_from_slice(&[zsk.protocol, zsk.algorithm]);
     zsk_rdata.extend_from_slice(&zsk.public_key);

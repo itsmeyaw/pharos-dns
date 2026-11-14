@@ -121,8 +121,7 @@ pub(super) fn sign_with_owner(
         minimum,
         serial: previous_serial,
         ..
-    } =
-        Rdata::parse(Type::SOA, &soa.rdata).map_err(|e| e.to_string())?
+    } = Rdata::parse(Type::SOA, &soa.rdata).map_err(|e| e.to_string())?
     else {
         return Err("invalid SOA".into());
     };
@@ -528,7 +527,8 @@ mod tests {
 
     #[test]
     fn nsec_chain_includes_empty_nonterminal_wildcard_owner() {
-        let path = std::env::temp_dir().join(format!("pharos-sign-wildcard-ent-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("pharos-sign-wildcard-ent-{}", std::process::id()));
         std::fs::write(
             &path,
             "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n@ IN NS ns.\nleaf.* IN A 192.0.2.1\n",
@@ -545,7 +545,10 @@ mod tests {
         let Rdata::Nsec { bitmap, .. } = Rdata::parse(Type::NSEC, &nsec.rdata).unwrap() else {
             panic!("expected NSEC")
         };
-        assert_eq!(bitmap, pharos_dnssec::denial::type_bitmap(&[Type::NSEC, Type::RRSIG]).unwrap());
+        assert_eq!(
+            bitmap,
+            pharos_dnssec::denial::type_bitmap(&[Type::NSEC, Type::RRSIG]).unwrap()
+        );
     }
 
     #[test]

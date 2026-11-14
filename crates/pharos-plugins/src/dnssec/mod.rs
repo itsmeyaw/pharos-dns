@@ -255,9 +255,7 @@ mod tests {
         let name = NameRef::parse(domain.as_wire(), 0).unwrap();
         let mut query = Vec::new();
         let mut builder = MessageBuilder::new(&mut query, 512, 9, 0x0100).unwrap();
-        builder
-            .question(name, Type::DNSKEY, Class::CH)
-            .unwrap();
+        builder.question(name, Type::DNSKEY, Class::CH).unwrap();
         let _ = builder.finish();
         let mut response = Vec::with_capacity(512);
         let mut slots = [];
