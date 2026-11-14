@@ -1,6 +1,4 @@
-use pharos_proto::{
-    Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type, normalized_udp_size,
-};
+use pharos_proto::{Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type};
 use std::sync::Arc;
 
 use crate::{Action, Error, Outcome, Protocol, admission::write_error};
@@ -24,12 +22,13 @@ pub enum TsigSigning {
 /// Maximum Response size allowed for this Query and protocol.
 // RFC 4033 §9: Honor the requester's EDNS UDP payload size for DNSSEC responses.
 pub fn response_limit(query: Message<'_>, protocol: Protocol) -> usize {
-    // RFC 6891 §§6.2.3–6.2.5: cap UDP Responses at requester size and responder capacity.
-    usize::from(normalized_udp_size(
-        query.opt().map_or(512, Opt::response_udp_payload_size),
+    if protocol == Protocol::Tcp {
         // RFC 1035 §4.2.2: TCP response size is limited by the two-octet length prefix.
-        protocol == Protocol::Tcp,
-    ))
+        usize::from(u16::MAX)
+    } else {
+        // RFC 6891 §§6.2.3–6.2.5: cap UDP Responses at requester size and responder capacity.
+        usize::from(query.opt().map_or(512, Opt::response_udp_payload_size))
+    }
 }
 
 /// Finish a Plugin outcome, reporting Plugin and malformed Response errors.
@@ -228,6 +227,7 @@ fn scrub(
     let response_opt = query
         .opt()
         .map(|opt| opt.response_registered(existing, rcode));
+    // RFC 6891 §§6.2.3–6.2.5: retain the same capped payload value for OPT and truncation.
     let response_udp_size = response_opt.map(|opt| opt.udp_payload_size());
     let opt_len = response_opt.map_or(0, |opt| opt.wire_len());
     // RFC 6891 §7: a truncated EDNS response must retain the question and OPT record.

@@ -170,6 +170,7 @@ impl<'a> Opt<'a> {
         supported: &'b [u16],
         rcode: Rcode,
     ) -> ResponseOpt<'a, 'b> {
+        // RFC 7871 §7.2.2: retain Query ECS for a Response when the upstream omits it.
         let query_ecs = find_ecs_option(self.options.as_bytes());
         let mut source = existing.unwrap_or(self);
         // RFC 6891 §§6.2.3–6.2.5: cap the echoed requestor size at responder capacity.
@@ -277,7 +278,7 @@ fn find_ecs_option(options: &[u8]) -> Option<&[u8]> {
     while !rest.is_empty() {
         let size = usize::from(u16::from_be_bytes([rest[2], rest[3]])) + 4;
         if u16::from_be_bytes([rest[0], rest[1]]) == 8 {
-            // RFC 7871 §7.2.2: preserve the Query's ECS option when the upstream omitted OPT.
+            // RFC 7871 §6: ECS uses EDNS option code 8.
             return Some(&rest[..size]);
         }
         rest = &rest[size..];
