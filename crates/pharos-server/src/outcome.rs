@@ -1,5 +1,10 @@
-use pharos_proto::{Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type};
-use std::sync::Arc;
+use pharos_proto::{
+    Message, MessageBuilder, NameRef, Opt, Rcode, Section, TsigKey, TsigRecord, Type,
+};
+use std::{
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 use crate::{Action, Error, Outcome, Protocol, admission::write_error};
 
@@ -252,7 +257,6 @@ fn scrub(
     ];
     let mut stopped = false;
     let mut required_truncated = false;
-    // RFC 1035 §4.1.1: Walk sections in wire order before setting TC for omitted records.
     for (section, records) in [
         (1, message.answers()),
         (2, message.authorities()),
@@ -278,9 +282,13 @@ fn scrub(
         }
     }
     if required_truncated {
-        // RFC 2181 §9: Do not emit a partial Answer or Authority RRset.
-        end = question_end;
-        counts[1..].fill(0);
+        // RFC 2181 §9: Keep earlier complete RRsets and drop any group split by the cutoff.
+        let (safe_end, answer_count, authority_count) =
+            required_section_end(message, question_end, end);
+        end = safe_end;
+        counts[1] = answer_count;
+        counts[2] = authority_count;
+        counts[3] = 0;
     }
     // RFC 2181 §9 and RFC 4035 §3.1.1: optional Additional omissions alone do not set TC.
     let truncated = counts[1..3] != original[1..3];
@@ -327,6 +335,85 @@ fn scrub(
         wire[4 + 2 * i..6 + 2 * i].copy_from_slice(&count.to_be_bytes());
     }
     Ok(())
+}
+
+// RFC 2181 §9: move truncation before every required RRset that crosses the size limit.
+fn required_section_end(
+    message: Message<'_>,
+    question_end: usize,
+    mut end: usize,
+) -> (usize, u16, u16) {
+    let mut rrsets = std::collections::HashMap::new();
+    let mut start = question_end;
+    for record in message.answers().chain(message.authorities()) {
+        let record_end = record.rdata_offset + record.rdata.len();
+        rrsets
+            .entry(RrsetKey {
+                name: record.name,
+                rtype: record.rtype,
+                class: record.class,
+            })
+            .and_modify(|range: &mut (usize, usize)| range.1 = record_end)
+            .or_insert((start, record_end));
+        start = record_end;
+    }
+    let mut ranges = rrsets.into_values().collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+    let mut component = None;
+    let mut component_end = 0;
+    for (start, range_end) in ranges {
+        if start < component_end {
+            component_end = component_end.max(range_end);
+        } else {
+            if let Some(first) = component.filter(|first| *first < end && end < component_end) {
+                end = first;
+                break;
+            }
+            component = Some(start);
+            component_end = range_end;
+        }
+    }
+    if let Some(first) = component.filter(|first| *first < end && end < component_end) {
+        end = first;
+    }
+    let answer_count = message
+        .answers()
+        .take_while(|record| record.rdata_offset + record.rdata.len() <= end)
+        .count() as u16;
+    let authority_count = message
+        .authorities()
+        .take_while(|record| record.rdata_offset + record.rdata.len() <= end)
+        .count() as u16;
+    (end, answer_count, authority_count)
+}
+
+#[derive(Clone, Copy)]
+struct RrsetKey<'a> {
+    name: NameRef<'a>,
+    rtype: Type,
+    class: pharos_proto::Class,
+}
+
+impl PartialEq for RrsetKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.rtype == other.rtype && self.class == other.class
+    }
+}
+
+impl Eq for RrsetKey<'_> {}
+
+impl Hash for RrsetKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // RFC 4343 §3: Hash owner labels with ASCII case folding, matching DNS equality.
+        for label in self.name.labels() {
+            label.len().hash(state);
+            for byte in label {
+                byte.to_ascii_lowercase().hash(state);
+            }
+        }
+        self.rtype.hash(state);
+        self.class.hash(state);
+    }
 }
 
 fn append_tsig(

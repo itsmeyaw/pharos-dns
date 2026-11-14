@@ -45,6 +45,31 @@ fn response(count: usize) -> Vec<u8> {
     wire
 }
 
+fn response_with_two_rrsets() -> Vec<u8> {
+    let mut wire = Vec::with_capacity(65535);
+    let first = NameRef::parse(&[1, b'a', 0], 0).unwrap();
+    let second = NameRef::parse(&[1, b'b', 0], 0).unwrap();
+    let mut builder = MessageBuilder::new(&mut wire, 65535, 0x1234, 0x8180).unwrap();
+    builder.question(first, Type::A, Class::IN).unwrap();
+    builder
+        .record(Section::Answer, first, Type::TXT, Class::IN, 10, &[1; 10])
+        .unwrap();
+    for _ in 0..8 {
+        builder
+            .record(
+                Section::Answer,
+                second,
+                Type::TXT,
+                Class::IN,
+                10,
+                &[42; 150],
+            )
+            .unwrap();
+    }
+    let _ = builder.finish();
+    wire
+}
+
 #[test]
 fn truncation_does_not_emit_a_partial_required_rrset() {
     let wire = query(false);
@@ -66,6 +91,25 @@ fn truncation_does_not_emit_a_partial_required_rrset() {
     assert_eq!(message.answer_count(), 0);
     assert_eq!(message.authority_count(), 0);
     assert_eq!(message.additional_count(), 0);
+}
+
+#[test]
+fn truncation_keeps_earlier_complete_rrsets() {
+    let mut response = response_with_two_rrsets();
+    assert_eq!(
+        finish_outcome(
+            Message::parse(&query(false)).unwrap(),
+            Protocol::Udp,
+            Outcome::Response,
+            &mut response,
+            |_| panic!()
+        ),
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    assert!(message.tc());
+    assert_eq!(message.answer_count(), 1);
+    assert_eq!(message.answers().next().unwrap().name.to_string(), "a.");
 }
 
 #[test]
