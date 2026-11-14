@@ -9,7 +9,8 @@
 - `denial_min_ttl` is accepted for CoreDNS syntax compatibility but ignored: RFC 2308 §3 does not permit raising a negative TTL above its SOA-derived lifetime.
 - NXDOMAIN entries omit QTYPE from their key as RFC 2308 §5 requires; SOA-less NODATA, explicit wildcard QNAMEs, TKEY transactions, and ECS-bearing queries or responses are not cached.
 - Negative max TTL is capped at the positive max, and `keepttl` still ages negative TTLs, following RFC 2308 §§5–6.
-- Cache entries retain only query-relevant Answer/Authority RRsets; Additional records are omitted from cache hits.
+- Cache entries retain only query-relevant Answer/Authority RRsets; non-OPT Additional records are omitted from hits as a conservative bailiwick policy (RFC 5452 §6).
+- Cache hits retain each RRset's own minimum TTL rather than CoreDNS's response-wide minimum (RFC 2181 §5.2).
 - Stale responses use a positive 30-second default TTL, following RFC 8767 §4.
 - ECS bypass is conservative: even a scope-0 ECS response is not cached, and ECS queries do not use ordinary cached answers; network-prefix scope matching is not implemented (RFC 7871 §7.3).
 - Known cache gaps: failures are not keyed by upstream address (RFC 2308 §7.1), full data trust ranking is not implemented (RFC 2181 §5.4.1), and setup A/AAAA lookups do not validate owner names (RFC 5452 §6; `forward` plugin).
@@ -19,7 +20,7 @@
 - The cache hashes the same Query fields with FNV-1a rather than CoreDNS's FNV-1, so shard placement and eviction choices differ.
 - Configured Domains must be representable as DNS names; CoreDNS can normalize some malformed `disable` names without validating them.
 - Very large TTLs are bounded to the DNS TTL range during use rather than reproducing Go duration overflow.
-- Queries with compressed Questions, and Responses with compressed or multiple Questions or an OPT before other Additional records, are not cached: removing those encodings could invalidate compression pointers. CoreDNS re-encodes them.
+- Queries with compressed Questions and Responses with compressed or multiple Questions are not cached: removing those encodings could invalidate compression pointers. CoreDNS re-encodes them.
 - On a miss, Queries whose encoded names point into the header, or whose non-OPT RDATA might contain a compression pointer, also bypass the cache rather than changing AD.
 - Opaque EDNS option data is not treated as name compression.
 - On a hit, Pharos rewrites the Question's case in the stored wire Message; record names compressed against it therefore acquire the current Query's case, whereas CoreDNS rebuilds records from the cached Response.
@@ -27,6 +28,7 @@
 - TSIG-signed Queries and Responses bypass caching so that ID, flags and TTL rewrites cannot invalidate their signatures.
 - SERVFAIL, REFUSED, and internal resolution errors use the `servfail` TTL (default 5 seconds, minimum 1 second); repeated failures back off exponentially to 5 minutes, and expired failures are not served stale (RFC 9520 §3.2). `servfail 0` and sub-second values are raised to one second.
 - `disable denial` retains CoreDNS behavior and can leave positive caching enabled, despite RFC 2308 §8.
+- Cached DNAME Responses are reusable only for their exact QNAME; descendant synthesis from a cached DNAME is not implemented (RFC 6672 §§3.2, 3.4).
 - REFUSED responses are cached as resolution failures per RFC 9520 §§2.2 and 3.2; this differs from the previous CoreDNS-compatible behavior (ADR 0002).
 - Known gap: failure entries use QNAME, QTYPE, QCLASS, DO, and CD but omit upstream server address, contrary to RFC 2308 §7.1.
 - Wildcard source Metadata is not saved with cache entries.

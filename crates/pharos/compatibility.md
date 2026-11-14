@@ -31,6 +31,9 @@
 - RFC 9520 §3.2: `servfail 0` and sub-second failure TTLs are raised to one second; CoreDNS permits disabling or truncating failure caching below that minimum.
 - RFC 2308 §8: `disable denial` retains CoreDNS behavior and can leave positive caching enabled.
 - RFC 4035 §4.6: Upstream AD is retained for clients requesting AD/DO without a secure-channel policy, matching CoreDNS behavior.
+- RFC 2181 §5.2: Cache hits retain each RRset's own minimum TTL rather than CoreDNS's response-wide minimum.
+- RFC 5452 §6: Cache hits omit non-OPT Additional records, unlike CoreDNS's Extra retention, to avoid caching unvalidated glue.
+- RFC 6672 §§3.2, 3.4: Cached DNAME Answers are not synthesized for descendant QNAMEs; those Queries go upstream.
 
 ## cancel
 
@@ -347,7 +350,6 @@
 - A positive configured minimum TTL raises zero-TTL records before cache admission; default is five seconds. This retains the selected minimum-TTL compatibility policy despite RFC 1035 §3.2.1 and RFC 8767 §4 (ADR 0002; conf/cache #97).
 - `denial_min_ttl` is accepted for configuration compatibility but ignored, because RFC 2308 §3 does not permit raising a negative TTL above its SOA-derived lifetime.
 - REFUSED is cached as a resolution failure under RFC 9520 §§2.2 and 3.2; this differs from the previous cache behavior (conf/cache #97).
-- `servfail 0` disables failure caching and sub-second values truncate to zero; this behavior remains unchanged despite RFC 9520 §3.2's one-second minimum (conf/cache #97).
 - ECS-bearing queries and responses bypass the cache. This conservative subset does not implement RFC 7871 §7.3 prefix-aware scope matching.
 - Failure-cache keys omit the upstream address because the cache context does not expose the selected upstream (RFC 2308 §7.1; conf/cache #97).
 - SOA-less NODATA is classified as negative but is not cached (RFC 2308 §2.2; conf/cache #97).
