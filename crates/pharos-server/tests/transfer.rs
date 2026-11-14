@@ -646,6 +646,57 @@ async fn notify_uses_tcp_when_udp_does_not_reply() {
 }
 
 #[tokio::test]
+async fn notify_tcp_fallback_uses_configured_source_address() {
+    use pharos_proto::{Message, MessageBuilder};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = tcp.local_addr().unwrap();
+    let udp = UdpSocket::bind(address).await.unwrap();
+    let responder = tokio::spawn(async move {
+        let (mut socket, peer) = tokio::time::timeout(Duration::from_secs(1), tcp.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(peer.ip(), "127.0.0.2".parse::<std::net::IpAddr>().unwrap());
+        let len = tokio::time::timeout(Duration::from_secs(1), socket.read_u16())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut request = vec![0; usize::from(len)];
+        socket.read_exact(&mut request).await.unwrap();
+        let query = Message::parse(&request).unwrap();
+        let question = query.questions().next().unwrap();
+        let mut response = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut response, 512, query.id(), 0xa400).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        let _ = builder.finish();
+        socket.write_u16(response.len() as u16).await.unwrap();
+        socket.write_all(&response).await.unwrap();
+    });
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        pharos_server::transfer::notify_from(
+            address,
+            Some("127.0.0.2".parse().unwrap()),
+            &"a.".parse().unwrap(),
+            42,
+            Duration::from_millis(10),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), responder)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(udp);
+}
+
+#[tokio::test]
 async fn notify_reports_tcp_fallback_error_after_udp_retries() {
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = udp.local_addr().unwrap();
@@ -705,7 +756,7 @@ async fn notify_retries_response_with_wrong_id() {
     responder.await.unwrap();
 }
 
-// RFC 1996 §§3.3, 4.8: A NOTIFY Response must repeat the Question.
+// RFC 1996 §§3.6, 4.7: Retry until a NOTIFY Response repeats the Question.
 #[tokio::test]
 async fn notify_retries_response_with_wrong_question() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -713,7 +764,11 @@ async fn notify_retries_response_with_wrong_question() {
     let responder = tokio::spawn(async move {
         let mut wire = [0; 512];
         for attempt in 0..2 {
-            let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+            let (len, peer) =
+                tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut wire))
+                    .await
+                    .unwrap()
+                    .unwrap();
             if attempt == 0 {
                 wire[13] = b'b';
             }
@@ -721,15 +776,22 @@ async fn notify_retries_response_with_wrong_question() {
             socket.send_to(&wire[..len], peer).await.unwrap();
         }
     });
-    pharos_server::transfer::notify(
-        address,
-        &"a.".parse().unwrap(),
-        42,
-        Duration::from_millis(100),
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        pharos_server::transfer::notify(
+            address,
+            &"a.".parse().unwrap(),
+            42,
+            Duration::from_millis(100),
+        ),
     )
     .await
+    .unwrap()
     .unwrap();
-    responder.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), responder)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

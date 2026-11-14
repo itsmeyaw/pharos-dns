@@ -11,7 +11,7 @@ use pharos_proto::{
 };
 use tokio::{
     io::AsyncReadExt,
-    net::{TcpStream, UdpSocket},
+    net::{TcpSocket, TcpStream, UdpSocket},
     time::timeout,
 };
 
@@ -89,7 +89,7 @@ pub async fn notify_from(
             Err(error) => last_error = io::Error::new(io::ErrorKind::TimedOut, error),
         }
     }
-    notify_tcp(address, zone, id, deadline, &query)
+    notify_tcp(address, source, zone, id, deadline, &query)
         .await
         .map_err(|tcp_error| {
             io::Error::new(
@@ -118,6 +118,7 @@ fn notify_response(wire: &[u8], id: u16, zone: &Name) -> io::Result<Rcode> {
 
 async fn notify_tcp(
     address: SocketAddr,
+    source: Option<IpAddr>,
     zone: &Name,
     id: u16,
     deadline: Duration,
@@ -125,7 +126,21 @@ async fn notify_tcp(
 ) -> io::Result<()> {
     // RFC 1996 §3.4: Use TCP when UDP cannot complete the NOTIFY transaction.
     timeout(deadline, async {
-        let mut socket = TcpStream::connect(address).await?;
+        let socket = if address.is_ipv4() {
+            TcpSocket::new_v4()?
+        } else {
+            TcpSocket::new_v6()?
+        };
+        let source = source.unwrap_or_else(|| {
+            if address.is_ipv4() {
+                Ipv4Addr::UNSPECIFIED.into()
+            } else {
+                Ipv6Addr::UNSPECIFIED.into()
+            }
+        });
+        // RFC 1996 §3.4: Preserve configured source address on TCP fallback.
+        socket.bind(SocketAddr::new(source, 0))?;
+        let mut socket = socket.connect(address).await?;
         crate::write_tcp_frame(&mut socket, query).await?;
         let len = socket.read_u16().await?;
         let mut wire = vec![0; usize::from(len)];
