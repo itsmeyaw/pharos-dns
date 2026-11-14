@@ -576,15 +576,13 @@ mod tests {
         for (mode, error) in [("badkey", 17), ("badsig", 16)] {
             let query = parse(&format!("example. A IN udp +tsig=key.:c2VjcmV0:{mode}")).unwrap();
             let request = query.wire().unwrap();
-            assert!(
-                query
-                    .check_response_tsig(&request, &error_response(&request, error, 0))
-                    .is_err()
+            assert_eq!(
+                query.check_response_tsig(&request, &error_response(&request, error, 0)),
+                Err("unsigned BADKEY/BADSIG response is not NOTAUTH".into())
             );
-            assert!(
-                query
-                    .check_response_tsig(&request, &error_response(&request, error, 9))
-                    .is_ok()
+            assert_eq!(
+                query.check_response_tsig(&request, &error_response(&request, error, 9)),
+                Ok(true)
             );
         }
     }
@@ -678,7 +676,10 @@ mod tests {
             assert_eq!(message.opcode(), Opcode::NOTIFY, "{line}");
             assert!(!message.rd(), "{line}");
         }
-        assert!(parse("example. A IN udp +opcode=stateful").is_err());
+        assert_eq!(
+            parse("example. A IN udp +opcode=stateful").unwrap_err(),
+            "DSO requires TCP"
+        );
         assert!(parse("example. A IN tcp +opcode=stateful").is_ok());
     }
 
