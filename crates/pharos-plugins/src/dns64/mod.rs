@@ -83,31 +83,14 @@ impl Dns64 {
 }
 
 fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Error> {
-    let (ip, len) = value
-        .split_once('/')
-        .ok_or_else(|| cursor.error("invalid dns64 prefix"))?;
-    // RFC 4291 §2.2: IPv6 addresses use the conventional textual address forms.
-    let ip: Ipv6Addr = ip
-        .parse()
-        .map_err(|_| cursor.error("invalid dns64 prefix"))?;
-    let len: u8 = len
-        .parse()
-        .map_err(|_| cursor.error("invalid dns64 prefix"))?;
-    // RFC 6052 §2.2: only the six defined prefix lengths are valid; /96 is the maximum.
-    if !matches!(len, 32 | 40 | 48 | 56 | 64 | 96) {
-        return Err(cursor.error("invalid dns64 prefix length"));
-    }
-    let mut bytes = ip.octets();
-    // RFC 6052 §2.1: the Well-Known Prefix is valid only in its /96 format.
-    if bytes[..12] == "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets()[..12] && len != 96 {
-        return Err(cursor.error("invalid dns64 well-known prefix length"));
-    }
-    // RFC 6052 §2.2: the reserved octet must be zero for /96 Network-Specific Prefixes.
-    if len == 96 && bytes[8] != 0 {
-        return Err(cursor.error("invalid dns64 reserved octet"));
-    }
-    bytes[usize::from(len / 8)..].fill(0);
-    Ok((bytes, len))
+    rfc6052::parse(value).map_err(|error| {
+        cursor.error(match error {
+            rfc6052::PrefixError::Format => "invalid dns64 prefix",
+            rfc6052::PrefixError::Length => "invalid dns64 prefix length",
+            rfc6052::PrefixError::WellKnownLength => "invalid dns64 well-known prefix length",
+            rfc6052::PrefixError::ReservedOctet => "invalid dns64 reserved octet",
+        })
+    })
 }
 
 impl Plugin for Dns64 {
@@ -134,6 +117,7 @@ impl Plugin for Dns64 {
             Ok(message) => message,
             Err(_) => return Outcome::Error(ServerError::InvalidQuery),
         };
+        let original_flags = original.flags();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| {
@@ -162,6 +146,10 @@ impl Plugin for Dns64 {
             Ok(message) => message,
             Err(_) => return Outcome::Error(ServerError::InvalidQuery),
         };
+        // RFC 6147 §5.4: if the successful A lookup is empty, return the original AAAA response.
+        if response.rcode() == pharos_proto::Rcode::NOERROR && response.answer_count() == 0 {
+            return outcome;
+        }
         let result = (|| {
             let max = cx.max_response_size.max(512);
             if cx.response.capacity() < max {
@@ -180,8 +168,9 @@ impl Plugin for Dns64 {
                 } else {
                     0
                 }
-                // RFC 6147 §5.4: retain AA, RA, TC, and RCODE from the A response.
-                | (response.flags() & 0x068f);
+                // RFC 6147 §5.4: role flags come from the original AAAA response.
+                | (original_flags & 0x0480)
+                | (response.flags() & 0x020f);
             let mut builder = MessageBuilder::new(cx.response, max, cx.query.id(), flags)
                 .map_err(ServerError::Build)?;
             builder

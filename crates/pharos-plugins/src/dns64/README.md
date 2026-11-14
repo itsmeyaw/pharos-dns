@@ -4,6 +4,8 @@
 
 ## dns64
 
+- Rejects non-/96 use of the RFC 6052 Well-Known Prefix and nonzero /96 reserved octets (RFC 6052 §2.1–2.2).
+- Synthesized responses use AA/RA from the initial AAAA response and TC/RCODE from the A lookup (RFC 6147 §5.4).
 - AAAA synthesis uses a Self Lookup that allocates per Query; issue #86 tracks
   allocation-free Self Lookup. Queries that do not require synthesis do not
   allocate in this Plugin.
