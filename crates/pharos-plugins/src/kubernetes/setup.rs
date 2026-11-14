@@ -188,7 +188,7 @@ pub fn parse(cursor: &mut Cursor<'_>, server_domains: &[&str]) -> Result<Config,
             "multicluster" => {
                 let mut zones = Vec::new();
                 for argument in args {
-                    // RFC 1035 §2.3.4: reject arguments that cannot encode valid DNS names.
+                    // RFC 1035 §2.3.1: reject multicluster zones with invalid name syntax.
                     let normalized = normalize_domain(&argument);
                     if normalized.is_empty() {
                         return Err(cursor.error(format!("invalid multicluster zone '{argument}'")));

@@ -7,7 +7,7 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Record, Type};
 use pharos_server::{Handler, Phase, Protocol};
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // APIConnServeTest in CoreDNS handler_test.go: services, endpoint slices, pod and namespaces.
@@ -866,36 +866,32 @@ async fn handler_common_and_regular() {
 
 #[tokio::test]
 async fn tolerate_unready_annotation_covers_a_ptr_and_ns_queries() {
-    let address = Box::leak(local_ipv4().to_string().into_boxed_str());
+    let local = local_ip();
+    let address = Box::leak(local.to_string().into_boxed_str());
     let target = Box::leak(
         "unready.svc-unready.testns.svc.cluster.local."
             .to_owned()
             .into_boxed_str(),
     );
-    let ip: std::net::Ipv4Addr = address.parse().unwrap();
-    let octets = ip.octets();
-    let reverse = Box::leak(
-        format!(
-            "{}.{}.{}.{}.in-addr.arpa.",
-            octets[3], octets[2], octets[1], octets[0]
-        )
-        .into_boxed_str(),
-    );
+    let reverse = Box::leak(reverse_name(local).into_boxed_str());
+    let address_type = if local.is_ipv4() { "IPv4" } else { "IPv6" };
+    let address_qtype = if local.is_ipv4() { Type::A } else { Type::AAAA };
+    let address_rrtype = if local.is_ipv4() { "A" } else { "AAAA" };
     let service = r#"{"metadata":{"name":"svc-unready","namespace":"testns","annotations":{"service.alpha.kubernetes.io/tolerate-unready-endpoints":"true"}},"spec":{"clusterIP":"None","ports":[{"name":"http","protocol":"TCP","port":80}]}}"#;
     let services = append_json_item(SERVICES, service);
     let slice = format!(
-        r#"{{"metadata":{{"name":"svc-unready-slice","namespace":"testns","labels":{{"kubernetes.io/service-name":"svc-unready"}}}},"addressType":"IPv4","ports":[{{"name":"http","protocol":"TCP","port":80}}],"endpoints":[{{"addresses":["{address}"],"hostname":"unready","conditions":{{"ready":false}}}}]}}"#
+        r#"{{"metadata":{{"name":"svc-unready-slice","namespace":"testns","labels":{{"kubernetes.io/service-name":"svc-unready"}}}},"addressType":"{address_type}","ports":[{{"name":"http","protocol":"TCP","port":80}}],"endpoints":[{{"addresses":["{address}"],"hostname":"unready","conditions":{{"ready":false}}}}]}}"#
     );
     let endpoints = append_json_item(ENDPOINTS, &slice);
     run_group_on_stack_with_fixtures(
         String::new(),
         vec![
             row(
-                "unready A",
+                "unready address",
                 target,
-                Type::A,
+                address_qtype,
                 Rcode::NOERROR,
-                vec![rr(target, 5, "A", address)],
+                vec![rr(target, 5, address_rrtype, address)],
                 vec![],
                 vec![],
             ),
@@ -922,7 +918,7 @@ async fn tolerate_unready_annotation_covers_a_ptr_and_ns_queries() {
                 Rcode::NOERROR,
                 vec![rr("cluster.local.", 5, "NS", target)],
                 vec![],
-                vec![rr(target, 5, "A", address)],
+                vec![rr(target, 5, address_rrtype, address)],
             ),
         ],
         true,
@@ -934,17 +930,51 @@ async fn tolerate_unready_annotation_covers_a_ptr_and_ns_queries() {
     .await;
 }
 
-fn local_ipv4() -> Ipv4Addr {
-    nix::ifaddrs::getifaddrs()
+// RFC 1035 §3.3.11: the NS test needs an address for its authoritative server target.
+fn local_ip() -> IpAddr {
+    let addresses: Vec<_> = nix::ifaddrs::getifaddrs()
         .unwrap()
         .filter_map(|interface| {
-            interface
-                .address?
+            let address = interface.address?;
+            address
                 .as_sockaddr_in()
-                .map(|address| address.ip())
+                .map(|address| IpAddr::V4(address.ip()))
+                .or_else(|| {
+                    address
+                        .as_sockaddr_in6()
+                        .map(|address| IpAddr::V6(address.ip()))
+                })
         })
-        .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
-        .expect("tolerate-unready test requires a non-loopback IPv4 interface")
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        .collect();
+    addresses
+        .iter()
+        .find(|ip| ip.is_ipv4())
+        .or_else(|| addresses.first())
+        .copied()
+        .expect("tolerate-unready test requires a non-loopback interface")
+}
+
+fn reverse_name(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => {
+            // RFC 1035 §3.5: IPv4 reverse names use reversed decimal octets.
+            let [a, b, c, d] = ip.octets();
+            format!("{d}.{c}.{b}.{a}.in-addr.arpa.")
+        }
+        IpAddr::V6(ip) => {
+            // RFC 3596 §2.5: IPv6 reverse names use reversed hexadecimal nibbles.
+            let mut name = String::with_capacity(72);
+            for byte in ip.octets().iter().rev() {
+                name.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap());
+                name.push('.');
+                name.push(char::from_digit(u32::from(byte >> 4), 16).unwrap());
+                name.push('.');
+            }
+            name.push_str("ip6.arpa.");
+            name
+        }
+    }
 }
 
 fn append_json_item(array: &str, item: &str) -> String {
