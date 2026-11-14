@@ -34,6 +34,9 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
         )
         .unwrap();
     let _ = tsig_builder.finish();
+    let mut sha256_ds = [0; 36];
+    sha256_ds[2] = 8;
+    sha256_ds[3] = 2;
     let region = Region::new(GLOBAL);
     let parsed = Message::parse(query).unwrap();
     std::hint::black_box(parsed.questions().next().unwrap());
@@ -70,6 +73,8 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
     }
     for (rtype, bytes) in [
         (Type::DS, &b"\0\0\x08\0\xff"[..]),
+        // RFC 4509 §2.2: Keep the fixed 32-octet SHA-256 path covered.
+        (Type::DS, &sha256_ds[..]),
         (Type::CDS, &b"\0\0\x08\0\xff"[..]),
         (Type::DNSKEY, &b"\x01\0\x03\x08\xff"[..]),
         (Type::CDNSKEY, &b"\x01\0\x03\x08\xff"[..]),
