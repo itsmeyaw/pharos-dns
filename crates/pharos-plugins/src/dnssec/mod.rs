@@ -40,11 +40,9 @@ impl Plugin for Dnssec {
         }
         let matching = cx.query.questions().next().and_then(|question| {
             let zone = self.zone_for(question.name)?;
-            // RFC 4035 §3.1.3.1: Skip synthetic denial if this configured zone has no signing key.
-            self.keys
-                .iter()
-                .any(|key| key.public.owner == *zone)
-                .then(|| question.qtype == Type::DNSKEY && question.name == *zone)
+            let has_zone_key = self.keys.iter().any(|key| key.public.owner == *zone);
+            // RFC 4035 §3.1: DNSSEC proof processing applies only to signed zones.
+            has_zone_key.then(|| question.qtype == Type::DNSKEY && question.name == *zone)
         });
         // RFC 4033 §9: DO queries in configured zones receive DNSSEC records.
         let do_bit = matching.is_some() && cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
