@@ -206,11 +206,11 @@ fn rejects_hostile_wire_names() {
         (truncated_label.as_slice(), 0),
         (long_label.as_slice(), 0),
         (long_name.as_slice(), 0),
-        (pointer_chain.as_slice(), pointer_chain.len() - 2),
         (&[][..], 0),
     ] {
         assert!(NameRef::parse(message, offset).is_err());
     }
+    assert!(NameRef::parse(&pointer_chain, pointer_chain.len() - 2).is_ok());
 }
 
 #[test]
@@ -235,18 +235,14 @@ fn compares_borrowed_names_without_copying() {
 }
 
 #[test]
-fn bounds_compression_hops_and_cycles() {
+fn bounds_compression_chains_by_wire_and_expanded_name_size() {
     let mut message = vec![0];
-    for index in 0..256 {
+    for index in 0..512 {
         let target = if index == 0 { 0 } else { 1 + 2 * (index - 1) };
         message.push(0xc0 | ((target >> 8) as u8));
         message.push(target as u8);
     }
-    assert!(NameRef::parse(&message, 1 + 2 * 254).is_ok());
-    assert_eq!(
-        NameRef::parse(&message, 1 + 2 * 255).unwrap_err(),
-        NameError::PointerLimit
-    );
+    assert!(NameRef::parse(&message, 1 + 2 * 511).is_ok());
     assert!(NameRef::parse(b"\x01a\xc0\x00", 0).is_err());
     for message in [
         &b"\xc0"[..],

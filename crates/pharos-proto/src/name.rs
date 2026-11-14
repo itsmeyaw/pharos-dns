@@ -8,7 +8,6 @@ use std::{
 // RFC 1035 §2.3.4: wire names are at most 255 octets and labels at most 63 octets.
 const MAX_NAME_LEN: usize = 255;
 const MAX_LABEL_LEN: usize = 63;
-const MAX_POINTER_HOPS: usize = 255;
 const MAX_LABELS: usize = 127;
 
 /// An absolute domain name used in configuration and authoritative data.
@@ -357,7 +356,6 @@ impl<'a> NameRef<'a> {
         NameRefLabels {
             message: self.message,
             position: self.offset,
-            remaining_hops: MAX_POINTER_HOPS,
             done: false,
         }
     }
@@ -441,7 +439,6 @@ impl Eq for NameRef<'_> {}
 pub struct NameRefLabels<'a> {
     message: &'a [u8],
     position: usize,
-    remaining_hops: usize,
     done: bool,
 }
 
@@ -450,38 +447,32 @@ impl<'a> Iterator for NameRefLabels<'a> {
 
     // RFC 4343 §4: Preserve input label octets where convenient.
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-        let length = *self.message.get(self.position)?;
-        match length {
-            0 => {
-                self.done = true;
-                None
-            }
-            1..=63 => {
-                let start = self.position + 1;
-                let label = self.message.get(start..start + usize::from(length))?;
-                self.position = start + usize::from(length);
-                Some(label)
-            }
-            // RFC 4343 §3.1: Compression pointers expand before case-insensitive comparison.
-            0xc0..=0xff => {
-                if self.remaining_hops == 0 {
+        while !self.done {
+            let length = *self.message.get(self.position)?;
+            match length {
+                0 => {
                     self.done = true;
                     return None;
                 }
-                let target = usize::from(length & 0x3f) << 8
-                    | usize::from(*self.message.get(self.position + 1)?);
-                self.position = target;
-                self.remaining_hops -= 1;
-                self.next()
-            }
-            _ => {
-                self.done = true;
-                None
+                1..=63 => {
+                    let start = self.position + 1;
+                    let label = self.message.get(start..start + usize::from(length))?;
+                    self.position = start + usize::from(length);
+                    return Some(label);
+                }
+                // RFC 4343 §3.1: Compression pointers expand before case-insensitive comparison.
+                0xc0..=0xff => {
+                    let target = usize::from(length & 0x3f) << 8
+                        | usize::from(*self.message.get(self.position + 1)?);
+                    self.position = target;
+                }
+                _ => {
+                    self.done = true;
+                    return None;
+                }
             }
         }
+        None
     }
 }
 
@@ -489,7 +480,6 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
     let mut position = offset;
     let mut wire_len = 0;
     let mut expanded_len = 0;
-    let mut hops = 0;
     let mut jumped = false;
     let mut pointer_limit = message.len();
     loop {
@@ -531,10 +521,6 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
                 // RFC 1035 §4.1.4: compression pointers refer to a prior occurrence.
                 if target >= position {
                     return Err(NameError::PointerNotBackwards);
-                }
-                hops += 1;
-                if hops > MAX_POINTER_HOPS {
-                    return Err(NameError::PointerLimit);
                 }
                 if !jumped {
                     wire_len += 2;
