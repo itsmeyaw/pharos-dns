@@ -32,6 +32,7 @@ impl<'a> EdnsOptions<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, EdnsOptionError> {
         let mut remaining = bytes;
         // RFC 6891 §6.1.2: each option has a 16-bit code, length, and length-bounded data.
+        // RFC 8914 §3: Receivers accept multiple EDE options in one DNS message.
         while !remaining.is_empty() {
             if remaining.len() < 4 {
                 return Err(EdnsOptionError::Truncated);
@@ -112,6 +113,7 @@ impl ClientSubnet {
         source_prefix: u8,
         scope_prefix: u8,
     ) -> Result<Self, EdnsOptionError> {
+        // RFC 7871 §6: ECS address families 1 and 2 identify IPv4 and IPv6.
         let (family, bits) = if address.is_ipv4() { (1, 32) } else { (2, 128) };
         if source_prefix > bits || scope_prefix > bits {
             return Err(EdnsOptionError::InvalidOption { code: 8 });
@@ -154,6 +156,7 @@ impl ClientSubnet {
 }
 
 /// A typed option view. Byte slices borrow the original wire buffer.
+// RFC 5001 §2.4: Compare NSID payloads as raw bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EdnsOption<'a> {
     Nsid(&'a [u8]),
@@ -175,11 +178,15 @@ pub enum EdnsOption<'a> {
 impl EdnsOption<'_> {
     pub fn code(&self) -> u16 {
         match self {
+            // RFC 5001 §2.3: NSID uses EDNS option code 3.
             Self::Nsid(_) => 3,
             Self::Cookie(_) => 10,
+            // RFC 8914 §2: EDE uses EDNS option code 15.
             Self::ExtendedError { .. } => 15,
             Self::Padding(_) => 12,
+            // RFC 7871 §6: The EDNS Client Subnet option code is 8.
             Self::ClientSubnet(_) => 8,
+            // RFC 7828 §6: IANA assigns EDNS option code 11 to edns-tcp-keepalive.
             Self::TcpKeepalive(_) => 11,
             Self::Unknown { code, .. } => *code,
         }
@@ -197,6 +204,7 @@ impl EdnsOption<'_> {
                 info_code,
                 extra_text,
             } => {
+                // RFC 8914 §2: OPTION-LENGTH includes INFO-CODE and EXTRA-TEXT.
                 let len = extra_text
                     .len()
                     .checked_add(2)
@@ -204,10 +212,12 @@ impl EdnsOption<'_> {
                 let len = u16::try_from(len).map_err(|_| EdnsOptionError::OptionTooLong)?;
                 output.extend_from_slice(&self.code().to_be_bytes());
                 output.extend_from_slice(&len.to_be_bytes());
+                // RFC 8914 §2: INFO-CODE is a 16-bit network-byte-order registry index.
                 output.extend_from_slice(&info_code.to_be_bytes());
                 output.extend_from_slice(extra_text);
                 return Ok(());
             }
+            // RFC 7828 §3.1: Option 11 encodes an optional network-order timeout in 100 ms units.
             Self::TcpKeepalive(timeout) => {
                 if let Some(timeout) = timeout {
                     fixed[..2].copy_from_slice(&timeout.to_be_bytes());
@@ -218,6 +228,7 @@ impl EdnsOption<'_> {
             }
             // RFC 7871 §6: ECS carries family, source prefix, scope prefix, and address.
             Self::ClientSubnet(subnet) => {
+                // RFC 7871 §6: ECS fields use network byte order.
                 fixed[..2].copy_from_slice(&subnet.family.to_be_bytes());
                 fixed[2] = subnet.source_prefix;
                 fixed[3] = subnet.scope_prefix;
@@ -229,6 +240,7 @@ impl EdnsOption<'_> {
                 &fixed[..4 + len]
             }
         };
+        // RFC 7871 §6: OPTION-LENGTH counts payload octets after its field.
         let len = u16::try_from(data.len()).map_err(|_| EdnsOptionError::OptionTooLong)?;
         parse_option(self.code(), data)?;
         output.extend_from_slice(&self.code().to_be_bytes());
@@ -241,16 +253,20 @@ impl EdnsOption<'_> {
 fn parse_option(code: u16, data: &[u8]) -> Result<EdnsOption<'_>, EdnsOptionError> {
     let invalid = || EdnsOptionError::InvalidOption { code };
     Ok(match code {
+        // RFC 5001 §2.3: NSID option data is an opaque byte string.
         3 => EdnsOption::Nsid(data),
         10 => EdnsOption::Cookie(data),
         12 => EdnsOption::Padding(data),
         // RFC 8914 §2: EDE starts with a 16-bit info code followed by optional text.
+        // RFC 8914 §3: Accept EDE codes and text without matching them to RCODE.
         15 => {
             if data.len() < 2 {
                 return Err(invalid());
             }
+            // RFC 8914 §2: INFO-CODE keeps any 16-bit registry index, known or not.
             EdnsOption::ExtendedError {
                 info_code: u16::from_be_bytes([data[0], data[1]]),
+                // RFC 8914 §2: EXTRA-TEXT uses remaining bytes and may be empty or unterminated.
                 extra_text: &data[2..],
             }
         }
@@ -305,6 +321,7 @@ fn parse_option(code: u16, data: &[u8]) -> Result<EdnsOption<'_>, EdnsOptionErro
 impl fmt::Display for EdnsOption<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // RFC 5001 §2.4: Present NSID payload as two hexadecimal digits per octet.
             Self::Nsid(data) | Self::Cookie(data) => hex(f, data, false),
             Self::Padding(data) => hex(f, data, true),
             Self::Unknown { code, data } => {
@@ -337,6 +354,7 @@ impl fmt::Display for EdnsOption<'_> {
                 if let Some(description) = EDE_DESCRIPTIONS.get(usize::from(*info_code)) {
                     write!(f, " ({description})")?;
                 }
+                // RFC 8914 §2: EXTRA-TEXT is shown as lossy UTF-8 text for display only.
                 write!(f, ": ({})", String::from_utf8_lossy(extra_text))
             }
         }
@@ -354,6 +372,7 @@ fn hex(f: &mut fmt::Formatter<'_>, data: &[u8], upper: bool) -> fmt::Result {
     Ok(())
 }
 
+// RFC 9824 §9: EDE INFO-CODE 30 means Invalid Query Type.
 const EDE_DESCRIPTIONS: [&str; 31] = [
     "Other",
     "Unsupported DNSKEY Algorithm",

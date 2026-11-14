@@ -122,6 +122,7 @@ fn decode_alphanumeric_escapes(zone: &[u8]) -> Vec<u8> {
 
 fn space_numeric_apl_at_line_end(zone: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(zone.len());
+    // RFC 3123 §6: An APL RR with empty RDATA is valid and implements an empty list.
     // RFC 3597 §5 and RFC 3123 §4: numeric TYPE42 also permits an empty APL.
     for line in zone.split_inclusive(|&b| b == b'\n') {
         let end = line

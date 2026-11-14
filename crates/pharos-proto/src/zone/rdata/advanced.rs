@@ -38,6 +38,7 @@ pub(super) fn parse(
     let result = (|| -> Result<bool, String> {
         match rtype {
             // RFC 1876 §§2-3: LOC coordinates and precision are encoded in centimeters.
+            // RFC 1876 §5.3: LOC RDATA parsing is independent of the RR class.
             Type::LOC => {
                 if bad.iter().any(|&b| b) {
                     index = bad.iter().position(|&b| b).unwrap_or(0);
@@ -66,6 +67,7 @@ pub(super) fn parse(
                 };
                 #[cfg(not(target_arch = "x86_64"))]
                 let altitude = adjusted as i64 as u32;
+                // RFC 1876 §3: Default LOC size and precisions are 1 m, 10 km, and 10 m.
                 let mut precision = [0x12, 0x16, 0x13];
                 for (offset, (slot, field)) in precision.iter_mut().zip(&fields[i..]).enumerate() {
                     *slot = at!(i + offset, loc_precision(field))?;
@@ -76,7 +78,9 @@ pub(super) fn parse(
                 out.extend(altitude.to_be_bytes());
             }
             // RFC 8005 §5: HIP stores the HIT and public-key lengths before their octets.
+            // RFC 8005 §6: HIP text uses an integer algorithm, hex HIT, Base64 key, and RVS names.
             Type::HIP => {
+                // RFC 8005 §5.2: The PK algorithm is an octet, unchecked against the registry.
                 let algorithm = num!(0, number(field!(0, "missing HIP algorithm")))?;
                 let hit_field = field!(1, "missing HIP HIT");
                 if hit_field.is_empty() {
@@ -92,12 +96,17 @@ pub(super) fn parse(
                 let key = at!(2, base64(key_field))?;
                 out.push((hit_field.len() as u8) / 2);
                 out.push(algorithm);
+                // RFC 8005 §5.3: HIP stores key length as a 16-bit network-order byte count.
                 out.extend((key.len() as u16).to_be_bytes());
+                // RFC 8005 §5.4: HIP stores HIT as binary bytes in network byte order.
                 out.extend(hit);
                 at!(1, check_size(&out))?;
+                // RFC 8005 §5.5: The decoded key is written unchanged in its algorithm's format.
                 out.extend(key);
                 at!(2, check_size(&out))?;
+                // RFC 8005 §4.1: RVS names use the origin, including the owner name.
                 for (offset, field) in fields[3..].iter().enumerate() {
+                    // RFC 8005 §5.6: HIP appends uncompressed RVS names in preference order.
                     at!(offset + 3, name(&mut out, field, origin))?;
                     at!(offset + 3, check_size(&out))?;
                 }
@@ -118,6 +127,7 @@ pub(super) fn parse(
                     value => num!(0, number::<u16>(value))?,
                 };
                 out.extend(cert_type.to_be_bytes());
+                // RFC 4398 §2.2: CERT uses a decimal key tag and an algorithm with Base64 data.
                 num!(1, put16(&mut out, field!(1, "missing CERT key tag")))?;
                 out.push(num!(
                     2,
@@ -133,9 +143,11 @@ pub(super) fn parse(
                     error
                 })?;
             }
-            // RFC 7477 §2.1: CSYNC ends with an NSEC-format type bitmap.
+            // RFC 7477 §2.1.1.2.1: the Type Bit Map uses the NSEC wire encoding.
             Type::CSYNC => {
+                // RFC 7477 §2.1.1.1: SOA Serial is a 32-bit copy of the child-zone serial.
                 num!(0, put32(&mut out, field!(0, "missing CSYNC serial")))?;
+                // RFC 7477 §2.1.1.2: the Flags field occupies 16 bits.
                 num!(1, put16(&mut out, field!(1, "missing CSYNC flags")))?;
                 for (offset, field) in fields[2..].iter().enumerate() {
                     at!(offset + 2, type_code(field))?;
@@ -143,11 +155,14 @@ pub(super) fn parse(
                 at!(fields.len(), bitmap(&mut out, &fields[2..]))?;
             }
             // RFC 4025 §2 and RFC 8777 §4: gateway type determines the address encoding.
+            // RFC 8777 §4.3.1: AMTRELAY uses precedence, D-bit, type, and relay fields.
             Type::IPSECKEY | Type::AMTRELAY => {
+                // RFC 4025 §2.2: IPSECKEY precedence is an 8-bit value.
                 out.push(num!(0, number(field!(0, "missing gateway precedence")))?);
                 let (kind, gateway) = if rtype == Type::IPSECKEY {
                     let kind = num!(1, number(field!(1, "missing gateway type")))?;
                     out.push(kind);
+                    // RFC 4025 §3.1: the algorithm is an unsigned integer without mnemonics.
                     out.push(num!(2, number(field!(2, "missing IPSECKEY algorithm")))?);
                     (kind, fields.get(3).copied().unwrap_or(""))
                 } else {
@@ -155,11 +170,13 @@ pub(super) fn parse(
                     if bad.get(1).copied().unwrap_or(false) {
                         return Err(super::INVALID_ESCAPE.into());
                     }
+                    // RFC 8777 §4.2.2: D=0 clears and D=1 sets the high bit of the type octet.
                     let discovery = match field!(1, "missing AMTRELAY discovery") {
                         "0" => 0,
                         "1" => 0x80,
                         _ => return Err("invalid discovery".into()),
                     };
+                    // RFC 8777 §4.2.3: The relay type selects the AMTRELAY relay-field encoding.
                     let kind: u8 = num!(2, number(field!(2, "missing gateway type")))?;
                     out.push(discovery | kind);
                     (kind & 0x7f, fields.get(3).copied().unwrap_or(""))
@@ -176,6 +193,7 @@ pub(super) fn parse(
                 }
                 if rtype == Type::IPSECKEY {
                     let prefix = out.len();
+                    // RFC 4025 §3.1: Public-key data is Base64; absent text means zero octets.
                     out.extend(base64_tail(fields, 4).map_err(|(field, error)| {
                         index = field;
                         error
@@ -192,8 +210,11 @@ pub(super) fn parse(
                     index = bad.iter().position(|&b| b).unwrap_or(0);
                     return Err(super::INVALID_ESCAPE.into());
                 }
+                // RFC 3123 §6: Duplicate APL items are allowed and are not merged.
                 for (field_index, field) in fields.iter().enumerate() {
+                    // RFC 3123 §§5.1-5.2: APL items use family-specific addresses and prefixes.
                     at!(field_index, apl(&mut out, field))?;
+                    // RFC 3123 §6: The number of APL items is bounded by available RDATA space.
                     at!(field_index, check_size(&out))?;
                 }
             }
@@ -218,6 +239,7 @@ pub(super) fn parse(
             }
             _ => return Ok(false),
         }
+        // RFC 4025 §2.6: IPSECKEY public-key data is limited by the 16-bit RDATA length.
         if out.len() > usize::from(u16::MAX) {
             index = fields.len().saturating_sub(1);
             return Err("RDATA exceeds 65535 octets".into());
@@ -490,8 +512,11 @@ fn loc_precision(field: &str) -> Result<u8, String> {
 }
 
 // RFC 4025 §2.3: only gateway types 0-3 have defined encodings.
+// RFC 8777 §4.2.4: The relay field is an address or uncompressed domain name selected by type.
 fn gateway_wire(out: &mut Vec<u8>, kind: u8, field: &str, origin: &Name) -> Result<(), String> {
+    // RFC 4025 §2.5: IP addresses use network-order octets and names use uncompressed wire form.
     match kind {
+        // RFC 4025 §3.1: gateway type 0 requires "." when no gateway is indicated.
         0 if field != "." => return Err("invalid empty gateway".into()),
         1 => {
             let ip: IpAddr = field.parse().map_err(|_| "invalid gateway IPv4")?;
@@ -509,6 +534,7 @@ fn gateway_wire(out: &mut Vec<u8>, kind: u8, field: &str, origin: &Name) -> Resu
             out.extend(ip.octets());
         }
         3 if field.is_empty() => return Err("invalid gateway name".into()),
+        // RFC 4025 §2.3: Gateway type 3 contains an uncompressed wire-format domain name.
         3 => name(out, field, origin)?,
         _ => {}
     }
@@ -517,6 +543,7 @@ fn gateway_wire(out: &mut Vec<u8>, kind: u8, field: &str, origin: &Name) -> Resu
 
 // RFC 3123 §§4.1-4.2: address family and prefix select the minimum address octets.
 fn apl(out: &mut Vec<u8>, field: &str) -> Result<(), String> {
+    // RFC 3123 §5: Each APL item uses decimal AFI, address/prefix, and optional !.
     let (family, cidr) = field.split_once(':').ok_or("invalid APL family")?;
     let (negated, family) = family
         .strip_prefix('!')
@@ -525,11 +552,13 @@ fn apl(out: &mut Vec<u8>, field: &str) -> Result<(), String> {
     let (address, prefix) = cidr.split_once('/').ok_or("missing APL prefix")?;
     let prefix: u8 = number(prefix)?;
     let bytes = match family {
+        // RFC 3123 §5.1: IPv4 APL address is dotted-quad text, prefix 0-32.
         1 => address
             .parse::<Ipv4Addr>()
             .map_err(|_| "invalid APL IPv4")?
             .octets()
             .to_vec(),
+        // RFC 3123 §5.2: IPv6 APL address is RFC 2373 §2.2 text, prefix 0-128.
         2 => address
             .parse::<Ipv6Addr>()
             .map_err(|_| "invalid APL IPv6")?

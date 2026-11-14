@@ -144,6 +144,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
     /// Invalid maximum sizes leave the buffer unchanged. The caller must encode
     /// opcode, RCODE and other flags in their respective header bit positions.
     /// Maximum sizes below 512 octets are treated as 512.
+    // RFC 3226 §2.4: DNSSEC-capable servers can use UDP messages larger than 512 octets.
     pub fn new(wire: &'a mut B, max_size: usize, id: u16, flags: u16) -> Result<Self, BuildError> {
         if max_size > usize::from(u16::MAX) || max_size.max(MIN_MESSAGE_SIZE) > wire.max_capacity()
         {
@@ -253,6 +254,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
             self.write_name(name)?;
             self.write_bytes(&rtype.0.to_be_bytes())?;
             self.write_bytes(&class.0.to_be_bytes())?;
+            // RFC 8767 §4: TTL is an unsigned duration; high-order-bit values remain positive.
             self.write_bytes(&ttl.to_be_bytes())?;
             let length_offset = self.wire.len();
             self.write_bytes(&[0, 0])?;
@@ -261,6 +263,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
                 builder: self,
                 compress: true,
             })?;
+            // RFC 4398 §4: RDATA over 65,535 octets cannot fit in RDLENGTH.
             let length = u16::try_from(self.wire.len() - rdata_start)
                 .map_err(|_| BuildError::RdataTooLong)?;
             self.wire[length_offset..length_offset + 2].copy_from_slice(&length.to_be_bytes());
@@ -272,6 +275,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
     /// Appends one pre-encoded OPT record from the reserved space and finishes.
     /// The record must have an uncompressed root owner and a complete RDATA field.
     /// On error, the buffer contains the completed Message without the OPT.
+    // RFC 6891 §6.1.2: OPT uses root NAME, TYPE 41, and RDLENGTH-bounded option data.
     pub fn finish_with_opt(mut self, opt: &[u8]) -> Result<&'a mut B, BuildError> {
         let error = if opt.len() > self.reserved {
             Some(BuildError::SizeLimit)
@@ -329,6 +333,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
                     return Err(error);
                 }
                 // RFC 1035 §4.1.1: TC marks a message truncated by the transmission limit.
+                // RFC 2181 §5.1: Set TC when a required RRset cannot fit in full.
                 self.wire[2] |= 0x02;
                 self.stopped = true;
                 Ok(false)
@@ -344,6 +349,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
         Ok(())
     }
 
+    // RFC 3597 §4: The owner name is always eligible for compression.
     fn write_name(&mut self, name: NameRef<'_>) -> Result<(), BuildError> {
         self.write_name_with_compression(name, true)
     }
@@ -353,6 +359,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
         name: NameRef<'_>,
         compress: bool,
     ) -> Result<(), BuildError> {
+        // RFC 4343 §4.1: Preserve label case when writing DNS names.
         for (index, label) in name.labels().enumerate() {
             let pointer = self.offsets[..self.offset_count]
                 .iter()

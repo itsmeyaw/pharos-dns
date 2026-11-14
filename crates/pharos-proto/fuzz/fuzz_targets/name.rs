@@ -7,6 +7,7 @@ use pharos_proto::{Name, NameRef};
 fuzz_target!(|data: &[u8]| {
     let offset = data.first().copied().map_or(0, usize::from);
     for offset in [0, 12, offset] {
+        // RFC 4343 §2.1: Presentation escapes represent unusual DNS label octets without loss.
         if let Ok(name) = NameRef::parse(data, offset) {
             let owned = name.to_name();
             let parsed: Name = name.to_string().parse().unwrap();

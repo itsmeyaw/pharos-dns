@@ -209,6 +209,7 @@ fn valid_txt(mut bytes: &[u8]) -> Result<(), RdataError> {
     Ok(())
 }
 
+// RFC 6840 §6.4: An NSEC3 type bitmap may be empty for an empty non-terminal.
 fn valid_bitmap(mut bytes: &[u8]) -> Result<(), RdataError> {
     // RFC 4034 §4.1.2: bitmap windows are ordered, 1–32 octets, and have no trailing zeros.
     let mut previous = None;
@@ -254,6 +255,7 @@ fn display_bitmap(f: &mut fmt::Formatter<'_>, mut bytes: &[u8]) -> fmt::Result {
     Ok(())
 }
 
+// RFC 4648 §8: Encode each octet as two hexadecimal characters.
 fn display_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     for byte in bytes {
         write!(f, "{byte:02X}")?;
@@ -261,6 +263,7 @@ fn display_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     Ok(())
 }
 
+// RFC 4648 §§3.2,3.5,4,7: Encode bit groups with zero pad bits and optional padding.
 fn display_base(
     f: &mut fmt::Formatter<'_>,
     bytes: &[u8],
@@ -295,6 +298,7 @@ fn display_base(
     Ok(())
 }
 
+// RFC 4034 §3.2: RRSIG times use YYYYMMDDHHmmSS presentation.
 fn display_date(f: &mut fmt::Formatter<'_>, seconds: u64) -> fmt::Result {
     // Gregorian civil date from days since the Unix epoch.
     let days = (seconds / 86400) as i64 + 719468;
@@ -318,6 +322,7 @@ fn display_date(f: &mut fmt::Formatter<'_>, seconds: u64) -> fmt::Result {
     )
 }
 
+// RFC 1035 §5.1: Escape quotes and backslashes; encode non-printable octets as decimal.
 fn display_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     for &byte in bytes {
         match byte {
@@ -397,6 +402,7 @@ fn display_svc_bytes(f: &mut fmt::Formatter<'_>, bytes: &[u8], alpn: bool) -> fm
     Ok(())
 }
 
+// RFC 9460 §2.1: SvcParam presentation uses registered names or keyNNNNN for unknown keys.
 fn display_svc_params(f: &mut fmt::Formatter<'_>, params: SvcParams<'_>) -> fmt::Result {
     for (key, value) in params.iter() {
         f.write_str(" ")?;
@@ -424,6 +430,7 @@ fn display_svc_params(f: &mut fmt::Formatter<'_>, params: SvcParams<'_>) -> fmt:
                     rest = next;
                 }
             }
+            // RFC 9540 §4: The ohttp SvcParam has an empty presentation and wire value.
             2 | 8 => {}
             3 => write!(f, "{}", u16::from_be_bytes([value[0], value[1]]))?,
             4 => {
@@ -447,6 +454,7 @@ fn display_svc_params(f: &mut fmt::Formatter<'_>, params: SvcParams<'_>) -> fmt:
                         f.write_str(",")?;
                     }
                     let octets: [u8; 16] = ip.try_into().map_err(|_| fmt::Error)?;
+                    // RFC 5952 §4: Emit IPv6 addresses in canonical text form.
                     write!(f, "{}", Ipv6Addr::from(octets))?;
                 }
             }
@@ -478,6 +486,7 @@ pub enum Rdata<'a> {
         preference: u16,
         exchange: NameRef<'a>,
     },
+    // RFC 1982 §7: DNS SOA serials are unsigned 32-bit serial numbers.
     Soa {
         mname: NameRef<'a>,
         rname: NameRef<'a>,
@@ -640,6 +649,7 @@ impl<'a> Rdata<'a> {
         }
     }
 
+    // RFC 1035 §3.3: Standard RR RDATA formats are identical across classes.
     pub(crate) fn parse_in_message(
         rtype: Type,
         wire: &'a [u8],
@@ -649,6 +659,7 @@ impl<'a> Rdata<'a> {
         let bytes = wire
             .get(offset..offset.checked_add(len).ok_or(RdataError)?)
             .ok_or(RdataError)?;
+        // RFC 1035 §4.1.3: RDLENGTH is an unsigned 16-bit octet count.
         if matches!(rtype, Type::TLSA | Type::SSHFP | Type::ZONEMD | Type::TSIG)
             && len > usize::from(u16::MAX)
         {
@@ -663,6 +674,7 @@ impl<'a> Rdata<'a> {
             Type::AAAA => Ok(Self::Aaaa(Ipv6Addr::from(
                 <[u8; 16]>::try_from(bytes).map_err(|_| RdataError)?,
             ))),
+            // RFC 1035 §3.3.1: CNAME RDATA names the canonical domain name.
             Type::NS | Type::CNAME | Type::DNAME | Type::PTR => {
                 let name = NameRef::parse(wire, offset).map_err(|_| RdataError)?;
                 if name.wire_len() != len {
@@ -756,6 +768,7 @@ impl<'a> Rdata<'a> {
                     target: &bytes[4..],
                 })
             }
+            // RFC 2782 §The format of the SRV RR: SRV has priority, weight, port, and target.
             Type::SRV => {
                 let header = bytes.get(..6).ok_or(RdataError)?;
                 let target = NameRef::parse(wire, offset + 6).map_err(|_| RdataError)?;
@@ -776,6 +789,7 @@ impl<'a> Rdata<'a> {
                 let (services, rest) = character_string(rest)?;
                 let (regexp, rest) = character_string(rest)?;
                 let name_start = len - rest.len();
+                // RFC 3403 §4.1: NAPTR replacement is a fully qualified domain name.
                 let replacement =
                     NameRef::parse(wire, offset + name_start).map_err(|_| RdataError)?;
                 if replacement.wire_len() != rest.len() {
@@ -791,6 +805,7 @@ impl<'a> Rdata<'a> {
                 })
             }
             // RFC 9460 §2.2: SVCB RDATA contains priority, target, and SvcParams.
+            // RFC 9460 §6: SVCB and HTTPS use the same RDATA processing.
             Type::SVCB | Type::HTTPS => {
                 let header = bytes.get(..2).ok_or(RdataError)?;
                 let priority = u16::from_be_bytes([header[0], header[1]]);
@@ -812,9 +827,12 @@ impl<'a> Rdata<'a> {
                 })
             }
             // RFC 4034 §5.1: DS RDATA contains key tag, algorithm, digest type, and digest.
+            // RFC 7344 §3.1: CDS uses the DS wire format and field layout.
             Type::DS | Type::CDS => {
                 let h = bytes.get(..4).ok_or(RdataError)?;
+                // RFC 4034 §5.1.3: The DS digest type identifies the digest algorithm.
                 let (key_tag, algorithm, digest_type, digest) =
+                    // RFC 4034 §5.1.1: DS key tags are in network byte order.
                     (u16::from_be_bytes([h[0], h[1]]), h[2], h[3], &bytes[4..]);
                 Ok(if rtype == Type::DS {
                     Self::Ds {
@@ -833,6 +851,7 @@ impl<'a> Rdata<'a> {
                 })
             }
             // RFC 4034 §2.1: DNSKEY has flags, protocol, algorithm, and public key.
+            // RFC 7344 §3.2: CDNSKEY RDATA has the DNSKEY field layout.
             Type::DNSKEY | Type::CDNSKEY => {
                 let h = bytes.get(..4).ok_or(RdataError)?;
                 let (flags, protocol, algorithm, public_key) =
@@ -859,7 +878,9 @@ impl<'a> Rdata<'a> {
                 let signer = NameRef::parse(wire, offset + 18).map_err(|_| RdataError)?;
                 let signature = bytes.get(18 + signer.wire_len()..).ok_or(RdataError)?;
                 Ok(Self::Rrsig {
+                    // RFC 4034 §3.1.1: Type Covered identifies the RR type covered by RRSIG.
                     type_covered: Type(u16::from_be_bytes([h[0], h[1]])),
+                    // RFC 4034 §3.1.2: Algorithm identifies the signature algorithm.
                     algorithm: h[2],
                     labels: h[3],
                     original_ttl: u32::from_be_bytes([h[4], h[5], h[6], h[7]]),
@@ -871,6 +892,7 @@ impl<'a> Rdata<'a> {
                 })
             }
             // RFC 4034 §4.1: NSEC contains a next-domain name and type bitmaps.
+            // RFC 4034 §4: NSEC RDATA is independent of RR class.
             Type::NSEC => {
                 let next = NameRef::parse(wire, offset).map_err(|_| RdataError)?;
                 let bitmap = bytes.get(next.wire_len()..).ok_or(RdataError)?;
@@ -879,9 +901,11 @@ impl<'a> Rdata<'a> {
             }
             // RFC 5155 §3.2: NSEC3 adds a next hash and bitmap after the salt.
             // RFC 5155 §4.2: NSEC3PARAM ends after its length-prefixed salt.
+            // RFC 5155 §4.1: NSEC3PARAM mirrors the first four NSEC3 RDATA fields.
             Type::NSEC3 | Type::NSEC3PARAM => {
                 let h = bytes.get(..4).ok_or(RdataError)?;
                 let (salt, rest) = character_string(&bytes[4..])?;
+                // RFC 5155 §4.1.1: NSEC3PARAM carries an NSEC3 hash-algorithm identifier.
                 let (hash_algorithm, flags, iterations) =
                     (h[0], h[1], u16::from_be_bytes([h[2], h[3]]));
                 if rtype == Type::NSEC3PARAM {
@@ -895,6 +919,7 @@ impl<'a> Rdata<'a> {
                         salt,
                     })
                 } else {
+                    // RFC 5155 §3.1.7: The next owner stores the binary hash, not the zone.
                     let (next_owner, bitmap) = character_string(rest)?;
                     valid_bitmap(bitmap)?;
                     Ok(Self::Nsec3 {
@@ -907,6 +932,7 @@ impl<'a> Rdata<'a> {
                     })
                 }
             }
+            // RFC 6698 §2.1.4: TLSA association data is the unparsed remainder after fixed fields.
             Type::TLSA => {
                 let h = bytes.get(..3).ok_or(RdataError)?;
                 Ok(Self::Tlsa {
@@ -916,6 +942,7 @@ impl<'a> Rdata<'a> {
                     certificate: &bytes[3..],
                 })
             }
+            // RFC 4255 §3.1: SSHFP stores algorithm, fingerprint type, then fingerprint bytes.
             Type::SSHFP => {
                 let h = bytes.get(..2).ok_or(RdataError)?;
                 Ok(Self::Sshfp {
@@ -928,9 +955,12 @@ impl<'a> Rdata<'a> {
             Type::ZONEMD => {
                 let h = bytes.get(..18).ok_or(RdataError)?;
                 Ok(Self::Zonemd {
+                    // RFC 8976 §2.2.1: Serial is a 32-bit unsigned network-order integer.
                     serial: u32::from_be_bytes([h[0], h[1], h[2], h[3]]),
+                    // RFC 8976 §2.2.2: Scheme is an 8-bit unsigned method identifier.
                     scheme: h[4],
                     hash_algorithm: h[5],
+                    // RFC 8976 §2.2.3: SHA384 and SHA512 digests are not truncated.
                     digest: &bytes[6..],
                 })
             }
@@ -962,6 +992,7 @@ impl<'a> Rdata<'a> {
             }
             _ if unsupported_name_type(rtype) => Err(RdataError),
             // shortcut: other record types stay opaque, add typed formats before zone parsing.
+            // RFC 4701 §3.1: DHCID RDATA stays opaque bytes, not parsed.
             _ => Ok(Self::Unknown(rtype, bytes)),
         }
     }
@@ -1008,11 +1039,15 @@ impl<'a> Rdata<'a> {
         writer: &mut RdataWriter<'_, '_, B>,
     ) -> Result<(), BuildError> {
         match self {
+            // RFC 1035 §3.4.1: A RDATA carries one 32-bit Internet address.
             Self::A(addr) => writer.write_bytes(&addr.octets()),
+            // RFC 3596 §2.2: AAAA RDATA is a 128-bit IPv6 address in network order.
             Self::Aaaa(addr) => writer.write_bytes(&addr.octets()),
+            // RFC 3597 §4: Embedded names in RFC 1035 well-known RDATA may be compressed.
             Self::Ns(name) | Self::Cname(name) | Self::Ptr(name) => writer.write_name(*name),
-            // RFC 6672 §2.4: DNAME target names must not be compressed.
+            // RFC 6672 §2.1 and §2.5: DNAME target names must not be compressed.
             Self::Dname(name) => writer.write_uncompressed_name(*name),
+            // RFC 1035 §3.3.9: MX RDATA contains a preference and exchange name.
             Self::Mx {
                 preference,
                 exchange,
@@ -1020,6 +1055,7 @@ impl<'a> Rdata<'a> {
                 writer.write_bytes(&preference.to_be_bytes())?;
                 writer.write_name(*exchange)
             }
+            // RFC 1035 §3.3.13: SOA has two names followed by five unsigned 32-bit fields.
             Self::Soa {
                 mname,
                 rname,
@@ -1036,14 +1072,17 @@ impl<'a> Rdata<'a> {
                 }
                 Ok(())
             }
+            // RFC 1035 §3.3.14: TXT RDATA contains one or more character-strings.
             Self::Txt(bytes) => {
                 valid_txt(bytes).map_err(|_| BuildError::InvalidRdata)?;
                 writer.write_bytes(bytes)
             }
+            // RFC 1035 §3.3.2: HINFO RDATA contains CPU and OS character-strings.
             Self::Hinfo { cpu, os } => {
                 write_character_string(writer, cpu)?;
                 write_character_string(writer, os)
             }
+            // RFC 8659 §4.1: CAA writes flags, a length-prefixed tag, and value octets.
             Self::Caa { flags, tag, value } => {
                 if tag.is_empty() || !tag.iter().all(u8::is_ascii_alphanumeric) {
                     return Err(BuildError::InvalidRdata);
@@ -1052,6 +1091,7 @@ impl<'a> Rdata<'a> {
                 write_character_string(writer, tag)?;
                 writer.write_bytes(value)
             }
+            // RFC 7553 §4.5: URI Priority and Weight precede Target in network byte order.
             Self::Uri {
                 priority,
                 weight,
@@ -1105,6 +1145,7 @@ impl<'a> Rdata<'a> {
                 writer.write_uncompressed_name(*target)?;
                 writer.write_bytes(params)
             }
+            // RFC 7344 §3.1: CDS RDATA uses the DS wire format.
             Self::Ds {
                 key_tag,
                 algorithm,
@@ -1117,6 +1158,7 @@ impl<'a> Rdata<'a> {
                 digest_type,
                 digest,
             } => {
+                // RFC 4034 §5.1.1: DS key tags are serialized in network byte order.
                 writer.write_bytes(&key_tag.to_be_bytes())?;
                 writer.write_bytes(&[*algorithm, *digest_type])?;
                 writer.write_bytes(digest)
@@ -1153,6 +1195,7 @@ impl<'a> Rdata<'a> {
                 for value in [original_ttl, expiration, inception] {
                     writer.write_bytes(&value.to_be_bytes())?;
                 }
+                // RFC 4034 §3.1.6: The DNSKEY key tag is encoded in network byte order.
                 writer.write_bytes(&key_tag.to_be_bytes())?;
                 // RFC 4034 §3.1.7: senders must not compress the RRSIG signer name.
                 writer.write_uncompressed_name(*signer)?;
@@ -1172,10 +1215,12 @@ impl<'a> Rdata<'a> {
                 next_owner,
                 bitmap,
             } => {
+                // RFC 5155 §3.2: NSEC3 fields use wire order and network-byte-order integers.
                 valid_bitmap(bitmap).map_err(|_| BuildError::InvalidRdata)?;
                 writer.write_bytes(&[*hash_algorithm, *flags])?;
                 writer.write_bytes(&iterations.to_be_bytes())?;
                 write_character_string(writer, salt)?;
+                // RFC 5155 §3.1.7: The next owner stores the binary hash, not the zone.
                 write_character_string(writer, next_owner)?;
                 writer.write_bytes(bitmap)
             }
@@ -1185,10 +1230,13 @@ impl<'a> Rdata<'a> {
                 iterations,
                 salt,
             } => {
+                // RFC 5155 §4.2: NSEC3PARAM encodes algorithm, flags, iterations, and salt.
                 writer.write_bytes(&[*hash_algorithm, *flags])?;
                 writer.write_bytes(&iterations.to_be_bytes())?;
+                // RFC 5155 §4.1.4: Salt Length counts the following salt octets.
                 write_character_string(writer, salt)
             }
+            // RFC 6698 §2.1.4: TLSA association data follows the three fixed fields verbatim.
             Self::Tlsa {
                 usage,
                 selector,
@@ -1201,6 +1249,7 @@ impl<'a> Rdata<'a> {
                 writer.write_bytes(&[*usage, *selector, *matching_type])?;
                 writer.write_bytes(certificate)
             }
+            // RFC 4255 §3.1: SSHFP encodes algorithm, fingerprint type, then fingerprint bytes.
             Self::Sshfp {
                 algorithm,
                 fingerprint_type,
@@ -1212,12 +1261,14 @@ impl<'a> Rdata<'a> {
                 writer.write_bytes(&[*algorithm, *fingerprint_type])?;
                 writer.write_bytes(fingerprint)
             }
+            // RFC 8976 §2.2: ZONEMD carries serial, scheme, hash algorithm, and digest in order.
             Self::Zonemd {
                 serial,
                 scheme,
                 hash_algorithm,
                 digest,
             } => {
+                // RFC 8976 §2.2.4: A ZONEMD digest is at least 12 octets.
                 if !(12..=usize::from(u16::MAX) - 6).contains(&digest.len()) {
                     return Err(BuildError::InvalidRdata);
                 }
@@ -1293,6 +1344,7 @@ impl<'a> Rdata<'a> {
             {
                 Err(BuildError::InvalidRdata)
             }
+            // RFC 3597 §3: Unknown RDATA is transmitted unchanged as binary data.
             Self::Unknown(_, bytes) => writer.write_bytes(bytes),
         }
     }
@@ -1302,6 +1354,7 @@ impl fmt::Display for Rdata<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::A(addr) => write!(f, "{addr}"),
+            // RFC 5952 §4.3: Display hexadecimal letters in lowercase.
             Self::Aaaa(addr) => write!(f, "{addr}"),
             Self::Ns(name) | Self::Cname(name) | Self::Dname(name) | Self::Ptr(name) => {
                 write!(f, "{name}")
@@ -1349,6 +1402,7 @@ impl fmt::Display for Rdata<'_> {
                 f.write_str(" ")?;
                 display_octets(f, value)
             }
+            // RFC 7553 §4.4: URI Target uses double quotes in presentation format.
             Self::Uri {
                 priority,
                 weight,
@@ -1373,6 +1427,7 @@ impl fmt::Display for Rdata<'_> {
                 regexp,
                 replacement,
             } => {
+                // RFC 3403 §4.3: Flags, Services, and Regexp are quoted character-strings.
                 write!(f, "{order} {preference} ")?;
                 display_quoted(f, flags)?;
                 f.write_str(" ")?;
@@ -1397,6 +1452,7 @@ impl fmt::Display for Rdata<'_> {
                     Err(_) => write!(f, " {}", Self::Unknown(self.rtype(), params)),
                 }
             }
+            // RFC 7344 §3.1: CDS presentation format matches DS.
             Self::Ds {
                 key_tag,
                 algorithm,
@@ -1409,6 +1465,7 @@ impl fmt::Display for Rdata<'_> {
                 digest_type,
                 digest,
             } => {
+                // RFC 4034 §5.3: DS fields use decimal numbers and a hexadecimal digest.
                 write!(f, "{key_tag} {algorithm} {digest_type} ")?;
                 display_hex(f, digest)
             }
@@ -1424,6 +1481,7 @@ impl fmt::Display for Rdata<'_> {
                 algorithm,
                 public_key,
             } => {
+                // RFC 4034 §2.2: The DNSKEY public key uses Base64 presentation.
                 write!(f, "{flags} {protocol} {algorithm} ")?;
                 display_base(
                     f,
@@ -1433,6 +1491,7 @@ impl fmt::Display for Rdata<'_> {
                     true,
                 )
             }
+            // RFC 4034 §3.2: RRSIG fields use the specified presentation forms.
             Self::Rrsig {
                 type_covered,
                 algorithm,
@@ -1444,6 +1503,7 @@ impl fmt::Display for Rdata<'_> {
                 signer,
                 signature,
             } => {
+                // RFC 4034 §3.2: RRSIG uses decimal fields, UTC timestamps, and Base64.
                 write!(f, "{type_covered} {algorithm} {labels} {original_ttl} ")?;
                 display_date(f, u64::from(*expiration))?;
                 f.write_str(" ")?;
@@ -1457,6 +1517,7 @@ impl fmt::Display for Rdata<'_> {
                     true,
                 )
             }
+            // RFC 4034 §4.2: NSEC presents the next name and type mnemonics or TYPE numbers.
             Self::Nsec { next, bitmap } => {
                 write!(f, "{next}")?;
                 if bitmap.is_empty() {
@@ -1465,6 +1526,7 @@ impl fmt::Display for Rdata<'_> {
                     display_bitmap(f, bitmap)
                 }
             }
+            // RFC 5155 §3.3: The next hashed owner uses unpadded base32hex presentation.
             Self::Nsec3 {
                 hash_algorithm,
                 flags,
@@ -1473,6 +1535,7 @@ impl fmt::Display for Rdata<'_> {
                 next_owner,
                 bitmap,
             } => {
+                // RFC 5155 §3.3: NSEC3 uses decimal fields, hex salt, base32hex hash, and types.
                 write!(f, "{hash_algorithm} {flags} {iterations} ")?;
                 if salt.is_empty() {
                     f.write_str("-")?;
@@ -1483,6 +1546,7 @@ impl fmt::Display for Rdata<'_> {
                 display_base(f, next_owner, b"0123456789ABCDEFGHIJKLMNOPQRSTUV", 5, false)?;
                 display_bitmap(f, bitmap)
             }
+            // RFC 5155 §4.3: NSEC3PARAM uses decimal fields and "-" for an empty salt.
             Self::Nsec3param {
                 hash_algorithm,
                 flags,
@@ -1502,12 +1566,14 @@ impl fmt::Display for Rdata<'_> {
                 matching_type,
                 certificate,
             } => {
+                // RFC 6698 §2.2: Certificate association data is presented in hexadecimal.
                 write!(f, "{usage} {selector} {matching_type} ")?;
                 for byte in *certificate {
                     write!(f, "{byte:02x}")?;
                 }
                 Ok(())
             }
+            // RFC 4255 §3.2: SSHFP uses decimal identifiers and a hexadecimal fingerprint.
             Self::Sshfp {
                 algorithm,
                 fingerprint_type,
@@ -1522,6 +1588,7 @@ impl fmt::Display for Rdata<'_> {
                 hash_algorithm,
                 digest,
             } => {
+                // RFC 8976 §2.3: ZONEMD uses decimal fields and a hexadecimal digest.
                 write!(f, "{serial} {scheme} {hash_algorithm} ")?;
                 for byte in *digest {
                     write!(f, "{byte:02x}")?;

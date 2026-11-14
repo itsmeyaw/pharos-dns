@@ -73,6 +73,7 @@ fn generic_cases() -> Vec<Case> {
     }
     result.push(generic_case(15, "mx-pointer-forward", 7, "000ac004016100"));
     // RFC 1035 §4.2.2: even valid RDATA cannot fit a message if the whole RR exceeds 65535 bytes.
+    // RFC 1035 §4.1.3: RDLENGTH is a 16-bit integer, limiting RDATA to 65535 octets.
     let long_txt = format!(
         "{}fd{}",
         format!("ff{}", "61".repeat(255)).repeat(255),
@@ -911,6 +912,7 @@ fn generic_name_pointer_results_are_compared_on_wire() {
 }
 
 // RFC 1035 §3.1: an absolute owner needs at least the root label octet.
+// RFC 1035 §5.1: A blank owner inherits the last stated owner, if one exists.
 const EMPTY_OWNER_CASES: [(&[u8], &str); 3] = [
     (
         b"$TTL 3600\n IN A 192.0.2.1\n",
@@ -965,7 +967,7 @@ fn accepted_but_unencodable_record() {
         "oversized record should not be representable on wire"
     );
     eprintln!("Go accepted oversized TXT but PackRR failed: {go}Rust: {rust}");
-    // RFC 4034 §2.1 and RFC 9460 §2.2: invalid keys cannot become wire records.
+    // RFC 4034 §2.2 and RFC 9460 §2.2: DNSKEY uses Base64; SvcParam keys must not repeat.
     for (name, input, error) in [
         (
             "invalid DNSKEY base64",

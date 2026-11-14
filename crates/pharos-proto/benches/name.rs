@@ -11,6 +11,7 @@ fn name_benchmarks(criterion: &mut Criterion) {
     criterion.bench_function("name/wire_parse", |bencher| {
         bencher.iter(|| NameRef::parse(black_box(wire), 0).unwrap())
     });
+    // RFC 4343 §3: DNS name lookup compares ASCII letters without regard to case.
     criterion.bench_function("name/compare", |bencher| {
         bencher.iter(|| black_box(name) == black_box(other))
     });

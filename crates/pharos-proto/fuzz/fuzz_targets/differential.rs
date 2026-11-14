@@ -35,6 +35,7 @@ fuzz_target!(|wire: &[u8]| {
         return;
     }
     // Domain validates record boundaries but not OPT placement, owner, or payloads.
+    // RFC 6891 §6.1.1: OPT appears only once, only in Additional, and has the root owner name.
     let mut opt_count = 0;
     let mut invalid_opt = false;
     for (additional, mut records) in [
@@ -59,17 +60,20 @@ fuzz_target!(|wire: &[u8]| {
         }
     }
     // Domain accepts forward/overlapping pointers and longer pointer chains.
+    // RFC 1035 §4.1.4: Compressed names use pointers to prior occurrences in the DNS message.
     let pharos = match pharos {
         Err(MessageError::Name(NameError::PointerNotBackwards | NameError::PointerLimit)) => return,
         Err(MessageError::InvalidOpt) if invalid_opt => return,
         result => result.expect("domain accepted a Message rejected by Pharos"),
     };
     assert!(!invalid_opt, "Pharos accepted an invalid OPT");
+    // RFC 1035 §4.1.1: DNS headers carry the identifier, flags, and section counts.
     assert_eq!(pharos.id(), domain.header().id());
     assert_eq!(
         pharos.flags().to_be_bytes(),
         domain.header().as_slice()[2..4]
     );
+    // RFC 6891 §6.1.3: The OPT TTL carries the extended RCODE, EDNS version, and flags.
     match (pharos.opt(), domain.opt()) {
         (Some(ours), Some(theirs)) => {
             assert_eq!(ours.udp_payload_size(), theirs.udp_payload_size());
@@ -112,6 +116,7 @@ fuzz_target!(|wire: &[u8]| {
             domain.header_counts().arcount()
         )
     );
+    // RFC 1035 §4.1.2: Each question contains QNAME, QTYPE, and QCLASS.
     let mut offset = 12;
     for question in pharos.questions() {
         assert_eq!(questions.pos(), offset);
@@ -130,6 +135,7 @@ fuzz_target!(|wire: &[u8]| {
         offset += question.name.wire_len() + 4;
         assert_eq!(questions.pos(), offset);
     }
+    // RFC 1035 §4.1.3: Each RR carries owner, type, class, TTL, RDLENGTH, and bounded RDATA.
     for (mut theirs, ours) in [
         (answers, pharos.answers()),
         (authorities, pharos.authorities()),

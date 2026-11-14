@@ -61,6 +61,7 @@ pub struct Message<'a> {
     question_name_len: usize,
 }
 
+// RFC 1034 §3.7.1: queries select resource data by QTYPE and QCLASS.
 /// A Question in a Message.
 #[derive(Clone, Copy, Debug)]
 pub struct Question<'a> {
@@ -69,12 +70,14 @@ pub struct Question<'a> {
     pub qclass: Class,
 }
 
+// RFC 1034 §3.6: an RR carries its owner, type, class, TTL, and type-dependent RDATA.
 /// A resource record in a Message.
 #[derive(Clone, Copy, Debug)]
 pub struct Record<'a> {
     pub name: NameRef<'a>,
     pub rtype: Type,
     pub class: Class,
+    // RFC 8767 §4: TTL is a 32-bit unsigned integer number of seconds.
     pub ttl: u32,
     pub rdata: &'a [u8],
     pub rdata_offset: usize,
@@ -83,6 +86,7 @@ pub struct Record<'a> {
 }
 
 impl<'a> Record<'a> {
+    // RFC 4025 §1.3: IPSECKEY RDATA is independent of the RR class.
     /// Parses the record's RDATA without allocating.
     pub fn data(&self) -> Result<crate::Rdata<'a>, crate::RdataError> {
         crate::Rdata::parse_in_message(self.rtype, self.wire, self.rdata_offset, self.rdata.len())
@@ -121,19 +125,25 @@ fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), Message
     let result = Question {
         name,
         qtype: Type(read_u16(wire, offset)?),
+        // RFC 1035 §3.2.5: QCLASS includes every CLASS value and wildcard code 255.
         qclass: Class(read_u16(wire, offset + 2)?),
     };
     Ok((result, offset + 4))
 }
+// RFC 6698 §2: record class and TTL are parsed with no TLSA-specific restriction.
 fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageError> {
+    // RFC 6895 §3: each RR has NAME, TYPE, CLASS, TTL, RDLENGTH, and variable RDATA.
     // RFC 1035 §4.1.3: RDLENGTH bounds the RDATA following the fixed RR fields.
     let name = NameRef::parse(wire, offset)?;
     let offset = offset + name.wire_len();
     let rtype = Type(read_u16(wire, offset)?);
+    // RFC 8162 §2: the record class is read per record, so SMIMEA is class independent.
     let class = Class(read_u16(wire, offset + 2)?);
+    // RFC 8767 §4: parse TTL as unsigned 32-bit seconds, with the high-order bit positive.
     let ttl = read_u32(wire, offset + 4)?;
     let len = usize::from(read_u16(wire, offset + 8)?);
     let rdata_offset = offset + 10;
+    // RFC 6895 §3: RDATA is variable-length and its format depends on TYPE and sometimes CLASS.
     let rdata = wire
         .get(rdata_offset..rdata_offset + len)
         .ok_or(MessageError::Truncated)?;
@@ -160,7 +170,9 @@ impl<'a> Message<'a> {
             MessageBuilder::new(&mut wire, usize::from(u16::MAX), self.id(), self.flags())?;
         let mut questions = self.questions();
         questions.next().ok_or(BuildError::InvalidRdata)?;
+        // RFC 4343 §4.1: preserve the caller-supplied question name's case when rebuilding.
         let name = NameRef::parse(name.as_wire(), 0).expect("validated name");
+        // RFC 1035 §4.1.2: encode the requested QNAME, QTYPE, and QCLASS in the Question.
         if !builder.question(name, qtype, Class::IN)? {
             return Err(BuildError::SizeLimit);
         }
@@ -169,12 +181,14 @@ impl<'a> Message<'a> {
                 return Err(BuildError::SizeLimit);
             }
         }
+        // RFC 6891 §6.1.2: retain the OPT pseudo-RR fields and options in the copied Query.
         for (section, records) in [
             (Section::Answer, self.answers()),
             (Section::Authority, self.authorities()),
             (Section::Additional, self.additionals()),
         ] {
             for record in records {
+                // RFC 3597 §3: Preserve known RDATA except for permitted compression changes.
                 let data = record.data().map_err(|_| BuildError::InvalidRdata)?;
                 if !builder.record_with(
                     section,
@@ -198,6 +212,7 @@ impl<'a> Message<'a> {
         self.wire
     }
 
+    // RFC 1035 §4.1: Header is followed by Question, Answer, Authority, and Additional sections.
     /// Validates all section boundaries and names before exposing the view.
     /// Bytes after the declared sections are ignored, as in CoreDNS.
     pub fn parse(wire: &'a [u8]) -> Result<Self, MessageError> {
@@ -249,10 +264,12 @@ impl<'a> Message<'a> {
             question_name_len: 0,
         })
     }
+    // RFC 1035 §4.1.1: ID is the 16-bit transaction identifier copied into the response.
     #[must_use]
     pub fn id(&self) -> u16 {
         u16::from_be_bytes([self.wire[0], self.wire[1]])
     }
+    // RFC 1035 §4.1.1: Header flags carry QR, OPCODE, AA, TC, RD, RA, Z, and RCODE.
     #[must_use]
     pub fn flags(&self) -> u16 {
         self.flags
@@ -424,6 +441,7 @@ impl<'a> Message<'a> {
         }
         true
     }
+    // RFC 6895 §2: the header QR bit identifies a query or response.
     #[must_use]
     pub fn qr(&self) -> bool {
         self.flags() & 0x8000 != 0
@@ -460,6 +478,7 @@ impl<'a> Message<'a> {
     pub fn cd(&self) -> bool {
         self.flags() & 0x0010 != 0
     }
+    // RFC 8914 §6: EDE is diagnostic and never changes RCODE processing.
     #[must_use]
     pub fn rcode(&self) -> Rcode {
         Rcode::from_parts(
@@ -634,6 +653,7 @@ impl<'a> MessageMut<'a> {
     pub fn set_flags(&mut self, flags: u16) {
         self.wire[2..4].copy_from_slice(&flags.to_be_bytes());
     }
+    // RFC 1035 §4.1.3: TTL is the resource record cache lifetime in seconds.
     /// Rewrites record TTLs, leaving OPT's non-TTL field intact.
     pub fn rewrite_ttls(&mut self, mut rewrite: impl FnMut(u32) -> u32) {
         for section in 1..4 {

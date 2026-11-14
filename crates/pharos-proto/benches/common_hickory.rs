@@ -4,6 +4,7 @@ use hickory_proto::rr::rdata::A;
 use hickory_proto::rr::{Name as HName, RData, Record, RecordType};
 use pharos_proto::{Class, MessageBuilder, NameRef, Section, Type};
 
+// RFC 1035 §4.1.1: The DNS header carries identifier, flags, and section counts.
 pub const QUERY: &[u8] =
     b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x07example\x03com\0\x00\x01\x00\x01";
 
@@ -11,15 +12,19 @@ pub fn pharos_response() -> Vec<u8> {
     let name = NameRef::parse(QUERY, 12).unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 0x1234, 0x8180).unwrap();
+    // RFC 1035 §3.2.5: QCLASS value 1 selects the Internet class.
     builder.question(name, Type(1), Class(1)).unwrap();
     for i in 0..5 {
+        // RFC 1035 §3.2.2: TYPE value 1 identifies an A record.
         builder
             .record(
                 Section::Answer,
                 name,
                 Type(1),
+                // RFC 1035 §3.2.4: CLASS value 1 identifies the Internet class.
                 Class(1),
                 60,
+                // RFC 1035 §3.4.1: A record RDATA carries one 32-bit Internet address.
                 &[192, 0, 2, i],
             )
             .unwrap();

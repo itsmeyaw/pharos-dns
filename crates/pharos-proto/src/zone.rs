@@ -271,12 +271,14 @@ impl<R: BufRead> ZoneParser<R> {
                         });
                         active = false;
                     }
+                // RFC 1035 §5.1: Quoted text literals can contain CRLF.
                 } else if b == b'\n' || b == b'\r' {
                     if quote {
                         raw.push(b);
                         token.push(char::from(b));
                         active = true;
                     }
+                // RFC 1035 §3.1: DNS labels may contain arbitrary octets.
                 } else {
                     raw.push(b);
                     if b >= 128 {
@@ -336,6 +338,7 @@ impl<R: BufRead> ZoneParser<R> {
                 .iter()
                 .any(|directive| tokens[0].eq_ignore_ascii_case(directive))
         {
+            // RFC 1035 §5.1: $ORIGIN changes the origin used to resolve relative names.
             if tokens[0].eq_ignore_ascii_case("$ORIGIN") {
                 if tokens.len() != 2 {
                     return Err(err_at(2, "invalid origin"));
@@ -343,13 +346,16 @@ impl<R: BufRead> ZoneParser<R> {
                 reject_quote(&tokens[1])?;
                 self.origin = Name::parse(&normalize_escapes(&tokens[1]), &self.origin)
                     .map_err(|e| err_at(1, &e.to_string()))?;
+            // RFC 2308 §4: $TTL sets the default TTL for following non-SIG records without one.
             } else if tokens[0].eq_ignore_ascii_case("$TTL") {
                 if tokens.len() != 2 {
                     return Err(err_at(2, "invalid TTL"));
                 }
                 reject_quote(&tokens[1])?;
+                // RFC 2308 §4: $TTL supplies master-file defaults; SOA.MINIMUM does not.
                 self.ttl = Some(parse_ttl(&tokens[1]).ok_or_else(|| err_at(1, "invalid TTL"))?);
                 self.directive_ttl = true;
+            // RFC 1035 §5.1: $INCLUDE inserts a file without changing the parent's origin.
             } else if tokens[0].eq_ignore_ascii_case("$INCLUDE") {
                 if !self.include_allowed {
                     return Err(err("$INCLUDE not allowed"));
@@ -441,6 +447,7 @@ impl<R: BufRead> ZoneParser<R> {
                 .map_err(|e| err(&e.to_string()))?
         };
         let mut ttl = self.ttl;
+        // RFC 3123 §5: An APL zone record may use the IN class.
         let mut class = Class::IN;
         let mut saw_class = false;
         let mut saw_ttl = false;
@@ -476,6 +483,7 @@ impl<R: BufRead> ZoneParser<R> {
             return Err(err_at(i - 1, "TSIG has no zone presentation format"));
         }
         // RFC 1035 §5.1: quotes delimit character-strings, not merely whitespace.
+        // RFC 3597 §5: \# selects generic RDATA presentation for known or unknown RR types.
         let generic = tokens.get(i).is_some_and(|t| t.text == r"\#");
         let split_strings = !generic
             && matches!(
@@ -494,6 +502,7 @@ impl<R: BufRead> ZoneParser<R> {
         let mut field_tokens = Vec::new();
         for (index, token) in tokens[i..].iter().enumerate() {
             let svc_param = !generic && (rtype == Type::SVCB || rtype == Type::HTTPS) && index >= 2;
+            // RFC 3403 §4.3: NAPTR flags, services, and regexp fields are quoted strings.
             let quoted_string = !generic
                 && ((rtype == Type::NAPTR && (2..5).contains(&index))
                     || ((rtype == Type::CAA || rtype == Type::URI) && index == 2));
@@ -556,6 +565,7 @@ impl<R: BufRead> ZoneParser<R> {
             self.ttl = Some(ttl);
         }
         self.owner = Some(owner.clone());
+        // RFC 3123 §6: Multiple APL RRs are legal; applications define their interpretation.
         Ok(Some(ZoneRecord {
             owner,
             ttl,
@@ -601,6 +611,7 @@ fn normalize_escapes(value: &str) -> String {
                 write!(output, "\\{number:03}").expect("writing to a String");
                 i += 4;
             } else {
+                // RFC 1035 §5.1: A backslash quotes the following non-digit character.
                 if !bytes[i + 1].is_ascii_digit() {
                     output.push('\\');
                 }
@@ -868,6 +879,7 @@ fn expand_generate(input: &str, value: i64, end: i64) -> Result<String, String> 
 }
 
 // RFC 2308 §4: a default TTL may be written using unit suffixes.
+// RFC 1035 §5.1: TTL fields use decimal integers; unit suffixes are an extension.
 fn parse_ttl(value: &str) -> Option<u32> {
     let mut result = 0_usize;
     let mut number = 0_usize;

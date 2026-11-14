@@ -15,6 +15,7 @@ pub enum TsigAlgorithm {
 }
 
 impl TsigAlgorithm {
+    // RFC 8945 §6: Algorithm names and digest sizes follow the TSIG algorithm table.
     fn name(self) -> &'static [u8] {
         match self {
             Self::Sha1 => b"\x09hmac-sha1\0",
@@ -71,6 +72,7 @@ impl TsigKey {
             match algorithm {
                 TsigAlgorithm::Sha1 => aws_hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
                 TsigAlgorithm::Sha224 => aws_hmac::HMAC_SHA224,
+                // RFC 8945 §10: HMAC-SHA-256 is mandatory and implemented as a precaution.
                 TsigAlgorithm::Sha256 => aws_hmac::HMAC_SHA256,
                 TsigAlgorithm::Sha384 => aws_hmac::HMAC_SHA384,
                 TsigAlgorithm::Sha512 => aws_hmac::HMAC_SHA512,
@@ -93,6 +95,7 @@ impl TsigKey {
         if owner != self.name {
             return Err(TsigError::BadKey);
         }
+        // RFC 8945 §9: TSIG algorithm names compare case-insensitively as DNS names.
         if algorithm != NameRef::parse(self.algorithm.name(), 0).expect("algorithm name") {
             let known = [
                 TsigAlgorithm::Sha1,
@@ -124,6 +127,7 @@ impl TsigKey {
         fudge: u16,
         prior_mac: Option<&[u8]>,
     ) -> Result<(), TsigError> {
+        // RFC 8945 §7: Responses use a full-length MAC, at least as long as the Query MAC.
         self.sign_truncated(wire, time, fudge, prior_mac, self.algorithm.len())
     }
 
@@ -146,6 +150,7 @@ impl TsigKey {
             return Err(TsigError::Format);
         }
         // RFC 8945 §5.2.2.1: truncated MACs have a mandatory minimum size.
+        // RFC 8945 §6: The MAC floor permits the recommended 96-bit SHA-1 truncation.
         if mac_len > self.algorithm.len() || mac_len < 10.max(self.algorithm.len() / 2) {
             return Err(TsigError::Format);
         }
@@ -156,12 +161,13 @@ impl TsigKey {
             digest.update(&len.to_be_bytes());
             digest.update(mac);
         }
-        // RFC 8945 §4.3: hash the Message before adding TSIG, then its variables.
+        // RFC 8945 §4.3.2: Hash the message before TSIG and ARCOUNT, then its variables.
         digest.update(wire);
         let owner = NameRef::parse(self.name.as_wire(), 0).expect("valid key name");
         let algorithm = NameRef::parse(self.algorithm.name(), 0).expect("valid algorithm name");
         variables(&mut digest, owner, algorithm, time, fudge, 0, &[]);
         let mac = digest.sign();
+        // RFC 8945 §5.2.2.1: Truncate by keeping initial octets and discarding trailing octets.
         self.append(wire, time, fudge, &mac.as_ref()[..mac_len]);
         Ok(())
     }
@@ -192,6 +198,7 @@ impl TsigKey {
         let id = [wire[0], wire[1]];
         let count = u16::from_be_bytes([wire[10], wire[11]]) + 1;
         wire.extend_from_slice(self.name.as_wire());
+        // RFC 8945 §4.3.3: TSIG CLASS is ANY and TTL is 0.
         wire.extend_from_slice(&[0, 250, 0, 255, 0, 0, 0, 0]);
         let rdata_len = self.algorithm.name().len() + 16 + mac.len();
         wire.extend_from_slice(&(rdata_len as u16).to_be_bytes());
@@ -241,7 +248,9 @@ impl TsigKey {
             TsigError::Format => unreachable!(),
         };
         // RFC 8945 §5.3.2: only an authenticated Query MAC may be chained in an error Response.
+        // RFC 8945 §4.3.1: An invalid request MAC must produce an unsigned error.
         let authenticated = matches!(failure, TsigError::BadTime | TsigError::BadTrunc);
+        // RFC 8945 §5.2.3: BADTIME echoes the Query time and returns server time in Other Data.
         let time = if failure == TsigError::BadTime {
             query_tsig.time_signed
         } else if authenticated {
@@ -277,9 +286,11 @@ impl TsigKey {
         {
             return Err(TsigError::Format);
         }
+        // RFC 6895 §2.3: RCODE 9 with a nonzero TSIG Error means Not Authorized.
         response[3] = (response[3] & 0xf0) | 9;
         let mut mac = [0; 64];
         if authenticated {
+            // RFC 8945 §5.3.2: Authenticate the response Message and response TSIG variables.
             let mut digest = self.digest();
             digest.update(&(query_tsig.mac.len() as u16).to_be_bytes());
             digest.update(query_tsig.mac);
@@ -338,12 +349,14 @@ impl TsigKey {
         if wire[2] & 0x80 == 0 && tsig.error != 0 {
             return Err(TsigError::Format);
         }
+        // RFC 8945 §5.2: Validate key, MAC, time, and truncation in this order.
         self.check_key(tsig.owner, tsig.algorithm)?;
         let len = tsig.mac.len();
         // RFC 8945 §5.2.2.1: reject MACs shorter than 10 octets or half the hash.
         if len > self.algorithm.len() || len < 10.max(self.algorithm.len() / 2) {
             return Err(TsigError::Format);
         }
+        // RFC 8945 §5.2.2: Calculate and compare the received MAC.
         let mut digest = self.digest();
         if let Some(mac) = prior_mac {
             let n = u16::try_from(mac.len()).map_err(|_| TsigError::Format)?;
@@ -365,6 +378,7 @@ impl TsigKey {
             tsig.error,
             tsig.other,
         );
+        // RFC 8945 §5.2.2.1: Compare the complete hash or the permitted truncated prefix.
         let tag = digest.sign();
         if constant_time::verify_slices_are_equal(&tag.as_ref()[..len], tsig.mac).is_err() {
             return Err(TsigError::BadSig);
@@ -497,6 +511,7 @@ impl<'a> TsigStream<'a> {
             .chain(message.authorities())
             .chain(message.additionals())
             .any(|rr| rr.rtype == Type::TSIG);
+        // RFC 8945 §5.3.1: Require TSIG on the first and last stream Messages.
         if !has_tsig {
             self.add_unsigned(wire)?;
             return Ok(None);
@@ -544,6 +559,7 @@ impl<'a> TsigStream<'a> {
         Ok(Some(tsig))
     }
 
+    // RFC 8945 §5.3.1: The first and final Messages in a Response stream must be signed.
     /// Reject a stream with no signed Response or an unsigned final Message.
     pub fn finish(&self) -> Result<(), TsigError> {
         if self.failed || self.digest.is_none() || self.unsigned != 0 {
@@ -575,6 +591,7 @@ impl<'a> TsigRecord<'a> {
     }
 }
 
+// RFC 1035 §3.1: Encode names as length-prefixed labels ending with the root label.
 fn write_name(output: &mut Vec<u8>, name: NameRef<'_>) {
     for label in name.labels() {
         output.push(label.len() as u8);
@@ -601,6 +618,7 @@ fn parse(wire: &[u8]) -> Result<TsigRecord<'_>, TsigError> {
         if rr.rtype != Type::TSIG {
             continue;
         }
+        // RFC 8945 §4.3.3: Reject TSIG records whose CLASS is not ANY or TTL is not 0.
         if rr.class != Class::ANY || rr.ttl != 0 || rr.rdata_offset + rr.rdata.len() != wire.len() {
             return Err(TsigError::Format);
         }
@@ -667,6 +685,7 @@ fn canonical(digest: &mut aws_hmac::Context, name: NameRef<'_>) {
     digest.update(&[0]);
 }
 
+// RFC 8945 §4.3.3: Hash TSIG variables in the specified field order.
 fn variables(
     digest: &mut aws_hmac::Context,
     owner: NameRef<'_>,
@@ -676,9 +695,11 @@ fn variables(
     error: u16,
     other: &[u8],
 ) {
+    // RFC 8945 §4.3.3: Hash canonical variables, excluding RDLENGTH, MAC Size, and Original ID.
     canonical(digest, owner);
     digest.update(&[0, 255, 0, 0, 0, 0]);
     canonical(digest, algorithm);
+    // RFC 8945 §4.3.3.1: Hash Time Signed followed by Fudge in network byte order.
     digest.update(&time.to_be_bytes()[2..]);
     digest.update(&fudge.to_be_bytes());
     digest.update(&error.to_be_bytes());

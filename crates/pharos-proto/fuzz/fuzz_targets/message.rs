@@ -39,6 +39,7 @@ fuzz_target!(|wire: &[u8]| {
             let _ = data.to_string();
         }
     }
+    // RFC 6891 §6.1.2: EDNS options encode code, length, and opaque data as big-endian octets.
     if let Ok(options) = EdnsOptions::parse(wire) {
         assert_eq!(options.as_bytes(), wire);
         assert!(options.iter().eq(options.iter()));

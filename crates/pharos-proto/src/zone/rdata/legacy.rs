@@ -30,7 +30,7 @@ pub(super) fn parse(
     }
     let result = (|| -> Result<bool, String> {
         match rtype {
-            // RFC 1035 §3.3 and RFC 1348 §3: these RDATA consist of one domain name.
+            // RFC 1348 §NSAP-PTR RR and RFC 1035 §3.3: these RDATA consist of one domain name.
             Type::NSAP_PTR | Type::MR | Type::MB | Type::MG | Type::MF | Type::MD => {
                 at!(fields.len().min(1), count(fields, 1))?;
                 at!(0, name(&mut out, fields[0], origin))?;
@@ -42,16 +42,20 @@ pub(super) fn parse(
                     at!(i, name(&mut out, field, origin))?;
                 }
             }
-            // RFC 1183 §§1,3.3, RFC 2230 §2 and RFC 6742 §3.4: a preference precedes a name.
+            // RFC 1183 §§1,3.3, RFC 2230 §3.1 and RFC 6742 §3.4: a preference precedes a name.
+            // RFC 2230 §3.1: KX has a 16-bit preference and uncompressed exchanger name.
             Type::RT | Type::AFSDB | Type::KX | Type::LP => {
                 at!(fields.len().min(2), count(fields, 2))?;
+                // RFC 6742 §2.4.2: LP preference is an unsigned decimal 16-bit integer.
                 num!(0, put16(&mut out, fields[0]))?;
+                // RFC 6742 §2.4.2: LP target is a domain name referencing L32 or L64 records.
                 at!(1, name(&mut out, fields[1], origin))?;
             }
-            // RFC 2163 §4: PX has a preference and two mapping names.
+            // RFC 2163 §4.3: A PX MCGAM record carries a preference, RFC822 name, and X.400 name.
             Type::PX => {
                 at!(fields.len().min(3), count(fields, 3))?;
                 num!(0, put16(&mut out, fields[0]))?;
+                // RFC 3597 §4: Names in PX RDATA are emitted without compression.
                 at!(1, name(&mut out, fields[1], origin))?;
                 at!(2, name(&mut out, fields[2], origin))?;
             }
@@ -96,6 +100,7 @@ pub(super) fn parse(
                 length_bytes(&mut out, &rest)?;
             }
             // RFC 1712 §3: longitude, latitude and altitude are character-strings.
+            // RFC 1712 §4: GPOS has numerical values in longitude, latitude, altitude order.
             Type::GPOS => {
                 at!(fields.len().min(3), count(fields, 3))?;
                 for (i, field) in fields.iter().enumerate() {
@@ -107,6 +112,7 @@ pub(super) fn parse(
                 }
             }
             // RFC 7043 §§2.1-2.2: EUI addresses are fixed-size network-order octets.
+            // RFC 7043 §§3.2, 4.2: EUI addresses use six or eight hyphen-separated hex octets.
             Type::EUI48 | Type::EUI64 => {
                 at!(fields.len().min(1), count(fields, 1))?;
                 index = 0;
@@ -118,6 +124,7 @@ pub(super) fn parse(
                 out.extend(hex(&parts.concat())?);
             }
             // RFC 6742 §§3.1-3.3: ILNP records pair a preference with a fixed-size identifier.
+            // RFC 6742 §§2.1.1.1-2: NID has a network-order 16-bit preference and 64-bit NodeID.
             Type::NID | Type::L64 => {
                 at!(fields.len().min(2), count(fields, 2))?;
                 num!(0, put16(&mut out, fields[0]))?;
@@ -135,6 +142,7 @@ pub(super) fn parse(
                     std::str::from_utf8(&digits).map_err(|_| "invalid identifier")?
                 )?);
             }
+            // RFC 6742 §§2.2.1.1-2.2.1.2: L32 has a 16-bit preference and 32-bit locator.
             Type::L32 => {
                 at!(fields.len().min(2), count(fields, 2))?;
                 num!(0, put16(&mut out, fields[0]))?;
@@ -161,7 +169,7 @@ pub(super) fn parse(
                         .map_or(&[][..], |(_, chunk)| chunk.as_slice()),
                 )?;
             }
-            // RFC 1035 §3.3.14 and RFC 9606 §2: TXT-style data uses character-strings.
+            // RFC 1035 §3.3.14 and RFC 9606 §4: TXT and RESINFO RDATA use character-strings.
             Type::AVC | Type::NINFO | Type::RESINFO => {
                 for (i, chunk) in text_chunks(fields, &mut index)? {
                     index = i;
@@ -171,9 +179,10 @@ pub(super) fn parse(
                     }
                 }
             }
-            // RFC 4701 §3 and RFC 7929 §2: presentation data is base64.
+            // RFC 4701 §3.2 and RFC 7929 §2.3: presentation data is base64.
             Type::DHCID | Type::OPENPGPKEY => out.extend(binary(fields, 0, true, 0, &mut index)?),
             // RFC 2535 §3.1: KEY and RKEY use DNSKEY's wire layout.
+            // RFC 3007 §1.5: KEY signatory bits do not affect processing.
             Type::RKEY | Type::KEY => {
                 if fields.len() < 3 {
                     index = fields.len();
@@ -184,13 +193,14 @@ pub(super) fn parse(
                 out.push(num!(2, number(fields[2]))?);
                 out.extend(binary(fields, 3, true, out.len(), &mut index)?);
             }
-            // RFC 4431 §3 and RFC 4034 §5.1: DLV and TA share the DS wire layout.
+            // RFC 4431 §2 and RFC 4034 §5: DLV and TA share the DS RDATA format.
             Type::DLV | Type::TA => {
                 if fields.len() < 3 {
                     index = fields.len();
                     return Err("missing digest fields".into());
                 }
                 num!(0, put16(&mut out, fields[0]))?;
+                // RFC 4431 §2: DLV uses the same algorithm and digest type values as DS.
                 out.push(num!(1, dnssec_algorithm(fields[1], true))?);
                 out.push(num!(2, number(fields[2]))?);
                 out.extend(binary(fields, 3, false, out.len(), &mut index)?);
@@ -210,6 +220,7 @@ pub(super) fn parse(
                 out.extend(binary(fields, 8, true, out.len(), &mut index)?);
             }
             // RFC 4034 §4.1.2: miekg encodes NXT using NSEC's windowed bitmap.
+            // RFC 2535 §7.3: NXT presentation is the next name followed by type mnemonics.
             Type::NXT => {
                 if fields.is_empty() {
                     index = fields.len();

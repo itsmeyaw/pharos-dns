@@ -112,6 +112,7 @@ impl<'a> Opt<'a> {
     pub const fn z(self) -> u16 {
         self.flags() & 0x3fff
     }
+    // RFC 6891 §6.1.4: DO is the top bit of the 16-bit OPT flags.
     #[must_use]
     pub const fn dnssec_ok(self) -> bool {
         self.flags() & 0x8000 != 0
@@ -139,6 +140,7 @@ impl<'a> Opt<'a> {
         Ok(())
     }
 
+    // RFC 6891 §6.1.3: responses use the highest EDNS version implemented by the responder.
     /// Applies CoreDNS SizeAndDo to an optional existing Response OPT.
     /// Only registered option codes are copied when the Response had no OPT.
     /// The Response version is reset to zero, even for an existing OPT.
@@ -151,6 +153,7 @@ impl<'a> Opt<'a> {
     ) -> ResponseOpt<'a, 'b> {
         let mut source = existing.unwrap_or(self);
         source.size = self.size;
+        // RFC 6891 §6.1.3: responses carry version 0, the highest EDNS version implemented here.
         source.ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
             | (source.ttl & 0xff00)
             | if self.dnssec_ok() { 0x8000 } else { 0 };
@@ -185,6 +188,7 @@ pub struct ResponseOpt<'a, 'b> {
 }
 
 impl ResponseOpt<'_, '_> {
+    // RFC 6891 §6.1.2: selected options retain received order, though their order has no meaning.
     fn selected(&self) -> impl Iterator<Item = &[u8]> {
         let mut rest = self.source.options.as_bytes();
         std::iter::from_fn(move || {
@@ -233,6 +237,7 @@ impl fmt::Display for Opt<'_> {
         if self.dnssec_ok() {
             f.write_str(" do")?;
         }
+        // RFC 9824 §9: CO is the allocated EDNS flag bit 1.
         if self.flags() & 0x4000 != 0 {
             f.write_str(" co")?;
         }
@@ -269,7 +274,7 @@ pub const fn normalized_udp_size(size: u16, tcp: bool) -> u16 {
     if tcp {
         u16::MAX
     } else if size < 512 {
-        // RFC 6891 §6.2.3: advertised UDP sizes below 512 are treated as 512.
+        // RFC 6891 §6.2.5: advertised UDP sizes below 512 are treated as 512.
         512
     } else {
         size

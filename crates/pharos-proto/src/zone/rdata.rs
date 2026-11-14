@@ -81,7 +81,7 @@ fn parse_rdata_inner(
             $expr
         }};
     }
-    // RFC 1035 §5.1: an RR entry carries RDATA; RFC 3123 §4 lets APL hold zero items.
+    // RFC 1035 §5.1: an RR entry carries RDATA; RFC 3123 §6 lets APL hold zero items.
     if fields.is_empty() && rtype != Type::APL {
         return Err("missing RDATA".into());
     }
@@ -119,18 +119,21 @@ fn parse_rdata_inner(
                     .octets(),
             );
         }
+        // RFC 5952 §4: accept every legitimate RFC 4291 IPv6 text form when parsing addresses.
         Type::AAAA => {
             at!(fields.len().min(1), count(fields, 1))?;
             *index = 0;
             out.extend(
                 fields[0]
+                    // RFC 4291 §2.2: IPv6 text representations in conventional forms are accepted.
                     .parse::<Ipv6Addr>()
                     .map_err(|_| "invalid IPv6 address")?
                     .octets(),
             );
         }
         // RFC 1035 §3.3: domain names in RDATA are encoded as uncompressed names.
-        // RFC 6672 §2.3: DNAME RDATA is also a domain name.
+        // RFC 6672 §2.1: DNAME RDATA contains one fully qualified target name.
+        // RFC 1034 §3.6.2: CNAME RDATA identifies the canonical name of an alias.
         Type::NS | Type::CNAME | Type::PTR | Type::DNAME => {
             at!(fields.len().min(1), count(fields, 1))?;
             at!(0, name(&mut out, fields[0], origin))?;
@@ -141,17 +144,21 @@ fn parse_rdata_inner(
             at!(1, name(&mut out, fields[1], origin))?;
         }
         Type::SOA => {
+            // RFC 1035 §3.3.13: SOA RDATA has two names followed by five unsigned 32-bit fields.
             at!(fields.len().min(7), count(fields, 7))?;
             at!(0, name(&mut out, fields[0], origin))?;
             at!(1, name(&mut out, fields[1], origin))?;
             num!(2, put32(&mut out, fields[2]))?;
             // RFC 2308 §4: SOA timers accept TTL unit suffixes; the serial remains decimal.
+            // RFC 1035 §3.3.13: SOA timer fields are 32-bit intervals measured in seconds.
             for (i, field) in fields[3..].iter().enumerate() {
                 let timer = num!(i + 3, super::parse_ttl(&decode_escapes(field)));
                 out.extend(timer.ok_or("invalid SOA timer")?.to_be_bytes());
             }
         }
         // RFC 4408 §3.1.1: the obsolete SPF RR type has the same format as TXT.
+        // RFC 7208 §3.1: SPF uses the TXT layout for CoreDNS compatibility (ADR 0002).
+        // RFC 1035 §3.3.14 and RFC 4408 §3.1.1: TXT and SPF use character-strings.
         Type::TXT | Type::SPF => {
             for (i, field) in fields.iter().enumerate() {
                 let data = at!(i, unescape(field))?;
@@ -191,7 +198,8 @@ fn parse_rdata_inner(
             }
             length_bytes(&mut out, &os)?;
         }
-        // RFC 2782 §3 and RFC 3403 §4: SRV and NAPTR contain fixed integers followed by names.
+        // RFC 2782 §3 and RFC 3403 §4.3: SRV and NAPTR use 16-bit integers.
+        // RFC 2782 §The format of the SRV RR: SRV has priority, weight, port, and target.
         Type::SRV => {
             at!(fields.len().min(4), count(fields, 4))?;
             for (i, field) in fields[..3].iter().enumerate() {
@@ -199,6 +207,7 @@ fn parse_rdata_inner(
             }
             at!(3, name(&mut out, fields[3], origin))?;
         }
+        // RFC 3403 §3: DDDS rules are inserted as NAPTR records in DNS zones.
         Type::NAPTR => {
             at!(fields.len().min(6), count(fields, 6))?;
             num!(0, put16(&mut out, fields[0]))?;
@@ -211,6 +220,7 @@ fn parse_rdata_inner(
         // RFC 8659 §4: CAA has flags, a length-prefixed tag, and an unframed value.
         Type::CAA => {
             at!(fields.len().min(3), count(fields, 3))?;
+            // RFC 8659 §4.1.1: Canonical CAA flags are an unsigned integer from 0 through 255.
             let flag = num!(0, number(fields[0]))?;
             let tag = at!(1, unescape(fields[1]))?;
             if tag.is_empty() {
@@ -224,25 +234,27 @@ fn parse_rdata_inner(
             }
             out.extend(value);
         }
-        // RFC 7553 §4: URI has two 16-bit integers followed by target octets.
+        // RFC 7553 §4.5: URI RDATA is two 16-bit integers followed by Target octets.
         Type::URI => {
             at!(fields.len().min(3), count(fields, 3))?;
             num!(0, put16(&mut out, fields[0]))?;
             num!(1, put16(&mut out, fields[1]))?;
             out.extend(at!(2, unescape(fields[2]))?);
         }
-        // RFC 4034 §5 and RFC 7344 §4: DS/CDS digest is hexadecimal.
+        // RFC 4034 §5 and RFC 7344 §3.1: DS/CDS digest is hexadecimal.
         Type::DS | Type::CDS => {
             if fields.len() < 3 {
                 *index = fields.len();
                 return Err("missing DS fields".into());
             }
+            // RFC 4034 §5.3: DS numeric fields use decimal; the algorithm may use a mnemonic.
             num!(0, put16(&mut out, fields[0]))?;
             out.push(num!(1, dnssec_algorithm(fields[1], true))?);
             out.push(num!(2, number(fields[2]))?);
             out.extend(at!(hex_error_index(fields, 3), hex(&fields[3..].concat()))?);
         }
-        // RFC 4034 §2 and RFC 7344 §4: DNSKEY/CDNSKEY public keys use base64.
+        // RFC 4034 §2.2: DNSKEY flags are decimal and its public key uses Base64 presentation.
+        // RFC 7344 §3.2: CDNSKEY presentation uses base64 like DNSKEY.
         Type::DNSKEY | Type::CDNSKEY => {
             if fields.len() < 3 {
                 *index = fields.len();
@@ -256,13 +268,14 @@ fn parse_rdata_inner(
                 base64(&fields[3..].concat())
             )?);
         }
-        // RFC 6698 §2, RFC 8162 §2 and RFC 4255 §3: association data is hexadecimal.
+        // RFC 6698 §2.2, RFC 8162 §2 and RFC 4255 §3: association data is hexadecimal.
         Type::TLSA | Type::SMIMEA | Type::SSHFP => {
             let prefix = if rtype == Type::SSHFP { 2 } else { 3 };
             if fields.len() <= prefix {
                 *index = fields.len();
                 return Err("missing association data".into());
             }
+            // RFC 6698 §2.2: Usage, selector, and matching type are 8-bit unsigned integers.
             for (i, field) in fields[..prefix].iter().enumerate() {
                 out.push(num!(i, number(field))?);
             }
@@ -271,7 +284,7 @@ fn parse_rdata_inner(
                 hex(&fields[prefix..].concat())
             )?);
         }
-        // RFC 8976 §2.1: ZONEMD uses a serial, scheme, algorithm, and hexadecimal digest.
+        // RFC 8976 §2.3: ZONEMD uses decimal integers and case-insensitive hexadecimal digest.
         Type::ZONEMD => {
             if fields.len() < 3 {
                 *index = fields.len();
@@ -283,7 +296,8 @@ fn parse_rdata_inner(
             let digest = at!(hex_error_index(fields, 3), hex(&fields[3..].concat()))?;
             out.extend(digest);
         }
-        // RFC 4034 §3.1: signature times accept either decimal seconds or YYYYMMDDHHMMSS.
+        // RFC 4034 §3.2: signature times accept either decimal seconds or YYYYMMDDHHMMSS.
+        // RFC 4034 §3.2: RRSIG fields use type, algorithm, number, time, name, and Base64 forms.
         Type::RRSIG => {
             if fields.len() < 8 {
                 *index = fields.len();
@@ -314,6 +328,7 @@ fn parse_rdata_inner(
             }
             bitmap(&mut out, &fields[1..])?;
         }
+        // RFC 5155 §4.3: NSEC3PARAM uses decimal fields and hex salt; "-" is empty salt.
         Type::NSEC3 | Type::NSEC3PARAM => {
             let required = if rtype == Type::NSEC3 { 5 } else { 4 };
             if fields.len() < required || (rtype == Type::NSEC3PARAM && fields.len() != required) {
@@ -341,12 +356,15 @@ fn parse_rdata_inner(
             }
         }
         // RFC 9460 §2.2: parameters are serialized once each in numeric key order.
+        // RFC 9460 §2.1: SVCB presentation has priority, target name, and SvcParams.
         Type::SVCB | Type::HTTPS => {
             if fields.len() < 2 {
                 *index = fields.len();
                 return Err("missing SVCB priority or target".into());
             }
+            // RFC 9460 §2.1: SvcPriority is an unsigned 16-bit integer.
             num!(0, put16(&mut out, fields[0]))?;
+            // RFC 9460 §2.1: TargetName is a domain name.
             at!(1, name(&mut out, fields[1], origin))?;
             *index = 2.min(fields.len());
             svc_params(&mut out, &fields[2..], index)?;
@@ -430,6 +448,7 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
         35 => b"22sssn",
         37 => b"221r",
         41 => b"o",
+        // RFC 3123 §4: APL RDATA consists of zero or more address-family items.
         42 => b"q",
         44 => b"11r",
         45 => b"111gr",
@@ -651,6 +670,7 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                 }
             }
             b'h' => {}
+            // RFC 3123 §4: An APL item carries family, prefix, negation, length, and address data.
             b'q' => {
                 while pos < data.len() {
                     let h = data.get(pos..pos + 4).ok_or("truncated generic APL")?;
@@ -838,11 +858,16 @@ fn dnssec_algorithm(value: &str, insensitive: bool) -> Result<u8, String> {
         "RSASHA1" => Ok(5),
         "DSA-NSEC3-SHA1" => Ok(6),
         "RSASHA1-NSEC3-SHA1" => Ok(7),
+        // RFC 5702 §2.1: RSA/SHA-256 DNSKEY records use algorithm number 8.
         "RSASHA256" => Ok(8),
+        // RFC 5702 §2.2: RSA/SHA-512 DNSKEY records use algorithm number 10.
         "RSASHA512" => Ok(10),
         "ECC-GOST" => Ok(12),
+        // RFC 6605 §7: DNSSEC algorithm 13 identifies ECDSA P-256 with SHA-256.
         "ECDSAP256SHA256" => Ok(13),
+        // RFC 6605 §7: DNSSEC algorithm 14 identifies ECDSA P-384 with SHA-384.
         "ECDSAP384SHA384" => Ok(14),
+        // RFC 8080 §5: mnemonic ED25519 is DNSSEC algorithm 15.
         "ED25519" => Ok(15),
         "ED448" => Ok(16),
         "INDIRECT" => Ok(252),
@@ -870,6 +895,7 @@ fn name(out: &mut Vec<u8>, value: &str, origin: &Name) -> Result<(), String> {
 }
 
 // RFC 1035 §5.1: backslash followed by three decimal digits represents one octet.
+// RFC 9460 §A: SvcParamValue uses character-string decoding before key-specific parsing.
 fn unescape(value: &str) -> Result<Vec<u8>, String> {
     let bytes = value.as_bytes();
     let mut out = Vec::new();
@@ -910,6 +936,7 @@ fn character_string(out: &mut Vec<u8>, value: &str) -> Result<(), String> {
 }
 
 // RFC 4034 §5.3: DS digest fields use hexadecimal presentation.
+// RFC 4648 §8: decode each pair of hexadecimal digits as one octet.
 fn hex(value: &str) -> Result<Vec<u8>, String> {
     let b = value.as_bytes();
     if !b.len().is_multiple_of(2) {
@@ -930,6 +957,7 @@ fn hex(value: &str) -> Result<Vec<u8>, String> {
 }
 
 // RFC 4648 §3.5: Go's standard decoder accepts nonzero unused padding bits.
+// RFC 4648 §12: malformed encoded input returns an error without panicking.
 fn base64(value: &str) -> Result<Vec<u8>, String> {
     let bytes = value.as_bytes();
     if !bytes.len().is_multiple_of(4) {
@@ -969,6 +997,7 @@ fn base64(value: &str) -> Result<Vec<u8>, String> {
 }
 
 // RFC 5155 §3.3: NSEC3 hashes use unpadded base32hex.
+// RFC 4648 §7: decode 5-bit groups using the extended-hex alphabet.
 fn base32hex(value: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let mut bits = 0u32;
@@ -1027,6 +1056,7 @@ fn bitmap(out: &mut Vec<u8>, fields: &[&str]) -> Result<(), String> {
 
 // RFC 9460 §2.1: named SvcParam keys also have a keyNNNN presentation form.
 fn svc_key(value: &str) -> Result<u16, String> {
+    // RFC 9460 §14.3.2: Initial SvcParam key names map to assigned numeric identifiers.
     let key = match value {
         "mandatory" => 0,
         "alpn" => 1,
@@ -1056,6 +1086,7 @@ fn svc_key(value: &str) -> Result<u16, String> {
 }
 
 // RFC 9460 Appendix A.1: list escaping is decoded after character-string escaping.
+// RFC 9460 §2.1: List-valued SvcParams use comma-separated presentation values.
 fn svc_list(value: &str) -> Result<Vec<Vec<u8>>, String> {
     let bytes = unescape(value)?;
     let mut parts = vec![Vec::new()];
@@ -1085,20 +1116,23 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
     let mut params = Vec::new();
     for (i, field) in fields.iter().enumerate() {
         *index = i + 2;
+        // RFC 9460 §2.1: Each SvcParam is a key=value pair or a standalone key.
         let (key, value) = match field.split_once('=') {
             Some((key, value)) => (key, Some(value)),
+            // RFC 9460 §2.1: An omitted SvcParam value is interpreted as empty.
             None => (*field, None),
         };
         let opaque = key.starts_with("key");
         let key = svc_key(key)?;
         let mut data = Vec::new();
         if opaque {
+            // RFC 9460 §2.1: Unknown-key values use decoded bytes as their wire encoding.
             data.extend(unescape(value.unwrap_or(""))?);
             params.push((key, data));
             continue;
         }
         match key {
-            // RFC 9460 §7.1: mandatory is serialized as a sorted sequence of keys.
+            // RFC 9460 §8: mandatory lists keys in increasing numeric order.
             0 => {
                 let mut keys = Vec::new();
                 let mut rest = value.unwrap_or("");
@@ -1120,6 +1154,7 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
                     }
                 }
             }
+            // RFC 9540 §4: the ohttp parameter's presentation and wire values are empty.
             2 | 8 => {
                 if value.is_some_and(|v| !v.is_empty()) {
                     return Err("SvcParam must be empty".into());
@@ -1133,6 +1168,7 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
                 }
                 put16(&mut data, port)?;
             }
+            // RFC 9460 §7.3: ipv4hint is a nonempty comma-separated list of IPv4 addresses.
             4 => {
                 for ip in value.ok_or("missing IPv4 hints")?.split(',') {
                     data.extend(
@@ -1144,6 +1180,7 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
             }
             5 => data.extend(base64(value.unwrap_or(""))?),
             6 => {
+                // RFC 9460 §7.3: ipv6hint is a nonempty comma-separated list of IPv6 addresses.
                 for ip in value.ok_or("missing IPv6 hints")?.split(',') {
                     let ip = ip.parse::<Ipv6Addr>().map_err(|_| "invalid IPv6 hint")?;
                     if ip.to_ipv4_mapped().is_some() {
@@ -1160,7 +1197,9 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
         }
         params.push((key, data));
     }
+    // RFC 9460 §2.1: SvcParam keys may appear in any order in presentation format.
     params.sort_unstable_by_key(|(key, _)| *key);
+    // RFC 9460 §2.1: A SvcParamKey must appear at most once.
     if params.windows(2).any(|w| w[0].0 == w[1].0) {
         return Err("duplicate SvcParam".into());
     }
@@ -1182,6 +1221,7 @@ fn timestamp(value: &str) -> Result<u32, String> {
         return number(value);
     }
     // RFC 1982 §3.1: signature dates use 32-bit serial arithmetic.
+    // RFC 4034 §3.1.5: YYYYMMDDHHMMSS signature times are reduced to 32-bit serial values.
     let seconds = timestamp_calendar(value)?;
     let period = 1_i64 << 31;
     let modulo = (seconds / period - 1).max(0);

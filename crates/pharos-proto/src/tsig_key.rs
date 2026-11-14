@@ -47,6 +47,7 @@ pub fn decode_secret(secret: &str) -> Result<Vec<u8>, TsigKeyError> {
 
 /// Encode a TSIG secret using standard padded Base64.
 pub fn encode_secret(secret: &[u8]) -> String {
+    // RFC 4648 §§3.1,3.2,3.5,4: Encode standard Base64 with padding and zero pad bits.
     STANDARD.encode(secret)
 }
 

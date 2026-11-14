@@ -109,6 +109,7 @@ impl Name {
                     position += 1;
                 }
             }
+            // RFC 1035 §2.3.4: Limit labels to 63 octets and full names to 255 octets.
             if len - label > MAX_LABEL_LEN {
                 return Err(NameError::LabelTooLong);
             }
@@ -160,6 +161,7 @@ impl Name {
         label_offsets(&self.wire).1
     }
 
+    // RFC 1034 §3.1: A domain name is the sequence of labels from a node to the root.
     /// Returns whether this name is at or below `domain`.
     #[must_use]
     pub fn is_subdomain_of(&self, domain: &Self) -> bool {
@@ -240,6 +242,7 @@ impl Name {
                         position += 1;
                     }
                 }
+                // RFC 6895 §3.3.1: Text labels can contain any octet, including zero.
                 byte => {
                     label.push(byte);
                     position += 1;
@@ -445,6 +448,7 @@ pub struct NameRefLabels<'a> {
 impl<'a> Iterator for NameRefLabels<'a> {
     type Item = &'a [u8];
 
+    // RFC 4343 §4: Preserve input label octets where convenient.
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
@@ -461,6 +465,7 @@ impl<'a> Iterator for NameRefLabels<'a> {
                 self.position = start + usize::from(length);
                 Some(label)
             }
+            // RFC 4343 §3.1: Compression pointers expand before case-insensitive comparison.
             0xc0..=0xff => {
                 if self.remaining_hops == 0 {
                     self.done = true;
@@ -543,7 +548,8 @@ fn check_message_name(message: &[u8], offset: usize) -> Result<usize, NameError>
     }
 }
 
-// RFC 1035 §2.3.4: wire names consist of labels terminated by a root octet.
+// RFC 6895 §3.3.2: The zero-length root label terminates each name.
+// RFC 1035 §3.1: Wire names use length-prefixed labels ending in the root label.
 fn check_uncompressed(wire: &[u8]) -> Result<(), NameError> {
     if wire.len() > MAX_NAME_LEN {
         return Err(NameError::NameTooLong);
@@ -566,6 +572,7 @@ fn check_uncompressed(wire: &[u8]) -> Result<(), NameError> {
     }
 }
 
+// RFC 4343 §2: DNS labels may contain any 8-bit octet.
 fn push_label(wire: &mut Vec<u8>, label: &[u8]) -> Result<(), NameError> {
     if label.is_empty() {
         return Err(NameError::EmptyLabel);
@@ -608,6 +615,7 @@ fn label_at(wire: &[u8], offset: usize) -> &[u8] {
 }
 
 fn equal_label(left: &[u8], right: &[u8]) -> bool {
+    // RFC 6895 §3.3.1: Text labels compare ASCII uppercase and lowercase letters as equal.
     // RFC 4343 §3: ASCII letters in DNS labels compare case-insensitively.
     left.len() == right.len()
         && left

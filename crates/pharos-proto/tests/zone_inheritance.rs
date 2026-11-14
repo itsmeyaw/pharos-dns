@@ -3,6 +3,7 @@ use std::io::Cursor;
 use pharos_proto::zone::ZoneParser;
 
 // Ported from miekg/dns parse_test.go TestOmittedTTL.
+// RFC 2308 §4: RRs after $TTL without explicit TTL use the directive's TTL.
 #[test]
 fn omitted_ttl_and_owner_follow_prior_records_and_directives() {
     let zone = r#"
