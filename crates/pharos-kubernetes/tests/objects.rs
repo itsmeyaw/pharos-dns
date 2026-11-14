@@ -58,7 +58,7 @@ fn service_keeps_addresses_and_supplies_port_sentinel() {
 }
 
 #[test]
-fn endpoints_exclude_unready_and_retain_names() {
+fn endpoints_retain_readiness_and_names() {
     let input: EndpointSlice = serde_json::from_value(json!({
         "metadata":{"name":"slice", "namespace":"prod", "labels":{"kubernetes.io/service-name":"web"}},
         "addressType":"IPv4",
@@ -70,11 +70,23 @@ fn endpoints_exclude_unready_and_retain_names() {
     })).unwrap();
     let ep = Endpoints::from(input);
     assert_eq!(ep.service_name.as_ref(), "web");
-    assert_eq!(ep.addresses.len(), 2);
+    assert_eq!(ep.addresses.len(), 3);
     assert_eq!(ep.addresses[0].hostname, "host");
     assert_eq!(ep.addresses[0].node_name, "node");
-    assert_eq!(ep.addresses[0].target_ref_name, "pod");
+    assert_eq!(ep.addresses[0].target_ref_name.as_ref(), "pod");
+    assert!(!ep.addresses[1].ready);
     assert_eq!(ep.ports[0].port, -1);
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn readiness_policy_keeps_dns_objects_at_their_original_size() {
+    // Retained object counts make a per-object word material at cluster scale.
+    assert_eq!(std::mem::size_of::<Service>(), 176);
+    assert_eq!(
+        std::mem::size_of::<pharos_kubernetes::object::EndpointAddress>(),
+        96
+    );
 }
 
 #[test]
@@ -101,7 +113,7 @@ fn endpoint_slice_ignores_unsupported_address_types() {
 }
 
 #[test]
-fn endpoint_zones_are_optional_and_only_retain_ready_addresses() {
+fn endpoint_zones_are_optional_and_retain_readiness() {
     let input: EndpointSlice = serde_json::from_value(json!({
         "metadata":{"name":"slice", "namespace":"prod"},
         "addressType":"IPv4",
@@ -118,11 +130,11 @@ fn endpoint_zones_are_optional_and_only_retain_ready_addresses() {
     assert!(Endpoints::from(input.clone()).zones.is_none());
     let ep = Endpoints::from_slice_with_zones(input);
     let zones = ep.zones.as_ref().unwrap();
-    assert_eq!(zones.len(), 3);
+    assert_eq!(zones.len(), 4);
     assert_eq!(zones.get("10.0.0.1").unwrap(), "us-west-2b");
     assert_eq!(zones.get("10.0.0.2").unwrap(), "us-west-2a");
     assert_eq!(zones.get("10.0.0.5").unwrap(), "");
-    assert!(!zones.contains_key("10.0.0.3"));
+    assert_eq!(zones.get("10.0.0.3").unwrap(), "us-west-2b");
     assert!(!zones.contains_key("10.0.0.4"));
     assert_eq!(ep.clone().zones, ep.zones);
     let mut changed = ep.clone();

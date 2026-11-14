@@ -34,13 +34,12 @@ pub(crate) fn address(labels: &[&[u8]]) -> Option<IpAddr> {
         return Some(Ipv4Addr::from(octets).into());
     }
     // Kubernetes DNS spec 1.1.0 §2.4.3: IPv6 PTR names reverse 32 nibbles before ip6.arpa.
-    // RFC 3596 §2.5: IPv6 reverse names encode 32 nibbles; extra labels are accepted here.
-    if !kind.eq_ignore_ascii_case(b"ip6") || !(32..=35).contains(&body.len()) {
+    if !kind.eq_ignore_ascii_case(b"ip6") || body.len() != 32 {
         return None;
     }
-    // RFC 3596 §2.5: IPv6 reverse names use hexadecimal nibbles in reverse order.
+    // RFC 3596 §2.5: reverse exactly 32 hexadecimal address nibbles.
     let mut octets = [0; 16];
-    for (i, label) in body.iter().rev().take(32).enumerate() {
+    for (i, label) in body.iter().rev().enumerate() {
         if label.len() != 1 {
             return None;
         }
@@ -84,8 +83,11 @@ mod tests {
         labels.extend([&b"ip6"[..], &b"arpa"[..]]);
         assert_eq!(address(&labels), Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         labels.insert(0, b"ignored");
-        assert_eq!(address(&labels), Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert_eq!(address(&labels), None);
         labels.remove(0);
+        labels.push(b"extra");
+        assert_eq!(address(&labels), None);
+        labels.pop();
         labels[1] = b"gg";
         assert_eq!(address(&labels), None);
     }

@@ -12,6 +12,11 @@ pub struct Port {
 }
 
 impl Port {
+    // Kubernetes DNS spec 1.1.0 §2.3.2 and KEP-752: only named, non-nil ports create SRV records.
+    pub fn has_srv(&self) -> bool {
+        !self.name.is_empty() && self.port >= 0
+    }
+
     fn sentinel() -> Self {
         Self {
             name: String::new(),
@@ -27,10 +32,12 @@ pub struct Service {
     pub name: Arc<str>,
     pub namespace: Arc<str>,
     pub cluster_ips: Vec<String>,
-    pub service_type: String,
+    // Box<str> frees one word for the readiness policy without growing Service.
+    pub service_type: Box<str>,
     pub external_name: String,
     pub ports: Vec<Port>,
     pub external_ips: Vec<String>,
+    pub tolerate_unready_endpoints: bool,
 }
 
 impl Service {
@@ -44,6 +51,15 @@ impl Service {
 impl From<v1::Service> for Service {
     fn from(input: v1::Service) -> Self {
         let spec = input.spec.unwrap_or_default();
+        // Kubernetes DNS spec 1.1.0 §2.1: honor the unready-endpoint Service annotation.
+        let tolerate_unready_endpoints = input
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| {
+                annotations.get("service.alpha.kubernetes.io/tolerate-unready-endpoints")
+            })
+            .is_some_and(|value| value == "true");
         let mut external_ips = spec.external_ips.unwrap_or_default();
         if let Some(ingress) = input
             .status
@@ -81,10 +97,11 @@ impl From<v1::Service> for Service {
             name: input.metadata.name.unwrap_or_default().into(),
             namespace: input.metadata.namespace.unwrap_or_default().into(),
             cluster_ips,
-            service_type: spec.type_.unwrap_or_default(),
+            service_type: spec.type_.unwrap_or_default().into_boxed_str(),
             external_name: spec.external_name.unwrap_or_default(),
             ports,
             external_ips,
+            tolerate_unready_endpoints,
         }
     }
 }
@@ -147,7 +164,16 @@ pub struct EndpointAddress {
     pub ip: String,
     pub hostname: String,
     pub node_name: String,
-    pub target_ref_name: String,
+    // Box<str> keeps the readiness bit within the original 96-byte address.
+    pub target_ref_name: Box<str>,
+    pub ready: bool,
+}
+
+impl EndpointAddress {
+    // Kubernetes DNS spec 1.1.0 §2.1: Service policy can make an unready endpoint DNS-visible.
+    pub fn dns_eligible(&self, tolerate_unready: bool) -> bool {
+        self.ready || tolerate_unready
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,18 +230,16 @@ impl Endpoints {
             if input.address_type != "IPv4" && input.address_type != "IPv6" {
                 continue;
             }
-            // Kubernetes DNS spec 1.1.0 §2.4.1: headless answers use ready endpoint addresses.
             // KEP-1672 §Design Details: Treat unknown endpoint readiness as ready.
-            if endpoint.conditions.and_then(|condition| condition.ready) == Some(false) {
-                continue;
-            }
+            let ready = endpoint.conditions.and_then(|condition| condition.ready) != Some(false);
             let hostname = endpoint.hostname.unwrap_or_default();
             let node_name = endpoint.node_name.unwrap_or_default();
             let target_ref_name = endpoint
                 .target_ref
                 .and_then(|target| target.name)
                 .filter(|name| name.len() < 64)
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_boxed_str();
             // KEP-563 §Proposal: Retain every address of a dual-stack backend endpoint.
             for ip in endpoint.addresses {
                 // KEP-752 §Proposal > Zone (Per Endpoint): Retain endpoint zones.
@@ -229,6 +253,7 @@ impl Endpoints {
                     hostname: hostname.clone(),
                     node_name: node_name.clone(),
                     target_ref_name: target_ref_name.clone(),
+                    ready,
                 });
             }
         }
@@ -329,5 +354,71 @@ impl From<v1::Namespace> for Namespace {
             version: input.metadata.resource_version.unwrap_or_default(),
             name: input.metadata.name.unwrap_or_default().into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Endpoints, Port, Service};
+    use k8s_openapi::api::{core::v1, discovery::v1::EndpointSlice};
+    use serde_json::json;
+
+    #[test]
+    fn only_named_non_nil_ports_create_srv_records() {
+        assert!(
+            Port {
+                name: "http".into(),
+                protocol: "TCP".into(),
+                port: 80,
+            }
+            .has_srv()
+        );
+        assert!(
+            !Port {
+                name: String::new(),
+                protocol: "TCP".into(),
+                port: 80,
+            }
+            .has_srv()
+        );
+        assert!(
+            !Port {
+                name: "http".into(),
+                protocol: "TCP".into(),
+                port: -1,
+            }
+            .has_srv()
+        );
+    }
+
+    #[test]
+    fn service_annotation_enables_unready_endpoint_answers() {
+        let service = Service::from(
+            serde_json::from_value::<v1::Service>(json!({
+                "metadata": {
+                    "annotations": {
+                        "service.alpha.kubernetes.io/tolerate-unready-endpoints": "true"
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        assert!(service.tolerate_unready_endpoints);
+    }
+
+    #[test]
+    fn slice_retains_unready_endpoints_for_service_policy() {
+        let endpoints = Endpoints::from(
+            serde_json::from_value::<EndpointSlice>(json!({
+                "addressType": "IPv4",
+                "endpoints": [{
+                    "addresses": ["192.0.2.1"],
+                    "conditions": {"ready": false}
+                }]
+            }))
+            .unwrap(),
+        );
+        assert_eq!(endpoints.addresses.len(), 1);
+        assert!(!endpoints.addresses[0].ready);
     }
 }

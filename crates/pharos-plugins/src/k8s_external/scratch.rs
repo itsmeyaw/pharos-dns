@@ -27,19 +27,79 @@ struct Entry {
     start: usize,
     first_len: usize,
     second_len: usize,
-    port: u16,
+    tag: u16,
     next: Option<usize>,
 }
 
+#[derive(Default)]
+pub(super) struct Targets {
+    buckets: HashMap<u64, usize>,
+    entries: Vec<Target>,
+    bytes: Vec<u8>,
+}
+
+struct Target {
+    start: usize,
+    len: usize,
+    chased_index: usize,
+    has_address: bool,
+    next: Option<usize>,
+}
+
+// RFC 4343 §3.1: retain canonical target names for case-insensitive SRV lookup.
+impl Targets {
+    pub(super) fn insert(&mut self, name: &[u8], chased_index: usize, has_address: bool) -> bool {
+        let hash = self.buckets.hasher().hash_one(name);
+        let mut next = self.buckets.get(&hash).copied();
+        while let Some(index) = next {
+            let entry = &self.entries[index];
+            if &self.bytes[entry.start..entry.start + entry.len] == name {
+                return false;
+            }
+            next = entry.next;
+        }
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(name);
+        let index = self.entries.len();
+        self.entries.push(Target {
+            start,
+            len: name.len(),
+            chased_index,
+            has_address,
+            next: self.buckets.insert(hash, index),
+        });
+        true
+    }
+
+    pub(super) fn get(&self, name: &[u8]) -> Option<(usize, bool)> {
+        let hash = self.buckets.hasher().hash_one(name);
+        let mut next = self.buckets.get(&hash).copied();
+        while let Some(index) = next {
+            let entry = &self.entries[index];
+            if &self.bytes[entry.start..entry.start + entry.len] == name {
+                return Some((entry.chased_index, entry.has_address));
+            }
+            next = entry.next;
+        }
+        None
+    }
+
+    fn clear(&mut self) {
+        self.buckets.clear();
+        self.entries.clear();
+        self.bytes.clear();
+    }
+}
+
 impl Seen {
-    pub(super) fn insert(&mut self, first: &[u8], second: &[u8], port: u16) -> bool {
-        let hash = self.buckets.hasher().hash_one((first, second, port));
+    pub(super) fn insert(&mut self, first: &[u8], second: &[u8], tag: u16) -> bool {
+        let hash = self.buckets.hasher().hash_one((first, second, tag));
         let mut next = self.buckets.get(&hash).copied();
         while let Some(index) = next {
             let entry = &self.entries[index];
             let middle = entry.start + entry.first_len;
             let end = middle + entry.second_len;
-            if entry.port == port
+            if entry.tag == tag
                 && &self.bytes[entry.start..middle] == first
                 && &self.bytes[middle..end] == second
             {
@@ -55,7 +115,7 @@ impl Seen {
             start,
             first_len: first.len(),
             second_len: second.len(),
-            port,
+            tag,
             next: self.buckets.insert(hash, index),
         });
         true
@@ -73,6 +133,7 @@ pub(super) struct Scratch {
     pub(super) addresses: HashSet<Address>,
     pub(super) srv: Seen,
     pub(super) extra: Seen,
+    pub(super) targets: Targets,
 }
 
 thread_local! {
@@ -106,6 +167,7 @@ impl Drop for Lease {
         scratch.addresses.clear();
         scratch.srv.clear();
         scratch.extra.clear();
+        scratch.targets.clear();
         let _ = POOL.try_with(|pool| pool.borrow_mut().push(scratch));
     }
 }
@@ -124,6 +186,9 @@ mod tests {
         assert!(first.srv.insert(b"host.example.", b"", 443));
         assert!(first.extra.insert(b"host.example.", b"192.0.2.1", 0));
         assert!(!first.extra.insert(b"host.example.", b"192.0.2.1", 0));
+        assert!(first.targets.insert(b"host.example.", 4, true));
+        assert_eq!(first.targets.get(b"host.example."), Some((4, true)));
+        assert_eq!(first.targets.get(b"missing.example."), None);
         assert!(first.extra.insert(b"other.example.", b"192.0.2.1", 0));
         let capacity = first.addresses.capacity();
         drop(first);
@@ -132,6 +197,7 @@ mod tests {
         assert!(reused.addresses.insert(Address::new("192.0.2.1")));
         assert!(reused.srv.insert(b"host.example.", b"", 80));
         assert!(reused.extra.insert(b"host.example.", b"192.0.2.1", 0));
+        assert!(reused.targets.insert(b"host.example.", 4, true));
     }
 
     #[test]

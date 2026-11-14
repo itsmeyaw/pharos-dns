@@ -7,6 +7,7 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Record, Type};
 use pharos_server::{Handler, Phase, Protocol};
+use std::net::IpAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // APIConnServeTest in CoreDNS handler_test.go: services, endpoint slices, pod and namespaces.
@@ -20,7 +21,8 @@ const SERVICES: &str = r#"[
  {"metadata":{"name":"external","namespace":"testns"},"spec":{"type":"ExternalName","externalName":"ext.interwebs.test","ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"external-to-service","namespace":"testns"},"spec":{"type":"ExternalName","externalName":"svc1.testns.svc.cluster.local.","ports":[{"name":"http","protocol":"TCP","port":80}]}},
  {"metadata":{"name":"svc1","namespace":"unexposedns"},"spec":{"clusterIP":"10.0.0.2","ports":[{"name":"http","protocol":"TCP","port":80}]}},
- {"metadata":{"name":"svc-dual-stack","namespace":"testns"},"spec":{"clusterIPs":["10.0.0.3","10::3"],"ports":[{"name":"http","protocol":"TCP","port":80}]}}
+ {"metadata":{"name":"svc-dual-stack","namespace":"testns"},"spec":{"clusterIPs":["10.0.0.3","10::3"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},
+ {"metadata":{"name":"svc-unnamed","namespace":"testns"},"spec":{"clusterIP":"10.0.0.4","ports":[{"protocol":"TCP","port":80}]}}
 ]"#;
 const ENDPOINTS: &str = r#"[
  {"metadata":{"name":"kubedns","namespace":"kube-system","labels":{"kubernetes.io/service-name":"kubedns"}},"addressType":"IPv4","ports":[{"name":"dns","protocol":"UDP","port":53}],"endpoints":[{"addresses":["172.0.0.100"]}]},
@@ -33,10 +35,22 @@ const ENDPOINTS: &str = r#"[
 const PODS: &str = r#"[{"metadata":{"name":"foo","namespace":"podns","labels":{"app.kubernetes.io/name":"foo","bar":"baz"}},"status":{"podIPs":[{"ip":"10.240.0.1"}]}}]"#;
 const NAMESPACES: &str = r#"[{"metadata":{"name":"testns"}},{"metadata":{"name":"podns"}},{"metadata":{"name":"svcns"}},{"metadata":{"name":"kube-system"}},{"metadata":{"name":"unexposedns"}}]"#;
 const IMPORTS: &str = r#"[{"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"svc1","namespace":"testns"},"spec":{"type":"ClusterSetIP","ips":["10.0.0.1"],"ports":[{"name":"http","protocol":"TCP","port":80}]}},{"apiVersion":"multicluster.x-k8s.io/v1alpha1","kind":"ServiceImport","metadata":{"name":"hdls1","namespace":"testns"},"spec":{"type":"Headless"}}]"#;
-const MC_ENDPOINTS: &str = r#"[{"metadata":{"name":"mc1","namespace":"testns","labels":{"multicluster.kubernetes.io/service-name":"hdls1","multicluster.kubernetes.io/source-cluster":"cluster1"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":80}],"endpoints":[{"addresses":["172.0.0.2"]}]}]"#;
+const MC_ENDPOINTS: &str = r#"[{"metadata":{"name":"mc1","namespace":"testns","labels":{"multicluster.kubernetes.io/service-name":"hdls1","multicluster.kubernetes.io/source-cluster":"cluster1.cluster2"}},"addressType":"IPv4","ports":[{"name":"http","protocol":"TCP","port":80}],"endpoints":[{"addresses":["172.0.0.2"]}]}]"#;
 
 async fn api(
     hold_endpoints: bool,
+) -> (
+    String,
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+) {
+    api_with_fixtures(hold_endpoints, SERVICES.into(), ENDPOINTS.into()).await
+}
+
+async fn api_with_fixtures(
+    hold_endpoints: bool,
+    services: String,
+    endpoints: String,
 ) -> (
     String,
     tokio::sync::watch::Sender<bool>,
@@ -48,10 +62,14 @@ async fn api(
     let address = listener.local_addr().unwrap();
     let (gate, _) = tokio::sync::watch::channel(!hold_endpoints);
     let receiver = gate.subscribe();
+    let services = std::sync::Arc::<str>::from(services);
+    let endpoints = std::sync::Arc::<str>::from(endpoints);
     let task = tokio::spawn(async move {
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut receiver = receiver.clone();
+            let services = services.clone();
+            let endpoints = endpoints.clone();
             tokio::spawn(async move {
                 let mut request = [0; 8192];
                 let n = socket.read(&mut request).await.unwrap();
@@ -65,7 +83,7 @@ async fn api(
                 let (kind, items) = if request.contains("/serviceimports") {
                     ("ServiceImportList", IMPORTS)
                 } else if request.contains("/api/v1/services") {
-                    ("ServiceList", SERVICES)
+                    ("ServiceList", services.as_ref())
                 } else if request.contains("/endpointslices") {
                     while !*receiver.borrow_and_update() {
                         if receiver.changed().await.is_err() {
@@ -77,7 +95,7 @@ async fn api(
                         if request.contains("multicluster.kubernetes.io") {
                             MC_ENDPOINTS
                         } else {
-                            ENDPOINTS
+                            endpoints.as_ref()
                         },
                     )
                 } else if request.contains("/api/v1/pods") {
@@ -289,6 +307,7 @@ fn record(record: Record<'_>, expected_serial: Option<u32>) -> String {
         Rdata::A(ip) => ("A", ip.to_string()),
         Rdata::Aaaa(ip) => ("AAAA", ip.to_string()),
         Rdata::Cname(target) => ("CNAME", target.to_string()),
+        Rdata::Ptr(target) => ("PTR", target.to_string()),
         Rdata::Ns(target) => ("NS", target.to_string()),
         Rdata::Txt(data) => ("TXT", String::from_utf8(data[1..].to_vec()).unwrap()),
         Rdata::Srv {
@@ -329,11 +348,53 @@ async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
 }
 
 async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
-    let (endpoint, gate, api_task) = api(!synced).await;
+    run_group_on_stack_with_fixtures(
+        options,
+        cases,
+        synced,
+        "bind 127.0.0.1",
+        SERVICES.into(),
+        ENDPOINTS.into(),
+        None,
+    )
+    .await;
+}
+
+async fn run_group_on_stack_with_fixtures(
+    options: String,
+    cases: Vec<Case>,
+    synced: bool,
+    bind: &str,
+    services: String,
+    endpoints: String,
+    transfer_address: Option<&str>,
+) {
+    let (endpoint, gate, api_task) = api_with_fixtures(!synced, services, endpoints).await;
+    let multicluster = cases
+        .iter()
+        .any(|case| case.name.ends_with(".clusterset.local."));
+    let reverse = cases
+        .iter()
+        .any(|case| case.name.ends_with(".in-addr.arpa."));
+    let mut zones = if multicluster {
+        "cluster.local clusterset.local".to_owned()
+    } else {
+        "cluster.local".to_owned()
+    };
+    if reverse {
+        zones.push_str(" in-addr.arpa");
+    }
+    let bind = if bind.is_empty() {
+        String::new()
+    } else {
+        format!("{bind}\n ")
+    };
     let text = format!(
-        ".:53 {{\n bind 127.0.0.1\n kubernetes cluster.local {{\n  endpoint {endpoint}\n  startup_timeout 3s\n  {options}\n }}\n}}"
+        ".:53 {{\n {bind}kubernetes {zones} {{\n  endpoint {endpoint}\n  startup_timeout 3s\n  {options}\n }}\n}}"
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    #[cfg(feature = "plugin-transfer")]
+    let transferer = blocks[0].config.kubernetes.as_ref().unwrap().clone();
     let lifecycle = blocks[0].config.lifecycle.clone();
     let startup = if synced {
         lifecycle.run(Phase::Startup).await.unwrap();
@@ -347,7 +408,11 @@ async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
     let (servers, _) = servers(blocks).unwrap();
     let server = servers.values().next().unwrap();
     let serial = if synced {
-        let zone: Name = "cluster.local.".parse().unwrap();
+        let zone: Name = if multicluster {
+            "clusterset.local.".parse().unwrap()
+        } else {
+            "cluster.local.".parse().unwrap()
+        };
         let mut query = Vec::with_capacity(512);
         let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x100).unwrap();
         builder
@@ -437,63 +502,102 @@ async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
             ));
         }
     }
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    #[cfg(feature = "plugin-transfer")]
+    if let Some(address) = transfer_address {
+        use pharos_plugins::transfer::{TransferRequest, Transferer};
+
+        // RFC 5936 §2.2 and Kubernetes DNS spec 1.1.0 §2.1: AXFR includes tolerated endpoints.
+        let expected_address = address.parse::<IpAddr>().unwrap();
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let mut stream = transferer
+            .transfer(TransferRequest {
+                zone: NameRef::parse(zone.as_wire(), 0).unwrap(),
+                serial: 0,
+                id: 1,
+                flags: 0,
+                protocol: Protocol::Tcp,
+                qtype: Type::AXFR,
+                qclass: Class::IN,
+            })
+            .unwrap()
+            .unwrap();
+        let mut wire = Vec::new();
+        let mut found = false;
+        while stream.next(&mut wire).unwrap() {
+            for record in Message::parse(&wire).unwrap().answers() {
+                let matches_address = match (record.data().unwrap(), expected_address) {
+                    (Rdata::A(ip), IpAddr::V4(expected)) => ip == expected,
+                    (Rdata::Aaaa(ip), IpAddr::V6(expected)) => ip == expected,
+                    _ => false,
+                };
+                if record.name.to_string() == "unready.svc-unready.testns.svc.cluster.local."
+                    && matches_address
+                {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "AXFR omitted tolerated unready endpoint address");
+    }
+    #[cfg(not(feature = "plugin-transfer"))]
+    assert!(transfer_address.is_none(), "transfer feature is disabled");
     if let Some(startup) = startup {
         gate.send(true).unwrap();
         startup.await.unwrap();
     }
     lifecycle.run(Phase::Shutdown).await.unwrap();
     api_task.abort();
-    assert!(errors.is_empty(), "{}", errors.join("\n"));
 }
 
 #[tokio::test]
-async fn multicluster_answers_service_and_cluster_qualified_endpoint() {
-    let zone = "cluster.local.";
+async fn multicluster_ignore_empty_keeps_cluster_set_ip_records() {
+    let zone = "clusterset.local.";
     run_group(
-        "multicluster cluster.local",
+        "multicluster clusterset.local\n ignore empty_service",
         vec![
             positive(
                 "import",
-                "svc1.testns.svc.cluster.local.",
+                "svc1.testns.svc.clusterset.local.",
                 Type::A,
                 &["10.0.0.1"],
             ),
             positive(
                 "headless",
-                "hdls1.testns.svc.cluster.local.",
+                "hdls1.testns.svc.clusterset.local.",
                 Type::A,
                 &["172.0.0.2"],
             ),
             positive(
                 "endpoint",
-                "172-0-0-2.cluster1.hdls1.testns.svc.cluster.local.",
+                "172-0-0-2.cluster1.cluster2.hdls1.testns.svc.clusterset.local.",
                 Type::A,
                 &["172.0.0.2"],
             ),
             srv(
                 "headless srv",
-                "_http._tcp.hdls1.testns.svc.cluster.local.",
-                "172-0-0-2.cluster1.hdls1.testns.svc.cluster.local.",
+                "_http._tcp.hdls1.testns.svc.clusterset.local.",
+                "172-0-0-2.cluster1.cluster2.hdls1.testns.svc.clusterset.local.",
                 100,
                 "172.0.0.2",
             ),
             srv(
                 "import srv",
-                "_http._tcp.svc1.testns.svc.cluster.local.",
-                "svc1.testns.svc.cluster.local.",
+                "_http._tcp.svc1.testns.svc.clusterset.local.",
+                "svc1.testns.svc.clusterset.local.",
                 100,
                 "10.0.0.1",
             ),
             negative(
                 "missing cluster",
-                "172-0-0-2.hdls1.testns.svc.cluster.local.",
+                "172-0-0-2.hdls1.testns.svc.clusterset.local.",
                 Type::A,
                 Rcode::NXDOMAIN,
                 zone,
             ),
             negative(
                 "no ipv6",
-                "svc1.testns.svc.cluster.local.",
+                "svc1.testns.svc.clusterset.local.",
                 Type::AAAA,
                 Rcode::NOERROR,
                 zone,
@@ -531,6 +635,13 @@ async fn handler_common_and_regular() {
         positive("common 2", empty, Type::A, &["10.0.0.1"]),
         srv("common 3", svc1, svc1, 100, "10.0.0.1"),
         srv("common 4", empty, empty, 100, "10.0.0.1"),
+        negative(
+            "common unnamed port",
+            "svc-unnamed.testns.svc.cluster.local.",
+            Type::SRV,
+            a,
+            zone,
+        ),
         srv("common 5", svc6, svc6, 100, "1234:abcd::1"),
         srv(
             "common 6",
@@ -730,6 +841,15 @@ async fn handler_common_and_regular() {
         ),
         positive("regular 9", ext, Type::CNAME, &["ext.interwebs.test."]),
         row(
+            "external target failure keeps alias",
+            ext,
+            Type::A,
+            Rcode::SERVFAIL,
+            vec![rr(ext, 5, "CNAME", "ext.interwebs.test.")],
+            vec![],
+            vec![],
+        ),
+        row(
             "regular 11",
             "external-to-service.testns.svc.cluster.local.",
             Type::A,
@@ -751,8 +871,124 @@ async fn handler_common_and_regular() {
 }
 
 #[tokio::test]
+async fn tolerate_unready_annotation_covers_a_ptr_and_ns_queries() {
+    let local = local_ip();
+    let address = Box::leak(local.to_string().into_boxed_str());
+    let target = Box::leak(
+        "unready.svc-unready.testns.svc.cluster.local."
+            .to_owned()
+            .into_boxed_str(),
+    );
+    let reverse = Box::leak(reverse_name(local).into_boxed_str());
+    let address_type = if local.is_ipv4() { "IPv4" } else { "IPv6" };
+    let address_qtype = if local.is_ipv4() { Type::A } else { Type::AAAA };
+    let address_rrtype = if local.is_ipv4() { "A" } else { "AAAA" };
+    let service = r#"{"metadata":{"name":"svc-unready","namespace":"testns","annotations":{"service.alpha.kubernetes.io/tolerate-unready-endpoints":"true"}},"spec":{"clusterIP":"None","ports":[{"name":"http","protocol":"TCP","port":80}]}}"#;
+    let services = append_json_item(SERVICES, service);
+    let slice = format!(
+        r#"{{"metadata":{{"name":"svc-unready-slice","namespace":"testns","labels":{{"kubernetes.io/service-name":"svc-unready"}}}},"addressType":"{address_type}","ports":[{{"name":"http","protocol":"TCP","port":80}}],"endpoints":[{{"addresses":["{address}"],"hostname":"unready","conditions":{{"ready":false}}}}]}}"#
+    );
+    let endpoints = append_json_item(ENDPOINTS, &slice);
+    run_group_on_stack_with_fixtures(
+        String::new(),
+        vec![
+            row(
+                "unready address",
+                target,
+                address_qtype,
+                Rcode::NOERROR,
+                vec![rr(target, 5, address_rrtype, address)],
+                vec![],
+                vec![],
+            ),
+            row(
+                "unready PTR",
+                reverse,
+                Type::PTR,
+                Rcode::NOERROR,
+                vec![rr(reverse, 5, "PTR", target)],
+                vec![],
+                vec![],
+            ),
+            srv(
+                "unready SRV",
+                "_http._tcp.svc-unready.testns.svc.cluster.local.",
+                target,
+                100,
+                address,
+            ),
+            row(
+                "unready NS",
+                "cluster.local.",
+                Type::NS,
+                Rcode::NOERROR,
+                vec![rr("cluster.local.", 5, "NS", target)],
+                vec![],
+                vec![rr(target, 5, address_rrtype, address)],
+            ),
+        ],
+        true,
+        "",
+        services,
+        endpoints,
+        Some(address),
+    )
+    .await;
+}
+
+// RFC 1035 §3.3.1 and RFC 3596 §2.1: the local NS target needs an address RR.
+fn local_ip() -> IpAddr {
+    let addresses: Vec<_> = nix::ifaddrs::getifaddrs()
+        .unwrap()
+        .filter_map(|interface| {
+            let address = interface.address?;
+            address
+                .as_sockaddr_in()
+                .map(|address| IpAddr::V4(address.ip()))
+                .or_else(|| {
+                    address
+                        .as_sockaddr_in6()
+                        .map(|address| IpAddr::V6(address.ip()))
+                })
+        })
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        .collect();
+    addresses
+        .iter()
+        .find(|ip| ip.is_ipv4())
+        .or_else(|| addresses.first())
+        .copied()
+        .expect("tolerate-unready test requires a non-loopback interface")
+}
+
+fn reverse_name(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => {
+            // RFC 1035 §3.5: IPv4 reverse names use reversed decimal octets.
+            let [a, b, c, d] = ip.octets();
+            format!("{d}.{c}.{b}.{a}.in-addr.arpa.")
+        }
+        IpAddr::V6(ip) => {
+            // RFC 3596 §2.5: IPv6 reverse names use reversed hexadecimal nibbles.
+            let mut name = String::with_capacity(72);
+            for byte in ip.octets().iter().rev() {
+                name.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap());
+                name.push('.');
+                name.push(char::from_digit(u32::from(byte >> 4), 16).unwrap());
+                name.push('.');
+            }
+            name.push_str("ip6.arpa.");
+            name
+        }
+    }
+}
+
+fn append_json_item(array: &str, item: &str) -> String {
+    format!("{},{}]", array.trim_end_matches(']'), item)
+}
+
+#[tokio::test]
 async fn handler_case_and_ignore_empty() {
-    let z = "cluster.local.";
     let cases = vec![
         negative(
             "case 1",
@@ -783,12 +1019,11 @@ async fn handler_case_and_ignore_empty() {
             vec![],
             vec![],
         ),
-        negative(
+        positive(
             "empty 1",
             "svcempty.testns.svc.cluster.local.",
             Type::A,
-            Rcode::NXDOMAIN,
-            z,
+            &["10.0.0.1"],
         ),
         positive(
             "empty 2",

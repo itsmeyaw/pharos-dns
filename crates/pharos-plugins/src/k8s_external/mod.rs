@@ -6,7 +6,7 @@ pub mod setup;
 #[cfg(feature = "plugin-transfer")]
 mod transfer;
 
-use pharos_proto::{Class, MessageBuilder, Name, NameError, NameRef, Section, Type};
+use pharos_proto::{Class, MessageBuilder, Name, NameError, NameRef, Rcode, Section, Type};
 use pharos_server::{Context, Next, Outcome, Plugin};
 
 pub struct External {
@@ -182,6 +182,11 @@ impl External {
         let Some(q) = cx.query.questions().next() else {
             return Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL);
         };
+        let (code, target_authority) = if q.qtype != Type::SRV {
+            final_response(code, chased)
+        } else {
+            (code, None)
+        };
         let (Some(ns), Some(host)) = (&zone.ns, &zone.host) else {
             return Outcome::Unanswered(pharos_proto::Rcode::SERVFAIL);
         };
@@ -213,7 +218,6 @@ impl External {
                 let mut scratch = scratch::lease();
                 store.with_read(|index| {
                     let mut ordinal = 0usize;
-                    let mut chased = chased.iter().peekable();
                     lookup::snapshot_or_lookup(
                         index,
                         request,
@@ -223,7 +227,7 @@ impl External {
                         |address, _, _| {
                             let current = ordinal;
                             ordinal += 1;
-                            let entry = chased_at(&mut chased, current, address);
+                            let entry = chased_at(chased, current, address);
                             if error.is_some() {
                                 return;
                             }
@@ -234,6 +238,20 @@ impl External {
                                 Ok(ip) => ip,
                                 Err(_) => {
                                     if let Some(entry) = entry {
+                                        let mut key = [0; 2048];
+                                        let Some(key) =
+                                            target_key(request, None, address, zone_ref, &mut key)
+                                        else {
+                                            return;
+                                        };
+                                        // RFC 1034 §3.6.2: emit one CNAME RR per target name.
+                                        if !scratch.extra.insert(
+                                            key,
+                                            &entry.ordinal.to_be_bytes(),
+                                            0,
+                                        ) {
+                                            return;
+                                        }
                                         truncated |= entry.answers.iter().flatten().any(|wire| {
                                             pharos_proto::Message::parse(wire)
                                                 .is_ok_and(|message| message.tc())
@@ -287,6 +305,10 @@ impl External {
                 if let Some(error) = error {
                     return Err(error);
                 }
+                if let Some(message) = target_authority.as_ref() {
+                    // RFC 2308 §3: append negative Authority after all CNAME-cycle answers.
+                    crate::dns::copy_authorities(&mut b, message)?;
+                }
             }
             // RFC 3596 §3: SRV answers include available target addresses in Additional.
             if let Some(request) = request
@@ -294,6 +316,18 @@ impl External {
             {
                 let mut error = None;
                 let mut scratch = scratch::lease();
+                for (index, entry) in chased.iter().enumerate() {
+                    let name = NameRef::parse(entry.name.as_wire(), 0).ok();
+                    let mut wire = [0; 255];
+                    if let Some(key) = name.and_then(|name| canonical_wire(name, &mut wire)) {
+                        // RFC 4343 §3.1: canonical target labels index each chased result once.
+                        let inserted =
+                            scratch
+                                .targets
+                                .insert(key, index, response_has_address_target(entry));
+                        debug_assert!(inserted);
+                    }
+                }
                 store.with_read(|index| {
                     let mut count = 0usize;
                     lookup::snapshot_or_lookup(
@@ -311,9 +345,10 @@ impl External {
                         self.config.headless,
                         kubernetes.endpoint_pod_names(),
                         snapshot,
-                        // KEP-752 §Endpoint Port: The EndpointSlice port applies to all endpoints.
+                        // Kubernetes DNS spec 1.1.0 §2.3.2: unnamed ports have no SRV record.
+                        // RFC 2782 §The format of the SRV RR: targets need addresses and cannot be aliases.
                         |address, port, endpoint| {
-                            if port.port < 0 || error.is_some() {
+                            if !port.has_srv() || error.is_some() {
                                 return;
                             }
                             let mut target_wire = [0; 255];
@@ -326,6 +361,10 @@ impl External {
                             ) else {
                                 return;
                             };
+                            let entry = chased_for_target(&scratch.targets, chased, target);
+                            if !cached_has_address_target(address, entry) {
+                                return;
+                            }
                             let mut key = [0; 2048];
                             let Some(key) =
                                 target_key(request, endpoint, address, zone_ref, &mut key)
@@ -355,8 +394,6 @@ impl External {
                             }
                         },
                     );
-                    let mut ordinal = 0usize;
-                    let mut chased = chased.iter().peekable();
                     // RFC 2782 §The format of the SRV RR: Add available target addresses.
                     lookup::snapshot_or_lookup(
                         index,
@@ -365,10 +402,7 @@ impl External {
                         kubernetes.endpoint_pod_names(),
                         snapshot,
                         |address, port, endpoint| {
-                            let current = ordinal;
-                            ordinal += 1;
-                            let entry = chased_at(&mut chased, current, address);
-                            if port.port < 0 || error.is_some() {
+                            if !port.has_srv() || error.is_some() {
                                 return;
                             }
                             let mut target_wire = [0; 255];
@@ -381,6 +415,10 @@ impl External {
                             ) else {
                                 return;
                             };
+                            let entry = chased_for_target(&scratch.targets, chased, target);
+                            if !cached_has_address_target(address, entry) {
+                                return;
+                            }
                             let mut key = [0; 2048];
                             let Some(key) =
                                 target_key(request, endpoint, address, zone_ref, &mut key)
@@ -404,15 +442,16 @@ impl External {
                                 return;
                             }
                             let Some(ip) = ip else {
-                                if let Some(entry) = entry
-                                    && let Err(err) = write_chased(
-                                        &mut b,
-                                        q.name,
-                                        entry,
-                                        kubernetes.ttl(),
-                                        Section::Additional,
-                                    )
-                                {
+                                let Some((entry, _)) = entry else {
+                                    return;
+                                };
+                                if let Err(err) = write_chased(
+                                    &mut b,
+                                    q.name,
+                                    entry,
+                                    kubernetes.ttl(),
+                                    Section::Additional,
+                                ) {
                                     error = Some(err);
                                 }
                                 return;
@@ -477,26 +516,120 @@ struct Chased {
     answers: [Option<Vec<u8>>; 2],
 }
 
-fn chased_at<'a>(
-    chased: &mut std::iter::Peekable<std::slice::Iter<'a, Chased>>,
-    ordinal: usize,
-    address: &str,
-) -> Option<&'a Chased> {
-    while chased.peek().is_some_and(|entry| entry.ordinal < ordinal) {
-        chased.next();
+#[cfg(test)]
+fn final_rcode(initial: Rcode, chased: &[Chased]) -> Rcode {
+    final_response(initial, chased).0
+}
+
+fn final_response<'a>(
+    initial: Rcode,
+    chased: &'a [Chased],
+) -> (Rcode, Option<pharos_proto::Message<'a>>) {
+    let mut final_code = initial;
+    let mut authority = None;
+    for entry in chased {
+        let Some(wire) = entry.answers[0].as_deref() else {
+            final_code = Rcode::SERVFAIL;
+            authority = None;
+            continue;
+        };
+        let Ok(message) = pharos_proto::Message::parse(wire) else {
+            final_code = Rcode::SERVFAIL;
+            authority = None;
+            continue;
+        };
+        final_code = message.rcode();
+        // RFC 6604 §3: successful chased answers produce a NOERROR response.
+        if final_code == Rcode::NOERROR && message.answer_count() > 0 {
+            return (Rcode::NOERROR, None);
+        }
+        authority = Some(message);
     }
-    if chased.peek().is_some_and(|entry| entry.ordinal == ordinal) {
-        chased.next().filter(|entry| {
-            let mut wire = [0; 255];
-            let Ok(expected) = NameRef::parse(entry.name.as_wire(), 0) else {
+    (final_code, authority)
+}
+
+fn chased_matches(address: &str, name: &Name) -> bool {
+    let mut wire = [0; 255];
+    let Ok(expected) = NameRef::parse(name.as_wire(), 0) else {
+        return false;
+    };
+    // RFC 4343 §3.1: compare DNS labels with ASCII-only case folding.
+    hostname(address, &mut wire).is_some_and(|target| {
+        target.labels().count() == expected.labels().count()
+            && target
+                .labels()
+                .zip(expected.labels())
+                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    })
+}
+
+// RFC 4343 §3.1: canonical DNS-name keys fold only ASCII letter case.
+fn canonical_wire<'a>(name: NameRef<'_>, wire: &'a mut [u8; 255]) -> Option<&'a [u8]> {
+    let mut len = 0;
+    for label in name.labels() {
+        if len + label.len() + 2 > wire.len() {
+            return None;
+        }
+        wire[len] = label.len() as u8;
+        len += 1;
+        for byte in label {
+            wire[len] = byte.to_ascii_lowercase();
+            len += 1;
+        }
+    }
+    wire[len] = 0;
+    Some(&wire[..len + 1])
+}
+
+// RFC 1034 §4.3.2: retain each CNAME target response with its query cycle.
+fn chased_at<'a>(chased: &'a [Chased], ordinal: usize, address: &str) -> Option<&'a Chased> {
+    let index = chased
+        .binary_search_by_key(&ordinal, |entry| entry.ordinal)
+        .ok()?;
+    let entry = &chased[index];
+    chased_matches(address, &entry.name).then_some(entry)
+}
+
+fn chased_for_target<'a>(
+    targets: &scratch::Targets,
+    chased: &'a [Chased],
+    target: NameRef<'_>,
+) -> Option<(&'a Chased, bool)> {
+    // RFC 4343 §3.1: canonical target labels avoid per-callback wire reparsing.
+    let mut wire = [0; 255];
+    let key = canonical_wire(target, &mut wire)?;
+    let (index, has_address) = targets.get(key)?;
+    Some((chased.get(index)?, has_address))
+}
+
+// RFC 2782 §The format of the SRV RR: SRV targets must resolve to addresses and not aliases.
+fn response_has_address_target(chased: &Chased) -> bool {
+    let mut found_address = false;
+    for wire in chased.answers.iter().flatten() {
+        let Ok(message) = pharos_proto::Message::parse(wire) else {
+            continue;
+        };
+        for record in message.answers() {
+            if record.rtype == Type::CNAME {
                 return false;
-            };
-            // RFC 4343 §4.1: preserve the case of label octets when matching the captured target.
-            hostname(address, &mut wire).is_some_and(|target| target.labels().eq(expected.labels()))
-        })
-    } else {
-        None
+            }
+            found_address |= matches!(record.rtype, Type::A | Type::AAAA);
+        }
     }
+    found_address
+}
+
+fn cached_has_address_target(address: &str, chased: Option<(&Chased, bool)>) -> bool {
+    // RFC 2782 §The format of the SRV RR: use only targets with a non-alias address RRset.
+    if address.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    chased.is_some_and(|(_, has_address)| has_address)
+}
+
+#[cfg(test)]
+fn has_address_target(address: &str, chased: Option<&Chased>) -> bool {
+    address.parse::<std::net::IpAddr>().is_ok() || chased.is_some_and(response_has_address_target)
 }
 
 fn write_chased(
@@ -740,7 +873,7 @@ impl External {
             }
             let request = lookup::parse(&labels[..relative]);
             // shortcut: hostname targets and Self Lookups allocate per Query until #86 pools buffers and futures.
-            let mut chased = Vec::new();
+            let mut chased: Vec<Chased> = Vec::new();
             let (snapshot, code) = match &request {
                 Ok(request) if matches!(q.qtype, Type::A | Type::AAAA | Type::SRV) => store
                     .with_read(|index| {
@@ -757,7 +890,7 @@ impl External {
                                 let current = ordinal;
                                 ordinal += 1;
                                 if address.parse::<std::net::IpAddr>().is_ok()
-                                    || q.qtype == Type::SRV && port.port < 0
+                                    || q.qtype == Type::SRV && !port.has_srv()
                                 {
                                     return;
                                 }
@@ -766,9 +899,9 @@ impl External {
                                     service_target(request, None, address, zone_ref, &mut wire)
                                     && let Ok(name) = target.to_string().parse::<Name>()
                                     && (q.qtype != Type::SRV || {
-                                        let mut key = [0; 2048];
-                                        target_key(request, None, address, zone_ref, &mut key)
-                                            .is_some_and(|key| scratch.extra.insert(key, key, 0))
+                                        let mut key = [0; 255];
+                                        canonical_wire(target, &mut key)
+                                            .is_some_and(|key| scratch.extra.insert(key, b"", 0))
                                     })
                                 {
                                     chased.push(Chased {
@@ -801,7 +934,7 @@ impl External {
                 return None;
             }
             for entry in &mut chased {
-                entry.answers[0] = cx
+                let lookup = cx
                     .self_lookup(
                         &entry.name,
                         if q.qtype == Type::SRV {
@@ -810,8 +943,8 @@ impl External {
                             q.qtype
                         },
                     )
-                    .await
-                    .ok();
+                    .await;
+                entry.answers[0] = Some(lookup.unwrap_or_default());
                 if q.qtype == Type::SRV {
                     entry.answers[1] = cx.self_lookup(&entry.name, Type::AAAA).await.ok();
                 }
@@ -878,7 +1011,7 @@ impl External {
                     |w| w.write_name(ns_ref),
                 )?;
                 let mut err = None;
-                // RFC 3596 §3: NS answers include available nameserver addresses in Additional.
+                // RFC 3596 §3: Include only available nameserver address records in Additional.
                 store.with_read(|index| {
                     kubernetes.visit_external_ns(index, self.config.headless, |ip| {
                         let result = match ip {
@@ -898,14 +1031,7 @@ impl External {
                                 self.config.ttl,
                                 &ip.octets(),
                             ),
-                            None => b.record(
-                                Section::Additional,
-                                ns_ref,
-                                Type::AAAA,
-                                Class::IN,
-                                self.config.ttl,
-                                &[],
-                            ),
+                            None => return,
                         };
                         if let Err(error) = result {
                             err = Some(error);
@@ -916,6 +1042,7 @@ impl External {
                     return Err(error);
                 }
             } else if ns_subdomain && matches!(q.qtype, Type::A | Type::AAAA) {
+                // RFC 3596 §2.2: an AAAA RR must contain a 128-bit IPv6 address.
                 let mut err = None;
                 let mut answers = 0;
                 store.with_read(|index| {
@@ -936,14 +1063,6 @@ impl External {
                                 Class::IN,
                                 self.config.ttl,
                                 &ip.octets(),
-                            ),
-                            None if q.qtype == Type::AAAA => b.record(
-                                Section::Answer,
-                                q.name,
-                                Type::AAAA,
-                                Class::IN,
-                                self.config.ttl,
-                                &[],
                             ),
                             _ => return,
                         };
@@ -1207,6 +1326,129 @@ mod tests {
             hostname(r"example\\.", &mut wire).unwrap().to_string(),
             r"example\\."
         );
+    }
+
+    #[test]
+    fn cname_target_rcode_replaces_initial_rcode() {
+        let target: Name = "missing.example.net.".parse().unwrap();
+        let mut wire = Vec::with_capacity(128);
+        let mut builder =
+            MessageBuilder::new(&mut wire, 128, 1, 0x8000 | Rcode::NXDOMAIN.0).unwrap();
+        builder
+            .question(
+                NameRef::parse(target.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let chased = [Chased {
+            ordinal: 0,
+            name: target,
+            answers: [Some(wire), None],
+        }];
+        assert_eq!(final_rcode(Rcode::NOERROR, &chased), Rcode::NXDOMAIN);
+        let positive_name: Name = "found.example.net.".parse().unwrap();
+        let positive_ref = NameRef::parse(positive_name.as_wire(), 0).unwrap();
+        let mut positive_wire = Vec::with_capacity(128);
+        let mut builder = MessageBuilder::new(&mut positive_wire, 128, 1, 0x8000).unwrap();
+        builder.question(positive_ref, Type::A, Class::IN).unwrap();
+        builder
+            .record(
+                Section::Answer,
+                positive_ref,
+                Type::A,
+                Class::IN,
+                30,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mixed = [
+            Chased {
+                ordinal: 0,
+                name: positive_name,
+                answers: [Some(positive_wire), None],
+            },
+            Chased {
+                ordinal: 1,
+                name: "missing.example.net.".parse().unwrap(),
+                answers: [Some(chased[0].answers[0].clone().unwrap()), None],
+            },
+        ];
+        assert_eq!(final_rcode(Rcode::NXDOMAIN, &mixed), Rcode::NOERROR);
+        assert!(final_response(Rcode::NXDOMAIN, &mixed).1.is_none());
+        assert_eq!(
+            final_rcode(
+                Rcode::NOERROR,
+                &[Chased {
+                    ordinal: 0,
+                    name: "failed.example.net.".parse().unwrap(),
+                    answers: [None, None],
+                }]
+            ),
+            Rcode::SERVFAIL
+        );
+        assert_eq!(final_rcode(Rcode::SERVFAIL, &[]), Rcode::SERVFAIL);
+    }
+
+    #[test]
+    fn captured_target_matches_ascii_case_insensitively() {
+        let chased = [Chased {
+            ordinal: 0,
+            name: "MiXeD.example.net.".parse().unwrap(),
+            answers: [None, None],
+        }];
+        assert!(chased_at(&chased, 0, "mixed.example.net").is_some());
+    }
+
+    #[test]
+    fn srv_target_must_resolve_to_address_without_cname() {
+        let target: Name = "target.example.net.".parse().unwrap();
+        let target_ref = NameRef::parse(target.as_wire(), 0).unwrap();
+        let make_response = |alias: bool| {
+            let mut wire = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x8000).unwrap();
+            builder.question(target_ref, Type::A, Class::IN).unwrap();
+            if alias {
+                builder
+                    .record_with(
+                        Section::Answer,
+                        target_ref,
+                        Type::CNAME,
+                        Class::IN,
+                        30,
+                        |w| w.write_name(target_ref),
+                    )
+                    .unwrap();
+            } else {
+                builder
+                    .record(
+                        Section::Answer,
+                        target_ref,
+                        Type::A,
+                        Class::IN,
+                        30,
+                        &[192, 0, 2, 1],
+                    )
+                    .unwrap();
+            }
+            let _ = builder.finish();
+            wire
+        };
+        let address = Chased {
+            ordinal: 0,
+            name: target.clone(),
+            answers: [Some(make_response(false)), None],
+        };
+        let alias = Chased {
+            ordinal: 0,
+            name: target.clone(),
+            answers: [Some(make_response(true)), None],
+        };
+        assert!(has_address_target("target.example.net", Some(&address)));
+        assert!(!has_address_target("target.example.net", Some(&alias)));
+        assert!(!has_address_target("target.example.net", None));
     }
 
     #[tokio::test]
@@ -1818,7 +2060,7 @@ mod tests {
                 ("web.prod.example.com.".into(), 80),
                 ("web.prod.example.com.".into(), 443),
                 ("lb.example.net.".into(), 80),
-                ("lb.example.net.".into(), 443)
+                ("lb.example.net.".into(), 443),
             ]
         );
         let extra: Vec<_> = message
@@ -1906,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn chased_ordinals_reject_changed_or_missing_hosts() {
+    fn chased_at_uses_callback_ordinal_and_hostname() {
         let chased = [
             Chased {
                 ordinal: 1,
@@ -1924,30 +2166,75 @@ mod tests {
                 answers: [None, None],
             },
         ];
-        let mut cursor = chased.iter().peekable();
-        assert!(chased_at(&mut cursor, 1, "new.example").is_none());
-        assert!(chased_at(&mut cursor, 4, "other.example").is_none());
+        assert_eq!(chased_at(&chased, 1, "old.example").unwrap().ordinal, 1);
+        assert!(chased_at(&chased, 1, "same.example").is_none());
+        assert!(chased_at(&chased, 4, "other.example").is_none());
         assert_eq!(
-            chased_at(&mut cursor, 5, "later.example")
+            chased_at(&chased, 5, "later.example")
                 .unwrap()
                 .name
                 .to_string(),
             "later.example."
         );
+        assert!(chased_at(&chased, 20, "same.example").is_none());
     }
 
     #[test]
-    fn chased_hosts_match_exact_wire_labels_without_copying_presentation() {
+    fn one_hostname_chase_serves_each_service_port() {
+        let chased = [Chased {
+            ordinal: 2,
+            name: "lb.example.net.".parse().unwrap(),
+            answers: [None, None],
+        }];
+        let mut targets = scratch::Targets::default();
+        let name = NameRef::parse(chased[0].name.as_wire(), 0).unwrap();
+        let mut wire = [0; 255];
+        let key = canonical_wire(name, &mut wire).unwrap();
+        assert!(targets.insert(key, 0, true));
+        assert!(chased_for_target(&targets, &chased, name).is_some());
+        assert!(chased_for_target(&targets, &chased, name).is_some());
+    }
+
+    #[test]
+    fn hostname_chase_survives_interleaved_target_callbacks() {
+        let chased = [
+            Chased {
+                ordinal: 0,
+                name: "lb-a.example.net.".parse().unwrap(),
+                answers: [None, None],
+            },
+            Chased {
+                ordinal: 1,
+                name: "lb-b.example.net.".parse().unwrap(),
+                answers: [None, None],
+            },
+        ];
+        let mut targets = scratch::Targets::default();
+        for (index, entry) in chased.iter().enumerate() {
+            let name = NameRef::parse(entry.name.as_wire(), 0).unwrap();
+            let mut wire = [0; 255];
+            let key = canonical_wire(name, &mut wire).unwrap();
+            assert!(targets.insert(key, index, true));
+        }
+        for host in ["lb-a.example.net", "lb-b.example.net", "lb-a.example.net"] {
+            let mut wire = [0; 255];
+            let name = hostname(host, &mut wire).unwrap();
+            assert!(chased_for_target(&targets, &chased, name).is_some());
+        }
+    }
+
+    #[test]
+    fn chased_hosts_match_dns_labels_without_copying_presentation() {
         let chased = [Chased {
             ordinal: 0,
             name: r"a\.b.Example.".parse().unwrap(),
             answers: [None, None],
         }];
-        let matches = |address| chased_at(&mut chased.iter().peekable(), 0, address).is_some();
+        let matches = |address| chased_at(&chased, 0, address).is_some();
         assert!(matches(r"a\.b.Example"));
         assert!(matches(r"a\046b.Example."));
         assert!(!matches(r"a.b.Example"));
-        assert!(!matches(r"a\.b.example"));
+        assert!(matches(r"a\.b.example"));
         assert!(!matches(r"a\.c.Example"));
         assert!(!matches(r"a\.b.Example.."));
     }
@@ -1970,10 +2257,9 @@ mod tests {
                 answers: [None, None],
             },
         ];
-        let mut cursor = chased.iter().peekable();
-        assert!(chased_at(&mut cursor, 0, &escaped).is_some());
-        assert!(chased_at(&mut cursor, 1, &host).is_some());
-        assert!(chased_at(&mut chased.iter().peekable(), 0, &"x".repeat(8192)).is_none());
+        assert!(chased_at(&chased, 0, &escaped).is_some());
+        assert!(chased_at(&chased, 1, &host).is_some());
+        assert!(chased_at(&chased, 0, &"x".repeat(8192)).is_none());
     }
 
     #[test]

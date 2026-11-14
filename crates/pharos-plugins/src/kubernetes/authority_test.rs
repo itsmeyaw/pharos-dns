@@ -62,6 +62,14 @@ async fn authority_rows_use_the_injected_local_addresses() {
         assert_eq!(answer.as_deref(), expected, "{local} {kind}");
         assert_eq!(message.answer_count(), u16::from(expected.is_some()));
     }
+    let wire = query(&configured(), "ns.dns.interwebs.test.", Type::TXT).await;
+    let message = Message::parse(&wire).unwrap();
+    // RFC 2308 §2.2: an existing name without TXT data is NODATA, not NXDOMAIN.
+    assert_eq!(
+        (message.rcode(), message.answer_count()),
+        (Rcode::NOERROR, 0)
+    );
+    assert_eq!(message.authorities().next().unwrap().rtype, Type::SOA);
     let chain = configured();
     let plugin = chain.kubernetes.as_ref().unwrap();
     let zone: Name = "interwebs.test.".parse().unwrap();
@@ -105,4 +113,45 @@ async fn apex_ns_with_injected_loopback_matches_coredns() {
     assert!(
         matches!(message.additionals().next().unwrap().data().unwrap(), Rdata::A(ip) if ip.octets() == [127, 0, 0, 1])
     );
+}
+
+#[test]
+fn copies_final_target_authority_records() {
+    let target: Name = "missing.example.test.".parse().unwrap();
+    let mname: Name = "ns.example.test.".parse().unwrap();
+    let rname: Name = "hostmaster.example.test.".parse().unwrap();
+    let target_ref = NameRef::parse(target.as_wire(), 0).unwrap();
+    let mname_ref = NameRef::parse(mname.as_wire(), 0).unwrap();
+    let rname_ref = NameRef::parse(rname.as_wire(), 0).unwrap();
+    let mut upstream = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut upstream, 512, 7, 0x8003).unwrap();
+    builder.question(target_ref, Type::A, Class::IN).unwrap();
+    builder
+        .record_with(
+            pharos_proto::Section::Authority,
+            target_ref,
+            Type::SOA,
+            Class::IN,
+            5,
+            |w| {
+                w.write_name(mname_ref)?;
+                w.write_name(rname_ref)?;
+                for value in [1u32, 2, 3, 4, 5] {
+                    w.write_bytes(&value.to_be_bytes())?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let upstream = Message::parse(&upstream).unwrap();
+
+    let mut response = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut response, 512, 7, 0x8003).unwrap();
+    builder.question(target_ref, Type::A, Class::IN).unwrap();
+    crate::dns::copy_authorities(&mut builder, &upstream).unwrap();
+    let _ = builder.finish();
+    let response = Message::parse(&response).unwrap();
+    assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+    assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
 }

@@ -174,6 +174,7 @@ fn validates_coredns_options() {
 fn validates_label_selector_grammar() {
     for selector in [
         "app=nginx",
+        "a!=value",
         "example.com/app in (foo, bar),!disabled",
         "a=,b==value,c notin (x,y)",
         "foo",
@@ -192,7 +193,6 @@ fn validates_label_selector_grammar() {
         "environment in (production, qa",
         "bad key=value",
         "app > 1",
-        "a!=value",
         "!a=value",
         "!a in (b)",
         "UPPER.example/app=x",
@@ -208,7 +208,10 @@ fn validates_label_selector_grammar() {
         );
     }
     let k = config("kubernetes cluster.local {\n labels z=first,a in (z,a,z),z=last\n}").unwrap();
-    assert_eq!(k.label_selector.as_deref(), Some("a in (a,z),z=last"));
+    assert_eq!(
+        k.label_selector.as_deref(),
+        Some("a in (a,z),z=first,z=last")
+    );
     let long_prefix = format!("{}/app=ok", "a".repeat(64));
     assert!(
         config(&format!(
@@ -236,16 +239,19 @@ fn multicluster_setup_matches_coredns() {
             .unwrap();
     assert_eq!(configured.multicluster_zones, ["clusterset.local."]);
     assert!(configured.watch_config().multicluster);
+    let invalid = config("kubernetes cluster.local {\n multicluster cluster.local\n}").unwrap_err();
+    assert!(invalid.message.contains("clusterset.local"), "{invalid}");
     let empty = config("kubernetes cluster.local {\n multicluster\n}").unwrap();
     assert!(empty.multicluster_zones.is_empty());
     assert!(!empty.watch_config().multicluster);
     for zones in ["bad..zone", "bad..zone cluster.local"] {
-        let parsed = config(&format!(
+        let malformed = config(&format!(
             "kubernetes cluster.local {{\n multicluster {zones}\n}}"
         ))
-        .unwrap();
+        .unwrap_err();
         assert!(
-            !parsed.watch_config().multicluster || parsed.multicluster_zones == ["cluster.local."]
+            malformed.message.contains("invalid multicluster zone"),
+            "{zones}: {malformed}"
         );
     }
     let invalid =

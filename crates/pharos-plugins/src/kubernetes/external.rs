@@ -57,6 +57,10 @@ fn visit_service(
     // CoreDNS kubernetes/ns.go nsAddrs: headless mode selects endpoints before external IPs.
     if headless && service.headless() {
         for address in &endpoints.addresses {
+            if !address.dns_eligible(service.tolerate_unready_endpoints) {
+                // Kubernetes DNS spec 1.1.0 §2.1: tolerate unready endpoints only by annotation.
+                continue;
+            }
             visit(parse_ip(&address.ip));
         }
     } else {
@@ -77,10 +81,18 @@ fn visit_external_ns(
     for local in locals {
         let text = scratch::IpText::new(normalize_ip(*local));
         for endpoints in index.endpoints_by_ip_unfiltered(text.as_str()) {
+            let service = index.service_unfiltered(&endpoints.namespace, &endpoints.service_name);
+            // Kubernetes DNS spec 1.1.0 §2.1: only ready or explicitly tolerated endpoints are published.
+            if !endpoints.addresses.iter().any(|address| {
+                address.ip == text.as_str()
+                    && address.dns_eligible(
+                        service.is_some_and(|service| service.tolerate_unready_endpoints),
+                    )
+            }) {
+                continue;
+            }
             found = true;
-            if let Some(service) =
-                index.service_unfiltered(&endpoints.namespace, &endpoints.service_name)
-            {
+            if let Some(service) = service {
                 visit_service(service, endpoints, headless, &mut visit);
             }
         }
@@ -103,10 +115,11 @@ mod tests {
             name: "dns".into(),
             namespace: "system".into(),
             cluster_ips: vec![if headless { "None" } else { "10.0.0.10" }.into()],
-            service_type: String::new(),
+            service_type: String::new().into(),
             external_name: String::new(),
             ports: vec![],
             external_ips: external_ips.iter().map(|ip| (*ip).into()).collect(),
+            tolerate_unready_endpoints: false,
         }
     }
 
@@ -122,7 +135,8 @@ mod tests {
                     ip: ip.into(),
                     hostname: String::new(),
                     node_name: String::new(),
-                    target_ref_name: String::new(),
+                    target_ref_name: String::new().into(),
+                    ready: true,
                 })
                 .collect(),
             ports: vec![],

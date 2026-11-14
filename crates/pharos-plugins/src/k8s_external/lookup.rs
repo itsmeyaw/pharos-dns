@@ -17,7 +17,7 @@ pub(super) struct Request<'a> {
 pub(super) enum Snapshot {
     Service(Arc<Service>),
     Headless {
-        _service: Arc<Service>,
+        service: Arc<Service>,
         endpoints: Option<Arc<Vec<Arc<Endpoints>>>>,
     },
     MissingNamespace,
@@ -44,7 +44,7 @@ pub(super) fn capture(index: &Index, req: &Request<'_>, headless: bool) -> Snaps
     };
     if uses_endpoints(&service, req, headless) {
         Snapshot::Headless {
-            _service: service,
+            service,
             endpoints: index.endpoints_snapshot(namespace, name),
         }
     } else {
@@ -110,6 +110,7 @@ pub(super) fn lookup(
             index.endpoints(namespace, service),
             req,
             endpoint_pod_names,
+            svc.tolerate_unready_endpoints,
             callback,
         )
     } else {
@@ -121,11 +122,15 @@ fn endpoints<'a>(
     slices: impl IntoIterator<Item = &'a Endpoints>,
     req: &Request<'_>,
     endpoint_pod_names: bool,
+    tolerate_unready: bool,
     mut callback: impl FnMut(&str, &Port, Option<&[u8]>),
 ) -> Rcode {
     let mut code = Rcode::NXDOMAIN;
     for ep in slices {
         for addr in &ep.addresses {
+            if !addr.dns_eligible(tolerate_unready) {
+                continue;
+            }
             let mut buf = [0; 64];
             let label = endpoint_label(addr, endpoint_pod_names, &mut buf);
             if !req.endpoint.is_empty() && !req.endpoint.eq_ignore_ascii_case(label) {
@@ -176,7 +181,9 @@ pub(super) fn snapshot_or_lookup(
 ) -> Rcode {
     match snapshot {
         Some(Snapshot::Headless {
-            endpoints: slices, ..
+            service,
+            endpoints: slices,
+            ..
         }) => endpoints(
             slices
                 .iter()
@@ -184,6 +191,7 @@ pub(super) fn snapshot_or_lookup(
                 .map(Arc::as_ref),
             req,
             endpoint_pod_names,
+            service.tolerate_unready_endpoints,
             callback,
         ),
         Some(Snapshot::Service(service)) => external(service, req, callback),
@@ -245,7 +253,8 @@ mod tests {
                     ip: address.into(),
                     hostname: hostname.into(),
                     node_name: String::new(),
-                    target_ref_name: String::new(),
+                    target_ref_name: String::new().into(),
+                    ready: true,
                 }],
                 ports: vec![
                     Port {
@@ -267,15 +276,16 @@ mod tests {
             slice("two", "192.0.2.2", "pod2"),
         ]);
         let snapshot = Snapshot::Headless {
-            _service: Arc::new(Service {
+            service: Arc::new(Service {
                 version: "1".into(),
                 name: "head".into(),
                 namespace: "prod".into(),
                 cluster_ips: vec!["None".into()],
-                service_type: String::new(),
+                service_type: String::new().into(),
                 external_name: String::new(),
                 ports: vec![],
                 external_ips: vec![],
+                tolerate_unready_endpoints: false,
             }),
             endpoints: Some(Arc::clone(&current)),
         };
@@ -331,6 +341,43 @@ mod tests {
     }
 
     #[test]
+    fn service_policy_controls_unready_endpoint_lookup() {
+        use pharos_kubernetes::object::{EndpointAddress, Endpoints, Port};
+        let slice = Endpoints {
+            version: "1".into(),
+            name: "one".into(),
+            namespace: "prod".into(),
+            service_name: "head".into(),
+            addresses: vec![EndpointAddress {
+                ip: "192.0.2.1".into(),
+                hostname: "node".into(),
+                node_name: String::new(),
+                target_ref_name: String::new().into(),
+                ready: false,
+            }],
+            ports: vec![Port {
+                name: "http".into(),
+                protocol: "TCP".into(),
+                port: 80,
+            }],
+            zones: None,
+        };
+        let request = parse(&[b"_http", b"_tcp", b"head", b"prod"]).unwrap();
+        let mut returned = false;
+        assert_eq!(
+            endpoints([&slice], &request, false, false, |_, _, _| returned = true),
+            Rcode::NXDOMAIN
+        );
+        assert!(!returned);
+        // Kubernetes DNS spec 1.1.0 §2.1: the annotation opts into unready endpoint data.
+        assert_eq!(
+            endpoints([&slice], &request, false, true, |_, _, _| returned = true),
+            Rcode::NOERROR
+        );
+        assert!(returned);
+    }
+
+    #[test]
     fn retained_external_service_keeps_order_and_port_filter_after_update() {
         use pharos_kubernetes::object::{Port, Service};
         use std::sync::Arc;
@@ -342,6 +389,7 @@ mod tests {
             service_type: "LoadBalancer".into(),
             external_name: String::new(),
             external_ips: vec!["192.0.2.1".into(), "old.example".into(), "192.0.2.2".into()],
+            tolerate_unready_endpoints: false,
             ports: vec![
                 Port {
                     name: "http".into(),
@@ -435,6 +483,7 @@ mod tests {
             hostname: "explicit".into(),
             node_name: String::new(),
             target_ref_name: "pod".into(),
+            ready: true,
         };
         let mut buf = [0; 64];
         assert_eq!(endpoint_label(&addr, true, &mut buf), b"explicit");
@@ -542,7 +591,7 @@ mod tests {
             ));
             let req = parse(&[b"web", b"prod"]).unwrap();
             let empty = Snapshot::Headless {
-                _service: index.service_snapshot("prod", "web").unwrap(),
+                service: index.service_snapshot("prod", "web").unwrap(),
                 endpoints: None,
             };
             assert_eq!(

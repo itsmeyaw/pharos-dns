@@ -53,7 +53,7 @@ impl Resource {
         }
     }
 
-    fn write_object(self, out: &mut String, i: usize) {
+    fn write_object(self, out: &mut String, i: usize, unready_percent: usize) {
         match self {
             Self::Service => {
                 let ip = format!("10.{}.{}.{}", i / 65536, i / 256 % 256, i % 256);
@@ -64,7 +64,9 @@ impl Resource {
                 for offset in 0..3 {
                     if offset != 0 { out.push(','); }
                     let address = i * 3 + offset;
-                    write!(out, r#"{{"addresses":["192.{}.{}.{}"]}}"#, address / 65536, address / 256 % 256, address % 256).unwrap();
+                    // KEP-1672 §Design Details: EndpointSlice readiness controls DNS eligibility.
+                    let ready = endpoint_ready(address, unready_percent);
+                    write!(out, r#"{{"addresses":["192.{}.{}.{}"],"conditions":{{"ready":{ready}}}}}"#, address / 65536, address / 256 % 256, address % 256).unwrap();
                 }
                 out.push_str("]}");
             }
@@ -73,7 +75,7 @@ impl Resource {
     }
 }
 
-fn list(resource: Resource) -> String {
+fn list(resource: Resource, unready_percent: usize) -> String {
     let (api, kind) = resource.api_and_kind();
     let mut out = format!(
         r#"{{"apiVersion":"{api}","kind":"{kind}List","metadata":{{"resourceVersion":"1"}},"items":["#
@@ -82,18 +84,18 @@ fn list(resource: Resource) -> String {
         if i != 0 {
             out.push(',');
         }
-        resource.write_object(&mut out, i);
+        resource.write_object(&mut out, i, unready_percent);
     }
     out.push_str("]}");
     out
 }
 
-fn initial_watch(resource: Resource) -> String {
+fn initial_watch(resource: Resource, unready_percent: usize) -> String {
     let (api, kind) = resource.api_and_kind();
     let mut out = String::new();
     for i in 0..resource.count() {
         out.push_str(r#"{"type":"ADDED","object":"#);
-        resource.write_object(&mut out, i);
+        resource.write_object(&mut out, i, unready_percent);
         out.push_str("}\n");
     }
     writeln!(out, r#"{{"type":"BOOKMARK","object":{{"apiVersion":"{api}","kind":"{kind}","metadata":{{"resourceVersion":"1","annotations":{{"k8s.io/initial-events-end":"true"}}}}}}}}"#).unwrap();
@@ -107,9 +109,10 @@ fn api_response(path: &str, query: Option<&str>) -> Response<Body> {
         .split('&')
         .any(|part| part == "sendInitialEvents=true");
     let (status, body) = if let Some(resource) = Resource::from_path(path) {
+        let unready_percent = unready_percent();
         if watch {
             let initial_data = if initial {
-                initial_watch(resource)
+                initial_watch(resource, unready_percent)
             } else {
                 String::new()
             };
@@ -119,7 +122,7 @@ fn api_response(path: &str, query: Option<&str>) -> Response<Body> {
             let stream = first.chain(futures::stream::pending());
             (200, BodyExt::boxed(StreamBody::new(stream)))
         } else {
-            (200, full(list(resource)))
+            (200, full(list(resource, unready_percent)))
         }
     } else {
         let body = match path {
@@ -140,6 +143,20 @@ fn api_response(path: &str, query: Option<&str>) -> Response<Body> {
         .header("content-type", "application/json")
         .body(body)
         .unwrap()
+}
+
+fn endpoint_ready(index: usize, unready_percent: usize) -> bool {
+    index % 100 >= unready_percent
+}
+
+// KEP-1672 §Design Details: model EndpointSlice readiness with a bounded fixture percentage.
+fn unready_percent() -> usize {
+    let value = std::env::var("PHAROS_MEMORY_UNREADY_PERCENT")
+        .unwrap_or_else(|_| "0".into())
+        .parse::<usize>()
+        .expect("PHAROS_MEMORY_UNREADY_PERCENT must be an integer");
+    assert!(value <= 100, "unready percentage must be <=100");
+    value
 }
 
 fn live_heap_bytes(stats: Stats) -> i128 {
@@ -191,6 +208,11 @@ async fn serve(address: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn client(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "Object sizes: Service={} B; EndpointAddress={} B",
+        std::mem::size_of::<pharos_kubernetes::object::Service>(),
+        std::mem::size_of::<pharos_kubernetes::object::EndpointAddress>()
+    );
     let registry = pharos_server::metrics::Registry::new("memory", "memory", "memory");
     let config = ClientConfig {
         endpoint: Some(url.into()),
@@ -210,6 +232,7 @@ async fn client(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let counts = controller.store().with_read(|index| index.counts());
     assert_eq!(counts, (SERVICES, SERVICES, SERVICES * 3, 0, 1));
+    let (service_count, slice_count, endpoint_count, pod_count, namespace_count) = counts;
     let after_heap = live_heap_bytes(GLOBAL.stats());
     let after_rss = rss_kib()?;
     println!(
@@ -222,7 +245,13 @@ async fn client(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "services: {}; slices: {}; endpoints: {}; pods: {}; namespaces: {}",
-        counts.0, counts.1, counts.2, counts.3, counts.4
+        service_count, slice_count, endpoint_count, pod_count, namespace_count
+    );
+    let unready_percent = unready_percent();
+    println!(
+        "unready endpoints: {}/{} ({unready_percent}%)",
+        endpoint_count * unready_percent / 100,
+        endpoint_count
     );
     controller.stop().await;
     Ok(())
@@ -241,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{api_response, live_heap_bytes};
+    use super::{api_response, endpoint_ready, live_heap_bytes};
     use http_body_util::BodyExt;
 
     #[tokio::test]
@@ -311,5 +340,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(live_heap_bytes(stats), 150);
+    }
+
+    #[test]
+    fn unready_fraction_matches_requested_percentage() {
+        for percent in [10, 50] {
+            let unready = (0..100)
+                .filter(|index| !endpoint_ready(*index, percent))
+                .count();
+            assert_eq!(unready, percent);
+        }
     }
 }

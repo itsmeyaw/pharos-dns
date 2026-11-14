@@ -107,6 +107,55 @@ mod tests {
     }
 
     #[test]
+    fn namespace_membership_changes_advance_required_namespace_serial() {
+        let store = Store::new(&[], true);
+        let namespace = Namespace {
+            name: "prod".into(),
+            version: "1".into(),
+        };
+        store.apply_namespace(namespace.clone());
+        assert_ne!(store.with_read(|index| index.serial()), 0);
+        store.0.write().unwrap().serial = 1;
+        store.delete_namespace("prod");
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+
+        store.0.write().unwrap().serial = 1;
+        store.replace_namespaces(vec![namespace]);
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+    }
+
+    #[test]
+    fn endpoint_readiness_and_service_annotation_changes_are_dns_changes() {
+        let store = Store::default();
+        let mut service_obj = service("None");
+        service_obj.version = "1".into();
+        store.apply_service(service_obj.clone());
+        store.0.write().unwrap().serial = 1;
+        service_obj.version = "2".into();
+        service_obj.tolerate_unready_endpoints = true;
+        store.apply_service(service_obj);
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+
+        let external = Store::default();
+        let mut service_obj = service("None");
+        service_obj.version = "1".into();
+        external.apply_service(service_obj.clone());
+        external.0.write().unwrap().external_serial = 1;
+        service_obj.version = "2".into();
+        service_obj.tolerate_unready_endpoints = true;
+        external.apply_service(service_obj);
+        assert_ne!(external.with_read(|index| index.external_serial()), 1);
+
+        let mut endpoints = slice("slice", "192.0.2.1");
+        store.apply_endpoints(endpoints.clone());
+        store.0.write().unwrap().serial = 1;
+        endpoints.version = "2".into();
+        endpoints.addresses[0].ready = false;
+        store.apply_endpoints(endpoints);
+        assert_ne!(store.with_read(|index| index.serial()), 1);
+    }
+
+    #[test]
     fn multicluster_ips_and_endpoint_pod_names_signal_without_serial_change() {
         let store = Store::default();
         let mut changes = store.subscribe_changes();
@@ -1078,7 +1127,7 @@ impl Index {
         self.delete_service(&service.namespace, &service.name);
         // RFC 1034 §3.1: store ExternalName targets as absolute domain names.
         // Kubernetes DNS spec 1.1.0 §2.5: Store ExternalName targets for CNAME answers.
-        if service.service_type == "ExternalName" {
+        if service.service_type.as_ref() == "ExternalName" {
             let fqdn = if service.external_name.ends_with('.') {
                 service.external_name.clone()
             } else {
@@ -1482,14 +1531,23 @@ impl Store {
     pub(crate) fn apply_namespace(&self, object: Namespace) {
         let mut index = self.0.write().unwrap();
         if !index.namespaces.contains_key(&object.name) {
-            index.signal_internal();
+            // RFC 1034 §4.3.5: exposed Namespace changes alter the zone and its SOA serial.
+            if index.require_namespace {
+                index.mark_modified();
+            } else {
+                index.signal_internal();
+            }
         }
         index.namespaces.insert(object.name.clone(), object);
     }
     pub(crate) fn delete_namespace(&self, name: &str) {
         let mut index = self.0.write().unwrap();
         if index.namespaces.remove(name).is_some() {
-            index.signal_internal();
+            if index.require_namespace {
+                index.mark_modified();
+            } else {
+                index.signal_internal();
+            }
         }
     }
     pub(crate) fn replace_namespaces(&self, objects: Vec<Namespace>) {
@@ -1499,7 +1557,11 @@ impl Store {
                 .iter()
                 .any(|object| !index.namespaces.contains_key(&object.name))
         {
-            index.signal_internal();
+            if index.require_namespace {
+                index.mark_modified();
+            } else {
+                index.signal_internal();
+            }
         }
         index.namespaces = objects
             .into_iter()
@@ -1511,12 +1573,19 @@ impl Store {
 fn service_changed(old: Option<&Service>, new: &Service) -> bool {
     old.is_none_or(|old| {
         old.version != new.version
-            && (old.external_name != new.external_name || old.ports != new.ports)
+            && (old.external_name != new.external_name
+                || old.ports != new.ports
+                // Kubernetes DNS spec 1.1.0 §2.1: readiness tolerance changes DNS answers.
+                || old.tolerate_unready_endpoints != new.tolerate_unready_endpoints)
     })
 }
 
 fn service_external_changed(old: &Service, new: &Service) -> bool {
-    old.version != new.version && (old.external_ips != new.external_ips || old.ports != new.ports)
+    old.version != new.version
+        && (old.external_ips != new.external_ips
+            || old.ports != new.ports
+            // Kubernetes DNS spec 1.1.0 §2.1: readiness tolerance changes exported endpoints.
+            || old.tolerate_unready_endpoints != new.tolerate_unready_endpoints)
 }
 
 fn service_import_changed(old: &ServiceImport, new: &ServiceImport) -> bool {
@@ -1542,7 +1611,7 @@ fn endpoints_changed(old: Option<&Endpoints>, new: &Endpoints) -> bool {
                     .addresses
                     .iter()
                     .zip(&new.addresses)
-                    .any(|(a, b)| a.ip != b.ip || a.hostname != b.hostname))
+                    .any(|(a, b)| a.ip != b.ip || a.hostname != b.hostname || a.ready != b.ready))
     })
 }
 
