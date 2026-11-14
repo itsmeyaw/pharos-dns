@@ -1,6 +1,6 @@
 //! On-demand upstream health checks, independent of the forwarding transport.
 
-use pharos_proto::{Class, Message, Name, NameRef, Opcode, Type};
+use pharos_proto::{Class, Name, NameRef, Opcode, Type};
 use pharos_server::metrics::ProxyMetrics;
 use std::{
     io,
@@ -128,6 +128,14 @@ impl Health {
                         state.running = false;
                         return;
                     }
+                    let elapsed = shared.started.elapsed().as_secs();
+                    // RFC 2308 §7.2: Expire old dead-server state before recording this failure.
+                    reset_expired_down_window(
+                        &shared.fails,
+                        &shared.down_since_secs,
+                        shared.config.max_fails,
+                        elapsed,
+                    );
                     let _ =
                         shared
                             .fails
@@ -135,7 +143,6 @@ impl Health {
                                 Some(fails.saturating_add(1))
                             });
                     if shared.fails.load(Ordering::Relaxed) > shared.config.max_fails {
-                        let elapsed = shared.started.elapsed().as_secs();
                         let _ = shared.down_since_secs.compare_exchange(
                             u64::MAX,
                             elapsed,
@@ -156,10 +163,11 @@ impl Health {
     #[must_use]
     pub fn down(&self) -> bool {
         let since = self.shared.down_since_secs.load(Ordering::Relaxed);
-        self.shared.config.max_fails != 0
-            && self.fails() > self.shared.config.max_fails
-            && since != u64::MAX
-            && !down_expired(since, self.shared.started.elapsed().as_secs())
+        let max_fails = self.shared.config.max_fails;
+        if max_fails == 0 || self.fails() <= max_fails || since == u64::MAX {
+            return false;
+        }
+        !down_expired(since, self.shared.started.elapsed().as_secs())
     }
 
     /// Consecutive failed checks, reset to zero by a successful check.
@@ -191,6 +199,23 @@ impl Health {
 
 fn down_expired(since_secs: u64, now_secs: u64) -> bool {
     now_secs.saturating_sub(since_secs) >= DOWN_TTL_SECS
+}
+
+fn reset_expired_down_window(
+    fails: &AtomicU32,
+    down_since_secs: &AtomicU64,
+    max_fails: u32,
+    now_secs: u64,
+) {
+    let since = down_since_secs.load(Ordering::Relaxed);
+    if fails.load(Ordering::Relaxed) > max_fails
+        && since != u64::MAX
+        && down_expired(since, now_secs)
+    {
+        // RFC 2308 §7.2: Re-arm the five-minute dead-server expiry after it elapses.
+        fails.store(0, Ordering::Relaxed);
+        down_since_secs.store(u64::MAX, Ordering::Relaxed);
+    }
 }
 
 impl Drop for Health {
@@ -255,22 +280,33 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
         response
     };
 
-    let response = Message::parse(&response).map_err(io::Error::other)?;
-    // RFC 5452 §4.2: A health response must echo the query Question.
-    if response.id() == u16::from_be_bytes(id)
-        && response.qr()
-        && response.opcode() == Opcode::QUERY
-        && response.question_count() == 1
-        && response.questions().all(|question| {
-            question.name == NameRef::parse(config.domain.as_wire(), 0).expect("valid health name")
-                && question.qtype == Type::NS
-                && question.qclass == Class::IN
-        })
-    {
+    if response_matches_query(&response, id, &config.domain) {
         Ok(())
     } else {
         Err(io::ErrorKind::InvalidData.into())
     }
+}
+
+fn response_matches_query(response: &[u8], id: [u8; 2], domain: &Name) -> bool {
+    // RFC 5452 §4.2: Match response ID, QR, opcode, and Question without decoding answer RDATA.
+    if response.len() < 12
+        || response[..2] != id
+        || response[2] & 0x80 == 0
+        || response[2] & 0x78 != Opcode::QUERY.0 << 3
+        || response[4..6] != [0, 1]
+    {
+        return false;
+    }
+    let Ok(name) = NameRef::parse(response, 12) else {
+        return false;
+    };
+    let question_offset = 12 + name.wire_len();
+    let Some(question) = response.get(question_offset..question_offset + 4) else {
+        return false;
+    };
+    name == NameRef::parse(domain.as_wire(), 0).expect("valid health name")
+        && u16::from_be_bytes([question[0], question[1]]) == Type::NS.0
+        && u16::from_be_bytes([question[2], question[3]]) == Class::IN.0
 }
 
 #[cfg(test)]
@@ -288,6 +324,24 @@ mod tests {
         assert!(!down_expired(10, 309));
         assert!(down_expired(10, 310));
         assert!(!down_expired(310, 10));
+        let fails = AtomicU32::new(4);
+        let down_since = AtomicU64::new(10);
+        reset_expired_down_window(&fails, &down_since, 3, 310);
+        assert_eq!(fails.load(Ordering::Relaxed), 0);
+        assert_eq!(down_since.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn matching_health_question_survives_malformed_answer_rdata() {
+        let response = [
+            0x12, 0x34, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0xc0, 0x0c, 0, 1, 0, 1,
+            0, 0, 0, 30, 0, 4, 127,
+        ];
+        assert!(response_matches_query(
+            &response,
+            [0x12, 0x34],
+            &".".parse().unwrap()
+        ));
     }
 
     #[tokio::test]
