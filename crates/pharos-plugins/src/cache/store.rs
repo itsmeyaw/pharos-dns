@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pharos_proto::{Class, Message, Name, Type};
+use pharos_proto::{Class, Message, Name, Rcode, Type};
 
 #[derive(Default)]
 struct ShardHasher(u64);
@@ -45,6 +45,9 @@ struct Item {
     name: Name,
     qtype: Type,
     qclass: Class,
+    nxdomain: bool,
+    negative: bool,
+    failure: bool,
     wire: Box<[u8]>,
     ttl_offsets: Box<[usize]>,
     ttl: u32,
@@ -59,6 +62,7 @@ struct Item {
 
 #[derive(Clone, Copy)]
 pub(super) struct Hit {
+    pub key: u64,
     pub stale: bool,
     pub refresh: Option<Instant>,
     pub generation: Instant,
@@ -90,6 +94,15 @@ impl Store {
             .items
             .get(&key)
             .is_some_and(|item| item.stored == stored)
+    }
+
+    pub(super) fn next_failure_ttl(&self, key: u64, base: u32) -> u32 {
+        let shard = self.shards[key as usize & 255].lock().unwrap();
+        let previous = shard.items.get(&key).filter(|item| item.failure);
+        // RFC 9520 §3.2: Exponentially increase repeated failure caching, capped at 5 minutes.
+        previous
+            .map_or(base, |item| item.ttl.saturating_mul(2).max(base))
+            .min(300)
     }
 
     // RFC 2181 §5.4: replace a complete cached Response; never merge data from separate Responses.
@@ -158,7 +171,7 @@ impl Store {
             item
         };
         if question.name != item.name
-            || question.qtype != item.qtype
+            || (!item.nxdomain && question.qtype != item.qtype)
             || question.qclass != item.qclass
         {
             return None;
@@ -168,6 +181,10 @@ impl Store {
         let elapsed = now.duration_since(item.stored).as_secs();
         // RFC 8767 §5: limit serving expired data to the configured maximum stale interval.
         let stale = elapsed >= u64::from(item.ttl);
+        // RFC 9520 §3.2: Do not serve expired resolution failures beyond their bounded cache TTL.
+        if stale && item.failure {
+            return None;
+        }
         if stale
             && (config.stale.is_zero()
                 || Duration::from_secs(elapsed - u64::from(item.ttl)) >= config.stale)
@@ -181,12 +198,16 @@ impl Store {
             output.reserve(item.wire.len().saturating_sub(output.len()));
         }
         // RFC 8767 §4: Set the response TTL for served stale records.
-        let ttl = if stale && !config.stale_ttl.is_zero() {
-            config.stale_ttl.as_secs() as u32
+        let ttl = if stale {
+            // RFC 8767 §4: Stale records always carry a positive TTL.
+            config.stale_ttl.as_secs().max(1) as u32
         } else if config.keepttl {
-            item.ttl
-        } else if stale {
-            0
+            if item.negative {
+                // RFC 2308 §6: Negative TTLs decrease with cache age even under keepttl.
+                item.ttl - elapsed as u32
+            } else {
+                item.ttl
+            }
         } else {
             // RFC 2308 §6: decrement the TTL of cached negative answers by their cache age.
             item.ttl - elapsed as u32
@@ -210,6 +231,8 @@ impl Store {
             output[position..position + label.len()].copy_from_slice(label);
             position += label.len();
         }
+        // RFC 2308 §5: Reused NXDOMAIN entries echo the current QTYPE.
+        output[position + 1..position + 3].copy_from_slice(&question.qtype.0.to_be_bytes());
         for &offset in &item.ttl_offsets {
             output[offset..offset + 4].copy_from_slice(&ttl.to_be_bytes());
         }
@@ -239,6 +262,7 @@ impl Store {
                 None
             };
         Some(Hit {
+            key,
             stale,
             refresh,
             generation,
@@ -297,6 +321,16 @@ impl Item {
             return None;
         }
         let question = response.questions().next()?;
+        // RFC 2930 §3: TKEY transactions are transient and must not enter the cache.
+        if question.qtype == Type::TKEY
+            || response
+                .answers()
+                .chain(response.authorities())
+                .chain(response.additionals())
+                .any(|record| record.rtype == Type::TKEY)
+        {
+            return None;
+        }
         // shortcut: compressed Questions and non-final OPTs need safe re-encoding before caching.
         let raw_len: usize = question
             .name
@@ -342,6 +376,9 @@ impl Item {
             name: question.name.to_name(),
             qtype: question.qtype,
             qclass: question.qclass,
+            nxdomain: response.rcode() == Rcode::NXDOMAIN,
+            negative: response.rcode() == Rcode::NXDOMAIN || !super::answers_question(response),
+            failure: super::is_resolution_failure(response.rcode()),
             wire: wire.into_boxed_slice(),
             ttl_offsets,
             ttl,
@@ -358,8 +395,45 @@ impl Item {
 
 #[cfg(test)]
 mod tests {
-    use super::ShardHasher;
-    use std::{collections::HashSet, hash::Hasher};
+    use super::{ShardHasher, Store};
+    use pharos_corefile::{Cursor, lex};
+    use pharos_proto::{Class, Message, MessageBuilder, NameRef, Section, Type};
+    use std::{
+        collections::HashSet,
+        hash::Hasher,
+        time::{Duration, Instant},
+    };
+
+    fn message(qtype: Type, flags: u16, negative_soa: bool) -> Vec<u8> {
+        let name = NameRef::parse(b"\x01x\0", 0).unwrap();
+        let mut wire = Vec::with_capacity(128);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, flags).unwrap();
+        builder.question(name, qtype, Class::IN).unwrap();
+        if flags & 0x000f == 0 && !negative_soa && qtype != Type::TKEY {
+            builder
+                .record(Section::Answer, name, qtype, Class::IN, 30, &[192, 0, 2, 1])
+                .unwrap();
+        }
+        if negative_soa {
+            builder
+                .record(
+                    Section::Authority,
+                    name,
+                    Type::SOA,
+                    Class::IN,
+                    30,
+                    b"\0\0\0\0\0\x01\0\0\0\x02\0\0\0\x03\0\0\0\x04\0\0\0\x03",
+                )
+                .unwrap();
+        }
+        let _ = builder.finish();
+        wire
+    }
+
+    fn config(text: &str) -> super::super::setup::Config {
+        let tokens = lex("Corefile", text);
+        super::super::setup::parse(&mut Cursor::new("Corefile", &tokens), &["."]).unwrap()
+    }
 
     #[test]
     fn map_hash_keeps_bucket_entropy_within_one_shard() {
@@ -371,5 +445,143 @@ mod tests {
             })
             .collect::<HashSet<_>>();
         assert_eq!(buckets.len(), 256);
+    }
+
+    #[test]
+    fn stale_response_ttl_never_zero() {
+        let query_wire = message(Type::A, 0x0100, false);
+        let query = Message::parse(&query_wire).unwrap();
+        let response_wire = message(Type::A, 0x8000, false);
+        let response = Message::parse(&response_wire).unwrap();
+        let store = Store::new(1024);
+        store.insert(1, &response, 0, false, false).unwrap();
+        let mut output = Vec::with_capacity(128);
+        store
+            .serve(
+                1,
+                &query,
+                &mut output,
+                &config("cache {\nserve_stale 1h immediate 0\n}"),
+                false,
+                true,
+            )
+            .unwrap();
+        let hit = Message::parse(&output).unwrap();
+        assert_eq!(hit.answers().next().unwrap().ttl, 1);
+    }
+
+    #[test]
+    fn keepttl_still_ages_negative_soa_ttl() {
+        let query_wire = message(Type::A, 0x0100, false);
+        let query = Message::parse(&query_wire).unwrap();
+        let response_wire = message(Type::A, 0x8003, true);
+        let response = Message::parse(&response_wire).unwrap();
+        let store = Store::new(1024);
+        store.insert(2, &response, 30, false, false).unwrap();
+        store.shards[2]
+            .lock()
+            .unwrap()
+            .items
+            .get_mut(&2)
+            .unwrap()
+            .stored = Instant::now() - Duration::from_secs(4);
+        let mut output = Vec::with_capacity(128);
+        store
+            .serve(
+                2,
+                &query,
+                &mut output,
+                &config("cache {\nkeepttl\n}"),
+                false,
+                true,
+            )
+            .unwrap();
+        let hit = Message::parse(&output).unwrap();
+        assert_eq!(hit.authorities().next().unwrap().ttl, 26);
+    }
+
+    #[test]
+    fn nxdomain_hit_rewrites_question_qtype() {
+        let query_a_wire = message(Type::A, 0x0100, false);
+        let query_aaaa_wire = message(Type::AAAA, 0x0100, false);
+        let response_wire = message(Type::A, 0x8003, true);
+        let query_a = Message::parse(&query_a_wire).unwrap();
+        let query_aaaa = Message::parse(&query_aaaa_wire).unwrap();
+        let response = Message::parse(&response_wire).unwrap();
+        let key = super::super::nxdomain_key(&query_a);
+        let store = Store::new(1024);
+        store.insert(key, &response, 30, false, false).unwrap();
+        let mut output = Vec::with_capacity(128);
+        store
+            .serve(key, &query_aaaa, &mut output, &config("cache"), false, true)
+            .unwrap();
+        assert_eq!(
+            Message::parse(&output)
+                .unwrap()
+                .questions()
+                .next()
+                .unwrap()
+                .qtype,
+            Type::AAAA
+        );
+    }
+
+    #[test]
+    fn failure_ttl_backs_off_exponentially_to_five_minutes() {
+        let response_wire = message(Type::A, 0x8002, false);
+        let response = Message::parse(&response_wire).unwrap();
+        let store = Store::new(1024);
+        store.insert(3, &response, 5, false, false).unwrap();
+        assert_eq!(store.next_failure_ttl(3, 5), 10);
+        store.insert(3, &response, 10, false, false).unwrap();
+        assert_eq!(store.next_failure_ttl(3, 5), 20);
+        store.insert(3, &response, 300, false, false).unwrap();
+        assert_eq!(store.next_failure_ttl(3, 5), 300);
+    }
+
+    #[test]
+    fn refused_entries_use_failure_backoff() {
+        let response_wire = message(Type::A, 0x8005, false);
+        let response = Message::parse(&response_wire).unwrap();
+        let store = Store::new(1024);
+        store.insert(4, &response, 5, false, false).unwrap();
+        assert_eq!(store.next_failure_ttl(4, 5), 10);
+    }
+
+    #[test]
+    fn expired_failures_are_not_served_stale() {
+        let query_wire = message(Type::A, 0x0100, false);
+        let response_wire = message(Type::A, 0x8002, false);
+        let query = Message::parse(&query_wire).unwrap();
+        let response = Message::parse(&response_wire).unwrap();
+        let store = Store::new(1024);
+        store.insert(5, &response, 0, false, false).unwrap();
+        let mut output = Vec::with_capacity(128);
+        assert!(
+            store
+                .serve(
+                    5,
+                    &query,
+                    &mut output,
+                    &config("cache {\nserve_stale 1h\n}"),
+                    false,
+                    true,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tkey_response_is_not_cacheable() {
+        let name = NameRef::parse(b"\x01x\0", 0).unwrap();
+        let mut wire = Vec::with_capacity(64);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x8000).unwrap();
+        builder.question(name, Type::A, Class::IN).unwrap();
+        builder
+            .record(Section::Answer, name, Type::TKEY, Class::IN, 30, &[])
+            .unwrap();
+        let _ = builder.finish();
+        let response = Message::parse(&wire).unwrap();
+        assert!(super::Item::new(&response, 30).is_none());
     }
 }

@@ -11,7 +11,8 @@ use std::{
 };
 
 use pharos_proto::{
-    Message, MessageBuilder, MessageMut, Name, NameRef, Opcode, Rcode, Rdata, ResponseType, Type,
+    EdnsOption, Message, MessageBuilder, MessageMut, Name, NameRef, Opcode, Rcode, Rdata,
+    ResponseType, Type,
 };
 use pharos_server::{Context, Next, Outcome, Plugin};
 
@@ -26,6 +27,8 @@ pub struct Cache {
     bypass: OnceLock<Name>,
     writes: Mutex<()>,
 }
+
+const MAX_CACHED_TTL: u32 = 604_800;
 
 struct RefreshGuard {
     chain: Arc<crate::Chain>,
@@ -154,6 +157,9 @@ impl Plugin for Cache {
         // RFC 8945 §4.1: TSIG records are not cached.
         if query.opcode() != Opcode::QUERY
             || dynamic
+            || question.qtype == Type::TKEY // RFC 2930 §3: TKEY transactions are transient.
+            || has_explicit_wildcard(question.name) // RFC 1034 §4.3.3: Do not cache explicit wildcard names.
+            || has_client_subnet(&query) // RFC 7871 §7.3: Do not reuse ECS-tailored data across networks.
             // RFC 8945 §4.3.2: TSIG-signed queries bypass cache because the MAC covers the wire.
             || query.additionals().any(|record| record.rtype == Type::TSIG)
             || question.name.wire_len()
@@ -189,9 +195,19 @@ impl Plugin for Cache {
             .flatten();
         let hit = if let Some(hit) = positive {
             Some((false, hit))
-        } else if let Some(denial) =
-            self.denial
-                .serve(key, &query, cx.response, &self.config, false, can_grow)
+        } else if let Some(denial) = self
+            .denial
+            .serve(key, &query, cx.response, &self.config, false, can_grow)
+            .or_else(|| {
+                self.denial.serve(
+                    nxdomain_key(&query),
+                    &query,
+                    cx.response,
+                    &self.config,
+                    false,
+                    can_grow,
+                )
+            })
         {
             if cx.response[3] & 15 == 2 {
                 if let Some(positive) =
@@ -199,8 +215,12 @@ impl Plugin for Cache {
                         .serve(key, &query, cx.response, &self.config, false, can_grow)
                 {
                     if let Some(stored) = denial.refresh {
-                        self.denial
-                            .finish_refresh(key, stored, std::time::Duration::ZERO, true);
+                        self.denial.finish_refresh(
+                            denial.key,
+                            stored,
+                            std::time::Duration::ZERO,
+                            true,
+                        );
                     }
                     Some((false, positive))
                 } else {
@@ -223,14 +243,14 @@ impl Plugin for Cache {
             if let Some(stored) = hit.refresh {
                 let store = if denial { &self.denial } else { &self.success };
                 if !query.can_set_ad_in_wire() {
-                    store.finish_refresh(key, stored, self.config.stale_recheck, false);
+                    store.finish_refresh(hit.key, stored, self.config.stale_recheck, false);
                 } else if let Some(chain) = self.chain.get().and_then(Weak::upgrade) {
                     if (!hit.stale || !self.config.verify)
                         && let Some(metrics) = metrics
                     {
                         metrics.prefetch();
                     }
-                    let task = self.spawn_refresh(chain, cx, key, denial, hit);
+                    let task = self.spawn_refresh(chain, cx, hit.key, denial, hit);
                     if hit.stale && self.config.verify {
                         // RFC 8767 §5: Serve stale after the timer while refresh continues.
                         let result = if self.config.verify_timeout.is_zero() {
@@ -253,7 +273,7 @@ impl Plugin for Cache {
                 } else if hit.stale && self.config.verify {
                     let mut guard = LocalRefreshGuard {
                         store,
-                        key,
+                        key: hit.key,
                         stored,
                         recheck: self.config.stale_recheck,
                         success: false,
@@ -275,7 +295,7 @@ impl Plugin for Cache {
                             && outcome == Outcome::Response
                             && Self::matches_refresh(&query, cx.response))
                     {
-                        self.process_response(cx, outcome, Some((denial, hit.generation)));
+                        self.process_response(cx, outcome, Some((denial, hit.key, hit.generation)));
                     }
                     if !valid {
                         cx.response.clear();
@@ -286,7 +306,7 @@ impl Plugin for Cache {
                         return Outcome::Response;
                     }
                 } else {
-                    store.finish_refresh(key, stored, self.config.stale_recheck, false);
+                    store.finish_refresh(hit.key, stored, self.config.stale_recheck, false);
                 }
             }
             if hit.stale
@@ -456,7 +476,7 @@ impl Cache {
                     && outcome == Outcome::Response
                     && Self::matches_refresh(&context.query, context.response))
             {
-                cache.process_response(&mut context, outcome, Some((denial, generation)));
+                cache.process_response(&mut context, outcome, Some((denial, key, generation)));
                 if valid
                     && denial
                     && Message::parse(context.response).is_ok_and(|message| {
@@ -487,16 +507,16 @@ impl Cache {
         response: &Message<'_>,
         ttl: u32,
         denial: bool,
-        expected: Option<(bool, Instant)>,
+        expected: Option<(bool, u64, Instant)>,
     ) -> Option<bool> {
         let _write = self.writes.lock().unwrap();
-        if let Some((old_denial, stored)) = expected {
+        if let Some((old_denial, old_key, stored)) = expected {
             let old = if old_denial {
                 &self.denial
             } else {
                 &self.success
             };
-            if !old.is_current(key, stored) {
+            if !old.is_current(old_key, stored) {
                 return None;
             }
         }
@@ -518,7 +538,7 @@ impl Cache {
         &self,
         cx: &mut Context<'_, '_>,
         outcome: Outcome,
-        expected: Option<(bool, Instant)>,
+        expected: Option<(bool, u64, Instant)>,
     ) -> Outcome {
         let query = cx.query;
         let Some(question) = query.questions().next() else {
@@ -541,7 +561,9 @@ impl Cache {
                     .iter()
                     .any(|zone| contains(question.name, zone))
             {
-                let ttl = self.config.fail_ttl.as_secs() as u32;
+                let ttl = self
+                    .denial
+                    .next_failure_ttl(key, self.config.fail_ttl.as_secs() as u32);
                 if ttl > 0
                     && let Ok(mut builder) = MessageBuilder::new(
                         cx.response,
@@ -573,9 +595,13 @@ impl Cache {
         let Ok(response) = Message::parse(cx.response) else {
             return outcome;
         };
-        if response
-            .additionals()
-            .any(|record| record.rtype == Type::TSIG)
+        // RFC 2930 §3: TKEY transactions are transient and must not be cached.
+        if has_client_subnet(&response)
+            || response
+                .answers()
+                .chain(response.authorities())
+                .chain(response.additionals())
+                .any(|record| matches!(record.rtype, Type::TSIG | Type::TKEY))
         {
             return outcome;
         }
@@ -584,6 +610,11 @@ impl Cache {
             .map_or(0, |duration| duration.as_secs().min(i64::MAX as u64) as i64);
         let mut response_type = pharos_proto::typify_response(Some(&response), now);
         let has_soa = response.authorities().any(|rr| rr.rtype == Type::SOA);
+        let has_ns = response.authorities().any(|rr| rr.rtype == Type::NS);
+        // RFC 2308 §2.1: NXDOMAIN can include CNAME answers before the final name error.
+        if response.rcode() == Rcode::NXDOMAIN && has_soa {
+            response_type = ResponseType::NxDomain;
+        }
         let incomplete = response_type == ResponseType::Positive
             && response.answer_count() > 0
             && !answers_question(&response);
@@ -592,17 +623,21 @@ impl Cache {
             response_type = ResponseType::NoData;
         }
         // RFC 8020 §2: store NXDOMAIN as a denial for subsequent matching queries.
-        let denial = matches!(
-            response_type,
-            ResponseType::NxDomain | ResponseType::NoData | ResponseType::ServerError
-        );
+        let failure = is_resolution_failure(response.rcode());
+        let no_data_without_soa = is_soa_less_nodata(&response, has_soa, has_ns);
+        let denial = failure
+            || matches!(
+                response_type,
+                ResponseType::NxDomain | ResponseType::NoData | ResponseType::ServerError
+            );
         let (minimum, maximum) = if denial {
             (self.config.denial_min_ttl, self.config.denial_max_ttl)
         } else {
             (self.config.success_min_ttl, self.config.success_max_ttl)
         };
         let minimum = minimum.as_secs().min(u64::from(u32::MAX)) as u32;
-        let maximum = maximum.as_secs().min(u64::from(u32::MAX)) as u32;
+        // RFC 8767 §4: Cached TTLs must not exceed the recommended one-week maximum.
+        let maximum = cached_maximum(maximum.as_secs());
         let mut ttl = maximum;
         let mut found = false;
         // RFC 4035 §4.5: use the shortest RR TTL so the cache entry expires together.
@@ -630,8 +665,13 @@ impl Cache {
             ttl = 5;
         }
         // RFC 8767 §4: cached TTLs are capped by the configured maximum.
-        ttl = ttl.max(minimum).min(maximum);
-        if response_type == ResponseType::ServerError {
+        ttl = bound_ttl(ttl, denial, minimum, maximum);
+        if failure {
+            // RFC 9520 §3.2: Cache SERVFAIL and REFUSED with the failure backoff.
+            ttl = self
+                .denial
+                .next_failure_ttl(key, self.config.fail_ttl.as_secs() as u32);
+        } else if response_type == ResponseType::ServerError {
             ttl = self.config.fail_ttl.as_secs() as u32;
         }
         let matches = response.questions().next().is_some_and(|q| {
@@ -641,13 +681,15 @@ impl Cache {
         let eligible = !response.tc()
             && ttl > 0
             && (!incomplete || has_soa)
+            && !no_data_without_soa
             && (matches!(
                 response_type,
                 ResponseType::Positive
                     | ResponseType::Referral
                     | ResponseType::NoData
                     | ResponseType::ServerError
-            ) || (response_type == ResponseType::NxDomain && has_soa));
+            ) || (response_type == ResponseType::NxDomain && has_soa)
+                || failure);
         if eligible
             && !matches
             && let Some(metrics) = metrics
@@ -666,7 +708,12 @@ impl Cache {
         }
         // RFC 1035 §7.4: retain complete responses for later matching queries.
         if cacheable && let Ok(response) = Message::parse(cx.response) {
-            let inserted = self.insert_response(key, &response, ttl, denial, expected);
+            let response_key = if response_type == ResponseType::NxDomain {
+                nxdomain_key(&query)
+            } else {
+                key
+            };
+            let inserted = self.insert_response(response_key, &response, ttl, denial, expected);
             if let Some(evicted) = inserted
                 && let Some(metrics) = metrics
             {
@@ -704,6 +751,43 @@ fn strip_trailing_opt(wire: &mut Vec<u8>) {
     let count = message.additional_count() - 1;
     wire.truncate(start);
     wire[10..12].copy_from_slice(&count.to_be_bytes());
+}
+
+fn has_client_subnet(message: &Message<'_>) -> bool {
+    // RFC 7871 §7.3: Avoid sharing ECS-tailored responses across client networks.
+    message.opt().is_some_and(|opt| {
+        opt.options()
+            .iter()
+            .any(|option| matches!(option, EdnsOption::ClientSubnet(_)))
+    })
+}
+
+fn has_explicit_wildcard(name: NameRef<'_>) -> bool {
+    name.labels().any(|label| label == b"*")
+}
+
+fn is_soa_less_nodata(message: &Message<'_>, has_soa: bool, has_ns: bool) -> bool {
+    // RFC 2308 §5: Do not cache NODATA without an SOA in the authority section.
+    message.rcode() == Rcode::NOERROR && message.answer_count() == 0 && !has_soa && !has_ns
+}
+
+fn bound_ttl(ttl: u32, denial: bool, minimum: u32, maximum: u32) -> u32 {
+    if denial {
+        // RFC 2308 §3: Never raise a negative TTL above its SOA-derived lifetime.
+        ttl.min(maximum)
+    } else {
+        ttl.max(minimum).min(maximum)
+    }
+}
+
+fn cached_maximum(maximum: u64) -> u32 {
+    // RFC 8767 §4: Cap cached TTLs at the recommended 604800 seconds.
+    maximum.min(u64::from(MAX_CACHED_TTL)) as u32
+}
+
+fn is_resolution_failure(rcode: Rcode) -> bool {
+    // RFC 9520 §2.2: REFUSED and SERVFAIL are resolution failures.
+    matches!(rcode, Rcode::SERVFAIL | Rcode::REFUSED)
 }
 
 // RFC 8482 §4.2: decide cacheability from the answer records alone, with no HINFO-specific case.
@@ -785,18 +869,101 @@ impl std::fmt::Write for KeyHash {
     }
 }
 
-// RFC 2308 §5: index NODATA responses by QNAME, QTYPE, and QCLASS.
+// RFC 2308 §5: Index ordinary responses by QNAME, QTYPE, and QCLASS.
 fn key(query: &Message<'_>) -> u64 {
+    cache_key(query, true)
+}
+
+// RFC 2308 §5: Index NXDOMAIN responses by QNAME and QCLASS, independent of QTYPE.
+fn nxdomain_key(query: &Message<'_>) -> u64 {
+    cache_key(query, false)
+}
+
+fn cache_key(query: &Message<'_>, include_qtype: bool) -> u64 {
     let question = query.questions().next().expect("Query has a Question");
     let mut hash = KeyHash(0xcbf29ce484222325);
+    hash.bytes(&[u8::from(include_qtype)]);
     hash.bytes(&[if query.opt().is_some_and(|opt| opt.dnssec_ok()) {
         b'1'
     } else {
         b'0'
     }]);
     hash.bytes(&[if query.cd() { b'1' } else { b'0' }]);
-    hash.bytes(&question.qtype.0.to_be_bytes());
+    if include_qtype {
+        hash.bytes(&question.qtype.0.to_be_bytes());
+    }
     hash.bytes(&question.qclass.0.to_be_bytes());
     write!(hash, "{}", question.name).expect("hash writer never fails");
     hash.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pharos_proto::{Class, MessageBuilder};
+
+    fn query(qtype: Type) -> Vec<u8> {
+        let name = NameRef::parse(b"\x01x\0", 0).unwrap();
+        let mut wire = Vec::with_capacity(64);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+        builder.question(name, qtype, Class::IN).unwrap();
+        let _ = builder.finish();
+        wire
+    }
+
+    #[test]
+    fn nxdomain_key_ignores_qtype_but_regular_key_does_not() {
+        let a_wire = query(Type::A);
+        let aaaa_wire = query(Type::AAAA);
+        let a = Message::parse(&a_wire).unwrap();
+        let aaaa = Message::parse(&aaaa_wire).unwrap();
+        assert_eq!(nxdomain_key(&a), nxdomain_key(&aaaa));
+        assert_ne!(key(&a), key(&aaaa));
+    }
+
+    #[test]
+    fn explicit_wildcard_names_are_detected() {
+        let wildcard = NameRef::parse(b"\x01*\x07example\x03org\0", 0).unwrap();
+        let ordinary = NameRef::parse(b"\x01x\x07example\x03org\0", 0).unwrap();
+        assert!(has_explicit_wildcard(wildcard));
+        assert!(!has_explicit_wildcard(ordinary));
+    }
+
+    #[test]
+    fn ecs_query_is_detected_for_conservative_cache_bypass() {
+        let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\x01\x01x\0\0\x01\0\x01\0\0\x29\x04\xd0\0\0\0\0\0\x0b\0\x08\0\x07\0\x01\x18\0\xc0\0\x02";
+        assert!(has_client_subnet(&Message::parse(wire).unwrap()));
+        assert!(!has_client_subnet(
+            &Message::parse(&query(Type::A)).unwrap()
+        ));
+    }
+
+    #[test]
+    fn negative_ttl_is_not_raised_to_positive_minimum() {
+        assert_eq!(bound_ttl(1, true, 5, 100), 1);
+        assert_eq!(bound_ttl(1, false, 5, 100), 5);
+    }
+
+    #[test]
+    fn cache_ttl_cap_is_one_week() {
+        assert_eq!(cached_maximum(u64::MAX), MAX_CACHED_TTL);
+    }
+
+    #[test]
+    fn refused_is_a_cacheable_resolution_failure() {
+        assert!(is_resolution_failure(Rcode::REFUSED));
+        assert!(is_resolution_failure(Rcode::SERVFAIL));
+        assert!(!is_resolution_failure(Rcode::FORMERR));
+    }
+
+    #[test]
+    fn nodata_without_soa_is_not_cacheable() {
+        let name = NameRef::parse(b"\x01x\0", 0).unwrap();
+        let mut wire = Vec::with_capacity(64);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x8000).unwrap();
+        builder.question(name, Type::A, Class::IN).unwrap();
+        let _ = builder.finish();
+        let response = Message::parse(&wire).unwrap();
+        assert!(is_soa_less_nodata(&response, false, false));
+    }
 }

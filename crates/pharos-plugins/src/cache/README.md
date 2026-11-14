@@ -14,6 +14,8 @@
 - On a hit, Pharos rewrites the Question's case in the stored wire Message; record names compressed against it therefore acquire the current Query's case, whereas CoreDNS rebuilds records from the cached Response.
 - If a UDP caller's Response buffer is too small for a cached Message, Pharos falls through to Next instead of growing it on the hit.
 - TSIG-signed Queries and Responses bypass caching so that ID, flags and TTL rewrites cannot invalidate their signatures.
+- SERVFAIL, REFUSED, and internal resolution errors use the `servfail` TTL (default 5 seconds); repeated failures back off exponentially to 5 minutes, and expired failures are not served stale (RFC 9520 §3.2). `servfail 0` disables this cache, and sub-second values truncate to zero for CoreDNS compatibility.
+- Failure entries use the same QNAME, QTYPE, QCLASS, DO, and CD cache key as other query responses; the upstream server address is not part of the key (RFC 2308 §7.1).
 - Wildcard source Metadata is not saved with cache entries.
 - Background refreshes use a fresh Metadata map and retain Listener state for Self Lookup.
 - A `verify` refresh on a routed Server Block runs as a background task, even without a verify timeout, and concurrent verifies are coalesced.
