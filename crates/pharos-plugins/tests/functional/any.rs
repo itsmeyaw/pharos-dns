@@ -16,15 +16,67 @@ fn configured(text: &str) -> Result<Chain, String> {
 #[test]
 fn coredns_setup_accepts_any() {
     assert!(configured("any").is_ok());
+    assert!(configured("any ttl 60").is_ok());
 }
 
 #[test]
 fn coredns_setup_rejects_arguments_and_block_options() {
     assert!(configured("any example.org").is_err());
     assert!(configured("any {\n foo\n}").is_err());
+    assert!(configured("any ttl").is_err());
+    assert!(configured("any ttl nope").is_err());
+    assert!(configured("any ttl 60 extra").is_err());
     assert!(configured("any {\n}").is_err());
     assert!(configured("any {}").is_err());
     assert!(configured("any\nany").is_ok());
+}
+
+#[tokio::test]
+async fn any_uses_configured_hinfo_ttl() {
+    let chain = configured("any ttl 60").unwrap();
+    let name: Name = "example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::ANY,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .any
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, NextOutcome(Outcome::Drop))
+            .await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .ttl,
+        60
+    );
 }
 
 struct NextOutcome(Outcome);
@@ -103,7 +155,11 @@ async fn any_passes_non_in_queries_to_next_plugin() {
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
     builder
-        .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::ANY, Class::CH)
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::ANY,
+            Class::CH,
+        )
         .unwrap();
     let _ = builder.finish();
     let domain: Name = ".".parse().unwrap();
