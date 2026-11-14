@@ -7,7 +7,7 @@ use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 use tokio::net::UdpSocket;
 
 #[tokio::test]
-async fn forward_clears_ad_after_verified_tsig_is_stripped() {
+async fn forward_preserves_ad_for_listener_tsig_finalization() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = upstream.local_addr().unwrap();
     let task = tokio::spawn(async move {
@@ -36,7 +36,6 @@ async fn forward_clears_ad_after_verified_tsig_is_stripped() {
     ];
     key.sign(&mut wire, now, 300, None).unwrap();
     let query = Message::parse(&wire).unwrap();
-    let mac = key.verify(&wire, now, None, 0).unwrap().mac;
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::with_capacity(65535);
     let mut slots = [];
@@ -53,18 +52,9 @@ async fn forward_clears_ad_after_verified_tsig_is_stripped() {
     };
     let outcome = configured[0].config.serve(&mut cx).await;
     assert_eq!(outcome, Outcome::Response);
-    assert!(!Message::parse(cx.response).unwrap().ad());
-    let signing = cx.metadata.take_tsig_signing();
-    pharos_server::finish_outcome_signed(
-        query,
-        Protocol::Udp,
-        outcome,
-        &mut response,
-        signing,
-        |error| panic!("{error}"),
-    );
-    key.verify(&response, now, Some(mac), 0).unwrap();
-    assert!(!Message::parse(&response).unwrap().ad());
+    // RFC 8945 §5.5: Listener clears AD only when it re-signs without upstream transaction security.
+    assert!(Message::parse(cx.response).unwrap().ad());
+    assert!(cx.metadata.take_tsig_signing().is_some());
     task.await.unwrap();
 }
 
