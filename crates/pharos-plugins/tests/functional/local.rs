@@ -22,11 +22,20 @@ impl Next for NextDrop {
 }
 
 async fn query(chain: &Chain, name: &str, qtype: Type) -> (Outcome, Vec<u8>) {
+    query_class(chain, name, qtype, Class::IN).await
+}
+
+async fn query_class(
+    chain: &Chain,
+    name: &str,
+    qtype: Type,
+    qclass: Class,
+) -> (Outcome, Vec<u8>) {
     let name: Name = name.parse().unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 123, 0x0110).unwrap();
     builder
-        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, Class::IN)
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, qclass)
         .unwrap();
     let _ = builder.finish();
     let domain: Name = ".".parse().unwrap();
@@ -184,7 +193,7 @@ async fn coredns_local_cases() {
         let msg = Message::parse(&wire).unwrap();
         assert_eq!(
             (msg.id(), msg.flags() & 0xfff0, msg.rcode()),
-            (123, 0x8110, rcode),
+            (123, 0x8510, rcode),
             "{name}"
         );
         let rr = msg.answers().next();
@@ -203,6 +212,15 @@ async fn coredns_local_cases() {
             assert_eq!((rr.class, rr.ttl), (Class::IN, 604800));
         }
     }
+}
+
+#[tokio::test]
+async fn local_passes_non_in_questions_to_next_plugin() {
+    let chain = configured("local").unwrap();
+    assert_eq!(
+        query_class(&chain, "localhost.", Type::A, Class::CH).await.0,
+        Outcome::Drop
+    );
 }
 
 #[tokio::test]

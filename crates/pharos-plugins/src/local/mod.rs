@@ -57,6 +57,15 @@ impl Local {
 
 impl Plugin for Local {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        // RFC 1034 §4.3.1: answer only Internet-class Questions with IN records.
+        if cx
+            .query
+            .questions()
+            .next()
+            .is_some_and(|question| question.qclass != Class::IN)
+        {
+            return next.run(cx).await;
+        }
         match self.answer(cx) {
             Some(outcome) => outcome,
             None => next.run(cx).await,
@@ -163,7 +172,8 @@ impl Local {
                 }
             }
             // RFC 1035 §4.1.1 and RFC 4035 §3.2.2: mark a Response and copy opcode, RD and CD.
-            let mut flags = 0x8000 | (cx.query.flags() & 0x7800) | if nxdomain { 3 } else { 0 };
+            // RFC 1034 §4.3.2: mark local-zone answers, including NXDOMAIN, authoritative.
+            let mut flags = 0x8400 | (cx.query.flags() & 0x7800) | if nxdomain { 3 } else { 0 };
             if cx.query.opcode() == Opcode::QUERY {
                 flags |= cx.query.flags() & 0x0110;
             }
