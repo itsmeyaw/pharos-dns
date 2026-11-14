@@ -128,7 +128,7 @@ fn random(max: usize) -> usize {
     (u64::from_ne_bytes(bytes) % max as u64) as usize
 }
 
-// RFC 2308 §3.1: Bound attempts for one resolution to three queries.
+// RFC 9520 §3.1: Send at most three queries per server and transport.
 fn max_attempts(configured: Option<u32>, upstreams: usize) -> u64 {
     configured.map_or((upstreams * 2).min(3) as u64, |attempts| {
         u64::from(attempts.clamp(1, 3))
@@ -274,6 +274,14 @@ impl Plugin for Forward {
             };
 
             let count = stanza.proxies.len();
+            if stanza
+                .proxies
+                .iter()
+                .all(|upstream| upstream.proxy.is_none())
+            {
+                // RFC 1034 §5.2.3: An unusable resolver set is a temporary resolution failure.
+                return Outcome::Unanswered(Rcode::SERVFAIL);
+            }
             let mut buffer = self.buffers.get();
             let (order, wire, query_buffer, fallback_buffer) = buffer.parts();
             // RFC 1034 §4.3.1: Forward RD unchanged so recursion occurs only on request.
@@ -327,10 +335,16 @@ impl Plugin for Forward {
             } else {
                 proxy::Transport::Udp
             };
-            let fallback_len = if cx
+            // RFC 7871 §7.1.3: Prepare fallback only when Query carries ECS.
+            let fallback_len = if cx.query.wire_changed() {
+                proxy::without_ecs(query_wire, fallback_buffer, protocol)
+                    .ok()
+                    .flatten()
+            } else if cx
                 .query
                 .additionals()
                 .any(|record| record.rtype == pharos_proto::Type::TSIG)
+                || !proxy::has_ecs(&cx.query)
             {
                 None
             } else {
@@ -366,7 +380,7 @@ impl Plugin for Forward {
                     if fails >= count {
                         break;
                     }
-                    // RFC 2308 §3.1: Invalid configured targets send no query and use no retry slot.
+                    // RFC 9520 §3.1: Invalid targets send no query and use no retry slot.
                     tokio::time::sleep(Duration::from_millis(1)).await;
                     continue;
                 };

@@ -63,6 +63,7 @@ fn lookup_chain(
     qtype: Type,
     depth: usize,
 ) -> io::Result<Vec<IpAddr>> {
+    // RFC 1034 §5.3.3: Bound CNAME restarts; shortcut: 16 aliases, raise when resolver policy is configurable.
     if depth == 16 {
         return Err(io::Error::other("resolver CNAME chain is too long"));
     }
