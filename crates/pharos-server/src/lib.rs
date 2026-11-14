@@ -876,6 +876,8 @@ impl Listener {
         bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
         bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
     ) -> io::Result<Self> {
+        // RFC 7766 §5: a DNS Listener must provide UDP as well as TCP service.
+        let workers = workers.max(1);
         let wildcard = address.is_ipv6() && address.ip().is_unspecified();
         let mut ipv4_only = false;
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
@@ -1084,6 +1086,27 @@ mod wildcard_tests {
         .await
         .unwrap();
         assert_eq!(BINDS.load(Ordering::SeqCst), 3);
+        listener.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_keeps_one_udp_worker_when_zero_is_configured() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static BINDS: AtomicUsize = AtomicUsize::new(0);
+        fn counting_bind(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
+            BINDS.fetch_add(1, Ordering::SeqCst);
+            udp::bind(address)
+        }
+        let listener = Listener::bind_with_ipv6(
+            "127.0.0.1:0".parse().unwrap(),
+            Echo,
+            0,
+            bind_ipv6_dual,
+            counting_bind,
+        )
+        .await
+        .unwrap();
+        assert_eq!(BINDS.load(Ordering::SeqCst), 1);
         listener.shutdown().await.unwrap();
     }
 
