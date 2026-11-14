@@ -22,16 +22,9 @@ pub struct Cache {
     denial: store::Store,
     metrics: Vec<(SocketAddr, pharos_server::metrics::CacheMetrics)>,
     chain: OnceLock<Weak<crate::Chain>>,
-    special_policy: OnceLock<SpecialCachePolicy>,
     #[cfg(feature = "plugin-dynupdate")]
     bypass: OnceLock<Name>,
     writes: Mutex<()>,
-}
-
-#[derive(Clone, Copy, Default)]
-struct SpecialCachePolicy {
-    file_configured: bool,
-    special_forwarding: bool,
 }
 
 const MAX_CACHED_TTL: u32 = 604_800;
@@ -119,7 +112,6 @@ impl Cache {
             denial: store::Store::new(config.denial_capacity),
             metrics: Vec::new(),
             chain: OnceLock::new(),
-            special_policy: OnceLock::new(),
             #[cfg(feature = "plugin-dynupdate")]
             bypass: OnceLock::new(),
             writes: Mutex::new(()),
@@ -129,22 +121,6 @@ impl Cache {
 
     pub(crate) fn bind(&self, chain: &Arc<crate::Chain>) {
         let _ = self.chain.set(Arc::downgrade(chain));
-        // RFC 6761 §§6.1–6.2: snapshot special-name delegation policy once, outside the Query path.
-        #[cfg(feature = "plugin-file")]
-        let file_configured = chain.file.is_some();
-        #[cfg(not(feature = "plugin-file"))]
-        let file_configured = false;
-        #[cfg(feature = "plugin-forward")]
-        let special_forwarding = chain
-            .forward
-            .as_ref()
-            .is_some_and(|forward| forward.allows_any_special());
-        #[cfg(not(feature = "plugin-forward"))]
-        let special_forwarding = false;
-        let _ = self.special_policy.set(SpecialCachePolicy {
-            file_configured,
-            special_forwarding,
-        });
         // CoreDNS plugin/cache/setup.go:27-32 and plugin/dynupdate/dynupdate.go:88-91 bypass mutable Zones.
         #[cfg(feature = "plugin-dynupdate")]
         if let Some(dynamic) = &chain.dynupdate {
@@ -186,10 +162,23 @@ impl Plugin for Cache {
             return next.run(cx).await;
         };
         if let Some(special) = crate::special_use(question.name) {
-            let policy = self.special_policy.get().copied().unwrap_or_default();
-            if !policy.file_configured
-                && (!special.permits_upstream() || !policy.special_forwarding)
-            {
+            let chain = self.chain.get().and_then(Weak::upgrade);
+            #[cfg(feature = "plugin-file")]
+            let configured_zone = chain
+                .as_ref()
+                .and_then(|chain| chain.file.as_ref())
+                .is_some_and(|file| file.has_zone_for(question.name));
+            #[cfg(not(feature = "plugin-file"))]
+            let configured_zone = false;
+            #[cfg(feature = "plugin-forward")]
+            let upstream_allowed = special.permits_upstream()
+                && chain
+                    .as_ref()
+                    .and_then(|chain| chain.forward.as_ref())
+                    .is_some_and(|forward| forward.allows_special(question.name));
+            #[cfg(not(feature = "plugin-forward"))]
+            let upstream_allowed = false;
+            if !configured_zone && !upstream_allowed {
                 // RFC 6761 §§6.1, 6.2 and 6.4: avoid caching or forwarding reserved names by default.
                 return crate::special_negative(
                     cx.response,

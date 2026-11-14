@@ -279,10 +279,6 @@ impl Forward {
                     || !stanza.ignored.iter().any(|ignored| contains(name, ignored)))
         })
     }
-
-    pub(crate) fn allows_any_special(&self) -> bool {
-        self.stanzas.iter().any(|stanza| stanza.allow_special)
-    }
 }
 
 // RFC 6761 §6.2: Explicit forward zones enable upstream lookup for test names.
