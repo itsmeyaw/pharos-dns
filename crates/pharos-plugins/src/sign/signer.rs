@@ -211,6 +211,20 @@ pub(super) fn sign_with_owner(
             owners.entry(rr.owner.clone()).or_default().push(rr.rtype);
         }
     }
+    // RFC 4592 §4.7; RFC 4034 §4: Empty non-terminals are authoritative NSEC owners.
+    for rr in &records {
+        if !authoritative(&rr.owner) {
+            continue;
+        }
+        let mut parent = rr.owner.parent();
+        while let Some(name) = parent {
+            if !name.is_subdomain_of(apex) || !authoritative(&name) {
+                break;
+            }
+            owners.entry(name.clone()).or_default();
+            parent = name.parent();
+        }
+    }
     let names: Vec<_> = owners.into_iter().collect();
     // RFC 4034 §4.1: NSEC links authoritative names in canonical order and lists their types.
     for (index, (owner, types)) in names.iter().enumerate() {
@@ -477,6 +491,28 @@ mod tests {
             assert_eq!(rr.ttl, 1_800);
         }
         assert!(!nsecs.is_empty());
+    }
+
+    #[test]
+    fn nsec_chain_includes_empty_nonterminal_wildcard_owner() {
+        let path = std::env::temp_dir().join(format!("pharos-sign-wildcard-ent-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n@ IN NS ns.\nleaf.* IN A 192.0.2.1\n",
+        )
+        .unwrap();
+        let apex: Name = "miek.nl.".parse().unwrap();
+        let records = sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let wildcard: Name = "*.miek.nl.".parse().unwrap();
+        let nsec = records
+            .iter()
+            .find(|rr| rr.owner == wildcard && rr.rtype == Type::NSEC)
+            .unwrap();
+        let Rdata::Nsec { bitmap, .. } = Rdata::parse(Type::NSEC, &nsec.rdata).unwrap() else {
+            panic!("expected NSEC")
+        };
+        assert_eq!(bitmap, pharos_dnssec::denial::type_bitmap(&[Type::NSEC, Type::RRSIG]).unwrap());
     }
 
     #[test]
