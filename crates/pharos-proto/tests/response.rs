@@ -90,7 +90,7 @@ fn malformed_dnssec_signature_is_not_classified_as_cacheable() {
 }
 
 #[test]
-fn soa_takes_precedence_over_ns_and_dnssec_serial_arithmetic_matches_miekg() {
+fn soa_takes_precedence_over_ns_and_rrsig_times_use_serial_arithmetic() {
     let authority = [
         (Section::Authority, Type::NS, &b"\0"[..]),
         (Section::Authority, Type::SOA, &b""[..]),

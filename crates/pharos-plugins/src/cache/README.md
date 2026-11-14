@@ -5,6 +5,8 @@
 ## cache
 
 - Negative Responses use the SOA MINIMUM as well as the record TTLs to bound the cache lifetime, following RFC 2308; CoreDNS's `MinimalTTLWithMaximum` checks only record TTLs.
+- REFUSED is a cacheable resolution failure with the configured failure TTL (RFC 9520 §§2.2, 3.2).
+- NXDOMAIN Responses with CNAME-only Answers are negative Responses under RFC 6604 §3 and use denial caching.
 - The cache hashes the same Query fields with FNV-1a rather than CoreDNS's FNV-1, so shard placement and eviction choices differ.
 - Configured Domains must be representable as DNS names; CoreDNS can normalize some malformed `disable` names without validating them.
 - Very large TTLs are bounded to the DNS TTL range during use rather than reproducing Go duration overflow.

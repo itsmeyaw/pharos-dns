@@ -96,6 +96,7 @@ pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType 
     } else if rcode == Rcode::NXDOMAIN {
         ResponseType::NxDomain
     } else if matches!(rcode, Rcode::SERVFAIL | Rcode::NOTIMP | Rcode::REFUSED) {
+        // RFC 9520 §§2.2, 3.2: REFUSED is a cacheable resolution failure.
         ResponseType::ServerError
     } else if ns && rcode == Rcode::NOERROR {
         ResponseType::Referral
@@ -106,7 +107,7 @@ pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType 
     }
 }
 
-// RFC 1982 §3.2: map Unix seconds into 32-bit serial space before RRSIG time comparison.
+// RFC 4034 §3.1.5 and RFC 1982 §3.2: compare RRSIG times with 32-bit serial arithmetic.
 fn signature_valid(inception: u32, expiration: u32, now: i64) -> bool {
     let now = now as u32;
     let before_or_equal =
