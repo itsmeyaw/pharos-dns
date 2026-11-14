@@ -72,7 +72,17 @@ pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType 
             return ResponseType::Positive;
         }
         if rcode == Rcode::NXDOMAIN {
-            return ResponseType::OtherError;
+            // RFC 6604 §3: a final CNAME-chain response may carry NXDOMAIN and CNAME answers.
+            let mut has_cname = false;
+            let is_cname_chain = message.answers().all(|rr| {
+                has_cname |= rr.rtype == Type::CNAME;
+                matches!(rr.rtype, Type::CNAME | Type::RRSIG)
+            });
+            return if has_cname && is_cname_chain {
+                ResponseType::NxDomain
+            } else {
+                ResponseType::OtherError
+            };
         }
     }
     let mut soa = false;
@@ -85,7 +95,7 @@ pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType 
         ResponseType::NoData
     } else if rcode == Rcode::NXDOMAIN {
         ResponseType::NxDomain
-    } else if rcode == Rcode::SERVFAIL || rcode == Rcode::NOTIMP {
+    } else if matches!(rcode, Rcode::SERVFAIL | Rcode::NOTIMP | Rcode::REFUSED) {
         ResponseType::ServerError
     } else if ns && rcode == Rcode::NOERROR {
         ResponseType::Referral
@@ -96,11 +106,11 @@ pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType 
     }
 }
 
-// RFC 4034 §3.1.5: use miekg/dns ValidityPeriod truncation for CoreDNS compatibility.
+// RFC 1982 §3.2: compare RRSIG times in the 32-bit serial-number space.
 fn signature_valid(inception: u32, expiration: u32, now: i64) -> bool {
-    let expiration = i128::from(expiration);
-    let inception = i128::from(inception);
-    let now = i128::from(now);
-    let adjust = |time: i128| time + ((time - now) / (1_i128 << 31)) * (1_i128 << 31);
-    adjust(inception) <= now && now <= adjust(expiration)
+    // RFC 1982 §3.2: Unix seconds wrap into the 32-bit RRSIG serial space.
+    let now = now as u32;
+    let before_or_equal =
+        |left: u32, right: u32| left == right || right.wrapping_sub(left) < (1_u32 << 31);
+    before_or_equal(inception, now) && before_or_equal(now, expiration)
 }

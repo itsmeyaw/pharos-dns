@@ -52,7 +52,7 @@ fn response_types_and_classes_follow_coredns() {
         (0x8003, Type::A, &answer[..], OtherError, Error),
         (0x8002, Type::A, &[][..], ServerError, Error),
         (0x8004, Type::A, &[][..], ServerError, Error),
-        (0x8005, Type::A, &[][..], OtherError, Error),
+        (0x8005, Type::A, &[][..], ServerError, Error),
         (0xa000, Type::A, &[][..], Meta, Error),
         (0xa800, Type::A, &[][..], Update, Error),
         (0x8000, Type::AXFR, &[][..], Meta, Error),
@@ -101,5 +101,12 @@ fn soa_takes_precedence_over_ns_and_dnssec_serial_arithmetic_matches_miekg() {
     let sig = b"\0\x02\x08\0\0\0\0\x3c\0\0\0\x96\0\0\0\x32\0\x01\0";
     let records = [(Section::Answer, Type::RRSIG, &sig[..])];
     let wire = response(0x8000, Type::A, &records, true);
-    assert_eq!(typify(&wire, (1_i64 << 32) + 100), ResponseType::OtherError);
+    assert_eq!(typify(&wire, (1_i64 << 32) + 100), ResponseType::Positive);
+}
+
+#[test]
+fn nxdomain_may_carry_cname_answers() {
+    let cname = [(Section::Answer, Type::CNAME, &b"\x01a\0"[..])];
+    let wire = response(0x8003, Type::A, &cname, false);
+    assert_eq!(typify(&wire, 100), ResponseType::NxDomain);
 }
