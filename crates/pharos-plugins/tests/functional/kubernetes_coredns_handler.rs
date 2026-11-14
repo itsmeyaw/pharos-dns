@@ -7,6 +7,7 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Record, Type};
 use pharos_server::{Handler, Phase, Protocol};
+use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // APIConnServeTest in CoreDNS handler_test.go: services, endpoint slices, pod and namespaces.
@@ -354,6 +355,7 @@ async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
         "bind 127.0.0.1",
         SERVICES.into(),
         ENDPOINTS.into(),
+        None,
     )
     .await;
 }
@@ -365,6 +367,7 @@ async fn run_group_on_stack_with_fixtures(
     bind: &str,
     services: String,
     endpoints: String,
+    transfer_address: Option<&str>,
 ) {
     let (endpoint, gate, api_task) = api_with_fixtures(!synced, services, endpoints).await;
     let multicluster = cases
@@ -390,6 +393,8 @@ async fn run_group_on_stack_with_fixtures(
         ".:53 {{\n {bind}kubernetes {zones} {{\n  endpoint {endpoint}\n  startup_timeout 3s\n  {options}\n }}\n}}"
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    #[cfg(feature = "plugin-transfer")]
+    let transferer = blocks[0].config.kubernetes.as_ref().unwrap().clone();
     let lifecycle = blocks[0].config.lifecycle.clone();
     let startup = if synced {
         lifecycle.run(Phase::Startup).await.unwrap();
@@ -497,13 +502,46 @@ async fn run_group_on_stack_with_fixtures(
             ));
         }
     }
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    #[cfg(feature = "plugin-transfer")]
+    if let Some(address) = transfer_address {
+        use pharos_plugins::transfer::{TransferRequest, Transferer};
+
+        // RFC 5936 §2.2 and Kubernetes DNS spec 1.1.0 §2.1: AXFR includes tolerated endpoints.
+        let zone: Name = "cluster.local.".parse().unwrap();
+        let mut stream = transferer
+            .transfer(TransferRequest {
+                zone: NameRef::parse(zone.as_wire(), 0).unwrap(),
+                serial: 0,
+                id: 1,
+                flags: 0,
+                protocol: Protocol::Tcp,
+                qtype: Type::AXFR,
+                qclass: Class::IN,
+            })
+            .unwrap()
+            .unwrap();
+        let mut wire = Vec::new();
+        let mut found = false;
+        while stream.next(&mut wire).unwrap() {
+            for record in Message::parse(&wire).unwrap().answers() {
+                if record.name.to_string() == "unready.svc-unready.testns.svc.cluster.local."
+                    && matches!(record.data().unwrap(), Rdata::A(ip) if ip.to_string() == address)
+                {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "AXFR omitted tolerated unready endpoint address");
+    }
+    #[cfg(not(feature = "plugin-transfer"))]
+    assert!(transfer_address.is_none(), "transfer feature is disabled");
     if let Some(startup) = startup {
         gate.send(true).unwrap();
         startup.await.unwrap();
     }
     lifecycle.run(Phase::Shutdown).await.unwrap();
     api_task.abort();
-    assert!(errors.is_empty(), "{}", errors.join("\n"));
 }
 
 #[tokio::test]
@@ -828,16 +866,7 @@ async fn handler_common_and_regular() {
 
 #[tokio::test]
 async fn tolerate_unready_annotation_covers_a_ptr_and_ns_queries() {
-    let route = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-    route.connect("192.0.2.1:53").unwrap();
-    let address = Box::leak(
-        route
-            .local_addr()
-            .unwrap()
-            .ip()
-            .to_string()
-            .into_boxed_str(),
-    );
+    let address = Box::leak(local_ipv4().to_string().into_boxed_str());
     let target = Box::leak(
         "unready.svc-unready.testns.svc.cluster.local."
             .to_owned()
@@ -879,6 +908,13 @@ async fn tolerate_unready_annotation_covers_a_ptr_and_ns_queries() {
                 vec![],
                 vec![],
             ),
+            srv(
+                "unready SRV",
+                "_http._tcp.svc-unready.testns.svc.cluster.local.",
+                target,
+                100,
+                address,
+            ),
             row(
                 "unready NS",
                 "cluster.local.",
@@ -893,8 +929,22 @@ async fn tolerate_unready_annotation_covers_a_ptr_and_ns_queries() {
         "",
         services,
         endpoints,
+        Some(address),
     )
     .await;
+}
+
+fn local_ipv4() -> Ipv4Addr {
+    nix::ifaddrs::getifaddrs()
+        .unwrap()
+        .filter_map(|interface| {
+            interface
+                .address?
+                .as_sockaddr_in()
+                .map(|address| address.ip())
+        })
+        .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        .expect("tolerate-unready test requires a non-loopback IPv4 interface")
 }
 
 fn append_json_item(array: &str, item: &str) -> String {

@@ -1042,7 +1042,23 @@ mod tests {
         tolerated
             .endpoints(base, &endpoints, false, true, None)
             .unwrap();
-        assert!(tolerated.size > 0);
+        let bytes = tolerated.bytes.unwrap();
+        let mut srv = Vec::new();
+        for wire in messages(&bytes) {
+            for record in Message::parse(wire).unwrap().answers() {
+                if let Rdata::Srv { port, target, .. } = record.data().unwrap() {
+                    srv.push((record.name.to_string(), port, target.to_string()));
+                }
+            }
+        }
+        assert_eq!(
+            srv,
+            [(
+                "_http._tcp.web.prod.svc.cluster.local.".into(),
+                80,
+                "node.web.prod.svc.cluster.local.".into()
+            )]
+        );
     }
 
     #[test]
