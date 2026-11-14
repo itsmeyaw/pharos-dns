@@ -12,6 +12,7 @@ use std::net::Ipv6Addr;
 struct ScriptedChain {
     dns64: pharos_plugins::dns64::Dns64,
     initial_rcode: u16,
+    initial_aa_ra: u16,
     initial_soa: bool,
     fallback_rcode: u16,
     fallback_answers: bool,
@@ -38,6 +39,11 @@ impl Next for ScriptedNext<'_> {
             self.0.initial_rcode
         };
         let flags = 0x8100
+            | if fallback {
+                self.0.initial_aa_ra ^ 0x0480
+            } else {
+                self.0.initial_aa_ra
+            }
             | code
             | if fallback && self.0.truncated {
                 0x0200
@@ -90,16 +96,17 @@ impl Next for ScriptedNext<'_> {
 // Derived from CoreDNS TestDNS64 and TestDNS64FallbackError.
 #[tokio::test]
 async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
-    for (initial, soa, fallback, answers, truncated, expected_code, expected_ttls) in [
-        (0, true, 0, true, false, 0, vec![60, 70]),
-        (5, false, 0, true, false, 0, vec![60, 600]),
-        (0, true, 0, true, true, 0, vec![60, 70]),
-        (0, true, 0, false, false, 0, vec![]),
-        (0, false, 2, false, false, 2, vec![]),
-        (0, false, 5, false, false, 5, vec![]),
-        (0, false, 1, false, false, 1, vec![]),
-        (0, false, 3, false, false, 3, vec![]),
-        (0, false, 4, false, false, 4, vec![]),
+    for (initial, soa, fallback, answers, truncated, role_flags, expected_code, expected_ttls) in [
+        (0, true, 0, true, false, 0x0480, 0, vec![60, 70]),
+        (5, false, 0, true, false, 0x0480, 0, vec![60, 600]),
+        (0, true, 0, true, true, 0x0480, 0, vec![60, 70]),
+        (0, true, 0, true, false, 0, 0, vec![60, 70]),
+        (0, true, 0, false, false, 0x0480, 0, vec![]),
+        (0, false, 2, false, false, 0x0480, 2, vec![]),
+        (0, false, 5, false, false, 0x0480, 5, vec![]),
+        (0, false, 1, false, false, 0x0480, 1, vec![]),
+        (0, false, 3, false, false, 0x0480, 3, vec![]),
+        (0, false, 4, false, false, 0x0480, 4, vec![]),
     ] {
         let blocks = parse("Corefile", ".:53 {\n dns64\n}").unwrap();
         let mut chain = configure::<Chain>(&blocks, directives())
@@ -109,6 +116,7 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
         let scripted = ScriptedChain {
             dns64: chain.dns64.take().unwrap(),
             initial_rcode: initial,
+            initial_aa_ra: role_flags,
             initial_soa: soa,
             fallback_rcode: fallback,
             fallback_answers: answers,
@@ -149,12 +157,15 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
         assert_eq!(message.questions().next().unwrap().qtype, Type::AAAA);
         assert_eq!(message.rcode(), Rcode(expected_code));
         assert_eq!(message.tc(), truncated);
+        assert_eq!(message.flags() & 0x0480, role_flags);
         assert_eq!(
             message.answers().map(|rr| rr.ttl).collect::<Vec<_>>(),
             expected_ttls
         );
         if answers {
             assert!(message.answers().all(|rr| rr.rtype == Type::AAAA));
+        } else if soa && fallback == 0 {
+            assert_eq!(message.authorities().next().unwrap().ttl, 70);
         } else {
             assert_eq!(message.authorities().next().unwrap().ttl, 3600);
         }
@@ -339,11 +350,28 @@ async fn coredns_dns64_synthesizes_prefixes_through_self_lookup() {
     synthesizes_prefixes_through_self_lookup().await;
 }
 
+#[test]
+fn dns64_rejects_invalid_well_known_prefix_lengths_and_reserved_octet() {
+    for prefix in [
+        "64:ff9b::/32",
+        "64:ff9b:0:0:1::/32",
+        "64:ff9b::/64",
+        "2001:db8:0:0:100::/96",
+    ] {
+        let config = format!(".:53 {{\n dns64 {prefix}\n}}");
+        let blocks = parse("Corefile", &config).unwrap();
+        assert!(
+            configure::<Chain>(&blocks, directives()).is_err(),
+            "{prefix}"
+        );
+    }
+}
+
 async fn synthesizes_prefixes_through_self_lookup() {
     for (prefix, expected) in [
         ("64:ff9b::/96", "64:ff9b::4040:4040"),
-        ("64:ff9b::/64", "64:ff9b::40:4040:4000:0"),
-        ("64:ff9b::/56", "64:ff9b:0:40:40:4040::"),
+        ("2001:db8:0:0::/64", "2001:db8:0:0:40:4040:4000:0"),
+        ("2001:db8:0:40::/56", "2001:db8:0:40:40:4040::"),
         ("64::/32", "64:0:4040:4040::"),
     ] {
         let config = format!(

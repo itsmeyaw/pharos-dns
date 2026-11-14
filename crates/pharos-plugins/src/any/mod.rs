@@ -3,9 +3,33 @@ pub(crate) mod setup;
 use pharos_proto::{Class, MessageBuilder, Opcode, Section, Type};
 use pharos_server::{Context, Error, Next, Outcome, Plugin, Protocol};
 
+use pharos_corefile::{Cursor, Error as CorefileError};
+
 /// Answers ANY Queries with a minimal HINFO Response.
 #[derive(Debug)]
-pub struct Any;
+pub struct Any {
+    ttl: u32,
+}
+
+impl Any {
+    pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Self, CorefileError> {
+        cursor.next();
+        // RFC 8482 §4.2: accept optional operator-set TTL, defaulting to 8482.
+        let ttl = match cursor.remaining_args().as_slice() {
+            [] => 8482,
+            [key, value] if key == "ttl" => value.parse().map_err(|_| cursor.arg_err())?,
+            _ => return Err(cursor.arg_err()),
+        };
+        // RFC 2181 §8: reject configured TTLs receivers would interpret as zero.
+        if ttl > i32::MAX as u32 {
+            return Err(cursor.error("invalid TTL"));
+        }
+        if cursor.next_arg() {
+            return Err(cursor.arg_err());
+        }
+        Ok(Self { ttl })
+    }
+}
 
 impl Plugin for Any {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
@@ -13,6 +37,10 @@ impl Plugin for Any {
             return next.run(cx).await;
         };
         if question.qtype != Type::ANY {
+            return next.run(cx).await;
+        }
+        // RFC 1034 §4.3.1: synthesize answers only for IN-class ANY queries.
+        if question.qclass != Class::IN {
             return next.run(cx).await;
         }
         let result = (|| {
@@ -40,13 +68,14 @@ impl Plugin for Any {
             // RFC 8482 §4.2: synthesize an HINFO record for an ANY Query.
             // RFC 1035 §3.3.2: HINFO RDATA contains CPU and OS character-strings.
             builder
+                // RFC 8482 §4.2: use the operator-configured HINFO TTL.
                 .record(
                     Section::Answer,
                     question.name,
                     Type::HINFO,
                     Class::IN,
-                    8482,
-                    b"\x0dANY obsoleted\x0cSee RFC 8482",
+                    self.ttl,
+                    b"\x07RFC8482\x0cSee RFC 8482",
                 )
                 .map_err(Error::Build)?;
             let _ = builder.finish();

@@ -4,6 +4,10 @@
 
 ## any
 
+- `any ttl <seconds>` configures the synthesized HINFO TTL; the default is 8482 seconds.
+- HINFO uses the RFC 8482 CPU string. The OS string remains `See RFC 8482` for CoreDNS compatibility.
+- Non-IN ANY Questions pass through instead of receiving an IN HINFO answer (RFC 1034 §4.3.1).
+
 - Like CoreDNS, `any` synthesizes its HINFO before consulting a Backend, even for a CNAME or signed Zone; it cannot include an RRSIG when DO is set (RFC 8482 §4.2).
 - The UDP caller must supply a Response buffer with enough capacity; otherwise Pharos returns an error instead of allocating on the UDP Query path.
 

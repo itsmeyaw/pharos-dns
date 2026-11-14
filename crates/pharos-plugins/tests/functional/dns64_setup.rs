@@ -26,7 +26,7 @@ fn coredns_dns64_setup_cases() {
         ("dns64 64:dead::/96", true),
         ("dns64 {\n translate_all\n}", true),
         ("dns64 {\n prefix 64:ff9b::/96\n}", true),
-        ("dns64 {\n prefix 64:ff9b::/32\n}", true),
+        ("dns64 {\n prefix 64:ff9b::/32\n}", false),
         ("dns64 {\n prefix 64:ff9b::/52\n}", false),
         ("dns64 {\n prefix 64:ff9b::/104\n}", false),
         ("dns64 {\n prefix 8.8.8.8/24\n}", false),

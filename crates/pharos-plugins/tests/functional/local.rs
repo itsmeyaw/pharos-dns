@@ -22,11 +22,15 @@ impl Next for NextDrop {
 }
 
 async fn query(chain: &Chain, name: &str, qtype: Type) -> (Outcome, Vec<u8>) {
+    query_class(chain, name, qtype, Class::IN).await
+}
+
+async fn query_class(chain: &Chain, name: &str, qtype: Type, qclass: Class) -> (Outcome, Vec<u8>) {
     let name: Name = name.parse().unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 123, 0x0110).unwrap();
     builder
-        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, Class::IN)
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, qclass)
         .unwrap();
     let _ = builder.finish();
     let domain: Name = ".".parse().unwrap();
@@ -116,6 +120,20 @@ async fn coredns_local_cases() {
             Some("127.in-addr.arpa."),
         ),
         (
+            "127.in-addr.arpa.",
+            Type::NS,
+            Rcode::NOERROR,
+            Some(("127.in-addr.arpa.", Type::NS)),
+            None,
+        ),
+        (
+            "127.in-addr.arpa.",
+            Type::SOA,
+            Rcode::NOERROR,
+            Some(("127.in-addr.arpa.", Type::SOA)),
+            None,
+        ),
+        (
             "localhost.",
             Type::MX,
             Rcode::NOERROR,
@@ -184,7 +202,7 @@ async fn coredns_local_cases() {
         let msg = Message::parse(&wire).unwrap();
         assert_eq!(
             (msg.id(), msg.flags() & 0xfff0, msg.rcode()),
-            (123, 0x8110, rcode),
+            (123, 0x8510, rcode),
             "{name}"
         );
         let rr = msg.answers().next();
@@ -201,8 +219,31 @@ async fn coredns_local_cases() {
         );
         for rr in msg.answers().chain(msg.authorities()) {
             assert_eq!((rr.class, rr.ttl), (Class::IN, 604800));
+            if qtype == Type::NS {
+                assert_eq!(
+                    NameRef::parse(rr.rdata, 0).unwrap().to_string(),
+                    "localhost."
+                );
+            }
+            if qtype == Type::SOA {
+                let mname = NameRef::parse(rr.rdata, 0).unwrap();
+                assert_eq!(mname.to_string(), "localhost.");
+                let rname = NameRef::parse(rr.rdata, mname.wire_len()).unwrap();
+                assert_eq!(rname.to_string(), "nobody.invalid.");
+            }
         }
     }
+}
+
+#[tokio::test]
+async fn local_passes_non_in_questions_to_next_plugin() {
+    let chain = configured("local").unwrap();
+    assert_eq!(
+        query_class(&chain, "localhost.", Type::A, Class::CH)
+            .await
+            .0,
+        Outcome::Drop
+    );
 }
 
 #[tokio::test]
@@ -216,6 +257,16 @@ async fn coredns_localhost_prefix_and_next() {
     for name in ["a.localhost.", "a.LOCALHOST."] {
         assert_eq!(query(&off, name, Type::AAAA).await.0, Outcome::Response);
     }
+    let (outcome, wire) = query(&on, "localhost.example.net.", Type::MX).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(response.aa());
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    let soa = response.authorities().next().unwrap();
+    assert_eq!(
+        NameRef::parse(soa.rdata, 0).unwrap().to_string(),
+        "localhost."
+    );
     for name in [
         "example.net.",
         "notlocalhost.",

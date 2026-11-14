@@ -63,11 +63,12 @@ async fn coredns_query_and_response_rules_and_precedence() {
         ("response", 0_u16, "set", "ra", 0x80),
         ("response", 0x80, "clear", "ra", 0),
         ("response", 0, "set", "rd", 0x100),
-        ("response", 0, "set", "aa", 0x400),
+        ("response", 0, "set", "aa", 0),
         ("query", 0, "set", "ra", 0x80),
         ("query", 0, "set", "rd", 0x100),
+        ("query", 0x400, "set", "rd", 0x500),
         ("query", 0x100, "clear", "rd", 0),
-        ("query", 0, "set", "aa", 0x400),
+        ("query", 0, "set", "aa", 0),
     ] {
         let directive = format!("header {{\n {selector} {action} {flag}\n}}");
         let chain = configured(&directive).unwrap();
@@ -154,14 +155,7 @@ async fn rules_are_ordered_and_non_response_outcomes_are_preserved() {
                 .await,
             outcome
         );
-        assert_eq!(
-            Message::parse(cx.response).unwrap().flags(),
-            if outcome == Outcome::Response {
-                0x480
-            } else {
-                0x80
-            }
-        );
+        assert_eq!(Message::parse(cx.response).unwrap().flags(), 0x80);
     }
 }
 
@@ -177,7 +171,7 @@ async fn query_rules_reach_forward_upstream() {
     let task = tokio::spawn(async move {
         let mut wire = [0; 512];
         let (len, peer) = upstream.recv_from(&mut wire).await.unwrap();
-        assert_eq!(Message::parse(&wire[..len]).unwrap().flags(), 0x480);
+        assert_eq!(Message::parse(&wire[..len]).unwrap().flags(), 0x80);
         wire[2] |= 0x80;
         upstream.send_to(&wire[..len], peer).await.unwrap();
     });

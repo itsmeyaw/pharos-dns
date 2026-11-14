@@ -3,7 +3,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
-use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
+use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
 use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 
 fn configured(text: &str) -> Result<Chain, String> {
@@ -16,15 +16,69 @@ fn configured(text: &str) -> Result<Chain, String> {
 #[test]
 fn coredns_setup_accepts_any() {
     assert!(configured("any").is_ok());
+    assert!(configured("any ttl 60").is_ok());
+    assert!(configured("any ttl 2147483647").is_ok());
 }
 
 #[test]
 fn coredns_setup_rejects_arguments_and_block_options() {
     assert!(configured("any example.org").is_err());
     assert!(configured("any {\n foo\n}").is_err());
+    assert!(configured("any ttl").is_err());
+    assert!(configured("any ttl nope").is_err());
+    assert!(configured("any ttl 60 extra").is_err());
+    assert!(configured("any ttl 2147483648").is_err());
     assert!(configured("any {\n}").is_err());
     assert!(configured("any {}").is_err());
     assert!(configured("any\nany").is_ok());
+}
+
+#[tokio::test]
+async fn any_uses_configured_hinfo_ttl() {
+    let chain = configured("any ttl 60").unwrap();
+    let name: Name = "example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::ANY,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .any
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, NextOutcome(Outcome::Drop))
+            .await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .ttl,
+        60
+    );
 }
 
 struct NextOutcome(Outcome);
@@ -42,7 +96,7 @@ async fn coredns_any_synthesizes_hinfo() {
     let name_ref = NameRef::parse(name.as_wire(), 0).unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 0x1234, 0x0110).unwrap();
-    builder.question(name_ref, Type::ANY, Class::CH).unwrap();
+    builder.question(name_ref, Type::ANY, Class::IN).unwrap();
     let _ = builder.finish();
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::with_capacity(512);
@@ -81,7 +135,7 @@ async fn coredns_any_synthesizes_hinfo() {
     let question = message.questions().next().unwrap();
     assert_eq!(
         (question.name.to_string(), question.qtype, question.qclass),
-        ("ExAmple.org.".into(), Type::ANY, Class::CH)
+        ("ExAmple.org.".into(), Type::ANY, Class::IN)
     );
     let answer = message.answers().next().unwrap();
     assert_eq!(
@@ -93,7 +147,57 @@ async fn coredns_any_synthesizes_hinfo() {
         ),
         ("ExAmple.org.".into(), Type::HINFO, Class::IN, 8482)
     );
-    assert_eq!(answer.rdata, b"\x0dANY obsoleted\x0cSee RFC 8482");
+    assert_eq!(answer.rdata, b"\x07RFC8482\x0cSee RFC 8482");
+}
+
+#[tokio::test]
+async fn any_passes_non_in_queries_to_next_plugin() {
+    let chain = configured("any").unwrap();
+    let name: Name = "example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::ANY,
+            Class::CH,
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(1232),
+            0x8000,
+            &[],
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .any
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, NextOutcome(Outcome::Drop))
+            .await,
+        Outcome::Drop
+    );
+    assert!(response.is_empty());
 }
 
 #[tokio::test]

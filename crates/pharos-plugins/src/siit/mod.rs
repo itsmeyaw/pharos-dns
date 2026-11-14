@@ -28,7 +28,7 @@ impl Siit {
     pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Self, Error> {
         let mut result = Self {
             // RFC 6052 §2.1: The default algorithmic-mapping prefix is 64:ff9b::/96.
-            prefix: "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets(),
+            prefix: crate::rfc6052::WELL_KNOWN_PREFIX,
             prefix_len: 96,
             eam: Vec::new(),
             metrics: Vec::new(),
@@ -42,24 +42,19 @@ impl Siit {
                     "ipv6_prefix" => {
                         let args = cursor.remaining_args();
                         let value = args.first().ok_or_else(|| cursor.arg_err())?;
-                        let (ip, len) = value
-                            .split_once('/')
-                            .ok_or_else(|| cursor.error("invalid prefix"))?;
-                        // RFC 4291 §2.2: IPv6 uses conventional textual address forms.
-                        let ip: Ipv6Addr =
-                            ip.parse().map_err(|_| cursor.error("invalid prefix"))?;
-                        let len: u8 = len.parse().map_err(|_| cursor.error("invalid prefix"))?;
-                        // RFC 6052 §2.2: only six prefix lengths are defined and the u octet is zero.
-                        if !matches!(len, 32 | 40 | 48 | 56 | 64 | 96) {
-                            return Err(cursor.error("invalid prefix length"));
-                        }
-                        let mut bytes = ip.octets();
-                        bytes[usize::from(len / 8)..].fill(0);
-                        if bytes[8] != 0 {
-                            return Err(cursor.error("invalid reserved octet"));
-                        }
-                        result.prefix = bytes;
-                        result.prefix_len = len;
+                        (result.prefix, result.prefix_len) =
+                            crate::rfc6052::parse(value).map_err(|error| {
+                                cursor.error(match error {
+                                    crate::rfc6052::PrefixError::Format => "invalid prefix",
+                                    crate::rfc6052::PrefixError::Length => "invalid prefix length",
+                                    crate::rfc6052::PrefixError::WellKnownLength => {
+                                        "invalid well-known prefix length"
+                                    }
+                                    crate::rfc6052::PrefixError::ReservedOctet => {
+                                        "invalid reserved octet"
+                                    }
+                                })
+                            })?;
                     }
                     // RFC 7757 §3.2: Bare EAM addresses use /32 for IPv4 and /128 for IPv6.
                     "eam" => {

@@ -68,11 +68,15 @@ fn chain(file: &HostsFile, options: &str) -> Chain {
 }
 
 async fn query(chain: &Chain, qname: &str, qtype: Type) -> (Outcome, Vec<u8>) {
+    query_class(chain, qname, qtype, Class::IN).await
+}
+
+async fn query_class(chain: &Chain, qname: &str, qtype: Type, qclass: Class) -> (Outcome, Vec<u8>) {
     let name: Name = qname.parse().unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 0x1234, 0x0100).unwrap();
     builder
-        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, Class::IN)
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, qclass)
         .unwrap();
     let _ = builder.finish();
     let domain: Name = ".".parse().unwrap();
@@ -91,6 +95,17 @@ async fn query(chain: &Chain, qname: &str, qtype: Type) -> (Outcome, Vec<u8>) {
     };
     let outcome = chain.serve(&mut context).await;
     (outcome, response)
+}
+
+#[tokio::test]
+async fn non_in_questions_pass_through_to_next_plugin() {
+    let file = HostsFile::new();
+    let chain = chain(&file, "");
+    chain.lifecycle.run(Phase::Startup).await.unwrap();
+    let (outcome, wire) = query_class(&chain, "example.org.", Type::A, Class::CH).await;
+    assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
+    assert!(wire.is_empty());
+    chain.lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 
 // CoreDNS TestLookupA: values, owners, classes, TTLs, and reverse aliases.
@@ -163,7 +178,8 @@ async fn coredns_lookup_cases() {
         assert_eq!(response.rcode(), Rcode::NOERROR);
         assert!(response.aa());
         assert_eq!(response.answer_count(), 0);
-        assert_eq!(response.authority_count(), 0);
+        assert_eq!(response.authority_count(), 1);
+        assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
         assert_eq!(response.additional_count(), 0);
     }
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
@@ -176,8 +192,12 @@ async fn coredns_wildcard_parent_case() {
     let chain = chain(&file, "");
     chain.lifecycle.run(Phase::Startup).await.unwrap();
     let (outcome, wire) = query(&chain, "apps.example.com.", Type::A).await;
-    assert_eq!(outcome, Outcome::Unanswered(Rcode::SERVFAIL));
-    assert!(wire.is_empty());
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(response.aa());
+    assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+    assert_eq!(response.answer_count(), 0);
+    assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
 }
 
@@ -215,7 +235,8 @@ async fn coredns_fallthrough_unsupported_cases() {
             assert_eq!(response.rcode(), Rcode::NOERROR);
             assert!(response.aa());
             assert_eq!(response.answer_count(), 0);
-            assert_eq!(response.authority_count(), 0);
+            assert_eq!(response.authority_count(), 1);
+            assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
             assert_eq!(response.additional_count(), 0);
         }
         chain.lifecycle.run(Phase::Shutdown).await.unwrap();
@@ -223,14 +244,17 @@ async fn coredns_fallthrough_unsupported_cases() {
 }
 
 #[tokio::test]
-async fn missing_names_without_fallthrough_return_servfail() {
+async fn missing_names_without_fallthrough_return_authoritative_nxdomain() {
     let file = HostsFile::new();
     let chain = chain(&file, "");
     chain.lifecycle.run(Phase::Startup).await.unwrap();
     for qtype in [Type::A, Type::AAAA, Type::MX, Type::TXT] {
         let (outcome, wire) = query(&chain, "missing.example.org.", qtype).await;
-        assert_eq!(outcome, Outcome::Unanswered(Rcode::SERVFAIL), "{qtype:?}");
-        assert!(wire.is_empty());
+        assert_eq!(outcome, Outcome::Response, "{qtype:?}");
+        let response = Message::parse(&wire).unwrap();
+        assert!(response.aa());
+        assert_eq!(response.rcode(), Rcode::NXDOMAIN, "{qtype:?}");
+        assert_eq!(response.answer_count(), 0, "{qtype:?}");
     }
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
 }

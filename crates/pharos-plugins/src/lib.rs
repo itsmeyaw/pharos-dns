@@ -85,6 +85,8 @@ pub mod proxy;
 mod regex_match;
 #[cfg(feature = "plugin-rewrite")]
 pub mod rewrite;
+#[cfg(any(feature = "plugin-dns64", feature = "plugin-siit"))]
+mod rfc6052;
 #[cfg(feature = "plugin-secondary")]
 pub mod secondary;
 #[cfg(feature = "plugin-sign")]

@@ -16,9 +16,8 @@ const TTL: u32 = 604_800;
 const LOCALHOST: &[u8] = b"\x09localhost\0";
 // RFC 1035 §3.3.13: SOA RDATA contains MNAME, RNAME and five 32-bit values.
 // RFC 6303 §3: Serve localhost SOA and NS data to identify empty-zone answers.
-// RFC 6303 §3: Set SOA MNAME to the local NS target.
-const SOA: &[u8] =
-    b"\x09localhost\0\x04root\x09localhost\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
+// RFC 6303 §3: Use nobody.invalid. as the SOA RNAME.
+const SOA_TAIL: &[u8] = b"\x06nobody\x07invalid\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
 
 #[derive(Debug)]
 pub struct Local {
@@ -57,6 +56,15 @@ impl Local {
 
 impl Plugin for Local {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        // RFC 1034 §4.3.1: answer only Internet-class Questions with IN records.
+        if cx
+            .query
+            .questions()
+            .next()
+            .is_some_and(|question| question.qclass != Class::IN)
+        {
+            return next.run(cx).await;
+        }
         match self.answer(cx) {
             Some(outcome) => outcome,
             None => next.run(cx).await,
@@ -140,13 +148,17 @@ impl Local {
         // RFC 1035 §3.1: encode Domain names as length-prefixed labels ending in zero.
         let mut origin = [0u8; 255];
         let mut len = 0;
-        if !special {
-            for label in &labels[zone_start.unwrap()..count] {
+        if let Some(start) = zone_start {
+            for label in &labels[start..count] {
                 origin[len] = label.len() as u8;
                 len += 1;
                 origin[len..len + label.len()].copy_from_slice(label);
                 len += label.len();
             }
+        } else {
+            // RFC 6761 §6.3: localhost-prefix aliases use localhost. as their local zone.
+            origin[..LOCALHOST.len()].copy_from_slice(LOCALHOST);
+            len = LOCALHOST.len() - 1;
         }
         let owner = if special || apex {
             question.name
@@ -163,7 +175,8 @@ impl Local {
                 }
             }
             // RFC 1035 §4.1.1 and RFC 4035 §3.2.2: mark a Response and copy opcode, RD and CD.
-            let mut flags = 0x8000 | (cx.query.flags() & 0x7800) | if nxdomain { 3 } else { 0 };
+            // RFC 1034 §4.3.2: mark local-zone answers, including NXDOMAIN, authoritative.
+            let mut flags = 0x8400 | (cx.query.flags() & 0x7800) | if nxdomain { 3 } else { 0 };
             if cx.query.opcode() == Opcode::QUERY {
                 flags |= cx.query.flags() & 0x0110;
             }
@@ -175,11 +188,20 @@ impl Local {
             // RFC 6303 §3: Include SOA records for negative caching and update discovery.
             let rtype = answer_type.unwrap_or(Type::SOA);
             // RFC 1035 §3.4.1 and RFC 3596 §2.2: encode A and AAAA loopback addresses.
+            let mut soa = [0u8; 255 + 36];
             let rdata: &[u8] = match rtype {
                 Type::A => &[127, 0, 0, 1],
                 Type::AAAA => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-                Type::NS | Type::PTR => LOCALHOST,
-                _ => SOA,
+                // RFC 6303 §3: use resolvable localhost. as the local NS target.
+                Type::NS => LOCALHOST,
+                Type::PTR => LOCALHOST,
+                _ => {
+                    // RFC 2181 §7.3: make SOA MNAME match the resolvable local NS target.
+                    soa[..LOCALHOST.len()].copy_from_slice(LOCALHOST);
+                    soa[LOCALHOST.len()..LOCALHOST.len() + SOA_TAIL.len()]
+                        .copy_from_slice(SOA_TAIL);
+                    &soa[..LOCALHOST.len() + SOA_TAIL.len()]
+                }
             };
             // RFC 2181 §7.2: SOA answers retain a nonzero TTL instead of forcing TTL zero.
             builder

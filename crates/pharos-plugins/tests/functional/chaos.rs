@@ -150,14 +150,17 @@ async fn coredns_trims_and_deduplicates_setup_values() {
 
 #[cfg(feature = "plugin-whoami")]
 #[tokio::test]
-async fn chaos_enables_non_in_for_all_blocks_on_listener() {
+async fn chaos_enables_non_in_only_for_the_chaos_block() {
     use pharos_plugins::servers;
     use pharos_server::{Action, Handler};
     let source = "version.bind:53 {\n chaos v1 author\n}\nother.example:53 {\n whoami\n}";
     let blocks = parse("Corefile", source).unwrap();
     let (servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     let server = servers.values().next().unwrap();
-    for name in ["version.bind.", "other.example."] {
+    for (name, expected_rcode) in [
+        ("version.bind.", pharos_proto::Rcode::NOERROR),
+        ("other.example.", pharos_proto::Rcode::SERVFAIL),
+    ] {
         let name: Name = name.parse().unwrap();
         let mut wire = Vec::new();
         let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
@@ -181,10 +184,7 @@ async fn chaos_enables_non_in_for_all_blocks_on_listener() {
                 .await,
             Action::Respond
         );
-        assert_eq!(
-            Message::parse(&response).unwrap().rcode(),
-            pharos_proto::Rcode::NOERROR
-        );
+        assert_eq!(Message::parse(&response).unwrap().rcode(), expected_rcode);
     }
 }
 

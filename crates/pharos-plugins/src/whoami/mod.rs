@@ -12,8 +12,17 @@ impl pharos_server::Plugin for Whoami {
     async fn serve<N: pharos_server::Next + Send>(
         &self,
         context: &mut Context<'_, '_>,
-        _next: N,
+        next: N,
     ) -> Outcome {
+        // RFC 1034 §4.3.1 and RFC 3596 §2.1: serve only Internet-class Questions.
+        if context
+            .query
+            .questions()
+            .next()
+            .is_some_and(|question| question.qclass != Class::IN)
+        {
+            return next.run(context).await;
+        }
         match response(context) {
             Ok(()) => Outcome::Response,
             Err(error) => Outcome::Error(error),
@@ -27,7 +36,8 @@ fn response(context: &mut Context<'_, '_>) -> Result<(), Error> {
         || NameRef::parse(&[0], 0).expect("root name"),
         |question| question.name,
     );
-    let class = question.map_or(Class(0), |question| question.qclass);
+    // RFC 1034 §4.3.1 and RFC 3596 §2.1: these diagnostic address RRs use class IN.
+    let class = Class::IN;
     let max_size = context.max_response_size.max(512);
     if context.response.capacity() < max_size {
         if context.protocol == Protocol::Tcp {
@@ -40,13 +50,16 @@ fn response(context: &mut Context<'_, '_>) -> Result<(), Error> {
     }
     // RFC 1035 §3.1: encoded domain names are limited to 255 octets.
     let mut srv_name = [0_u8; 255];
+    // RFC 2782 §2: SRV owner names start with _Service._Proto.Name.
+    srv_name[0] = 7;
+    srv_name[1..8].copy_from_slice(b"_whoami");
     let label = match context.protocol {
         Protocol::Udp => b"_udp",
         Protocol::Tcp => b"_tcp",
     };
-    srv_name[0] = 4;
-    srv_name[1..5].copy_from_slice(label);
-    let mut position = 5;
+    srv_name[8] = 4;
+    srv_name[9..13].copy_from_slice(label);
+    let mut position = 13;
     for label in name.labels() {
         if position + 1 + label.len() >= srv_name.len() {
             return Err(Error::InvalidQuery);
