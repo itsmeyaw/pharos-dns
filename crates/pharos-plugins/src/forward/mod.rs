@@ -46,6 +46,8 @@ pub struct Forward {
     buffers: BufferPool,
 }
 
+const MAX_IDLE_SCRATCH: usize = 4;
+
 #[derive(Default)]
 // shortcut: the pool retains peak concurrency, cap it if idle memory becomes costly.
 struct BufferPool(Mutex<Vec<Scratch>>);
@@ -56,6 +58,18 @@ struct Scratch {
     query: Vec<u8>,
     fallback: Vec<u8>,
     upstream_attempts: Vec<u8>,
+}
+
+impl Scratch {
+    fn new() -> Self {
+        Self {
+            bytes: vec![0; 65535],
+            order: Vec::new(),
+            query: Vec::new(),
+            fallback: Vec::new(),
+            upstream_attempts: Vec::new(),
+        }
+    }
 }
 
 struct Buffer<'a> {
@@ -73,13 +87,8 @@ struct BufferParts<'a> {
 
 impl BufferPool {
     fn get(&self) -> Buffer<'_> {
-        let scratch = self.0.lock().unwrap().pop().unwrap_or_else(|| Scratch {
-            bytes: vec![0; 65535],
-            order: Vec::new(),
-            query: Vec::new(),
-            fallback: Vec::new(),
-            upstream_attempts: Vec::new(),
-        });
+        let scratch = { self.0.lock().unwrap().pop() };
+        let scratch = scratch.unwrap_or_else(Scratch::new);
         Buffer {
             pool: self,
             scratch: Some(scratch),
@@ -102,11 +111,12 @@ impl Buffer<'_> {
 
 impl Drop for Buffer<'_> {
     fn drop(&mut self) {
-        self.pool
-            .0
-            .lock()
-            .unwrap()
-            .push(self.scratch.take().expect("buffer exists"));
+        let scratch = self.scratch.take().expect("buffer exists");
+        let mut pool = self.pool.0.lock().unwrap();
+        // shortcut: Retain four idle buffers per Forward; raise only if burst allocation is measurable.
+        if pool.len() < MAX_IDLE_SCRATCH {
+            pool.push(scratch);
+        }
     }
 }
 
@@ -407,7 +417,6 @@ impl Plugin for Forward {
                         break;
                     }
                     // RFC 1034 §5.3.3: Continue resolution when this server target cannot be used.
-                    tokio::time::sleep(Duration::from_millis(1)).await;
                     continue;
                 };
                 let result = loop {
@@ -535,7 +544,10 @@ impl Plugin for Forward {
 
 #[cfg(test)]
 mod tests {
-    use super::{BufferPool, clear_ad_after_tsig_strip, max_attempts, primary_attempt_limit};
+    use super::{
+        BufferPool, MAX_IDLE_SCRATCH, clear_ad_after_tsig_strip, max_attempts,
+        primary_attempt_limit,
+    };
 
     #[test]
     fn returned_buffers_keep_their_contents_and_are_reused() {
@@ -546,6 +558,16 @@ mod tests {
         }
         let mut buffer = pool.get();
         assert_eq!(buffer.parts().bytes[65534], 123);
+    }
+
+    #[test]
+    fn buffer_pool_drops_idle_scratch_above_its_bound() {
+        let pool = BufferPool::default();
+        let held = (0..MAX_IDLE_SCRATCH + 2)
+            .map(|_| pool.get())
+            .collect::<Vec<_>>();
+        drop(held);
+        assert_eq!(pool.0.lock().unwrap().len(), MAX_IDLE_SCRATCH);
     }
 
     #[test]
