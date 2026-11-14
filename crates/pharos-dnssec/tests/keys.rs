@@ -278,16 +278,12 @@ fn sha1_algorithms_are_refused_with_rollover_hint() {
 fn rejects_rsa_sha512_and_reserved_dnskey_flags() {
     let public = "example.org. 3600 IN DNSKEY 257 3 10 AwEAAQ==";
     let private = "Private-key-format: v1.3\nAlgorithm: 10 (RSASHA512)\n";
-    for error in [
+    let expected = "DNSSEC algorithm 10 must not be used for signing (RFC 9904 §3)";
+    assert_eq!(
         parse_key_pair(public, private).unwrap_err().to_string(),
-        parse_pkcs8(public, b"").unwrap_err().to_string(),
-    ] {
-        assert!(
-            error.contains("algorithm 10 must not be used for signing"),
-            "{error}"
-        );
-        assert!(error.contains("RFC 9904 §3"), "{error}");
-    }
+        expected
+    );
+    assert_eq!(parse_pkcs8(public, b"").unwrap_err().to_string(), expected);
 
     let public = PUBLIC.replace("257 3 13", "259 3 13");
     assert!(parse_key_pair(&public, PRIVATE).is_err());
