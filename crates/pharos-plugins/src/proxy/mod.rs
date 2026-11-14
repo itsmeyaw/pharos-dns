@@ -3,6 +3,10 @@
 //! DNS-over-TLS is deferred to M3.
 //! CoreDNS's `forward` performs the `prefer_udp` TC retry; Pharos does it here,
 //! so a `forward` caller must not retry the same truncated Response again.
+//! UDP source ports: the OS picks a random port for each new socket, a socket
+//! serves at most `UDP_MAX_USES` Queries before it closes, and at most
+//! `UDP_MAX_IDLE` idle UDP sockets are retained per Upstream. Sockets in flight
+//! are bounded only by concurrent Queries, never by a per-Query allocation.
 
 pub mod health;
 pub use health::{Health, HealthConfig};
@@ -33,6 +37,9 @@ static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 thread_local! { static SHARD: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS; }
 const EXPIRE: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+// RFC 5452 §9.2: limit how many Queries share one unpredictable UDP source port.
+const UDP_MAX_USES: u32 = 8;
+const UDP_MAX_IDLE: usize = 256;
 
 #[cfg(target_os = "linux")]
 fn enable_recv_err(socket: &UdpSocket, address: SocketAddr) {
@@ -143,6 +150,7 @@ struct Cached {
     socket: Socket,
     created: Instant,
     used: Instant,
+    uses: u32,
 }
 
 enum Socket {
@@ -190,6 +198,7 @@ pub struct Proxy {
     expire: Duration,
     max_age: Duration,
     max_idle_conns: usize,
+    udp_max_uses: u32,
     idle: [AtomicUsize; 2],
     stopped: AtomicBool,
     started: Instant,
@@ -216,6 +225,7 @@ impl Proxy {
             expire: EXPIRE,
             max_age: Duration::ZERO,
             max_idle_conns: 0,
+            udp_max_uses: UDP_MAX_USES,
             idle: [AtomicUsize::new(0), AtomicUsize::new(0)],
             stopped: AtomicBool::new(false),
             started: Instant::now(),
@@ -295,6 +305,11 @@ impl Proxy {
     /// Limit idle connections per Transport for this Upstream; zero means unlimited.
     pub fn set_max_idle_conns(&mut self, max: usize) {
         self.max_idle_conns = max;
+    }
+
+    /// Set how many Queries one UDP socket (and so one source port) serves; at least one.
+    pub fn set_udp_max_uses(&mut self, max: u32) {
+        self.udp_max_uses = max.max(1);
     }
 
     /// Set maximum connection age from creation; zero means unlimited.
@@ -476,10 +491,10 @@ impl Proxy {
             }
         }
         // RFC 7766 §6.2.1: DNS clients should reuse persistent TCP connections.
-        let (mut socket, created) = if let Some(cached) = cached {
-            (cached.socket, cached.created)
+        let (mut socket, created, uses) = if let Some(cached) = cached {
+            (cached.socket, cached.created, cached.uses)
         } else {
-            (self.dial(transport).await?, Instant::now())
+            (self.dial(transport).await?, Instant::now(), 0)
         };
         let mut id = [0; 2];
         // RFC 8945 §5.5: forward messages with unshared TSIG keys unchanged.
@@ -581,12 +596,19 @@ impl Proxy {
         }
         // RFC 1035 §4.1.1: the response ID matches the original query ID.
         response[..2].copy_from_slice(&query[..2]);
-        {
+        // RFC 5452 §9.2: retire a UDP socket after its use budget so its source port changes.
+        let spent = transport == Transport::Udp && uses + 1 >= self.udp_max_uses;
+        let max_idle = match (transport, self.max_idle_conns) {
+            (Transport::Udp, 0) => UDP_MAX_IDLE,
+            (Transport::Udp, max) => max.min(UDP_MAX_IDLE),
+            (Transport::Tcp, max) => max,
+        };
+        if !spent {
             let mut queue = self.shards[protocol][shard].lock().unwrap();
             if !self.stopped.load(Ordering::Acquire)
                 && self.idle[protocol]
                     .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                        (self.max_idle_conns == 0 || count < self.max_idle_conns).then(|| count + 1)
+                        (max_idle == 0 || count < max_idle).then(|| count + 1)
                     })
                     .is_ok()
             {
@@ -594,6 +616,7 @@ impl Proxy {
                     socket,
                     created,
                     used: Instant::now(),
+                    uses: uses + 1,
                 });
             }
         }

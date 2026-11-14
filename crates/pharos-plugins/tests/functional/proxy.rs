@@ -1088,3 +1088,70 @@ async fn oversized_udp_response_becomes_a_clean_truncated_response() {
     assert_eq!(message.question_count(), 1);
     upstream.await.unwrap();
 }
+
+// RFC 5452 §9.2: repeated Queries to one Upstream must not share one source port forever.
+#[tokio::test]
+async fn udp_source_port_changes_after_its_use_budget() {
+    use std::collections::HashMap;
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut proxy = Proxy::new(server.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let mut peers = Vec::new();
+        for _ in 0..32 {
+            let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+            peers.push(peer);
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+        peers
+    });
+    proxy.set_udp_max_uses(4);
+    let mut response = [0; 512];
+    for _ in 0..32 {
+        let result = proxy
+            .exchange(QUERY, &mut response, Transport::Udp, Options::default())
+            .await
+            .unwrap();
+        assert_eq!(&response[..2], &QUERY[..2]);
+        assert_eq!(result.len, QUERY.len());
+    }
+    let mut uses = HashMap::new();
+    for peer in upstream.await.unwrap() {
+        *uses.entry(peer).or_insert(0) += 1;
+    }
+    assert!(uses.len() >= 8, "{uses:?}");
+    assert!(uses.values().all(|&count| count <= 4), "{uses:?}");
+}
+
+#[tokio::test]
+async fn concurrent_udp_queries_match_their_own_responses() {
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let proxy = Proxy::new(server.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut wire = [0; 512];
+        loop {
+            let (len, peer) = server.recv_from(&mut wire).await.unwrap();
+            wire[2] |= 0x80;
+            server.send_to(&wire[..len], peer).await.unwrap();
+        }
+    });
+    let proxy = std::sync::Arc::new(proxy);
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..64u16 {
+        let proxy = proxy.clone();
+        tasks.spawn(async move {
+            let mut query = QUERY.to_vec();
+            query[..2].copy_from_slice(&index.to_be_bytes());
+            let mut response = [0; 512];
+            proxy
+                .exchange(&query, &mut response, Transport::Udp, Options::default())
+                .await
+                .unwrap();
+            assert_eq!(response[..2], index.to_be_bytes());
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        done.unwrap();
+    }
+}
