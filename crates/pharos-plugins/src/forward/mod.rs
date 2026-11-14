@@ -53,6 +53,7 @@ struct Scratch {
     bytes: Vec<u8>,
     order: Vec<usize>,
     query: Vec<u8>,
+    fallback: Vec<u8>,
 }
 
 struct Buffer<'a> {
@@ -66,6 +67,7 @@ impl BufferPool {
             bytes: vec![0; 65535],
             order: Vec::new(),
             query: Vec::new(),
+            fallback: Vec::new(),
         });
         Buffer {
             pool: self,
@@ -75,9 +77,14 @@ impl BufferPool {
 }
 
 impl Buffer<'_> {
-    fn parts(&mut self) -> (&mut Vec<usize>, &mut [u8], &mut Vec<u8>) {
+    fn parts(&mut self) -> (&mut Vec<usize>, &mut [u8], &mut Vec<u8>, &mut Vec<u8>) {
         let scratch = self.scratch.as_mut().expect("buffer returned only on drop");
-        (&mut scratch.order, &mut scratch.bytes, &mut scratch.query)
+        (
+            &mut scratch.order,
+            &mut scratch.bytes,
+            &mut scratch.query,
+            &mut scratch.fallback,
+        )
     }
 }
 
@@ -119,6 +126,20 @@ fn random(max: usize) -> usize {
         return 0;
     }
     (u64::from_ne_bytes(bytes) % max as u64) as usize
+}
+
+// RFC 2308 §3.1: Bound attempts for one resolution to three queries.
+fn max_attempts(configured: Option<u32>, upstreams: usize) -> u64 {
+    configured.map_or((upstreams * 2).min(3) as u64, |attempts| {
+        u64::from(attempts.clamp(1, 3))
+    })
+}
+
+fn clear_ad_after_tsig_strip(validated_tsig: bool, response: &mut [u8]) {
+    if validated_tsig && response.len() >= 4 {
+        // RFC 8945 §5.5: Clear AD when forwarding without transaction security.
+        response[3] &= !0x20;
+    }
 }
 
 struct InFlight<'a>(&'a AtomicUsize);
@@ -254,7 +275,7 @@ impl Plugin for Forward {
 
             let count = stanza.proxies.len();
             let mut buffer = self.buffers.get();
-            let (order, wire, query_buffer) = buffer.parts();
+            let (order, wire, query_buffer, fallback_buffer) = buffer.parts();
             // RFC 1034 §4.3.1: Forward RD unchanged so recursion occurs only on request.
             let original_query = cx.query.as_wire();
             let query_wire = if cx.query.wire_changed() {
@@ -294,9 +315,7 @@ impl Plugin for Forward {
             }
             // RFC 1035 §4.2.1: Retry lost UDP queries after timeout, trying other servers first.
             let deadline = Instant::now() + Duration::from_secs(5);
-            let max_attempts = stanza
-                .max_connect_attempts
-                .map_or((count * 2) as u64, u64::from);
+            let attempt_limit = max_attempts(stanza.max_connect_attempts, count);
             let mut attempts = 0_u64;
             let mut i = 0;
             let mut fails = 0;
@@ -308,7 +327,18 @@ impl Plugin for Forward {
             } else {
                 proxy::Transport::Udp
             };
-            while Instant::now() < deadline && (max_attempts == 0 || attempts < max_attempts) {
+            let fallback_len = if cx
+                .query
+                .additionals()
+                .any(|record| record.rtype == pharos_proto::Type::TSIG)
+            {
+                None
+            } else {
+                proxy::without_ecs(query_wire, fallback_buffer, protocol)
+                    .ok()
+                    .flatten()
+            };
+            while Instant::now() < deadline && attempts < attempt_limit {
                 if i == count {
                     i = 0;
                     fails = 0;
@@ -333,10 +363,10 @@ impl Plugin for Forward {
                         .insert_inline("forward/upstream", &upstream.address);
                 }
                 let Some(proxy) = &upstream.proxy else {
-                    attempts += 1;
                     if fails >= count {
                         break;
                     }
+                    // RFC 2308 §3.1: Invalid configured targets send no query and use no retry slot.
                     tokio::time::sleep(Duration::from_millis(1)).await;
                     continue;
                 };
@@ -352,7 +382,7 @@ impl Plugin for Forward {
                     }
                     break result;
                 };
-                let exchange = match result {
+                let mut exchange = match result {
                     Ok(Ok(exchange)) => exchange,
                     Ok(Err(proxy::Error::Mismatch(_len))) => {
                         #[cfg(feature = "plugin-debug")]
@@ -369,7 +399,12 @@ impl Plugin for Forward {
                                 &wire[.._len],
                             );
                         }
-                        return Outcome::Unanswered(Rcode::FORMERR);
+                        // RFC 1035 §4.1.1: An upstream mismatch is not a client FORMERR.
+                        attempts += 1;
+                        if fails >= count {
+                            break;
+                        }
+                        continue;
                     }
                     Ok(Err(proxy::Error::InvalidRequest)) => {
                         return Outcome::Unanswered(Rcode::FORMERR);
@@ -385,6 +420,34 @@ impl Plugin for Forward {
                         continue;
                     }
                 };
+                attempts += 1;
+                let rcode = Message::parse(&wire[..exchange.len])
+                    .expect("proxy validated Response")
+                    .rcode();
+                if rcode == Rcode::REFUSED
+                    && let Some(fallback_len) = fallback_len
+                    && attempts < attempt_limit
+                {
+                    // RFC 7871 §7.1.3: Retry REFUSED without the ECS address.
+                    attempts += 1;
+                    let retry = timeout_at(
+                        deadline,
+                        proxy.exchange(
+                            &fallback_buffer[..fallback_len],
+                            wire,
+                            protocol,
+                            stanza.options,
+                        ),
+                    )
+                    .await;
+                    let Ok(Ok(retried)) = retry else {
+                        if fails >= count {
+                            break;
+                        }
+                        continue;
+                    };
+                    exchange = retried;
+                }
                 let answer = &wire[..exchange.len];
                 let response = Message::parse(answer).expect("proxy validated Response");
                 if stanza.failover.contains(&response.rcode()) {
@@ -406,6 +469,7 @@ impl Plugin for Forward {
                 cx.response.clear();
                 // RFC 5625 §4.3: return Responses without filtering RRs by TYPE or CLASS.
                 cx.response.extend_from_slice(answer);
+                clear_ad_after_tsig_strip(cx.metadata.validated_tsig().is_some(), cx.response);
                 return Outcome::Response;
             }
             // RFC 1034 §5.2.3: Temporary resolution failures return SERVFAIL.
@@ -419,7 +483,7 @@ impl Plugin for Forward {
 
 #[cfg(test)]
 mod tests {
-    use super::BufferPool;
+    use super::{BufferPool, clear_ad_after_tsig_strip, max_attempts};
 
     #[test]
     fn returned_buffers_keep_their_contents_and_are_reused() {
@@ -430,5 +494,26 @@ mod tests {
         }
         let mut buffer = pool.get();
         assert_eq!(buffer.parts().1[65534], 123);
+    }
+
+    #[test]
+    fn connect_attempts_never_exceed_three() {
+        assert_eq!(max_attempts(None, 1), 2);
+        assert_eq!(max_attempts(None, 8), 3);
+        assert_eq!(max_attempts(Some(0), 8), 1);
+        assert_eq!(max_attempts(Some(2), 8), 2);
+        assert_eq!(max_attempts(Some(9), 8), 3);
+    }
+
+    #[test]
+    fn clears_ad_only_when_verified_tsig_was_stripped() {
+        let mut response = [0, 0, 0x81, 0xa0];
+        clear_ad_after_tsig_strip(false, &mut response);
+        assert_eq!(response[3], 0xa0);
+        clear_ad_after_tsig_strip(true, &mut response);
+        assert_eq!(response[3], 0x80);
+        response[3] = 0xa0;
+        clear_ad_after_tsig_strip(false, &mut response);
+        assert_eq!(response[3], 0xa0);
     }
 }
