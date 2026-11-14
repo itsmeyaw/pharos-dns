@@ -106,9 +106,8 @@ pub fn typify_response(message: Option<&Message<'_>>, now: i64) -> ResponseType 
     }
 }
 
-// RFC 1982 §3.2: compare RRSIG times in the 32-bit serial-number space.
+// RFC 1982 §3.2: map Unix seconds into 32-bit serial space before RRSIG time comparison.
 fn signature_valid(inception: u32, expiration: u32, now: i64) -> bool {
-    // RFC 1982 §3.2: Unix seconds wrap into the 32-bit RRSIG serial space.
     let now = now as u32;
     let before_or_equal =
         |left: u32, right: u32| left == right || right.wrapping_sub(left) < (1_u32 << 31);

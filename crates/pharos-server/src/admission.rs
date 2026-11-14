@@ -176,7 +176,6 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode) {
     let _ = builder.finish();
 }
 
-// RFC 6891 §7: fall back only when strict parsing rejects malformed EDNS.
 // RFC 1035 §4.1.2: recover the first Question without constructing a validated Message.
 fn raw_question(wire: &[u8]) -> Option<(NameRef<'_>, Type, Class)> {
     if wire.len() < 12 || u16::from_be_bytes([wire[4], wire[5]]) == 0 {
@@ -195,7 +194,7 @@ fn raw_question(wire: &[u8]) -> Option<(NameRef<'_>, Type, Class)> {
     ))
 }
 
-// RFC 6891 §7: recover OPT presence after Message::parse rejects its option payload.
+// RFC 6891 §7: fall back only when strict parsing rejects malformed EDNS; recover OPT presence.
 fn raw_opt(wire: &[u8]) -> Option<(u16, u16)> {
     if wire.len() < 12 {
         return None;
