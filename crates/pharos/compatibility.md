@@ -86,6 +86,7 @@
 ## health
 
 - [health Plugin notes](../crates/pharos-plugins/src/health/README.md)
+- Operational HTTP endpoints allow GET and HEAD only; recognized other methods return 405 and unknown methods return 501. This changes `/health` from CoreDNS's normal response for every method.
 
 ## hosts
 
@@ -134,10 +135,12 @@
 ## prometheus
 
 - [prometheus Plugin notes](../crates/pharos-plugins/src/prometheus/README.md)
+- `/metrics` returns 405, not its previous 404, for recognized methods other than GET and HEAD; HEAD now shares GET status and headers.
 
 ## ready
 
 - [ready Plugin notes](../crates/pharos-plugins/src/ready/README.md)
+- `/ready` returns 405, not its previous 404, for recognized methods other than GET and HEAD; HEAD now shares GET status and headers.
 
 ## reload
 
@@ -237,6 +240,7 @@
 
 ## Server
 
+- Operational HTTP responses carry SHA-256 strong ETags and evaluate `If-Match` / `If-None-Match`; byte ranges are ignored. Cleartext HTTP rejects absolute-form HTTPS targets with 421, and the listener caps HTTP/1 request buffering at 16 KiB.
 - Each UDP worker handles up to 256 waiting Queries concurrently and retains one
   active or spare slot plus at most 16 completed slots for reuse. Each plain slot reserves 65,535
   bytes each for its Query and Response, plus coroutine storage; shed Responses

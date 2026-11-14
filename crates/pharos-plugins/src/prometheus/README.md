@@ -8,7 +8,8 @@
 - The `tls` option is parsed, but any TLS configuration fails startup rather than silently serving unprotected HTTP; Prometheus exporter-toolkit TLS and authentication are not implemented.
 - Blocks sharing a metrics address must use the same TLS configuration.
 - Metrics HTTP connections are capped at five seconds total, rather than CoreDNS's separate per-request read, write and idle deadlines, and at 1,024 simultaneous connections.
-- Only GET requests are served at `/metrics`; other HTTP methods return 404.
+- GET and HEAD are served at `/metrics`; recognized other methods return 405 with `Allow: GET, HEAD`, and unknown methods return 501. This replaces the previous 404 behavior.
+- Responses carry strong body-hash ETags and evaluate `If-Match` and `If-None-Match`. Range requests receive the full representation; byte ranges are not implemented.
 - Pharos requires a numeric metrics port at startup; CoreDNS can also resolve service names supported by the host.
 - Bind and startup errors are reported, whereas CoreDNS's shared Listener setup currently discards errors from its `uniq.ForEach` callback.
 

@@ -80,6 +80,58 @@ async fn scrape_counts_only_blocks_with_prometheus() {
 }
 
 #[tokio::test]
+async fn metrics_head_uses_get_metadata_and_post_is_not_allowed() {
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap();
+    drop(socket);
+    let input = format!(".:0 {{\n prometheus {address}\n whoami\n}}");
+    let blocks = parse("Corefile", &input).unwrap();
+    let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    lifecycle.run(Phase::Startup).await.unwrap();
+
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"HEAD /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut head = String::new();
+    stream.read_to_string(&mut head).await.unwrap();
+    assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+    let etag = head
+        .lines()
+        .find_map(|line| line.strip_prefix("etag: "))
+        .unwrap();
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{head}");
+    assert!(
+        head.contains("content-type: text/plain; version=0.0.4; charset=utf-8\r\n"),
+        "{head}"
+    );
+    assert!(head.ends_with("\r\n\r\n"), "{head}");
+
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"POST /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut method_error = String::new();
+    stream.read_to_string(&mut method_error).await.unwrap();
+    assert!(
+        method_error.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+        "{method_error}"
+    );
+    assert!(
+        method_error.contains("allow: GET, HEAD\r\n"),
+        "{method_error}"
+    );
+    assert!(
+        method_error.ends_with("Method Not Allowed\n"),
+        "{method_error}"
+    );
+
+    lifecycle.run(Phase::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
 async fn metrics_bind_failure_is_reported() {
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let input = format!(

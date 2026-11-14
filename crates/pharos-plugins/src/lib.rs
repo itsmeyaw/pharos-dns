@@ -599,7 +599,16 @@ pub fn servers_with_registry(
                     return Ok(());
                 }
                 let server =
-                    pharos_server::http::Listener::bind_with_methods(&address, |_, path| {
+                    pharos_server::http::Listener::bind_with_methods(&address, |method, path| {
+                        if method != "GET" {
+                            return (path == "/health").then(|| {
+                                (
+                                    405,
+                                    "text/plain; charset=utf-8",
+                                    "Method Not Allowed\n".into(),
+                                )
+                            });
+                        }
                         // RFC 9110 §9.3.1: GET /health returns the health representation.
                         Some(if path == "/health" {
                             // RFC 9110 §5.6.3: Media-type parameter OWS uses one SP.
@@ -657,15 +666,25 @@ pub fn servers_with_registry(
                 if listener.lock().unwrap().is_some() {
                     return Ok(());
                 }
-                let server =
-                    pharos_server::http::Listener::bind_with_status(&address, move |path| {
-                        (path == "/ready").then(|| {
-                            // RFC 9110 §9.3.1: GET /ready returns the readiness representation.
-                            let (status, body) = state.response();
-                            (status, "text/plain; charset=utf-8", body)
-                        })
-                    })
-                    .await?;
+                let server = pharos_server::http::Listener::bind_with_methods(
+                    &address,
+                    move |method, path| {
+                        if path != "/ready" {
+                            return None;
+                        }
+                        if method != "GET" {
+                            return Some((
+                                405,
+                                "text/plain; charset=utf-8",
+                                "Method Not Allowed\n".into(),
+                            ));
+                        }
+                        // RFC 9110 §9.3.1: GET /ready returns the readiness representation.
+                        let (status, body) = state.response();
+                        Some((status, "text/plain; charset=utf-8", body))
+                    },
+                )
+                .await?;
                 *listener.lock().unwrap() = Some(server);
                 Ok(())
             }
@@ -705,16 +724,26 @@ pub fn servers_with_registry(
                         "prometheus TLS configuration is not supported",
                     ));
                 }
-                let server = pharos_server::http::Listener::bind(&address, move |path| {
-                    if path != "/metrics" {
-                        return None;
-                    }
-                    let mut body = String::new();
-                    // RFC 9110 §9.3.1: GET /metrics returns the current metrics representation.
-                    registry.encode(&mut body);
-                    // RFC 9110 §5.6.3: Media-type parameter OWS uses one SP for readability.
-                    Some(("text/plain; version=0.0.4; charset=utf-8", body))
-                })
+                let server = pharos_server::http::Listener::bind_with_methods(
+                    &address,
+                    move |method, path| {
+                        if path != "/metrics" {
+                            return None;
+                        }
+                        if method != "GET" {
+                            return Some((
+                                405,
+                                "text/plain; charset=utf-8",
+                                "Method Not Allowed\n".into(),
+                            ));
+                        }
+                        let mut body = String::new();
+                        // RFC 9110 §9.3.1: GET /metrics returns the current metrics representation.
+                        registry.encode(&mut body);
+                        // RFC 9110 §5.6.3: Media-type parameter OWS uses one SP for readability.
+                        Some((200, "text/plain; version=0.0.4; charset=utf-8", body))
+                    },
+                )
                 .await?;
                 *listener.lock().unwrap() = Some(server);
                 Ok(())

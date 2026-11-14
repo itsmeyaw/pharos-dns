@@ -2317,6 +2317,7 @@ dependencies = [
  "libc",
  "nix",
  "pharos-proto",
+ "sha2",
  "socket2",
  "stats_alloc",
  "tokio",
