@@ -43,16 +43,32 @@ async fn api(
     tokio::sync::watch::Sender<bool>,
     tokio::task::JoinHandle<()>,
 ) {
+    api_with_fixtures(hold_endpoints, SERVICES.into(), ENDPOINTS.into()).await
+}
+
+async fn api_with_fixtures(
+    hold_endpoints: bool,
+    services: String,
+    endpoints: String,
+) -> (
+    String,
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", support::free_port()))
         .await
         .unwrap();
     let address = listener.local_addr().unwrap();
     let (gate, _) = tokio::sync::watch::channel(!hold_endpoints);
     let receiver = gate.subscribe();
+    let services = std::sync::Arc::<str>::from(services);
+    let endpoints = std::sync::Arc::<str>::from(endpoints);
     let task = tokio::spawn(async move {
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut receiver = receiver.clone();
+            let services = services.clone();
+            let endpoints = endpoints.clone();
             tokio::spawn(async move {
                 let mut request = [0; 8192];
                 let n = socket.read(&mut request).await.unwrap();
@@ -66,7 +82,7 @@ async fn api(
                 let (kind, items) = if request.contains("/serviceimports") {
                     ("ServiceImportList", IMPORTS)
                 } else if request.contains("/api/v1/services") {
-                    ("ServiceList", SERVICES)
+                    ("ServiceList", services.as_ref())
                 } else if request.contains("/endpointslices") {
                     while !*receiver.borrow_and_update() {
                         if receiver.changed().await.is_err() {
@@ -78,7 +94,7 @@ async fn api(
                         if request.contains("multicluster.kubernetes.io") {
                             MC_ENDPOINTS
                         } else {
-                            ENDPOINTS
+                            endpoints.as_ref()
                         },
                     )
                 } else if request.contains("/api/v1/pods") {
@@ -290,6 +306,7 @@ fn record(record: Record<'_>, expected_serial: Option<u32>) -> String {
         Rdata::A(ip) => ("A", ip.to_string()),
         Rdata::Aaaa(ip) => ("AAAA", ip.to_string()),
         Rdata::Cname(target) => ("CNAME", target.to_string()),
+        Rdata::Ptr(target) => ("PTR", target.to_string()),
         Rdata::Ns(target) => ("NS", target.to_string()),
         Rdata::Txt(data) => ("TXT", String::from_utf8(data[1..].to_vec()).unwrap()),
         Rdata::Srv {
@@ -330,17 +347,47 @@ async fn run_group(options: &str, cases: Vec<Case>, synced: bool) {
 }
 
 async fn run_group_on_stack(options: String, cases: Vec<Case>, synced: bool) {
-    let (endpoint, gate, api_task) = api(!synced).await;
+    run_group_on_stack_with_fixtures(
+        options,
+        cases,
+        synced,
+        "bind 127.0.0.1",
+        SERVICES.into(),
+        ENDPOINTS.into(),
+    )
+    .await;
+}
+
+async fn run_group_on_stack_with_fixtures(
+    options: String,
+    cases: Vec<Case>,
+    synced: bool,
+    bind: &str,
+    services: String,
+    endpoints: String,
+) {
+    let (endpoint, gate, api_task) = api_with_fixtures(!synced, services, endpoints).await;
     let multicluster = cases
         .iter()
         .any(|case| case.name.ends_with(".clusterset.local."));
-    let zones = if multicluster {
-        "cluster.local clusterset.local"
+    let reverse = cases
+        .iter()
+        .any(|case| case.name.ends_with(".in-addr.arpa."));
+    let mut zones = if multicluster {
+        "cluster.local clusterset.local".to_owned()
     } else {
-        "cluster.local"
+        "cluster.local".to_owned()
+    };
+    if reverse {
+        zones.push_str(" in-addr.arpa");
+    }
+    let bind = if bind.is_empty() {
+        String::new()
+    } else {
+        format!("{bind}\n ")
     };
     let text = format!(
-        ".:53 {{\n bind 127.0.0.1\n kubernetes {zones} {{\n  endpoint {endpoint}\n  startup_timeout 3s\n  {options}\n }}\n}}"
+        ".:53 {{\n {bind}kubernetes {zones} {{\n  endpoint {endpoint}\n  startup_timeout 3s\n  {options}\n }}\n}}"
     );
     let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
     let lifecycle = blocks[0].config.lifecycle.clone();
@@ -777,6 +824,81 @@ async fn handler_common_and_regular() {
         ),
     ]);
     run_group("namespaces testns", cases, true).await;
+}
+
+#[tokio::test]
+async fn tolerate_unready_annotation_covers_a_ptr_and_ns_queries() {
+    let route = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    route.connect("192.0.2.1:53").unwrap();
+    let address = Box::leak(
+        route
+            .local_addr()
+            .unwrap()
+            .ip()
+            .to_string()
+            .into_boxed_str(),
+    );
+    let target = Box::leak(
+        "unready.svc-unready.testns.svc.cluster.local."
+            .to_owned()
+            .into_boxed_str(),
+    );
+    let ip: std::net::Ipv4Addr = address.parse().unwrap();
+    let octets = ip.octets();
+    let reverse = Box::leak(
+        format!(
+            "{}.{}.{}.{}.in-addr.arpa.",
+            octets[3], octets[2], octets[1], octets[0]
+        )
+        .into_boxed_str(),
+    );
+    let service = r#"{"metadata":{"name":"svc-unready","namespace":"testns","annotations":{"service.alpha.kubernetes.io/tolerate-unready-endpoints":"true"}},"spec":{"clusterIP":"None","ports":[{"name":"http","protocol":"TCP","port":80}]}}"#;
+    let services = append_json_item(SERVICES, service);
+    let slice = format!(
+        r#"{{"metadata":{{"name":"svc-unready-slice","namespace":"testns","labels":{{"kubernetes.io/service-name":"svc-unready"}}}},"addressType":"IPv4","ports":[{{"name":"http","protocol":"TCP","port":80}}],"endpoints":[{{"addresses":["{address}"],"hostname":"unready","conditions":{{"ready":false}}}}]}}"#
+    );
+    let endpoints = append_json_item(ENDPOINTS, &slice);
+    run_group_on_stack_with_fixtures(
+        String::new(),
+        vec![
+            row(
+                "unready A",
+                target,
+                Type::A,
+                Rcode::NOERROR,
+                vec![rr(target, 5, "A", address)],
+                vec![],
+                vec![],
+            ),
+            row(
+                "unready PTR",
+                reverse,
+                Type::PTR,
+                Rcode::NOERROR,
+                vec![rr(reverse, 5, "PTR", target)],
+                vec![],
+                vec![],
+            ),
+            row(
+                "unready NS",
+                "cluster.local.",
+                Type::NS,
+                Rcode::NOERROR,
+                vec![rr("cluster.local.", 5, "NS", target)],
+                vec![],
+                vec![rr(target, 5, "A", address)],
+            ),
+        ],
+        true,
+        "",
+        services,
+        endpoints,
+    )
+    .await;
+}
+
+fn append_json_item(array: &str, item: &str) -> String {
+    format!("{},{}]", array.trim_end_matches(']'), item)
 }
 
 #[tokio::test]
