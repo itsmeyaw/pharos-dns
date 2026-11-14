@@ -4,11 +4,8 @@ use std::fmt;
 
 use aws_lc_rs::{
     rand::SystemRandom,
-    signature::{self, RsaKeyPair},
+    signature::{self, EcdsaKeyPair, Ed25519KeyPair, RsaKeyPair},
 };
-use ed25519_dalek::{Signer as _, pkcs8::DecodePrivateKey as _};
-use p256::ecdsa::signature::hazmat::PrehashSigner;
-use sha2::{Digest, Sha256, Sha384};
 
 /// A signing key or signing operation could not be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,9 +34,8 @@ impl std::error::Error for SignError {}
 
 enum Key {
     Rsa(RsaKeyPair, &'static dyn signature::RsaEncoding),
-    P256(p256::ecdsa::SigningKey),
-    P384(p384::ecdsa::SigningKey),
-    Ed25519(ed25519_dalek::SigningKey),
+    Ecdsa(EcdsaKeyPair),
+    Ed25519(Ed25519KeyPair),
 }
 
 /// A parsed private key, reusable for signing multiple canonical RRsets.
@@ -80,16 +76,18 @@ impl SigningKey {
                 let key = RsaKeyPair::from_pkcs8(der).map_err(|_| SignError::InvalidKey)?;
                 Self::from_rsa(algorithm, key)
             }
-            // RFC 9904 §3; RFC 6605 §4: P-256 signatures use fixed-width r || s output.
-            13 => p256::ecdsa::SigningKey::from_pkcs8_der(der)
-                .map(|key| Self(Key::P256(key)))
-                .map_err(|_| SignError::InvalidKey),
-            // RFC 9904 §3; RFC 6605 §4: P-384 signatures use fixed-width r || s output.
-            14 => p384::ecdsa::SigningKey::from_pkcs8_der(der)
-                .map(|key| Self(Key::P384(key)))
-                .map_err(|_| SignError::InvalidKey),
+            // RFC 9904 §3; RFC 6605 §4: ECDSA signatures use fixed-width r || s output.
+            13 | 14 => {
+                let encoding = match algorithm {
+                    13 => &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+                    _ => &signature::ECDSA_P384_SHA384_FIXED_SIGNING,
+                };
+                EcdsaKeyPair::from_pkcs8(encoding, der)
+                    .map(|key| Self(Key::Ecdsa(key)))
+                    .map_err(|_| SignError::InvalidKey)
+            }
             // RFC 9904 §3: Support algorithm 15, recommended for DNSSEC signing.
-            15 => ed25519_dalek::SigningKey::from_pkcs8_der(der)
+            15 => Ed25519KeyPair::from_pkcs8(der)
                 .map(|key| Self(Key::Ed25519(key)))
                 .map_err(|_| SignError::InvalidKey),
             _ => Err(SignError::UnsupportedAlgorithm(algorithm)),
@@ -101,7 +99,8 @@ impl SigningKey {
     /// The caller must construct and canonicalize the input as specified by
     /// RFC 4034 §3.1.8; this function does not hash it in advance.
     pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>, SignError> {
-        let mut output = vec![0; self.signature_len()];
+        // RFC 5702 §2.2: RSA modulus is at most 4096 bits, so no signature exceeds 512 octets.
+        let mut output = vec![0; 512];
         let len = self.sign_into(data, &mut output)?;
         output.truncate(len);
         Ok(output)
@@ -126,51 +125,24 @@ impl SigningKey {
                     .map_err(|_| SignError::SigningFailed)?;
                 Ok(len)
             }
-            // RFC 6605 §4; RFC 6979 §3.3: P-256 uses fixed-width, deterministic ECDSA.
-            Key::P256(key) => {
-                let digest = Sha256::digest(data);
-                let signature: p256::ecdsa::Signature = key
-                    .sign_prehash(&digest)
-                    .map_err(|_| SignError::SigningFailed)?;
-                let signature = signature.to_bytes();
-                if output.len() < signature.len() {
-                    return Err(SignError::SigningFailed);
-                }
-                output[..signature.len()].copy_from_slice(&signature);
-                Ok(signature.len())
-            }
-            // RFC 6605 §4; RFC 6979 §3.3: P-384 uses fixed-width, deterministic ECDSA.
-            Key::P384(key) => {
-                let digest = Sha384::digest(data);
-                let signature: p384::ecdsa::Signature = key
-                    .sign_prehash(&digest)
-                    .map_err(|_| SignError::SigningFailed)?;
-                let signature = signature.to_bytes();
-                if output.len() < signature.len() {
-                    return Err(SignError::SigningFailed);
-                }
-                output[..signature.len()].copy_from_slice(&signature);
-                Ok(signature.len())
-            }
+            // RFC 6605 §4: ECDSA signatures are fixed-width r || s, not DER.
+            Key::Ecdsa(key) => copy_signature(key.sign(&random, data), output),
             // RFC 8080 §4: The Ed25519 signature is encoded directly.
             // RFC 8032 §5.1.6: Sign the complete message with Ed25519.
-            Key::Ed25519(key) => {
-                let signature = key.sign(data).to_bytes();
-                if output.len() < signature.len() {
-                    return Err(SignError::SigningFailed);
-                }
-                output[..signature.len()].copy_from_slice(&signature);
-                Ok(signature.len())
-            }
+            Key::Ed25519(key) => copy_signature(Ok(key.sign(data)), output),
         }
     }
+}
 
-    fn signature_len(&self) -> usize {
-        match &self.0 {
-            Key::Rsa(key, _) => key.public_modulus_len(),
-            Key::P256(_) => 64,
-            Key::P384(_) => 96,
-            Key::Ed25519(_) => 64,
-        }
-    }
+fn copy_signature(
+    signature: Result<signature::Signature, aws_lc_rs::error::Unspecified>,
+    output: &mut [u8],
+) -> Result<usize, SignError> {
+    let signature = signature.map_err(|_| SignError::SigningFailed)?;
+    let signature = signature.as_ref();
+    output
+        .get_mut(..signature.len())
+        .ok_or(SignError::SigningFailed)?
+        .copy_from_slice(signature);
+    Ok(signature.len())
 }
