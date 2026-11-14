@@ -90,6 +90,7 @@
 ## hosts
 
 - [hosts Plugin notes](../crates/pharos-plugins/src/hosts/README.md)
+- RFC 4592 §§2.2.1, 3.3: `hosts` replaces only the leftmost QNAME label for wildcard lookup and does not search closest-encloser ancestors, matching CoreDNS v1.15.0 (ADR 0002).
 
 ## k8s_external
 

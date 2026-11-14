@@ -7,6 +7,7 @@
 - An unmapped name without fallthrough gets authoritative NXDOMAIN and a synthetic SOA, rather than CoreDNS's SERVFAIL (RFC 1034 §4.3.2; RFC 2308 §3).
 - Authoritative NODATA includes a synthetic SOA for negative caching (RFC 2308 §3).
 - Non-IN Questions pass through rather than receiving IN-class host records (RFC 1034 §4.3.1).
+- Wildcard lookup replaces only the leftmost QNAME label; it does not search ancestor suffixes for the closest encloser (RFC 4592 §§2.2.1, 3.3). This matches CoreDNS v1.15.0's single wildcard-key lookup.
 - Pharos discards names that are not valid DNS names or UTF-8; CoreDNS retains arbitrary fields in its hosts maps.
 - Pharos lowercases ASCII name bytes, while CoreDNS applies Go's Unicode lowercasing.
 - Configured Domains that cannot be represented as DNS names are ignored for matching; CoreDNS keeps its normalized strings.
