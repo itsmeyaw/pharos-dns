@@ -165,6 +165,7 @@ pub(super) fn prerequisites(zone: &Zone, records: &[ExpandedRecord]) -> Rcode {
             return Rcode::NOTZONE;
         }
         // RFC 2136 §3.2.2: class ANY and NONE prerequisites need empty RDATA and a known type.
+        // RFC 2136 §§3.2.1–3.2.5: prerequisite results follow class, type, and Zone state.
         match record.class {
             // RFC 2136 §§2.4.1–2.4.5: ANY and NONE test existence with empty RDATA.
             Class::ANY | Class::NONE => {
@@ -222,15 +223,10 @@ pub(super) fn prerequisites(zone: &Zone, records: &[ExpandedRecord]) -> Rcode {
         for rr in zone
             .records()
             .iter()
-                .filter(|rr| rr.owner == owner && rr.rtype == kind)
+            .filter(|rr| rr.owner == owner && rr.rtype == kind)
         {
             if !have.iter().any(|other| {
-                same_record_with_rdata_lengths(
-                    other,
-                    other.rdata.len(),
-                    rr,
-                    rr.rdata.len(),
-                )
+                same_record_with_rdata_lengths(other, other.rdata.len(), rr, rr.rdata.len())
             }) {
                 have.push(rr);
             }
@@ -255,7 +251,7 @@ pub(super) fn prerequisites(zone: &Zone, records: &[ExpandedRecord]) -> Rcode {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_zone, prerequisites, validate_updates, ExpandedRecord};
+    use super::{ExpandedRecord, build_zone, prerequisites, validate_updates};
     use crate::zone::Zone;
     use pharos_proto::{
         Class, Name, Rcode, Type,
@@ -345,10 +341,7 @@ mod tests {
         }
         let first = rr("www.example.org.", Type::A, Class::IN, &[192, 0, 2, 1]);
         let second = rr("www.example.org.", Type::A, Class::IN, &[192, 0, 2, 2]);
-        assert_eq!(
-            prerequisites(&zone, &[expanded(&first)]),
-            Rcode::NXRRSET
-        );
+        assert_eq!(prerequisites(&zone, &[expanded(&first)]), Rcode::NXRRSET);
         assert_eq!(
             prerequisites(
                 &zone,
@@ -552,9 +545,7 @@ mod tests {
         );
         let (added, changed) = original.apply_updates(&[first]).unwrap();
         assert!(changed);
-        let (replaced, changed) = added
-            .apply_updates(std::slice::from_ref(&second))
-            .unwrap();
+        let (replaced, changed) = added.apply_updates(std::slice::from_ref(&second)).unwrap();
         assert!(changed);
         let wks: Vec<_> = replaced
             .records()
@@ -581,9 +572,7 @@ mod tests {
             "new.example.org.".parse::<Name>().unwrap().as_wire(),
         );
         let (added, _) = original.apply_updates(&[first]).unwrap();
-        let (replaced, changed) = added
-            .apply_updates(std::slice::from_ref(&second))
-            .unwrap();
+        let (replaced, changed) = added.apply_updates(std::slice::from_ref(&second)).unwrap();
         assert!(changed);
         let dnames: Vec<_> = replaced
             .records()

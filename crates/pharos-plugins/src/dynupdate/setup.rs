@@ -1,6 +1,6 @@
+use crate::zone::update::WKS_TYPE;
 use pharos_corefile::{Cursor, Error, normalize_domain};
 use pharos_proto::{Name, Type};
-use crate::zone::update::WKS_TYPE;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -63,6 +63,7 @@ pub(super) fn unsupported(kind: Type) -> bool {
     )
 }
 
+// RFC 3597 §§2, 5: only known RDATA formats use type-specific parsing and mnemonic syntax.
 fn has_rdata_parser(kind: Type) -> bool {
     matches!(
         kind,
@@ -149,15 +150,21 @@ fn has_rdata_parser(kind: Type) -> bool {
     )
 }
 
-// RFC 3597 §6: accept unrecognized ordinary RR types as opaque RDATA.
+// RFC 3597 §3: accept unrecognized ordinary RR types as opaque RDATA.
 pub(super) fn known(kind: Type) -> bool {
     has_rdata_parser(kind)
         || (kind.0 != 0
-        && kind.0 != u16::MAX
-        && !matches!(
-            kind,
-            Type::AXFR | Type::IXFR | Type::MAILA | Type::MAILB | Type::OPT | Type::TKEY | Type::TSIG
-        ))
+            && kind.0 != u16::MAX
+            && !matches!(
+                kind,
+                Type::AXFR
+                    | Type::IXFR
+                    | Type::MAILA
+                    | Type::MAILB
+                    | Type::OPT
+                    | Type::TKEY
+                    | Type::TSIG
+            ))
 }
 
 // CoreDNS plugin/normalize.go:65: allow names may omit the trailing dot.
@@ -191,7 +198,7 @@ fn policy_type(raw: &str) -> Option<Type> {
                 | Type::TSIG
         )
         || (!has_rdata_parser(kind) && kind != WKS_TYPE)
-        // RFC 2136 §1.1.5: allow the assigned WKS type as TYPE11.
+        // RFC 1035 §3.2.2: WKS is assigned RR type 11.
         || (kind.to_string().starts_with("TYPE") && kind != WKS_TYPE)
         || kind == Type::RESERVED
     {
@@ -401,11 +408,13 @@ mod tests {
         let key: Name = "key.example.org.".parse().unwrap();
         let owner: Name = "host.example.org.".parse().unwrap();
         assert!(parsed.allows(&key, &owner, Type(11)));
-        assert!(config(
-            "dynupdate {\nfile seed.zone\nallow key.example.org. * SPF\n}",
-            &["example.org"]
-        )
-        .is_err());
+        assert!(
+            config(
+                "dynupdate {\nfile seed.zone\nallow key.example.org. * SPF\n}",
+                &["example.org"]
+            )
+            .is_err()
+        );
     }
 
     #[test]

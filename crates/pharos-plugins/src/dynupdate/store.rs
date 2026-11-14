@@ -1,12 +1,9 @@
-use super::{bbolt, setup::Config, update::build_zone, wire, ExpandedRecord};
+use super::{ExpandedRecord, bbolt, setup::Config, update::build_zone, wire};
 use crate::zone::Zone;
 use arc_swap::ArcSwap;
-use pharos_proto::{
-    Name, Rcode,
-    zone::ZoneParser,
-};
 #[cfg(test)]
 use pharos_proto::zone::ZoneRecord;
+use pharos_proto::{Name, Rcode, zone::ZoneParser};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
@@ -96,11 +93,7 @@ impl Shared {
             return Ok((code, false));
         }
         let (candidate, changed) = zone
-            .apply_updates_with_rdata_lengths(
-                updates
-                    .iter()
-                    .map(|rr| (&rr.record, rr.rdata_len)),
-            )
+            .apply_updates_with_rdata_lengths(updates.iter().map(|rr| (&rr.record, rr.rdata_len)))
             .map_err(invalid)?;
         if !changed {
             return Ok((Rcode::NOERROR, false));

@@ -149,11 +149,10 @@ impl DynUpdate {
         };
         let config = Arc::clone(&self.config);
         // RFC 2136 §3.7: UPDATE transactions publish complete Zone snapshots atomically.
-        let result =
-            tokio::task::spawn_blocking(move || {
-                shared.transact_expanded(&config, &key, &prereqs, &updates)
-            })
-                .await;
+        let result = tokio::task::spawn_blocking(move || {
+            shared.transact_expanded(&config, &key, &prereqs, &updates)
+        })
+        .await;
         let code = match result {
             Ok(Ok((code, changed))) => {
                 #[cfg(feature = "plugin-transfer")]
@@ -425,14 +424,24 @@ mod tests {
             (Class::IN, vec![], true, None),
             (Class::IN, vec![0, 1], true, None),
             (Class::IN, vec![0, 1, 0, 2], true, None),
-            (Class::IN, vec![0, 1, 0, 2, 0], true, Some(vec![0, 1, 0, 2, 0])),
+            (
+                Class::IN,
+                vec![0, 1, 0, 2, 0],
+                true,
+                Some(vec![0, 1, 0, 2, 0]),
+            ),
             (Class::IN, vec![1], true, None),
             (Class::IN, vec![0, 1, 2], true, None),
             (Class::ANY, vec![], true, Some(vec![])),
             (Class::NONE, vec![], false, Some(vec![])),
             (Class::NONE, vec![], true, None),
             (Class::NONE, vec![0, 1, 0, 2], true, None),
-            (Class::NONE, vec![0, 1, 0, 2, 0], true, Some(vec![0, 1, 0, 2, 0])),
+            (
+                Class::NONE,
+                vec![0, 1, 0, 2, 0],
+                true,
+                Some(vec![0, 1, 0, 2, 0]),
+            ),
         ] {
             let mut wire = Vec::with_capacity(512);
             let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
@@ -533,20 +542,24 @@ mod tests {
             "@ 60 IN NS ns.example.org.\n",
             "alias 60 IN CNAME example.org.\n",
         );
-        let zone_records = pharos_proto::zone::ZoneParser::new(
-            zone_text.as_bytes(),
-            apex.clone(),
-            "test",
-        )
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        let zone_records =
+            pharos_proto::zone::ZoneParser::new(zone_text.as_bytes(), apex.clone(), "test")
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
         let zone = crate::zone::Zone::from_records(apex.clone(), zone_records).unwrap();
 
-        for (wire_rdata, expected) in [(&[0xc0, 0x0c][..], Rcode::NXRRSET), (apex.as_wire(), Rcode::NOERROR)] {
+        for (wire_rdata, expected) in [
+            (&[0xc0, 0x0c][..], Rcode::NXRRSET),
+            (apex.as_wire(), Rcode::NOERROR),
+        ] {
             let mut wire = Vec::with_capacity(512);
             let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
             builder
-                .question(NameRef::parse(apex.as_wire(), 0).unwrap(), Type::SOA, Class::IN)
+                .question(
+                    NameRef::parse(apex.as_wire(), 0).unwrap(),
+                    Type::SOA,
+                    Class::IN,
+                )
                 .unwrap();
             builder
                 .record(
@@ -567,10 +580,7 @@ mod tests {
                 wire_rdata.len(),
                 "received RDLENGTH must survive expansion"
             );
-            assert_eq!(
-                update::prerequisites(&zone, &[expanded]),
-                expected
-            );
+            assert_eq!(update::prerequisites(&zone, &[expanded]), expected);
         }
     }
 

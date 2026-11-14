@@ -104,11 +104,7 @@ impl Zone {
     /// The caller must validate the UPDATE section, including owner, class,
     /// type, TTL, RDATA and nonzero SOA serial, before calling this method.
     pub fn apply_updates(&self, updates: &[ZoneRecord]) -> Result<(Self, bool), String> {
-        self.apply_updates_inner(
-            updates
-                .iter()
-                .map(|record| (record, record.rdata.len())),
-        )
+        self.apply_updates_inner(updates.iter().map(|record| (record, record.rdata.len())))
     }
 
     // RFC 2136 §1.1.1: retain received RDLENGTH when name compression expands RDATA.
@@ -119,6 +115,7 @@ impl Zone {
         self.apply_updates_inner(updates)
     }
 
+    // RFC 2136 §3.4.2: apply Update records in order to a private Zone candidate.
     fn apply_updates_inner<'a>(
         &self,
         updates: impl Iterator<Item = (&'a ZoneRecord, usize)>,
@@ -182,12 +179,8 @@ impl Zone {
                         .iter()
                         .filter(|rr| rr.owner == update.owner && rr.rtype == Type::DNAME);
                     if existing.next().is_some_and(|rr| {
-                        same_record_with_rdata_lengths(
-                            rr,
-                            rr.rdata.len(),
-                            update,
-                            update_rdata_len,
-                        ) && rr.ttl == update.ttl
+                        same_record_with_rdata_lengths(rr, rr.rdata.len(), update, update_rdata_len)
+                            && rr.ttl == update.ttl
                     }) && existing.next().is_none()
                     {
                         continue;
@@ -208,9 +201,7 @@ impl Zone {
                     if let Some(rr) = records.iter_mut().find(|rr| {
                         rr.owner == update.owner
                             && rr.rtype == WKS_TYPE
-                            && key.is_some_and(|key| {
-                                rr.rdata.get(..WKS_HEADER_LEN) == Some(key)
-                            })
+                            && key.is_some_and(|key| rr.rdata.get(..WKS_HEADER_LEN) == Some(key))
                     }) {
                         if rr.rdata != update.rdata || rr.ttl != update.ttl {
                             *rr = update.clone();
@@ -230,12 +221,7 @@ impl Zone {
                         continue;
                     }
                     if let Some(rr) = records.iter_mut().find(|rr| {
-                        same_record_with_rdata_lengths(
-                            rr,
-                            rr.rdata.len(),
-                            update,
-                            update_rdata_len,
-                        )
+                        same_record_with_rdata_lengths(rr, rr.rdata.len(), update, update_rdata_len)
                     }) {
                         if rr.ttl != update.ttl {
                             *rr = update.clone();
@@ -272,12 +258,7 @@ impl Zone {
                         continue;
                     }
                     if let Some(index) = records.iter().position(|rr| {
-                        same_record_with_rdata_lengths(
-                            rr,
-                            rr.rdata.len(),
-                            update,
-                            update_rdata_len,
-                        )
+                        same_record_with_rdata_lengths(rr, rr.rdata.len(), update, update_rdata_len)
                     }) {
                         records.remove(index);
                         changed = true;
