@@ -1,6 +1,5 @@
 //! DNS64 address synthesis.
 
-mod rfc6052;
 pub(crate) mod setup;
 
 use std::{
@@ -31,7 +30,7 @@ impl Dns64 {
         // RFC 6147 §5.2: use the Well-Known Prefix when no Pref64 is configured.
         let mut result = Self {
             // RFC 6052 §2.1: the default prefix is the well-known prefix 64:ff9b::/96.
-            prefix: rfc6052::WELL_KNOWN_PREFIX,
+            prefix: crate::rfc6052::WELL_KNOWN_PREFIX,
             prefix_len: 96,
             translate_all: false,
             allow_ipv4: false,
@@ -83,12 +82,14 @@ impl Dns64 {
 }
 
 fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Error> {
-    rfc6052::parse(value).map_err(|error| {
+    crate::rfc6052::parse(value).map_err(|error| {
         cursor.error(match error {
-            rfc6052::PrefixError::Format => "invalid dns64 prefix",
-            rfc6052::PrefixError::Length => "invalid dns64 prefix length",
-            rfc6052::PrefixError::WellKnownLength => "invalid dns64 well-known prefix length",
-            rfc6052::PrefixError::ReservedOctet => "invalid dns64 reserved octet",
+            crate::rfc6052::PrefixError::Format => "invalid dns64 prefix",
+            crate::rfc6052::PrefixError::Length => "invalid dns64 prefix length",
+            crate::rfc6052::PrefixError::WellKnownLength => {
+                "invalid dns64 well-known prefix length"
+            }
+            crate::rfc6052::PrefixError::ReservedOctet => "invalid dns64 reserved octet",
         })
     })
 }

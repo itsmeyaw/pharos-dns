@@ -1,7 +1,5 @@
 //! SIIT address synthesis.
 
-#[path = "../dns64/rfc6052.rs"]
-mod rfc6052;
 pub(crate) mod setup;
 
 use std::{
@@ -30,7 +28,7 @@ impl Siit {
     pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Self, Error> {
         let mut result = Self {
             // RFC 6052 §2.1: The default algorithmic-mapping prefix is 64:ff9b::/96.
-            prefix: rfc6052::WELL_KNOWN_PREFIX,
+            prefix: crate::rfc6052::WELL_KNOWN_PREFIX,
             prefix_len: 96,
             eam: Vec::new(),
             metrics: Vec::new(),
@@ -45,14 +43,16 @@ impl Siit {
                         let args = cursor.remaining_args();
                         let value = args.first().ok_or_else(|| cursor.arg_err())?;
                         (result.prefix, result.prefix_len) =
-                            rfc6052::parse(value).map_err(|error| {
+                            crate::rfc6052::parse(value).map_err(|error| {
                                 cursor.error(match error {
-                                    rfc6052::PrefixError::Format => "invalid prefix",
-                                    rfc6052::PrefixError::Length => "invalid prefix length",
-                                    rfc6052::PrefixError::WellKnownLength => {
+                                    crate::rfc6052::PrefixError::Format => "invalid prefix",
+                                    crate::rfc6052::PrefixError::Length => "invalid prefix length",
+                                    crate::rfc6052::PrefixError::WellKnownLength => {
                                         "invalid well-known prefix length"
                                     }
-                                    rfc6052::PrefixError::ReservedOctet => "invalid reserved octet",
+                                    crate::rfc6052::PrefixError::ReservedOctet => {
+                                        "invalid reserved octet"
+                                    }
                                 })
                             })?;
                     }

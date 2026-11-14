@@ -154,14 +154,7 @@ async fn rules_are_ordered_and_non_response_outcomes_are_preserved() {
                 .await,
             outcome
         );
-        assert_eq!(
-            Message::parse(cx.response).unwrap().flags(),
-            if outcome == Outcome::Response {
-                0x80
-            } else {
-                0x80
-            }
-        );
+        assert_eq!(Message::parse(cx.response).unwrap().flags(), 0x80);
     }
 }
 
