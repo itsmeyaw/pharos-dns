@@ -197,7 +197,7 @@ pub fn black_lie(
             Type::SPF,
         ]
     };
-    // RFC 9824 §3.1: A nonexistent-name bitmap stays compact, even at malformed apex input.
+    // RFC 9824 §3.1: A nonexistent-name bitmap stays compact.
     if at_apex && kind != BlackLieKind::NameError {
         types.extend([Type::NS, Type::SOA, Type::MX, Type::DNSKEY]);
     // RFC 9824 §3.1: NXNAME compact-denial bitmaps never assert delegation NS data.

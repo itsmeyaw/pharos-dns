@@ -2,7 +2,7 @@ use aws_lc_rs::digest::{self, SHA256, SHA384};
 use pharos_proto::Name;
 
 /// The digest algorithm used in DS and CDS records.
-// RFC 9904 §4 and RFC 9905 §5: SHA-1 MUST NOT be used for DNSSEC delegation.
+// RFC 9904 §4: SHA-1 MUST NOT be used for DNSSEC delegation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DigestType {
     Sha256,

@@ -14,6 +14,11 @@
 - RSASHA512 (algorithm 10) is refused for signing under RFC 9904 §3. RSA modulus and exponent values above 4096 bits are rejected (RFC 3110 §2; RFC 5702 §§2.1–2.2).
 - Each loaded DNSKEY is bound to its owner zone and cannot sign another configured zone (RFC 8080 §8).
 - A configured zone without a matching key passes DNSKEY and DO queries through unchanged.
+- Negative NXDOMAIN/NODATA answers return NOERROR with synthetic NXNAME NSEC in Authority. CoreDNS also maps NXDOMAIN to NOERROR, but puts its black-lie NSEC in Answer.
+- A DO negative response without SOA fails with SERVFAIL; Pharos does not return an unsigned denial. CoreDNS returns the upstream negative response.
+- Explicit QTYPE 128 receives FORMERR when the dnssec plugin is in the chain; CoreDNS does not reject the query this way.
+- Only a DNAME-synthesized CNAME is unsigned; real CNAME RRsets in the same response remain signed (RFC 6672 §5.3.1).
+- A sole apex CDS/CDNSKEY delete signal is retained and signed; CoreDNS drops it while replacing publication records (RFC 8078 §4).
 - RSA private keys below 2048 bits are rejected by aws-lc-rs; CoreDNS accepts them.
 - Key files currently require a standalone DNSKEY record with an absolute owner, IN class if specified, and a numeric TTL; the complete zone-file grammar is not supported.
 - Canonical signing rejects A6 and legacy name-bearing RDATA that `pharos-proto` cannot safely relocate, rather than signing them as CoreDNS does.

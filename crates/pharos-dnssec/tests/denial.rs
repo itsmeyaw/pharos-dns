@@ -84,6 +84,8 @@ fn black_lies_match_coredns_denial_and_referral() {
     assert!(!lie.bitmap_contains(Type::A));
     assert!(lie.bitmap_contains(Type::NSEC));
     assert!(lie.bitmap_contains(Type::NXNAME));
+    let nodata = black_lie(&qname, &name("example."), Type::A, BlackLieKind::Negative).unwrap();
+    assert!(!nodata.bitmap_contains(Type::A));
     let rrsig_nodata = black_lie(
         &qname,
         &name("example."),
