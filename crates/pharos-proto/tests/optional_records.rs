@@ -35,8 +35,21 @@ fn optional_rrset_overflow_rolls_back_data_and_tc() {
         })
         .unwrap();
     assert_eq!(included, None);
+    assert!(
+        builder
+            .record(
+                Section::Additional,
+                owner,
+                Type::TXT,
+                Class::IN,
+                60,
+                b"\x01x"
+            )
+            .unwrap()
+    );
     let response = Message::parse(builder.finish()).unwrap();
     assert_eq!(response.answers().count(), 1);
-    assert_eq!(response.additionals().count(), 0);
+    assert_eq!(response.additionals().count(), 1);
+    assert_eq!(response.additionals().next().unwrap().rtype, Type::TXT);
     assert!(!response.tc());
 }

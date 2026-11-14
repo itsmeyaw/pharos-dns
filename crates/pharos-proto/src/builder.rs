@@ -182,7 +182,7 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
         self.reserve(opt.wire_len())
     }
 
-    /// Adds optional content atomically. `None` rolls back the whole write without TC.
+    /// Adds optional content atomically. `None` or an error rolls back all builder state.
     // RFC 2181 §9: Omit optional Additional RRsets whole when the Message is full.
     pub fn try_optional<T, E>(
         &mut self,

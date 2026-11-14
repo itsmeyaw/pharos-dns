@@ -44,14 +44,14 @@ fn same_covered_signatures(left: &Record<'_>, right: &Record<'_>) -> bool {
             (left.data(), right.data()),
             (
                 Ok(Rdata::Rrsig {
-                    type_covered: left,
+                    type_covered: left_type,
                     ..
                 }),
                 Ok(Rdata::Rrsig {
-                    type_covered: right,
+                    type_covered: right_type,
                     ..
                 })
-            ) if left == right
+            ) if left_type == right_type
         )
 }
 
@@ -124,7 +124,7 @@ impl Dnssec {
         let denial = matches!(kind, ResponseType::NxDomain | ResponseType::NoData);
         let soa = message.authorities().find(|rr| rr.rtype == Type::SOA);
         if denial && soa.is_none() {
-            // RFC 2308 §3: A negative answer without SOA cannot be returned as a valid denial.
+            // RFC 2308 §3: Missing SOA invalidates denial context; report internal response state, not bad query.
             return Err(Error::Internal);
         }
         let referral = kind == ResponseType::Referral && message.authority_count() > 0;
@@ -362,12 +362,12 @@ impl Dnssec {
                             )?;
                             Ok(if omitted { None } else { Some(signed) })
                         })?;
+                        attempted_sets += 1;
                         let Some(signed) = signed else {
                             additional_signature_omitted = true;
                             break;
                         };
                         signed_sets += usize::from(signed);
-                        attempted_sets += 1;
                     }
                 }
                 continue;

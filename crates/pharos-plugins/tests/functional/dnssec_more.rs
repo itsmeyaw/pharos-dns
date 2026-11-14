@@ -67,6 +67,7 @@ enum Reply {
     Large,
     Priority,
     AdditionalLarge,
+    AdditionalSignatureLarge,
     DnameWithRealCname,
     AdditionalDataLarge,
 }
@@ -336,6 +337,28 @@ impl Next for Reply {
                     );
                 }
             }
+            Self::AdditionalSignatureLarge => {
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::A,
+                    Class::IN,
+                    1800,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+                for i in 0..16 {
+                    b.record(
+                        Section::Additional,
+                        q.name,
+                        Type::A,
+                        Class::IN,
+                        1800,
+                        &[192, 0, 2, i],
+                    )
+                    .unwrap();
+                }
+            }
             Self::DnameWithRealCname => {
                 let dname: Name = "dname.miek.nl.".parse().unwrap();
                 let target: Name = "a.target.miek.nl.".parse().unwrap();
@@ -576,6 +599,60 @@ async fn additional_data_overflow_does_not_set_tc() {
     assert!(msg.answers().any(|rr| rr.rtype == Type::RRSIG));
     let additional = msg.additionals().filter(|rr| rr.rtype == Type::A).count();
     assert_eq!(additional, 0);
+}
+
+#[tokio::test]
+async fn additional_signature_rrset_is_omitted_whole_without_tc() {
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let single_key = plugin("miek.nl", KEY);
+    let (outcome, wire) = serve(
+        &single_key,
+        &q,
+        Reply::AdditionalSignatureLarge,
+        Protocol::Udp,
+        512,
+        512,
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    assert!(!msg.tc());
+    assert_eq!(
+        msg.additionals().filter(|rr| rr.rtype == Type::A).count(),
+        16
+    );
+    assert_eq!(
+        msg.additionals()
+            .filter(|rr| rr.rtype == Type::RRSIG)
+            .count(),
+        1
+    );
+
+    let text = format!("miek.nl {{\n dnssec {{\n key file {KEY}\n key file {OTHER_KEY}\n }}\n}}");
+    let mut chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let two_keys = chain[0].config.dnssec.take().unwrap();
+    let (outcome, wire) = serve(
+        &two_keys,
+        &q,
+        Reply::AdditionalSignatureLarge,
+        Protocol::Udp,
+        512,
+        512,
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    assert!(!msg.tc());
+    assert_eq!(
+        msg.additionals().filter(|rr| rr.rtype == Type::A).count(),
+        16
+    );
+    assert_eq!(
+        msg.additionals()
+            .filter(|rr| rr.rtype == Type::RRSIG)
+            .count(),
+        0
+    );
 }
 
 async fn serve(
