@@ -1089,6 +1089,17 @@ mod wildcard_tests {
         }
     }
 
+    #[derive(Debug)]
+    struct WorkerCount(usize);
+    impl Handler for WorkerCount {
+        fn udp_workers(&self) -> usize {
+            self.0
+        }
+        async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+            Action::Drop
+        }
+    }
+
     #[tokio::test]
     async fn listener_binds_the_requested_number_of_udp_sockets() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1135,6 +1146,28 @@ mod wildcard_tests {
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(BINDS.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn listener_registry_rejects_zero_udp_workers_for_existing_listener() {
+        let key = super::ListenerKey {
+            transport: super::Transport::Dns,
+            address: "127.0.0.1:0".parse().unwrap(),
+        };
+        let mut registry = super::ListenerRegistry::default();
+        registry
+            .apply(std::collections::HashMap::from([(key, WorkerCount(1))]))
+            .await
+            .unwrap();
+        let address = registry.get(&key).unwrap().local_addr();
+
+        let error = registry
+            .apply(std::collections::HashMap::from([(key, WorkerCount(0))]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(registry.get(&key).unwrap().local_addr(), address);
+        registry.shutdown().await.unwrap();
     }
 
     #[tokio::test]
