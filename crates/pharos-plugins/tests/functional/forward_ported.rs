@@ -6,7 +6,9 @@ use pharos_plugins::{Chain, directives};
 use pharos_proto::{Message, Name, Rcode};
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 use std::{
+    io::{Read as StdRead, Write as StdWrite},
     net::SocketAddr,
+    net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -408,6 +410,79 @@ async fn resolver_expands_hostname_and_deduplicates_numeric_address() {
         );
     }
     assert_eq!(counts(&[&first, &second]), vec![1, 2]);
+}
+
+#[tokio::test]
+async fn configured_resolver_retries_truncated_udp_over_tcp() {
+    let tcp = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let resolver_address = tcp.local_addr().unwrap();
+    let udp = StdUdpSocket::bind(resolver_address).unwrap();
+    udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let resolver = std::thread::spawn(move || {
+        let mut wire = [0; 512];
+        let (len, peer) = udp.recv_from(&mut wire).unwrap();
+        assert_eq!(
+            Message::parse(&wire[..len])
+                .unwrap()
+                .questions()
+                .next()
+                .unwrap()
+                .qtype
+                .0,
+            1
+        );
+        let mut truncated = wire[..len].to_vec();
+        truncated[2..4].copy_from_slice(&0x8380_u16.to_be_bytes());
+        udp.send_to(&truncated, peer).unwrap();
+
+        let (mut stream, _) = tcp.accept().unwrap();
+        let mut frame = [0; 2];
+        stream.read_exact(&mut frame).unwrap();
+        let mut query = vec![0; usize::from(u16::from_be_bytes(frame))];
+        stream.read_exact(&mut query).unwrap();
+        let mut answer = query.clone();
+        answer[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+        answer[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+        stream
+            .write_all(&(answer.len() as u16).to_be_bytes())
+            .unwrap();
+        stream.write_all(&answer).unwrap();
+
+        let (len, peer) = udp.recv_from(&mut wire).unwrap();
+        assert_eq!(
+            Message::parse(&wire[..len])
+                .unwrap()
+                .questions()
+                .next()
+                .unwrap()
+                .qtype
+                .0,
+            28
+        );
+        wire[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+        udp.send_to(&wire[..len], peer).unwrap();
+    });
+
+    let upstream = udp_fake(0, Some(42)).await;
+    let chain = configure_chain(&format!(
+        "forward . upstream.example:{} {{\nresolver {resolver_address}\n}}",
+        upstream.addr.port()
+    ))
+    .unwrap();
+    resolver.join().unwrap();
+    let (outcome, response) = query(&chain).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .next()
+            .unwrap()
+            .rdata[3],
+        42
+    );
+    assert_eq!(upstream.count.load(Ordering::SeqCst), 1);
 }
 
 // CoreDNS health_test.go TestHealth, TestHealthNoRecursion, TestHealthDomain and TestHealthNoMaxFails.
