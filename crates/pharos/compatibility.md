@@ -269,7 +269,10 @@
 - SIG(0) and TSIG must be the final Additional RR; OPT may precede them (RFCs 6891 §6.1.1, 2931 §3.1, 8945 §§5.1–5.2).
 - The protocol parser rejects duplicate OPT records, OPT records outside Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
 - DSO session Primary TLVs are unsupported; the Listener suppresses ID-zero DSO requests without inspecting their Primary TLV (RFC 8490 §5.4.1).
-- The DNS Listener returns FORMERR for malformed Messages with at least four octets and drops shorter datagrams. CoreDNS v1.15.0 accepts malformed OPTs when its header-count policy allows them, and selects the last OPT in Additional.
+- The DNS Listener returns header-only FORMERR for malformed Messages shorter than 12 octets, including 0–3-byte datagrams; missing Message ID octets are zero-filled (RFC 5625 §6.3).
+- A one-byte datagram therefore receives a 12-byte FORMERR Response. This amplification follows RFC 5625 §6.3's requirement to answer short DNS packets.
+- TKEY QTYPE Queries return NOTIMP before Plugin dispatch, including QCLASS=ANY, because the server has no TKEY service (RFC 2930 §3).
+- If UPDATE is disabled, the Listener returns NOTIMP before validating UPDATE section framing; accepted malformed UPDATEs return FORMERR (RFC 2136 §§2.2, 3.1.1).
 - The DNS Listener ignores the reserved header Z bit on receipt, as RFC 6895 §2.1 recommends, and clears it in generated Responses (conf/server #101).
 - Zero-question QUERY Messages route to the root Server Block when configured; CoreDNS's standard query path also permits QDCOUNT=0 (RFC 9619 §4; conf/server #101).
 - For DS at a configured zone cut, Pharos uses the parent Server Block; if no parent is configured, it routes to the child and returns authoritative NODATA, as RFC 4035 §3.1.4.1 requires (conf/server #101).
@@ -282,7 +285,8 @@
 - For a header-only Message claiming one Question, Pharos returns FORMERR; CoreDNS returns SERVFAIL.
 - For pass-through Responses, Pharos truncates the encoded Message without recompression; CoreDNS may fit more records by recompressing first.
 - If an OPT precedes other Additional records, Pharos drops the following records rather than shifting their compression pointers; Listener size truncation does not set TC solely for optional Additional omission (RFC 2181 §9). The `nsid` plugin instead drops records after OPT and sets TC.
-- TC is set when truncation omits required Answer or Authority data; RRset completeness limits remain as recorded in the RFC conformance table.
+- When the size limit cuts an Answer or Authority RRset, the Listener moves the cutoff before the whole RRset and retains earlier complete RRsets. Interleaved RRsets may require dropping their entire overlapping span (RFC 2181 §9).
+- A peer FIN closes only its TCP send direction. The Listener drains accepted Queries while the peer can still read; RST or a failed write cancels in-flight Query and Transfer tasks (RFC 9293 §3.6.1; RFC 7766 §6.2.4; RFC 5936 §4.1.2).
 - Pharos removes OPT from a Response to a non-EDNS Query, as RFC 6891 requires; CoreDNS may preserve a Plugin-supplied OPT in that case.
 - Pharos answers Plugin errors with SERVFAIL. CoreDNS ignores returned errors and bases the Response on the separately returned RCODE; without `errors` it does not log ordinary chain errors. Pharos likewise logs those errors only when `errors` is configured, while logging recovered panics at the Listener.
 - A UDP IXFR that reaches a Zone Transfer stream returns the current SOA only, following RFC 1995 §2; CoreDNS's `transfer` returns REFUSED instead.
