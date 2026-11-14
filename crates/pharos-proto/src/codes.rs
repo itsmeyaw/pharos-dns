@@ -68,8 +68,8 @@ dns_code! {
         NOTZONE = 10 => "NOTZONE",
         // RFC 8490 §5.4.1: DSOTYPENI is RCODE 11.
         DSOTYPENI = 11 => "DSOTYPENI",
-        // RFC 8945 §3: DNS RCODE BADSIG is 16.
-        BADSIG = 16 => "BADSIG",
+        // RFC 6895 §2.3: RCODE 16 displays as BADVERS; TSIG calls this value BADSIG.
+        BADSIG = 16 => "BADVERS",
         // RFC 8945 §3: DNS RCODE BADKEY is 17.
         BADKEY = 17 => "BADKEY",
         // RFC 8945 §3: DNS RCODE BADTIME is 18.
