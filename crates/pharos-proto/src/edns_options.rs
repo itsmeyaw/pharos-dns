@@ -266,8 +266,7 @@ fn parse_option(code: u16, data: &[u8]) -> Result<EdnsOption<'_>, EdnsOptionErro
             if data.len() < 2 {
                 return Err(invalid());
             }
-            // RFC 8914 §2: EXTRA-TEXT is UTF-8.
-            std::str::from_utf8(&data[2..]).map_err(|_| invalid())?;
+            // RFC 8914 §2 defines UTF-8; preserve received octets for CoreDNS-compatible display.
             // RFC 8914 §2: INFO-CODE keeps any 16-bit registry index, known or not.
             EdnsOption::ExtendedError {
                 info_code: u16::from_be_bytes([data[0], data[1]]),

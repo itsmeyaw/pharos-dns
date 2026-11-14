@@ -128,7 +128,6 @@ fn rejects_malformed_framing_and_structured_payloads() {
         &[0, 3, 0][..],
         &[0, 3, 0, 2, 1][..],
         &[0, 15, 0, 1, 0][..],
-        &[0, 15, 0, 3, 0, 1, 0xff][..],
         &[0, 11, 0, 3, 0, 1, 3][..],
         &[0, 8, 0, 3, 0, 1, 0][..],
         &[0, 8, 0, 4, 0, 0, 0, 0][..],
@@ -188,6 +187,20 @@ fn empty_options_and_unknown_ede_codes() {
             .to_string(),
         "65535: ()"
     );
+}
+
+#[test]
+fn received_ede_with_invalid_utf8_keeps_bytes_and_displays_replacement() {
+    let wire = [0, 15, 0, 3, 0xff, 0xff, 0xff];
+    let option = EdnsOptions::parse(&wire).unwrap().iter().next().unwrap();
+    assert_eq!(
+        option,
+        EdnsOption::ExtendedError {
+            info_code: u16::MAX,
+            extra_text: &[0xff]
+        }
+    );
+    assert_eq!(option.to_string(), "65535: (\u{fffd})");
 }
 
 #[test]
