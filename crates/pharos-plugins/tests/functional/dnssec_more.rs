@@ -388,10 +388,9 @@ impl Next for Reply {
                 )
                 .unwrap();
                 for i in 0..40 {
-                    let owner: Name = format!("n{i}.miek.nl.").parse().unwrap();
                     b.record(
                         Section::Additional,
-                        NameRef::parse(owner.as_wire(), 0).unwrap(),
+                        q.name,
                         Type::A,
                         Class::IN,
                         1800,
@@ -520,6 +519,15 @@ async fn nxname_formerr_applies_with_or_without_do_and_keys() {
 }
 
 #[tokio::test]
+async fn nxname_formerr_applies_outside_configured_zones() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("outside.example.", Type::NXNAME, 1, None);
+    let (outcome, wire) = serve(&dnssec, &q, Reply::NegativeNoSoa, Protocol::Udp, 4096, 4096).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::FORMERR);
+}
+
+#[tokio::test]
 async fn signed_responses_clear_cd() {
     let dnssec = plugin("miek.nl", KEY);
     for (name, qtype, reply) in [
@@ -567,7 +575,7 @@ async fn additional_data_overflow_does_not_set_tc() {
     assert!(!msg.tc());
     assert!(msg.answers().any(|rr| rr.rtype == Type::RRSIG));
     let additional = msg.additionals().filter(|rr| rr.rtype == Type::A).count();
-    assert!((1..40).contains(&additional));
+    assert_eq!(additional, 0);
 }
 
 async fn serve(
@@ -1142,7 +1150,7 @@ async fn mixed_case_owners_form_one_signed_rrset() {
         .unwrap();
 }
 
-// RFC 8080 §8: Select nested zones case-insensitively and never reuse parent keys for them.
+// RFC 4035 §2.1: Select nested zones case-insensitively and never reuse parent keys for them.
 #[tokio::test]
 async fn nested_zone_selection_is_case_insensitive() {
     let dnssec = plugin("miek.nl sub.miek.nl", KEY);

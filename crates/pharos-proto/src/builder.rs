@@ -182,6 +182,32 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
         self.reserve(opt.wire_len())
     }
 
+    /// Adds optional content atomically. `None` rolls back the whole write without TC.
+    // RFC 2181 §9: Omit optional Additional RRsets whole when the Message is full.
+    pub fn optional<T, E>(
+        &mut self,
+        write: impl FnOnce(&mut Self) -> Result<Option<T>, E>,
+    ) -> Result<Option<T>, E> {
+        let length = self.wire.len();
+        let flags = [self.wire[2], self.wire[3]];
+        let reserved = self.reserved;
+        let counts = self.counts;
+        let section = self.section;
+        let stopped = self.stopped;
+        let offset_count = self.offset_count;
+        let result = write(self);
+        if !matches!(&result, Ok(Some(_))) {
+            self.wire.truncate_buffer(length);
+            self.wire[2..4].copy_from_slice(&flags);
+            self.reserved = reserved;
+            self.counts = counts;
+            self.section = section;
+            self.stopped = stopped;
+            self.offset_count = offset_count;
+        }
+        result
+    }
+
     /// Adds a Question. If it cannot fit, it is rolled back, TC is set, and writing stops.
     pub fn question(
         &mut self,
