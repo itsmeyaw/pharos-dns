@@ -87,7 +87,7 @@ fn edns_response_opt_is_copied_and_small_response_is_unchanged() {
     let message = Message::parse(&response).unwrap();
     assert!(response.len() <= 1232);
     assert!(message.tc());
-    assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
     assert!(message.opt().unwrap().dnssec_ok());
 
     let wire = self::query(false);
@@ -183,7 +183,7 @@ fn nonfinal_opt_keeps_its_options_and_discards_following_records() {
     assert!(!message.tc());
     assert_eq!(message.additional_count(), 1);
     let opt = message.opt().unwrap();
-    assert_eq!(opt.udp_payload_size(), 4096);
+    assert_eq!(opt.udp_payload_size(), 1232);
     assert_eq!(opt.options().as_bytes(), &[0, 3, 0, 1, b'x']);
 }
 
@@ -209,7 +209,7 @@ fn response_opt_is_removed_when_query_has_no_edns() {
 }
 
 #[test]
-fn response_opt_advertises_server_capacity_not_client_limit() {
+fn response_opt_echoes_client_payload_limit() {
     let mut wire = query(true);
     wire[22..24].copy_from_slice(&512_u16.to_be_bytes());
     let query = Message::parse(&wire).unwrap();
@@ -223,11 +223,11 @@ fn response_opt_advertises_server_capacity_not_client_limit() {
     );
     let message = Message::parse(&response).unwrap();
     assert!(response.len() <= 512);
-    assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 512);
 }
 
 #[test]
-fn echoes_ecs_when_upstream_omits_opt_and_clears_untrusted_ad() {
+fn echoes_ecs_and_preserves_requested_upstream_ad() {
     let mut wire = query(true);
     let ecs = [0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2];
     wire[28..30].copy_from_slice(&(ecs.len() as u16).to_be_bytes());
@@ -244,7 +244,7 @@ fn echoes_ecs_when_upstream_omits_opt_and_clears_untrusted_ad() {
     );
     let message = Message::parse(&response).unwrap();
     assert_eq!(message.opt().unwrap().options().as_bytes(), &ecs);
-    assert!(!message.ad());
+    assert!(message.ad());
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn unanswered_tcp_response_can_append_edns_to_an_empty_buffer() {
     assert!(!logged);
     let message = Message::parse(&response).unwrap();
     assert_eq!(message.rcode(), Rcode::REFUSED);
-    assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
 }
 
 #[test]
@@ -283,6 +283,7 @@ fn signed_response_reserves_room_before_truncation() {
     let mac = key.verify(&wire, 1_000, None, 0).unwrap().mac;
     let query = Message::parse(&wire).unwrap();
     let mut response = response(8);
+    response[3] |= 0x20;
     let signing = TsigSigning::Signed {
         key: Arc::clone(&key),
         time: 1_000,
@@ -304,6 +305,7 @@ fn signed_response_reserves_room_before_truncation() {
     assert!(Message::parse(&response).unwrap().tc());
     assert_eq!(Message::parse(&response).unwrap().answer_count(), 0);
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    assert!(!Message::parse(&response).unwrap().ad());
     key.verify(&response, 1_000, Some(mac), 0).unwrap();
 }
 

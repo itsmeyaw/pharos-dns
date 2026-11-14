@@ -100,8 +100,9 @@ pub fn finish_outcome_signed(
         TsigSigning::Signed { reserved, .. } | TsigSigning::Error { reserved, .. } => *reserved,
     });
     let signed = signing.is_some();
-    // RFC 8945 §5.5: clear AD when forwarding without transaction security to the upstream.
-    if response.len() >= 4 {
+    let signed_response = matches!(&signing, Some(TsigSigning::Signed { .. }));
+    // RFC 8945 §5.5: clear AD before signing a forwarded Response without upstream transaction security.
+    if signed_response && response.len() >= 4 {
         response[3] &= !0x20;
     }
     let before = signed
@@ -292,10 +293,19 @@ fn scrub(
         wire.copy_within(offset..offset + len, end + 11);
         wire.truncate(end + opt_len);
         wire[end..end + 3].copy_from_slice(&[0, 0, 41]);
-        wire[end + 3..end + 5].copy_from_slice(&RESPONSE_UDP_PAYLOAD_SIZE.to_be_bytes());
+        // RFC 6891 §§6.2.3–6.2.5: echo the normalized request size up to responder capacity.
+        wire[end + 3..end + 5].copy_from_slice(
+            &normalized_udp_size(
+                query_opt
+                    .udp_payload_size()
+                    .min(RESPONSE_UDP_PAYLOAD_SIZE),
+                false,
+            )
+            .to_be_bytes(),
+        );
         // RFC 3225 §3: Copy the query's DO bit into the response.
         let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
-            // RFC 9824 §9: preserve the allocated CO flag, but clear reserved EDNS bits.
+            // RFC 9824 §5.1: preserve CO, but clear reserved EDNS bits.
             | u32::from(existing_flags.unwrap_or_default() & 0x4000)
             | if query_opt.dnssec_ok() { 0x8000 } else { 0 };
         wire[end + 5..end + 9].copy_from_slice(&ttl.to_be_bytes());

@@ -74,7 +74,7 @@ async fn listener_uses_clamped_opt_for_udp_and_tcp_responses() {
                     .opt()
                     .unwrap()
                     .udp_payload_size(),
-                4096
+                size.min(1232)
             );
         }
     }
@@ -109,7 +109,7 @@ async fn clamped_udp_response_truncates_but_tcp_does_not() {
             Action::Respond
         );
         let message = Message::parse(&response).unwrap();
-        assert_eq!(message.opt().unwrap().udp_payload_size(), 4096);
+        assert_eq!(message.opt().unwrap().udp_payload_size(), 512);
         assert_eq!(message.tc(), protocol == Protocol::Udp);
         assert_eq!(response.len() <= 512, protocol == Protocol::Udp);
     }

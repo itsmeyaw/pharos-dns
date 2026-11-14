@@ -7,7 +7,7 @@ use crate::{BuildError, EdnsOption, EdnsOptions, Message, MessageBuilder, Opcode
 
 static REGISTERED_OPTIONS: [AtomicU64; 1024] = [const { AtomicU64::new(0) }; 1024];
 
-/// Response OPT payload size advertised by Pharos.
+/// Maximum UDP payload size advertised in Responses by Pharos.
 // RFC 3226 §3: DNSSEC-aware servers SHOULD advertise at least 4000 octets.
 pub const RESPONSE_UDP_PAYLOAD_SIZE: u16 = 4096;
 
@@ -64,10 +64,16 @@ pub struct Opt<'a> {
 }
 
 impl<'a> Opt<'a> {
-    /// CoreDNS's initial BADVERS OPT; `response` applies the advertised server payload size.
+    /// CoreDNS's initial BADVERS OPT, advertising the server's supported payload size.
     #[must_use]
     pub fn badvers() -> Opt<'static> {
-        Opt::new(0, 1, 0, 0, EdnsOptions::parse(&[]).expect("empty options"))
+        Opt::new(
+            RESPONSE_UDP_PAYLOAD_SIZE,
+            1,
+            0,
+            0,
+            EdnsOptions::parse(&[]).expect("empty options"),
+        )
     }
 
     /// Creates an OPT from its wire fields and validated option data.
@@ -157,9 +163,13 @@ impl<'a> Opt<'a> {
     ) -> ResponseOpt<'a, 'b> {
         let query_ecs = find_ecs_option(self.options.as_bytes());
         let mut source = existing.unwrap_or(self);
-        source.size = RESPONSE_UDP_PAYLOAD_SIZE;
+        // RFC 6891 §§6.2.3–6.2.5: cap the echoed requestor size at responder capacity.
+        source.size = normalized_udp_size(
+            self.udp_payload_size().min(RESPONSE_UDP_PAYLOAD_SIZE),
+            false,
+        );
         // RFC 6891 §6.1.3: responses carry version 0, the highest EDNS version implemented here.
-        // RFC 9824 §9: CO is allocated; clear other reserved flags and copy DO from the Query.
+        // RFC 9824 §5.1: preserve CO; clear other reserved flags and copy DO from the Query.
         source.ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
             | (source.ttl & 0x4000)
             | if self.dnssec_ok() { 0x8000 } else { 0 };
@@ -270,7 +280,7 @@ impl fmt::Display for Opt<'_> {
         if self.dnssec_ok() {
             f.write_str(" do")?;
         }
-        // RFC 9824 §9: CO is the allocated EDNS flag bit 1.
+        // RFC 9824 §5.1: CO is EDNS flag bit 1.
         if self.flags() & 0x4000 != 0 {
             f.write_str(" co")?;
         }
