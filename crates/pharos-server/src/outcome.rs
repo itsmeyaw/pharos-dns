@@ -21,12 +21,12 @@ pub enum TsigSigning {
     },
 }
 
-/// Maximum Response size requested by the client for this protocol.
+/// Maximum Response size allowed for this Query and protocol.
 // RFC 4033 §9: Honor the requester's EDNS UDP payload size for DNSSEC responses.
 pub fn response_limit(query: Message<'_>, protocol: Protocol) -> usize {
-    // RFC 6891 §6.2.3: EDNS advertises a UDP payload size, with a 512-octet minimum.
+    // RFC 6891 §§6.2.3–6.2.5: cap UDP Responses at requester size and responder capacity.
     usize::from(normalized_udp_size(
-        query.opt().map_or(512, |opt| opt.udp_payload_size()),
+        query.opt().map_or(512, Opt::response_udp_payload_size),
         // RFC 1035 §4.2.2: TCP response size is limited by the two-octet length prefix.
         protocol == Protocol::Tcp,
     ))

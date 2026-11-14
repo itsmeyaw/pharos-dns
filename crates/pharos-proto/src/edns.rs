@@ -105,6 +105,15 @@ impl<'a> Opt<'a> {
     pub const fn udp_payload_size(self) -> u16 {
         self.size
     }
+    /// The normalized UDP size available for this request's Response.
+    // RFC 6891 §§6.2.3–6.2.5: cap the requester size at responder capacity and a 512-octet minimum.
+    #[must_use]
+    pub fn response_udp_payload_size(self) -> u16 {
+        normalized_udp_size(
+            self.udp_payload_size().min(Self::RESPONSE_UDP_PAYLOAD_SIZE),
+            false,
+        )
+    }
     #[must_use]
     pub const fn extended_rcode(self) -> u8 {
         (self.ttl >> 24) as u8
@@ -164,10 +173,7 @@ impl<'a> Opt<'a> {
         let query_ecs = find_ecs_option(self.options.as_bytes());
         let mut source = existing.unwrap_or(self);
         // RFC 6891 §§6.2.3–6.2.5: cap the echoed requestor size at responder capacity.
-        source.size = normalized_udp_size(
-            self.udp_payload_size().min(Self::RESPONSE_UDP_PAYLOAD_SIZE),
-            false,
-        );
+        source.size = self.response_udp_payload_size();
         // RFC 6891 §6.1.3: responses carry version 0, the highest EDNS version implemented here.
         // RFC 9824 §5.1: preserve CO; clear other reserved flags and copy DO from the Query.
         source.ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
@@ -239,6 +245,7 @@ impl ResponseOpt<'_, '_> {
                 }
             }
             if !found_ecs {
+                // RFC 7871 §7.2.2: preserve Query ECS when the upstream Response omits it.
                 return query_ecs.take();
             }
             None

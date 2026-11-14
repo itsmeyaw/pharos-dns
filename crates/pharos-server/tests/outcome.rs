@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use pharos_proto::{Class, Message, MessageBuilder, NameRef, Rcode, Section, Type};
-use pharos_server::{Action, Error, Outcome, Protocol, finish_outcome};
+use pharos_server::{Action, Error, Outcome, Protocol, finish_outcome, response_limit};
 
 fn query(edns: bool) -> Vec<u8> {
     let mut wire = vec![
@@ -224,6 +224,14 @@ fn response_opt_echoes_client_payload_limit() {
     let message = Message::parse(&response).unwrap();
     assert!(response.len() <= 512);
     assert_eq!(message.opt().unwrap().udp_payload_size(), 512);
+}
+
+#[test]
+fn udp_response_limit_never_exceeds_server_capacity() {
+    let mut wire = query(true);
+    wire[22..24].copy_from_slice(&u16::MAX.to_be_bytes());
+    let query = Message::parse(&wire).unwrap();
+    assert_eq!(response_limit(query, Protocol::Udp), 4096);
 }
 
 #[test]
