@@ -162,6 +162,9 @@
 ## transfer
 
 - [transfer Plugin notes](../crates/pharos-plugins/src/transfer/README.md)
+- `to` accepts CIDR prefixes as a Pharos extension for incoming AXFR/IXFR ACLs. CIDR entries are not NOTIFY recipients; NOTIFY reports an error for them. Use explicit IP addresses for NOTIFY.
+- IXFR requires the Authority SOA owner and class to match the Question; mismatches return SERVFAIL. This is stricter than CoreDNS's parser (RFC 1995 §3).
+- IXFR serial ordering uses RFC 1982 §3.2, including wraparound. An equal or newer client serial gets one current SOA; CoreDNS's generic and Kubernetes transfer paths check equality only (RFC 1995 §2).
 
 ## root
 

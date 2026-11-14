@@ -1,5 +1,5 @@
 use super::Zone;
-use crate::transfer::{TransferRequest, serial_at_least};
+use crate::{serial::serial_at_least, transfer::TransferRequest};
 use pharos_proto::{MessageBuilder, NameRef, Section, Type};
 use pharos_server::{Error, Protocol, Stream};
 use std::sync::Arc;

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 #[test]
 fn ixfr_serial_order_uses_rfc1982_half_space() {
-    use super::serial_at_least;
+    use crate::serial::serial_at_least;
 
     assert!(serial_at_least(7, 7));
     assert!(serial_at_least(0, u32::MAX));
@@ -42,6 +42,24 @@ fn transfer_cidr_matches_ipv4_and_ipv6_prefixes() {
         0
     ));
     assert!(super::destination("192.0.2.0/33").is_none());
+}
+
+#[tokio::test]
+async fn notify_reports_cidr_destinations_as_unsupported() {
+    let zone: Name = "example.org.".parse().unwrap();
+    let transfer = Transfer {
+        zones: vec![TransferZone {
+            domains: vec![zone.clone()],
+            destinations: vec![Destination::Network {
+                address: "192.0.2.0".parse().unwrap(),
+                prefix: 24,
+            }],
+            source: None,
+        }],
+    };
+
+    let error = transfer.notify(&zone).await.unwrap_err();
+    assert!(error.to_string().contains("CIDR"));
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -124,15 +142,19 @@ async fn generated_chain_tries_transferers_in_order() {
 }
 
 #[test]
-fn ixfr_rejects_an_authority_soa_that_does_not_match_the_zone_and_class() {
+fn ixfr_validates_authority_soa_owner_and_class() {
     use pharos_proto::{Message, MessageBuilder, Section};
 
     // RFC 1995 §3: The Authority SOA identifies the Zone and class being transferred.
     let zone: Name = "example.org.".parse().unwrap();
-    let soa = [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    for (owner, class) in [
-        ("other.example.", Class::IN),
-        ("example.org.", Class::CH),
+    // RFC 1035 §3.3.13: SOA RDATA has two names followed by five 32-bit fields.
+    let soa_rdata = [
+        0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
+    ];
+    for (owner, class, accepted) in [
+        ("other.example.", Class::IN, false),
+        ("example.org.", Class::CH, false),
+        ("example.org.", Class::IN, true),
     ] {
         let owner: Name = owner.parse().unwrap();
         let mut wire = Vec::with_capacity(512);
@@ -151,7 +173,7 @@ fn ixfr_rejects_an_authority_soa_that_does_not_match_the_zone_and_class() {
                 Type::SOA,
                 class,
                 0,
-                &soa,
+                &soa_rdata,
             )
             .unwrap();
         let _ = builder.finish();
@@ -183,10 +205,13 @@ fn ixfr_rejects_an_authority_soa_that_does_not_match_the_zone_and_class() {
             calls: Arc::clone(&calls),
         };
 
-        assert_eq!(
-            transfer.process(&cx, Some(&provider)),
-            Some(Outcome::Unanswered(Rcode::SERVFAIL))
-        );
-        assert!(calls.lock().unwrap().is_empty());
+        let outcome = transfer.process(&cx, Some(&provider));
+        if accepted {
+            assert!(matches!(outcome, Some(Outcome::Stream(_))));
+            assert_eq!(&*calls.lock().unwrap(), &[1]);
+        } else {
+            assert_eq!(outcome, Some(Outcome::Unanswered(Rcode::SERVFAIL)));
+            assert!(calls.lock().unwrap().is_empty());
+        }
     }
 }

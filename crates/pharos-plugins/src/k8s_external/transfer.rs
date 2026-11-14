@@ -7,7 +7,10 @@ use std::{
 
 use super::{External, Zone};
 use crate::kubernetes::Kubernetes;
-use crate::transfer::{TransferRequest, Transferer};
+use crate::{
+    serial::serial_at_least,
+    transfer::{TransferRequest, Transferer},
+};
 use pharos_kubernetes::{
     object::{EndpointAddress, Service},
     store::Index,
@@ -574,11 +577,6 @@ where
         }
     }
     Ok(())
-}
-
-// RFC 1982 §3.2: compare serials in modulo-2^32 half-space order.
-fn serial_at_least(candidate: u32, current: u32) -> bool {
-    candidate.wrapping_sub(current) < (1 << 31)
 }
 
 // RFC 1995 §2: current IXFR and UDP IXFR return only the current SOA.

@@ -33,11 +33,6 @@ pub struct TransferRequest<'a> {
     pub qclass: Class,
 }
 
-// RFC 1982 §3.2: Equal or forward serials are within the modulo half-space.
-pub(crate) fn serial_at_least(candidate: u32, current: u32) -> bool {
-    candidate.wrapping_sub(current) < (1 << 31)
-}
-
 #[derive(Clone, Debug)]
 pub struct Transfer {
     pub(crate) zones: Vec<TransferZone>,
@@ -79,8 +74,16 @@ impl Transfer {
         let mut errors = Vec::new();
         // RFC 1996 §4.6: Send NOTIFY to each configured server destination.
         for destination in &rule.destinations {
-            let Destination::Address { host, port } = destination else {
-                continue;
+            let (host, port) = match destination {
+                Destination::Address { host, port } => (host, port),
+                Destination::All => continue,
+                Destination::Network { address, prefix } => {
+                    // RFC 1996 §2.1: A CIDR ACL does not name a NOTIFY recipient.
+                    errors.push(format!(
+                        "{address}/{prefix}: CIDR is not a NOTIFY destination"
+                    ));
+                    continue;
+                }
             };
             // RFC 5952 §6: Bracket IPv6 literals when combining them with port numbers.
             let endpoint = if host.contains(':') {
@@ -236,9 +239,7 @@ impl Transfer {
             .any(|destination| match destination {
                 Destination::All => true,
                 Destination::Address { host, .. } => host.as_bytes() == &client.bytes[..client.len],
-                Destination::Network { address, prefix } => {
-                    in_network(ip, *address, *prefix)
-                }
+                Destination::Network { address, prefix } => in_network(ip, *address, *prefix),
             });
         if !allowed {
             // RFC 1035 §4.1.1: REFUSED means policy prevents this transfer.

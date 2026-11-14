@@ -1,5 +1,5 @@
 use super::*;
-use crate::transfer::{TransferRequest, serial_at_least};
+use crate::{serial::serial_at_least, transfer::TransferRequest};
 use pharos_kubernetes::object::{Endpoints, Port};
 use pharos_proto::{FixedBuffer, Rdata};
 use pharos_server::{Error, Stream};
