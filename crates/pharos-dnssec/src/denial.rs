@@ -42,6 +42,7 @@ impl std::error::Error for DenialError {}
 pub fn type_bitmap(types: &[Type]) -> Result<Vec<u8>, DenialError> {
     let mut types = types.to_vec();
     // RFC 5155 §3.2.1: meta-types and QTYPEs cannot be asserted in a bitmap.
+    // RFC 9824 §7.1: NXNAME (128) is the only pseudo-type allowed in compact-denial bitmaps.
     if types
         .iter()
         .any(|t| matches!(t.0, 0 | 41 | 129..=255 | 65535))
@@ -88,6 +89,7 @@ impl Nsec {
         }
     }
 
+    // RFC 4034 §4.1.2: A set bit asserts that the RR type exists at the NSEC owner.
     /// Tests whether a type is asserted in this record's bitmap.
     #[must_use]
     pub fn bitmap_contains(&self, rtype: Type) -> bool {
@@ -122,6 +124,7 @@ fn zone_names(apex: &Name, names: &[ZoneName]) -> Result<BTreeMap<Name, Vec<Type
     Ok(owners)
 }
 
+// RFC 9824 §7.2: Precomputed NSEC chains contain only supplied zone owner names.
 /// Builds a circular NSEC chain from authoritative owner names in canonical order.
 ///
 /// Include the Apex's SOA and NS types and exclude glue and other non-authoritative data.
@@ -194,6 +197,7 @@ pub fn black_lie(
     }
     // RFC 4470 §3: synthetic NSEC spans must not cover existing names.
     let mut wire = qname.as_wire().to_vec();
+    // RFC 9824 §3.4: Append a zero octet to the first label for an unsigned referral span.
     if kind == BlackLieKind::Referral && !at_apex {
         // Append a zero octet to the first label for a minimal Referral span.
         let len = usize::from(wire[0]);
@@ -203,6 +207,7 @@ pub fn black_lie(
         wire[0] += 1;
         wire.insert(1 + len, 0);
     } else {
+        // RFC 4470 §4: A leading zero-octet label increments a DNS name.
         wire.splice(0..0, [1, 0]);
     }
     let next = NameRef::parse(&wire, 0)
@@ -217,6 +222,7 @@ pub fn black_lie(
 
 /// Computes the binary NSEC3 SHA-1 hash using canonical uncompressed name wire data.
 pub fn nsec3_hash(name: &Name, iterations: u16, salt: &[u8]) -> Result<[u8; 20], DenialError> {
+    // RFC 5155 §3.1.4: Salt Length is an unsigned octet, limiting salt to 255 octets.
     if salt.len() > 255 {
         return Err(DenialError::SaltTooLong);
     }
@@ -228,12 +234,14 @@ pub fn nsec3_hash(name: &Name, iterations: u16, salt: &[u8]) -> Result<[u8; 20],
         .collect::<Vec<_>>();
     let mut context = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
     context.update(&wire);
+    // RFC 5155 §4.1.5: Append salt octets after the original owner name before hashing.
     context.update(salt);
     let mut hash: [u8; 20] = context
         .finish()
         .as_ref()
         .try_into()
         .expect("SHA-1 is 20 octets");
+    // RFC 5155 §3.1.3: Iterations counts hashes after the initial hash.
     for _ in 0..iterations {
         let mut context = Context::new(&SHA1_FOR_LEGACY_USE_ONLY);
         context.update(&hash);
@@ -246,6 +254,7 @@ pub fn nsec3_hash(name: &Name, iterations: u16, salt: &[u8]) -> Result<[u8; 20],
 /// Encodes an NSEC3 SHA-1 digest as an unpadded base32hex label.
 #[must_use]
 pub fn nsec3_hash_label(hash: &[u8; 20]) -> String {
+    // RFC 4648 §§3.1,3.2,7: Encode complete 40-bit quanta without line feeds or padding.
     // RFC 5155 §3.3: hashed owner labels use unpadded base32 extended hex.
     const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
     let mut label = String::with_capacity(32);
@@ -276,8 +285,11 @@ impl Nsec3 {
     /// Borrows the typed RDATA from this record.
     #[must_use]
     pub fn rdata(&self) -> Rdata<'_> {
+        // RFC 5155 §3: NSEC3 RDATA identifies the hash algorithm, salt, and iterations.
         Rdata::Nsec3 {
+            // RFC 5155 §3.1.1: NSEC3 hash algorithm 1 selects SHA-1.
             hash_algorithm: 1,
+            // RFC 5155 §3.1.2: Constructed NSEC3 records leave all flags clear.
             flags: 0,
             iterations: self.iterations,
             salt: &self.salt,
@@ -319,12 +331,15 @@ pub fn nsec3_chain(
     for (original, mut types) in owners {
         // RFC 5155 §7.1: NSEC3 itself is never asserted in the original owner's bitmap.
         types.retain(|t| *t != Type::NSEC3);
+        // RFC 5155 §C.1: NSEC3 records in a complete set use the same salt and parameters.
         let hash = nsec3_hash(&original, iterations, salt)?;
+        // RFC 5155 §7.1: Prepend the hash label to the zone name for the NSEC3 owner.
         let owner_text = if apex.as_wire() == [0] {
             format!("{}.", nsec3_hash_label(&hash))
         } else {
             format!("{}.{}", nsec3_hash_label(&hash), apex)
         };
+        // RFC 5155 §10.1: Reject hashed owner names exceeding 255 octets.
         let owner = owner_text.parse().map_err(|_| DenialError::NameTooLong)?;
         records.push(Nsec3 {
             original,
@@ -333,6 +348,7 @@ pub fn nsec3_chain(
             next_hash: hash,
             iterations,
             salt: salt.to_vec(),
+            // RFC 5155 §3.1.8: The bitmap lists RR types at the original owner name.
             bitmap: type_bitmap(&types)?,
         });
     }

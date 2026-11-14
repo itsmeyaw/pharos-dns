@@ -44,8 +44,11 @@ pub struct SigningKey(Key);
 impl SigningKey {
     /// Use a parsed RSA private key with DNSSEC algorithm 8 or 10.
     pub fn from_rsa(algorithm: u8, key: RsaKeyPair) -> Result<Self, SignError> {
+        // RFC 8017 §B.1 and RFC 5702 §3: Algorithms 8 and 10 use SHA-256 and SHA-512.
         // RFC 5702 §3: algorithm 8 uses SHA-256 and algorithm 10 uses SHA-512.
+        // RFC 8017 §A.2.4: Algorithms 8 and 10 select SHA-256 and SHA-512 RSA identifiers.
         let encoding: &'static dyn signature::RsaEncoding = match algorithm {
+            // RFC 9904 §3: Support algorithm 8, required for DNSSEC signing.
             8 => &signature::RSA_PKCS1_SHA256,
             10 => &signature::RSA_PKCS1_SHA512,
             _ => return Err(SignError::UnsupportedAlgorithm(algorithm)),
@@ -57,7 +60,9 @@ impl SigningKey {
     pub fn from_ecdsa(algorithm: u8, key: EcdsaKeyPair) -> Result<Self, SignError> {
         // RFC 6605 §4: ECDSA signatures use the curve-specific fixed-width format.
         let expected = match algorithm {
+            // RFC 9904 §3: Support algorithm 13, required for DNSSEC signing.
             13 => &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            // RFC 9904 §3: Support algorithm 14, permitted for DNSSEC signing.
             14 => &signature::ECDSA_P384_SHA384_FIXED_SIGNING,
             _ => return Err(SignError::UnsupportedAlgorithm(algorithm)),
         };
@@ -78,12 +83,14 @@ impl SigningKey {
     /// unavailable because aws-lc-rs does not expose RSA/SHA-1 signing. RSA
     /// keys must be 2048–8192 bits, as required by aws-lc-rs.
     pub fn from_pkcs8(algorithm: u8, der: &[u8]) -> Result<Self, SignError> {
-        // RFC 5702 §3, RFC 6605 §4 and RFC 8080 §3: DNSSEC algorithm numbers.
+        // RFC 5702 §3, RFC 6605 §4 and RFC 8080 §5: DNSSEC algorithm numbers.
+        // RFC 6944 §2.3: RSAMD5 is not implemented for DNSSEC signing.
         match algorithm {
             8 | 10 => {
                 let key = RsaKeyPair::from_pkcs8(der).map_err(|_| SignError::InvalidKey)?;
                 Self::from_rsa(algorithm, key)
             }
+            // RFC 9904 §3: ECDSA P-256/SHA-256 signing (algorithm 13) is mandatory.
             13 | 14 => {
                 let encoding = match algorithm {
                     13 => &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
@@ -93,6 +100,7 @@ impl SigningKey {
                     EcdsaKeyPair::from_pkcs8(encoding, der).map_err(|_| SignError::InvalidKey)?;
                 Self::from_ecdsa(algorithm, key)
             }
+            // RFC 9904 §3: Support algorithm 15, recommended for DNSSEC signing.
             15 => Ok(Self::from_ed25519(
                 Ed25519KeyPair::from_pkcs8(der).map_err(|_| SignError::InvalidKey)?,
             )),
@@ -107,9 +115,13 @@ impl SigningKey {
     pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>, SignError> {
         let random = SystemRandom::new();
         match &self.0 {
+            // RFC 8017 §9.2: RSA PKCS#1 v1.5 encodes the hash as DER DigestInfo with FF padding.
             // RFC 5702 §3: RSA signatures use RSASSA-PKCS1-v1_5.
+            // RFC 8017 §8.2: RSASSA-PKCS1-v1_5 combines RSASP1 with EMSA-PKCS1-v1_5.
             Key::Rsa(key, encoding) => {
+                // RFC 8017 §4.1: RSA signatures use fixed-length integer-to-octet conversion.
                 let mut output = vec![0; key.public_modulus_len()];
+                // RFC 8017 §5.2.1: The RSA signature primitive uses the private key.
                 key.sign(*encoding, &random, data, &mut output)
                     .map_err(|_| SignError::SigningFailed)?;
                 Ok(output)
@@ -119,7 +131,8 @@ impl SigningKey {
                 .sign(&random, data)
                 .map(|signature| signature.as_ref().to_vec())
                 .map_err(|_| SignError::SigningFailed),
-            // RFC 8080 §3: the Ed25519 signature is encoded directly.
+            // RFC 8080 §4: The Ed25519 signature is encoded directly.
+            // RFC 8032 §5.1.6: Sign the complete message with Ed25519.
             Key::Ed25519(key) => Ok(key.sign(data).as_ref().to_vec()),
         }
     }

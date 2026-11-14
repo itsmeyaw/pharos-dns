@@ -66,6 +66,7 @@ fn invalid(message: &str) -> KeyError {
 
 fn refuse_sha1(algorithm: u8) -> Result<(), KeyError> {
     // RFC 9905 §2: RSASHA1 and RSASHA1-NSEC3-SHA1 MUST NOT be used to create RRSIG records.
+    // RFC 9904 §3: Algorithms 5 and 7 are not recommended for signing, so refuse them.
     if matches!(algorithm, 5 | 7) {
         return Err(KeyError(format!(
             "DNSSEC algorithm {algorithm} (SHA-1) must not be used for signing (RFC 9905 §2); \
@@ -122,11 +123,14 @@ pub fn parse_key_pair(public: &str, private: &str) -> Result<KeyPair, KeyError> 
         let value = fields
             .get(name)
             .ok_or_else(|| invalid("missing private-key field"))?;
+        // RFC 4648 §§3.3,4: Decode standard Base64 and reject non-alphabet input.
         STANDARD
             .decode(value)
             .map_err(|_| invalid("invalid private-key base64"))
     };
+    // RFC 5702 §5.1: Algorithms 8 and 10 support RSA/SHA-2 DNSKEY signing keys.
     let private = match algorithm {
+        // RFC 8017 §3.2: Load n, e, d and CRT values p, q, dP, dQ, and qInv.
         8 | 10 => {
             // RFC 8017 Appendix A.1.2: RSAPrivateKey is a sequence of nine integers.
             let mut body = vec![2, 1, 0];
@@ -159,12 +163,14 @@ pub fn parse_key_pair(public: &str, private: &str) -> Result<KeyPair, KeyError> 
             .map_err(|_| invalid("invalid or mismatched ECDSA key"))?;
             PrivateKey::Ecdsa(key)
         }
+        // RFC 8080 §5: Ed25519 uses DNSSEC algorithm number 15.
         15 => {
             // RFC 8032 §5.1.5: an Ed25519 private key seed is 32 octets.
             let seed = field("privatekey")?;
             if seed.len() != 32 {
                 return Err(invalid("invalid Ed25519 seed length"));
             }
+            // RFC 8032 §5.1.5: Derive the Ed25519 public key from the 32-octet private seed.
             PrivateKey::Ed25519(
                 signature::Ed25519KeyPair::from_seed_unchecked(&seed)
                     .map_err(|_| invalid("invalid Ed25519 private key"))?,
@@ -181,14 +187,18 @@ pub fn parse_pkcs8(public: &str, private: &[u8]) -> Result<KeyPair, KeyError> {
     refuse_sha1(public.algorithm)?;
     // RFC 7468 §10: a PKCS#8 PEM uses the PRIVATE KEY textual label.
     let decoded;
+    // RFC 7468 §3: PEM parsing accepts standard encapsulation and Base64 lines of any length.
     let private = if private.starts_with(b"-----BEGIN") {
+        // RFC 7468 §2: Malformed textual encodings return errors without panicking.
         let text = std::str::from_utf8(private)
             .map_err(|_| invalid("invalid PEM"))?
             .trim();
         let body = text
+            // RFC 7468 §2: PKCS#8 PEM boundaries use exact BEGIN and END delimiters.
             .strip_prefix("-----BEGIN PRIVATE KEY-----")
             .and_then(|s| s.strip_suffix("-----END PRIVATE KEY-----"))
             .ok_or_else(|| invalid("invalid PKCS#8 PEM"))?;
+        // RFC 4648 §§3.3,4 and RFC 7468 §2: Strip whitespace; reject invalid Base64 input.
         decoded = STANDARD
             .decode(body.split_whitespace().collect::<String>())
             .map_err(|_| invalid("invalid PEM base64"))?;
@@ -215,6 +225,7 @@ pub fn parse_pkcs8(public: &str, private: &[u8]) -> Result<KeyPair, KeyError> {
     validate_pair(public, private)
 }
 
+// RFC 6605 §3: DNSSEC ECDSA uses the P-256 and P-384 curves.
 fn ecdsa_algorithm(algorithm: u8) -> Result<&'static signature::EcdsaSigningAlgorithm, KeyError> {
     match algorithm {
         13 => Ok(&signature::ECDSA_P256_SHA256_FIXED_SIGNING),
@@ -225,10 +236,12 @@ fn ecdsa_algorithm(algorithm: u8) -> Result<&'static signature::EcdsaSigningAlgo
 
 fn validate_pair(public: Dnskey, private: PrivateKey) -> Result<KeyPair, KeyError> {
     let matches = match &private {
+        // RFC 8017 §3.1: Compare the DNSKEY (n, e) with the private key's public components.
         PrivateKey::Rsa(key) => rsa_public_der(&public.public_key)? == key.public_key().as_ref(),
         PrivateKey::Ecdsa(key) => {
             key.public_key().as_ref().strip_prefix(&[4]) == Some(public.public_key.as_slice())
         }
+        // RFC 8032 §5.1.2: Compare the Ed25519 public key as its 32-octet point encoding.
         PrivateKey::Ed25519(key) => key.public_key().as_ref() == public.public_key,
     };
     if !matches {
@@ -242,6 +255,7 @@ pub fn parse_dnskey(input: &str) -> Result<Dnskey, KeyError> {
     // shortcut: only standalone DNSKEY records are supported; switch to the #46 zone parser when available.
     let mut text = String::new();
     for line in input.lines() {
+        // RFC 1035 §5.1: A semicolon starts a master-file comment.
         text.push_str(line.split(';').next().unwrap_or(""));
         text.push(' ');
     }
@@ -267,6 +281,7 @@ pub fn parse_dnskey(input: &str) -> Result<Dnskey, KeyError> {
     if !(1..=3).contains(&index) || tokens.len() < index + 5 {
         return Err(invalid("invalid DNSKEY record"));
     }
+    // RFC 1035 §5.1: An RR has an owner, optional TTL and class, then type and RDATA.
     let owner = tokens[0]
         .parse()
         .map_err(|_| invalid("invalid DNSKEY owner"))?;
@@ -285,6 +300,7 @@ pub fn parse_dnskey(input: &str) -> Result<Dnskey, KeyError> {
             return Err(invalid("invalid DNSKEY header"));
         }
     }
+    // RFC 4034 §2.2: DNSKEY flags are represented as an unsigned decimal integer.
     let flags = tokens[index + 1]
         .parse()
         .map_err(|_| invalid("invalid DNSKEY flags"))?;
@@ -298,6 +314,7 @@ pub fn parse_dnskey(input: &str) -> Result<Dnskey, KeyError> {
     if protocol != 3 {
         return Err(invalid("DNSKEY protocol must be 3"));
     }
+    // RFC 4648 §§3.3,4 and RFC 4034 §2.1.4: Join tokens; reject invalid Base64 input.
     let public_key = STANDARD
         .decode(tokens[index + 4..].concat())
         .map_err(|_| invalid("invalid DNSKEY base64"))?;
@@ -330,6 +347,7 @@ fn rsa_public_der(public: &[u8]) -> Result<Vec<u8>, KeyError> {
     if length == 0 || end >= public.len() {
         return Err(invalid("invalid RSA DNSKEY"));
     }
+    // RFC 8017 §A.1.1: RSAPublicKey DER encodes modulus followed by publicExponent.
     let mut body = der_integer(&public[end..])?;
     body.extend(der_integer(&public[start..end])?);
     Ok(der(0x30, &body))

@@ -65,6 +65,7 @@ pub fn canonical_rdata(data: &Rdata<'_>) -> Result<Vec<u8>, CanonicalError> {
         Rdata::A(addr) => out.extend_from_slice(&addr.octets()),
         Rdata::Aaaa(addr) => out.extend_from_slice(&addr.octets()),
         // RFC 4034 §6.2: canonical DNAME targets are lowercased.
+        // RFC 6672 §2.5: DNAME targets are downcased for DNSSEC validation.
         Rdata::Ns(name) | Rdata::Cname(name) | Rdata::Dname(name) | Rdata::Ptr(name) => {
             write_name(&mut out, name, true)
         }
@@ -91,6 +92,7 @@ pub fn canonical_rdata(data: &Rdata<'_>) -> Result<Vec<u8>, CanonicalError> {
             }
         }
         Rdata::Txt(bytes) => out.extend_from_slice(bytes),
+        // RFC 6840 §5.1: HINFO character strings contain no names and are not case-folded.
         Rdata::Hinfo { cpu, os } => {
             string(&mut out, cpu)?;
             string(&mut out, os)?;
@@ -100,6 +102,7 @@ pub fn canonical_rdata(data: &Rdata<'_>) -> Result<Vec<u8>, CanonicalError> {
             string(&mut out, tag)?;
             out.extend_from_slice(value);
         }
+        // RFC 7553 §4.5: URI RDATA preserves Priority, Weight, and Target octets.
         Rdata::Uri {
             priority,
             weight,
@@ -233,6 +236,7 @@ pub fn canonical_rdata(data: &Rdata<'_>) -> Result<Vec<u8>, CanonicalError> {
             out.extend_from_slice(&iterations.to_be_bytes());
             string(&mut out, salt)?;
         }
+        // RFC 6698 §2.1: TLSA RDATA preserves three fields followed by association data.
         Rdata::Tlsa {
             usage,
             selector,
@@ -292,6 +296,7 @@ pub fn canonical_rdata(data: &Rdata<'_>) -> Result<Vec<u8>, CanonicalError> {
         }
         // shortcut: A6 and legacy name-bearing types need typed proto support before signing.
         Rdata::Unknown(Type(38), _) => return Err(CanonicalError::Rdata),
+        // RFC 3597 §7: Other RR types retain embedded-name case in canonical RDATA.
         Rdata::Unknown(_, bytes) => out.extend_from_slice(bytes),
     }
     if out.len() > usize::from(u16::MAX) {
@@ -326,6 +331,7 @@ fn write_rrsig_prefix(
         out.extend_from_slice(&value.to_be_bytes());
     }
     out.extend_from_slice(&key_tag.to_be_bytes());
+    // RFC 6840 §5.1: Canonical RRSIG signer names are lowercase.
     write_name(out, signer, true);
 }
 
@@ -348,6 +354,7 @@ pub fn canonical_rr(
 ) -> Result<Vec<u8>, CanonicalError> {
     let rdata = canonical_rdata(data)?;
     let mut name = Vec::new();
+    // RFC 3597 §7: Lowercase the canonical owner name for every RR type.
     write_name(&mut name, owner, true);
     let mut out = Vec::new();
     write_rr(&mut out, &name, data.rtype(), class, original_ttl, &rdata);
@@ -376,11 +383,13 @@ pub fn signed_data(
     };
     let first = records.first().ok_or(CanonicalError::Rrset)?;
     let count = first.owner.labels().count();
+    // RFC 4034 §3.1.3: Labels must not exceed the RRSIG owner's label count.
     if usize::from(labels) > count {
         return Err(CanonicalError::Rrsig);
     }
     let mut owner = Vec::new();
     // RFC 4035 §5.3.2: a smaller Labels value reconstructs the wildcard owner.
+    // RFC 4034 §6.2: Canonicalize wildcard owners in their original unexpanded form.
     if usize::from(labels) < count {
         owner.extend_from_slice(&[1, b'*']);
         for label in first.owner.labels().skip(count - usize::from(labels)) {
@@ -401,6 +410,7 @@ pub fn signed_data(
         }
         rdatas.push(canonical_rdata(&record.data)?);
     }
+    // RFC 3597 §7: Sort canonical RDATA octets and remove duplicate records.
     // RFC 4034 §6.3: order by canonical RDATA and discard duplicates.
     rdatas.sort_unstable();
     rdatas.dedup();
