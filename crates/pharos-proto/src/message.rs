@@ -220,33 +220,65 @@ impl<'a> Message<'a> {
             return Err(MessageError::Truncated);
         }
         // RFC 1035 §4.1.1: the four header counts describe the following sections.
-        let counts = [
+        let mut counts = [
             read_u16(wire, 4)?,
             read_u16(wire, 6)?,
             read_u16(wire, 8)?,
             read_u16(wire, 10)?,
         ];
+        let opcode = Opcode(((u16::from_be_bytes([wire[2], wire[3]]) >> 11) & 15) as u8);
+        let notify = opcode == Opcode::NOTIFY;
         let mut starts = [0; 4];
         let mut offset = HEADER_LEN;
         let mut has_opt = false;
-        for section in 0..4 {
+        'sections: for section in 0..4 {
             starts[section] = offset;
-            for _ in 0..counts[section] {
+            let wire_count = counts[section];
+            if notify && section == 2 {
+                // RFC 1996 §3.9: ignore Authority records after finding Additional's boundary.
+                counts[section] = 0;
+            }
+            for _ in 0..wire_count {
                 offset = if section == 0 {
                     question(wire, offset)?.1
                 } else {
-                    let (rr, next) = record(wire, offset)?;
+                    let (rr, next) = match record(wire, offset) {
+                        Ok(record) => record,
+                        Err(_) if notify && section >= 2 => {
+                            // RFC 1996 §3.9: malformed ignored data cannot reject a NOTIFY.
+                            counts[section] = 0;
+                            if section == 2 {
+                                counts[3] = 0;
+                            }
+                            break 'sections;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let sig0 =
+                        section == 3 && rr.rtype == Type::SIG && rr.rdata.starts_with(&[0, 0]);
                     // RFC 6891 §6.1.1: OPT appears at most once in the additional section.
                     // RFC 6891 §6.1.2: the OPT owner is the root and its RDATA holds options.
-                    if rr.rtype == Type::OPT {
+                    if rr.rtype == Type::OPT && !(notify && section == 2) {
                         if section != 3
                             || has_opt
                             || rr.name.labels().next().is_some()
                             || EdnsOptions::parse(rr.rdata).is_err()
                         {
+                            if notify && section == 3 {
+                                counts[3] = 0;
+                                break;
+                            }
                             return Err(MessageError::InvalidOpt);
                         }
                         has_opt = true;
+                    }
+                    // RFC 6891 §6.1.1: SIG(0) precedes OPT in Additional.
+                    if sig0 && has_opt {
+                        if notify {
+                            counts[3] = 0;
+                            break;
+                        }
+                        return Err(MessageError::InvalidOpt);
                     }
                     next
                 };

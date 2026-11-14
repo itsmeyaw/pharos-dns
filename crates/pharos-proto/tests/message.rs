@@ -119,6 +119,37 @@ fn hostile_counts_and_compression_are_rejected() {
 }
 
 #[test]
+fn sig0_precedes_opt_and_notify_ignores_trailing_sections() {
+    use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
+    let name: Name = ".".parse().unwrap();
+    let root = NameRef::parse(name.as_wire(), 0).unwrap();
+    let mut sig0_then_opt = Vec::new();
+    let mut builder = MessageBuilder::new(&mut sig0_then_opt, 512, 1, 0).unwrap();
+    builder
+        .record(Section::Additional, root, Type::SIG, Class::IN, 0, &[0, 0])
+        .unwrap();
+    builder
+        .record(Section::Additional, root, Type::OPT, Class(1232), 0, &[])
+        .unwrap();
+    let sig0_then_opt = builder.finish();
+    assert!(Message::parse(sig0_then_opt).is_ok());
+
+    let mut opt_then_sig0 = Vec::new();
+    let mut builder = MessageBuilder::new(&mut opt_then_sig0, 512, 1, 0).unwrap();
+    builder
+        .record(Section::Additional, root, Type::OPT, Class(1232), 0, &[])
+        .unwrap();
+    builder
+        .record(Section::Additional, root, Type::SIG, Class::IN, 0, &[0, 0])
+        .unwrap();
+    let opt_then_sig0 = builder.finish();
+    assert!(Message::parse(opt_then_sig0).is_err());
+
+    let notify = b"\0\x01\x20\0\0\x01\0\0\0\x01\0\x01\x01a\0\0\x06\0\x01\xff";
+    assert_eq!(Message::parse(notify).unwrap().authority_count(), 0);
+}
+
+#[test]
 fn reads_flags_counts_and_record_offsets() {
     let wire = b"\xab\xcd\xff\xff\x00\x01\x00\x01\x00\x01\x00\x01\x01x\0\x00\x01\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x78\x00\x04\x7f\x00\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x01\x00\x00\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00";
     let message = Message::parse(wire).unwrap();
@@ -147,7 +178,7 @@ fn reads_flags_counts_and_record_offsets() {
 }
 
 #[test]
-fn rejects_compression_bombs() {
+fn accepts_backward_pointer_chains_over_255_hops() {
     let mut wire = vec![0; 12];
     wire[7] = 2; // Answer count
     wire.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 0, 0, 2, 0]); // root, RR header, 512-byte RDATA
@@ -159,7 +190,8 @@ fn rejects_compression_bombs() {
     let target = 23 + 2 * 255;
     wire.extend_from_slice(&[0xc0 | (target >> 8) as u8, target as u8]);
     wire.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
-    assert!(Message::parse(&wire).is_err());
+    let message = Message::parse(&wire).unwrap();
+    assert_eq!(message.answers().next().unwrap().name.labels().count(), 0);
 }
 
 proptest::proptest! {
