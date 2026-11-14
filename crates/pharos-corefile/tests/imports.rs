@@ -101,3 +101,12 @@ fn import_paths_are_cleaned_before_opening() {
         dir.join("shared").to_string_lossy()
     );
 }
+
+#[test]
+fn rejects_import_globs_with_multiple_wildcards_or_brackets() {
+    let dir = fixture_dir();
+    let corefile = dir.join("Corefile").to_string_lossy().into_owned();
+    for pattern in ["import a**.conf", "import a??.conf", "import [ab].conf"] {
+        assert!(parse(&corefile, pattern).is_err(), "{pattern}");
+    }
+}

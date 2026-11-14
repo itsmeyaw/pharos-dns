@@ -356,11 +356,12 @@ impl Parser<'_> {
                 clean_path(&base.parent().unwrap_or(Path::new("/")).join(&pattern))
             };
             let glob_pattern = path.to_string_lossy();
+            // ADR 0003 / coredns/caddy v1.1.4 caddyfile/parse.go doImport: preserve glob limits.
             if glob_pattern.matches('*').count() > 1
                 || glob_pattern.matches('?').count() > 1
                 || (glob_pattern.contains('[') && glob_pattern.contains(']'))
             {
-                return Err(self.error("too many import wildcards"));
+                return Err(self.error("import glob exceeds CoreDNS wildcard limits"));
             }
             let mut translated = String::new();
             let mut chars = glob_pattern.chars();

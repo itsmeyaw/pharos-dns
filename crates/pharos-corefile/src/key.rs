@@ -32,12 +32,14 @@ pub fn normalize_key(key: &str) -> Result<Vec<ServerBlockKey>, String> {
                 .map(|port| (host, port.to_string()))
         })
         .unwrap_or((host, String::new()));
+    // RFC 1035 §2.3.4 / ADR 0003: preserve CoreDNS v1.15.0's 255-byte presentation cap.
     if host.len() > 255 || !valid_domain(host) {
         return Err(format!("invalid Domain: {host}"));
     }
 
     let domains = match parse_cidr(host) {
         Some((ip, prefix)) => {
+            // RFC 4291 §2.3 / ADR 0003: preserve CoreDNS v1.15.0's IPv6 CIDR rejection.
             if host.starts_with(':') || (host.starts_with('0') && host.contains(':')) {
                 return Err(format!("invalid CIDR {host}"));
             }
@@ -60,6 +62,7 @@ pub fn normalize_key(key: &str) -> Result<Vec<ServerBlockKey>, String> {
     domains
         .into_iter()
         .map(|domain| {
+            // RFC 1035 §2.3.4 / ADR 0003: CoreDNS also caps the qualified presentation.
             if domain.len() > 255 || !valid_domain(&domain) {
                 return Err(format!("invalid Domain: {domain}"));
             }
@@ -73,7 +76,7 @@ pub fn normalize_key(key: &str) -> Result<Vec<ServerBlockKey>, String> {
 }
 
 fn go_lowercase(c: char) -> char {
-    // Go's Unicode tables predate these case mappings in Rust's tables.
+    // RFC 4343 §3 / ADR 0003: match CoreDNS Go 1.26.0 ToLower; recheck on Go upgrade.
     match c {
         '\u{1c89}'
         | '\u{a7cb}'
@@ -112,48 +115,58 @@ fn valid_domain(name: &str) -> bool {
     }
     let qualified = fqdn(name);
     let bytes = qualified.as_bytes();
-    let (mut i, mut begin, mut offset) = (0, 0, 0);
-    let (mut was_dot, mut escape) = (false, false);
+    let (mut i, mut label_len, mut name_len) = (0, 0, 0);
+    let mut was_dot = false;
     while i < bytes.len() {
         match bytes[i] {
             b'\\' => {
-                escape = !escape;
-                if offset + 1 > 256 {
-                    return false;
-                }
                 let digits = bytes
                     .get(i + 1..i + 4)
                     .is_some_and(|digits| digits.iter().all(u8::is_ascii_digit));
-                let escaped = if digits { 3 } else { 1 };
-                i += escaped;
-                begin += escaped;
+                if digits {
+                    // RFC 1035 §5.1: decimal escapes must fit in one octet.
+                    let value = u16::from(bytes[i + 1] - b'0') * 100
+                        + u16::from(bytes[i + 2] - b'0') * 10
+                        + u16::from(bytes[i + 3] - b'0');
+                    if value > u16::from(u8::MAX) {
+                        return false;
+                    }
+                    label_len += 1;
+                    i += 4;
+                } else if i + 1 < bytes.len() {
+                    label_len += 1;
+                    i += 2;
+                } else {
+                    return false;
+                }
                 was_dot = false;
             }
             b'.' => {
-                escape = false;
                 if (i == 0 && bytes.len() > 1) || was_dot {
                     return false;
                 }
-                let label_len = i - begin;
-                // RFC 1035 §2.3.4: DNS labels are limited to 63 octets.
-                if label_len >= 64 {
+                name_len += 1 + label_len;
+                // RFC 1035 §2.3.4: leave one octet for the root label.
+                if name_len > 254 {
                     return false;
                 }
-                offset += 1 + label_len;
-                if offset > 256 {
-                    return false;
-                }
-                begin = i + 1;
+                label_len = 0;
                 was_dot = true;
+                i += 1;
             }
             _ => {
-                escape = false;
+                label_len += 1;
                 was_dot = false;
+                i += 1;
             }
         }
-        i += 1;
+        // RFC 1035 §2.3.4: each DNS label is at most 63 wire octets.
+        if label_len > 63 {
+            return false;
+        }
     }
-    !escape
+    // RFC 1035 §5.1: an escaped dot is label data, not the terminating root label.
+    was_dot
 }
 
 fn parse_cidr(host: &str) -> Option<(IpAddr, u32)> {
@@ -206,7 +219,7 @@ fn reverse_domains(ip: IpAddr, prefix: u32) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerBlockKey, normalize_key};
+    use super::{ServerBlockKey, go_lowercase, normalize_key};
 
     fn key(transport: &str, domain: &str, port: &str) -> ServerBlockKey {
         ServerBlockKey {
@@ -291,12 +304,38 @@ mod tests {
         let expanded = normalize_key("2001:db8::/29:853").unwrap();
         assert_eq!(expanded.len(), 8);
         assert_eq!(expanded[7], key("dns", "f.b.d.0.1.0.0.2.ip6.arpa.", "853"));
-        assert!(normalize_key("::1/128").is_err());
-        assert!(normalize_key("0:1::/32").is_err());
+        assert_eq!(
+            normalize_key("::1/128").unwrap_err(),
+            "invalid CIDR ::1/128"
+        );
+        assert_eq!(
+            normalize_key("0:1::/32").unwrap_err(),
+            "invalid CIDR 0:1::/32"
+        );
         assert_eq!(
             normalize_key("2001:db8::/0").unwrap(),
             [key("dns", "ip6.arpa.", "53")]
         );
+    }
+
+    #[test]
+    fn go_lowercase_preserves_all_coredns_unicode_exclusions() {
+        let mut codepoints = vec![
+            0x1c89, 0xa7cb, 0xa7cc, 0xa7ce, 0xa7d2, 0xa7d4, 0xa7da, 0xa7dc,
+        ];
+        codepoints.extend(0x10d50..=0x10d65);
+        codepoints.extend(0x16ea0..=0x16eb8);
+        assert_eq!(codepoints.len(), 55);
+
+        for codepoint in codepoints {
+            let character = char::from_u32(codepoint).unwrap();
+            assert_ne!(
+                character.to_lowercase().next(),
+                Some(character),
+                "U+{codepoint:04X}"
+            );
+            assert_eq!(go_lowercase(character), character, "U+{codepoint:04X}");
+        }
     }
 
     #[test]
@@ -328,8 +367,53 @@ mod tests {
         );
         assert_eq!(normalize_key("A\\.").unwrap(), [key("dns", "a\\..", "53")]);
         assert_eq!(
-            normalize_key("İᲉ\u{10d50}\u{16ea0}").unwrap(),
-            [key("dns", "iᲉ\u{10d50}\u{16ea0}.", "53")]
+            normalize_key("AİᲉ\u{10d50}\u{16ea0}").unwrap(),
+            [key("dns", "aiᲉ\u{10d50}\u{16ea0}.", "53")]
         );
+    }
+
+    #[test]
+    fn enforces_corefile_presentation_cap_and_wire_limits() {
+        let escaped = |lengths: &[usize]| {
+            lengths
+                .iter()
+                .map(|length| "\\065".repeat(*length))
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        let escaped_label = escaped(&[63]);
+        assert_eq!(
+            normalize_key(&escaped_label).unwrap()[0].domain,
+            format!("{escaped_label}.")
+        );
+        assert!(normalize_key(r"\255").is_ok());
+        assert!(normalize_key(r"\999").is_err());
+        assert_eq!(normalize_key(r"a\\").unwrap(), [key("dns", r"a\\.", "53")]);
+
+        let max_wire_length = [
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(61),
+        ]
+        .join(".");
+        assert_eq!(
+            normalize_key(&max_wire_length).unwrap()[0].domain,
+            format!("{max_wire_length}.")
+        );
+        let overlong_wire_name = [
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(63),
+            "a".repeat(62),
+        ]
+        .join(".");
+        assert!(normalize_key(&overlong_wire_name).is_err());
+
+        let wire_257_name = vec!["a".repeat(63); 4].join(".");
+        assert!(normalize_key(&wire_257_name).is_err());
+
+        // ADR 0003: CoreDNS rejects long presentation strings before counting wire octets.
+        assert!(normalize_key(&escaped(&[63, 63, 63, 61])).is_err());
     }
 }

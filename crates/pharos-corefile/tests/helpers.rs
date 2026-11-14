@@ -1,4 +1,6 @@
-use pharos_corefile::{Fallthrough, normalize_domain, origins_from_args_or_server_block};
+use pharos_corefile::{
+    Fallthrough, normalize_domain, normalize_key, origins_from_args_or_server_block,
+};
 
 #[test]
 fn origins_prefer_arguments_and_expand_networks() {
@@ -49,7 +51,6 @@ fn coredns_normalize_exact_fixtures() {
             "10.0.0.0/15",
             vec!["0.10.in-addr.arpa.", "1.10.in-addr.arpa."],
         ),
-        ("::fFFF:B:F/115", vec![]),
         (
             "2001:db8::/112",
             vec!["0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."],
@@ -61,6 +62,11 @@ fn coredns_normalize_exact_fixtures() {
     ] {
         assert_eq!(normalize_domain(host), expected, "{host}");
     }
+    // CoreDNS v1.15.0 plugin/normalize_test.go: TestHostNormalizeExact rejects this CIDR.
+    assert_eq!(
+        normalize_key("::fFFF:B:F/115").unwrap_err(),
+        "invalid CIDR ::fFFF:B:F/115"
+    );
     for (prefix, count) in [(29, 8), (30, 4), (113, 8), (114, 4), (115, 2)] {
         let domains = normalize_domain(&format!("2001:db8::/{prefix}"));
         assert_eq!(domains.len(), count);
