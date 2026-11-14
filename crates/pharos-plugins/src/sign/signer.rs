@@ -128,8 +128,9 @@ pub(super) fn sign_with_owner(
     let soa_ttl = soa.ttl;
     // RFC 1035 §3.3.13: SOA serial is the first of five trailing 32-bit values.
     let serial_offset = soa.rdata.len().checked_sub(20).ok_or("invalid SOA")?;
-    // RFC 4033 §8.2: A time-derived SOA serial must advance when it is not newer.
-    let serial = if now <= previous_serial {
+    // RFC 1982 §3.2; RFC 4033 §8.2: Half-range and equal serials are not newer.
+    let delta = now.wrapping_sub(previous_serial);
+    let serial = if delta == 0 || delta >= (1_u32 << 31) {
         previous_serial.wrapping_add(1)
     } else {
         now
@@ -220,7 +221,7 @@ pub(super) fn sign_with_owner(
             owners.entry(rr.owner.clone()).or_default().push(rr.rtype);
         }
     }
-    // RFC 4592 §4.7; RFC 4034 §4: Empty non-terminals are authoritative NSEC owners.
+    // RFC 4035 §2.3; RFC 4592 §§2.2.2,4.9: Empty non-terminals are authoritative NSEC owners.
     for rr in &records {
         if !authoritative(&rr.owner) {
             continue;
@@ -434,12 +435,12 @@ mod tests {
         assert_eq!(cds.rdata[3], 2);
     }
 
-    // RFC 4033 §8.2: Time-based signing must advance a non-increasing SOA serial.
+    // RFC 1982 §3.2; RFC 4033 §8.2: Time-based signing must advance non-newer serials.
     #[test]
     fn soa_serial_advances_when_unix_time_is_not_newer() {
         let path = std::env::temp_dir().join(format!("pharos-sign-serial-{}", std::process::id()));
         let apex: Name = "miek.nl.".parse().unwrap();
-        for (previous, now) in [(100, 100), (100, 99)] {
+        for (previous, now, expected) in [(100, 100, 101), (100, 99, 101), (u32::MAX - 1, 1, 1)] {
             std::fs::write(
                 &path,
                 format!(
@@ -451,7 +452,7 @@ mod tests {
             let soa = records.iter().find(|rr| rr.rtype == Type::SOA).unwrap();
             assert!(matches!(
                 Rdata::parse(Type::SOA, &soa.rdata).unwrap(),
-                Rdata::Soa { serial: 101, .. }
+                Rdata::Soa { serial, .. } if serial == expected
             ));
         }
         std::fs::remove_file(path).unwrap();
@@ -525,30 +526,33 @@ mod tests {
         assert!(!nsecs.is_empty());
     }
 
+    // RFC 4592 §4.7; RFC 4034 §4.1.1: Empty non-terminals need NSEC records.
     #[test]
-    fn nsec_chain_includes_empty_nonterminal_wildcard_owner() {
+    fn nsec_chain_includes_wildcard_and_plain_empty_nonterminals() {
         let path =
             std::env::temp_dir().join(format!("pharos-sign-wildcard-ent-{}", std::process::id()));
         std::fs::write(
             &path,
-            "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n@ IN NS ns.\nleaf.* IN A 192.0.2.1\n",
+            "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n@ IN NS ns.\nleaf.* IN A 192.0.2.1\na.b IN A 192.0.2.2\n",
         )
         .unwrap();
         let apex: Name = "miek.nl.".parse().unwrap();
         let records = sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).unwrap();
         std::fs::remove_file(path).unwrap();
-        let wildcard: Name = "*.miek.nl.".parse().unwrap();
-        let nsec = records
-            .iter()
-            .find(|rr| rr.owner == wildcard && rr.rtype == Type::NSEC)
-            .unwrap();
-        let Rdata::Nsec { bitmap, .. } = Rdata::parse(Type::NSEC, &nsec.rdata).unwrap() else {
-            panic!("expected NSEC")
-        };
-        assert_eq!(
-            bitmap,
-            pharos_dnssec::denial::type_bitmap(&[Type::NSEC, Type::RRSIG]).unwrap()
-        );
+        for owner in ["*.miek.nl.", "b.miek.nl."] {
+            let owner: Name = owner.parse().unwrap();
+            let nsec = records
+                .iter()
+                .find(|rr| rr.owner == owner && rr.rtype == Type::NSEC)
+                .unwrap();
+            let Rdata::Nsec { bitmap, .. } = Rdata::parse(Type::NSEC, &nsec.rdata).unwrap() else {
+                panic!("expected NSEC")
+            };
+            assert_eq!(
+                bitmap,
+                pharos_dnssec::denial::type_bitmap(&[Type::NSEC, Type::RRSIG]).unwrap()
+            );
+        }
     }
 
     #[test]
