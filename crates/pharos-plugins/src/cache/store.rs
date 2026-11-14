@@ -49,7 +49,7 @@ struct Item {
     negative: bool,
     failure: bool,
     wire: Box<[u8]>,
-    ttl_offsets: Box<[usize]>,
+    rr_ttls: Box<[(usize, u32)]>,
     ttl: u32,
     stored: Instant,
     hits: i64,
@@ -207,20 +207,6 @@ impl Store {
             output.reserve(item.wire.len().saturating_sub(output.len()));
         }
         // RFC 8767 §4: Set the response TTL for served stale records.
-        let ttl = if stale {
-            // RFC 8767 §4: Stale records always carry a positive TTL.
-            config.stale_ttl.as_secs().max(1) as u32
-        } else if config.keepttl {
-            if item.negative {
-                // RFC 2308 §6: Negative TTLs decrease with cache age even under keepttl.
-                item.ttl - elapsed as u32
-            } else {
-                item.ttl
-            }
-        } else {
-            // RFC 2308 §6: decrement the TTL of cached negative answers by their cache age.
-            item.ttl - elapsed as u32
-        };
         output.clear();
         // RFC 5155 §9.1: Return complete responses with required NSEC3 records.
         output.extend_from_slice(&item.wire);
@@ -242,7 +228,16 @@ impl Store {
         }
         // RFC 2308 §5: Reused NXDOMAIN entries echo the current QTYPE.
         output[position + 1..position + 3].copy_from_slice(&question.qtype.0.to_be_bytes());
-        for &offset in &item.ttl_offsets {
+        for &(offset, record_ttl) in &item.rr_ttls {
+            let ttl = if stale {
+                // RFC 8767 §4: Stale records always carry a positive TTL.
+                config.stale_ttl.as_secs().max(1) as u32
+            } else if config.keepttl && !item.negative {
+                record_ttl
+            } else {
+                // RFC 2308 §6: Age each cached RRset TTL by cache time.
+                record_ttl - elapsed as u32
+            };
             output[offset..offset + 4].copy_from_slice(&ttl.to_be_bytes());
         }
         if !stale && config.prefetch_amount > 0 {
@@ -334,7 +329,7 @@ impl Item {
         if question.qtype == Type::TKEY || super::has_record_type(response, Type::TKEY) {
             return None;
         }
-        // shortcut: compressed Questions and non-final OPTs need safe re-encoding before caching.
+        // shortcut: compressed Questions need safe re-encoding before caching.
         let raw_len: usize = question
             .name
             .labels()
@@ -344,37 +339,20 @@ impl Item {
         if question.name.wire_len() != raw_len {
             return None;
         }
-        let mut end = response
-            .answers()
-            .chain(response.authorities())
-            .chain(response.additionals())
+        let end = response
+            .authorities()
             .last()
+            .or_else(|| response.answers().last())
             .map_or(12 + raw_len + 4, |rr| rr.rdata_offset + rr.rdata.len());
-        // RFC 6891 §6.2.1: Cached Responses omit the OPT record.
-        if let Some(opt) = response.additionals().find(|rr| rr.rtype == Type::OPT) {
-            let opt_end = opt.rdata_offset + opt.rdata.len();
-            if response.additionals().last()?.rdata_offset != opt.rdata_offset {
-                return None;
-            }
-            end = opt.ttl_offset - 4 - opt.name.wire_len();
-            if opt_end > response.as_wire().len() {
-                return None;
-            }
-        }
-        // RFC 2308 §6: cached negative responses retain SOA and denial records.
-        let ttl_offsets: Box<[_]> = response
+        // RFC 2181 §5.4.1: Cache only Answer and Authority data, never untrusted Additional data.
+        let rr_ttls: Box<[_]> = response
             .answers()
             .chain(response.authorities())
-            .chain(response.additionals())
-            .filter(|rr| rr.rtype != Type::OPT)
-            .map(|rr| rr.ttl_offset)
+            .map(|rr| (rr.ttl_offset, rr.ttl))
             .collect();
-        // RFC 7871 §7.3.1: Store the response wire, keeping each RRSIG with the RRset it signs.
+        // RFC 2181 §5.4.1: Drop Additional records by ending cached wire after Authority.
         let mut wire = response.as_wire()[..end].to_vec();
-        if response.opt().is_some() {
-            let count = response.additional_count() - 1;
-            wire[10..12].copy_from_slice(&count.to_be_bytes());
-        }
+        wire[10..12].copy_from_slice(&0_u16.to_be_bytes());
         Some(Self {
             name: question.name.to_name(),
             qtype: question.qtype,
@@ -383,7 +361,7 @@ impl Item {
             negative: response.rcode() == Rcode::NXDOMAIN || !super::answers_question(response),
             failure: super::is_resolution_failure(response.rcode()),
             wire: wire.into_boxed_slice(),
-            ttl_offsets,
+            rr_ttls,
             ttl,
             stored: Instant::now(),
             hits: 0,

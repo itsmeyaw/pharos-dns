@@ -4,13 +4,15 @@ pub(crate) mod setup;
 mod store;
 
 use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
     net::SocketAddr,
     sync::{Arc, Mutex, OnceLock, Weak},
     time::{Instant, SystemTime},
 };
 
 use pharos_proto::{
-    EdnsOption, Message, MessageBuilder, MessageMut, Name, NameRef, Opcode, Opt, Rcode, Rdata,
+    Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Opcode, Opt, Rcode, Rdata,
     ResponseType, Type,
 };
 use pharos_server::{Context, Next, Outcome, Plugin};
@@ -666,28 +668,45 @@ impl Cache {
         let minimum = minimum.as_secs().min(u64::from(u32::MAX)) as u32;
         // RFC 8767 §4: Cached TTLs must not exceed the recommended one-week maximum.
         let maximum = cached_maximum(maximum.as_secs());
-        let mut ttl = maximum;
-        let mut signature_remaining = u32::MAX;
-        let mut found = false;
-        // RFC 4035 §4.5: use the shortest RR TTL so the cache entry expires together.
-        for record in response
+        let rrset_minima = rrset_minimum_ttls(&response);
+        let malformed_non_authoritative_rrset =
+            !response.aa() && has_mixed_rrset_ttl(&response, &rrset_minima);
+        // RFC 4033 §8.1: Keep cached data within every RRSIG's validity interval.
+        let signature_remaining = response
             .answers()
             .chain(response.authorities())
-            .chain(response.additionals())
-        {
-            if record.rtype == Type::OPT {
-                continue;
-            }
+            .filter(|record| record.rtype == Type::RRSIG)
+            .filter_map(|record| match record.data() {
+                Ok(Rdata::Rrsig { expiration, .. }) => Some(signature_ttl(expiration, now as u32)),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(u32::MAX);
+        let mut ttl = maximum;
+        let mut rr_ttls = Vec::new();
+        let mut found = false;
+        // RFC 2181 §5.2: Normalize TTLs to each RRset's minimum, not the whole Response's.
+        for record in response.answers().chain(response.authorities()) {
+            let record_ttl = if failure {
+                self.config.fail_ttl.as_secs().min(u64::from(u32::MAX)) as u32
+            } else {
+                cap_ttl_at_signature(
+                    normalized_rrset_ttl(
+                        record,
+                        rrset_minima
+                            .get(&RrsetKey::new(record))
+                            .copied()
+                            .unwrap_or(record.ttl),
+                        denial,
+                        minimum,
+                        maximum,
+                    ),
+                    signature_remaining,
+                )
+            };
             found = true;
-            ttl = ttl.min(record.ttl);
-            // RFC 2308 §4: bound the negative-response TTL by SOA.MINIMUM.
-            if denial && let Ok(Rdata::Soa { minimum, .. }) = record.data() {
-                ttl = ttl.min(minimum);
-            }
-            if let Ok(Rdata::Rrsig { expiration, .. }) = record.data() {
-                signature_remaining =
-                    signature_remaining.min(signature_ttl(expiration, now as u32));
-            }
+            ttl = ttl.min(record_ttl);
+            rr_ttls.push((record.ttl_offset, record_ttl));
         }
         if !found
             || !matches!(
@@ -700,9 +719,6 @@ impl Cache {
         {
             ttl = 5;
         }
-        ttl = bound_ttl(ttl, denial, minimum, maximum);
-        // RFC 4033 §8.1: Signature validity bounds cache lifetime after all TTL floors.
-        ttl = cap_ttl_at_signature(ttl, signature_remaining);
         if failure {
             // RFC 9520 §3.2: Cache SERVFAIL and REFUSED with the failure backoff.
             ttl = self
@@ -711,14 +727,24 @@ impl Cache {
         } else if response_type == ResponseType::ServerError {
             ttl = self.config.fail_ttl.as_secs() as u32;
         }
+        if failure || response_type == ResponseType::ServerError {
+            for (_, record_ttl) in &mut rr_ttls {
+                *record_ttl = ttl;
+            }
+        }
         let matches = response.questions().next().is_some_and(|q| {
             q.name == question.name && q.qtype == question.qtype && q.qclass == question.qclass
         });
-        // RFC 1035 §7.4: reject truncated responses that may contain incomplete RRsets.
+        // RFC 1035 §7.4: Reject truncated responses that may contain incomplete RRsets.
+        // RFC 2181 §5.4.1: Cache only complete Responses with query-relevant Answer/Authority data.
+        let relevant =
+            response_records_relevant(question.name, question.qtype, question.qclass, &response);
         let eligible = !response.tc()
             && ttl > 0
             && (!incomplete || has_soa)
             && !no_data_without_soa
+            && relevant
+            && !malformed_non_authoritative_rrset
             && (matches!(
                 response_type,
                 ResponseType::Positive
@@ -743,8 +769,10 @@ impl Cache {
         let cacheable = cacheable
             && !has_explicit_wildcard(question.name)
             && !disabled.iter().any(|zone| contains(question.name, zone));
-        if let Ok(mut mutable) = MessageMut::parse(cx.response) {
-            mutable.rewrite_ttls(|_| ttl);
+        if !malformed_non_authoritative_rrset {
+            for (offset, record_ttl) in rr_ttls {
+                cx.response[offset..offset + 4].copy_from_slice(&record_ttl.to_be_bytes());
+            }
         }
         // RFC 1035 §7.4: retain complete responses for later matching queries.
         if cacheable && let Ok(response) = Message::parse(cx.response) {
@@ -817,6 +845,185 @@ fn has_explicit_wildcard(name: NameRef<'_>) -> bool {
 fn is_soa_less_nodata(message: &Message<'_>, has_soa: bool, has_ns: bool) -> bool {
     // RFC 2308 §5: Do not cache NODATA without an SOA in the authority section.
     message.rcode() == Rcode::NOERROR && message.answer_count() == 0 && !has_soa && !has_ns
+}
+
+#[derive(Clone, Copy)]
+struct RrsetKey<'a> {
+    name: NameRef<'a>,
+    rtype: Type,
+    class: Class,
+}
+
+impl<'a> RrsetKey<'a> {
+    fn new(record: pharos_proto::Record<'a>) -> Self {
+        RrsetKey {
+            name: record.name,
+            rtype: record.rtype,
+            class: record.class,
+        }
+    }
+}
+
+impl PartialEq for RrsetKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.rtype == other.rtype && self.class == other.class
+    }
+}
+
+impl Eq for RrsetKey<'_> {}
+
+impl Hash for RrsetKey<'_> {
+    // RFC 1035 §3.1: Hash owner names case-insensitively to match RRset identity.
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.rtype.0.hash(state);
+        self.class.0.hash(state);
+        for label in self.name.labels() {
+            state.write_u8(label.len() as u8);
+            for byte in label {
+                state.write_u8(byte.to_ascii_lowercase());
+            }
+        }
+        state.write_u8(0);
+    }
+}
+
+fn rrset_minimum_ttls<'a>(message: &Message<'a>) -> HashMap<RrsetKey<'a>, u32> {
+    let mut minima = HashMap::new();
+    for record in message.answers().chain(message.authorities()) {
+        minima
+            .entry(RrsetKey::new(record))
+            .and_modify(|minimum: &mut u32| *minimum = (*minimum).min(record.ttl))
+            .or_insert(record.ttl);
+    }
+    minima
+}
+
+// RFC 2181 §5.2: Reject mixed-TTL RRsets from non-authoritative responses.
+fn has_mixed_rrset_ttl<'a>(message: &Message<'a>, minima: &HashMap<RrsetKey<'a>, u32>) -> bool {
+    message
+        .answers()
+        .chain(message.authorities())
+        .any(|record| minima.get(&RrsetKey::new(record)) != Some(&record.ttl))
+}
+
+fn normalized_rrset_ttl(
+    record: pharos_proto::Record<'_>,
+    rrset_minimum: u32,
+    denial: bool,
+    minimum: u32,
+    maximum: u32,
+) -> u32 {
+    let mut ttl = rrset_minimum;
+    if denial
+        && record.rtype == Type::SOA
+        && let Ok(Rdata::Soa { minimum, .. }) = record.data()
+    {
+        // RFC 2308 §4: Bound negative SOA lifetime by SOA.MINIMUM.
+        ttl = ttl.min(minimum);
+    }
+    bound_ttl(ttl, denial, minimum, maximum)
+}
+
+// RFC 5452 §6: Reject response data outside the queried name's bailiwick.
+fn response_records_relevant(
+    qname: NameRef<'_>,
+    qtype: Type,
+    qclass: Class,
+    response: &Message<'_>,
+) -> bool {
+    let mut chain = vec![qname.to_name()];
+    if qtype != Type::CNAME {
+        loop {
+            let Some(current_name) = chain.last() else {
+                return false;
+            };
+            let Ok(current) = NameRef::parse(current_name.as_wire(), 0) else {
+                return false;
+            };
+            let mut target: Option<Name> = None;
+            for record in response
+                .answers()
+                .filter(|record| record.rtype == Type::CNAME && record.name == current)
+            {
+                if qclass != Class::ANY && record.class != qclass {
+                    continue;
+                }
+                let Ok(Rdata::Cname(alias)) = record.data() else {
+                    return false;
+                };
+                let alias = alias.to_name();
+                if target.as_ref().is_some_and(|existing| existing != &alias) {
+                    return false;
+                }
+                target = Some(alias);
+            }
+            let Some(target) = target else {
+                break;
+            };
+            if chain.contains(&target) {
+                return false;
+            }
+            chain.push(target);
+        }
+    }
+    for record in response.answers() {
+        if qclass != Class::ANY && record.class != qclass {
+            return false;
+        }
+        let Some(index) = chain.iter().position(|name| {
+            NameRef::parse(name.as_wire(), 0).is_ok_and(|name| name == record.name)
+        }) else {
+            return false;
+        };
+        let has_target = index + 1 < chain.len();
+        let relevant = match record.rtype {
+            Type::CNAME => has_target || (qtype == Type::CNAME && index == 0),
+            Type::RRSIG => match record.data() {
+                Ok(Rdata::Rrsig { type_covered, .. }) => {
+                    (type_covered == Type::CNAME
+                        && (has_target || (qtype == Type::CNAME && index == 0)))
+                        || (qtype == Type::ANY
+                            || (type_covered == qtype
+                                && !has_target
+                                && response.rcode() != Rcode::NXDOMAIN))
+                }
+                _ => false,
+            },
+            rtype => {
+                qtype == Type::ANY
+                    || (rtype == qtype && !has_target && response.rcode() != Rcode::NXDOMAIN)
+            }
+        };
+        if !relevant {
+            return false;
+        }
+    }
+    for record in response.authorities() {
+        if qclass != Class::ANY && record.class != qclass {
+            return false;
+        }
+        let in_domain = chain.iter().any(|name| {
+            NameRef::parse(name.as_wire(), 0).is_ok_and(|name| contains_ref(name, record.name))
+        });
+        if !in_domain {
+            return false;
+        }
+        let relevant_type = match record.rtype {
+            Type::NS | Type::SOA | Type::DS | Type::NSEC | Type::NSEC3 => true,
+            Type::RRSIG => matches!(
+                record.data(),
+                Ok(Rdata::Rrsig {
+                    type_covered: Type::NS | Type::SOA | Type::DS | Type::NSEC | Type::NSEC3,
+                    ..
+                })
+            ),
+            _ => false,
+        };
+        if !relevant_type {
+            return false;
+        }
+    }
+    true
 }
 
 fn bound_ttl(ttl: u32, denial: bool, minimum: u32, maximum: u32) -> u32 {
@@ -898,6 +1105,10 @@ fn answers_question(message: &Message<'_>) -> bool {
 
 fn contains(name: NameRef<'_>, domain: &Name) -> bool {
     let domain = NameRef::parse(domain.as_wire(), 0).expect("configured Domain");
+    contains_ref(name, domain)
+}
+
+fn contains_ref(name: NameRef<'_>, domain: NameRef<'_>) -> bool {
     let count = name.labels().count();
     let suffix = domain.labels().count();
     count >= suffix

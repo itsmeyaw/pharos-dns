@@ -9,9 +9,10 @@
 - `denial_min_ttl` is accepted for CoreDNS syntax compatibility but ignored: RFC 2308 §3 does not permit raising a negative TTL above its SOA-derived lifetime.
 - NXDOMAIN entries omit QTYPE from their key as RFC 2308 §5 requires; SOA-less NODATA, explicit wildcard QNAMEs, TKEY transactions, and ECS-bearing queries or responses are not cached.
 - Negative max TTL is capped at the positive max, and `keepttl` still ages negative TTLs, following RFC 2308 §§5–6.
+- Cache entries retain only query-relevant Answer/Authority RRsets; Additional records are omitted from cache hits.
 - Stale responses use a positive 30-second default TTL, following RFC 8767 §4.
 - ECS bypass is conservative: even a scope-0 ECS response is not cached, and ECS queries do not use ordinary cached answers; network-prefix scope matching is not implemented (RFC 7871 §7.3).
-- Known cache gaps: failures are not keyed by upstream address (RFC 2308 §7.1), data trust is not ranked (RFC 2181 §5.4.1), and Additional glue is not bailiwick-filtered (RFC 5452 §6).
+- Known cache gaps: failures are not keyed by upstream address (RFC 2308 §7.1), full data trust ranking is not implemented (RFC 2181 §5.4.1), and setup A/AAAA lookups do not validate owner names (RFC 5452 §6; `forward` plugin).
 - Cache hits may precede authoritative file data because plugin order places cache before file; deployments needing zone-file precedence must avoid overlapping cached names (RFC 2181 §5.4.1).
 - AD from upstream is retained for AD/DO clients without a configured secure-channel trust policy (RFC 4035 §4.6).
 - NXDOMAIN Responses with CNAME-only Answers are negative Responses under RFC 6604 §3 and use denial caching.
@@ -24,7 +25,8 @@
 - On a hit, Pharos rewrites the Question's case in the stored wire Message; record names compressed against it therefore acquire the current Query's case, whereas CoreDNS rebuilds records from the cached Response.
 - If a UDP caller's Response buffer is too small for a cached Message, Pharos falls through to Next instead of growing it on the hit.
 - TSIG-signed Queries and Responses bypass caching so that ID, flags and TTL rewrites cannot invalidate their signatures.
-- SERVFAIL, REFUSED, and internal resolution errors use the `servfail` TTL (default 5 seconds); repeated failures back off exponentially to 5 minutes, and expired failures are not served stale (RFC 9520 §3.2). `servfail 0` disables this cache, and sub-second values truncate to zero for CoreDNS compatibility.
+- SERVFAIL, REFUSED, and internal resolution errors use the `servfail` TTL (default 5 seconds, minimum 1 second); repeated failures back off exponentially to 5 minutes, and expired failures are not served stale (RFC 9520 §3.2). `servfail 0` and sub-second values are raised to one second.
+- `disable denial` retains CoreDNS behavior and can leave positive caching enabled, despite RFC 2308 §8.
 - REFUSED responses are cached as resolution failures per RFC 9520 §§2.2 and 3.2; this differs from the previous CoreDNS-compatible behavior (ADR 0002).
 - Known gap: failure entries use QNAME, QTYPE, QCLASS, DO, and CD but omit upstream server address, contrary to RFC 2308 §7.1.
 - Wildcard source Metadata is not saved with cache entries.

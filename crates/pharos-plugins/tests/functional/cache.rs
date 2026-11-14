@@ -15,6 +15,113 @@ struct Backend<'a> {
     cname: bool,
 }
 
+struct PolicyResponse<'a> {
+    calls: &'a AtomicUsize,
+    authoritative: bool,
+    cname: bool,
+    mixed_ttl: bool,
+    unrelated_answer: bool,
+    unrelated_authority: bool,
+    unrelated_additional: bool,
+}
+
+impl Next for PolicyResponse<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let target: Name = "target.example.".parse().unwrap();
+        let unrelated: Name = "unrelated.other.".parse().unwrap();
+        let flags = 0x8080 | (u16::from(self.authoritative) * 0x0400);
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), flags).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        if self.cname {
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::CNAME,
+                    question.qclass,
+                    30,
+                    target.as_wire(),
+                )
+                .unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    target.as_name_ref(),
+                    Type::A,
+                    question.qclass,
+                    10,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+        } else {
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::A,
+                    question.qclass,
+                    30,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+            if self.mixed_ttl {
+                builder
+                    .record(
+                        Section::Answer,
+                        question.name,
+                        Type::A,
+                        question.qclass,
+                        10,
+                        &[192, 0, 2, 2],
+                    )
+                    .unwrap();
+            }
+        }
+        if self.unrelated_answer {
+            builder
+                .record(
+                    Section::Answer,
+                    unrelated.as_name_ref(),
+                    Type::A,
+                    question.qclass,
+                    30,
+                    &[192, 0, 2, 3],
+                )
+                .unwrap();
+        }
+        if self.unrelated_authority {
+            builder
+                .record(
+                    Section::Authority,
+                    unrelated.as_name_ref(),
+                    Type::SOA,
+                    question.qclass,
+                    30,
+                    b"\0\0\0\0\0\x01\0\0\0\x02\0\0\0\x03\0\0\0\x04\0\0\0\x03",
+                )
+                .unwrap();
+        }
+        if self.unrelated_additional {
+            builder
+                .record(
+                    Section::Additional,
+                    unrelated.as_name_ref(),
+                    Type::A,
+                    question.qclass,
+                    30,
+                    &[192, 0, 2, 4],
+                )
+                .unwrap();
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
 struct Unanswered<'a>(&'a AtomicUsize);
 impl Next for Unanswered<'_> {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
@@ -732,7 +839,7 @@ async fn keepttl_retains_the_inserted_ttl() {
 }
 
 #[tokio::test]
-async fn caches_servfail_and_can_disable_it() {
+async fn servfail_zero_uses_one_second_minimum() {
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
     let chain = cache();
     let calls = AtomicUsize::new(0);
@@ -744,7 +851,7 @@ async fn caches_servfail_and_can_disable_it() {
     let calls = AtomicUsize::new(0);
     let _ = query(&chain, wire, &calls, 2, false).await;
     let _ = query(&chain, wire, &calls, 2, false).await;
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -860,6 +967,140 @@ async fn incomplete_positive_without_soa_is_not_cached() {
     let _ = query(&chain, wire, &calls, 0, false).await;
     let _ = query(&chain, wire, &calls, 0, false).await;
     assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn cached_rrsets_keep_their_own_minimum_ttls() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: true,
+        cname: true,
+        mixed_ttl: false,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        unrelated_additional: false,
+    };
+
+    let _ = query_with(&chain, &query, next()).await;
+    let (_, hit) = query_with(&chain, &query, next()).await;
+    let hit = Message::parse(&hit).unwrap();
+    let mut answers = hit.answers();
+    assert_eq!(answers.next().unwrap().ttl, 30);
+    assert_eq!(answers.next().unwrap().ttl, 10);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn non_authoritative_rrsets_with_mismatched_ttls_are_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: false,
+        cname: false,
+        mixed_ttl: true,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        unrelated_additional: false,
+    };
+
+    let _ = query_with(&chain, &query, next()).await;
+    let _ = query_with(&chain, &query, next()).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn authoritative_mixed_ttl_rrset_uses_its_minimum_ttl() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: true,
+        cname: false,
+        mixed_ttl: true,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        unrelated_additional: false,
+    };
+
+    let _ = query_with(&chain, &query, next()).await;
+    let (_, hit) = query_with(&chain, &query, next()).await;
+    let answers = Message::parse(&hit).unwrap();
+    assert_eq!(
+        answers
+            .answers()
+            .map(|record| record.ttl)
+            .collect::<Vec<_>>(),
+        [10, 10]
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn response_with_unrelated_answer_records_is_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: false,
+        cname: false,
+        mixed_ttl: false,
+        unrelated_answer: true,
+        unrelated_authority: false,
+        unrelated_additional: false,
+    };
+
+    let _ = query_with(&chain, &query, next()).await;
+    let _ = query_with(&chain, &query, next()).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn response_with_out_of_domain_authority_records_is_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: false,
+        cname: false,
+        mixed_ttl: false,
+        unrelated_answer: false,
+        unrelated_authority: true,
+        unrelated_additional: false,
+    };
+
+    let _ = query_with(&chain, &query, next()).await;
+    let _ = query_with(&chain, &query, next()).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn cached_response_drops_additional_records() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: false,
+        cname: false,
+        mixed_ttl: false,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        unrelated_additional: true,
+    };
+
+    let (_, miss) = query_with(&chain, &query, next()).await;
+    let (_, hit) = query_with(&chain, &query, next()).await;
+    assert_eq!(Message::parse(&miss).unwrap().additional_count(), 1);
+    assert_eq!(Message::parse(&hit).unwrap().additional_count(), 0);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 async fn query(

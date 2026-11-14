@@ -207,6 +207,8 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, server_keys: &[&str]) -> Result<Con
                     return Err(cursor.arg_err());
                 }
                 config.fail_ttl = nonnegative_duration(cursor, &args[0])?;
+                // RFC 9520 §3.2: Failure entries must live for at least one second.
+                config.fail_ttl = config.fail_ttl.max(Duration::from_secs(1));
                 // RFC 9520 §3.2: resolution failures must not be cached for over 5 minutes.
                 if config.fail_ttl > Duration::from_secs(300) {
                     return Err(cursor.error("servfail TTL exceeds 5 minutes"));
@@ -516,6 +518,14 @@ mod tests {
                 parse_text(&format!("cache {{\n{value}\n}}")).is_err(),
                 "accepted {value}"
             );
+        }
+    }
+
+    #[test]
+    fn servfail_ttl_obeys_one_second_minimum() {
+        for option in ["servfail 0", "servfail 0ms", "servfail 500ms"] {
+            let config = parse_text(&format!("cache {{\n{option}\n}}")).unwrap();
+            assert_eq!(config.fail_ttl, Duration::from_secs(1), "{option}");
         }
     }
 
