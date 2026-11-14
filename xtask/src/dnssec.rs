@@ -148,7 +148,7 @@ mod tests {
             }],
         )
         .unwrap();
-        let signer = SigningKey::from_ed25519(private);
+        let signer = SigningKey::from_pkcs8(15, pkcs8.as_ref()).unwrap();
         let signature = signer.sign(&input).unwrap();
         if let Rdata::Rrsig {
             signature: bytes, ..

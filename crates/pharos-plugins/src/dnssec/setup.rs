@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use pharos_corefile::{BlockContext, Cursor, Error};
-use pharos_dnssec::keys::KeyPair;
+use pharos_dnssec::{keys::KeyPair, sign::SigningKey};
 use pharos_proto::Name;
 
 use super::Dnssec;
@@ -86,6 +86,17 @@ pub(crate) fn setup(
             return Err(cursor.error("DNSKEY owner must match a configured DNSSEC zone"));
         }
     }
+    let signers = keys
+        .iter()
+        .map(|key| {
+            let der = key
+                .private
+                .to_pkcs8_der()
+                .map_err(|error| cursor.error(error.to_string()))?;
+            SigningKey::from_pkcs8(key.public.algorithm, &der)
+                .map_err(|error| cursor.error(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     // RFC 4034 §2.1: DNSKEY RDATA is flags, protocol, algorithm, then the public key.
     let public = keys
         .iter()
@@ -99,6 +110,7 @@ pub(crate) fn setup(
     block.config.dnssec = Some(Dnssec {
         zones,
         keys,
+        signers,
         public,
         // CoreDNS plugin/pkg/cache: 256 shards each have at least four entries.
         capacity: ((capacity / 256).max(4) as usize) * 256,
@@ -133,6 +145,35 @@ mod tests {
         assert_eq!(dnssec.zones.len(), 2);
         assert_eq!(dnssec.keys.len(), 1);
         assert_eq!(dnssec.keys[0].public.owner.to_string(), "miek.nl.");
+    }
+
+    #[test]
+    fn rejects_key_without_zone_key_bit_and_key_outside_configured_zone() {
+        let source = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+        );
+        let path =
+            std::env::temp_dir().join(format!("pharos-dnssec-invalid-key-{}", std::process::id()));
+        let key = std::fs::read_to_string(format!("{source}.key")).unwrap();
+        let private = std::fs::read_to_string(format!("{source}.private")).unwrap();
+        std::fs::write(format!("{}.private", path.display()), private).unwrap();
+        for (zone, key_text, expected) in [
+            ("miek.nl", key.replace("257 3 13", "1 3 13"), "Zone Key"),
+            ("example.org", key.clone(), "configured DNSSEC zone"),
+        ] {
+            std::fs::write(format!("{}.key", path.display()), key_text).unwrap();
+            let text = format!(
+                "{zone} {{\n dnssec {{\n key file {}\n }}\n}}",
+                path.display()
+            );
+            let result =
+                configure::<crate::Chain>(&parse("Corefile", &text).unwrap(), crate::directives());
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        std::fs::remove_file(format!("{}.key", path.display())).unwrap();
+        std::fs::remove_file(format!("{}.private", path.display())).unwrap();
     }
 
     #[test]

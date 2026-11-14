@@ -4,7 +4,6 @@ use pharos_dnssec::{
     canonical::{CanonicalRecord, signed_data},
     denial::{BlackLieKind, black_lie},
     digest::key_tag,
-    sign::SigningKey,
 };
 use pharos_proto::{
     Message, MessageBuilder, NameRef, Rdata, Record, ResponseType, Section, Type, typify_response,
@@ -107,7 +106,7 @@ impl Dnssec {
         let soa = message.authorities().find(|rr| rr.rtype == Type::SOA);
         if denial && soa.is_none() {
             // RFC 2308 §3: A negative answer without SOA cannot be returned as a valid denial.
-            return Err(Error::InvalidQuery);
+            return Err(Error::Internal);
         }
         let referral = kind == ResponseType::Referral && message.authority_count() > 0;
         let make_lie =
@@ -175,8 +174,8 @@ impl Dnssec {
         }
         let mut signed_sets = 0;
         let mut attempted_sets = 0;
+        // RFC 1035 §4.1.1: TC marks truncation of required message content.
         let mut required_tc = message.flags() & 0x0200 != 0;
-        let mut tc_before_additional = false;
         let mut additional_data_omitted = false;
         let mut additional_signature_omitted = false;
         // RFC 4035 §3.1.4: Referral signatures cover DS, not delegation NS or glue.
@@ -199,11 +198,8 @@ impl Dnssec {
             (Section::Authority, message.authorities()),
             (Section::Additional, message.additionals()),
         ] {
-            if section == Section::Additional {
-                tc_before_additional = required_tc;
-            }
             let records: Vec<_> = records.collect();
-            // RFC 4035 §3.1.1: Put denial proofs and their signatures in Authority, not Answer.
+            // RFC 4035 §3.1.3.1: Put denial proofs and their signatures in Authority, not Answer.
             if section == Section::Authority
                 && let Some(lie) = &lie
             {
@@ -217,9 +213,8 @@ impl Dnssec {
                 required_tc |= !added;
                 let (signed, omitted) =
                     self.sign_set(&mut builder, section, &[rr], zone, now, rr.ttl)?;
-                required_tc |= omitted && section != Section::Additional;
+                required_tc |= omitted;
                 signed_sets += usize::from(signed);
-                additional_signature_omitted |= section == Section::Additional && omitted;
                 attempted_sets += 1;
             }
             if section == Section::Additional {
@@ -363,22 +358,10 @@ impl Dnssec {
                             |writer| data.write(writer),
                         )
                         .map_err(Error::Build)?;
-                    if section == Section::Additional && !added {
-                        if member.rtype == Type::RRSIG {
-                            additional_signature_omitted = true;
-                        } else {
-                            additional_data_omitted = true;
-                        }
-                    }
-                    if section != Section::Additional && !added {
+                    if !added {
                         required_tc = true;
                     }
                     rrset_complete &= added;
-                }
-                if section == Section::Additional
-                    && (additional_data_omitted || additional_signature_omitted)
-                {
-                    break;
                 }
                 // RFC 4035 §2.2: RRSIG, OPT, and TSIG are not signed as zone data.
                 if rrset_complete
@@ -395,21 +378,20 @@ impl Dnssec {
                         rrset_ttl(&message, rr, None),
                     )?;
                     signed_sets += usize::from(signed);
-                    additional_signature_omitted |= section == Section::Additional && omitted;
-                    required_tc |= omitted && section != Section::Additional;
+                    required_tc |= omitted;
                     attempted_sets += 1;
-                }
-                if section == Section::Additional && additional_signature_omitted {
-                    break;
                 }
             }
         }
-        let clear_additional_tc =
-            additional_signature_omitted && !tc_before_additional && !additional_data_omitted;
+        let clear_additional_tc = !required_tc;
         let _ = builder.finish();
         if clear_additional_tc {
-            // RFC 4035 §3.1.1: Additional RRSIG omission alone does not justify TC.
+            // RFC 2181 §9: Omission of optional Additional data must not set TC.
             cx.response[2] &= !0x02;
+        }
+        if signed_sets > 0 {
+            // RFC 4035 §3.1.6: Clear CD on a signed authoritative response.
+            cx.response[3] &= !0x10;
         }
         if let Some(metrics) = metrics {
             metrics.miss(attempted_sets);
@@ -457,6 +439,7 @@ impl Dnssec {
         let apex_dnskey = first.rtype == Type::DNSKEY && first.name == apex;
         // RFC 6840 §5.11: Track KSK/ZSK roles per algorithm without query-path allocation.
         let mut roles_by_algorithm = [0u8; 16];
+        // RFC 9904 §3: Key loading rejects unsupported algorithm numbers before this table is used.
         for key in self.keys.iter().filter(|key| key.public.owner == *zone) {
             if let Some(roles) = roles_by_algorithm.get_mut(usize::from(key.public.algorithm)) {
                 *roles |= match key.public.flags & 257 {
@@ -476,21 +459,27 @@ impl Dnssec {
                 })
             })
             .collect::<Result<_, Error>>()?;
-        let keys = self.keys.iter().zip(&self.public).filter(|(key, _)| {
-            // RFC 8080 §8: A zone's private key must not sign another zone's data.
-            if key.public.owner != *zone {
-                return false;
-            }
-            let roles = roles_by_algorithm
-                .get(usize::from(key.public.algorithm))
-                .copied()
-                .unwrap_or_default();
-            // RFC 6781 §3.1: In split-key signing, KSKs sign only the apex DNSKEY RRset.
-            roles != 3 || (key.public.flags & 257 == if apex_dnskey { 257 } else { 256 })
-        });
+        let keys = self
+            .keys
+            .iter()
+            .zip(&self.public)
+            .zip(&self.signers)
+            .filter(|((key, _), _)| {
+                // RFC 8080 §8: A zone's private key must not sign another zone's data.
+                if key.public.owner != *zone {
+                    return false;
+                }
+                let roles = roles_by_algorithm
+                    .get(usize::from(key.public.algorithm))
+                    .copied()
+                    .unwrap_or_default();
+                // RFC 6781 §3.1: In split-key signing, KSKs sign only the apex DNSKEY RRset.
+                roles != 3 || (key.public.flags & 257 == if apex_dnskey { 257 } else { 256 })
+            });
         let mut signed = false;
         let mut signature_omitted = false;
-        for (key, public) in keys {
+        let mut signature_bytes = [0u8; 512];
+        for ((key, public), prepared_signer) in keys {
             // RFC 4034 §3.1.3: a leading wildcard label is not counted in Labels.
             let labels = first.name.labels().count()
                 - usize::from(first.name.labels().next() == Some(b"*".as_slice()));
@@ -509,19 +498,15 @@ impl Dnssec {
                 signature: &[],
             };
             let data = signed_data(&sig, &canonical).map_err(|_| Error::InvalidQuery)?;
-            // RFC 3007 §4.3: Sign RRSIGs using online zone private keys.
-            let der = key
-                .private
-                .to_pkcs8_der()
+            // RFC 4034 §3.1.8.1: Sign canonical RRSIG data with the prepared zone key.
+            let signature_len = prepared_signer
+                .sign_into(&data, &mut signature_bytes)
                 .map_err(|_| Error::InvalidQuery)?;
-            let key = SigningKey::from_pkcs8(key.public.algorithm, &der)
-                .map_err(|_| Error::InvalidQuery)?;
-            let bytes = key.sign(&data).map_err(|_| Error::InvalidQuery)?;
             if let Rdata::Rrsig {
                 ref mut signature, ..
             } = sig
             {
-                *signature = &bytes;
+                *signature = &signature_bytes[..signature_len];
             }
             // RFC 4034 §3: the RRSIG RR's TTL matches the covered RRset's TTL.
             let included = builder

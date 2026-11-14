@@ -4,6 +4,70 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
 use pharos_server::{Action, Handler, Protocol};
 
+#[test]
+fn prepared_ecdsa_and_ed25519_signers_do_not_allocate() {
+    use aws_lc_rs::{
+        rand::SystemRandom,
+        signature::{self, EcdsaKeyPair},
+    };
+
+    if crate::run_isolated("dnssec::cases::prepared_ecdsa_and_ed25519_signers_do_not_allocate") {
+        return;
+    }
+    let _serial = crate::serial();
+    let base = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+    );
+    let ed25519 = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/miek-ed25519-ksk"
+    );
+    let mut signers: Vec<_> = [base, ed25519]
+        .into_iter()
+        .map(|base| {
+            let key = pharos_dnssec::keys::KeyPair::from_files(
+                format!("{base}.key"),
+                format!("{base}.private"),
+            )
+            .unwrap();
+            let der = key.private.to_pkcs8_der().unwrap();
+            (
+                pharos_dnssec::sign::SigningKey::from_pkcs8(key.public.algorithm, &der).unwrap(),
+                64,
+            )
+        })
+        .collect();
+    let p384_der = EcdsaKeyPair::generate_pkcs8(
+        &signature::ECDSA_P384_SHA384_FIXED_SIGNING,
+        &SystemRandom::new(),
+    )
+    .unwrap();
+    signers.push((
+        pharos_dnssec::sign::SigningKey::from_pkcs8(14, p384_der.as_ref()).unwrap(),
+        96,
+    ));
+    let mut signature = [0; 512];
+    for (index, (signer, signature_size)) in signers.iter().enumerate() {
+        let before = crate::GLOBAL.stats();
+        for _ in 0..100 {
+            assert_eq!(
+                signer
+                    .sign_into(b"canonical RRSIG data", &mut signature)
+                    .unwrap(),
+                *signature_size
+            );
+        }
+        let after = crate::GLOBAL.stats();
+        assert_eq!(after.allocations - before.allocations, 0, "signer {index}");
+        assert_eq!(
+            after.reallocations - before.reallocations,
+            0,
+            "signer {index}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn no_do_and_warmed_signature_hits_do_not_allocate() {
     if crate::run_isolated("dnssec::cases::no_do_and_warmed_signature_hits_do_not_allocate") {
@@ -136,7 +200,19 @@ async fn warmed_black_lie_hit_does_not_allocate() {
         );
         let reply = Message::parse(cx.response).unwrap();
         assert!(reply.authorities().any(|rr| rr.rtype == Type::NSEC));
-        assert!(reply.authorities().filter(|rr| rr.rtype == Type::RRSIG).all(|rr| matches!(rr.data().unwrap(), pharos_proto::Rdata::Rrsig { type_covered: Type::SOA, original_ttl, .. } if original_ttl == ttl) || matches!(rr.data().unwrap(), pharos_proto::Rdata::Rrsig { type_covered: Type::NSEC, original_ttl: 5, .. })));
+        let signatures: Vec<_> = reply
+            .authorities()
+            .filter(|rr| rr.rtype == Type::RRSIG)
+            .collect();
+        assert!(signatures.iter().any(|rr| matches!(
+            rr.data().unwrap(),
+            pharos_proto::Rdata::Rrsig {
+                type_covered: Type::NSEC,
+                original_ttl: 5,
+                ..
+            }
+        )));
+        assert!(signatures.iter().any(|rr| matches!(rr.data().unwrap(), pharos_proto::Rdata::Rrsig { type_covered: Type::SOA, original_ttl, .. } if original_ttl == ttl)));
         let before = crate::GLOBAL.stats();
         for _ in 0..100 {
             assert_eq!(

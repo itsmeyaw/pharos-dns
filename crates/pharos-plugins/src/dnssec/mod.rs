@@ -5,7 +5,7 @@ mod aws;
 pub(crate) mod setup;
 mod signing;
 
-use pharos_dnssec::keys::KeyPair;
+use pharos_dnssec::{keys::KeyPair, sign::SigningKey};
 use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
 use pharos_server::{Context, Error, Next, Outcome, Plugin, Protocol};
 use std::{collections::HashMap, sync::Mutex};
@@ -14,6 +14,7 @@ use std::{collections::HashMap, sync::Mutex};
 pub struct Dnssec {
     zones: Vec<Name>,
     keys: Vec<KeyPair>,
+    signers: Vec<SigningKey>,
     public: Vec<Vec<u8>>,
     capacity: usize,
     // shortcut: caches whole Responses; use RRset keys when canonicalization supports allocation-free buffers.

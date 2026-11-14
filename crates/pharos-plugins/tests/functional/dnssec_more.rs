@@ -20,6 +20,15 @@ fn plugin(zones: &str, keys: &str) -> Dnssec {
     chain[0].config.dnssec.take().unwrap()
 }
 
+fn plugin_without_key() -> Dnssec {
+    let mut chain = configure::<Chain>(
+        &parse("Corefile", "miek.nl {\n dnssec\n}").unwrap(),
+        directives(),
+    )
+    .unwrap();
+    chain[0].config.dnssec.take().unwrap()
+}
+
 // RFC 6891 §6.1.3: DO is carried in the OPT flags, not the DNS header.
 fn query(name: &str, qtype: Type, id: u16, opt: Option<bool>) -> Vec<u8> {
     let name: Name = name.parse().unwrap();
@@ -59,6 +68,7 @@ enum Reply {
     Priority,
     AdditionalLarge,
     DnameWithRealCname,
+    AdditionalDataLarge,
 }
 
 impl Next for Reply {
@@ -70,8 +80,12 @@ impl Next for Reply {
             Self::ReferralTtl => 0x8000,
             _ => 0x8400,
         };
-        let mut b =
-            MessageBuilder::new(cx.response, cx.max_response_size, cx.query.id(), flags).unwrap();
+        let response_limit = if matches!(self, Self::AdditionalDataLarge) {
+            65535
+        } else {
+            cx.max_response_size
+        };
+        let mut b = MessageBuilder::new(cx.response, response_limit, cx.query.id(), flags).unwrap();
         b.question(q.name, q.qtype, q.qclass).unwrap();
         match self {
             Self::Negative { extra, .. } => {
@@ -363,6 +377,29 @@ impl Next for Reply {
                 )
                 .unwrap();
             }
+            Self::AdditionalDataLarge => {
+                b.record(
+                    Section::Answer,
+                    q.name,
+                    Type::A,
+                    Class::IN,
+                    1800,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+                for i in 0..40 {
+                    let owner: Name = format!("n{i}.miek.nl.").parse().unwrap();
+                    b.record(
+                        Section::Additional,
+                        NameRef::parse(owner.as_wire(), 0).unwrap(),
+                        Type::A,
+                        Class::IN,
+                        1800,
+                        &[192, 0, 2, i],
+                    )
+                    .unwrap();
+                }
+            }
         }
         let _ = b.finish();
         Outcome::Response
@@ -464,7 +501,37 @@ async fn signed_negative_without_soa_fails_closed() {
     let dnssec = plugin("miek.nl", KEY);
     let q = query("missing.miek.nl.", Type::A, 1, Some(true));
     let (outcome, _) = serve(&dnssec, &q, Reply::NegativeNoSoa, Protocol::Udp, 4096, 4096).await;
-    assert_eq!(outcome, Outcome::Error(pharos_server::Error::InvalidQuery));
+    assert_eq!(outcome, Outcome::Error(pharos_server::Error::Internal));
+}
+
+#[tokio::test]
+async fn nxname_formerr_applies_with_or_without_do_and_keys() {
+    let keyed = plugin("miek.nl", KEY);
+    let unkeyed = plugin_without_key();
+    for dnssec in [&keyed, &unkeyed] {
+        for do_bit in [None, Some(false), Some(true)] {
+            let q = query("www.miek.nl.", Type::NXNAME, 1, do_bit);
+            let (outcome, wire) =
+                serve(dnssec, &q, Reply::NegativeNoSoa, Protocol::Udp, 4096, 4096).await;
+            assert_eq!(outcome, Outcome::Response);
+            assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::FORMERR);
+        }
+    }
+}
+
+#[tokio::test]
+async fn signed_responses_clear_cd() {
+    let dnssec = plugin("miek.nl", KEY);
+    for (name, qtype, reply) in [
+        ("www.miek.nl.", Type::A, Reply::Positive(Type::A)),
+        ("miek.nl.", Type::DNSKEY, Reply::Positive(Type::DNSKEY)),
+    ] {
+        let mut q = query(name, qtype, 1, Some(true));
+        q[3] |= 0x10;
+        let (outcome, wire) = serve(&dnssec, &q, reply, Protocol::Udp, 4096, 4096).await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(Message::parse(&wire).unwrap().flags() & 0x10, 0);
+    }
 }
 
 #[tokio::test]
@@ -480,6 +547,27 @@ async fn additional_rrsig_overflow_does_not_set_tc() {
         20
     );
     assert!(!msg.additionals().any(|rr| rr.rtype == Type::RRSIG));
+}
+
+#[tokio::test]
+async fn additional_data_overflow_does_not_set_tc() {
+    let dnssec = plugin("miek.nl", KEY);
+    let q = query("www.miek.nl.", Type::A, 1, Some(true));
+    let (outcome, wire) = serve(
+        &dnssec,
+        &q,
+        Reply::AdditionalDataLarge,
+        Protocol::Udp,
+        512,
+        512,
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Response);
+    let msg = Message::parse(&wire).unwrap();
+    assert!(!msg.tc());
+    assert!(msg.answers().any(|rr| rr.rtype == Type::RRSIG));
+    let additional = msg.additionals().filter(|rr| rr.rtype == Type::A).count();
+    assert!((1..40).contains(&additional));
 }
 
 async fn serve(
