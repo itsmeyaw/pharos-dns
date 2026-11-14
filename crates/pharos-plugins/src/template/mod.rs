@@ -668,7 +668,7 @@ impl Plugin for Template {
         for (index, (section, rr)) in hit.records.iter().enumerate() {
             if *section == Section::Answer
                 && rr.rtype == Type::CNAME
-                && matches!(question.qtype, Type::A | Type::AAAA)
+                && question.qtype != Type::CNAME
                 // RFC 1035 §3.3.1: CNAME RDATA names the canonical target.
                 && let Ok(target) = NameRef::parse(&rr.rdata, 0)
             {
@@ -695,7 +695,13 @@ impl Plugin for Template {
                 .and_then(|(_, wire)| Message::parse(wire).ok())
                 .is_some_and(|message| message.tc());
             // RFC 1035 §4.1.1: Set AA and the configured response code.
-            let flags = 0x8400
+            // RFC 1035 §6.2: QCLASS=ANY cannot be authoritative for selected-class data.
+            let flags = 0x8000
+                | if question.qclass == Class::ANY {
+                    0
+                } else {
+                    0x0400
+                }
                 | (query.flags() & 0x7800)
                 | if query.opcode() == pharos_proto::Opcode::QUERY {
                     query.flags() & 0x0110
@@ -722,8 +728,24 @@ impl Plugin for Template {
                     let owner =
                         NameRef::parse(rr.owner.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
                     // RFC 1035 §4.1.3: Encode owner, type, class, TTL, and RDATA.
+                    let response_section = if hit.rule.rcode == Rcode::NXDOMAIN
+                        && section == Section::Answer
+                        && rr.rtype == Type::SOA
+                    {
+                        // RFC 2308 §3: An authoritative NXDOMAIN's SOA belongs in Authority.
+                        Section::Authority
+                    } else {
+                        section
+                    };
                     builder
-                        .record(section, owner, rr.rtype, rr.class, rr.ttl, &rr.rdata)
+                        .record(
+                            response_section,
+                            owner,
+                            rr.rtype,
+                            rr.class,
+                            rr.ttl,
+                            &rr.rdata,
+                        )
                         .map_err(Error::Build)?;
                     for (_, wire) in lookups
                         .iter()

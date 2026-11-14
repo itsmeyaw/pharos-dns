@@ -292,7 +292,8 @@ template IN A example.net. {
     assert_eq!(outcome, Outcome::Response);
     let response = Message::parse(&wire).unwrap();
     assert_eq!(response.rcode(), Rcode::NXDOMAIN);
-    assert_eq!(response.answers().next().unwrap().rtype, Type::SOA);
+    assert_eq!(response.answer_count(), 0);
+    assert_eq!(response.authorities().next().unwrap().rtype, Type::SOA);
 
     let (outcome, wire) = query(&chain, "example.net.", Type::A, Class::IN, &[]).await;
     assert_eq!(outcome, Outcome::Response);
@@ -423,6 +424,7 @@ template IN A example. {
         let (outcome, wire) = query(&chain, name, qtype, qclass, &[]).await;
         assert_eq!(outcome, Outcome::Response, "{name} {qtype:?} {qclass:?}");
         let response = Message::parse(&wire).unwrap();
+        assert_eq!(response.aa(), qclass != Class::ANY);
         let answer = response.answers().next().unwrap();
         assert_eq!(
             (answer.rtype, answer.class, answer.ttl),
@@ -433,6 +435,62 @@ template IN A example. {
     let (outcome, wire) = query(&chain, "third.example.", Type::A, Class::IN, &[]).await;
     assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
     assert!(wire.is_empty());
+}
+
+#[tokio::test]
+async fn cname_answers_restart_template_lookup_for_mx() {
+    use pharos_server::{Action, Handler, ListenerKey, Router, Server};
+    use std::sync::Arc;
+
+    let chain = chain(
+        r#"
+template IN MX example. {
+ match ^alias[.]example[.]$
+ answer "alias.example. 60 IN CNAME target.example."
+ fallthrough
+}
+template IN MX example. {
+ match ^target[.]example[.]$
+ answer "target.example. 60 IN MX 10 mail.example."
+}
+"#,
+    );
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(chain), vec![]);
+    let server = Arc::new(Server::new(router, key));
+    let name: Name = "alias.example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::MX,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(4096);
+
+    assert_eq!(
+        Handler::handle_shared(
+            &server,
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response,
+        )
+        .await,
+        Action::Respond
+    );
+    let response = Message::parse(&response).unwrap();
+    assert_eq!(
+        response.answers().map(|rr| rr.rtype).collect::<Vec<_>>(),
+        [Type::CNAME, Type::MX]
+    );
 }
 
 // Derived from CoreDNS TestVar and TestExpr.
