@@ -748,15 +748,17 @@ mod tests {
             "{response}"
         );
 
-        let response = request(
-            address,
-            "GET https://localhost/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        )
-        .await;
-        assert!(
-            response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"),
-            "{response}"
-        );
+        for scheme in ["https", "HTTPS"] {
+            let response = request(
+                address,
+                &format!("GET {scheme}://localhost/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            )
+            .await;
+            assert!(
+                response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"),
+                "{response}"
+            );
+        }
 
         listener.shutdown().await.unwrap();
     }
