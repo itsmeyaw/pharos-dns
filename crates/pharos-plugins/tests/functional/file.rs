@@ -425,8 +425,62 @@ async fn overlong_dname_with_self_lookup_returns_one_dname() {
     );
     let response = Message::parse(&response).unwrap();
     assert_eq!(response.rcode(), Rcode::YXDOMAIN);
-    assert_eq!(response.answers().filter(|rr| rr.rtype == Type::DNAME).count(), 1);
+    assert_eq!(
+        response
+            .answers()
+            .filter(|rr| rr.rtype == Type::DNAME)
+            .count(),
+        1
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[cfg(feature = "plugin-transfer")]
+#[tokio::test]
+async fn axfr_class_mismatch_is_refused_on_wire() {
+    use pharos_server::{Action, Handler, ListenerKey, Router, Server};
+    use std::sync::Arc;
+
+    let zonefile = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/coredns-miek.zone"
+    );
+    let corefile = format!("miek.nl:53 {{\n file {zonefile}\n transfer miek.nl {{\n to *\n }}\n}}");
+    let chain = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, "miek.nl.".parse().unwrap(), Some(chain), vec![]);
+    let server = Arc::new(Server::new(router, key));
+    let apex: Name = "miek.nl.".parse().unwrap();
+    let mut query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(apex.as_wire(), 0).unwrap(),
+            Type::AXFR,
+            Class(3),
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        Handler::handle_shared(
+            &server,
+            &query,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Tcp,
+            &mut response,
+        )
+        .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
 }
 
 async fn external_alias_test() {

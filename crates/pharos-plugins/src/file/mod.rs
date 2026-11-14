@@ -88,7 +88,7 @@ impl Loaded {
             }
         };
         let serial = if self.by_mtime {
-            // RFC 1982 §2: Serial zero is a valid value, not a reload sentinel.
+            // RFC 1982 §7: Serial zero is an ordinary SOA serial value.
             None
         } else {
             self.current.load().as_ref().and_then(|zone| zone.serial())
@@ -142,7 +142,7 @@ impl File {
         root: Option<&Path>,
     ) -> Result<Self, Error> {
         Self::parse_with_reader(cursor, server_domains, root, |apex, path, file| {
-            // RFC 1982 §2: Serial zero is a valid value, not an initial-load sentinel.
+            // RFC 1982 §7: Serial zero is an ordinary SOA serial value.
             Zone::load_reader_with_serial(apex, path, BufReader::new(file), None)
         })
     }

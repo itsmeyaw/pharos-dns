@@ -1,5 +1,15 @@
 use super::*;
 
+struct RemoveFiles(Vec<std::path::PathBuf>);
+
+impl Drop for RemoveFiles {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 struct DropNext;
 
 impl Next for DropNext {
@@ -302,14 +312,15 @@ fn records_construct_a_reusable_zone_with_indexed_names_and_types() {
     );
 }
 
-#[test]
-fn zone_preserves_case_and_normalizes_duplicate_rrsets() {
+#[tokio::test]
+async fn zone_preserves_case_and_normalizes_duplicate_rrsets() {
     let apex: Name = "example.org.".parse().unwrap();
-    let text = "@ 3600 IN SOA Ns.Example.Org. Host.Example.Org. 1 2 3 4 60\n@ 300 IN NS Ns.Example.Org.\n@ 60 IN NS ns.example.org.\nWWW.Example.Org. 300 IN A 192.0.2.1\nwww.example.org. 60 IN A 192.0.2.1\nWwW.Example.Org. 120 IN A 192.0.2.2\n";
+    let text = "ExAmPle.Org. 3600 IN SOA Ns.Example.Org. Host.Example.Org. 1 2 3 4 60\nExAmPle.Org. 300 IN NS Ns.Example.Org.\nexample.org. 60 IN NS ns.example.org.\nWWW.Example.Org. 300 IN A 192.0.2.1\nwww.example.org. 60 IN A 192.0.2.1\nWwW.Example.Org. 120 IN A 192.0.2.2\n";
     let records = ZoneParser::new(text.as_bytes(), apex.clone(), "case.zone")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let zone = Zone::from_records(apex.clone(), records).unwrap();
+    assert_eq!(zone.apex().to_string(), "ExAmPle.Org.");
     let first = zone
         .records()
         .iter()
@@ -334,6 +345,18 @@ fn zone_preserves_case_and_normalizes_duplicate_rrsets() {
         "Ns.Example.Org."
     );
     assert_eq!(ns[0].ttl, 60);
+    let (outcome, response) = zone_response(&zone, &apex, Type::A, Class::IN, false).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&response)
+            .unwrap()
+            .authorities()
+            .next()
+            .unwrap()
+            .name
+            .to_string(),
+        "ExAmPle.Org."
+    );
     let owner = NameRef::parse(first.owner.as_wire(), 0).unwrap();
     let answers = zone.rrset(owner, Type::A).collect::<Vec<_>>();
     assert_eq!(answers.len(), 2);
@@ -410,8 +433,8 @@ fn zone_rejects_mixed_classes_and_cname_coexistence() {
     assert!(Zone::from_records(apex, conflict).is_err());
 }
 
-#[test]
-fn zone_rejects_mixed_svcb_modes() {
+#[tokio::test]
+async fn zone_ignores_service_mode_when_alias_mode_exists() {
     let apex: Name = "example.org.".parse().unwrap();
     let base = || {
         ZoneParser::new(
@@ -964,7 +987,7 @@ async fn signed_empty_nonterminal_includes_predecessor_nsec() {
 }
 
 #[tokio::test]
-async fn nxdomain_below_empty_nonterminal_uses_ent_as_closest_encloser() {
+async fn nxdomain_below_ent_proves_qname_and_closest_wildcard() {
     struct DropNext;
     impl Next for DropNext {
         async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
@@ -972,7 +995,7 @@ async fn nxdomain_below_empty_nonterminal_uses_ent_as_closest_encloser() {
         }
     }
     let apex: Name = "example.org.".parse().unwrap();
-    let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\n@ 3600 IN NSEC *.example.org. SOA NS NSEC\n*.example.org. 60 IN TXT \"wild\"\n*.example.org. 60 IN NSEC a.example.org. TXT NSEC\na 60 IN A 192.0.2.1\na 60 IN NSEC leaf.empty.example.org. A NSEC\nleaf.empty 60 IN A 192.0.2.2\n";
+    let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\n@ 3600 IN NSEC *.example.org. SOA NS NSEC\n*.example.org. 60 IN TXT \"wild\"\n*.example.org. 60 IN NSEC a.example.org. TXT NSEC\na 60 IN A 192.0.2.1\na 60 IN NSEC leaf.empty.example.org. A NSEC\nleaf.empty 60 IN A 192.0.2.2\nleaf.empty 60 IN NSEC x.empty.example.org. A NSEC\n";
     let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1020,7 +1043,7 @@ async fn nxdomain_below_empty_nonterminal_uses_ent_as_closest_encloser() {
             .filter(|rr| rr.rtype == Type::NSEC)
             .map(|rr| rr.name.to_string())
             .collect::<Vec<_>>(),
-        ["a.example.org."]
+        ["leaf.empty.example.org.", "a.example.org."]
     );
 }
 
@@ -1029,14 +1052,32 @@ fn zone_file_rejects_multiple_soa_records() {
     let apex: Name = "example.org.".parse().unwrap();
     let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN SOA ns.example.org. hostmaster.example.org. 2 2 3 4 5\n@ 3600 IN NS ns.example.org.\n";
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/multiple-soa.zone");
+    let _cleanup = RemoveFiles(vec![path.clone()]);
     std::fs::write(&path, text).unwrap();
     assert!(Zone::load(apex, &path).is_err());
     std::fs::remove_file(path).unwrap();
 }
 
 #[test]
+fn zone_snapshot_keeps_one_final_axfr_soa() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\nwww 60 IN A 192.0.2.1\n@ 3600 IN SOA ns.example.org. hostmaster.example.org. 2 2 3 4 5\n";
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "axfr-snapshot.zone")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let zone = Zone::from_records(apex.clone(), records).unwrap();
+    assert_eq!(zone.serial(), Some(2));
+    assert_eq!(
+        zone.rrset(NameRef::parse(apex.as_wire(), 0).unwrap(), Type::SOA)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn zero_serial_is_valid_at_file_setup() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-zero-serial.zone");
+    let _cleanup = RemoveFiles(vec![path.clone()]);
     let original = include_str!("../../tests/fixtures/file/example.zone");
     std::fs::write(&path, original.replace(" 1 7200", " 0 7200")).unwrap();
     let corefile = format!("example.org:53 {{\n file {}\n}}", path.display());
@@ -1070,6 +1111,7 @@ async fn negative_reload_fails_startup_instead_of_disabling_reload() {
 fn serial_reload_retains_old_zone_on_unchanged_or_invalid_data() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-serial-reload-test.zone");
+    let _cleanup = RemoveFiles(vec![path.clone()]);
     let original = include_str!("../../tests/fixtures/file/example.zone");
     std::fs::write(&path, original).unwrap();
     let apex: Name = "example.org.".parse().unwrap();
@@ -1099,6 +1141,7 @@ fn serial_reload_retains_old_zone_on_unchanged_or_invalid_data() {
 fn mtime_reload_accepts_unchanged_serial() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-mtime-reload-test.zone");
+    let _cleanup = RemoveFiles(vec![path.clone()]);
     let original = include_str!("../../tests/fixtures/file/example.zone");
     std::fs::write(&path, original).unwrap();
     let apex: Name = "example.org.".parse().unwrap();
@@ -1122,6 +1165,7 @@ fn reload_uses_path_mtime_sampled_before_open() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-stat-race.zone");
     let replacement =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-stat-race-new.zone");
+    let _cleanup = RemoveFiles(vec![path.clone(), replacement.clone()]);
     let original = include_str!("../../tests/fixtures/file/example.zone");
     let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     let observed_time = old_time + Duration::from_secs(10);
@@ -1161,6 +1205,7 @@ fn reload_uses_path_mtime_sampled_before_open() {
 #[test]
 fn mtime_reload_keeps_previous_zone_and_timestamp_on_errors() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-mtime-errors.zone");
+    let _cleanup = RemoveFiles(vec![path.clone()]);
     let original = include_str!("../../tests/fixtures/file/example.zone");
     let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     let changed_time = old_time + Duration::from_secs(10);
@@ -1202,6 +1247,7 @@ fn mtime_reload_keeps_previous_zone_and_timestamp_on_errors() {
 fn reload_gate_prevents_overlapping_blocking_reload_generations() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-concurrent-reload.zone");
+    let _cleanup = RemoveFiles(vec![path.clone()]);
     let original = include_str!("../../tests/fixtures/file/example.zone");
     std::fs::write(&path, original).unwrap();
     let apex: Name = "example.org.".parse().unwrap();
@@ -1236,6 +1282,7 @@ fn parse_opened_file_keeps_its_version_after_path_replacement() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-opened-version.zone");
     let replacement =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-opened-replacement.zone");
+    let _cleanup = RemoveFiles(vec![path.clone(), replacement.clone()]);
     let original = include_str!("../../tests/fixtures/file/example.zone");
     std::fs::write(&path, original).unwrap();
     let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
@@ -1273,6 +1320,7 @@ fn setup_uses_opened_file_snapshot_before_path_replacement() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-setup-snapshot.zone");
     let replacement =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-setup-snapshot-new.zone");
+    let _cleanup = RemoveFiles(vec![path.clone(), replacement.clone()]);
     let original = include_str!("../../tests/fixtures/file/example.zone");
     let old_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     let new_time = old_time + Duration::from_secs(10);
@@ -1336,6 +1384,7 @@ fn repeated_file_options_replace_fallthrough_and_duplicate_zones() {
 #[test]
 fn setup_parses_opened_zone_before_options() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/file-setup-order.zone");
+    let _cleanup = RemoveFiles(vec![path.clone()]);
     std::fs::write(&path, "invalid zone\n").unwrap();
     let config = format!(
         "example.org:53 {{\n file {} {{\n unknown_option\n }}\n}}",

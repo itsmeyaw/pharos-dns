@@ -1255,7 +1255,7 @@ async fn coredns_apex_and_nested_wildcards() {
     }
 }
 
-// Derived from CoreDNS svcb_test.go TestSVCBTargetNormalization.
+// Adapted from CoreDNS svcb_test.go; preserve source case per RFC 4343 §4.2.
 // RFC 9460 §4.1: Authoritative servers SHOULD return in-zone SVCB target data.
 #[tokio::test]
 async fn coredns_svcb_target_preserves_case_and_has_glue() {

@@ -23,13 +23,13 @@ impl Zone {
             .position(|rr| rr.rtype == Type::SOA)
             .ok_or(Error::InvalidQuery)?;
         let current = zone.serial().ok_or(Error::InvalidQuery)?;
-        // RFC 5936 §2.2.1: A transfer query class must match the Zone class.
+        // RFC 5936 §2.1.2: QCLASS identifies the requested zone class.
         if request.qclass != zone.class {
             return Err(Error::InvalidQuery);
         }
         // RFC 1995 §2: an up-to-date IXFR returns only the current SOA.
         // RFC 1995 §6: An unknown requested version falls back to a full TCP zone transfer.
-        // RFC 1982 §2: Serial zero is a value, not a sentinel.
+        // RFC 1982 §7: Serial zero is an ordinary SOA serial value.
         let only_soa = request.qtype == Type::IXFR
             && (request.protocol == Protocol::Udp || request.serial == current);
         let authoritative = !(only_soa && request.protocol == Protocol::Tcp);
@@ -63,7 +63,7 @@ impl Zone {
             }
             let apex = NameRef::parse(zone.apex.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
             // RFC 8945 §5.3: reserve room for Listener-applied TSIG on each Message.
-            // RFC 5936 §2.2.1: AXFR sets QR and AA and echoes ID, RD and CD.
+            // RFC 5936 §2.2.1: AXFR sets QR and AA and echoes ID and RD.
             let mut builder = MessageBuilder::new(
                 response,
                 64500,

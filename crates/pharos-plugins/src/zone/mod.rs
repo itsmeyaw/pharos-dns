@@ -60,6 +60,7 @@ impl std::fmt::Write for NameText {
 pub struct Zone {
     pub(crate) apex: Name,
     class: Class,
+    negative_ttl: u32,
     pub(crate) records: Vec<ZoneRecord>,
     names: Vec<ZoneNode>,
     tree: Vec<usize>,
@@ -146,10 +147,8 @@ impl Zone {
         mut records: Vec<ZoneRecord>,
         allow_empty: bool,
     ) -> Result<Self, String> {
-        let apex: Name = apex
-            .canonical()
-            .parse()
-            .map_err(|error: pharos_proto::NameError| error.to_string())?;
+        // RFC 4343 §4.2: Preserve the supplied apex spelling until SOA owner is known.
+        let mut apex = apex;
         let mut soa = false;
         let class = records
             .first()
@@ -220,7 +219,11 @@ impl Zone {
             index += 1;
             keep
         });
-        // RFC 2181 §5: Suppress duplicate RRs and use one TTL per RRset.
+        // RFC 4343 §4.2: The apex's SOA owner preserves the case loaded from the master file.
+        if let Some(soa) = records.iter().find(|record| record.rtype == Type::SOA) {
+            apex = soa.owner.clone();
+        }
+        // RFC 2181 §§5.1–5.2: Suppress duplicate RRs and use one TTL per RRset.
         let mut unique: std::collections::HashMap<(Name, u16, u16, Vec<u8>), usize> =
             std::collections::HashMap::with_capacity(records.len());
         let mut deduplicated: Vec<ZoneRecord> = Vec::with_capacity(records.len());
@@ -337,12 +340,18 @@ impl Zone {
             return Err("DNAME conflicts with other data".into());
         }
         // RFC 6672 §2.4: A DNAME owner cannot have data at any descendant.
-        if dnames.keys().any(|owner| {
-            records
-                .iter()
-                .any(|record| record.owner != *owner && contains(record.owner.as_wire(), owner))
-        }) {
-            return Err("Zone data exists below DNAME owner".into());
+        let dname_owners: std::collections::HashSet<_> = dnames.keys().cloned().collect();
+        for record in &records {
+            let mut suffix = record.owner.as_wire();
+            while suffix[0] != 0 {
+                suffix = &suffix[1 + usize::from(suffix[0])..];
+                let ancestor = NameRef::parse(suffix, 0)
+                    .map_err(|error| error.to_string())?
+                    .to_name();
+                if dname_owners.contains(&ancestor) {
+                    return Err("Zone data exists below DNAME owner".into());
+                }
+            }
         }
         for record in &records {
             let (offset, error) = match record.rtype {
@@ -642,26 +651,34 @@ fn contains_wire(name: &[u8], apex: &[u8]) -> bool {
 
 // RFC 4034 §6.1: canonical name ordering compares lowercase labels from the root.
 fn canonical_cmp(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
-    fn labels<'a>(mut name: &'a [u8], result: &mut [&'a [u8]; 127]) -> usize {
+    fn label_offsets(mut name: &[u8], offsets: &mut [u8; 127]) -> usize {
         let mut count = 0;
+        let mut offset = 0;
         while name[0] != 0 {
             let len = usize::from(name[0]);
-            result[count] = &name[1..1 + len];
+            offsets[count] = offset as u8;
             count += 1;
             name = &name[1 + len..];
+            offset += 1 + len;
         }
         count
     }
-    let mut a = [&[][..]; 127];
-    let mut b = [&[][..]; 127];
-    let ac = labels(left, &mut a);
-    let bc = labels(right, &mut b);
+    let mut a = [0; 127];
+    let mut b = [0; 127];
+    let ac = label_offsets(left, &mut a);
+    let bc = label_offsets(right, &mut b);
     // RFC 4343 §3: DNS name lookup matches ASCII letters without regard to case.
-    for (a, b) in a[..ac].iter().rev().zip(b[..bc].iter().rev()) {
-        let order = a
+    for index in 0..ac.min(bc) {
+        let left = &left[usize::from(a[ac - index - 1])..];
+        let right = &right[usize::from(b[bc - index - 1])..];
+        let order = left[1..1 + usize::from(left[0])]
             .iter()
             .map(u8::to_ascii_lowercase)
-            .cmp(b.iter().map(u8::to_ascii_lowercase));
+            .cmp(
+                right[1..1 + usize::from(right[0])]
+                    .iter()
+                    .map(u8::to_ascii_lowercase),
+            );
         if order != std::cmp::Ordering::Equal {
             return order;
         }
@@ -677,18 +694,14 @@ fn write_set(
     kind: Type,
     section: Section,
     dnssec: bool,
-) -> Result<(), pharos_server::Error> {
+) -> Result<bool, pharos_server::Error> {
     // RFC 2308 §3: Negative-answer SOA and its RRSIG use min(TTL, MINIMUM).
-    let ttl_cap = (section == Section::Authority && kind == Type::SOA)
-        .then(|| {
-            zone.records_at(source, Type::SOA)
-                .next()
-                .and_then(negative_soa_ttl)
-        })
-        .flatten();
+    let ttl_cap = (section == Section::Authority && kind == Type::SOA).then_some(zone.negative_ttl);
     let output_ttl = |ttl: u32| ttl_cap.map_or(ttl, |cap| ttl.min(cap));
     // RFC 2181 §10.2: PTR RRsets may contain multiple records.
+    let mut has_records = false;
     for rr in zone.records_at(source, kind) {
+        has_records = true;
         builder
             .record(
                 section,
@@ -703,7 +716,7 @@ fn write_set(
     // RFC 9460 §4.3: Include DNSSEC records with Additional RRsets when DO is set.
     // RFC 4592 §4.8: Include a wildcard RRset's RRSIG with synthesized data when DO is set.
     // RFC 4035 §3.1.1: include matching RRSIG records when DO is set.
-    if dnssec && kind != Type::RRSIG {
+    if dnssec && has_records && kind != Type::RRSIG {
         for rr in zone
             .records_at(source, Type::RRSIG)
             .filter(|rr| rr.rdata.get(..2) == Some(kind.0.to_be_bytes().as_slice()))
@@ -720,7 +733,7 @@ fn write_set(
                 .map_err(pharos_server::Error::Build)?;
         }
     }
-    Ok(())
+    Ok(has_records)
 }
 
 impl Zone {
@@ -755,10 +768,6 @@ impl Zone {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
-        // RFC 1035 §3.7.1: A zone answers only queries for its class.
-        if question.qclass != self.class && question.qclass != Class::ANY {
-            return next.run(cx).await;
-        }
         let mut wire = [0u8; 255];
         let mut len = 0;
         for label in question.name.labels() {
@@ -773,7 +782,16 @@ impl Zone {
         }
         let zone = self;
         if matches!(question.qtype, Type::AXFR | Type::IXFR) {
-            return Outcome::Unanswered(Rcode::REFUSED);
+            // RFC 5936 §2.2.1: A class mismatch means this server is not authoritative for the transfer.
+            return Outcome::Unanswered(if question.qclass == self.class {
+                Rcode::REFUSED
+            } else {
+                Rcode::NOTAUTH
+            });
+        }
+        // RFC 1035 §3.7.1: A zone answers only queries for its class.
+        if question.qclass != self.class && question.qclass != Class::ANY {
+            return next.run(cx).await;
         }
         // RFC 1996 §3.10: a server ignores NOTIFY from a host that is not a known master.
         if drop_notify && cx.query.opcode() == pharos_proto::Opcode::NOTIFY {
@@ -974,7 +992,7 @@ impl Zone {
             // RFC 1035 §4.1.1: OPCODE identifies the operation; RD is a Query flag.
             // RFC 4035 §3.1.6: Clear CD in authoritative responses.
             // RFC 2181 §6.1: Clear AA on pure referrals at a zone cut.
-            // RFC 1034 §4.3.1: QCLASS=* responses can never be authoritative.
+            // RFC 1034 §3.7.1: QCLASS=* responses can never be authoritative.
             let mut builder = MessageBuilder::new(
                 cx.response,
                 max,
@@ -1224,10 +1242,7 @@ impl Zone {
             if dnssec
                 && synthesized
                 && let Some(rr) = zone.previous_nsec(name)
-                && zone
-                    .records_at(source, Type::NSEC)
-                    .next()
-                    .is_none_or(|wildcard_nsec| wildcard_nsec.owner != rr.owner)
+                && !source.eq_ignore_ascii_case(rr.owner.as_wire())
             {
                 let owner = NameRef::parse(rr.owner.as_wire(), 0)
                     .map_err(|_| pharos_server::Error::InvalidQuery)?;
@@ -1245,24 +1260,26 @@ impl Zone {
             if dnssec && let Some(cut) = cut {
                 let owner = NameRef::parse(cut.owner.as_wire(), 0)
                     .map_err(|_| pharos_server::Error::InvalidQuery)?;
-                let kind = if zone
-                    .records_at(cut.owner.as_wire(), Type::DS)
-                    .next()
-                    .is_some()
-                {
-                    Type::DS
-                } else {
-                    Type::NSEC
-                };
-                write_set(
+                // RFC 4035 §3.1.4: A delegation without DS needs its NSEC denial instead.
+                if !write_set(
                     &mut builder,
                     zone,
                     cut.owner.as_wire(),
                     owner,
-                    kind,
+                    Type::DS,
                     Section::Authority,
                     true,
-                )?;
+                )? {
+                    write_set(
+                        &mut builder,
+                        zone,
+                        cut.owner.as_wire(),
+                        owner,
+                        Type::NSEC,
+                        Section::Authority,
+                        true,
+                    )?;
+                }
             }
             // RFC 1034 §4.3.2: Referrals include available address glue.
             if let Some(cut) = cut {
@@ -1294,7 +1311,7 @@ impl Zone {
                     Type::MX => Some(2),
                     // RFC 1183 §§1, 3.3 and RFC 2230 §3.1: process their host targets.
                     Type::AFSDB | Type::RT | Type::KX => Some(2),
-                    // RFC 9460 §4.1: TargetName "." means the SVCB owner name.
+                    // RFC 9460 §§2.5.2, 4.1: ServiceMode TargetName "." maps to its owner.
                     Type::SVCB | Type::HTTPS => Some(2),
                     Type::SRV => Some(6),
                     Type::NS if source.eq_ignore_ascii_case(zone.apex.as_wire()) => Some(0),
