@@ -69,13 +69,13 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
         std::hint::black_box(record.data().unwrap());
     }
     for (rtype, bytes) in [
-        (Type::DS, &b"\0\0\x08\x02\xff"[..]),
-        (Type::CDS, &b"\0\0\x08\x02\xff"[..]),
+        (Type::DS, &b"\0\0\x08\0\xff"[..]),
+        (Type::CDS, &b"\0\0\x08\0\xff"[..]),
         (Type::DNSKEY, &b"\x01\0\x03\x08\xff"[..]),
         (Type::CDNSKEY, &b"\x01\0\x03\x08\xff"[..]),
         (Type::RRSIG, &[0; 19][..]),
         (Type::NSEC, &b"\0\0\x01\x40"[..]),
-        (Type::NSEC3, &b"\x01\0\0\0\0\0\0\x01\x40"[..]),
+        (Type::NSEC3, &b"\x01\0\0\0\0\x01\0\0\x01\x40"[..]),
         (Type::NSEC3PARAM, &b"\x01\0\0\0\0"[..]),
         (
             Type::SVCB,
@@ -86,7 +86,7 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
         (Type::SSHFP, &b"\x01\x02\xff"[..]),
         (
             Type::ZONEMD,
-            &b"\0\0\0\x01\x01\x01\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"[..],
+            &b"\0\0\0\x01\x01\0\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"[..],
         ),
         (Type::TSIG, &[0; 17][..]),
     ] {

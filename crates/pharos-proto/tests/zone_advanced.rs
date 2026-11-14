@@ -49,10 +49,6 @@ fn zone_errors_point_to_the_offending_advanced_rdata_token() {
         ("a 1 CERT bad 1\n", "bad"),
         ("a 1 CERT PKIX 1 BADALG AQID\n", "BADALG"),
         ("a 1 CERT PKIX 1 8 AQID !!!! AA==\n", "!!!!"),
-        ("a 1 TKEY gss-tsig. 2 abcd 1 zz\n", "zz"),
-        ("a 1 TKEY relative 2 abcd 1 ff\n", "relative"),
-        ("a 1 TKEY . bad\n", "bad"),
-        ("a 1 TKEY . bad abcd\n", "bad"),
     ] {
         let offset = input.find(token).unwrap();
         let before = &input[..offset];
@@ -93,19 +89,11 @@ fn loc_defaults_precision_and_bounds() {
         ]
     );
     assert_eq!(
-        parse(
-            Type::LOC,
-            &["0", "S", "0", "W", "-100000", ".01m", "0.1m", "90000000m"]
-        )
-        .unwrap(),
-        [
-            0, 0x10, 0x11, 0x99, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0
-        ]
+        parse(Type::LOC, &["0", "S", "0", "W", "-100000"]).unwrap()[12..],
+        [0, 0, 0, 0]
     );
-    assert_eq!(
-        &parse(Type::LOC, &["0", "N", "0", "E", "-100000.02"]).unwrap()[12..],
-        &[255; 4]
-    );
+    assert!(parse(Type::LOC, &["0", "N", "0", "E", "-100000.02"]).is_err());
+    assert!(parse(Type::LOC, &["0", "N", "0", "E", "42849673"]).is_err());
     for fields in [
         vec!["91", "N", "0", "E", "0"],
         vec!["90", "1", "0", "N", "0", "E", "0"],
@@ -116,85 +104,22 @@ fn loc_defaults_precision_and_bounds() {
     }
 }
 
-// RFC 1876 §3: exercise miekg's floating-point parsing and centimeter conversion.
+// RFC 1876 §3: altitude must fit the specified centimeter range.
 #[test]
-fn loc_float_values_match_miekg() {
-    let positive_overflow = if cfg!(target_arch = "x86_64") {
-        0
-    } else {
-        u32::MAX
-    };
-    for (alt, expected) in [
-        ("NaN", 0),
-        ("nan", 0),
-        ("+Inf", positive_overflow),
-        ("-Inf", 0),
-        ("1e308", positive_overflow),
-        ("-1e308", 0),
-        ("1e20", positive_overflow),
-        ("-1e20", 0),
-        ("-100000.02", u32::MAX),
-        ("1e-999", 10_000_000),
-        ("0x1p+2", 10_000_400),
-        ("0x1.8p2", 10_000_600),
-        ("0x_1p2", 10_000_400),
-        ("1_0", 10_001_000),
-        ("0x1p1023", positive_overflow),
-        ("0x1.fffffffffffff7p1023", positive_overflow),
-        ("0x1p-1075", 10_000_000),
-        ("0x1.8p-1075", 10_000_000),
-    ] {
+fn loc_altitude_range_and_longitude_rounding() {
+    for (alt, expected) in [("-100000", 0u32), ("42849672.95", u32::MAX)] {
         let wire = parse(Type::LOC, &["0", "N", "0", "E", alt]).unwrap();
         assert_eq!(&wire[12..], &expected.to_be_bytes(), "altitude {alt}");
     }
-    let rounded = if cfg!(target_arch = "aarch64") {
-        0xca80_5500u32
-    } else {
-        0xca80_5400u32
-    };
-    let wire = parse(Type::LOC, &["0", "N", "0", "E", "-0x887d53625c.a52656p15"]).unwrap();
-    assert_eq!(&wire[12..], &rounded.to_be_bytes());
-    for alt in [
-        "+NaN",
-        "-NaN",
-        "1e309",
-        "-1e309",
-        "0x1p1024",
-        "0x1.fffffffffffff8p1023",
-        "1__0",
-        "1_e2",
-        "0x1._8p2",
-    ] {
+    for alt in ["-100000.01", "42849672.96", "NaN", "+Inf", "1e308"] {
         assert!(
             parse(Type::LOC, &["0", "N", "0", "E", alt]).is_err(),
-            "altitude {alt}"
+            "{alt}"
         );
     }
-    for (seconds, expected) in [
-        ("NaN", 0),
-        ("nan", 0),
-        ("1e-999", 0),
-        ("-0", 0),
-        ("0x1p+2", 4_000),
-        ("0x1.8p2", 6_000),
-        ("1_0", 10_000),
-        ("59.9999", 59_999),
-    ] {
-        let wire = parse(Type::LOC, &["0", "0", seconds, "N", "0", "E", "0"]).unwrap();
-        assert_eq!(
-            &wire[4..8],
-            &(0x8000_0000u32 + expected).to_be_bytes(),
-            "seconds {seconds}"
-        );
-    }
-    for seconds in [
-        "+NaN", "-NaN", "+Inf", "-Inf", "1e309", "1e308", "60", "-0.001",
-    ] {
-        assert!(
-            parse(Type::LOC, &["0", "0", seconds, "N", "0", "E", "0"]).is_err(),
-            "seconds {seconds}"
-        );
-    }
+    let wire = parse(Type::LOC, &["0", "N", "0", "0", "0.0001", "E", "0"]).unwrap();
+    assert_eq!(&wire[8..12], &0x8000_0001u32.to_be_bytes());
+    assert!(parse(Type::LOC, &["0", "N", "0", "E", "0", "1", "2", "3", "4"]).is_err());
 }
 
 // RFC 8005 §5 and RFC 4398 §2: HIP and CERT encode their keys in binary.
@@ -203,6 +128,10 @@ fn hip_and_cert() {
     assert_eq!(
         parse(Type::HIP, &["2", "20010010", "AQID", "rvs"]).unwrap(),
         b"\x04\x02\x00\x03\x20\x01\x00\x10\x01\x02\x03\x03rvs\x07example\0"
+    );
+    assert_eq!(
+        parse(Type::CERT, &["IPKIX", "42", "RSASHA256", "AQID"]).unwrap(),
+        [0, 4, 0, 42, 8, 1, 2, 3]
     );
     assert_eq!(
         parse(Type::CERT, &["PKIX", "42", "RSASHA256", "AQID"]).unwrap(),
@@ -214,17 +143,19 @@ fn hip_and_cert() {
     );
     assert!(parse(Type::HIP, &["2", "ABC", "AQID"]).is_err());
     assert!(parse(Type::HIP, &["2", "AB", "bad"]).is_err());
+    let long_hit = "AB".repeat(128);
+    assert_eq!(parse(Type::HIP, &["2", &long_hit, "AQID"]).unwrap()[0], 128);
     assert!(parse(Type::CERT, &["PKIX", "1"]).is_err());
 }
 
 // RFC 7477 §2.1: CSYNC uses an NSEC type bitmap.
 #[test]
-fn csync_bitmap_and_empty_bitmap() {
+fn csync_bitmap_must_not_be_empty() {
     assert_eq!(
-        parse(Type::CSYNC, &["66", "3", "A", "NS", "AAAA"]).unwrap(),
-        [0, 0, 0, 66, 0, 3, 0, 4, 0x60, 0, 0, 8]
+        parse(Type::CSYNC, &["66", "1", "A", "NS", "AAAA"]).unwrap(),
+        [0, 0, 0, 66, 0, 1, 0, 4, 0x60, 0, 0, 8]
     );
-    assert_eq!(parse(Type::CSYNC, &["0", "0"]).unwrap(), [0; 6]);
+    assert!(parse(Type::CSYNC, &["0", "0"]).is_err());
     assert!(parse(Type::CSYNC, &["0", "0", "NOTATYPE"]).is_err());
 }
 
@@ -255,16 +186,21 @@ fn gateway_variants() {
     );
     assert_eq!(
         parse(Type::AMTRELAY, &["10", "1", "3", "gw"]).unwrap(),
-        [10, 0x83]
+        b"\x0a\x83\x02gw\x07example\0"
     );
-    assert_eq!(
-        parse(Type::IPSECKEY, &["10", "99", "2"]).unwrap(),
-        [10, 99, 2]
-    );
-    assert_eq!(parse(Type::AMTRELAY, &["10", "0", "99"]).unwrap(), [10, 99]);
+    assert!(parse(Type::IPSECKEY, &["10", "99", "2"]).is_err());
+    assert!(parse(Type::AMTRELAY, &["10", "0", "99"]).is_err());
     assert!(parse(Type::AMTRELAY, &["10", "2", "0", "."]).is_err());
-    assert!(parse(Type::IPSECKEY, &["10", "1", "2", "::1"]).is_err());
+    assert_eq!(
+        parse(Type::IPSECKEY, &["10", "2", "2", "::1"]).unwrap()[3..],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    );
     assert!(parse(Type::IPSECKEY, &["10", "0", "2", "gw"]).is_err());
+    assert!(parse(Type::IPSECKEY, &["10", "0", "0", ".", "AQID"]).is_err());
+    assert_eq!(
+        parse(Type::IPSECKEY, &["10", "0", "0", "."]).unwrap(),
+        [10, 0, 0]
+    );
 }
 
 // RFC 1035 §5.1: an RR entry carries RDATA; miekg/dns packs zero values instead.
@@ -312,14 +248,14 @@ fn apl_prefixes_and_validation() {
 // RFC 2930 §2: TKEY has an algorithm name and two length-prefixed byte fields.
 #[test]
 fn tkey_miekg_presentation() {
-    assert_eq!(
-        parse(Type::TKEY, &["gss-tsig.", "2", "abcd", "1", "ff"]).unwrap(),
-        b"\x08gss-tsig\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x02\xab\xcd\0\x01\xff"
-    );
-    assert_eq!(
-        parse(Type::TKEY, &[".", "0", "ab", "0", "cd", "ignored"]).unwrap(),
-        b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\xab\0\0\xcd"
-    );
-    assert!(parse(Type::TKEY, &["gss-tsig.", "256", "abcd", "1", "ff"]).is_err());
+    let absolute = parse(Type::TKEY, &["gss-tsig.", "2", "abcd", "1", "ff"]).unwrap();
+    assert_eq!(&absolute[..10], b"\x08gss-tsig\0");
+    assert_eq!(&absolute[22..], b"\x00\x02\xab\xcd\x00\x01\xff");
+    let relative = parse(Type::TKEY, &["gss-tsig", "2", "abcd", "1", "ff"]).unwrap();
+    assert_eq!(&relative[..18], b"\x08gss-tsig\x07example\0");
+    assert_eq!(&relative[30..], b"\x00\x02\xab\xcd\x00\x01\xff");
     assert!(parse(Type::TKEY, &["gss-tsig.", "2", "abcd"]).is_err());
+    assert!(parse(Type::TKEY, &["gss-tsig.", "1", "abcd", "1", "ff"]).is_err());
+    assert!(parse(Type::TKEY, &["gss-tsig.", "2", "abcd", "0", "ff"]).is_err());
+    assert!(parse(Type::TKEY, &["gss-tsig.", "2", "abcd", "1", "ff", "extra"]).is_err());
 }

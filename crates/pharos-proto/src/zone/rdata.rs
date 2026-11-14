@@ -96,7 +96,16 @@ fn parse_rdata_inner(
         if data.len() != usize::from(len) {
             return Err("generic RDATA length mismatch".into());
         }
-        return generic_rdata(rtype, &data);
+        let normalized = generic_rdata(rtype, &data)?;
+        if normalized != data {
+            return Err("invalid generic RDATA for known type".into());
+        }
+        // RFC 3597 §5: valid generic RDATA for known types stays byte-for-byte unchanged.
+        return Ok(data);
+    }
+    if let Some(field) = bad.iter().position(|&invalid| invalid) {
+        *index = field;
+        return Err(INVALID_ESCAPE.into());
     }
     if let Some(result) = legacy::parse(rtype, fields, bad, origin)
         .or_else(|| advanced::parse(rtype, fields, bad, origin))
@@ -156,9 +165,7 @@ fn parse_rdata_inner(
                 out.extend(timer.ok_or("invalid SOA timer")?.to_be_bytes());
             }
         }
-        // RFC 4408 §3.1.1: the obsolete SPF RR type has the same format as TXT.
-        // RFC 7208 §3.1: SPF uses the TXT layout for CoreDNS compatibility (ADR 0002).
-        // RFC 1035 §3.3.14 and RFC 4408 §3.1.1: TXT and SPF use character-strings.
+        // RFC 4408 §3.1.1: SPF uses TXT's character-string layout for compatibility.
         Type::TXT | Type::SPF => {
             for (i, field) in fields.iter().enumerate() {
                 let data = at!(i, unescape(field))?;
@@ -171,32 +178,13 @@ fn parse_rdata_inner(
                 }
             }
         }
+        // RFC 1035 §3.3.2: HINFO has exactly two character-strings.
         Type::HINFO => {
-            let mut chunks = Vec::new();
+            at!(fields.len().min(2), count(fields, 2))?;
             for (i, field) in fields.iter().enumerate() {
-                let data = at!(i, unescape(field))?;
-                if data.is_empty() {
-                    chunks.push(Vec::new());
-                } else {
-                    chunks.extend(data.chunks(255).map(<[u8]>::to_vec));
-                }
+                let value = at!(i, unescape(field))?;
+                length_bytes(&mut out, &value)?;
             }
-            if chunks.len() == 1 {
-                let parts: Vec<_> = fields[0].split_whitespace().collect();
-                if parts.len() > 1 {
-                    chunks = parts.into_iter().map(unescape).collect::<Result<_, _>>()?;
-                }
-            }
-            let cpu = chunks.first().map_or(&[][..], Vec::as_slice);
-            length_bytes(&mut out, cpu)?;
-            let mut os = Vec::new();
-            for (i, chunk) in chunks.iter().skip(1).enumerate() {
-                if i != 0 {
-                    os.push(b' ');
-                }
-                os.extend_from_slice(chunk);
-            }
-            length_bytes(&mut out, &os)?;
         }
         // RFC 2782 §3 and RFC 3403 §4.3: SRV and NAPTR use 16-bit integers.
         // RFC 2782 §The format of the SRV RR: SRV has priority, weight, port, and target.
@@ -214,6 +202,13 @@ fn parse_rdata_inner(
             num!(1, put16(&mut out, fields[1]))?;
             for (i, field) in fields[2..5].iter().enumerate() {
                 at!(i + 2, character_string(&mut out, field))?;
+                if i == 0 && !field.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+                    return Err("invalid NAPTR flags".into());
+                }
+            }
+            if !fields[4].is_empty() && fields[5] != "." {
+                *index = 5;
+                return Err("NAPTR regexp requires root replacement".into());
             }
             at!(5, name(&mut out, fields[5], origin))?;
         }
@@ -223,15 +218,15 @@ fn parse_rdata_inner(
             // RFC 8659 §4.1.1: Canonical CAA flags are an unsigned integer from 0 through 255.
             let flag = num!(0, number(fields[0]))?;
             let tag = at!(1, unescape(fields[1]))?;
-            if tag.is_empty() {
+            if tag.is_empty() || !tag.iter().all(u8::is_ascii_alphanumeric) {
                 return Err("invalid CAA tag".into());
+            }
+            if flag & 0x7f != 0 {
+                return Err("invalid CAA flags".into());
             }
             out.push(flag);
             length_bytes(&mut out, &tag)?;
             let value = at!(2, unescape(fields[2]))?;
-            if value.len() > 255 {
-                return Err("CAA value exceeds 255 octets".into());
-            }
             out.extend(value);
         }
         // RFC 7553 §4.5: URI RDATA is two 16-bit integers followed by Target octets.
@@ -250,8 +245,14 @@ fn parse_rdata_inner(
             // RFC 4034 §5.3: DS numeric fields use decimal; the algorithm may use a mnemonic.
             num!(0, put16(&mut out, fields[0]))?;
             out.push(num!(1, dnssec_algorithm(fields[1], true))?);
-            out.push(num!(2, number(fields[2]))?);
-            out.extend(at!(hex_error_index(fields, 3), hex(&fields[3..].concat()))?);
+            let digest_type = num!(2, number(fields[2]))?;
+            out.push(digest_type);
+            let digest = at!(hex_error_index(fields, 3), hex(&fields[3..].concat()))?;
+            // RFC 4509 §2.2: SHA-256 DS digest is exactly 32 octets.
+            if digest_type == 2 && digest.len() != 32 {
+                return Err("SHA-256 DS digest must be 32 octets".into());
+            }
+            out.extend(digest);
         }
         // RFC 4034 §2.2: DNSKEY flags are decimal and its public key uses Base64 presentation.
         // RFC 7344 §3.2: CDNSKEY presentation uses base64 like DNSKEY.
@@ -260,9 +261,16 @@ fn parse_rdata_inner(
                 *index = fields.len();
                 return Err("missing DNSKEY fields".into());
             }
-            num!(0, put16(&mut out, fields[0]))?;
+            let flags: u16 = num!(0, number(fields[0]))?;
+            if flags & !0x0181 != 0 {
+                return Err("invalid DNSKEY flags".into());
+            }
+            out.extend(flags.to_be_bytes());
             out.push(num!(1, number(fields[1]))?);
-            out.push(num!(2, number(fields[2]))?);
+            if fields[1] != "3" {
+                return Err("DNSKEY protocol must be 3".into());
+            }
+            out.push(num!(2, dnssec_algorithm(fields[2], true))?);
             out.extend(at!(
                 base64_error_index(fields, 3),
                 base64(&fields[3..].concat())
@@ -294,6 +302,14 @@ fn parse_rdata_inner(
             out.push(num!(1, number(fields[1]))?);
             out.push(num!(2, number(fields[2]))?);
             let digest = at!(hex_error_index(fields, 3), hex(&fields[3..].concat()))?;
+            let expected = match out[5] {
+                1 => Some(48),
+                2 => Some(64),
+                _ => None,
+            };
+            if expected.is_some_and(|size| digest.len() != size) {
+                return Err("ZONEMD digest has invalid length".into());
+            }
             out.extend(digest);
         }
         // RFC 4034 §3.2: signature times accept either decimal seconds or YYYYMMDDHHMMSS.
@@ -324,7 +340,9 @@ fn parse_rdata_inner(
             }
             at!(0, name(&mut out, fields[0], origin))?;
             for (i, field) in fields[1..].iter().enumerate() {
-                at!(i + 1, type_code(field))?;
+                if at!(i + 1, type_code(field))? == 0 {
+                    return Err("TYPE0 is not a bitmap RR type".into());
+                }
             }
             bitmap(&mut out, &fields[1..])?;
         }
@@ -336,7 +354,14 @@ fn parse_rdata_inner(
                 return Err("invalid NSEC3 fields".into());
             }
             out.push(num!(0, number(fields[0]))?);
-            out.push(num!(1, number(fields[1]))?);
+            let flags = num!(1, number(fields[1]))?;
+            if (rtype == Type::NSEC3 && flags & !1 != 0)
+                || (rtype == Type::NSEC3PARAM && flags != 0)
+            {
+                *index = 1;
+                return Err("invalid NSEC3 flags".into());
+            }
+            out.push(flags);
             num!(2, put16(&mut out, fields[2]))?;
             *index = 3;
             let salt = if fields[3] == "-" {
@@ -347,10 +372,15 @@ fn parse_rdata_inner(
             length_bytes(&mut out, &salt)?;
             if rtype == Type::NSEC3 {
                 let hash = at!(4, base32hex(fields[4]))?;
-                out.push(20);
+                if hash.is_empty() || hash.len() > usize::from(u8::MAX) {
+                    return Err("invalid NSEC3 next hash length".into());
+                }
+                out.push(hash.len() as u8);
                 out.extend(hash);
                 for (i, field) in fields[5..].iter().enumerate() {
-                    at!(i + 5, type_code(field))?;
+                    if at!(i + 5, type_code(field))? == 0 {
+                        return Err("TYPE0 is not a bitmap RR type".into());
+                    }
                 }
                 bitmap(&mut out, &fields[5..])?;
             }
@@ -426,6 +456,26 @@ fn parse_rdata_inner(
 
 // RFC 3597 §5: known RDATA is unpacked and re-encoded in its type's wire format.
 fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
+    // RFC 7477 §2.1.1.2: CSYNC has only one defined flag and needs a bitmap block.
+    if rtype == Type::CSYNC && (data.len() <= 6 || u16::from_be_bytes([data[4], data[5]]) & !1 != 0)
+    {
+        return Err("invalid generic CSYNC".into());
+    }
+    // RFC 1706 §4: NSAP's final NSel octet is zero.
+    if rtype == Type::NSAP && (data.is_empty() || data.last() != Some(&0)) {
+        return Err("NSAP NSel octet must be zero".into());
+    }
+    // RFC 8976 §2.2.3: SHA384/SHA512 ZONEMD digests have exact lengths.
+    if rtype == Type::ZONEMD {
+        let expected = match data.get(5) {
+            Some(1) => Some(48),
+            Some(2) => Some(64),
+            _ => None,
+        };
+        if data.len() < 18 || expected.is_some_and(|size| data.len() - 6 != size) {
+            return Err("invalid generic ZONEMD digest length".into());
+        }
+    }
     // Fields are integers, names, character strings, addresses, bitmaps, or opaque tails.
     let layout: &[u8] = match rtype.0 {
         1 => b"a",
@@ -489,15 +539,17 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
             }
             b'a' | b'v' => {
                 let n = if field == b'a' { 4 } else { 16 };
-                if !missing {
-                    out.extend_from_slice(remaining.get(..n).ok_or("truncated generic address")?);
-                    pos += n;
+                if missing {
+                    return Err("missing generic address".into());
                 }
+                out.extend_from_slice(remaining.get(..n).ok_or("truncated generic address")?);
+                pos += n;
             }
             b'n' => {
-                if !missing {
-                    pos = generic_name(data, pos, &mut out)?;
+                if missing {
+                    return Err("missing generic name".into());
                 }
+                pos = generic_name(data, pos, &mut out)?;
             }
             b's' | b'l' | b'L' => {
                 let prefix = if field == b'L' { 2 } else { 1 };
@@ -547,6 +599,7 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                 }
             }
             b'p' => {
+                let params_start = out.len();
                 let mut last = None;
                 while pos < data.len() {
                     let header = data.get(pos..pos + 4).ok_or("truncated generic SVCB")?;
@@ -597,6 +650,8 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                     pos += 4 + len;
                     last = Some(key);
                 }
+                crate::SvcParams::parse(&out[params_start..])
+                    .map_err(|_| "invalid generic SVCB parameters")?;
             }
             b'o' => {
                 while pos < data.len() {
@@ -634,15 +689,7 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                         let option = &data[pos..pos + 4 + len];
                         crate::EdnsOptions::parse(option)
                             .map_err(|_| "invalid generic EDNS option")?;
-                        if code == 9 && !value.is_empty() {
-                            let expire = value.get(..4).ok_or("truncated generic EXPIRE")?;
-                            out.extend([h[0], h[1], 0, 4]);
-                            out.extend_from_slice(expire);
-                        } else if code == 11 && value == [0, 0] {
-                            out.extend([h[0], h[1], 0, 0]);
-                        } else {
-                            out.extend_from_slice(option);
-                        }
+                        out.extend_from_slice(option);
                     }
                     pos += 4 + len;
                 }
@@ -707,33 +754,8 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                 }
             }
             b'r' => {
-                if matches!(rtype, Type::CAA | Type::URI) {
-                    // RFC 7553 §4.5 and RFC 8659 §4: values are octet strings.
-                    let mut i = 0;
-                    while i < remaining.len() {
-                        if remaining[i] == b'\\' {
-                            i += 1;
-                            if i == remaining.len() {
-                                break;
-                            }
-                            if let Some(digits) = remaining
-                                .get(i..i + 3)
-                                .filter(|d| d.iter().all(u8::is_ascii_digit))
-                            {
-                                let n = u16::from(digits[0] - b'0') * 100
-                                    + u16::from(digits[1] - b'0') * 10
-                                    + u16::from(digits[2] - b'0');
-                                out.push(n as u8);
-                                i += 3;
-                                continue;
-                            }
-                        }
-                        out.push(remaining[i]);
-                        i += 1;
-                    }
-                } else {
-                    out.extend_from_slice(remaining);
-                }
+                // RFC 3597 §5: generic hexadecimal data is already wire-format octets.
+                out.extend_from_slice(remaining);
                 pos = data.len();
             }
             b' ' => {}
@@ -765,12 +787,17 @@ fn generic_name(data: &[u8], mut pos: usize, out: &mut Vec<u8>) -> Result<usize,
             }
             192..=255 => {
                 let second = *data.get(pos + 1).ok_or("truncated generic pointer")?;
+                let target = (usize::from(byte & 63) << 8) | usize::from(second);
+                // RFC 1035 §4.1.4: a compression pointer target must precede the pointer.
+                if target >= pos {
+                    return Err("generic compression pointer is not backwards".into());
+                }
                 end.get_or_insert(pos + 2);
                 hops += 1;
                 if hops > 126 {
                     return Err("too many generic name pointers".into());
                 }
-                pos = (usize::from(byte & 63) << 8) | usize::from(second);
+                pos = target;
             }
             _ => return Err("invalid generic name label".into()),
         }
@@ -915,6 +942,12 @@ fn unescape(value: &str) -> Result<Vec<u8>, String> {
             let n = u16::from(digits[0] - b'0') * 100
                 + u16::from(digits[1] - b'0') * 10
                 + u16::from(digits[2] - b'0');
+            if n > 255 {
+                return Err(INVALID_ESCAPE.into());
+            }
+            if n > 255 {
+                return Err(INVALID_ESCAPE.into());
+            }
             out.push(n as u8);
             i += 3;
         } else {
@@ -1163,7 +1196,8 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
             3 => {
                 let port = value.ok_or("missing port")?;
                 // RFC 1035 §5.1: a numeric port cannot hold a malformed digit escape.
-                if super::has_invalid_digit_escape(port) {
+                // RFC 9460 §7.2: port is unescaped ASCII decimal.
+                if port.contains('\\') {
                     return Err(INVALID_ESCAPE.into());
                 }
                 put16(&mut data, port)?;
@@ -1183,9 +1217,6 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
                 // RFC 9460 §7.3: ipv6hint is a nonempty comma-separated list of IPv6 addresses.
                 for ip in value.ok_or("missing IPv6 hints")?.split(',') {
                     let ip = ip.parse::<Ipv6Addr>().map_err(|_| "invalid IPv6 hint")?;
-                    if ip.to_ipv4_mapped().is_some() {
-                        return Err("IPv4-mapped IPv6 hint".into());
-                    }
                     data.extend(ip.octets());
                 }
             }
@@ -1203,6 +1234,7 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
     if params.windows(2).any(|w| w[0].0 == w[1].0) {
         return Err("duplicate SvcParam".into());
     }
+    let start = out.len();
     for (key, value) in params {
         out.extend(key.to_be_bytes());
         out.extend(
@@ -1212,6 +1244,8 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
         );
         out.extend(value);
     }
+    crate::rdata::validate_svc_param_relations(&out[start..])
+        .map_err(|_| "inconsistent SvcParams")?;
     Ok(())
 }
 

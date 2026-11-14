@@ -49,18 +49,21 @@ fn strings_and_coordinates() {
         parse(Type::X25, &["311061700956"]).unwrap(),
         b"\x0c311061700956"
     );
-    assert_eq!(parse(Type::ISDN, &["A"]).unwrap(), b"\x01A\0");
-    assert_eq!(parse(Type::ISDN, &[r"A\032B"]).unwrap(), b"\x03A B\0");
-    assert_eq!(parse(Type::ISDN, &["A B"]).unwrap(), b"\x01A\x01B");
+    assert!(parse(Type::X25, &["+311061700956"]).is_err());
+    assert_eq!(parse(Type::ISDN, &["123456"]).unwrap(), b"\x06123456");
     assert_eq!(
-        parse(Type::ISDN, &["A", "B", "C"]).unwrap(),
-        b"\x01A\x03B C"
+        parse(Type::ISDN, &["123456", "ABcd"]).unwrap(),
+        b"\x06123456\x04ABcd"
     );
+    assert!(parse(Type::ISDN, &["A"]).is_err());
+    assert!(parse(Type::ISDN, &["123", "ABC", "DEF"]).is_err());
+    assert!(parse(Type::ISDN, &["123", "12G"]).is_err());
     assert_eq!(
-        parse(Type::GPOS, &["-32.6882", "116.8652", "10.0"]).unwrap(),
-        b"\x08-32.6882\x08116.8652\x0410.0"
+        parse(Type::GPOS, &["116.8652", "-32.6882", "10.0"]).unwrap(),
+        b"\x08116.8652\x08-32.6882\x0410.0"
     );
-    assert!(parse(Type::GPOS, &["north", "0", "0"]).is_err());
+    assert!(parse(Type::GPOS, &["181", "0", "0"]).is_err());
+    assert!(parse(Type::GPOS, &["0", "91", "0"]).is_err());
     assert_eq!(
         parse(Type::UINFO, &["first", "discard"]).unwrap(),
         b"\x05first"
@@ -88,6 +91,11 @@ fn eui_ilnp_and_user_numbers() {
         [0, 0, 0x5e, 0xef, 0, 0, 0, 0x2a]
     );
     assert!(parse(Type::EUI48, &["00:00:5e:90:01:2a"]).is_err());
+    assert_eq!(
+        parse(Type::NSAP, &["0x47000580.ffe10000"]).unwrap(),
+        [0x47, 0, 5, 0x80, 0xff, 0xe1, 0, 0]
+    );
+    assert!(parse(Type::NSAP, &["0x47000580.ffe10001"]).is_err());
     for ty in [Type::NID, Type::L64] {
         assert_eq!(
             parse(ty, &["10", "0014:4fff:ff20:ee64"]).unwrap(),
@@ -95,9 +103,8 @@ fn eui_ilnp_and_user_numbers() {
             "{ty}"
         );
         assert!(parse(ty, &["10", "::1"]).is_err(), "{ty}");
-        assert_eq!(
-            parse(ty, &["10", "0014:4fffXff20Yee64suffix"]).unwrap(),
-            [0, 10, 0, 0x14, 0x4f, 0xff, 0xff, 0x20, 0xee, 0x64],
+        assert!(
+            parse(ty, &["10", "0014:4fffXff20Yee64suffix"]).is_err(),
             "{ty}"
         );
     }
@@ -105,10 +112,7 @@ fn eui_ilnp_and_user_numbers() {
         parse(Type::L32, &["10", "192.0.2.1"]).unwrap(),
         [0, 10, 192, 0, 2, 1]
     );
-    assert_eq!(
-        parse(Type::L32, &["1", "::ffff:192.0.2.1"]).unwrap(),
-        [0, 1, 192, 0, 2, 1]
-    );
+    assert!(parse(Type::L32, &["1", "::ffff:192.0.2.1"]).is_err());
     assert!(parse(Type::L32, &["1", "2001:db8::1"]).is_err());
     for ty in [Type::UID, Type::GID] {
         assert_eq!(parse(ty, &["4294967295"]).unwrap(), [255; 4], "{ty}");

@@ -6,9 +6,9 @@ use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rdata, Section
 fn unknown_type_and_rfc3597_presentation() {
     assert_eq!(Type(731).to_string(), "TYPE731");
     assert_eq!(Type(62347).to_string(), "TYPE62347");
-    assert_eq!(Type(11).to_string(), "TYPE11");
+    assert_eq!(Type(11).to_string(), "WKS");
     assert_eq!(Type(65534).to_string(), "TYPE65534");
-    assert_eq!(Type(0).to_string(), "None");
+    assert_eq!(Type(0).to_string(), "TYPE0");
     assert_eq!(Type(u16::MAX).to_string(), "Reserved");
     assert_eq!(
         Rdata::parse(Type(731), &[0xab, 0xcd, 0xef, 1, 0x23, 0x45])
@@ -39,7 +39,13 @@ fn all_type_mnemonics_match_miekg_or_use_type_number() {
     assert_eq!(known.len(), 88);
     for number in 0..=u16::MAX {
         let actual = Type(number).to_string();
-        if let Some(name) = known.get(&number) {
+        if number == 0 {
+            assert_eq!(actual, "TYPE0", "type zero has no RR mnemonic");
+        } else if number == 11 {
+            assert_eq!(actual, "WKS", "type 11 has a defined mnemonic");
+        } else if number == 22 {
+            assert_eq!(actual, "NSAP", "type 22 has a defined mnemonic");
+        } else if let Some(name) = known.get(&number) {
             assert_eq!(actual, *name, "type {number}");
         } else {
             assert_eq!(actual, format!("TYPE{number}"));

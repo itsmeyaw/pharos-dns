@@ -19,28 +19,21 @@ fn security_data_uses_miekg_hex_casing() {
             .to_string(),
         "1 1 ABCD"
     );
+    let mut zonemd = vec![0, 0, 0, 1, 1, 1];
+    for _ in 0..24 {
+        zonemd.extend([0xab, 0xcd]);
+    }
     assert_eq!(
-        Rdata::parse(
-            Type::ZONEMD,
-            &[
-                0, 0, 0, 1, 1, 1, 0xab, 0xcd, 0xab, 0xcd, 0xab, 0xcd, 0xab, 0xcd, 0xab, 0xcd, 0xab,
-                0xcd
-            ]
-        )
-        .unwrap()
-        .to_string(),
-        "1 1 1 abcdabcdabcdabcdabcdabcd"
+        Rdata::parse(Type::ZONEMD, &zonemd).unwrap().to_string(),
+        format!("1 1 1 {}", "abcd".repeat(24))
     );
 }
 
 #[test]
 fn security_data_rejects_truncated_headers() {
-    for (rtype, min) in [(Type::TLSA, 3), (Type::SSHFP, 2), (Type::ZONEMD, 6)] {
+    for (rtype, min) in [(Type::TLSA, 3), (Type::SSHFP, 2), (Type::ZONEMD, 18)] {
         for len in 0..min {
-            assert!(
-                Rdata::parse(rtype, &[0; 6][..len]).is_err(),
-                "{rtype} {len}"
-            );
+            assert!(Rdata::parse(rtype, &vec![0; len]).is_err(), "{rtype} {len}");
         }
     }
 }

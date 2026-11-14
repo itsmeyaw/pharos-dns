@@ -589,8 +589,8 @@ fn supported_typed_rdata_agrees_with_domain() {
         (Type::HINFO, b"\x03CPU\x02OS".to_vec()),
         (Type::CAA, b"\x80\x05issueexample.org".to_vec()),
         (Type::URI, b"\x00\x0a\x00\x01https://example.org/".to_vec()),
-        (Type::DS, vec![0x12, 0x34, 8, 2, 0xab, 0xcd]),
-        (Type::CDS, vec![0x12, 0x34, 8, 2, 0xab, 0xcd]),
+        (Type::DS, vec![0x12, 0x34, 8, 0, 0xab, 0xcd]),
+        (Type::CDS, vec![0x12, 0x34, 8, 0, 0xab, 0xcd]),
         (Type::DNSKEY, vec![1, 0, 3, 8, 1, 2, 3]),
         (Type::CDNSKEY, vec![1, 0, 3, 8, 1, 2, 3]),
         (Type::TLSA, vec![3, 1, 1, 0xab, 0xcd]),
@@ -599,7 +599,7 @@ fn supported_typed_rdata_agrees_with_domain() {
         (Type::SSHFP, vec![1, 2]),
         (
             Type::ZONEMD,
-            [vec![0, 0, 0, 1, 1, 1], vec![0xab; 12]].concat(),
+            [vec![0, 0, 0, 1, 1, 1], vec![0xab; 48]].concat(),
         ),
         (
             Type::TSIG,
@@ -1107,28 +1107,15 @@ fn domain_accepts_noncanonical_and_disordered_bitmap_windows() {
 }
 
 #[test]
-fn domain_requires_at_least_twelve_zonemd_digest_octets() {
-    let root: Name = ".".parse().unwrap();
-    let root = NameRef::parse(root.as_wire(), 0).unwrap();
-    for len in 0..=12 {
-        let mut data = vec![0; 6];
-        data.extend(vec![0xab; len]);
-        assert_eq!(
-            pharos_proto::Rdata::parse(Type::ZONEMD, &data).is_ok(),
-            len >= 12
-        );
-        let mut wire = Vec::new();
-        let mut builder = MessageBuilder::new(&mut wire, 512, 0, 0).unwrap();
-        builder
-            .record(Section::Answer, root, Type::ZONEMD, Class::IN, 0, &data)
-            .unwrap();
-        let msg = DomainMessage::from_octets(&builder.finish()[..]).unwrap();
-        let record = msg.question().answer().unwrap().next().unwrap().unwrap();
-        assert_eq!(
-            record
-                .to_any_record::<AllRecordData<_, ParsedName<_>>>()
-                .is_ok(),
-            len >= 12
-        );
+fn zonemd_sha_digests_require_exact_lengths() {
+    for (algorithm, required) in [(1, 48), (2, 64)] {
+        for len in [required - 1, required, required + 1] {
+            let mut data = vec![0, 0, 0, 1, 1, algorithm];
+            data.extend(vec![0xab; len]);
+            assert_eq!(
+                pharos_proto::Rdata::parse(Type::ZONEMD, &data).is_ok(),
+                len == required
+            );
+        }
     }
 }

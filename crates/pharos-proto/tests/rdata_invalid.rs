@@ -12,6 +12,7 @@ fn caa_tag_follows_rfc_8659_syntax() {
     assert!(Rdata::parse(Type::CAA, &[0, 0]).is_err());
     assert!(Rdata::parse(Type::CAA, &[0, 3, b'a', b' ', b'b']).is_err());
     assert!(Rdata::parse(Type::CAA, &[0, 3, b'A', b'0', b'z']).is_ok());
+    assert!(Rdata::parse(Type::CAA, &[1, 3, b'a', b'b', b'c']).is_err());
     assert!(Rdata::parse(Type::CAA, b"\0\x10abcdefghijklmnop").is_ok());
 
     let name: Name = ".".parse().unwrap();

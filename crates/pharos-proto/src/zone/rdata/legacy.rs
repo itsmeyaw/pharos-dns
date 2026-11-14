@@ -61,53 +61,79 @@ pub(super) fn parse(
             }
             // RFC 1183 §§3.1-3.2: X25 and ISDN use character-strings.
             Type::X25 => {
-                if fields.len() > 1 {
-                    index = 1;
-                    return Err("extra X25 fields".into());
+                at!(fields.len().min(1), count(fields, 1))?;
+                let address = fields[0];
+                // RFC 1183 §3.1: X.25 addresses are digits and start with a four-digit DNIC.
+                if address.len() < 4 || !address.bytes().all(|byte| byte.is_ascii_digit()) {
+                    index = 0;
+                    return Err("invalid X25 address".into());
                 }
-                at!(
-                    0,
-                    character_string(&mut out, fields.first().copied().unwrap_or(""))
-                )?;
+                at!(0, character_string(&mut out, address))?;
             }
             Type::ISDN => {
-                let mut chunks = text_chunks(fields, &mut index)?;
-                if chunks.len() == 1 && fields.len() == 1 {
-                    let parts: Vec<_> = fields[0].split_whitespace().collect();
-                    if parts.len() > 1 {
-                        chunks = text_chunks(&parts, &mut index)?;
-                        for (i, _) in &mut chunks {
-                            *i = 0;
-                        }
-                    }
+                if !(1..=2).contains(&fields.len()) {
+                    index = fields.len().min(2);
+                    return Err("invalid ISDN field count".into());
                 }
+                let chunks = text_chunks(fields, &mut index)?;
                 let address = chunks
                     .first()
                     .map_or(&[][..], |(_, chunk)| chunk.as_slice());
+                // RFC 1183 §3.2: ISDN address and subaddress use decimal and hexadecimal digits.
+                if !(4..=15).contains(&address.len()) || !address.iter().all(u8::is_ascii_digit) {
+                    index = 0;
+                    return Err("invalid ISDN address".into());
+                }
                 index = 0;
                 length_bytes(&mut out, address)?;
-                let mut rest = Vec::new();
-                for (n, (i, chunk)) in chunks.iter().skip(1).enumerate() {
-                    index = *i;
-                    if n != 0 {
-                        rest.push(b' ');
+                if let Some((field, subaddress)) = chunks.get(1) {
+                    index = *field;
+                    if !subaddress.iter().all(u8::is_ascii_hexdigit) {
+                        return Err("invalid ISDN subaddress".into());
                     }
-                    rest.extend(chunk);
-                    if rest.len() > 255 {
-                        return Err("character-string exceeds 255 octets".into());
-                    }
+                    length_bytes(&mut out, subaddress)?;
                 }
-                length_bytes(&mut out, &rest)?;
+            }
+            // RFC 1706 §§5,7: NSAP presentation is 0x hexadecimal octets, optional periods.
+            Type::NSAP => {
+                at!(fields.len().min(1), count(fields, 1))?;
+                let value = fields[0]
+                    .strip_prefix("0x")
+                    .or_else(|| fields[0].strip_prefix("0X"))
+                    .ok_or("NSAP address must start with 0x")?;
+                index = 0;
+                let digits: String = value.chars().filter(|&ch| ch != '.').collect();
+                if digits.is_empty()
+                    || !digits.len().is_multiple_of(2)
+                    || !digits.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Err("invalid NSAP address".into());
+                }
+                out.extend(hex(&digits)?);
+                if out.last() != Some(&0) {
+                    return Err("NSAP NSel octet must be zero".into());
+                }
             }
             // RFC 1712 §3: longitude, latitude and altitude are character-strings.
             // RFC 1712 §4: GPOS has numerical values in longitude, latitude, altitude order.
             Type::GPOS => {
                 at!(fields.len().min(3), count(fields, 3))?;
                 for (i, field) in fields.iter().enumerate() {
-                    at!(
+                    let value = at!(
                         i,
                         field.parse::<f64>().map_err(|_| "invalid GPOS coordinate")
                     )?;
+                    let range = if i == 0 {
+                        -180.0..=180.0
+                    } else if i == 1 {
+                        -90.0..=90.0
+                    } else {
+                        f64::NEG_INFINITY..=f64::INFINITY
+                    };
+                    // RFC 1712 §3: longitude is -180..180 and latitude is -90..90.
+                    if !value.is_finite() || !range.contains(&value) {
+                        return Err("GPOS coordinate out of range".into());
+                    }
                     character_string(&mut out, field)?;
                 }
             }
@@ -130,8 +156,14 @@ pub(super) fn parse(
                 num!(0, put16(&mut out, fields[0]))?;
                 index = 1;
                 let b = fields[1].as_bytes();
-                // miekg's stringToNodeID accepts trailing bytes and only requires one colon.
-                if b.len() < 19 || (b[4] != b':' && b[9] != b':' && b[14] != b':') {
+                // RFC 6742 §2.1.1.2 and §2.3.2: four exact four-hex-digit groups use colons.
+                if b.len() != 19 || b[4] != b':' || b[9] != b':' || b[14] != b':' {
+                    return Err("invalid NID/L64 identifier".into());
+                }
+                if [0..4, 5..9, 10..14, 15..19]
+                    .iter()
+                    .any(|range| !b[range.clone()].iter().all(u8::is_ascii_hexdigit))
+                {
                     return Err("invalid NID/L64 identifier".into());
                 }
                 let mut digits = Vec::with_capacity(16);
@@ -150,8 +182,9 @@ pub(super) fn parse(
                 let ip: std::net::IpAddr = fields[1].parse().map_err(|_| "invalid L32 address")?;
                 let ip = match ip {
                     std::net::IpAddr::V4(ip) => ip,
-                    std::net::IpAddr::V6(ip) => ip.to_ipv4_mapped().ok_or("invalid L32 address")?,
+                    std::net::IpAddr::V6(_) => return Err("invalid L32 address".into()),
                 };
+                // RFC 6742 §2.2.2: L32 locator presentation is an IPv4 dotted quad.
                 out.extend(ip.octets());
             }
             // RFC 1035 §3.3: numeric fields are encoded in network byte order.

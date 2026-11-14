@@ -45,12 +45,16 @@ pub(super) fn parse(
                     return Err(super::INVALID_ESCAPE.into());
                 }
                 let mut i = 0;
-                let lat = coordinate(fields, &mut i, &mut index, 90, "N", "S")?;
-                let lon = coordinate(fields, &mut i, &mut index, 180, "E", "W")?;
+                let lat = coordinate(fields, &mut i, &mut index, 90, "N", "S", false)?;
+                let lon = coordinate(fields, &mut i, &mut index, 180, "E", "W", true)?;
                 let alt = at!(i, fields.get(i).ok_or("missing LOC altitude"))?;
                 let alt = at!(i, loc_float(alt.strip_suffix(['m', 'M']).unwrap_or(alt)))?;
                 i += 1;
-                // RFC 1876 §2: match Go's architecture-dependent rounding and conversion.
+                // RFC 1876 §3: altitude is a signed centimeter offset from -100,000 meters.
+                if !alt.is_finite() || !(-100_000.0..=42_849_672.95).contains(&alt) {
+                    return Err("LOC altitude out of range".into());
+                }
+                // RFC 1876 §3: altitude range maps exactly into the unsigned 32-bit wire field.
                 #[cfg(target_arch = "aarch64")]
                 let adjusted = alt.mul_add(100.0, 10_000_000.0) + 0.5;
                 // shortcut: Go GOAMD64=v3 may fuse this; match its build profile if configurable.
@@ -68,6 +72,10 @@ pub(super) fn parse(
                 #[cfg(not(target_arch = "x86_64"))]
                 let altitude = adjusted as i64 as u32;
                 // RFC 1876 §3: Default LOC size and precisions are 1 m, 10 km, and 10 m.
+                if fields.len() - i > 3 {
+                    index = i + 3;
+                    return Err("extra LOC precision fields".into());
+                }
                 let mut precision = [0x12, 0x16, 0x13];
                 for (offset, (slot, field)) in precision.iter_mut().zip(&fields[i..]).enumerate() {
                     *slot = at!(i + offset, loc_precision(field))?;
@@ -94,7 +102,9 @@ pub(super) fn parse(
                     return Err("missing HIP key".into());
                 }
                 let key = at!(2, base64(key_field))?;
-                out.push((hit_field.len() as u8) / 2);
+                // RFC 8005 §5.1: HIT Length counts decoded octets, not presentation characters.
+                index = 1;
+                out.push(u8::try_from(hit.len()).map_err(|_| "HIP HIT too long")?);
                 out.push(algorithm);
                 // RFC 8005 §5.3: HIP stores key length as a 16-bit network-order byte count.
                 out.extend((key.len() as u16).to_be_bytes());
@@ -117,7 +127,7 @@ pub(super) fn parse(
                     "PKIX" => 1,
                     "SPKI" => 2,
                     "PGP" => 3,
-                    "IPIX" => 4,
+                    "IPKIX" => 4,
                     "ISPKI" => 5,
                     "IPGP" => 6,
                     "ACPKIX" => 7,
@@ -148,9 +158,20 @@ pub(super) fn parse(
                 // RFC 7477 §2.1.1.1: SOA Serial is a 32-bit copy of the child-zone serial.
                 num!(0, put32(&mut out, field!(0, "missing CSYNC serial")))?;
                 // RFC 7477 §2.1.1.2: the Flags field occupies 16 bits.
-                num!(1, put16(&mut out, field!(1, "missing CSYNC flags")))?;
+                let flags: u16 = num!(1, number(field!(1, "missing CSYNC flags")))?;
+                if flags & !1 != 0 {
+                    index = 1;
+                    return Err("invalid CSYNC flags".into());
+                }
+                out.extend(flags.to_be_bytes());
+                if fields.len() < 3 {
+                    index = fields.len();
+                    return Err("CSYNC bitmap must not be empty".into());
+                }
                 for (offset, field) in fields[2..].iter().enumerate() {
-                    at!(offset + 2, type_code(field))?;
+                    if at!(offset + 2, type_code(field))? == 0 {
+                        return Err("TYPE0 is not a bitmap RR type".into());
+                    }
                 }
                 at!(fields.len(), bitmap(&mut out, &fields[2..]))?;
             }
@@ -161,6 +182,10 @@ pub(super) fn parse(
                 out.push(num!(0, number(field!(0, "missing gateway precedence")))?);
                 let (kind, gateway) = if rtype == Type::IPSECKEY {
                     let kind = num!(1, number(field!(1, "missing gateway type")))?;
+                    if kind > 3 {
+                        index = 1;
+                        return Err("invalid IPSECKEY gateway type".into());
+                    }
                     out.push(kind);
                     // RFC 4025 §3.1: the algorithm is an unsigned integer without mnemonics.
                     out.push(num!(2, number(field!(2, "missing IPSECKEY algorithm")))?);
@@ -178,6 +203,10 @@ pub(super) fn parse(
                     };
                     // RFC 8777 §4.2.3: The relay type selects the AMTRELAY relay-field encoding.
                     let kind: u8 = num!(2, number(field!(2, "missing gateway type")))?;
+                    if kind > 3 {
+                        index = 2;
+                        return Err("invalid AMTRELAY gateway type".into());
+                    }
                     out.push(discovery | kind);
                     (kind & 0x7f, fields.get(3).copied().unwrap_or(""))
                 };
@@ -187,17 +216,21 @@ pub(super) fn parse(
                     index = 4;
                     return Err("extra AMTRELAY fields".into());
                 }
-                // miekg passes the discovery bit unmasked to its gateway packer.
-                if rtype == Type::IPSECKEY || out[1] < 128 {
-                    out.extend(addr);
-                }
+                // RFC 8777 §4.2.4: discovery flag does not suppress the relay field.
+                out.extend(addr);
                 if rtype == Type::IPSECKEY {
                     let prefix = out.len();
                     // RFC 4025 §3.1: Public-key data is Base64; absent text means zero octets.
-                    out.extend(base64_tail(fields, 4).map_err(|(field, error)| {
+                    let key = base64_tail(fields, 4).map_err(|(field, error)| {
                         index = field;
                         error
-                    })?);
+                    })?;
+                    // RFC 4025 §2.4: algorithm 0 denotes no public key material.
+                    if out[2] == 0 && !key.is_empty() {
+                        index = 4;
+                        return Err("algorithm 0 must not carry a public key".into());
+                    }
+                    out.extend(key);
                     check_tail_size(&out, prefix, fields, 4).map_err(|(field, error)| {
                         index = field;
                         error
@@ -220,21 +253,27 @@ pub(super) fn parse(
             }
             // RFC 2930 §2: TKEY's algorithm is followed by fixed fields and two opaque strings.
             Type::TKEY => {
-                let algorithm = field!(0, "missing TKEY algorithm");
-                if !algorithm.ends_with('.') {
-                    index = 0;
-                    return Err("TKEY algorithm must be absolute".into());
-                }
-                at!(0, name(&mut out, algorithm, origin))?;
+                at!(fields.len().min(5), super::count(fields, 5))?;
+                // RFC 1035 §5.1: relative algorithm names resolve against the current origin.
+                at!(0, name(&mut out, fields[0], origin))?;
                 out.extend([0; 12]);
-                let key_len: u8 = num!(1, number(field!(1, "missing TKEY key length")))?;
-                out.extend(u16::from(key_len).to_be_bytes());
-                out.extend(at!(2, hex(field!(2, "missing TKEY key")))?);
+                let key_len: u16 = num!(1, number(fields[1]))?;
+                let key = at!(2, hex(fields[2]))?;
+                if usize::from(key_len) != key.len() {
+                    index = 1;
+                    return Err("TKEY key size mismatch".into());
+                }
+                out.extend(key_len.to_be_bytes());
+                out.extend(key);
                 at!(2, check_size(&out))?;
-                let other_len: u8 = num!(3, number(field!(3, "missing TKEY other length")))?;
-                out.extend(u16::from(other_len).to_be_bytes());
-                at!(3, check_size(&out))?;
-                out.extend(at!(4, hex(field!(4, "missing TKEY other data")))?);
+                let other_len: u16 = num!(3, number(fields[3]))?;
+                let other = at!(4, hex(fields[4]))?;
+                if usize::from(other_len) != other.len() {
+                    index = 3;
+                    return Err("TKEY other size mismatch".into());
+                }
+                out.extend(other_len.to_be_bytes());
+                out.extend(other);
                 at!(4, check_size(&out))?;
             }
             _ => return Ok(false),
@@ -295,6 +334,7 @@ fn coordinate(
     max: u32,
     positive: &str,
     negative: &str,
+    round_away: bool,
 ) -> Result<u32, String> {
     *error_index = *i;
     let deg: u32 = number(fields.get(*i).ok_or("missing LOC degrees")?)?;
@@ -320,7 +360,14 @@ fn coordinate(
         if min == 0 {
             over_limit_index = *i;
         }
-        value += min * 60_000 + (sec * 1000.0) as u32;
+        // RFC 1876 §2: longitude rounding must move away from the Prime Meridian.
+        let millis = sec * 1000.0;
+        value += min * 60_000
+            + if round_away {
+                millis.ceil() as u32
+            } else {
+                millis as u32
+            };
         *i += 1;
         *error_index = *i;
         direction = *fields.get(*i).ok_or("missing LOC direction")?;
@@ -528,9 +575,6 @@ fn gateway_wire(out: &mut Vec<u8>, kind: u8, field: &str, origin: &Name) -> Resu
         }
         2 => {
             let ip: Ipv6Addr = field.parse().map_err(|_| "invalid gateway IPv6")?;
-            if ip.to_ipv4_mapped().is_some() {
-                return Err("invalid gateway IPv6".into());
-            }
             out.extend(ip.octets());
         }
         3 if field.is_empty() => return Err("invalid gateway name".into()),
@@ -622,7 +666,8 @@ mod tests {
             parse(Type::HIP, &hip, &[], &origin).unwrap().unwrap_err().0,
             1
         );
-        let tkey = [".", "1", huge_hex.as_str(), "1", "ff"];
+        let tkey_hex = "ab".repeat(65_535);
+        let tkey = [".", "65535", tkey_hex.as_str(), "1", "ff"];
         assert_eq!(
             parse(Type::TKEY, &tkey, &[], &origin)
                 .unwrap()
