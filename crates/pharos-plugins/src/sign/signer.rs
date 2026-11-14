@@ -242,7 +242,7 @@ pub(super) fn sign_with_owner(
         if (rr.rtype == Type::SOA || authoritative(&rr.owner))
             // RFC 4034 §3: Do not sign RRSIG records as zone data.
             && rr.rtype != Type::RRSIG
-            // RFC 5155 §6: Do not sign NS RRsets at non-apex delegation points.
+            // RFC 4035 §2.2: Do not sign NS RRsets at non-apex delegation points.
             && (rr.rtype != Type::NS || rr.owner == *apex)
         {
             rrsets
@@ -252,7 +252,7 @@ pub(super) fn sign_with_owner(
         }
     }
     let signer = NameRef::parse(apex.as_wire(), 0).map_err(|e| e.to_string())?;
-    // RFC 4034 §3.1.5: signature times use unsigned 32-bit serial arithmetic.
+    // RFC 1982 §3; RFC 4034 §3.1.5: signature times use unsigned 32-bit serial arithmetic.
     let inception = now.wrapping_sub(3 * 60 * 60).wrapping_sub(inception_jitter);
     let expiration = now
         .wrapping_add(32 * 24 * 60 * 60)
@@ -260,9 +260,16 @@ pub(super) fn sign_with_owner(
     let mut signatures = Vec::new();
     // RFC 4035 §2.2: Sign each authoritative RRset with its matching RRSIG fields and zone key.
     for ((owner, rtype, _), indices) in rrsets {
+        // RFC 2181 §5.2: Use the RRset's lowest TTL for both RRSIG TTL and Original TTL.
+        let ttl = indices
+            .iter()
+            .map(|&index| records[index].ttl)
+            .min()
+            .unwrap_or(records[indices[0]].ttl);
+        for index in indices.iter().copied() {
+            records[index].ttl = ttl;
+        }
         let first = &records[indices[0]];
-        // RFC 4034 §3: RRSIG TTL matches the covered RRset TTL, including apex NS.
-        let ttl = first.ttl;
         let owner_ref = NameRef::parse(owner.as_wire(), 0).map_err(|e| e.to_string())?;
         let rrset = indices
             .iter()
@@ -621,6 +628,40 @@ mod tests {
                 .filter(|rr| rr.rtype == Type::NSEC)
                 .all(|rr| rr.ttl == 3600)
         );
+    }
+
+    #[test]
+    fn mixed_ttl_rrset_uses_minimum_for_records_and_signature() {
+        let path =
+            std::env::temp_dir().join(format!("pharos-sign-mixed-ttl-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. (1 4H 1H 7D 4H)\n@ IN NS ns.\nwww 900 IN A 192.0.2.1\nwww 300 IN A 192.0.2.2\n",
+        )
+        .unwrap();
+        let apex: Name = "miek.nl.".parse().unwrap();
+        let records = sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let owner: Name = "www.miek.nl.".parse().unwrap();
+        assert!(
+            records
+                .iter()
+                .filter(|rr| rr.owner == owner && rr.rtype == Type::A)
+                .all(|rr| rr.ttl == 300)
+        );
+        let signature = records
+            .iter()
+            .find(|rr| rr.owner == owner && rr.rtype == Type::RRSIG)
+            .unwrap();
+        assert_eq!(signature.ttl, 300);
+        assert!(matches!(
+            Rdata::parse(Type::RRSIG, &signature.rdata).unwrap(),
+            Rdata::Rrsig {
+                type_covered: Type::A,
+                original_ttl: 300,
+                ..
+            }
+        ));
     }
 
     #[test]
