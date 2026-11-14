@@ -117,7 +117,11 @@ pub(super) fn sign_with_owner(
         .iter_mut()
         .find(|rr| rr.rtype == Type::SOA)
         .ok_or_else(|| "Zone has no SOA".to_string())?;
-    let Rdata::Soa { minimum, .. } =
+    let Rdata::Soa {
+        minimum,
+        serial: previous_serial,
+        ..
+    } =
         Rdata::parse(Type::SOA, &soa.rdata).map_err(|e| e.to_string())?
     else {
         return Err("invalid SOA".into());
@@ -125,7 +129,13 @@ pub(super) fn sign_with_owner(
     let soa_ttl = soa.ttl;
     // RFC 1035 §3.3.13: SOA serial is the first of five trailing 32-bit values.
     let serial_offset = soa.rdata.len().checked_sub(20).ok_or("invalid SOA")?;
-    soa.rdata[serial_offset..serial_offset + 4].copy_from_slice(&now.to_be_bytes());
+    // RFC 4033 §8.2: A time-derived SOA serial must advance when it is not newer.
+    let serial = if now <= previous_serial {
+        previous_serial.wrapping_add(1)
+    } else {
+        now
+    };
+    soa.rdata[serial_offset..serial_offset + 4].copy_from_slice(&serial.to_be_bytes());
 
     let mut signers = Vec::with_capacity(keys.len());
     for key in keys {
@@ -423,6 +433,29 @@ mod tests {
         }
         let cds = records.iter().find(|r| r.rtype == Type::CDS).unwrap();
         assert_eq!(cds.rdata[3], 2);
+    }
+
+    // RFC 4033 §8.2: Time-based signing must advance a non-increasing SOA serial.
+    #[test]
+    fn soa_serial_advances_when_unix_time_is_not_newer() {
+        let path = std::env::temp_dir().join(format!("pharos-sign-serial-{}", std::process::id()));
+        let apex: Name = "miek.nl.".parse().unwrap();
+        for (previous, now) in [(100, 100), (100, 99)] {
+            std::fs::write(
+                &path,
+                format!(
+                    "$TTL 1H\n$ORIGIN miek.nl.\n@ IN SOA ns. host. ({previous} 4H 1H 7D 4H)\n@ IN NS ns.\n"
+                ),
+            )
+            .unwrap();
+            let records = sign(&apex, &path, &[key()], now, 0, 0).unwrap();
+            let soa = records.iter().find(|rr| rr.rtype == Type::SOA).unwrap();
+            assert!(matches!(
+                Rdata::parse(Type::SOA, &soa.rdata).unwrap(),
+                Rdata::Soa { serial: 101, .. }
+            ));
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
