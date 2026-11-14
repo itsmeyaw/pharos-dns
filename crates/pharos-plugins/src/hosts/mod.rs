@@ -306,6 +306,7 @@ impl pharos_server::Plugin for Hosts {
         } else {
             (&[][..], &[][..])
         };
+        // RFC 1034 §4.3.2: distinguish missing owners from existing NODATA owners.
         let missing = ips.0.is_empty()
             && ips.1.is_empty()
             && names1.is_none()

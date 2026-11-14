@@ -92,12 +92,12 @@ fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Erro
     let len: u8 = len
         .parse()
         .map_err(|_| cursor.error("invalid dns64 prefix"))?;
-    // RFC 6052 §2.2: these six defined lengths are the only valid synthesis prefixes.
+    // RFC 6052 §2.2: only the six defined prefix lengths are valid; /96 is the maximum.
     if !matches!(len, 32 | 40 | 48 | 56 | 64 | 96) {
         return Err(cursor.error("invalid dns64 prefix length"));
     }
     let mut bytes = ip.octets();
-    // RFC 6052 §2.2: the Well-Known Prefix is valid only in its /96 format.
+    // RFC 6052 §2.1: the Well-Known Prefix is valid only in its /96 format.
     if bytes[..12] == "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets()[..12] && len != 96 {
         return Err(cursor.error("invalid dns64 well-known prefix length"));
     }
