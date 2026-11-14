@@ -315,6 +315,14 @@ impl External {
             {
                 let mut error = None;
                 let mut scratch = scratch::lease();
+                for entry in chased {
+                    let has_address = response_has_address_target(entry);
+                    scratch.srv.insert(
+                        &entry.ordinal.to_be_bytes(),
+                        entry.name.as_wire(),
+                        u16::from(has_address),
+                    );
+                }
                 store.with_read(|index| {
                     let mut count = 0usize;
                     lookup::snapshot_or_lookup(
@@ -340,7 +348,7 @@ impl External {
                             ordinal += 1;
                             let entry = chased_at(chased, current, address);
                             if !port.has_srv()
-                                || !has_address_target(address, entry)
+                                || !cached_has_address_target(address, entry, &scratch.srv)
                                 || error.is_some()
                             {
                                 return;
@@ -397,7 +405,7 @@ impl External {
                             ordinal += 1;
                             let entry = chased_at(chased, current, address);
                             if !port.has_srv()
-                                || !has_address_target(address, entry)
+                                || !cached_has_address_target(address, entry, &scratch.srv)
                                 || error.is_some()
                             {
                                 return;
@@ -550,14 +558,8 @@ fn chased_at<'a>(chased: &'a [Chased], ordinal: usize, address: &str) -> Option<
         .min_by_key(|entry| entry.ordinal.abs_diff(ordinal))
 }
 
-// RFC 2782 §The format of the SRV RR: SRV Target must resolve to addresses and not be an alias.
-fn has_address_target(address: &str, chased: Option<&Chased>) -> bool {
-    if address.parse::<std::net::IpAddr>().is_ok() {
-        return true;
-    }
-    let Some(chased) = chased else {
-        return false;
-    };
+// RFC 2782 §The format of the SRV RR: SRV targets must resolve to addresses and not aliases.
+fn response_has_address_target(chased: &Chased) -> bool {
     let mut found_address = false;
     for wire in chased.answers.iter().flatten() {
         let Ok(message) = pharos_proto::Message::parse(wire) else {
@@ -571,6 +573,18 @@ fn has_address_target(address: &str, chased: Option<&Chased>) -> bool {
         }
     }
     found_address
+}
+
+fn cached_has_address_target(address: &str, chased: Option<&Chased>, seen: &scratch::Seen) -> bool {
+    if address.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    chased.is_some_and(|entry| seen.contains(&entry.ordinal.to_be_bytes(), entry.name.as_wire(), 1))
+}
+
+#[cfg(test)]
+fn has_address_target(address: &str, chased: Option<&Chased>) -> bool {
+    address.parse::<std::net::IpAddr>().is_ok() || chased.is_some_and(response_has_address_target)
 }
 
 fn write_chased(

@@ -61,6 +61,24 @@ impl Seen {
         true
     }
 
+    pub(super) fn contains(&self, first: &[u8], second: &[u8], port: u16) -> bool {
+        let hash = self.buckets.hasher().hash_one((first, second, port));
+        let mut next = self.buckets.get(&hash).copied();
+        while let Some(index) = next {
+            let entry = &self.entries[index];
+            let middle = entry.start + entry.first_len;
+            let end = middle + entry.second_len;
+            if entry.port == port
+                && &self.bytes[entry.start..middle] == first
+                && &self.bytes[middle..end] == second
+            {
+                return true;
+            }
+            next = entry.next;
+        }
+        false
+    }
+
     fn clear(&mut self) {
         self.buckets.clear();
         self.entries.clear();
@@ -124,6 +142,8 @@ mod tests {
         assert!(first.srv.insert(b"host.example.", b"", 443));
         assert!(first.extra.insert(b"host.example.", b"192.0.2.1", 0));
         assert!(!first.extra.insert(b"host.example.", b"192.0.2.1", 0));
+        assert!(first.extra.contains(b"host.example.", b"192.0.2.1", 0));
+        assert!(!first.extra.contains(b"host.example.", b"192.0.2.1", 1));
         assert!(first.extra.insert(b"other.example.", b"192.0.2.1", 0));
         let capacity = first.addresses.capacity();
         drop(first);

@@ -578,7 +578,7 @@ where
 
 // RFC 1982 §3.2: compare serials in modulo-2^32 half-space order.
 fn serial_at_least(candidate: u32, current: u32) -> bool {
-    candidate == current || candidate.wrapping_sub(current) < (1 << 31)
+    candidate.wrapping_sub(current) < (1 << 31)
 }
 
 // RFC 1995 §2: current IXFR and UDP IXFR return only the current SOA.
