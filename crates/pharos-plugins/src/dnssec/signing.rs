@@ -183,7 +183,7 @@ impl Dnssec {
             .answers()
             .find(|rr| rr.rtype == Type::DNAME)
             .map(|rr| rr.name);
-        // RFC 4035 §3: A DNAME-synthesized CNAME SHOULD NOT be signed.
+        // RFC 6672 §5.3.1: A DNAME-synthesized CNAME is never signed.
         let signs_section = |section, rtype, owner| {
             (!referral || (section == Section::Authority && rtype == Type::DS))
                 && (!denial || section == Section::Authority)
@@ -474,14 +474,15 @@ impl Dnssec {
         let apex = NameRef::parse(zone.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
         let apex_dnskey = first.rtype == Type::DNSKEY && first.name == apex;
         // RFC 6840 §5.11: Track KSK/ZSK roles per algorithm without query-path allocation.
-        let mut roles_by_algorithm = [0u8; 256];
+        let mut roles_by_algorithm = [0u8; 16];
         for key in self.keys.iter().filter(|key| key.public.owner == *zone) {
-            let roles = &mut roles_by_algorithm[usize::from(key.public.algorithm)];
-            *roles |= match key.public.flags & 257 {
-                257 => 1,
-                256 => 2,
-                _ => 0,
-            };
+            if let Some(roles) = roles_by_algorithm.get_mut(usize::from(key.public.algorithm)) {
+                *roles |= match key.public.flags & 257 {
+                    257 => 1,
+                    256 => 2,
+                    _ => 0,
+                };
+            }
         }
         let canonical: Vec<_> = records
             .iter()
@@ -498,7 +499,10 @@ impl Dnssec {
             if key.public.owner != *zone {
                 return false;
             }
-            let roles = roles_by_algorithm[usize::from(key.public.algorithm)];
+            let roles = roles_by_algorithm
+                .get(usize::from(key.public.algorithm))
+                .copied()
+                .unwrap_or_default();
             // RFC 6781 §3.1: In split-key signing, KSKs sign only the apex DNSKEY RRset.
             roles != 3 || (key.public.flags & 257 == if apex_dnskey { 257 } else { 256 })
         });
