@@ -383,8 +383,12 @@
 - The local plugin returns positive `localhost.` apex NS/SOA data for CoreDNS compatibility (RFC 6761 §6.3).
 - Local answers set AA; local NS and SOA MNAME use resolvable `localhost.`, and SOA RNAME is `nobody.invalid.` (RFC 1034 §4.3.2; RFC 2181 §7.3; RFC 6303 §3; CoreDNS v1.15.0 `plugin/local`).
 - DNS64 and SIIT reject non-/96 RFC 6052 Well-Known Prefixes and nonzero /96 reserved octets; CoreDNS v1.15.0 DNS64 setup tests accept `64:ff9b::/32` (`plugin/dns64/setup_test.go`). DNS64 synthesized AA/RA come from the initial AAAA response (RFC 6052 §§2.1–2.2; RFC 6147 §5.4; CoreDNS v1.15.0 `plugin/dns64` and `plugin/siit`).
+- With the RFC 6052 Well-Known Prefix, DNS64 and SIIT do not synthesize or translate non-global IPv4 addresses; custom prefixes and explicit EAMs retain their configured behavior (RFC 6052 §3.1).
+- DNS64 follows CNAME-only A lookups for up to eight targets before SERVFAIL; the bound terminates alias cycles (RFC 6147 §5.1.5).
 - A successful empty A lookup returns the original AAAA response (RFC 6147 §5.4); this differs from the former Pharos behavior.
 - The `header` plugin can override AA on Queries and non-authoritative Responses; this retains CoreDNS v1.15.0 `plugin/header` behavior (RFC 1035 §4.1.1).
+- Header query rules still rewrite RD sent to Next, but Response RD copies the received Query as RFC 1035 §4.1.1 requires; CoreDNS may return the rewritten RD bit.
+- ACLs require numeric zone IDs for link-local IPv6 matches; unqualified networks do not match scoped clients (RFC 4007 §§11–12).
 
 - **Kubernetes and forwarding**
 
@@ -394,6 +398,8 @@
 - Multicluster accepts only `clusterset.local`; two-label source-cluster IDs are encoded as separate DNS labels, while CoreDNS v1.15.0 parses one cluster label (`plugin/kubernetes/parse.go`; KEP-1645 §§2.1,2.4.1–2.4.2).
 - `ignore empty_service` is accepted but does not suppress ClusterIP/ClusterSetIP records. `key!=value` selectors and repeated-key conjunctions are supported (conf/k8s #103).
 - Chased A/AAAA RCODE is NOERROR if any target answers; otherwise the final failed cycle determines RCODE (RFC 6604 §3; conf/k8s #103).
+- Template CNAME Self Lookup propagates the terminal RCODE when its configured RCODE is NOERROR; explicitly configured error RCODEs remain unchanged (RFC 6604 §3).
+- Template `ederror 0` adds `Other error` when no text is configured; configured UTF-8 text is preserved (RFC 8914 §4.1).
 - `tolerate-unready-endpoints=true` enables ordinary Service endpoint answers/transfers; ServiceImport endpoints ignore the annotation (KEP-752; conf/k8s #103).
 - Malformed multicluster names such as `bad..zone` are rejected; CoreDNS accepts and drops the malformed token (conf/k8s #103).
 - `forward` clamps `max_connect_attempts` to 1–3 per upstream/transport; zero means one. Unsigned ECS Queries reserve one attempt for the RFC 7871 §7.1.3 retry. Configured three therefore allows only two ECS-bearing attempts (RFC 9520 §3.1; CoreDNS default is `2n`).
