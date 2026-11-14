@@ -54,6 +54,12 @@ impl Siit {
                             return Err(cursor.error("invalid prefix length"));
                         }
                         let mut bytes = ip.octets();
+                        // RFC 6052 §2.1: the Well-Known Prefix is defined only as /96.
+                        if bytes[..12] == "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets()[..12]
+                            && len != 96
+                        {
+                            return Err(cursor.error("invalid well-known prefix length"));
+                        }
                         bytes[usize::from(len / 8)..].fill(0);
                         if bytes[8] != 0 {
                             return Err(cursor.error("invalid reserved octet"));
