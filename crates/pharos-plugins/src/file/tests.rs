@@ -341,6 +341,24 @@ fn zone_preserves_case_and_normalizes_duplicate_rrsets() {
 }
 
 #[test]
+fn signatures_keep_ttl_of_their_covered_rrset() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\n@ 3600 IN RRSIG NS 8 2 3600 20300101000000 20200101000000 12345 example.org. AQID\n@ 60 IN A 192.0.2.1\n@ 60 IN RRSIG A 8 2 60 20300101000000 20200101000000 12345 example.org. AQID\n";
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "rrsig-ttl.zone")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let zone = Zone::from_records(apex, records).unwrap();
+    let signatures = zone
+        .records()
+        .iter()
+        .filter(|rr| rr.rtype == Type::RRSIG)
+        .map(|rr| (u16::from_be_bytes([rr.rdata[0], rr.rdata[1]]), rr.ttl))
+        .collect::<Vec<_>>();
+    assert!(signatures.contains(&(Type::NS.0, 3600)));
+    assert!(signatures.contains(&(Type::A.0, 60)));
+}
+
+#[test]
 fn duplicate_cname_targets_compare_case_insensitively_without_rewriting_case() {
     let apex: Name = "example.org.".parse().unwrap();
     let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nalias.example.org. 300 IN CNAME TARGET.example.org.\nalias.example.org. 60 IN CNAME target.EXAMPLE.org.\n";

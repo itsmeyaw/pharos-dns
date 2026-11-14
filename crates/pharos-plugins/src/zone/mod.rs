@@ -255,22 +255,45 @@ impl Zone {
             }
         }
         records = deduplicated;
-        let mut rrset_ttls = std::collections::HashMap::with_capacity(records.len());
+        // RFC 4034 §3: An RRSIG RRset's TTL matches the RRset it covers.
+        let covered_type = |record: &ZoneRecord| {
+            if record.rtype == Type::RRSIG {
+                record
+                    .rdata
+                    .get(..2)
+                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        };
+        let rrset_key = |record: &ZoneRecord| {
+            (
+                record.owner.clone(),
+                record.rtype.0,
+                record.class.0,
+                covered_type(record),
+            )
+        };
+        let mut rrset_ttls =
+            std::collections::HashMap::<(Name, u16, u16, u16), u32>::with_capacity(records.len());
         for record in &records {
-            let ttl = rrset_ttls
-                .entry((record.owner.clone(), record.rtype.0, record.class.0))
-                .or_insert(record.ttl);
+            let ttl = rrset_ttls.entry(rrset_key(record)).or_insert(record.ttl);
             *ttl = (*ttl).min(record.ttl);
         }
         for record in &mut records {
-            record.ttl = rrset_ttls[&(record.owner.clone(), record.rtype.0, record.class.0)];
+            record.ttl = rrset_ttls[&rrset_key(record)];
         }
+        let negative_ttl = records
+            .iter()
+            .find(|record| record.rtype == Type::SOA)
+            .and_then(negative_soa_ttl)
+            .ok_or("invalid SOA negative TTL")?;
         // RFC 2181 §10.1: A CNAME owner has no ordinary data or competing targets.
         let mut cnames = std::collections::HashMap::new();
         let mut other_type_owners = std::collections::HashSet::new();
         let mut dnames = std::collections::HashMap::new();
         let mut ns_owners = std::collections::HashSet::new();
-        let mut svcb_modes = std::collections::HashMap::new();
         for record in &records {
             match record.rtype {
                 Type::CNAME => {
