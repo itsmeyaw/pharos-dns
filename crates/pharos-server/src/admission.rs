@@ -86,6 +86,7 @@ pub fn admit_with_update<'a>(
         header_error(wire, response, Rcode::FORMERR);
         return Admission::Respond;
     };
+    let query = query.ignore_notify_sections();
     // RFC 1035 §4.1.1: RCODE 5 refuses an operation for policy reasons.
     if !allow_non_in
         && query
@@ -133,6 +134,7 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode) {
         flags,
     )
     .ok() else {
+        // RFC 1035 §4.1.1: preserve the Message ID and FORMERR RCODE in the minimal Response.
         response.clear();
         response.extend_from_slice(&wire[..2]);
         response.extend_from_slice(&flags.to_be_bytes());

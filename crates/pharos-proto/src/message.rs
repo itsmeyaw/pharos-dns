@@ -59,6 +59,7 @@ pub struct Message<'a> {
     question_class: Option<Class>,
     question_name: [u8; 255],
     question_name_len: usize,
+    ignore_notify_sections: bool,
 }
 
 // RFC 1034 §3.7.1: queries select resource data by QTYPE and QCLASS.
@@ -230,8 +231,18 @@ impl<'a> Message<'a> {
         self.wire
     }
 
+    /// Return a NOTIFY request view that hides its ignored Authority and Additional sections.
+    // RFC 1996 §3.9: NOTIFY recipients must ignore both sections.
+    #[must_use]
+    pub fn ignore_notify_sections(mut self) -> Self {
+        if self.opcode() == Opcode::NOTIFY && self.flags & 0x8000 == 0 {
+            self.ignore_notify_sections = true;
+        }
+        self
+    }
+
     // RFC 1035 §4.1: Header is followed by Question, Answer, Authority, and Additional sections.
-    /// Validates all section boundaries and names before exposing the view.
+    /// Validates sections and names; malformed NOTIFY ancillary sections are ignored.
     /// Bytes after the declared sections are ignored, as in CoreDNS.
     pub fn parse(wire: &'a [u8]) -> Result<Self, MessageError> {
         if wire.len() < HEADER_LEN {
@@ -256,10 +267,6 @@ impl<'a> Message<'a> {
         'sections: for section in 0..4 {
             starts[section] = offset;
             let wire_count = counts[section];
-            if notify && section == 2 {
-                // RFC 1996 §3.9: ignore Authority records after finding Additional's boundary.
-                counts[section] = 0;
-            }
             for _ in 0..wire_count {
                 offset = if section == 0 {
                     question_with_budget(wire, offset, &mut pointer_budget)?.1
@@ -267,7 +274,7 @@ impl<'a> Message<'a> {
                     let (rr, next) = match record_with_budget(wire, offset, &mut pointer_budget) {
                         Ok(record) => record,
                         Err(_) if notify && section >= 2 => {
-                            // RFC 1996 §3.9: malformed ignored data cannot reject a NOTIFY.
+                            // RFC 1996 §3.9: malformed ignored sections cannot reject NOTIFY.
                             counts[section] = 0;
                             if section == 2 {
                                 counts[3] = 0;
@@ -284,6 +291,7 @@ impl<'a> Message<'a> {
                     }
                     // RFC 6891 §6.1.1: OPT appears at most once in the additional section.
                     // RFC 6891 §6.1.2: the OPT owner is the root and its RDATA holds options.
+                    // RFC 1996 §3.9: Ignore OPT records in the ignored Authority section.
                     if rr.rtype == Type::OPT && !(notify && section == 2) {
                         if section != 3
                             || has_opt
@@ -291,7 +299,7 @@ impl<'a> Message<'a> {
                             || EdnsOptions::parse(rr.rdata).is_err()
                         {
                             if notify && section == 3 {
-                                // RFC 1996 §3.9: malformed Additional data is ignored on NOTIFY requests.
+                                // RFC 1996 §3.9: ignore malformed Additional data on NOTIFY.
                                 counts[3] = 0;
                                 break;
                             }
@@ -316,6 +324,7 @@ impl<'a> Message<'a> {
             question_class: None,
             question_name: [0; 255],
             question_name_len: 0,
+            ignore_notify_sections: false,
         })
     }
     // RFC 1035 §4.1.1: ID is the 16-bit transaction identifier copied into the response.
@@ -557,16 +566,24 @@ impl<'a> Message<'a> {
     }
     #[must_use]
     pub const fn authority_count(&self) -> u16 {
-        self.counts[2]
+        if self.ignore_notify_sections {
+            0
+        } else {
+            self.counts[2]
+        }
     }
     #[must_use]
     pub const fn additional_count(&self) -> u16 {
-        self.counts[3]
+        if self.ignore_notify_sections {
+            0
+        } else {
+            self.counts[3]
+        }
     }
 
     /// Return a view with its final TSIG removed, retaining the borrowed wire bytes.
     pub fn without_final_tsig(mut self) -> Option<Self> {
-        let last = self.additionals().last()?;
+        let last = self.raw_records(3).last()?;
         if last.rtype != Type::TSIG {
             return None;
         }
@@ -602,6 +619,19 @@ impl<'a> Message<'a> {
         self.records(3)
     }
     fn records(&self, section: usize) -> Records<'a> {
+        let remaining = if self.ignore_notify_sections && section >= 2 {
+            0
+        } else {
+            self.counts[section]
+        };
+        Records {
+            wire: self.wire,
+            offset: self.starts[section],
+            remaining,
+            udp_payload_limit: self.udp_payload_limit,
+        }
+    }
+    fn raw_records(&self, section: usize) -> Records<'a> {
         Records {
             wire: self.wire,
             offset: self.starts[section],

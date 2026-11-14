@@ -162,6 +162,44 @@ fn sig0_is_last_after_opt_and_notify_ignores_trailing_sections() {
 }
 
 #[test]
+fn notify_requests_hide_valid_authority_and_additional_records() {
+    use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
+
+    let name: Name = "a.".parse().unwrap();
+    let name = NameRef::parse(name.as_wire(), 0).unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2000).unwrap();
+    builder.question(name, Type::SOA, Class::IN).unwrap();
+    builder
+        .record(
+            Section::Authority,
+            name,
+            Type::A,
+            Class::IN,
+            0,
+            &[192, 0, 2, 1],
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            name,
+            Type::A,
+            Class::IN,
+            0,
+            &[192, 0, 2, 2],
+        )
+        .unwrap();
+    let message = Message::parse(builder.finish())
+        .unwrap()
+        .ignore_notify_sections();
+
+    // RFC 1996 §3.9: NOTIFY requests ignore Authority and Additional records.
+    assert_eq!(message.authority_count(), 0);
+    assert_eq!(message.additional_count(), 0);
+}
+
+#[test]
 fn reads_flags_counts_and_record_offsets() {
     let wire = b"\xab\xcd\xff\xff\x00\x01\x00\x01\x00\x01\x00\x01\x01x\0\x00\x01\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x78\x00\x04\x7f\x00\x00\x01\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x01\x00\x00\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x02\x00\x00";
     let message = Message::parse(wire).unwrap();

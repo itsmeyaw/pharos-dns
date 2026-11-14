@@ -150,6 +150,27 @@ fn notify_ignores_authority_and_additional_sections() {
 }
 
 #[test]
+fn notify_ignores_valid_authority_and_additional_records() {
+    let mut wire = valid();
+    wire[2..4].copy_from_slice(&0x2000_u16.to_be_bytes());
+    wire[8..12].copy_from_slice(&[0, 1, 0, 1]);
+    for address in [[192, 0, 2, 1], [192, 0, 2, 2]] {
+        wire.extend_from_slice(&[
+            0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, address[0], address[1], address[2],
+            address[3],
+        ]);
+    }
+    let mut response = Vec::with_capacity(512);
+    let Admission::Query(query) = admit(&wire, false, &mut response) else {
+        panic!("valid NOTIFY must reach the handler")
+    };
+    assert_eq!(query.authority_count(), 0);
+    assert_eq!(query.additional_count(), 0);
+    assert_eq!(query.authorities().count(), 0);
+    assert_eq!(query.additionals().count(), 0);
+}
+
+#[test]
 fn dso_unidirectional_messages_are_suppressed_and_dso_errors_clear_reserved_bits() {
     let mut wire = [0, 0, 0x30, 0x30, 0, 0, 0, 0, 0, 0, 0, 0];
     let mut response = Vec::with_capacity(512);
