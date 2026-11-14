@@ -5,6 +5,7 @@
 ## erratic
 
 - AXFR over UDP is REFUSED by the Listener (RFC 5936 §4.2); CoreDNS sends the transfer over UDP.
+- The test-only query-counter TC rule can set TC without truncating a Message (RFC 1035 §4.1.1); do not use `erratic` in production.
 
 ## Differential scenarios
 
