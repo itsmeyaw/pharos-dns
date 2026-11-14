@@ -54,16 +54,18 @@ fn raw_lp_rdata_rejects_compressed_target_names() {
         ),
         Err(BuildError::InvalidRdata)
     );
-    assert!(builder
-        .record(
-            Section::Answer,
-            borrowed(&owner),
-            Type::LP,
-            Class::IN,
-            60,
-            b"\x00\x01\x03foo\x00"
-        )
-        .unwrap());
+    assert!(
+        builder
+            .record(
+                Section::Answer,
+                borrowed(&owner),
+                Type::LP,
+                Class::IN,
+                60,
+                b"\x00\x01\x03foo\x00"
+            )
+            .unwrap()
+    );
 }
 
 #[test]

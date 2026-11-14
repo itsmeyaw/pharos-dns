@@ -192,10 +192,7 @@ fn empty_options_and_unknown_ede_codes() {
 
 #[test]
 fn zero_prefix_roundtrips_and_family_zero_is_rejected() {
-    let cases: &[&[u8]] = &[
-        &[0, 8, 0, 4, 0, 1, 0, 32],
-        &[0, 8, 0, 4, 0, 2, 0, 128],
-    ];
+    let cases: &[&[u8]] = &[&[0, 8, 0, 4, 0, 1, 0, 32], &[0, 8, 0, 4, 0, 2, 0, 128]];
     for wire in cases {
         let options = EdnsOptions::parse(wire).unwrap();
         let mut output = Vec::new();

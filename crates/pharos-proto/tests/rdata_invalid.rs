@@ -37,7 +37,9 @@ fn caa_tag_follows_rfc_8659_syntax() {
 #[test]
 fn caa_display_lowercases_the_tag() {
     assert_eq!(
-        Rdata::parse(Type::CAA, b"\0\x05ISSUEv").unwrap().to_string(),
+        Rdata::parse(Type::CAA, b"\0\x05ISSUEv")
+            .unwrap()
+            .to_string(),
         "0 issue \"v\""
     );
 }

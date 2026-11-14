@@ -206,9 +206,8 @@ impl EdnsOption<'_> {
             } => {
                 // RFC 8914 §2: OPTION-LENGTH includes INFO-CODE and EXTRA-TEXT.
                 // RFC 8914 §2: EXTRA-TEXT is UTF-8.
-                std::str::from_utf8(extra_text).map_err(|_| EdnsOptionError::InvalidOption {
-                    code: self.code(),
-                })?;
+                std::str::from_utf8(extra_text)
+                    .map_err(|_| EdnsOptionError::InvalidOption { code: self.code() })?;
                 let len = extra_text
                     .len()
                     .checked_add(2)

@@ -49,9 +49,13 @@ fn rejects_invalid_class_and_odd_generic_rdata_words() {
         r"a 60 TYPE65000 \# 1 A A".to_owned() + "\n",
     ] {
         assert!(
-            ZoneParser::new(Cursor::new(input.as_bytes()), ".".parse().unwrap(), "strict")
-                .collect::<Result<Vec<_>, _>>()
-                .is_err(),
+            ZoneParser::new(
+                Cursor::new(input.as_bytes()),
+                ".".parse().unwrap(),
+                "strict"
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .is_err(),
             "{input:?}"
         );
     }
@@ -68,9 +72,13 @@ fn rejects_invalid_svcparam_digit_escapes_and_empty_alpn() {
         "a 60 SVCB 1 . alpn\n".to_owned(),
     ] {
         assert!(
-        ZoneParser::new(Cursor::new(input.as_bytes()), ".".parse().unwrap(), "strict")
-                .collect::<Result<Vec<_>, _>>()
-                .is_err(),
+            ZoneParser::new(
+                Cursor::new(input.as_bytes()),
+                ".".parse().unwrap(),
+                "strict"
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .is_err(),
             "{input:?}"
         );
     }

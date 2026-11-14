@@ -1,8 +1,8 @@
 use crate::{Name, Type};
 
 use super::{
-    base64, character_string, count, dnssec_algorithm, hex, length_bytes, name, number,
-    put16, put32, type_code, unescape,
+    base64, character_string, count, dnssec_algorithm, hex, length_bytes, name, number, put16,
+    put32, type_code, unescape,
 };
 
 pub(super) fn parse(
