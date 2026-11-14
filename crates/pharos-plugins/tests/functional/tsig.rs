@@ -3,7 +3,7 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Message, Name, Rcode, TsigAlgorithm, TsigKey};
-use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
+use pharos_server::{Context, Metadata, Outcome, Plugin, Protocol, Transport};
 use tokio::net::UdpSocket;
 
 #[tokio::test]
@@ -785,6 +785,62 @@ async fn coredns_serve_dns_requirement_and_next_cases() {
         );
         assert_eq!(cx.metadata.take_tsig_signing().is_some(), authenticated);
     }
+}
+
+#[tokio::test]
+async fn malformed_notify_authority_does_not_bypass_required_tsig() {
+    struct Next;
+    impl pharos_server::Next for Next {
+        async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+            Outcome::Response
+        }
+    }
+
+    let blocks = parse(
+        "Corefile",
+        ". {\n tsig {\n secret key. c2VjcmV0\n require_opcode NOTIFY\n }\n}",
+    )
+    .unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut wire = vec![
+        0, 1, 0x20, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, b'a', 0, 0, 6, 0, 1,
+    ];
+    wire.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 1]);
+    key.sign(&mut wire, now, 300, None).unwrap();
+    wire[19] = 0x40;
+    let query = Message::parse(&wire).unwrap();
+    assert_eq!(query.additional_count(), 0);
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query,
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+
+    assert_eq!(
+        configured[0]
+            .config
+            .tsig
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, Next)
+            .await,
+        Outcome::Unanswered(Rcode::REFUSED)
+    );
+    assert!(pharos_plugins::tsig::validated_key_name(&cx).is_none());
 }
 
 #[tokio::test]
