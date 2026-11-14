@@ -545,14 +545,14 @@ impl<C: Chain> Server<C> {
                 }
             }
         } else {
-            if query.opcode() == pharos_proto::Opcode::UPDATE {
-                if self.router.has_unhandled_zone(&self.key, query) {
-                    // RFC 2136 §3.1.1: a zone with no UPDATE handler gets NOTIMP.
-                    Outcome::Unanswered(Rcode::NOTIMP)
-                } else {
-                    // RFC 2136 §3.1.1: UPDATE outside server authority gets NOTAUTH.
-                    Outcome::Unanswered(Rcode::NOTAUTH)
-                }
+            if query.opcode() == pharos_proto::Opcode::UPDATE
+                && self.router.has_unhandled_zone(&self.key, query)
+            {
+                // RFC 2136 §3.1.1: a zone with no UPDATE handler gets NOTIMP.
+                Outcome::Unanswered(Rcode::NOTIMP)
+            } else if query.opcode() == pharos_proto::Opcode::UPDATE {
+                // RFC 2136 §3.1.1: UPDATE outside server authority gets NOTAUTH.
+                Outcome::Unanswered(Rcode::NOTAUTH)
             } else {
                 // RFC 1035 §4.1.1: REFUSED means the server declines the requested operation.
                 Outcome::Unanswered(Rcode::REFUSED)

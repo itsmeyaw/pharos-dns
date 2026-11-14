@@ -195,6 +195,7 @@ impl<C> Router<C> {
             }
             if ds_at_cut && count == labels {
                 if VIEW {
+                    // RFC 4035 §3.1.4.1: collect child-view metadata; answer from the parent zone.
                     let _ = matches(block);
                 }
                 continue;
@@ -230,7 +231,9 @@ fn domain_matches(name: NameRef<'_>, labels: usize, domain: &Name) -> bool {
     if count > labels {
         return false;
     }
-    let domain = NameRef::parse(domain.as_wire(), 0).expect("validated Domain");
+    let Ok(domain) = NameRef::parse(domain.as_wire(), 0) else {
+        return false;
+    };
     name.labels()
         .skip(labels - count)
         .zip(domain.labels())
