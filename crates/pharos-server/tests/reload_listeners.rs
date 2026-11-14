@@ -132,6 +132,7 @@ async fn in_flight_query_finishes_with_old_handler() {
     assert!(std::sync::Arc::strong_count(&retired[0].handler) > 1);
     resume.notify_one();
     let mut frame = [0; 3];
+    // RFC 1035 §4.2.2: TCP messages carry a two-byte length excluding the prefix itself.
     client.read_exact(&mut frame).await.unwrap();
     assert_eq!(frame, [0, 1, 1]);
     assert_eq!(std::sync::Arc::strong_count(&retired[0].handler), 1);

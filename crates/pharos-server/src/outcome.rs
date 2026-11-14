@@ -22,10 +22,12 @@ pub enum TsigSigning {
 }
 
 /// Maximum Response size requested by the client for this protocol.
+// RFC 4033 §9: Honor the requester's EDNS UDP payload size for DNSSEC responses.
 pub fn response_limit(query: Message<'_>, protocol: Protocol) -> usize {
     // RFC 6891 §6.2.3: EDNS advertises a UDP payload size, with a 512-octet minimum.
     usize::from(normalized_udp_size(
         query.opt().map_or(512, |opt| opt.udp_payload_size()),
+        // RFC 1035 §4.2.2: TCP response size is limited by the two-octet length prefix.
         protocol == Protocol::Tcp,
     ))
 }
@@ -55,6 +57,7 @@ pub fn finish_outcome_signed(
         Outcome::Stream(mut stream) => {
             if protocol == Protocol::Tcp {
                 match signing {
+                    // RFC 5936 §2.2.5: Include transaction-security records in AXFR responses.
                     Some(TsigSigning::Signed { key, fudge, .. }) => {
                         stream.signing = Some(crate::StreamSigning { key, fudge });
                     }
@@ -83,6 +86,7 @@ pub fn finish_outcome_signed(
             }
             write_error(query, response, code);
         }
+        // RFC 1035 §4.1.1: Encode a processing error as RCODE 2 (SERVFAIL).
         Outcome::Error(error) => {
             log(error);
             write_error(query, response, Rcode::SERVFAIL);
@@ -200,6 +204,7 @@ fn udp_ixfr(
     Ok(())
 }
 
+// RFC 7766 §4: Without EDNS(0), truncate UDP responses above 512 octets and set TC.
 fn scrub(
     query: Message<'_>,
     limit: usize,
@@ -207,6 +212,7 @@ fn scrub(
     wire: &mut Vec<u8>,
 ) -> Result<(), Error> {
     let message = Message::parse(wire).map_err(|_| Error::InvalidQuery)?;
+    // RFC 6891 §7: Omit OPT when the request did not include an OPT record.
     if query.opt().is_none() && message.opt().is_none() && wire.len() <= limit {
         return Ok(());
     }
@@ -217,6 +223,7 @@ fn scrub(
         .map(|rr| (rr.rdata_offset, rr.rdata.len()));
     let rcode = message.rcode();
     // RFC 6891 §6.1.1: an EDNS request requires an OPT record in the response.
+    // RFC 7828 §3.3.1: UDP keepalive has no effect; only registered options are echoed.
     let response_opt = query
         .opt()
         .map(|opt| opt.response_registered(existing, rcode));
@@ -241,6 +248,7 @@ fn scrub(
         message.additional_count() - u16::from(existing.is_some()),
     ];
     let mut stopped = false;
+    // RFC 1035 §6.2: Truncate from the end to preserve earlier Answer and Authority records.
     for (section, records) in [
         (1, message.answers()),
         (2, message.authorities()),
@@ -279,6 +287,7 @@ fn scrub(
         wire.truncate(end + opt_len);
         wire[end..end + 3].copy_from_slice(&[0, 0, 41]);
         wire[end + 3..end + 5].copy_from_slice(&query_opt.udp_payload_size().to_be_bytes());
+        // RFC 3225 §3: Copy the query's DO bit into the response.
         let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
             | u32::from(existing_flags.unwrap_or_default() & 0xff00)
             | if query_opt.dnssec_ok() { 0x8000 } else { 0 };
@@ -294,6 +303,7 @@ fn scrub(
             counts[3] += 1;
         }
     }
+    // RFC 5625 §4.4: Set TC on local truncation and preserve any upstream TC bit.
     if truncated {
         wire[2] |= 0x02;
     }
@@ -325,6 +335,8 @@ fn append_tsig(
             key, time, fudge, ..
         } => {
             // RFC 8945 §4.3.1: the Response MAC includes the authenticated Query MAC.
+            // RFC 8945 §5.2.2.1: Use the verified truncated Query MAC in the Response MAC.
+            // RFC 8945 §5.3: The Response MAC covers the Query MAC, Message, and TSIG variables.
             key.sign(wire, time, fudge, Some(record.mac))
                 .map_err(|_| Error::InvalidQuery)
         }

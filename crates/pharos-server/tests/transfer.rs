@@ -146,6 +146,7 @@ async fn signed_axfr_client_authenticates_stream() {
     listener.shutdown().await.unwrap();
 }
 
+// RFC 8945 §5.4: Discard transfer messages with missing or invalid TSIG.
 #[tokio::test]
 async fn signed_axfr_client_rejects_unsigned_last_and_tampering() {
     for tamper in [false, true] {
@@ -497,6 +498,7 @@ async fn axfr_client_rejects_a_different_closing_soa() {
     let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
         .await
         .unwrap();
+    // RFC 5936 §2.2: An AXFR transfer must end with its opening SOA record.
     let error = pharos_server::transfer::axfr(
         listener.local_addr(),
         &"a.".parse().unwrap(),
@@ -601,6 +603,7 @@ async fn notify_accepts_noerror_without_qr_or_notify_opcode() {
     responder.await.unwrap();
 }
 
+// RFC 1996 §3.6: Retry NOTIFY until a response matches the query ID and peer.
 #[tokio::test]
 async fn notify_retries_response_with_wrong_id() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -710,6 +713,7 @@ async fn dig_axfr_and_ixfr_interoperate_with_plugin_stream() {
     let listener = Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
         .await
         .unwrap();
+    // RFC 1995 §4: A full IXFR response begins and ends with the zone SOA.
     for qtype in ["AXFR", "IXFR=0"] {
         let output = std::process::Command::new("dig")
             .args([

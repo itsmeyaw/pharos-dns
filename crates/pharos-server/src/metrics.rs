@@ -385,6 +385,7 @@ impl DynamicMetricSnapshot {
                 len += 1;
                 wire[len..len + label.len()].copy_from_slice(label);
                 // RFC 4343 §3: DNS label matching is ASCII case-insensitive.
+                // RFC 4343 §3.1: Preserve non-ASCII octets during ASCII case normalization.
                 wire[len..len + label.len()].make_ascii_lowercase();
                 len += label.len();
             }
@@ -1856,6 +1857,7 @@ fn rcode(code: u16) -> String {
         8 => "NXRRSET",
         9 => "NOTAUTH",
         10 => "NOTZONE",
+        // RFC 8490 §5.4.1: RCODE 11 is DSOTYPENI for DSO responses.
         11 => "DSOTYPENI",
         16 => "BADSIG",
         17 => "BADKEY",

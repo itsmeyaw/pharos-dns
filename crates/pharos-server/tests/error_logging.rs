@@ -110,6 +110,7 @@ async fn suppresses_only_marked_plugin_error_not_panics_or_scrub_errors() {
             Action::Respond
         );
         assert_eq!(*LOGGED.lock().unwrap(), expected);
+        // RFC 1035 §4.1.1: RCODE 2 means the server could not process the query.
         assert_eq!(Message::parse(&reply).unwrap().rcode(), Rcode::SERVFAIL);
     }
 }

@@ -299,6 +299,7 @@ impl<C: Chain> Handler for Server<C> {
             .and_then(|block| block.chain())
             .and_then(|chain| chain.parallel_query(&query))
     }
+    // RFC 1034 §2.2: DNS query handling accepts transport-independent messages.
     async fn handle(
         &self,
         wire: &[u8],
@@ -496,6 +497,7 @@ impl<C: Chain> Server<C> {
         let mut tsig_signing = None;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
+                // RFC 2136 §3: Return NOTIMP when UPDATE is not implemented.
                 if query.opcode() == pharos_proto::Opcode::UPDATE && !chain.accepts_update() {
                     Outcome::Unanswered(Rcode::NOTIMP)
                 } else {
@@ -538,6 +540,7 @@ impl<C: Chain> Server<C> {
                 Outcome::Unanswered(Rcode::REFUSED)
             }
         } else {
+            // RFC 1035 §4.1.1: REFUSED means the server declines the requested operation.
             Outcome::Unanswered(Rcode::REFUSED)
         };
         let recorded_size = if outcome == Outcome::Response {
@@ -550,6 +553,7 @@ impl<C: Chain> Server<C> {
                 pharos_proto::Message::parse(response).map_or(0, |message| message.rcode().0)
             }
             Outcome::Unanswered(code) => code.0,
+            // RFC 1035 §4.1.1: RCODE 2 reports a server processing problem.
             Outcome::Error(_) => Rcode::SERVFAIL.0,
             Outcome::Drop | Outcome::Stream(_) => 0,
         };

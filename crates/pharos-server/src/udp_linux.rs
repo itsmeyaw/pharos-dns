@@ -12,6 +12,7 @@ use tokio::{io::Interest, net::UdpSocket, sync::watch, task::JoinHandle};
 use crate::Handler;
 
 const BATCH: usize = 16;
+// RFC 5625 §4.4.3: Receive up to 65,535 octets, exceeding the 4,096-octet requirement.
 const MAX_MESSAGE: usize = 65535;
 
 thread_local! {
@@ -54,6 +55,7 @@ fn receive(
     })
 }
 
+// RFC 2181 §4.2: Send UDP replies to the source port of the query.
 pub(crate) fn send(socket: &UdpSocket, response: &[u8], peer: SocketAddr) -> io::Result<()> {
     let slices = [[IoSlice::new(response)]];
     let peers = [Some(SockaddrStorage::from(peer))];
@@ -72,6 +74,7 @@ pub(crate) fn send(socket: &UdpSocket, response: &[u8], peer: SocketAddr) -> io:
     })
 }
 
+// RFC 1035 §4.2.1: Serve standard DNS queries over UDP.
 pub(crate) fn spawn<H: Handler>(
     socket: UdpSocket,
     handler: Arc<H>,

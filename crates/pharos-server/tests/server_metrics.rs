@@ -98,6 +98,7 @@ async fn server_records_query_and_unanswered_response() {
     let mut text = String::new();
     server.metrics().encode(&mut text);
     assert!(text.contains("pharos_dns_requests_total{family=\"1\",proto=\"udp\",server=\"dns://127.0.0.1:53\",type=\"other\",view=\"\",zone=\".\"} 1\n"), "{text}");
+    // RFC 1035 §4.1.1: RCODE 2 means the server could not process the query.
     assert!(text.contains("pharos_dns_responses_total{plugin=\"\",rcode=\"SERVFAIL\",server=\"dns://127.0.0.1:53\",view=\"\",zone=\".\"} 1\n"), "{text}");
     assert!(text.contains("pharos_dns_response_size_bytes_sum{proto=\"udp\",server=\"dns://127.0.0.1:53\",view=\"\",zone=\".\"} 0\n"), "{text}");
 }

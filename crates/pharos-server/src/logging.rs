@@ -183,6 +183,7 @@ fn json_string(out: &mut impl fmt::Write, value: &str) {
     let _ = out.write_char('"');
 }
 
+// RFC 3339 §5.3: Omit fractional seconds, a rarely used option.
 fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
     let seconds = match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs() as i64,
@@ -190,6 +191,7 @@ fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
             -(error.duration().as_secs() as i64) - i64::from(error.duration().subsec_nanos() != 0)
         }
     };
+    // RFC 3339 §5.7: Convert Unix days into a valid Gregorian date.
     let days = seconds.div_euclid(86_400);
     let day_seconds = seconds.rem_euclid(86_400);
     // Gregorian civil date from days since 1970-01-01.
@@ -203,6 +205,8 @@ fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
+    // RFC 3339 §4.1: Emit timestamps in UTC to avoid local time-zone rules.
+    // RFC 3339 §5.7: Emit ordinary UTC seconds and hours from 00 through 23.
     let _ = write!(
         out,
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",

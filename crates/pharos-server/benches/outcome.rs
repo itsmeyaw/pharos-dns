@@ -40,6 +40,7 @@ fn outcome_benchmarks(c: &mut Criterion) {
             Action::Respond
         );
         let result = Message::parse(&check).unwrap();
+        // RFC 1035 §4.2.1: Truncated UDP responses set TC.
         assert_eq!(result.tc(), truncated);
         assert_eq!(result.answer_count(), if truncated { 3 } else { 8 });
         assert_eq!(result.opt().is_some(), !truncated);

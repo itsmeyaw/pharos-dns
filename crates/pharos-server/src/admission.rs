@@ -31,17 +31,20 @@ pub fn admit_with_update<'a>(
         return Admission::Drop;
     }
     let opcode = (flags >> 11) & 15;
+    // RFC 3425 §3: Obsolete IQUERY requests receive NOTIMP.
     if opcode != 0 && opcode != 4 && !(opcode == 5 && allow_update) {
         header_error(wire, response, Rcode::NOTIMP, true);
         return Admission::Respond;
     }
     let count = |i| u16::from_be_bytes([wire[i], wire[i + 1]]);
     // RFC 9619 §4: a QUERY with more than one question requires FORMERR.
-    // RFC 2136 §2.2: UPDATE carries arbitrary Prerequisite and Update record counts.
+    // RFC 2136 §§2.4–2.5: UPDATE prerequisite and update sections may contain multiple records.
+    // RFC 2136 §2.3: The UPDATE Zone section contains exactly one record.
     if count(4) != 1 || opcode != 5 && (count(6) > 1 || count(8) > 1 || count(10) > 2) {
         header_error(wire, response, Rcode::FORMERR, false);
         return Admission::Respond;
     }
+    // RFC 6891 §6.1.1: Multiple OPT records cause FORMERR.
     let Ok(query) = Message::parse(wire) else {
         header_error(wire, response, Rcode::FORMERR, false);
         return Admission::Respond;
@@ -50,6 +53,7 @@ pub fn admit_with_update<'a>(
         header_error(wire, response, Rcode::SERVFAIL, false);
         return Admission::Respond;
     };
+    // RFC 1035 §4.1.1: RCODE 5 refuses an operation for policy reasons.
     if !allow_non_in && question.qclass != Class::IN {
         write_error(query, response, Rcode::REFUSED);
         return Admission::Respond;
@@ -65,6 +69,7 @@ pub fn admit_with_update<'a>(
     Admission::Query(query)
 }
 
+// RFC 8490 §5.5: DSO responses set QR and copy the request MESSAGE ID.
 fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode, keep_opcode: bool) {
     let flags = u16::from_be_bytes([wire[2], wire[3]]);
     let flags = 0x8000 | (flags & 0x03b0) | if keep_opcode { flags & 0x7800 } else { 0 } | rcode.0;
@@ -74,18 +79,22 @@ fn header_error(wire: &[u8], response: &mut Vec<u8>, rcode: Rcode, keep_opcode: 
     response.extend_from_slice(&[0; 8]);
 }
 
+// RFC 5936 §2.2: AXFR errors end with one Response carrying the applicable RCODE.
 pub(crate) fn write_error(query: Message<'_>, response: &mut Vec<u8>, rcode: Rcode) {
     // RFC 1035 §4.1.1: QR marks a response; the opcode and RD are copied from the query.
     let flags = 0x8000
         | (query.flags() & 0x7800)
         | if query.opcode() == Opcode::QUERY {
+            // RFC 4035 §3.2.2: Copy the query's CD bit into the response.
             query.flags() & 0x0110
         } else {
             0
         }
         | (rcode.0 & 15);
+    // RFC 1035 §4.1.1: Copy the Query ID into the Response.
     let mut builder = MessageBuilder::new(response, usize::from(u16::MAX), query.id(), flags)
         .expect("valid maximum");
+    // RFC 5936 §2.2.2: Copy the AXFR Query's Question into an error Response.
     if let Some(question) = query.questions().next() {
         let _ = builder.question(question.name, question.qtype, question.qclass);
     }

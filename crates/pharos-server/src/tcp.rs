@@ -18,9 +18,11 @@ use tokio::{
 use crate::{Action, Handler, Protocol, TcpOptions};
 
 // CoreDNS has no default connection limit; cap ours to bound resource use.
+// RFC 7766 §10: Bound concurrent connections and idle sessions to mitigate denial of service.
 const MAX_CONNECTIONS: usize = 1024;
 const MAX_IN_FLIGHT_PER_CONNECTION: usize = 16;
 
+// RFC 1034 §2.4: Name servers concurrently process resolver queries.
 pub(crate) fn spawn<H: Handler>(
     listener: TcpListener,
     handler: Arc<H>,
@@ -34,6 +36,7 @@ pub(crate) fn spawn<H: Handler>(
             if *shutdown.borrow() {
                 break Ok(());
             }
+            // RFC 1035 §4.2.2: Accept multiple TCP connections without blocking other work.
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => break Ok(()),
@@ -44,6 +47,7 @@ pub(crate) fn spawn<H: Handler>(
                             stops.retain(|stop| !stop.is_closed());
                             let (stop, stopped) = watch::channel(false);
                             stops.push(stop.clone());
+                            // RFC 1996 §3.5: Keep serving DNS during TCP NOTIFY transactions.
                             connections.spawn(serve(
                                 stream, crate::canonical_peer(peer), Arc::clone(&handler),
                                 (stop, stopped), handler.tcp_options(),
@@ -96,6 +100,7 @@ async fn read_frame(reader: &mut OwnedReadHalf) -> io::Result<Vec<u8>> {
     let mut length = [0; 2];
     reader.read_exact(&mut length).await?;
     let mut query = vec![0; usize::from(u16::from_be_bytes(length))];
+    // RFC 7766 §8: Do not close when one read lacks the complete DNS Message.
     reader.read_exact(&mut query).await?;
     Ok(query)
 }
@@ -119,6 +124,7 @@ async fn serve<H: Handler>(
     let idle = tokio::time::sleep(options.read);
     tokio::pin!(idle);
 
+    // RFC 7766 §6.2.1: Serve multiple queries on one TCP connection.
     'read: loop {
         while let Some(result) = queries.try_join_next() {
             if let Ok(response) = result {
@@ -129,6 +135,7 @@ async fn serve<H: Handler>(
             break;
         }
         // RFC 7766 §6.2.3: a server may close a connection at any time and clients must cope.
+        // RFC 7766 §6.2.4: A server may close a connection after its query limit.
         if options.max_queries.is_some_and(|max| count >= max) {
             break;
         }
@@ -144,6 +151,7 @@ async fn serve<H: Handler>(
             }
         }
         // RFC 7766 §6.2.3: servers close idle connections after a timeout; idle starts once no Query is in flight.
+        // RFC 7828 §3: Idle time resets when session activity resumes.
         let query = {
             let frame = read_frame(&mut reader);
             tokio::pin!(frame);
@@ -199,6 +207,7 @@ async fn serve<H: Handler>(
 
         // A complete frame is accepted work and must finish even during shutdown.
         // RFC 7766 §6.2.1.1: servers should process pipelined TCP queries concurrently.
+        // RFC 7766 §7: Prepare responses in parallel and send them as soon as available.
         let handler = Arc::clone(&handler);
         let writer = Arc::clone(&writer);
         let stop = stop.clone();
@@ -226,6 +235,7 @@ async fn serve<H: Handler>(
             };
             loop {
                 // RFC 5936 §4.1.2: a connection can serve concurrent Transfer sessions.
+                // RFC 9103 §6.2: AXFR sessions may run concurrently on one TCP connection.
                 let mut writer = writer.lock().await;
                 if writer.is_none() {
                     break;
@@ -234,6 +244,7 @@ async fn serve<H: Handler>(
                     response.clear();
                     match transfer.next(&mut response) {
                         Ok(true) => {}
+                        // RFC 5936 §4.1.2: Completed AXFR leaves the connection open for reuse.
                         Ok(false) => break,
                         Err(failure) => {
                             // RFC 5936 §2.3: closing the connection terminates the client's AXFR session.
@@ -250,6 +261,7 @@ async fn serve<H: Handler>(
                 }
                 if let (Some(signer), Some(signing)) = (signer.as_mut(), signing.as_ref()) {
                     // RFC 8945 §5.3.1: sign every stream Message with the preceding MAC.
+                    // RFC 5936 §2.2.5: Include TSIG under transaction-security rules.
                     let signing_failed =
                         match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                             Ok(now) => signer
@@ -264,6 +276,7 @@ async fn serve<H: Handler>(
                         break;
                     }
                 }
+                // RFC 5936 §2: TCP framing limits each AXFR Message to 65535 octets.
                 if u16::try_from(response.len()).is_err() {
                     if transfer.is_some() {
                         // RFC 1035 §4.2.2: TCP Message lengths must fit in two octets.
@@ -278,7 +291,10 @@ async fn serve<H: Handler>(
                     break;
                 }
                 // RFC 5936 §2.2: every Transfer Message is separately framed on the connection.
+                // RFC 2136 §3.8: Send the TCP response on the requestor's open connection.
+                // RFC 2181 §4.2: Send each TCP reply on the Query's connection.
                 if let Some(stream) = writer.as_mut() {
+                    // RFC 7766 §5: Send responses on the same TCP connection as queries.
                     let result = timeout(options.write, write_tcp_frame(stream, &response)).await;
                     if !matches!(result, Ok(Ok(()))) {
                         *writer = None;
@@ -307,6 +323,7 @@ async fn serve<H: Handler>(
             Err(_) => {}
         }
     }
+    // RFC 1035 §4.2.2: Finish outstanding responses before closing a TCP connection.
     while queries.join_next().await.is_some() {}
 }
 

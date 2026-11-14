@@ -86,12 +86,17 @@ impl Drop for HealthProbe {
 }
 
 async fn health_request(address: &str) -> io::Result<()> {
+    // RFC 9110 §4.3.2: Connect to the configured host and port and request the target path.
     let stream = tokio::net::TcpStream::connect(address).await?;
+    // RFC 9110 §6.2: Hyper sends the health probe using HTTP/1.1 control data.
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .map_err(io::Error::other)?;
+    // RFC 9110 §10.1.3: The internal health probe sends no Referer field.
     let request = Request::builder()
+        // RFC 9110 §9.3.1: The health probe sends GET without content.
         .uri("/health")
+        // RFC 9110 §7.2: Send the target authority in the Host field.
         .header("host", address)
         .body(Full::<Bytes>::default())
         .map_err(io::Error::other)?;
@@ -111,6 +116,7 @@ impl Listener {
         F: Fn(&str) -> Option<(&'static str, String)> + Send + Sync + 'static,
     {
         Self::bind_with_status(address, move |path| {
+            // RFC 9110 §15.3.1: A 200 metrics response carries the requested representation.
             route(path).map(|(content_type, body)| (200, content_type, body))
         })
         .await
@@ -122,6 +128,7 @@ impl Listener {
         F: Fn(&str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
     {
         Self::bind_with_methods(address, move |method, path| {
+            // RFC 9110 §9.3.1: GET retrieves the current representation for a metrics route.
             (method == "GET").then(|| route(path)).flatten()
         })
         .await
@@ -180,24 +187,32 @@ impl Listener {
                         let route = Arc::clone(&route);
                         let mut stop = receiver.clone();
                         connections.spawn(async move {
+                            // RFC 9110 §6.5.1: Do not merge trailer fields into headers.
                             let service = service_fn(move |request: Request<Incoming>| {
+                                // RFC 9110 §9.3.1: GET content does not change routing.
                                 let response = route(request.method().as_str(), request.uri().path());
                                 async move {
+                                    // RFC 9110 §6.5.1: Do not generate trailer fields.
                                     let mut result = Response::new(Full::default());
                                     match response {
                                         Some((status, content_type, body)) => match (StatusCode::from_u16(status), HeaderValue::from_str(content_type)) {
                                             (Ok(status), Ok(content_type)) => {
                                                 *result.status_mut() = status;
+                                                // RFC 9110 §5.1: Content-Type is registered.
                                                 result.headers_mut().insert(CONTENT_TYPE, content_type);
+                                                // RFC 9110 §6.4: Send endpoint content as body.
                                                 *result.body_mut() = Full::new(Bytes::from(body));
                                             }
+                                            // RFC 9110 §15.6.1: 500 reports a server failure.
                                             _ => *result.status_mut() = StatusCode::INTERNAL_SERVER_ERROR,
                                         },
+                                        // RFC 9110 §15.5: 4xx reports a client error.
                                         None => *result.status_mut() = StatusCode::NOT_FOUND,
                                     }
                                     Ok::<_, Infallible>(result)
                                 }
                             });
+                            // RFC 9110 §5.6.7: Hyper emits dates in IMF-fixdate format.
                             let connection = http1::Builder::new().serve_connection(TokioIo::new(stream), service);
                             tokio::pin!(connection);
                             tokio::select! {

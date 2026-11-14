@@ -125,6 +125,7 @@ async fn lookup(looping: bool) -> Vec<u8> {
     response
 }
 
+// RFC 1034 §4.3.2: Copy a CNAME into the answer and restart lookup at its canonical name.
 #[tokio::test]
 async fn cname_chases_into_another_server_block() {
     let wire = lookup(false).await;
@@ -133,6 +134,7 @@ async fn cname_chases_into_another_server_block() {
     let answers = response.answers().collect::<Vec<_>>();
     assert_eq!(answers.len(), 2);
     assert_eq!(answers[0].name.to_string(), "a.example.");
+    // RFC 1035 §3.3.1: CNAME RDATA names the canonical name as a domain name.
     assert!(
         matches!(answers[0].data().unwrap(), Rdata::Cname(target) if target.to_string() == "b.other.")
     );
@@ -140,6 +142,7 @@ async fn cname_chases_into_another_server_block() {
     assert_eq!(answers[1].rdata, [192, 0, 2, 42]);
 }
 
+// RFC 1034 §3.6.2: Follow CNAME chains and signal CNAME loops as errors.
 #[tokio::test]
 async fn cname_loop_returns_servfail() {
     let wire = lookup(true).await;

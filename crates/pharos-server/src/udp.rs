@@ -80,6 +80,7 @@ impl Slot {
         debug_assert!(data.peer.is_none() && !data.done);
         data.query.clear();
         data.query.extend_from_slice(query);
+        // RFC 4007 §8: Retain the scoped peer address for processing and replies.
         data.peer = Some((peer, client));
         if response.is_some() {
             data.response = response;
@@ -126,16 +127,19 @@ async fn serve_slot<H: Handler>(
         let body = response.data.as_mut().unwrap();
         body.clear();
         let action = H::handle_shared(&handler, &query, client, Protocol::Udp, body).await;
+        // RFC 2136 §3.8: Send the UDP response to the requestor's source port.
         if action == Action::Respond {
             if let Some(stack) = response.stack {
                 stack.push(response.data.take().unwrap(), peer);
             } else {
+                // RFC 2181 §4.2: Send each UDP reply to the Query's source port.
                 #[cfg(target_os = "linux")]
                 let result = socket
                     .async_io(tokio::io::Interest::WRITABLE, || {
                         crate::udp_linux::send(&socket, response.data.as_ref().unwrap(), peer)
                     })
                     .await;
+                // RFC 7766 §5: Send DNS responses over UDP when queries arrive over UDP.
                 #[cfg(not(target_os = "linux"))]
                 let result = socket
                     .send_to(response.data.as_ref().unwrap(), peer)
@@ -449,6 +453,7 @@ fn spawn_shed<H: Handler>(
         let socket = Arc::new(socket);
         let stack = crate::shed::ShedStack::for_socket(metrics);
         let mut writer = AbortOnDrop(tokio::spawn(Arc::clone(&stack).writer(Arc::clone(&socket))));
+        // RFC 3226 §3: DNSSEC-aware entities handle fragmented IPv4 and IPv6 UDP packets.
         let mut query = vec![0; 65535];
         let mut slot = None;
         let mut pending = JoinSet::new();

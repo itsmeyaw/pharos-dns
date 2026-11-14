@@ -134,6 +134,7 @@ async fn notify_reaches_the_plugin_chain_over_udp_and_tcp() {
     router.add(key, ".".parse().unwrap(), Some(NotifyProbe), vec![]);
     let server = Server::new(router, key);
     // RFC 1996 §3.7: NOTIFY carries opcode 4 and an SOA Question.
+    // RFC 1996 §4.5: NOTIFY uses opcode 4 and an SOA Question.
     let query = [
         0, 1, 0x20, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 6, 0, 1,
     ];
@@ -150,6 +151,7 @@ async fn notify_reaches_the_plugin_chain_over_udp_and_tcp() {
                 .await,
             Action::Respond
         );
+        // RFC 1035 §4.1.1: The server copies the request opcode into its response.
         let response = Message::parse(&response).unwrap();
         assert_eq!(response.opcode(), Opcode::NOTIFY);
         assert_eq!(response.rcode(), Rcode::REFUSED);
@@ -204,6 +206,7 @@ fn server(panic: bool) -> Server<Broken> {
     server
 }
 
+// RFC 1035 §4.1.1: RCODE 2 means the server could not process the query.
 #[tokio::test]
 async fn plugin_error_is_logged_and_answered_servfail() {
     let query = [0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1];

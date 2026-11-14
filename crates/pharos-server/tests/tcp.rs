@@ -340,6 +340,7 @@ async fn pending_query_finishes_after_listener_shutdown() {
         .unwrap();
 }
 
+// RFC 1035 §4.2.2: Keep the connection open until outstanding requests are satisfied.
 #[tokio::test]
 async fn pending_query_finishes_after_client_half_close() {
     let (started, mut observed) = async_mpsc::unbounded_channel();
@@ -502,6 +503,7 @@ async fn connect<H: Handler>(handler: H) -> (Listener, TcpStream) {
     (listener, stream)
 }
 
+// RFC 1035 §4.2.2: TCP messages use a two-octet length excluding the prefix itself.
 async fn send(stream: &mut TcpStream, query: &[u8]) {
     stream
         .write_all(&(query.len() as u16).to_be_bytes())
@@ -538,6 +540,7 @@ fn slow_handler() -> (
     )
 }
 
+// RFC 7766 §8: Do not close a connection when the first read lacks a complete DNS message.
 #[tokio::test]
 async fn reads_fragmented_frames_and_reuses_connection() {
     let (listener, mut stream) = connect(Echo).await;
@@ -550,6 +553,7 @@ async fn reads_fragmented_frames_and_reuses_connection() {
     listener.shutdown().await.unwrap();
 }
 
+// RFC 7766 §7: Prepare responses in parallel and send them out of order.
 #[tokio::test]
 async fn pipelined_queries_can_complete_out_of_order() {
     let (handler, mut started, release) = slow_handler();
@@ -570,6 +574,7 @@ async fn pipelined_queries_can_complete_out_of_order() {
     listener.shutdown().await.unwrap();
 }
 
+// RFC 1035 §4.2.2: Support multiple connections without blocking other work for TCP data.
 #[tokio::test]
 async fn slow_connections_do_not_throttle_other_connections() {
     // Fill the former global 256-Query limit across multiple connections.
@@ -697,6 +702,7 @@ async fn incomplete_frame_times_out() {
     listener.shutdown().await.unwrap();
 }
 
+// RFC 7766 §6.2.3: Servers should use an idle timeout on the order of seconds.
 #[tokio::test]
 async fn idle_connection_times_out() {
     let (listener, mut stream) = connect(Echo).await;

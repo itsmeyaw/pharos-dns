@@ -40,6 +40,7 @@ pub async fn notify_from(
     // shortcut: one Query buffer allocation per NOTIFY; reuse it when callers batch Zones.
     let mut query = Vec::with_capacity(512);
     // RFC 1996 §3.7: NOTIFY has opcode 4, AA set, and an SOA Question.
+    // RFC 1996 §4.5: NOTIFY has opcode 4, AA set, and an SOA Question.
     let mut builder = MessageBuilder::new(&mut query, 512, id, 0x2400).map_err(io::Error::other)?;
     builder
         .question(
@@ -116,6 +117,7 @@ pub async fn axfr_coredns(
 
 /// Receive an authenticated AXFR incrementally. Discard partial data on error;
 /// unsigned intermediate Messages are not authenticated until the next TSIG.
+// RFC 5936 §6: AXFR clients can authenticate transferred Messages with TSIG.
 pub async fn axfr_signed(
     address: SocketAddr,
     zone: &Name,
@@ -138,7 +140,9 @@ async fn axfr_inner(
 ) -> io::Result<()> {
     // shortcut: buffers are allocated once per Zone Transfer; reuse across transfers when needed.
     let mut query = Vec::with_capacity(512);
+    // RFC 5936 §2.1.4: AXFR queries leave the Authority section empty.
     let mut builder = MessageBuilder::new(&mut query, 512, id, 0).map_err(io::Error::other)?;
+    // RFC 5936 §2.1.2: The AXFR Question names the zone and uses QTYPE AXFR and class IN.
     builder
         .question(
             NameRef::parse(zone.as_wire(), 0).map_err(io::Error::other)?,
@@ -146,13 +150,16 @@ async fn axfr_inner(
             Class::IN,
         )
         .map_err(io::Error::other)?;
+    // RFC 5936 §2.1.3: The AXFR Query Answer section is empty.
     let _ = builder.finish();
+    // RFC 5936 §2.1.5: AXFR queries may carry one transaction-authentication record.
     if let Some(key) = key {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_secs();
         // RFC 8945 §4.3: authenticate the complete AXFR Query.
+        // RFC 8945 §5.1: Append the request TSIG last and keep its MAC for the response.
         key.sign(&mut query, now, 300, None)
             .map_err(io::Error::other)?;
     }
@@ -162,6 +169,7 @@ async fn axfr_inner(
     } else {
         None
     };
+    // RFC 5936 §2: AXFR sessions use TCP.
     let mut socket = timeout(deadline, TcpStream::connect(address)).await??;
     // RFC 1035 §4.2.2: TCP Messages are prefixed with a two-octet length.
     timeout(deadline, async {
@@ -174,6 +182,7 @@ async fn axfr_inner(
     let mut wire = Vec::new();
     let mut opening = None;
     loop {
+        // RFC 5936 §2.3: A closed TCP connection terminates this AXFR session.
         timeout(deadline, async {
             let length = socket.read_u16().await?;
             wire.resize(usize::from(length), 0);
@@ -221,6 +230,7 @@ async fn axfr_inner(
             continue;
         }
         // RFC 5936 §2.2: every Response belongs to the Query and carries its ID.
+        // RFC 5936 §2: AXFR clients do not use the TC bit.
         if message.id() != id || message.flags() & 0x8000 == 0 || message.rcode() != Rcode::NOERROR
         {
             return Err(invalid("invalid AXFR Response header"));
@@ -279,6 +289,7 @@ async fn axfr_inner(
         }
         on_message(message)?;
         if done {
+            // RFC 5936 §4.1.1: Close the idle TCP connection after AXFR completes.
             return Ok(());
         }
     }

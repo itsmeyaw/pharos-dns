@@ -157,6 +157,7 @@ impl<C> Router<C> {
     ) -> Option<&'a ServerBlock<C>> {
         let question = query.questions().next()?;
         let blocks = self.listeners.get(key)?;
+        // RFC 4035 §3.1.4.1: Answer DS queries at a zone cut from the parent zone's side.
         let ds = query.opcode() == Opcode::QUERY && question.qtype == Type::DS;
         let labels = question.name.labels().count();
         if VIEW && labels == 0 {
@@ -176,6 +177,7 @@ impl<C> Router<C> {
             return selected;
         }
         let mut selected = None;
+        // RFC 1034 §4.3.2: Select the nearest ancestor zone for QNAME.
         for block in blocks
             .iter()
             .filter(|block| block.domain.label_count() != 0)

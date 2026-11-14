@@ -801,9 +801,11 @@ pub struct TcpOptions {
 
 impl Default for TcpOptions {
     fn default() -> Self {
+        // RFC 7766 §6.2.3: Use a ten-second default TCP idle timeout.
         Self {
             read: std::time::Duration::from_secs(3),
             write: std::time::Duration::from_secs(5),
+            // RFC 7766 §6.2.3: The default server idle timeout is on the order of seconds.
             idle: std::time::Duration::from_secs(10),
             max_queries: None,
         }
@@ -879,6 +881,7 @@ impl Listener {
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
         let mut attempts = if address.port() == 0 { 16 } else { 1 };
         // RFC 7766 §5: general-purpose DNS implementations support both UDP and TCP.
+        // RFC 5625 §4.4.1: Accept DNS Queries over TCP as well as UDP.
         let (tcp, address, sockets) = loop {
             let tcp = if wildcard && !ipv4_only {
                 match optional_ipv6(bind_ipv6(address)) {
