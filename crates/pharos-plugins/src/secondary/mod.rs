@@ -158,11 +158,11 @@ impl Secondary {
                 Outcome::Unanswered(Rcode::REFUSED)
             };
         };
-        if matches!(question.qtype, Type::AXFR | Type::IXFR) {
-            return Outcome::Unanswered(Rcode::REFUSED);
-        }
         if cx.query.opcode() == Opcode::NOTIFY {
             return handle_notify(&zone, cx);
+        }
+        if matches!(question.qtype, Type::AXFR | Type::IXFR) {
+            return Outcome::Unanswered(Rcode::REFUSED);
         }
         if zone.expired.load(Ordering::Relaxed) {
             return Outcome::Unanswered(Rcode::SERVFAIL);
@@ -178,6 +178,15 @@ fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
     let Some(question) = cx.query.questions().next() else {
         return Outcome::Unanswered(Rcode::FORMERR);
     };
+    // RFC 1996 §3.10: Ignore NOTIFY from unconfigured Primary Servers.
+    if !zone
+        .config
+        .from
+        .iter()
+        .any(|address| update::primary_matches(address, cx.client))
+    {
+        return Outcome::Drop;
+    }
     // RFC 1996 §§3.2, 3.3: NOTIFY uses AA, one IN SOA Question, and zero undefined fields.
     if cx.query.flags() & 0x83ff != 0
         || cx.query.flags() & 0x0400 == 0
@@ -187,15 +196,6 @@ fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
         || question.name != zone.config.apex
     {
         return Outcome::Unanswered(Rcode::FORMERR);
-    }
-    // RFC 1996 §3.10: Ignore NOTIFY from unconfigured Primary Servers.
-    if !zone
-        .config
-        .from
-        .iter()
-        .any(|address| update::primary_matches(address, cx.client))
-    {
-        return Outcome::Drop;
     }
     let max = cx.max_response_size.max(512);
     if cx.response.capacity() < max {

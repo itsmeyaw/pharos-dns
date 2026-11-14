@@ -381,16 +381,54 @@ async fn secondary_rejects_malformed_notify_and_non_soa_question() {
     let secondary = configured[0].config.secondary.as_ref().unwrap();
     let apex: Name = "example.org.".parse().unwrap();
     let mut response = Vec::with_capacity(512);
-    for (flags, qtype, qclass, qname) in [
-        (0x2500, Type::SOA, Class::IN, apex.clone()),
-        (0x2000, Type::SOA, Class::IN, apex.clone()),
-        (0x2400, Type::A, Class::IN, apex.clone()),
-        (0x2400, Type::SOA, Class::CH, apex.clone()),
+    for (flags, qtype, qclass, qname, client, outcome) in [
+        (
+            0x2500,
+            Type::SOA,
+            Class::IN,
+            apex.clone(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Unanswered(Rcode::FORMERR),
+        ),
+        (
+            0x2500,
+            Type::SOA,
+            Class::IN,
+            apex.clone(),
+            "127.0.0.2:1000".parse().unwrap(),
+            Outcome::Drop,
+        ),
+        (
+            0x2000,
+            Type::SOA,
+            Class::IN,
+            apex.clone(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Unanswered(Rcode::FORMERR),
+        ),
+        (
+            0x2400,
+            Type::A,
+            Class::IN,
+            apex.clone(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Unanswered(Rcode::FORMERR),
+        ),
+        (
+            0x2400,
+            Type::SOA,
+            Class::CH,
+            apex.clone(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Unanswered(Rcode::FORMERR),
+        ),
         (
             0x2400,
             Type::SOA,
             Class::IN,
             "child.example.org.".parse().unwrap(),
+            "127.0.0.1:1000".parse().unwrap(),
+            Outcome::Unanswered(Rcode::FORMERR),
         ),
     ] {
         let mut query = Vec::with_capacity(512);
@@ -402,7 +440,7 @@ async fn secondary_rejects_malformed_notify_and_non_soa_question() {
         let mut slots = [None; 8];
         let mut cx = Context {
             query: Message::parse(&query).unwrap(),
-            client: "127.0.0.1:1000".parse().unwrap(),
+            client,
             local: "127.0.0.1:53".parse().unwrap(),
             transport: Transport::Dns,
             protocol: Protocol::Udp,
@@ -411,17 +449,14 @@ async fn secondary_rejects_malformed_notify_and_non_soa_question() {
             response: &mut response,
             max_response_size: 512,
         };
-        assert_eq!(
-            secondary.serve_with(&mut cx, TestNext, true).await,
-            Outcome::Unanswered(Rcode::FORMERR)
-        );
+        assert_eq!(secondary.serve_with(&mut cx, TestNext, true).await, outcome);
     }
     let zone = &secondary.shared.zones.load()[0];
     assert!(zone.notify_source.lock().unwrap().is_none());
 }
 
 #[test]
-fn coredns_zero_soa_timers_use_one_second() {
+fn zero_soa_timers_remain_zero() {
     let zone = SecondaryZone::new(ZoneConfig {
         apex: "example.org.".parse().unwrap(),
         from: vec![],
@@ -440,9 +475,9 @@ fn coredns_zero_soa_timers_use_one_second() {
     assert_eq!(
         update::timers(&zone),
         (
-            std::time::Duration::from_secs(1),
-            std::time::Duration::from_secs(1),
-            std::time::Duration::from_secs(1)
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO
         )
     );
 }
@@ -469,7 +504,7 @@ async fn failed_refresh_expires_the_zone() {
                 .unwrap();
             if attempt == 0 {
                 let mut soa = vec![0, 0];
-                for value in [1u32, 1, 1, 1, 0] {
+                for value in [1u32, 0, 1, 0, 0] {
                     soa.extend_from_slice(&value.to_be_bytes());
                 }
                 for _ in 0..2 {
@@ -501,7 +536,7 @@ async fn failed_refresh_expires_the_zone() {
     while zone.current.load().is_none() {
         tokio::task::yield_now().await;
     }
-    // Jitter is pinned to zero in tests, so the 1 s refresh, retry, and expire timers fire on their own.
+    // RFC 1034 §4.3.5: Zero REFRESH checks immediately and zero EXPIRE expires after failure.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !zone.expired.load(Ordering::Relaxed) {
         assert!(
