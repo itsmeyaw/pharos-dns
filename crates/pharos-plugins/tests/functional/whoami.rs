@@ -3,7 +3,7 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
-use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
+use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 use std::{
     future::Future,
     task::{Context as TaskContext, Poll, Waker},
@@ -17,6 +17,13 @@ fn run<F: Future>(future: F) -> F::Output {
     {
         Poll::Ready(result) => result,
         Poll::Pending => panic!("whoami should be ready immediately"),
+    }
+}
+
+struct NextDrop;
+impl Next for NextDrop {
+    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
+        Outcome::Drop
     }
 }
 
@@ -40,7 +47,7 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
         let name_ref = NameRef::parse(parsed.as_wire(), 0).unwrap();
         let mut wire = Vec::with_capacity(512);
         let mut builder = MessageBuilder::new(&mut wire, 512, 0x1234, 0x0110).unwrap();
-        builder.question(name_ref, kind, Class::CH).unwrap();
+        builder.question(name_ref, kind, Class::IN).unwrap();
         let _ = builder.finish();
         let query = Message::parse(&wire).unwrap();
         let mut response = Vec::with_capacity(512);
@@ -74,7 +81,7 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
         let mut extra = reply.additionals();
         let ip = extra.next().unwrap();
         assert_eq!(ip.name.to_string(), name);
-        assert_eq!((ip.class, ip.ttl), (Class::CH, 0));
+        assert_eq!((ip.class, ip.ttl), (Class::IN, 0));
         let socket: std::net::SocketAddr = address.parse().unwrap();
         match socket.ip() {
             std::net::IpAddr::V4(ipv4) => {
@@ -86,12 +93,12 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
                 assert_eq!(ip.rdata, ipv6.octets());
             }
         }
-        // RFC 2782 §2: The SRV owner carries the _udp or _tcp transport label before the zone.
+        // RFC 2782 §2: The SRV owner carries _Service._Proto before the zone.
         let srv = extra.next().unwrap();
         let prefix = if protocol == Protocol::Udp {
-            "_udp."
+            "_whoami._udp."
         } else {
-            "_tcp."
+            "_whoami._tcp."
         };
         assert_eq!(
             srv.name.to_string(),
@@ -101,7 +108,7 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
                 format!("{prefix}{name}")
             }
         );
-        assert_eq!((srv.rtype, srv.class, srv.ttl), (Type::SRV, Class::CH, 0));
+        assert_eq!((srv.rtype, srv.class, srv.ttl), (Type::SRV, Class::IN, 0));
         assert_eq!(
             srv.rdata,
             &[
@@ -115,6 +122,42 @@ fn corefile_whoami_answers_in_additional_for_both_families_and_protocols() {
             ]
         );
     }
+}
+
+#[test]
+fn whoami_passes_non_in_questions_to_next_plugin() {
+    let blocks = parse("Corefile", ".:53 {\n whoami\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let name: Name = "example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::CH,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut context = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        run(configured[0].config.whoami.as_ref().unwrap().serve(&mut context, NextDrop)),
+        Outcome::Drop
+    );
+    assert!(response.is_empty());
 }
 
 #[test]
