@@ -79,11 +79,8 @@ pub(super) fn parse(
                 let address = chunks
                     .first()
                     .map_or(&[][..], |(_, chunk)| chunk.as_slice());
-                // RFC 1183 §3.2: ISDN numbers are normally decimal digits, up to 15 octets.
-                if address.is_empty()
-                    || address.len() > 15
-                    || !address.iter().all(u8::is_ascii_digit)
-                {
+                // RFC 1183 §3.2: ISDN numbers are IA5 strings, normally decimal digits.
+                if address.is_empty() || !address.iter().all(u8::is_ascii) {
                     index = 0;
                     return Err("invalid ISDN address".into());
                 }
@@ -230,6 +227,7 @@ pub(super) fn parse(
                 out.extend(binary(fields, 3, true, out.len(), &mut index)?);
             }
             // RFC 4431 §2 and RFC 4034 §5: DLV and TA share the DS RDATA format.
+            // RFC 8749 §4 / ADR 0002: Retain DLV for CoreDNS v1.15.0 compatibility.
             Type::DLV | Type::TA => {
                 if fields.len() < 3 {
                     index = fields.len();

@@ -52,11 +52,15 @@ fn strings_and_coordinates() {
     assert!(parse(Type::X25, &["+311061700956"]).is_err());
     assert_eq!(parse(Type::ISDN, &["123456"]).unwrap(), b"\x06123456");
     assert_eq!(parse(Type::ISDN, &["1"]).unwrap(), b"\x011");
+    let address = "Q.931/+1(212)-555-0100";
+    let wire = parse(Type::ISDN, &[address]).unwrap();
+    assert_eq!(wire[0], address.len() as u8);
+    assert_eq!(&wire[1..], address.as_bytes());
     assert_eq!(
         parse(Type::ISDN, &["123456", "ABcd"]).unwrap(),
         b"\x06123456\x04ABcd"
     );
-    assert!(parse(Type::ISDN, &["A"]).is_err());
+    assert_eq!(parse(Type::ISDN, &["A"]).unwrap(), b"\x01A");
     assert!(parse(Type::ISDN, &["123", "ABC", "DEF"]).is_err());
     assert!(parse(Type::ISDN, &["123", "12G"]).is_err());
     assert_eq!(

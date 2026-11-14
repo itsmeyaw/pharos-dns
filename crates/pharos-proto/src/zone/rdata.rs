@@ -165,7 +165,8 @@ fn parse_rdata_inner(
                 out.extend(timer.ok_or("invalid SOA timer")?.to_be_bytes());
             }
         }
-        // RFC 4408 §3.1.1: SPF uses TXT's character-string layout for compatibility.
+        // RFC 4408 §3.1.1: SPF uses TXT's character-string layout.
+        // RFC 7208 §3.1: SPF uses TXT layout for CoreDNS compatibility (ADR 0002).
         Type::TXT | Type::SPF => {
             for (i, field) in fields.iter().enumerate() {
                 let data = at!(i, unescape(field))?;

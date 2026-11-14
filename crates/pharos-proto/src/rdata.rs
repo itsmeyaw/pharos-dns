@@ -272,9 +272,8 @@ fn valid_bitmap(mut bytes: &[u8]) -> Result<(), RdataError> {
             return Err(RdataError);
         }
         let block = bytes.get(2..2 + len).ok_or(RdataError)?;
-        if block.last() == Some(&0)
-            || (window == 0 && block.first().is_some_and(|byte| byte & 0x80 != 0))
-        {
+        // RFC 4034 §4.1.2: Ignore TYPE0's reserved bit instead of rejecting the bitmap.
+        if block.last() == Some(&0) {
             return Err(RdataError);
         }
         previous = Some(window);
@@ -300,7 +299,11 @@ fn display_bitmap(f: &mut fmt::Formatter<'_>, mut bytes: &[u8]) -> fmt::Result {
         for (index, byte) in bytes[2..2 + len].iter().enumerate() {
             for bit in 0..8 {
                 if byte & (0x80 >> bit) != 0 {
-                    write!(f, " {}", Type(window * 256 + (index * 8 + bit) as u16))?;
+                    let code = window * 256 + (index * 8 + bit) as u16;
+                    // RFC 4034 §4.1.2: Receivers ignore the reserved TYPE0 bitmap bit.
+                    if code != 0 {
+                        write!(f, " {}", Type(code))?;
+                    }
                 }
             }
         }
@@ -979,10 +982,8 @@ impl<'a> Rdata<'a> {
                 // RFC 5155 §4.1.1: NSEC3PARAM carries an NSEC3 hash-algorithm identifier.
                 let (hash_algorithm, flags, iterations) =
                     (h[0], h[1], u16::from_be_bytes([h[2], h[3]]));
-                // RFC 5155 §§3.1.2, 4.1.2: only NSEC3 Opt-Out bit is defined; PARAM flags are zero.
-                if (rtype == Type::NSEC3 && flags & !1 != 0)
-                    || (rtype == Type::NSEC3PARAM && flags != 0)
-                {
+                // RFC 5155 §3.1.2: only NSEC3 Opt-Out bit is defined.
+                if rtype == Type::NSEC3 && flags & !1 != 0 {
                     return Err(RdataError);
                 }
                 if rtype == Type::NSEC3PARAM {
@@ -991,7 +992,8 @@ impl<'a> Rdata<'a> {
                     }
                     Ok(Self::Nsec3param {
                         hash_algorithm,
-                        flags,
+                        // RFC 5155 §4.1.2: Ignore non-zero flags on received NSEC3PARAM RRs.
+                        flags: 0,
                         iterations,
                         salt,
                     })
@@ -1184,14 +1186,11 @@ impl<'a> Rdata<'a> {
             }
             // RFC 8659 §4.1: CAA writes flags, a length-prefixed tag, and value octets.
             Self::Caa { flags, tag, value } => {
-                // RFC 8659 §4.1: only Issuer Critical flag bit 7 is defined.
-                if *flags & 0x7f != 0
-                    || tag.is_empty()
-                    || !tag.iter().all(u8::is_ascii_alphanumeric)
-                {
+                if tag.is_empty() || !tag.iter().all(u8::is_ascii_alphanumeric) {
                     return Err(BuildError::InvalidRdata);
                 }
-                writer.write_bytes(&[*flags])?;
+                // RFC 8659 §4.1: Clear reserved flag bits when re-encoding received data.
+                writer.write_bytes(&[*flags & 0x80])?;
                 write_character_string(writer, tag)?;
                 writer.write_bytes(value)
             }
@@ -1289,11 +1288,9 @@ impl<'a> Rdata<'a> {
                 algorithm,
                 public_key,
             } => {
-                // RFC 4034 §§2.1.1-2: reserved DNSKEY flag bits are zero and Protocol is 3.
-                if *flags & !0x0181 != 0 || *protocol != 3 {
-                    return Err(BuildError::InvalidRdata);
-                }
-                writer.write_bytes(&flags.to_be_bytes())?;
+                // RFC 4034 §2.1.1: Clear reserved DNSKEY flag bits when re-encoding.
+                writer.write_bytes(&(*flags & 0x0181).to_be_bytes())?;
+                // RFC 4034 §2.1.2: Preserve protocol; values other than 3 remain unusable keys.
                 writer.write_bytes(&[*protocol, *algorithm])?;
                 writer.write_bytes(public_key)
             }
@@ -1349,16 +1346,13 @@ impl<'a> Rdata<'a> {
             }
             Self::Nsec3param {
                 hash_algorithm,
-                flags,
+                flags: _,
                 iterations,
                 salt,
             } => {
                 // RFC 5155 §4.2: NSEC3PARAM carries algorithm, flags, iterations, and salt.
-                // RFC 5155 §4.1.2: NSEC3PARAM flags are reserved and MUST be zero.
-                if *flags != 0 {
-                    return Err(BuildError::InvalidRdata);
-                }
-                writer.write_bytes(&[*hash_algorithm, *flags])?;
+                // RFC 5155 §4.1.2: Ignore received flags and emit the required zero value.
+                writer.write_bytes(&[*hash_algorithm, 0])?;
                 writer.write_bytes(&iterations.to_be_bytes())?;
                 // RFC 5155 §4.1.4: Salt Length counts the following salt octets.
                 write_character_string(writer, salt)

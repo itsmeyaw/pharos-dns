@@ -50,6 +50,11 @@ fn read_u32(wire: &[u8], offset: usize) -> Result<u32, MessageError> {
     Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
+// RFC 2181 §8: A received TTL with its high bit set is treated as zero.
+fn received_ttl(ttl: u32) -> u32 {
+    if ttl & 0x8000_0000 != 0 { 0 } else { ttl }
+}
+
 /// A validated, allocation-free view of a DNS Message.
 #[derive(Clone, Copy, Debug)]
 pub struct Message<'a> {
@@ -142,8 +147,13 @@ fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageErro
     let rtype = Type(read_u16(wire, offset)?);
     // RFC 8162 §2: the record class is read per record, so SMIMEA is class independent.
     let class = Class(read_u16(wire, offset + 2)?);
-    // RFC 8767 §4: parse TTL as unsigned 32-bit seconds, with the high-order bit positive.
-    let ttl = read_u32(wire, offset + 4)?;
+    // RFC 2181 §8: Treat TTL values with the high bit set as zero on receipt.
+    let raw_ttl = read_u32(wire, offset + 4)?;
+    let ttl = if rtype == Type::OPT {
+        raw_ttl
+    } else {
+        received_ttl(raw_ttl)
+    };
     let len = usize::from(read_u16(wire, offset + 8)?);
     let rdata_offset = offset + 10;
     // RFC 6895 §3: RDATA is variable-length and its format depends on TYPE and sometimes CLASS.
@@ -692,7 +702,7 @@ impl<'a> MessageMut<'a> {
                 // RFC 6891 §6.1.3: OPT uses the TTL field for extended RCODE, version, and flags.
                 if !is_opt {
                     self.wire[ttl_offset..ttl_offset + 4]
-                        .copy_from_slice(&rewrite(ttl).to_be_bytes());
+                        .copy_from_slice(&rewrite(received_ttl(ttl)).to_be_bytes());
                 }
             }
         }

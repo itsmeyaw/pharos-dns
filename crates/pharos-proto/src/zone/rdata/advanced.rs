@@ -165,6 +165,7 @@ pub(super) fn parse(
                     return Err("invalid CSYNC flags".into());
                 }
                 out.extend(flags.to_be_bytes());
+                // RFC 7477 §2.1.1.2.1: CSYNC Type Bit Map must not be empty.
                 if fields.len() < 3 {
                     index = fields.len();
                     return Err("CSYNC bitmap must not be empty".into());

@@ -481,6 +481,7 @@ impl<R: BufRead> ZoneParser<R> {
         let ttl = ttl
             .or_else(|| saw_class.then_some(0))
             .ok_or_else(|| err_at(i - 1, "missing TTL"))?;
+        // RFC 3123 §5: An APL zone record may use the IN class.
         // RFC 6895 §3.2: NONE, ANY, and reserved CLASS0 are not zone RR classes.
         if matches!(class, Class::NONE | Class::ANY | Class(0)) {
             return Err(err_at(i - 1, "invalid record class"));
@@ -496,9 +497,6 @@ impl<R: BufRead> ZoneParser<R> {
         // RFC 6895 §3.1: query-only and meta types are not stored as zone RRs.
         if matches!(rtype.0, 0 | 41 | 249..=255) {
             return Err(err_at(i - 1, "invalid zone record type"));
-        }
-        if rtype == Type::TSIG && tokens.get(i).is_none_or(|field| field.text != r"\#") {
-            return Err(err_at(i - 1, "TSIG has no zone presentation format"));
         }
         // RFC 1035 §5.1: quotes delimit character-strings, not merely whitespace.
         // RFC 3597 §5: \# selects generic RDATA presentation for known or unknown RR types.

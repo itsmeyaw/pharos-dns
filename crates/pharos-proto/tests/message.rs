@@ -108,6 +108,27 @@ fn patches_header_and_record_ttls_without_touching_opt() {
 }
 
 #[test]
+fn high_bit_wire_ttl_is_zeroed_before_rewrite() {
+    use pharos_proto::MessageMut;
+
+    let mut wire =
+        b"\0\x01\0\0\0\0\0\x01\0\0\0\0\0\0\x01\0\x01\x80\0\0\x3c\0\x04\xc0\0\x02\x01".to_vec();
+    let parsed = Message::parse(&wire).unwrap();
+    assert_eq!(parsed.answers().next().unwrap().ttl, 0);
+
+    let mut seen = None;
+    MessageMut::parse(&mut wire).unwrap().rewrite_ttls(|ttl| {
+        seen = Some(ttl);
+        ttl + 1
+    });
+    assert_eq!(seen, Some(0));
+    assert_eq!(
+        Message::parse(&wire).unwrap().answers().next().unwrap().ttl,
+        1
+    );
+}
+
+#[test]
 fn hostile_counts_and_compression_are_rejected() {
     for wire in [
         &b"\0\0\0\0\xff\xff\0\0\0\0\0\0"[..],
@@ -198,18 +219,15 @@ fn accepts_trailing_bytes_like_coredns() {
 
 #[test]
 fn rejects_multiple_tkey_records_in_one_message() {
-    let mut wire = [0; 12];
-    for count in [1_u16, 2] {
-        wire[6..8].copy_from_slice(&count.to_be_bytes());
-        let mut message = wire[..12].to_vec();
+    fn with_tkey_count(count: u16) -> Vec<u8> {
+        let mut message = vec![0; 12];
+        message[6..8].copy_from_slice(&count.to_be_bytes());
         for _ in 0..count {
             message.extend_from_slice(&[0, 0, 249, 0, 1, 0, 0, 0, 0, 0, 17]);
             message.extend([0; 17]);
         }
-        if count == 1 {
-            assert!(Message::parse(&message).is_ok());
-        } else {
-            assert!(Message::parse(&message).is_err());
-        }
+        message
     }
+    assert!(Message::parse(&with_tkey_count(1)).is_ok());
+    assert!(Message::parse(&with_tkey_count(2)).is_err());
 }
