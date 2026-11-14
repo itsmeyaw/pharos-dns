@@ -366,7 +366,7 @@ async fn zone_preserves_case_and_normalizes_duplicate_rrsets() {
 #[tokio::test]
 async fn served_signatures_use_their_covered_rrset_ttl() {
     let apex: Name = "example.org.".parse().unwrap();
-    let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\n@ 60 IN A 192.0.2.1\n@ 3600 IN RRSIG A 8 2 3600 20300101000000 20200101000000 12345 example.org. AQID\n";
+    let text = "@ 3600 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 3600 IN NS ns.example.org.\n@ 60 IN A 192.0.2.1\n@ 3600 IN RRSIG A 8 2 3600 20300101000000 20200101000000 12345 example.org. AQID\n@ 30 IN RRSIG A 8 2 3600 20300101000000 20200101000000 54321 example.org. BAUG\n";
     let records = ZoneParser::new(text.as_bytes(), apex.clone(), "rrsig-ttl.zone")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -374,14 +374,21 @@ async fn served_signatures_use_their_covered_rrset_ttl() {
     let apex: Name = "example.org.".parse().unwrap();
     let (outcome, response) = zone_response(&zone, &apex, Type::A, Class::IN, true).await;
     assert_eq!(outcome, Outcome::Response);
+    let answers = Message::parse(&response)
+        .unwrap()
+        .answers()
+        .collect::<Vec<_>>();
     assert_eq!(
-        Message::parse(&response)
-            .unwrap()
-            .answers()
-            .find(|rr| rr.rtype == Type::RRSIG)
-            .unwrap()
-            .ttl,
+        answers.iter().find(|rr| rr.rtype == Type::A).unwrap().ttl,
         60
+    );
+    assert_eq!(
+        answers
+            .iter()
+            .filter(|rr| rr.rtype == Type::RRSIG)
+            .map(|rr| rr.ttl)
+            .collect::<Vec<_>>(),
+        [60, 60]
     );
 }
 

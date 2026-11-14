@@ -286,12 +286,30 @@ impl Zone {
         };
         let mut rrset_ttls =
             std::collections::HashMap::<(Name, u16, u16), u32>::with_capacity(records.len());
+        let mut signature_ttls =
+            std::collections::HashMap::<(Name, u16, u16), u32>::with_capacity(records.len());
         for record in &records {
-            let ttl = rrset_ttls.entry(rrset_key(record)).or_insert(record.ttl);
-            *ttl = (*ttl).min(record.ttl);
+            if record.rtype == Type::RRSIG {
+                let ttl = signature_ttls
+                    .entry(rrset_key(record))
+                    .or_insert(record.ttl);
+                *ttl = (*ttl).min(record.ttl);
+            } else {
+                let ttl = rrset_ttls.entry(rrset_key(record)).or_insert(record.ttl);
+                *ttl = (*ttl).min(record.ttl);
+            }
         }
         for record in &mut records {
-            record.ttl = rrset_ttls[&rrset_key(record)];
+            let key = rrset_key(record);
+            record.ttl = if record.rtype == Type::RRSIG {
+                rrset_ttls
+                    .get(&key)
+                    .or_else(|| signature_ttls.get(&key))
+                    .copied()
+                    .unwrap_or(record.ttl)
+            } else {
+                rrset_ttls[&key]
+            };
         }
         let negative_ttl = records
             .iter()
