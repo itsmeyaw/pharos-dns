@@ -219,6 +219,9 @@ fn notify_request_view_retains_tsig_for_authentication() {
         )
         .unwrap();
     builder
+        .record(Section::Additional, name, Type::OPT, Class(1232), 0, &[])
+        .unwrap();
+    builder
         .record(Section::Additional, name, Type::TSIG, Class::ANY, 0, &[0])
         .unwrap();
     let message = Message::parse(builder.finish())
@@ -226,6 +229,7 @@ fn notify_request_view_retains_tsig_for_authentication() {
         .ignore_notify_sections();
 
     assert_eq!(message.additional_count(), 1);
+    assert_eq!(message.opt().unwrap().udp_payload_size(), 1232);
     assert_eq!(
         message
             .additionals()
@@ -236,6 +240,35 @@ fn notify_request_view_retains_tsig_for_authentication() {
     let unsigned = message.without_final_tsig().unwrap();
     assert_eq!(unsigned.additional_count(), 0);
     assert_eq!(unsigned.additionals().count(), 0);
+}
+
+#[test]
+fn parses_large_pointer_compressed_response_within_budget() {
+    use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
+
+    let name: Name = "a.".parse().unwrap();
+    let name = NameRef::parse(name.as_wire(), 0).unwrap();
+    let mut wire = Vec::with_capacity(usize::from(u16::MAX));
+    let mut builder = MessageBuilder::new(&mut wire, usize::from(u16::MAX), 1, 0x8180).unwrap();
+    builder.question(name, Type::A, Class::IN).unwrap();
+    for _ in 0..4000 {
+        assert!(
+            builder
+                .record(
+                    Section::Answer,
+                    name,
+                    Type::A,
+                    Class::IN,
+                    60,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap()
+        );
+    }
+    let _ = builder.finish();
+    let message = Message::parse(&wire).unwrap();
+    assert_eq!(message.answer_count(), 4000);
+    assert_eq!(message.answers().count(), 4000);
 }
 
 #[test]

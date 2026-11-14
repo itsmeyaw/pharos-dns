@@ -256,6 +256,7 @@
 - Pharos also rejects decimal name escapes above 255 instead of wrapping them to an octet as miekg/dns does.
 - SIG(0) and TSIG must be the final Additional RR; OPT may precede them (RFCs 6891 §6.1.1, 2931 §3.1, 8945 §§5.1–5.2).
 - The protocol parser rejects duplicate OPT records, OPT records outside Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
+- DSO session Primary TLVs are unsupported; the Listener suppresses ID-zero DSO requests without inspecting their Primary TLV (RFC 8490 §5.4.1).
 - The DNS Listener returns FORMERR for malformed Messages with at least four octets and drops shorter datagrams. CoreDNS v1.15.0 accepts malformed OPTs when its header-count policy allows them, and selects the last OPT in Additional.
 - The DNS Listener ignores the reserved header Z bit on receipt, as RFC 6895 §2.1 recommends, and clears it in generated Responses.
 - Zero-question QUERY Messages route to the root Server Block when configured; CoreDNS's standard query path also permits QDCOUNT=0.

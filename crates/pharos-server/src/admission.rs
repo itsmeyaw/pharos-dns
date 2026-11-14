@@ -72,8 +72,9 @@ pub fn admit_with_update<'a>(
     // RFC 9619 §4: QUERY permits zero questions and requires FORMERR above one.
     // RFC 2136 §§2.4–2.5: UPDATE prerequisite and update sections may contain multiple records.
     // RFC 2136 §2.3: The UPDATE Zone section contains exactly one record.
-    // RFC 1996 §§3.7, 3.9: NOTIFY permits section counts and ignores Authority and Additional.
-    if ((opcode == Opcode::UPDATE || opcode == Opcode::NOTIFY) && count(4) != 1)
+    // RFC 1996 §§3.7, 3.9: NOTIFY requires at least one Question and ignores other sections.
+    if (opcode == Opcode::UPDATE && count(4) != 1)
+        || (opcode == Opcode::NOTIFY && count(4) == 0)
         || (opcode != Opcode::UPDATE && opcode != Opcode::NOTIFY && count(4) > 1)
         || (opcode != Opcode::UPDATE
             && opcode != Opcode::NOTIFY
@@ -87,6 +88,11 @@ pub fn admit_with_update<'a>(
         header_error(wire, response, Rcode::FORMERR);
         return Admission::Respond;
     };
+    if query.has_nonfinal_tsig() {
+        // RFC 8945 §5.2: a misplaced TSIG requires FORMERR even without a TSIG Plugin.
+        header_error(wire, response, Rcode::FORMERR);
+        return Admission::Respond;
+    }
     // RFC 1996 §3.9: hide ignored Authority and Additional records from handlers.
     let query = query.ignore_notify_sections();
     // RFC 1035 §4.1.1: RCODE 5 refuses an operation for policy reasons.
@@ -110,7 +116,7 @@ pub fn admit_with_update<'a>(
     Admission::Query(query)
 }
 
-// RFC 8490 §5.4.3: ID zero marks an unidirectional DSO request.
+// RFC 8490 §5.4.1: DSO is unsupported; this shortcut suppresses ID-zero requests without parsing Primary TLVs.
 pub(crate) fn is_dso_unidirectional(wire: &[u8]) -> bool {
     if wire.len() < 12 {
         return false;

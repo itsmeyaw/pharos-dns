@@ -61,6 +61,7 @@ pub struct Message<'a> {
     question_name_len: usize,
     ignore_notify_sections: bool,
     notify_tsig_count: u16,
+    nonfinal_tsig: bool,
 }
 
 // RFC 1034 §3.7.1: queries select resource data by QTYPE and QCLASS.
@@ -121,8 +122,9 @@ impl<'a> Record<'a> {
 }
 
 fn question(wire: &[u8], offset: usize) -> Result<(Question<'_>, usize), MessageError> {
-    let mut pointer_budget = usize::MAX;
-    question_with_budget(wire, offset, &mut pointer_budget)
+    // RFC 1035 §4.1.2: section iterators reuse the QNAME validated by Message::parse.
+    let (name, offset) = NameRef::from_validated(wire, offset).ok_or(MessageError::Truncated)?;
+    question_after_name(wire, name, offset)
 }
 
 fn question_with_budget<'a>(
@@ -132,7 +134,15 @@ fn question_with_budget<'a>(
 ) -> Result<(Question<'a>, usize), MessageError> {
     // RFC 1035 §4.1.2: a question consists of QNAME, QTYPE, and QCLASS.
     let name = NameRef::parse_with_budget(wire, offset, pointer_budget)?;
-    let offset = offset + name.wire_len();
+    question_after_name(wire, name, offset + name.wire_len())
+}
+
+fn question_after_name<'a>(
+    wire: &'a [u8],
+    name: NameRef<'a>,
+    offset: usize,
+) -> Result<(Question<'a>, usize), MessageError> {
+    // RFC 1035 §4.1.2: read the fixed Question fields after its bounded QNAME.
     let result = Question {
         name,
         qtype: Type(read_u16(wire, offset)?),
@@ -143,8 +153,9 @@ fn question_with_budget<'a>(
 }
 // RFC 6698 §2: record class and TTL are parsed with no TLSA-specific restriction.
 fn record(wire: &[u8], offset: usize) -> Result<(Record<'_>, usize), MessageError> {
-    let mut pointer_budget = usize::MAX;
-    record_with_budget(wire, offset, &mut pointer_budget)
+    // RFC 1035 §4.1.3: section iterators reuse the NAME validated by Message::parse.
+    let (name, offset) = NameRef::from_validated(wire, offset).ok_or(MessageError::Truncated)?;
+    record_after_name(wire, name, offset)
 }
 
 fn record_with_budget<'a>(
@@ -155,7 +166,15 @@ fn record_with_budget<'a>(
     // RFC 6895 §3: each RR has NAME, TYPE, CLASS, TTL, RDLENGTH, and variable RDATA.
     // RFC 1035 §4.1.3: RDLENGTH bounds the RDATA following the fixed RR fields.
     let name = NameRef::parse_with_budget(wire, offset, pointer_budget)?;
-    let offset = offset + name.wire_len();
+    record_after_name(wire, name, offset + name.wire_len())
+}
+
+fn record_after_name<'a>(
+    wire: &'a [u8],
+    name: NameRef<'a>,
+    offset: usize,
+) -> Result<(Record<'a>, usize), MessageError> {
+    // RFC 6895 §3: decode fixed RR fields and bounded RDATA after its validated NAME.
     let rtype = Type(read_u16(wire, offset)?);
     // RFC 8162 §2: the record class is read per record, so SMIMEA is class independent.
     let class = Class(read_u16(wire, offset + 2)?);
@@ -274,10 +293,11 @@ impl<'a> Message<'a> {
         let mut has_opt = false;
         let mut has_sig0 = false;
         let mut notify_tsig_count = 0;
+        let mut nonfinal_tsig = false;
         'sections: for section in 0..4 {
             starts[section] = offset;
             let wire_count = counts[section];
-            for _ in 0..wire_count {
+            for record_index in 0..wire_count {
                 offset = if section == 0 {
                     question_with_budget(wire, offset, pointer_budget)?.1
                 } else {
@@ -294,6 +314,10 @@ impl<'a> Message<'a> {
                         }
                         Err(error) => return Err(error),
                     };
+                    if section == 3 && rr.rtype == Type::TSIG && record_index + 1 != wire_count {
+                        // RFC 8945 §5.2: retain placement status so Listener admission can FORMERR.
+                        nonfinal_tsig = true;
+                    }
                     // RFC 2931 §3.1: SIG(0) uses SIG with the Type Covered field set to zero.
                     let sig0 =
                         section == 3 && rr.rtype == Type::SIG && rr.rdata.starts_with(&[0, 0]);
@@ -343,6 +367,7 @@ impl<'a> Message<'a> {
             question_name_len: 0,
             ignore_notify_sections: false,
             notify_tsig_count,
+            nonfinal_tsig,
         })
     }
     // RFC 1035 §4.1.1: ID is the 16-bit transaction identifier copied into the response.
@@ -570,9 +595,15 @@ impl<'a> Message<'a> {
     /// Returns the validated OPT from the Additional section, if present.
     #[must_use]
     pub fn opt(&self) -> Option<Opt<'a>> {
-        self.additionals()
+        // RFC 6891 §6.1.1: keep EDNS control visible on NOTIFY views that hide ordinary Additionals.
+        self.raw_records(3)
             .find(|rr| rr.rtype == Type::OPT)
             .map(Opt::from_record)
+    }
+    /// Whether any TSIG record is not the final Additional RR.
+    #[must_use]
+    pub const fn has_nonfinal_tsig(&self) -> bool {
+        self.nonfinal_tsig
     }
     #[must_use]
     pub const fn question_count(&self) -> u16 {

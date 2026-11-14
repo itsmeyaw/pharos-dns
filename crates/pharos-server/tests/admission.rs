@@ -171,6 +171,44 @@ fn notify_ignores_valid_authority_and_additional_records() {
 }
 
 #[test]
+fn notify_requires_a_question_but_allows_multiple_questions() {
+    let mut response = Vec::with_capacity(512);
+    let mut wire = valid();
+    wire[2..4].copy_from_slice(&0x2000_u16.to_be_bytes());
+    wire[4..6].copy_from_slice(&0_u16.to_be_bytes());
+    wire.truncate(12);
+    assert!(matches!(
+        admit(&wire, false, &mut response),
+        Admission::Respond
+    ));
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::FORMERR);
+
+    wire = valid();
+    wire[2..4].copy_from_slice(&0x2000_u16.to_be_bytes());
+    wire[4..6].copy_from_slice(&2_u16.to_be_bytes());
+    let question = wire[12..].to_vec();
+    wire.extend_from_slice(&question);
+    assert!(matches!(
+        admit(&wire, false, &mut response),
+        Admission::Query(_)
+    ));
+}
+
+#[test]
+fn rejects_tsig_before_final_additional_record() {
+    let mut wire = valid();
+    wire[10..12].copy_from_slice(&2_u16.to_be_bytes());
+    wire.extend_from_slice(&[0, 0, 250, 0, 255, 0, 0, 0, 0, 0, 0]);
+    wire.extend_from_slice(&[0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 1]);
+    let mut response = Vec::with_capacity(512);
+    assert!(matches!(
+        admit(&wire, false, &mut response),
+        Admission::Respond
+    ));
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::FORMERR);
+}
+
+#[test]
 fn dso_unidirectional_messages_are_suppressed_and_dso_errors_clear_reserved_bits() {
     let mut wire = [0, 0, 0x30, 0x30, 0, 0, 0, 0, 0, 0, 0, 0];
     let mut response = Vec::with_capacity(512);

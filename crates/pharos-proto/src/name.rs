@@ -357,6 +357,46 @@ impl<'a> NameRef<'a> {
         })
     }
 
+    /// Rebuilds a borrowed view from the physical encoding of an already-validated name.
+    pub(crate) fn from_validated(message: &'a [u8], offset: usize) -> Option<(Self, usize)> {
+        // RFC 1035 §4.1.4: find the encoded boundary without following validated pointers again.
+        let mut position = offset;
+        loop {
+            let length = *message.get(position)?;
+            match length {
+                0 => {
+                    let end = position + 1;
+                    return Some((
+                        Self {
+                            message,
+                            offset,
+                            wire_len: end - offset,
+                        },
+                        end,
+                    ));
+                }
+                1..=63 => {
+                    let start = position + 1;
+                    position = start + usize::from(length);
+                    message.get(start..position)?;
+                }
+                0xc0..=0xff => {
+                    let end = position + 2;
+                    message.get(position + 1..end)?;
+                    return Some((
+                        Self {
+                            message,
+                            offset,
+                            wire_len: end - offset,
+                        },
+                        end,
+                    ));
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// Returns the encoded length at the original message offset.
     #[must_use]
     pub const fn wire_len(&self) -> usize {
@@ -375,6 +415,7 @@ impl<'a> NameRef<'a> {
         NameWireParts {
             message: self.message,
             position: Some(self.offset),
+            remaining_hops: MAX_POINTER_HOPS_PER_NAME,
         }
     }
 
@@ -384,6 +425,7 @@ impl<'a> NameRef<'a> {
         NameRefLabels {
             message: self.message,
             position: self.offset,
+            remaining_hops: MAX_POINTER_HOPS_PER_NAME,
             done: false,
         }
     }
@@ -416,6 +458,7 @@ pub enum NameWirePart {
 pub struct NameWireParts<'a> {
     message: &'a [u8],
     position: Option<usize>,
+    remaining_hops: usize,
 }
 
 impl Iterator for NameWireParts<'_> {
@@ -434,10 +477,20 @@ impl Iterator for NameWireParts<'_> {
                 self.position = Some(offset + len);
                 Some(NameWirePart::Label { offset, len })
             }
-            _ => {
+            0xc0..=0xff => {
+                // RFC 1035 §4.1.4: bound pointer traversal on every validated-name walk.
+                if self.remaining_hops == 0 {
+                    self.position = None;
+                    return None;
+                }
                 let target = usize::from(byte & 0x3f) << 8 | usize::from(self.message[offset + 1]);
                 self.position = Some(target);
+                self.remaining_hops -= 1;
                 Some(NameWirePart::Pointer { offset, target })
+            }
+            _ => {
+                self.position = None;
+                None
             }
         }
     }
@@ -467,6 +520,7 @@ impl Eq for NameRef<'_> {}
 pub struct NameRefLabels<'a> {
     message: &'a [u8],
     position: usize,
+    remaining_hops: usize,
     done: bool,
 }
 
@@ -491,9 +545,15 @@ impl<'a> Iterator for NameRefLabels<'a> {
                 }
                 // RFC 4343 §3.1: Compression pointers expand before case-insensitive comparison.
                 0xc0..=0xff => {
+                    // RFC 1035 §4.1.4: bound pointer traversal on every validated-name walk.
+                    if self.remaining_hops == 0 {
+                        self.done = true;
+                        return None;
+                    }
                     let target = usize::from(length & 0x3f) << 8
                         | usize::from(*self.message.get(self.position + 1)?);
                     self.position = target;
+                    self.remaining_hops -= 1;
                 }
                 _ => {
                     self.done = true;
