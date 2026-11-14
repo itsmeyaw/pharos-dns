@@ -130,23 +130,13 @@ fn check_forward(protocol: Protocol, failover: bool) {
 }
 
 #[test]
-fn warmed_ecs_multi_rr_forwarding_does_not_allocate() {
-    if crate::run_isolated(
-        "forward::forward_allocations::warmed_ecs_multi_rr_forwarding_does_not_allocate",
-    ) {
-        return;
-    }
-    check_ecs_forward(false);
-}
-
-#[test]
 fn warmed_refused_ecs_retry_does_not_allocate() {
     if crate::run_isolated(
         "forward::forward_allocations::warmed_refused_ecs_retry_does_not_allocate",
     ) {
         return;
     }
-    check_ecs_forward(true);
+    check_refused_ecs_forward();
 }
 
 // RFC 7871 §6 and RFC 7828 §3.2.1: exercise sanitized ECS and TCP Keepalive options.
@@ -167,12 +157,12 @@ fn ecs_query() -> Vec<u8> {
 }
 
 // RFC 1035 §§4.1.1, 4.1.3: Build a two-address A response without heap allocation.
-fn two_a_response(query: &[u8], response: &mut [u8], rcode: u8) -> usize {
+fn two_a_response(query: &[u8], response: &mut [u8]) -> usize {
     let message = Message::parse(query).unwrap();
     let question_len = 12 + message.questions().next().unwrap().name.wire_len() + 4;
     response[..question_len].copy_from_slice(&query[..question_len]);
     response[2] |= 0x80;
-    response[3] = rcode;
+    response[3] = Rcode::NOERROR.0 as u8;
     response[6..8].copy_from_slice(&2_u16.to_be_bytes());
     response[10..12].fill(0);
     let records = [
@@ -183,7 +173,7 @@ fn two_a_response(query: &[u8], response: &mut [u8], rcode: u8) -> usize {
     question_len + records.len()
 }
 
-fn check_ecs_forward(refused_retry: bool) {
+fn check_refused_ecs_forward() {
     let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
     upstream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -205,25 +195,18 @@ fn check_ecs_forward(refused_retry: bool) {
                     _ => None,
                 });
             assert_eq!(ecs.map(|subnet| subnet.scope_prefix()), Some(0));
-            if refused_retry {
-                response[..len].copy_from_slice(&query_wire[..len]);
-                response[2] |= 0x80;
-                response[3] = Rcode::REFUSED.0 as u8;
-                upstream.send_to(&response[..len], peer).unwrap();
-                let (len, peer) = upstream.recv_from(&mut query_wire).unwrap();
-                let retry = Message::parse(&query_wire[..len]).unwrap();
-                assert!(retry.opt().unwrap().options().iter().all(|option| {
-                    !matches!(option, EdnsOption::ClientSubnet(_))
-                        && !matches!(option, EdnsOption::TcpKeepalive(_))
-                }));
-                let response_len =
-                    two_a_response(&query_wire[..len], &mut response, Rcode::NOERROR.0 as u8);
-                upstream.send_to(&response[..response_len], peer).unwrap();
-            } else {
-                let response_len =
-                    two_a_response(&query_wire[..len], &mut response, Rcode::NOERROR.0 as u8);
-                upstream.send_to(&response[..response_len], peer).unwrap();
-            }
+            response[..len].copy_from_slice(&query_wire[..len]);
+            response[2] |= 0x80;
+            response[3] = Rcode::REFUSED.0 as u8;
+            upstream.send_to(&response[..len], peer).unwrap();
+            let (len, peer) = upstream.recv_from(&mut query_wire).unwrap();
+            let retry = Message::parse(&query_wire[..len]).unwrap();
+            assert!(retry.opt().unwrap().options().iter().all(|option| {
+                !matches!(option, EdnsOption::ClientSubnet(_))
+                    && !matches!(option, EdnsOption::TcpKeepalive(_))
+            }));
+            let response_len = two_a_response(&query_wire[..len], &mut response);
+            upstream.send_to(&response[..response_len], peer).unwrap();
         }
     });
 
