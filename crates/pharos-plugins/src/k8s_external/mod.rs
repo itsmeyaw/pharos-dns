@@ -307,7 +307,7 @@ impl External {
                 }
                 if let Some(message) = target_authority.as_ref() {
                     // RFC 2308 §3: append negative Authority after all CNAME-cycle answers.
-                    crate::dns::copy_authorities(&mut b, &message)?;
+                    crate::dns::copy_authorities(&mut b, message)?;
                 }
             }
             // RFC 3596 §3: SRV answers include available target addresses in Additional.
@@ -316,21 +316,17 @@ impl External {
             {
                 let mut error = None;
                 let mut scratch = scratch::lease();
-                for entry in chased {
+                for (index, entry) in chased.iter().enumerate() {
                     let name = NameRef::parse(entry.name.as_wire(), 0).ok();
                     let mut wire = [0; 255];
                     if let Some(key) = name.and_then(|name| canonical_wire(name, &mut wire)) {
                         // RFC 4343 §3.1: canonical target labels index each chased result once.
-                        debug_assert!(scratch.targets.insert(key, b"", 0));
+                        let inserted =
+                            scratch
+                                .targets
+                                .insert(key, index, response_has_address_target(entry));
+                        debug_assert!(inserted);
                     }
-                }
-                for entry in chased {
-                    let has_address = response_has_address_target(entry);
-                    scratch.targets.insert(
-                        &entry.ordinal.to_be_bytes(),
-                        entry.name.as_wire(),
-                        if has_address { TARGET_HAS_ADDRESS } else { 0 },
-                    );
                 }
                 store.with_read(|index| {
                     let mut count = 0usize;
@@ -366,7 +362,7 @@ impl External {
                                 return;
                             };
                             let entry = chased_for_target(&scratch.targets, chased, target);
-                            if !cached_has_address_target(address, entry, &scratch.targets) {
+                            if !cached_has_address_target(address, entry) {
                                 return;
                             }
                             let mut key = [0; 2048];
@@ -420,7 +416,7 @@ impl External {
                                 return;
                             };
                             let entry = chased_for_target(&scratch.targets, chased, target);
-                            if !cached_has_address_target(address, entry, &scratch.targets) {
+                            if !cached_has_address_target(address, entry) {
                                 return;
                             }
                             let mut key = [0; 2048];
@@ -446,15 +442,16 @@ impl External {
                                 return;
                             }
                             let Some(ip) = ip else {
-                                if let Some(entry) = entry
-                                    && let Err(err) = write_chased(
-                                        &mut b,
-                                        q.name,
-                                        entry,
-                                        kubernetes.ttl(),
-                                        Section::Additional,
-                                    )
-                                {
+                                let Some((entry, _)) = entry else {
+                                    return;
+                                };
+                                if let Err(err) = write_chased(
+                                    &mut b,
+                                    q.name,
+                                    entry,
+                                    kubernetes.ttl(),
+                                    Section::Additional,
+                                ) {
                                     error = Some(err);
                                 }
                                 return;
@@ -518,8 +515,6 @@ struct Chased {
     name: Name,
     answers: [Option<Vec<u8>>; 2],
 }
-
-const TARGET_HAS_ADDRESS: u16 = 1;
 
 #[cfg(test)]
 fn final_rcode(initial: Rcode, chased: &[Chased]) -> Rcode {
@@ -596,14 +591,15 @@ fn chased_at<'a>(chased: &'a [Chased], ordinal: usize, address: &str) -> Option<
 }
 
 fn chased_for_target<'a>(
-    targets: &scratch::Seen,
+    targets: &scratch::Targets,
     chased: &'a [Chased],
     target: NameRef<'_>,
-) -> Option<&'a Chased> {
+) -> Option<(&'a Chased, bool)> {
     // RFC 4343 §3.1: canonical target labels avoid per-callback wire reparsing.
     let mut wire = [0; 255];
     let key = canonical_wire(target, &mut wire)?;
-    chased.get(targets.find(key, b"", 0)?)
+    let (index, has_address) = targets.get(key)?;
+    Some((chased.get(index)?, has_address))
 }
 
 // RFC 2782 §The format of the SRV RR: SRV targets must resolve to addresses and not aliases.
@@ -623,18 +619,12 @@ fn response_has_address_target(chased: &Chased) -> bool {
     found_address
 }
 
-fn cached_has_address_target(address: &str, chased: Option<&Chased>, seen: &scratch::Seen) -> bool {
+fn cached_has_address_target(address: &str, chased: Option<(&Chased, bool)>) -> bool {
     // RFC 2782 §The format of the SRV RR: use only targets with a non-alias address RRset.
     if address.parse::<std::net::IpAddr>().is_ok() {
         return true;
     }
-    chased.is_some_and(|entry| {
-        seen.contains(
-            &entry.ordinal.to_be_bytes(),
-            entry.name.as_wire(),
-            TARGET_HAS_ADDRESS,
-        )
-    })
+    chased.is_some_and(|(_, has_address)| has_address)
 }
 
 #[cfg(test)]
@@ -2196,11 +2186,11 @@ mod tests {
             name: "lb.example.net.".parse().unwrap(),
             answers: [None, None],
         }];
-        let mut targets = scratch::Seen::default();
+        let mut targets = scratch::Targets::default();
         let name = NameRef::parse(chased[0].name.as_wire(), 0).unwrap();
         let mut wire = [0; 255];
         let key = canonical_wire(name, &mut wire).unwrap();
-        assert!(targets.insert(key, b"", 0));
+        assert!(targets.insert(key, 0, true));
         assert!(chased_for_target(&targets, &chased, name).is_some());
         assert!(chased_for_target(&targets, &chased, name).is_some());
     }
@@ -2219,12 +2209,12 @@ mod tests {
                 answers: [None, None],
             },
         ];
-        let mut targets = scratch::Seen::default();
-        for entry in &chased {
+        let mut targets = scratch::Targets::default();
+        for (index, entry) in chased.iter().enumerate() {
             let name = NameRef::parse(entry.name.as_wire(), 0).unwrap();
             let mut wire = [0; 255];
             let key = canonical_wire(name, &mut wire).unwrap();
-            assert!(targets.insert(key, b"", 0));
+            assert!(targets.insert(key, index, true));
         }
         for host in ["lb-a.example.net", "lb-b.example.net", "lb-a.example.net"] {
             let mut wire = [0; 255];
