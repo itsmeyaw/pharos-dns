@@ -83,20 +83,24 @@ impl Header {
 
 impl Plugin for Header {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        // RFC 1035 §4.1.1: AA is response-only, so header rules cannot set it in a Query.
-        cx.query = cx
-            .query
-            .with_flags(self.query.apply(cx.query.flags()) & !0x0400);
+        let query_flags = self.query.apply(cx.query.flags());
+        // RFC 1035 §4.1.1: a rule cannot set AA in a Query.
+        let query_flags = if self.query.set & 0x0400 != 0 {
+            query_flags & !0x0400
+        } else {
+            query_flags
+        };
+        cx.query = cx.query.with_flags(query_flags);
         let outcome = next.run(cx).await;
         if outcome == Outcome::Response && cx.response.len() >= 4 {
-            let flags = u16::from_be_bytes([cx.response[2], cx.response[3]]);
-            // RFC 1035 §4.1.1: preserve AA unless Next marked the Response authoritative.
-            let flags = self.response.apply(flags)
-                & (if flags & 0x0400 == 0 {
-                    !0x0400
-                } else {
-                    u16::MAX
-                });
+            let original_flags = u16::from_be_bytes([cx.response[2], cx.response[3]]);
+            let flags = self.response.apply(original_flags);
+            // RFC 1035 §4.1.1: a rule cannot add AA to a non-authoritative Response.
+            let flags = if self.response.set & 0x0400 != 0 && original_flags & 0x0400 == 0 {
+                flags & !0x0400
+            } else {
+                flags
+            };
             cx.response[2..4].copy_from_slice(&flags.to_be_bytes());
         }
         outcome

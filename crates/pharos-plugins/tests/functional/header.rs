@@ -66,6 +66,7 @@ async fn coredns_query_and_response_rules_and_precedence() {
         ("response", 0, "set", "aa", 0),
         ("query", 0, "set", "ra", 0x80),
         ("query", 0, "set", "rd", 0x100),
+        ("query", 0x400, "set", "rd", 0x500),
         ("query", 0x100, "clear", "rd", 0),
         ("query", 0, "set", "aa", 0),
     ] {
