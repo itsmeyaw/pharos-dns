@@ -58,7 +58,8 @@ fn uses_endpoints(svc: &Service, req: &Request<'_>, headless: bool) -> bool {
 
 pub(super) fn parse<'a>(labels: &'a [&'a [u8]]) -> Result<Request<'a>, Rcode> {
     let Some((&namespace, remaining)) = labels.split_last() else {
-        return Err(Rcode::SERVFAIL);
+        // RFC 1035 §2.3.1: the root domain is a valid domain name.
+        return Ok(Request::default());
     };
     let mut req = Request {
         namespace,
@@ -456,8 +457,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_or_too_long_relative_names() {
-        assert_eq!(parse(&[]), Err(Rcode::SERVFAIL));
+    fn empty_relative_name_is_valid_and_too_long_names_are_rejected() {
+        // RFC 1035 §2.3.1: the root domain is a valid domain name.
+        assert_eq!(parse(&[]), Ok(Request::default()));
         assert_eq!(
             parse(&[b"a", b"b", b"c", b"web", b"prod"]),
             Err(Rcode::NXDOMAIN)
