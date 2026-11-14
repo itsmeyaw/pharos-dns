@@ -881,7 +881,7 @@ async fn wildcard_publishes_metadata() {
 }
 
 #[tokio::test]
-async fn signed_referral_includes_ds_and_in_bailiwick_signed_glue() {
+async fn signed_referral_includes_ds_and_signed_sibling_glue() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/file/signed.zone"
