@@ -170,6 +170,7 @@ impl Plugin for Dns64 {
                     0
                 }
                 // RFC 6147 §5.4: role flags come from the original AAAA response.
+                // RFC 6147 §5.4 and RFC 1035 §4.1.1: retain final RCODE and TC on truncation.
                 | (original_flags & 0x0480)
                 | (response.flags() & 0x020f);
             let mut builder = MessageBuilder::new(cx.response, max, cx.query.id(), flags)

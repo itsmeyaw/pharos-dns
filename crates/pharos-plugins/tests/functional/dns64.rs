@@ -363,6 +363,7 @@ fn dns64_rejects_invalid_well_known_prefix_lengths_and_reserved_octet() {
 async fn synthesizes_prefixes_through_self_lookup() {
     for (prefix, expected) in [
         ("64:ff9b::/96", "64:ff9b::4040:4040"),
+        ("2001:db8:0:0::/64", "2001:db8:0:0:40:4040:4000:0"),
         ("2001:db8:0:40::/56", "2001:db8:0:40:40:4040::"),
         ("64::/32", "64:0:4040:4040::"),
     ] {
