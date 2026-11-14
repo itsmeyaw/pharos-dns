@@ -22,6 +22,7 @@ fn coredns_siit_setup_cases() {
         ("siit {\n eam 10.0.0.1 foobar\n}", false),
         ("siit {\n ipv6_prefix 64:ff9b::/72\n}", false),
         ("siit {\n ipv6_prefix 64:ff9b::/32\n}", false),
+        ("siit {\n ipv6_prefix 64:ff9b:0:0:1::/32\n}", false),
         ("siit {\n ipv6_prefix 64:ff9b::/40\n}", false),
         ("siit {\n ipv6_prefix 64:ff9b::/48\n}", false),
         ("siit {\n ipv6_prefix 64:ff9b::/56\n}", false),

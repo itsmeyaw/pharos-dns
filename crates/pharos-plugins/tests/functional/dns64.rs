@@ -346,7 +346,12 @@ async fn coredns_dns64_synthesizes_prefixes_through_self_lookup() {
 
 #[test]
 fn dns64_rejects_invalid_well_known_prefix_lengths_and_reserved_octet() {
-    for prefix in ["64:ff9b::/32", "64:ff9b::/64", "2001:db8:0:0:100::/96"] {
+    for prefix in [
+        "64:ff9b::/32",
+        "64:ff9b:0:0:1::/32",
+        "64:ff9b::/64",
+        "2001:db8:0:0:100::/96",
+    ] {
         let config = format!(".:53 {{\n dns64 {prefix}\n}}");
         let blocks = parse("Corefile", &config).unwrap();
         assert!(

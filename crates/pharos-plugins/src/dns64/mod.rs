@@ -1,9 +1,10 @@
 //! DNS64 address synthesis.
 
+mod rfc6052;
 pub(crate) mod setup;
 
 use std::{
-    net::{Ipv6Addr, SocketAddr},
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -30,7 +31,7 @@ impl Dns64 {
         // RFC 6147 §5.2: use the Well-Known Prefix when no Pref64 is configured.
         let mut result = Self {
             // RFC 6052 §2.1: the default prefix is the well-known prefix 64:ff9b::/96.
-            prefix: "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets(),
+            prefix: rfc6052::WELL_KNOWN_PREFIX,
             prefix_len: 96,
             translate_all: false,
             allow_ipv4: false,
