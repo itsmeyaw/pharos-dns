@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Conformance audit
 
-You are the **orchestrator** (level 0). You write no verdicts yourself: you build the inventory, dispatch a swarm of subagents in levels, check their coverage, and merge their output into `docs/conformance.md`. The audit is **relentless**: every section of every in-scope document, and every protocol-relevant line of code, ends up in a row or a coverage-ledger line of the fragments under `target/conformance/`. `docs/conformance.md` publishes only the rows that are not conformant. Use `caveman` skill.
+You are the **orchestrator** (level 0). You write no verdicts yourself: you build the inventory, dispatch a swarm of subagents in levels, check their coverage, and merge their output into `docs/conformance.md`. The audit is **relentless**: every section of every in-scope document, and every protocol-relevant line of code, ends up in a row or a coverage-ledger line of the fragments under `target/conformance/`. `docs/conformance.md` publishes only the rows that are not conformant. Use `caveman` skill. Read-only for all, no building. Long-running task.
 
 Two sweeps run in parallel and meet in the merge:
 
