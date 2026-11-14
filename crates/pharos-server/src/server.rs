@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     Action, Admission, Context, Error, Handler, ListenerKey, Metadata, Outcome, Protocol, Router,
-    admit_with_update, finish_outcome_signed,
+    TsigSigning, admit_with_update, finish_outcome_signed,
     metrics::{BlockMetrics, Registry},
     response_limit,
 };
@@ -495,6 +495,7 @@ impl<C: Chain> Server<C> {
         let mut error_plugin = None;
         let mut error_logged = false;
         let mut tsig_signing = None;
+        let mut forwarded_response = false;
         let outcome = if let Some(block) = block {
             if let Some(chain) = block.chain() {
                 // RFC 2136 §3: Return NOTIMP when UPDATE is not implemented.
@@ -514,6 +515,8 @@ impl<C: Chain> Server<C> {
                         )
                         .await
                     };
+                    forwarded_response =
+                        context.metadata.get(crate::metrics::WRITER_METADATA) == Some("forward");
                     if let Some(opt) = context.query.opt() {
                         query = query.with_udp_payload_limit(opt.udp_payload_size());
                     }
@@ -558,6 +561,15 @@ impl<C: Chain> Server<C> {
                 Outcome::Unanswered(Rcode::REFUSED)
             }
         };
+        if outcome == Outcome::Response
+            && forwarded_response
+            && matches!(&tsig_signing, Some(TsigSigning::Signed { .. }))
+            && !response_has_transaction_security(response)
+            && response.len() >= 4
+        {
+            // RFC 8945 §5.5: clear AD before signing a forwarded Response without upstream transaction security.
+            response[3] &= !0x20;
+        }
         let recorded_size = if outcome == Outcome::Response {
             response.len()
         } else {
@@ -648,6 +660,16 @@ impl<C: Chain> Server<C> {
         }
         action
     }
+}
+
+fn response_has_transaction_security(wire: &[u8]) -> bool {
+    // RFC 8945 §5.5 and RFC 2931 §3.2: TSIG and SIG(0) authenticate DNS transactions.
+    pharos_proto::Message::parse(wire).is_ok_and(|message| {
+        message.additionals().any(|record| {
+            record.rtype == pharos_proto::Type::TSIG
+                || (record.rtype == pharos_proto::Type::SIG && record.rdata.starts_with(&[0, 0]))
+        })
+    })
 }
 
 fn peer_is_ipv6(peer: SocketAddr) -> bool {

@@ -100,11 +100,6 @@ pub fn finish_outcome_signed(
         TsigSigning::Signed { reserved, .. } | TsigSigning::Error { reserved, .. } => *reserved,
     });
     let signed = signing.is_some();
-    let signed_response = matches!(&signing, Some(TsigSigning::Signed { .. }));
-    // RFC 8945 §5.5: clear AD before signing a forwarded Response without upstream transaction security.
-    if signed_response && response.len() >= 4 {
-        response[3] &= !0x20;
-    }
     let before = signed
         .then(|| Message::parse(response).ok())
         .flatten()
@@ -279,6 +274,7 @@ fn scrub(
             break;
         }
     }
+    // RFC 2181 §9 and RFC 4035 §3.1.1: optional Additional omissions alone do not set TC.
     let truncated = counts[1..3] != original[1..3];
     let existing_flags = existing.map(Opt::flags);
     if end + opt_len > wire.capacity() {

@@ -305,7 +305,7 @@ fn signed_response_reserves_room_before_truncation() {
     assert!(Message::parse(&response).unwrap().tc());
     assert_eq!(Message::parse(&response).unwrap().answer_count(), 0);
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
-    assert!(!Message::parse(&response).unwrap().ad());
+    assert!(Message::parse(&response).unwrap().ad());
     key.verify(&response, 1_000, Some(mac), 0).unwrap();
 }
 
