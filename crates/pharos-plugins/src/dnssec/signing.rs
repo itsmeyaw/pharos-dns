@@ -98,7 +98,7 @@ impl Dnssec {
             }
         }
         // shortcut: concurrent misses can sign twice; add bounded single-flight when RRset caching is implemented.
-        // shortcut: cache misses allocate for canonical RRsets and signing; remove when signing accepts caller buffers.
+        // shortcut: cache misses allocate parser/canonical/cache buffers; reuse bounded scratch after measuring miss cost.
         let original = cx.response.clone();
         let message = Message::parse(&original).map_err(|_| Error::InvalidQuery)?;
         let kind = typify_response(Some(&message), now as i64);
