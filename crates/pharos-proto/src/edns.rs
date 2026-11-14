@@ -7,6 +7,10 @@ use crate::{BuildError, EdnsOption, EdnsOptions, Message, MessageBuilder, Opcode
 
 static REGISTERED_OPTIONS: [AtomicU64; 1024] = [const { AtomicU64::new(0) }; 1024];
 
+/// Response OPT payload size advertised by Pharos.
+// RFC 3226 §3: DNSSEC-aware servers SHOULD advertise at least 4000 octets.
+pub const RESPONSE_UDP_PAYLOAD_SIZE: u16 = 4096;
+
 /// Register an EDNS option for copying from Queries to Responses across Server Blocks.
 pub fn register_edns_option(code: u16) {
     let code = usize::from(code);
@@ -151,17 +155,22 @@ impl<'a> Opt<'a> {
         supported: &'b [u16],
         rcode: Rcode,
     ) -> ResponseOpt<'a, 'b> {
+        let echo_ecs = self
+            .options
+            .iter()
+            .any(|option| matches!(option, EdnsOption::ClientSubnet(_)));
         let mut source = existing.unwrap_or(self);
-        source.size = self.size;
+        source.size = RESPONSE_UDP_PAYLOAD_SIZE;
         // RFC 6891 §6.1.3: responses carry version 0, the highest EDNS version implemented here.
         source.ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
-            | (source.ttl & 0xff00)
+            | (source.ttl & 0x4000)
             | if self.dnssec_ok() { 0x8000 } else { 0 };
         ResponseOpt {
             source,
             supported,
             copy_all: existing.is_some(),
             registered: false,
+            echo_ecs,
         }
     }
 
@@ -185,6 +194,7 @@ pub struct ResponseOpt<'a, 'b> {
     supported: &'b [u16],
     copy_all: bool,
     registered: bool,
+    echo_ecs: bool,
 }
 
 impl ResponseOpt<'_, '_> {
@@ -197,8 +207,10 @@ impl ResponseOpt<'_, '_> {
                 let len = usize::from(u16::from_be_bytes([rest[2], rest[3]])) + 4;
                 let (option, tail) = rest.split_at(len);
                 rest = tail;
-                if self.copy_all
+                if (self.copy_all && (code != 8 || self.echo_ecs))
                     || self.supported.contains(&code)
+                    // RFC 7871 §7.2.2: include ECS in the response to an ECS Query.
+                    || (self.echo_ecs && code == 8)
                     || (self.registered && edns_option_registered(code))
                 {
                     return Some(option);
