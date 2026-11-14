@@ -128,31 +128,7 @@ impl Health {
                         state.running = false;
                         return;
                     }
-                    let elapsed = shared.started.elapsed().as_secs();
-                    // RFC 2308 §7.2: Expire old dead-server state before recording this failure.
-                    reset_expired_down_window(
-                        &shared.fails,
-                        &shared.down_since_secs,
-                        shared.config.max_fails,
-                        elapsed,
-                    );
-                    let _ =
-                        shared
-                            .fails
-                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |fails| {
-                                Some(fails.saturating_add(1))
-                            });
-                    if shared.fails.load(Ordering::Relaxed) > shared.config.max_fails {
-                        let _ = shared.down_since_secs.compare_exchange(
-                            u64::MAX,
-                            elapsed,
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                        );
-                    }
-                    if let Some(metrics) = &shared.config.metrics {
-                        metrics.healthcheck_failure();
-                    }
+                    record_failure(&shared);
                 }
                 sleep(shared.config.interval).await;
             }
@@ -198,7 +174,35 @@ impl Health {
 }
 
 fn down_expired(since_secs: u64, now_secs: u64) -> bool {
+    // RFC 2308 §7.2: Dead-server indications expire no later than five minutes.
     now_secs.saturating_sub(since_secs) >= DOWN_TTL_SECS
+}
+
+fn record_failure(shared: &Shared) {
+    let elapsed = shared.started.elapsed().as_secs();
+    // RFC 2308 §7.2: Expire old dead-server state before recording this failure.
+    reset_expired_down_window(
+        &shared.fails,
+        &shared.down_since_secs,
+        shared.config.max_fails,
+        elapsed,
+    );
+    let _ = shared
+        .fails
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |fails| {
+            Some(fails.saturating_add(1))
+        });
+    if shared.fails.load(Ordering::Relaxed) > shared.config.max_fails {
+        let _ = shared.down_since_secs.compare_exchange(
+            u64::MAX,
+            elapsed,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+    if let Some(metrics) = &shared.config.metrics {
+        metrics.healthcheck_failure();
+    }
 }
 
 fn reset_expired_down_window(
@@ -329,6 +333,38 @@ mod tests {
         reset_expired_down_window(&fails, &down_since, 3, 310);
         assert_eq!(fails.load(Ordering::Relaxed), 0);
         assert_eq!(down_since.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn health_down_expires_and_rearms_on_new_probe_failures() {
+        let mut health = Health::new("127.0.0.1:53".parse().unwrap(), 1);
+        {
+            let shared = Arc::get_mut(&mut health.shared).unwrap();
+            shared.started = Instant::now() - Duration::from_secs(DOWN_TTL_SECS + 1);
+            shared.fails.store(2, Ordering::Relaxed);
+            shared.down_since_secs.store(0, Ordering::Relaxed);
+        }
+        assert!(!health.down());
+        record_failure(Arc::get_mut(&mut health.shared).unwrap());
+        assert!(!health.down());
+        record_failure(Arc::get_mut(&mut health.shared).unwrap());
+        assert!(health.down());
+    }
+
+    #[test]
+    fn health_down_rearms_after_expiry_and_fresh_failures() {
+        let mut health = Health::new("127.0.0.1:53".parse().unwrap(), 1);
+        {
+            let shared = Arc::get_mut(&mut health.shared).unwrap();
+            shared.started = Instant::now() - Duration::from_secs(DOWN_TTL_SECS + 1);
+            shared.fails.store(2, Ordering::Relaxed);
+            shared.down_since_secs.store(0, Ordering::Relaxed);
+        }
+        assert!(!health.down());
+        record_failure(Arc::get_mut(&mut health.shared).unwrap());
+        assert!(!health.down());
+        record_failure(Arc::get_mut(&mut health.shared).unwrap());
+        assert!(health.down());
     }
 
     #[test]
