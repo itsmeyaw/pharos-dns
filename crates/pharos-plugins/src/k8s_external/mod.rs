@@ -581,7 +581,7 @@ fn canonical_wire<'a>(name: NameRef<'_>, wire: &'a mut [u8; 255]) -> Option<&'a 
     Some(&wire[..len + 1])
 }
 
-// RFC 6604 §3: pair each saved target response with its matching lookup callback.
+// RFC 1034 §4.3.2: retain each CNAME target response with its query cycle.
 fn chased_at<'a>(chased: &'a [Chased], ordinal: usize, address: &str) -> Option<&'a Chased> {
     let index = chased
         .binary_search_by_key(&ordinal, |entry| entry.ordinal)

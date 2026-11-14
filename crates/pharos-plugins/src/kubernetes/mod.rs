@@ -350,6 +350,7 @@ fn cluster_id_matches(labels: &[&[u8]], id: &str) -> bool {
     }) && id_labels.next().is_none()
 }
 
+// KEP-1645 §§2.4.1–2.4.2: encode endpoint and source-cluster IDs as DNS labels.
 fn endpoint_target<'a>(
     req: &name::Request<'_>,
     endpoint: Option<(&[u8], Option<&[u8]>)>,
