@@ -26,7 +26,7 @@ struct Rule {
 struct Policy {
     action: Action,
     types: Vec<Type>,
-    networks: Vec<(IpAddr, u8)>,
+    networks: Vec<(IpAddr, u8, Option<u32>)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -105,10 +105,24 @@ impl Acl {
                             let (ip, prefix) = token
                                 .split_once('/')
                                 .map_or((token.as_str(), None), |(ip, prefix)| (ip, Some(prefix)));
+                            // RFC 4007 §11: Parse a numeric zone ID for scoped IPv6 prefixes.
+                            let (ip, scope) = if let Some((ip, scope)) = ip.rsplit_once('%') {
+                                let scope = scope
+                                    .parse::<u32>()
+                                    .ok()
+                                    .filter(|scope| *scope != 0)
+                                    .ok_or_else(|| cursor.error("invalid acl scope"))?;
+                                (ip, Some(scope))
+                            } else {
+                                (ip, None)
+                            };
                             // RFC 4291 §2.2: Parse conventional IPv6 address text.
                             let ip: IpAddr = ip
                                 .parse()
                                 .map_err(|_| cursor.error("invalid acl network"))?;
+                            if scope.is_some() && !requires_scope(ip) {
+                                return Err(cursor.error("scope requires link-local IPv6 network"));
+                            }
                             let max = if ip.is_ipv4() { 32 } else { 128 };
                             let prefix = prefix
                                 .map(|p| p.parse::<u8>())
@@ -119,7 +133,7 @@ impl Acl {
                                 return Err(cursor.error("invalid acl prefix"));
                             }
                             if !all_networks {
-                                networks.push((ip, prefix));
+                                networks.push((ip, prefix, scope));
                             }
                         }
                     }
@@ -198,6 +212,10 @@ impl Plugin for Acl {
             IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
             ip => ip,
         };
+        let client_scope = match cx.client {
+            SocketAddr::V6(address) => address.scope_id(),
+            SocketAddr::V4(_) => 0,
+        };
         for rule in &self.rules {
             // RFC 4343 §3: DNS name comparisons ignore ASCII letter case.
             let matched_domain = rule
@@ -238,8 +256,8 @@ impl Plugin for Acl {
                 .find(|policy| {
                     (policy.types.contains(&Type::NONE) || policy.types.contains(&question.qtype))
                         && (policy.networks.is_empty()
-                            || policy.networks.iter().any(|&(network, prefix)| {
-                                crate::ipnet::contains(network, prefix, ip)
+                            || policy.networks.iter().any(|&(network, prefix, scope)| {
+                                network_matches(network, prefix, scope, ip, client_scope)
                             }))
                 })
                 .map(|policy| policy.action);
@@ -318,5 +336,46 @@ impl Plugin for Acl {
             metrics.increment(0);
         }
         next.run(cx).await
+    }
+}
+
+// RFC 4007 §§11–12: Link-local unicast and multicast addresses need zone IDs.
+fn requires_scope(ip: IpAddr) -> bool {
+    let IpAddr::V6(ip) = ip else {
+        return false;
+    };
+    let octets = ip.octets();
+    (octets[0] == 0xfe && octets[1] & 0xc0 == 0x80)
+        || (octets[0] == 0xff && octets[1] & 0x0f == 2)
+}
+
+// RFC 4007 §§11–12: Match scoped IPv6 addresses only with their configured zone ID.
+fn network_matches(
+    network: IpAddr,
+    prefix: u8,
+    scope: Option<u32>,
+    client: IpAddr,
+    client_scope: u32,
+) -> bool {
+    crate::ipnet::contains(network, prefix, client)
+        && if requires_scope(client) {
+            scope.is_some_and(|scope| scope == client_scope)
+        } else {
+            scope.is_none()
+        }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::network_matches;
+    use std::net::IpAddr;
+
+    #[test]
+    fn link_local_acl_requires_matching_zone_id() {
+        let network: IpAddr = "fe80::".parse().unwrap();
+        let client: IpAddr = "fe80::1".parse().unwrap();
+        assert!(!network_matches(network, 64, None, client, 2));
+        assert!(network_matches(network, 64, Some(2), client, 2));
+        assert!(!network_matches(network, 64, Some(3), client, 2));
     }
 }
