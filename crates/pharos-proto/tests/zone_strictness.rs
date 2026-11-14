@@ -55,7 +55,7 @@ fn nsec3_short_hash_keeps_miekg_fixed_length_octet() {
 }
 
 #[test]
-fn rrsig_dates_use_miekg_serial_arithmetic() {
+fn rrsig_calendar_dates_outside_the_serial_window_are_rejected() {
     let result = parse(
         Type::RRSIG,
         &[
@@ -63,18 +63,14 @@ fn rrsig_dates_use_miekg_serial_arithmetic() {
             "8",
             "2",
             "3600",
-            "19691231235959",
+            "22000101000000",
             "22000101000000",
             "123",
             "example.",
             "AQID",
         ],
-    )
-    .unwrap();
-    assert_eq!(
-        &result[8..16],
-        &[0xff, 0xff, 0xff, 0xff, 0xb0, 0x9e, 0x19, 0x00]
     );
+    assert!(result.is_err());
 }
 
 #[test]

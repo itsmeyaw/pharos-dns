@@ -1258,12 +1258,17 @@ fn timestamp(value: &str) -> Result<u32, String> {
     if value.len() != 14 {
         return number(value);
     }
-    // RFC 1982 §3.1: signature dates use 32-bit serial arithmetic.
-    // RFC 4034 §3.1.5: YYYYMMDDHHMMSS signature times are reduced to 32-bit serial values.
     let seconds = timestamp_calendar(value)?;
-    let period = 1_i64 << 31;
-    let modulo = (seconds / period - 1).max(0);
-    Ok((seconds - modulo * period) as u32)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "system clock is before Unix epoch")?;
+    let now = i64::try_from(now.as_secs()).map_err(|_| "system clock is out of range")?;
+    // RFC 4034 §3.1.5: Dates more than 68 years from now are ambiguous under serial arithmetic.
+    if seconds.abs_diff(now) > (1_u64 << 31) {
+        return Err("signature timestamp is outside the 68-year serial window".into());
+    }
+    // RFC 4034 §3.1.5: Encode seconds since the Unix epoch as a 32-bit unsigned serial.
+    Ok(seconds as u32)
 }
 
 fn timestamp64(value: &str) -> Result<u64, String> {
