@@ -509,12 +509,23 @@ struct Chased {
 }
 
 fn final_rcode(initial: Rcode, chased: &[Chased]) -> Rcode {
-    // RFC 6604 §3: the last chased hostname is the final query cycle.
-    chased.last().map_or(initial, |entry| {
-        entry.answers[0].as_deref().map_or(Rcode::SERVFAIL, |wire| {
-            pharos_proto::Message::parse(wire).map_or(Rcode::SERVFAIL, |message| message.rcode())
-        })
-    })
+    let mut final_code = initial;
+    for entry in chased {
+        let Some(wire) = entry.answers[0].as_deref() else {
+            final_code = Rcode::SERVFAIL;
+            continue;
+        };
+        let Ok(message) = pharos_proto::Message::parse(wire) else {
+            final_code = Rcode::SERVFAIL;
+            continue;
+        };
+        final_code = message.rcode();
+        // RFC 6604 §3: successful chased answers produce a NOERROR response.
+        if final_code == Rcode::NOERROR && message.answer_count() > 0 {
+            return Rcode::NOERROR;
+        }
+    }
+    final_code
 }
 
 fn chased_matches(address: &str, name: &Name) -> bool {
@@ -1278,6 +1289,35 @@ mod tests {
             answers: [Some(wire), None],
         }];
         assert_eq!(final_rcode(Rcode::NOERROR, &chased), Rcode::NXDOMAIN);
+        let positive_name: Name = "found.example.net.".parse().unwrap();
+        let positive_ref = NameRef::parse(positive_name.as_wire(), 0).unwrap();
+        let mut positive_wire = Vec::with_capacity(128);
+        let mut builder = MessageBuilder::new(&mut positive_wire, 128, 1, 0x8000).unwrap();
+        builder.question(positive_ref, Type::A, Class::IN).unwrap();
+        builder
+            .record(
+                Section::Answer,
+                positive_ref,
+                Type::A,
+                Class::IN,
+                30,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mixed = [
+            Chased {
+                ordinal: 0,
+                name: positive_name,
+                answers: [Some(positive_wire), None],
+            },
+            Chased {
+                ordinal: 1,
+                name: "missing.example.net.".parse().unwrap(),
+                answers: [Some(chased[0].answers[0].clone().unwrap()), None],
+            },
+        ];
+        assert_eq!(final_rcode(Rcode::NXDOMAIN, &mixed), Rcode::NOERROR);
         assert_eq!(
             final_rcode(
                 Rcode::NOERROR,
