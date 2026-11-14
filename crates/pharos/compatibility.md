@@ -188,6 +188,7 @@
 
 ## General
 
+- CoreDNS v1.15.0 uses miekg/dns v1.1.73, whose `IsDomainName` permits a computed 256-octet name (`defaults.go` checks `off > 256`). Pharos rejects it under RFC 1035 §2.3.4; no DNS Message can carry that name.
 - CoreDNS v1.15.0's `plugin.SplitHostPort` caps server-block key presentation at 255 bytes before DNS wire-length validation (`plugin/normalize.go`, `core/dnsserver/register.go`). Pharos preserves this ADR 0003 behavior, so some RFC 1035 §2.3.4-valid escaped names with longer presentation remain rejected.
 - CoreDNS v1.15.0 normalizes server-block names with Go `strings.ToLower` and rejects IPv6 CIDRs beginning with `:` or `0` followed by `:` (`plugin/normalize.go`). Pharos preserves those Corefile behaviors for ADR 0003, despite RFC 4343 §3 and RFC 4291 §2.3.
 - CoreDNS v1.15.0's caddy v1.1.4 import parser rejects patterns with multiple `*` or `?` wildcards and all bracket expressions (`caddyfile/parse.go`); Pharos preserves those limits.
