@@ -3,7 +3,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
-use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
+use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
 use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 
 fn configured(text: &str) -> Result<Chain, String> {
@@ -160,6 +160,16 @@ async fn any_passes_non_in_queries_to_next_plugin() {
             NameRef::parse(name.as_wire(), 0).unwrap(),
             Type::ANY,
             Class::CH,
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(1232),
+            0x8000,
+            &[],
         )
         .unwrap();
     let _ = builder.finish();
