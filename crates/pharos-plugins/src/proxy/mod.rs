@@ -8,7 +8,7 @@ pub mod health;
 pub use health::{Health, HealthConfig};
 
 use pharos_proto::{
-    ClientSubnet, EdnsOption, Message, MessageError, NameError, NameRef, Rcode, Type,
+    ClientSubnet, EdnsOption, EdnsOptions, Message, MessageError, NameError, NameRef, Rcode, Type,
 };
 use pharos_server::{
     metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry},
@@ -172,6 +172,7 @@ fn ecs_option(message: &Message<'_>) -> Result<Option<ClientSubnet>, ()> {
 }
 
 pub(crate) fn has_ecs(message: &Message<'_>) -> bool {
+    // RFC 7871 §6: Presence of ECS selects subnet-aware forwarding.
     message.opt().is_some_and(|opt| {
         opt.options()
             .iter()
@@ -179,7 +180,29 @@ pub(crate) fn has_ecs(message: &Message<'_>) -> bool {
     })
 }
 
+pub(crate) fn has_unsigned_ecs_message(message: &Message<'_>) -> bool {
+    // RFC 7871 §6 and RFC 8945 §5.5: Detect rewritable ECS in one Additional scan.
+    let mut has_ecs = false;
+    for record in message.additionals() {
+        if record.rtype == Type::TSIG {
+            return false;
+        }
+        if record.rtype == Type::OPT {
+            let options = EdnsOptions::parse(record.rdata).expect("Message validated OPT options");
+            has_ecs |= options
+                .iter()
+                .any(|option| matches!(option, EdnsOption::ClientSubnet(_)));
+        }
+    }
+    has_ecs
+}
+
+pub(crate) fn has_unsigned_ecs(query: &[u8]) -> bool {
+    Message::parse(query).is_ok_and(|message| has_unsigned_ecs_message(&message))
+}
+
 fn keepalive_zero(message: &Message<'_>) -> bool {
+    // RFC 7828 §3.2.2: A zero TIMEOUT asks the client to close after this response.
     message
         .opt()
         .into_iter()
@@ -188,13 +211,15 @@ fn keepalive_zero(message: &Message<'_>) -> bool {
 }
 
 fn same_ecs(request: &Message<'_>, response: &Message<'_>) -> bool {
+    if request.opt().is_none() {
+        return !has_ecs(response);
+    }
     match (ecs_option(request), ecs_option(response)) {
         (Ok(Some(query)), Ok(Some(answer))) => {
             // RFC 7871 §7.3: Responses echo ECS family, source prefix, and address.
             query.family() == answer.family()
                 && query.source_prefix() == answer.source_prefix()
                 && query.address() == answer.address()
-                && answer.scope_prefix() <= answer.source_prefix()
         }
         (Ok(Some(_)), Ok(None)) => true,
         (Ok(None), Ok(None)) => true,
@@ -209,7 +234,6 @@ struct RecordIndex {
     offset: u16,
     rtype: u16,
     class: u16,
-    section: u8,
 }
 
 fn name_hash(name: NameRef<'_>) -> u32 {
@@ -225,6 +249,7 @@ fn name_hash(name: NameRef<'_>) -> u32 {
 }
 
 fn compare_names(left: NameRef<'_>, right: NameRef<'_>) -> std::cmp::Ordering {
+    // RFC 4343 §3: DNS label comparison ignores ASCII letter case.
     let mut left_labels = left.labels();
     let mut right_labels = right.labels();
     loop {
@@ -246,22 +271,30 @@ fn compare_names(left: NameRef<'_>, right: NameRef<'_>) -> std::cmp::Ordering {
 }
 
 fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
+    // RFC 2181 §5.2: Validate TTL consistency; OPT and TSIG are pseudo-records.
+    let mut ordinary = message
+        .answers()
+        .chain(message.authorities())
+        .chain(message.additionals())
+        .filter(|record| !matches!(record.rtype, Type::OPT | Type::TSIG));
+    if ordinary.next().is_none() || ordinary.next().is_none() {
+        return true;
+    }
     RRSET_SCRATCH.with(|scratch| {
         let Ok(mut indexes) = scratch.try_borrow_mut() else {
             return false;
         };
         indexes.clear();
-        for (section, records) in [
-            (0, message.answers()),
-            (1, message.authorities()),
-            (2, message.additionals()),
+        for records in [
+            message.answers(),
+            message.authorities(),
+            message.additionals(),
         ] {
             for record in records {
-                let Some(offset) = record
-                    .rdata_offset
-                    .checked_sub(record.name.wire_len() + 10)
-                    .and_then(|offset| u16::try_from(offset).ok())
-                else {
+                if matches!(record.rtype, Type::OPT | Type::TSIG) {
+                    continue;
+                }
+                let Ok(offset) = u16::try_from(record.name.offset()) else {
                     return false;
                 };
                 indexes.push(RecordIndex {
@@ -270,7 +303,6 @@ fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
                     offset,
                     rtype: record.rtype.0,
                     class: record.class.0,
-                    section,
                 });
             }
         }
@@ -286,7 +318,6 @@ fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
                         .expect("Message validated RR owner");
                     compare_names(same_name, other_name)
                 })
-                .then(left.section.cmp(&right.section))
                 .then(left.ttl.cmp(&right.ttl))
         });
         indexes.windows(2).all(|pair| {
@@ -303,7 +334,7 @@ fn rrsets_valid(message: &Message<'_>, wire: &[u8]) -> bool {
             let right_name = NameRef::parse(wire, usize::from(right.offset))
                 .expect("Message validated RR owner");
             compare_names(left_name, right_name) != std::cmp::Ordering::Equal
-                || (left.section == right.section && left.ttl == right.ttl)
+                || left.ttl == right.ttl
         })
     })
 }
@@ -826,7 +857,7 @@ impl Proxy {
         if !answer.qr() || !same_questions || !same_ecs(&request, &answer) {
             return Err(Error::Mismatch(length));
         }
-        // RFC 2181 §§5.2, 5.5: RRSets share TTLs and appear in one section only.
+        // RFC 2181 §5.2: Reject inconsistent RRset TTLs; §5.5 duplicate sections are SHOULD NOT.
         if !rrsets_valid(&answer, &response[..length]) {
             return Err(Error::Io(io::ErrorKind::InvalidData.into()));
         }
@@ -868,6 +899,7 @@ impl Drop for Proxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn query_with_options(options: &[u8]) -> Vec<u8> {
         let mut wire = vec![
@@ -887,6 +919,45 @@ mod tests {
             .await
             .unwrap();
         assert!(stream.nodelay().unwrap());
+    }
+
+    #[tokio::test]
+    async fn timeout_zero_tcp_response_closes_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let len = usize::from(stream.read_u16().await.unwrap());
+                let mut query = vec![0; len];
+                stream.read_exact(&mut query).await.unwrap();
+                let request = Message::parse(&query).unwrap();
+                assert!(matches!(
+                    request.opt().unwrap().options().iter().next(),
+                    Some(EdnsOption::TcpKeepalive(None))
+                ));
+                let mut answer = query;
+                answer[2] |= 0x80;
+                answer[26..28].copy_from_slice(&6_u16.to_be_bytes());
+                answer[30..32].copy_from_slice(&2_u16.to_be_bytes());
+                answer.extend_from_slice(&[0, 0]);
+                stream
+                    .write_u16(u16::try_from(answer.len()).unwrap())
+                    .await
+                    .unwrap();
+                stream.write_all(&answer).await.unwrap();
+            }
+        });
+        let proxy = Proxy::new(address);
+        let query = query_with_options(&[0, 11, 0, 2, 0, 10]);
+        let mut response = vec![0; usize::from(u16::MAX)];
+        for _ in 0..2 {
+            proxy
+                .exchange(&query, &mut response, Transport::Tcp, Options::default())
+                .await
+                .unwrap();
+        }
+        server.await.unwrap();
     }
 
     #[test]
@@ -941,7 +1012,7 @@ mod tests {
         let request_wire = query_with_options(&KEEPALIVE_AND_ECS[6..]);
         let request = Message::parse(&request_wire).unwrap();
         let mut response_options = KEEPALIVE_AND_ECS[6..].to_vec();
-        response_options[7] = 16;
+        response_options[7] = 32;
         let response_wire = query_with_options(&response_options);
         let response = Message::parse(&response_wire).unwrap();
         assert!(same_ecs(&request, &response));
@@ -984,13 +1055,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_rrsets_repeated_across_sections() {
+    fn permits_rrsets_repeated_across_sections() {
         let mut wire = vec![0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 1];
         let rr = [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1];
         wire.extend_from_slice(&rr);
         wire.extend_from_slice(&rr);
         let message = Message::parse(&wire).unwrap();
-        assert!(!rrsets_valid(&message, &wire));
+        assert!(rrsets_valid(&message, &wire));
     }
 
     #[cfg(target_os = "linux")]
