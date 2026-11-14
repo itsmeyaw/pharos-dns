@@ -599,6 +599,22 @@ mod tests {
     }
 
     #[test]
+    fn startup_accepts_corefile_unicode_domain_names() {
+        // RFC 4343 §2.1: normalized Corefile keys must be parseable ASCII presentation names.
+        let (_, _, domains, _, _, _) = super::prepare(
+            &crate::Options::default(),
+            "Corefile",
+            "MÜNICH.example:1053 {\nwhoami\n}",
+            &pharos_server::metrics::Registry::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            domains.values().next().unwrap(),
+            &[r"m\195\188nich.example.".to_owned()]
+        );
+    }
+
+    #[test]
     fn hash_preserves_line_boundaries_that_change_directive_arguments() {
         let same_line = pharos_corefile::parse(
             "Corefile",

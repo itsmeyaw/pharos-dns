@@ -1,11 +1,11 @@
-use std::net::IpAddr;
+use std::{fmt::Write as _, net::IpAddr};
 
 /// A normalized Server Block Key.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ServerBlockKey {
     /// Transport selected by the key.
     pub transport: String,
-    /// Fully qualified, lowercased Domain.
+    /// Fully qualified Domain in ASCII presentation, with non-ASCII octets escaped.
     pub domain: String,
     /// Decimal port, or an empty string for the Unix transport's default.
     pub port: String,
@@ -68,7 +68,7 @@ pub fn normalize_key(key: &str) -> Result<Vec<ServerBlockKey>, String> {
             }
             Ok(ServerBlockKey {
                 transport: transport.to_owned(),
-                domain: domain.chars().map(go_lowercase).collect(),
+                domain: ascii_presentation(&domain.chars().map(go_lowercase).collect::<String>()),
                 port: port.clone(),
             })
         })
@@ -90,6 +90,22 @@ fn go_lowercase(c: char) -> char {
         | '\u{16ea0}'..='\u{16eb8}' => c,
         _ => c.to_lowercase().next().unwrap_or(c),
     }
+}
+
+fn ascii_presentation(domain: &str) -> String {
+    if domain.is_ascii() {
+        return domain.to_owned();
+    }
+    // RFC 4343 §2.1: Non-ASCII UTF-8 octets need decimal escapes in ASCII presentation.
+    let mut escaped = String::with_capacity(domain.len());
+    for byte in domain.bytes() {
+        if byte.is_ascii() {
+            escaped.push(char::from(byte));
+        } else {
+            write!(escaped, "\\{byte:03}").expect("writing to a String");
+        }
+    }
+    escaped
 }
 
 fn fqdn(name: &str) -> String {
@@ -339,6 +355,15 @@ mod tests {
     }
 
     #[test]
+    fn unicode_server_block_domains_use_escaped_octet_presentation() {
+        // RFC 4343 §2.1: UTF-8 name octets use three-digit decimal escapes in ASCII presentation.
+        assert_eq!(
+            normalize_key("MÜNICH.Example.").unwrap(),
+            [key("dns", r"m\195\188nich.example.", "53")]
+        );
+    }
+
+    #[test]
     fn trailing_dot_and_invalid_cidr_remain_domains() {
         for (input, domain) in [
             ("10.0.0.0/8.", "10.0.0.0/8."),
@@ -368,7 +393,11 @@ mod tests {
         assert_eq!(normalize_key("A\\.").unwrap(), [key("dns", "a\\..", "53")]);
         assert_eq!(
             normalize_key("AİᲉ\u{10d50}\u{16ea0}").unwrap(),
-            [key("dns", "aiᲉ\u{10d50}\u{16ea0}.", "53")]
+            [key(
+                "dns",
+                r"ai\225\178\137\240\144\181\144\240\150\186\160.",
+                "53"
+            )]
         );
     }
 
