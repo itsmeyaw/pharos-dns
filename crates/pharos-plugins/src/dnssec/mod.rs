@@ -38,18 +38,19 @@ impl Plugin for Dnssec {
             };
         }
         let matching = cx.query.questions().next().and_then(|question| {
-            // RFC 2181 §5.1: Only intercept DNSKEY queries in the zone's IN class.
-            if question.qclass != Class::IN {
-                return None;
-            }
             let zone = self.zone_for(question.name)?;
             let has_zone_key = self.keys.iter().any(|key| key.public.owner == *zone);
             // RFC 4035 §3.1: DNSSEC proof processing applies only to signed zones.
-            has_zone_key.then(|| question.qtype == Type::DNSKEY && question.name == *zone)
+            has_zone_key.then_some((question, zone))
         });
         // RFC 4033 §9: DO queries in configured zones receive DNSSEC records.
         let do_bit = matching.is_some() && cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
-        let intercepted = matching.unwrap_or(false);
+        // RFC 2181 §5.1; RFC 1035 §3.2.3: IN and ANY queries may use configured IN DNSKEYs.
+        let intercepted = matching.is_some_and(|(question, zone)| {
+            matches!(question.qclass, Class::IN | Class::ANY)
+                && question.qtype == Type::DNSKEY
+                && question.name == *zone
+        });
         let outcome = if intercepted {
             match self.dnskey(cx) {
                 Ok(()) => Outcome::Response,
@@ -182,6 +183,30 @@ mod tests {
     use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type};
     use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 
+    struct QueryDnskeyReply;
+
+    impl Next for QueryDnskeyReply {
+        async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+            let question = cx.query.questions().next().unwrap();
+            let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8400).unwrap();
+            builder
+                .question(question.name, question.qtype, question.qclass)
+                .unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::DNSKEY,
+                    question.qclass,
+                    300,
+                    &[0, 1, 3, 13, 1],
+                )
+                .unwrap();
+            let _ = builder.finish();
+            Outcome::Response
+        }
+    }
+
     #[test]
     fn explicit_nxname_query_gets_formerr() {
         let domain: Name = "example.org.".parse().unwrap();
@@ -214,31 +239,6 @@ mod tests {
     // RFC 2181 §5.1: A DNSKEY answer must not cross the Query's class boundary.
     #[tokio::test]
     async fn non_in_dnskey_query_passes_through_without_in_records() {
-        struct Reply;
-
-        impl Next for Reply {
-            async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
-                let question = cx.query.questions().next().unwrap();
-                let mut builder =
-                    MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8400).unwrap();
-                builder
-                    .question(question.name, question.qtype, question.qclass)
-                    .unwrap();
-                builder
-                    .record(
-                        Section::Answer,
-                        question.name,
-                        Type::DNSKEY,
-                        question.qclass,
-                        300,
-                        &[0, 1, 3, 13, 1],
-                    )
-                    .unwrap();
-                let _ = builder.finish();
-                Outcome::Response
-            }
-        }
-
         let key = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
@@ -256,6 +256,16 @@ mod tests {
         let mut query = Vec::new();
         let mut builder = MessageBuilder::new(&mut query, 512, 9, 0x0100).unwrap();
         builder.question(name, Type::DNSKEY, Class::CH).unwrap();
+        builder
+            .record(
+                Section::Additional,
+                NameRef::parse(&[0], 0).unwrap(),
+                Type::OPT,
+                Class(1232),
+                0x8000,
+                &[],
+            )
+            .unwrap();
         let _ = builder.finish();
         let mut response = Vec::with_capacity(512);
         let mut slots = [];
@@ -271,8 +281,75 @@ mod tests {
             max_response_size: 512,
         };
 
-        assert_eq!(dnssec.serve(&mut cx, Reply).await, Outcome::Response);
+        assert_eq!(
+            dnssec.serve(&mut cx, QueryDnskeyReply).await,
+            Outcome::Response
+        );
         let reply = Message::parse(cx.response).unwrap();
-        assert_eq!(reply.answers().next().unwrap().class, Class::CH);
+        assert_eq!(reply.answers().count(), 2);
+        assert!(reply.answers().all(|rr| rr.class == Class::CH));
+        assert!(reply.answers().any(|rr| rr.rtype == Type::RRSIG));
+    }
+
+    // RFC 1035 §3.2.3: QCLASS=ANY selects DNSKEY data in any class.
+    #[tokio::test]
+    async fn qclass_any_dnskey_intercepts_signed_zone_key() {
+        let key = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+        );
+        let corefile = format!("miek.nl {{\n dnssec {{\n key file {key}\n }}\n}}");
+        let mut chain = pharos_corefile::configure::<crate::Chain>(
+            &pharos_corefile::parse("Corefile", &corefile).unwrap(),
+            crate::directives(),
+        )
+        .unwrap();
+        let dnssec = chain[0].config.dnssec.take().unwrap();
+
+        let domain: Name = "miek.nl.".parse().unwrap();
+        let name = NameRef::parse(domain.as_wire(), 0).unwrap();
+        let mut query = Vec::new();
+        let mut builder = MessageBuilder::new(&mut query, 512, 10, 0x0100).unwrap();
+        builder.question(name, Type::DNSKEY, Class::ANY).unwrap();
+        builder
+            .record(
+                Section::Additional,
+                NameRef::parse(&[0], 0).unwrap(),
+                Type::OPT,
+                Class(1232),
+                0x8000,
+                &[],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&query).unwrap(),
+            client: "127.0.0.1:1".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+
+        assert_eq!(
+            dnssec.serve(&mut cx, QueryDnskeyReply).await,
+            Outcome::Response
+        );
+        let reply = Message::parse(cx.response).unwrap();
+        assert!(
+            reply
+                .answers()
+                .any(|rr| rr.rtype == Type::DNSKEY && rr.class == Class::IN)
+        );
+        assert!(
+            reply
+                .answers()
+                .any(|rr| rr.rtype == Type::RRSIG && rr.class == Class::IN)
+        );
     }
 }
