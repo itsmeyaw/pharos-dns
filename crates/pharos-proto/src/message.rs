@@ -227,7 +227,8 @@ impl<'a> Message<'a> {
             read_u16(wire, 10)?,
         ];
         let opcode = Opcode(((u16::from_be_bytes([wire[2], wire[3]]) >> 11) & 15) as u8);
-        let notify = opcode == Opcode::NOTIFY;
+        // RFC 1996 §3.9 applies to requests; NOTIFY Responses parse their sections normally.
+        let notify = opcode == Opcode::NOTIFY && wire[2] & 0x80 == 0;
         let mut starts = [0; 4];
         let mut offset = HEADER_LEN;
         let mut has_opt = false;

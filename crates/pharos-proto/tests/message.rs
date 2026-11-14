@@ -147,6 +147,19 @@ fn sig0_precedes_opt_and_notify_ignores_trailing_sections() {
 
     let notify = b"\0\x01\x20\0\0\x01\0\0\0\x01\0\x01\x01a\0\0\x06\0\x01\xff";
     assert_eq!(Message::parse(notify).unwrap().authority_count(), 0);
+
+    let mut notify_response = Vec::new();
+    let mut builder = MessageBuilder::new(&mut notify_response, 512, 1, 0xa000).unwrap();
+    let a: Name = "a.".parse().unwrap();
+    let a = NameRef::parse(a.as_wire(), 0).unwrap();
+    builder.question(a, Type::SOA, Class::IN).unwrap();
+    builder
+        .record(Section::Authority, a, Type::NS, Class::IN, 0, &[0])
+        .unwrap();
+    assert_eq!(
+        Message::parse(builder.finish()).unwrap().authority_count(),
+        1
+    );
 }
 
 #[test]
