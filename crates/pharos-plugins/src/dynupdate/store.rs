@@ -212,6 +212,20 @@ fn load(db: &bbolt::Store, config: &Config) -> io::Result<Zone> {
     .map_err(invalid)
 }
 
+fn database_load_error(path: &std::path::Path, error: io::Error) -> io::Error {
+    let message = error.to_string();
+    // RFC 2181 §6.1: A durable authoritative Zone without apex NS needs repair before startup.
+    let repair = if message.contains("Zone apex has no NS record") {
+        "; repair: restore/UPDATE NS on previous build, or recreate DB from corrected seed"
+    } else {
+        ""
+    };
+    io::Error::new(
+        error.kind(),
+        format!("database {}: {message}{repair}", path.display()),
+    )
+}
+
 // CoreDNS plugin/dynupdate/store.go:44-71: overlapping instances share a store by file identity.
 pub(super) fn validate(config: &Config) -> io::Result<Arc<Zone>> {
     let Some(path) = &config.database else {
@@ -240,7 +254,9 @@ pub(super) fn validate(config: &Config) -> io::Result<Arc<Zone>> {
     }
     let file = File::open(path)?;
     lock(&file, true)?;
-    load(&bbolt::Store::open_limited(file, config.max_bytes)?, config).map(Arc::new)
+    load(&bbolt::Store::open_limited(file, config.max_bytes)?, config)
+        .map(Arc::new)
+        .map_err(|error| database_load_error(path, error))
 }
 
 pub(super) fn acquire(config: &Config) -> io::Result<Arc<Shared>> {
@@ -319,7 +335,7 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
         (db, zone)
     } else {
         let db = bbolt::Store::open_limited(file, config.max_bytes)?;
-        let zone = load(&db, config)?;
+        let zone = load(&db, config).map_err(|error| database_load_error(path, error))?;
         (db, zone)
     };
     let shared = Arc::new(Shared {
@@ -461,6 +477,7 @@ mod tests {
         )
         .unwrap();
         let shared = acquire(&config).unwrap();
+        let database = dir.join("db").canonicalize().unwrap();
         let records = shared
             .current
             .load()
@@ -488,6 +505,12 @@ mod tests {
             error.contains("add an NS RRset at the Zone apex"),
             "{error}"
         );
+        assert!(error.contains(&database.display().to_string()), "{error}");
+        assert!(
+            error.contains("restore/UPDATE NS on previous build"),
+            "{error}"
+        );
+        assert!(error.contains("recreate DB from corrected seed"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
