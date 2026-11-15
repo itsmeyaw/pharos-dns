@@ -137,6 +137,17 @@ permit upstream resolution and cache its answers. `invalid.` always gets a
 terminal NXDOMAIN; explicit `forward .invalid` is rejected. Explicit `file`
 Zones keep precedence, including Zones under these suffixes.
 
+Any enabled handler Chain gives special-use QUERYs a terminal negative answer
+after configured owners pass. This applies to every QCLASS: the SOA uses IN for
+QCLASS ANY and preserves other classes. Terminal `.test` and `.invalid` answers
+clear AA; reverse-catalogue NXDOMAIN sets AA, including when `local disable`
+suppresses local synthesis. RA is set only when a `forward` handler is
+configured, so cache-only chains clear RA. Non-QUERY opcodes do not receive this
+fallback. Writer metadata remains attributed to the nearest configured Plugin
+that passes the Query through; an empty Chain has no Plugin writer label.
+Synthetic special-use SOAs use `localhost.` as MNAME and `nobody.invalid.` as
+RNAME (RFC 2181 §7.3; RFC 6303 §3).
+
 The `local` Plugin serves the full RFC 6303 empty-zone catalogue; CoreDNS
 v1.15.0's `plugin/local/local.go` defaults only to `localhost.`,
 `0.in-addr.arpa.`, `127.in-addr.arpa.`, and `255.in-addr.arpa.`. Pharos also
