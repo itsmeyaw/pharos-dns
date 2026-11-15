@@ -269,10 +269,9 @@
 - SIG(0) and TSIG must be the final Additional RR; OPT may precede them (RFCs 6891 §6.1.1, 2931 §3.1, 8945 §§5.1–5.2).
 - The protocol parser rejects duplicate OPT records, OPT records outside Additional, and non-root OPT owners as invalid Messages intended for FORMERR.
 - DSO session Primary TLVs are unsupported; the Listener suppresses ID-zero DSO requests without inspecting their Primary TLV (RFC 8490 §5.4.1).
-- The DNS Listener returns header-only FORMERR for malformed Messages shorter than 12 octets, including 0–3-byte datagrams; missing Message ID octets are zero-filled (RFC 5625 §6.3).
-- A one-byte datagram therefore receives a 12-byte FORMERR Response. This amplification follows RFC 5625 §6.3's requirement to answer short DNS packets.
-- TKEY QTYPE Queries return NOTIMP before Plugin dispatch, including QCLASS=ANY, because the server has no TKEY service (RFC 2930 §3).
-- If UPDATE is disabled, the Listener returns NOTIMP before validating UPDATE section framing; accepted malformed UPDATEs return FORMERR (RFC 2136 §§2.2, 3.1.1).
+- The DNS Listener silently drops datagrams or TCP messages shorter than the 12-octet DNS header: no Message ID is guaranteed, and a reply to a one-byte datagram would amplify 12x. RFC 5625 §6.3 allows dropping intrinsically malformed packets (MAY) though it prefers a synthesized error (SHOULD); CoreDNS/miekg/dns likewise drops headers it cannot unpack. Messages with a complete header and malformed body receive FORMERR.
+- TKEY QTYPE Queries return NOTIMP before Plugin dispatch, including QCLASS=ANY, because the server has no TKEY service; RFC 2930 §3 permits NOTIMP or REFUSED.
+- If UPDATE is disabled, the Listener returns NOTIMP before validating UPDATE section framing; accepted malformed UPDATEs return FORMERR (RFC 2136 §3, §3.1.1).
 - The DNS Listener ignores the reserved header Z bit on receipt, as RFC 6895 §2.1 recommends, and clears it in generated Responses (conf/server #101).
 - Zero-question QUERY Messages route to the root Server Block when configured; CoreDNS's standard query path also permits QDCOUNT=0 (RFC 9619 §4; conf/server #101).
 - For DS at a configured zone cut, Pharos uses the parent Server Block; if no parent is configured, it routes to the child and returns authoritative NODATA, as RFC 4035 §3.1.4.1 requires (conf/server #101).

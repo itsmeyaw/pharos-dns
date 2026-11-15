@@ -21,18 +21,13 @@ pub fn admit_with_update<'a>(
     allow_update: bool,
     response: &mut Vec<u8>,
 ) -> Admission<'a> {
-    // RFC 1035 §4.1.1: QR=1 identifies a Response, not a request.
-    if wire.get(2).is_some_and(|flags| flags & 0x80 != 0) {
+    // RFC 5625 §6.3: Intrinsically malformed packets MAY be dropped; a header-less packet has no usable ID and a reply would amplify it.
+    if wire.len() < 12 {
         return Admission::Drop;
     }
-    if wire.len() < 12 {
-        // RFC 5625 §6.3: Return FORMERR for a DNS message shorter than its header.
-        response.clear();
-        response.extend_from_slice(&wire[..wire.len().min(2)]);
-        response.resize(2, 0);
-        response.extend_from_slice(&(0x8000 | Rcode::FORMERR.0).to_be_bytes());
-        response.extend_from_slice(&[0; 8]);
-        return Admission::Respond;
+    // RFC 1035 §4.1.1: QR=1 identifies a Response, not a request.
+    if wire[2] & 0x80 != 0 {
+        return Admission::Drop;
     }
     let flags = u16::from_be_bytes([wire[2], wire[3]]);
     // RFC 6895 §2.1: Do not reject the reserved DNS header Z bit.
@@ -100,7 +95,7 @@ pub fn admit_with_update<'a>(
         header_error(wire, response, Rcode::FORMERR);
         return Admission::Respond;
     }
-    // RFC 2930 §3: TKEY Queries use QCLASS ANY and receive NOTIMP without Plugin dispatch.
+    // RFC 2930 §3: A server without TKEY service returns NOTIMP (or REFUSED); Pharos returns NOTIMP.
     if query.opcode() == Opcode::QUERY
         && query
             .questions()
