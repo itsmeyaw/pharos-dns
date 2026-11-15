@@ -2,7 +2,10 @@ use std::{
     io::{self, IoSlice},
     net::SocketAddr,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::Poll,
     time::Duration,
 };
@@ -119,6 +122,8 @@ async fn serve<H: Handler>(
     let writer = Arc::new(Mutex::new(Some(writer)));
     let mut queries: JoinSet<Vec<u8>> = JoinSet::new();
     let mut responses = Vec::with_capacity(MAX_IN_FLIGHT_PER_CONNECTION);
+    // Set when the peer half-closes its send direction (FIN), as opposed to a reset.
+    let fin = Arc::new(AtomicBool::new(false));
     let mut count = 0usize;
     // One long-lived timer, re-armed only when it fires early: a timer per frame locks the time driver per Query.
     let idle = tokio::time::sleep(options.read);
@@ -200,6 +205,8 @@ async fn serve<H: Handler>(
                         ) {
                             // RFC 7766 §6.2.4; RFC 5936 §4.1.2: A reset peer abandoned active Responses and Transfers.
                             queries.abort_all();
+                        } else if error.kind() == io::ErrorKind::UnexpectedEof {
+                            fin.store(true, Ordering::Relaxed);
                         }
                         break 'read;
                     }
@@ -227,6 +234,7 @@ async fn serve<H: Handler>(
         let handler = Arc::clone(&handler);
         let writer = Arc::clone(&writer);
         let stop = stop.clone();
+        let fin = Arc::clone(&fin);
         let mut response = responses.pop().unwrap_or_default();
         response.clear();
         let mut task = Box::pin(async move {
@@ -254,6 +262,10 @@ async fn serve<H: Handler>(
                 // RFC 9103 §6.2: AXFR sessions may run concurrently on one TCP connection.
                 let mut writer = writer.lock().await;
                 if writer.is_none() {
+                    break;
+                }
+                // RFC 5936 §4.1.2: A remotely closed connection MUST cancel its AXFR sessions.
+                if transfer.is_some() && fin.load(Ordering::Relaxed) {
                     break;
                 }
                 if let Some(transfer) = transfer.as_mut() {
@@ -344,7 +356,17 @@ async fn serve<H: Handler>(
         queries.abort_all();
     }
     // RFC 9293 §3.6.1: A peer FIN closes only its send direction; finish accepted Responses.
-    while queries.join_next().await.is_some() {}
+    // RFC 7766 §6.2.4 says a server MUST NOT send pending Responses once the client has closed;
+    // we deliberately deviate for FIN (as miekg/dns does for read Queries): a failed write after
+    // RST aborts them, and `options.idle` bounds a stuck handler.
+    let drain = async { while queries.join_next().await.is_some() {} };
+    if fin.load(Ordering::Relaxed) {
+        if timeout(options.idle, drain).await.is_err() {
+            queries.abort_all();
+        }
+    } else {
+        drain.await;
+    }
 }
 
 #[cfg(test)]

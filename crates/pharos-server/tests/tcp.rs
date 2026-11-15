@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use pharos_server::{Action, Handler, Listener, Protocol, Stream};
+use pharos_server::{Action, Handler, Listener, Protocol, Stream, TcpOptions};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -449,6 +449,133 @@ async fn peer_reset_cancels_in_flight_query_tasks() {
         cancelled_before_shutdown,
         "peer reset left the Query running"
     );
+}
+
+struct WriteFailure {
+    started: async_mpsc::UnboundedSender<()>,
+    cancelled: async_mpsc::UnboundedSender<()>,
+}
+
+impl Handler for WriteFailure {
+    fn tcp_options(&self) -> TcpOptions {
+        TcpOptions {
+            write: Duration::from_millis(200),
+            ..TcpOptions::default()
+        }
+    }
+    async fn handle(&self, query: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        if query == b"big" {
+            return Action::Stream(Stream::new(|wire| {
+                wire.resize(65_535, 0);
+                Ok(true)
+            }));
+        }
+        self.started.send(()).unwrap();
+        let _cancelled = CancelOnDrop(self.cancelled.clone());
+        std::future::pending().await
+    }
+}
+
+// RFC 7766 §6.2.4; RFC 5936 §4.1.2: A failed write abandons the connection's other active Queries.
+#[tokio::test]
+async fn write_failure_cancels_in_flight_query_tasks() {
+    let (started, mut started_rx) = async_mpsc::unbounded_channel();
+    let (cancelled, mut cancelled_rx) = async_mpsc::unbounded_channel();
+    let (listener, mut stream) = connect(WriteFailure { started, cancelled }).await;
+    send(&mut stream, b"wait").await;
+    timeout(TEST_TIMEOUT, started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // The client never reads, so the Transfer's write times out.
+    send(&mut stream, b"big").await;
+    timeout(TEST_TIMEOUT, cancelled_rx.recv())
+        .await
+        .expect("write failure left the Query running")
+        .unwrap();
+    drop(stream);
+    listener.shutdown().await.unwrap();
+}
+
+struct CountedTransfer(Arc<AtomicUsize>);
+
+impl Handler for CountedTransfer {
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        let produced = Arc::clone(&self.0);
+        Action::Stream(Stream::new(move |wire| {
+            if produced.fetch_add(1, Ordering::SeqCst) == 10_000 {
+                return Ok(false);
+            }
+            wire.resize(65_535, 0);
+            Ok(true)
+        }))
+    }
+}
+
+// RFC 5936 §4.1.2: A remotely closed connection MUST cancel its AXFR sessions.
+#[tokio::test]
+async fn peer_reset_cancels_zone_transfer() {
+    let produced = Arc::new(AtomicUsize::new(0));
+    let (listener, mut stream) = connect(CountedTransfer(Arc::clone(&produced))).await;
+    send(&mut stream, b"transfer").await;
+    receive(&mut stream).await;
+    let stream = stream.into_std().unwrap();
+    socket2::SockRef::from(&stream)
+        .set_linger(Some(Duration::ZERO))
+        .unwrap();
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let first = produced.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(produced.load(Ordering::SeqCst), first);
+    assert!(first < 10_000);
+    listener.shutdown().await.unwrap();
+}
+
+// RFC 5936 §4.1.2: A client FIN is a remote close, so the Transfer stops although the Response path is open.
+#[tokio::test]
+async fn peer_fin_cancels_zone_transfer() {
+    let produced = Arc::new(AtomicUsize::new(0));
+    let (listener, mut stream) = connect(CountedTransfer(Arc::clone(&produced))).await;
+    send(&mut stream, b"transfer").await;
+    stream.shutdown().await.unwrap();
+    let mut sink = vec![0; 1 << 16];
+    timeout(TEST_TIMEOUT, async {
+        while stream.read(&mut sink).await.unwrap() != 0 {}
+    })
+    .await
+    .expect("Transfer kept running after client FIN");
+    assert!(produced.load(Ordering::SeqCst) < 10_000);
+    listener.shutdown().await.unwrap();
+}
+
+struct StuckAfterFin(async_mpsc::UnboundedSender<()>);
+
+impl Handler for StuckAfterFin {
+    fn tcp_options(&self) -> TcpOptions {
+        TcpOptions {
+            idle: Duration::from_millis(300),
+            ..TcpOptions::default()
+        }
+    }
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        let _cancelled = CancelOnDrop(self.0.clone());
+        std::future::pending().await
+    }
+}
+
+// RFC 7766 §6.2.4: Post-FIN draining of accepted Queries is bounded.
+#[tokio::test]
+async fn half_closed_connection_aborts_stuck_query_after_deadline() {
+    let (cancelled, mut cancelled_rx) = async_mpsc::unbounded_channel();
+    let (listener, mut stream) = connect(StuckAfterFin(cancelled)).await;
+    send(&mut stream, b"stuck").await;
+    stream.shutdown().await.unwrap();
+    timeout(TEST_TIMEOUT, cancelled_rx.recv())
+        .await
+        .expect("post-FIN drain never expired")
+        .unwrap();
+    listener.shutdown().await.unwrap();
 }
 
 #[tokio::test]
