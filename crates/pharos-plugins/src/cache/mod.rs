@@ -161,34 +161,9 @@ impl Plugin for Cache {
         let Some(question) = query.questions().next() else {
             return next.run(cx).await;
         };
-        if let Some(special) = crate::special_use(question.name) {
-            let chain = self.chain.get().and_then(Weak::upgrade);
-            #[cfg(feature = "plugin-file")]
-            let configured_zone = chain
-                .as_ref()
-                .and_then(|chain| chain.file.as_ref())
-                .is_some_and(|file| file.has_zone_for(question.name));
-            #[cfg(not(feature = "plugin-file"))]
-            let configured_zone = false;
-            #[cfg(feature = "plugin-forward")]
-            let upstream_allowed = special.permits_upstream()
-                && chain
-                    .as_ref()
-                    .and_then(|chain| chain.forward.as_ref())
-                    .is_some_and(|forward| forward.allows_special(question.name));
-            #[cfg(not(feature = "plugin-forward"))]
-            let upstream_allowed = false;
-            if !configured_zone && !upstream_allowed {
-                // RFC 6761 §§6.1, 6.2 and 6.4: avoid caching or forwarding reserved names by default.
-                return crate::special_negative(
-                    cx.response,
-                    query,
-                    cx.protocol,
-                    cx.max_response_size,
-                    pharos_proto::Rcode::NXDOMAIN,
-                );
-            }
-        }
+        let special = (question.qclass == pharos_proto::Class::IN)
+            .then(|| crate::special_use(question.name))
+            .flatten();
         let opt = query.opt();
         #[cfg(feature = "plugin-dynupdate")]
         let dynamic = self
@@ -204,6 +179,8 @@ impl Plugin for Cache {
             || has_client_subnet(opt) // RFC 7871 §7.3: Do not reuse ECS-tailored data across networks.
             // RFC 8945 §4.3.2: TSIG-signed queries bypass cache because the MAC covers the wire.
             || query.additionals().any(|record| record.rtype == Type::TSIG)
+            // RFC 6761 §§6.1–6.4: let later owner Plugins handle special names before cache admission.
+            || special.is_some()
             || question.name.wire_len()
                 != question
                     .name
@@ -217,7 +194,29 @@ impl Plugin for Cache {
                 .iter()
                 .any(|zone| contains(question.name, zone))
         {
-            return next.run(cx).await;
+            let outcome = next.run(cx).await;
+            if let Some(special) = special
+                && matches!(&outcome, Outcome::Error(pharos_server::Error::NoNextPlugin))
+            {
+                #[cfg(feature = "plugin-file")]
+                let authoritative = self
+                    .chain
+                    .get()
+                    .and_then(Weak::upgrade)
+                    .is_some_and(|chain| chain.file.is_some());
+                #[cfg(not(feature = "plugin-file"))]
+                let authoritative = false;
+                return crate::special_nxdomain(
+                    cx.response,
+                    query,
+                    cx.protocol,
+                    cx.max_response_size,
+                    special,
+                    authoritative,
+                    true,
+                );
+            }
+            return outcome;
         }
         let metrics = self
             .metrics

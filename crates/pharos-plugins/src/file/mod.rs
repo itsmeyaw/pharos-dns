@@ -9,19 +9,22 @@ mod transfer;
 pub use crate::zone::Zone;
 use crate::zone::{ZoneHolder, contains};
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
-use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Rcode, Section, Type};
+#[cfg(feature = "plugin-local")]
+use pharos_proto::NameRef;
+use pharos_proto::{Class, Name, Rcode};
 #[cfg(test)]
-use pharos_proto::{Message, zone::ZoneParser};
+use pharos_proto::{Message, MessageBuilder, Section, Type, zone::ZoneParser};
 #[cfg(test)]
 use pharos_server::Protocol;
 use pharos_server::{Context, Next, Outcome, Plugin};
+#[cfg(feature = "plugin-forward")]
+use std::sync::{OnceLock, Weak};
 use std::{
     io::{BufReader, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
-
 #[derive(Debug)]
 struct Loaded {
     apex: Name,
@@ -129,6 +132,7 @@ pub struct File {
     zones: Vec<Arc<Loaded>>,
     fallthrough: Vec<Name>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    #[cfg(feature = "plugin-forward")]
     chain: OnceLock<Weak<crate::Chain>>,
     #[cfg(feature = "plugin-transfer")]
     notifier: crate::zone::ZoneNotifier,
@@ -260,6 +264,7 @@ impl File {
             zones,
             fallthrough,
             tasks: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(feature = "plugin-forward")]
             chain: OnceLock::new(),
             #[cfg(feature = "plugin-transfer")]
             notifier: crate::zone::ZoneNotifier::default(),
@@ -353,74 +358,16 @@ impl File {
 }
 
 impl File {
+    #[cfg(feature = "plugin-forward")]
     pub(crate) fn bind(&self, chain: &Arc<crate::Chain>) {
         let _ = self.chain.set(Arc::downgrade(chain));
     }
 
+    #[cfg(feature = "plugin-local")]
     pub(crate) fn has_zone_for(&self, name: NameRef<'_>) -> bool {
         self.zones
             .iter()
             .any(|zone| crate::name_within(name, &zone.apex))
-    }
-
-    fn special_nxdomain(
-        response: &mut Vec<u8>,
-        query: pharos_proto::Message<'_>,
-        protocol: pharos_server::Protocol,
-        max_response_size: usize,
-        question: pharos_proto::Question<'_>,
-        special: crate::SpecialUse,
-    ) -> Outcome {
-        const SOA_TAIL: &[u8] =
-            b"\x06nobody\x07invalid\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
-        // RFC 6761 §§6.1, 6.2, 6.4 and RFC 6303 §3: answer unconfigured special names authoritatively.
-        let max = max_response_size.max(512);
-        if response.capacity() < max {
-            if protocol == pharos_server::Protocol::Tcp {
-                response.reserve(max.saturating_sub(response.len()));
-            } else {
-                return Outcome::Error(pharos_server::Error::ResponseBufferTooSmall);
-            }
-        }
-        let count = question.name.labels().count();
-        let start = count - special.zone_labels();
-        let mut owner_wire = [0u8; 255];
-        let mut owner_len = 0;
-        for label in question.name.labels().skip(start) {
-            owner_wire[owner_len] = label.len() as u8;
-            owner_len += 1;
-            owner_wire[owner_len..owner_len + label.len()].copy_from_slice(label);
-            owner_len += label.len();
-        }
-        owner_wire[owner_len] = 0;
-        owner_len += 1;
-        let owner = NameRef::parse(&owner_wire[..owner_len], 0).expect("special-use Zone suffix");
-        let mut flags = 0x8403 | (query.flags() & 0x7800);
-        if query.opcode() == Opcode::QUERY {
-            flags |= query.flags() & 0x0110;
-        }
-        let mut builder = match MessageBuilder::new(response, max, query.id(), flags) {
-            Ok(builder) => builder,
-            Err(error) => return Outcome::Error(pharos_server::Error::Build(error)),
-        };
-        if let Err(error) = builder.question(question.name, question.qtype, question.qclass) {
-            return Outcome::Error(pharos_server::Error::Build(error));
-        }
-        let mut soa = [0u8; 255 + 32];
-        soa[..owner_len].copy_from_slice(&owner_wire[..owner_len]);
-        soa[owner_len..owner_len + SOA_TAIL.len()].copy_from_slice(SOA_TAIL);
-        if let Err(error) = builder.record(
-            Section::Authority,
-            owner,
-            Type::SOA,
-            Class::IN,
-            604_800,
-            &soa[..owner_len + SOA_TAIL.len()],
-        ) {
-            return Outcome::Error(pharos_server::Error::Build(error));
-        }
-        let _ = builder.finish();
-        Outcome::Response
     }
 
     pub(crate) async fn serve_with<N: Next + Send>(
@@ -467,15 +414,32 @@ impl File {
                         .unwrap_or(false);
                 #[cfg(not(feature = "plugin-forward"))]
                 let upstream_allowed = false;
+                // RFC 6761 §§6.1–6.4: let later owner Plugins run before File's terminal negative.
                 if !upstream_allowed {
-                    return Self::special_nxdomain(
-                        cx.response,
-                        cx.query,
-                        cx.protocol,
-                        cx.max_response_size,
-                        question,
-                        special,
-                    );
+                    if !has_next {
+                        return crate::special_nxdomain(
+                            cx.response,
+                            cx.query,
+                            cx.protocol,
+                            cx.max_response_size,
+                            special,
+                            true,
+                            false,
+                        );
+                    }
+                    let outcome = next.run(cx).await;
+                    if matches!(&outcome, Outcome::Error(pharos_server::Error::NoNextPlugin)) {
+                        return crate::special_nxdomain(
+                            cx.response,
+                            cx.query,
+                            cx.protocol,
+                            cx.max_response_size,
+                            special,
+                            true,
+                            false,
+                        );
+                    }
+                    return outcome;
                 }
             }
             return if has_next {

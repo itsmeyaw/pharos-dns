@@ -3,13 +3,15 @@
 pub(crate) mod setup;
 
 use std::sync::{
-    Arc, OnceLock, Weak,
+    Arc,
     atomic::{AtomicU64, Ordering},
 };
+#[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
+use std::sync::{OnceLock, Weak};
 
 use pharos_corefile::{Cursor, Error as CorefileError, normalize_domain};
-use pharos_proto::{Class, MessageBuilder, Name, NameRef, Opcode, Section, Type};
-use pharos_server::{Context, Error, Next, Outcome, Plugin, Protocol, metrics::Registry};
+use pharos_proto::{Class, Name, NameRef, Opcode, Section, Type};
+use pharos_server::{Context, Error, Next, Outcome, Plugin, metrics::Registry};
 
 // RFC 6303 §3: Set the SOA minimum (negative-cache TTL) equal to the record TTL.
 const TTL: u32 = 604_800;
@@ -17,13 +19,13 @@ const LOCALHOST: &[u8] = b"\x09localhost\0";
 // RFC 1035 §3.3.13: SOA RDATA contains MNAME, RNAME and five 32-bit values.
 // RFC 6303 §3: Serve localhost SOA and NS data to identify empty-zone answers.
 // RFC 6303 §3: Use nobody.invalid. as the SOA RNAME.
-const SOA_TAIL: &[u8] = b"\x06nobody\x07invalid\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
 
 #[derive(Debug)]
 pub struct Local {
     prefix: bool,
     disabled_zones: Vec<Name>,
     counter: Option<Arc<AtomicU64>>,
+    #[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
     chain: OnceLock<Weak<crate::Chain>>,
 }
 
@@ -68,10 +70,12 @@ impl Local {
             prefix,
             disabled_zones,
             counter: None,
+            #[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
             chain: OnceLock::new(),
         })
     }
 
+    #[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
     pub(crate) fn bind(&self, chain: &Arc<crate::Chain>) {
         let _ = self.chain.set(Arc::downgrade(chain));
     }
@@ -222,29 +226,26 @@ impl Local {
             NameRef::parse(&origin[..=len], 0).expect("valid Domain")
         };
         let result = (|| {
-            let max = cx.max_response_size.max(512);
-            if cx.response.capacity() < max {
-                if cx.protocol == Protocol::Tcp {
-                    cx.response.reserve(max.saturating_sub(cx.response.len()));
-                } else {
-                    return Err(Error::ResponseBufferTooSmall);
-                }
-            }
             // RFC 1035 §4.1.1 and RFC 4035 §3.2.2: mark a Response and copy opcode, RD and CD.
             // RFC 1034 §4.3.2: mark local-zone answers, including NXDOMAIN, authoritative.
             let mut flags = 0x8400 | (cx.query.flags() & 0x7800) | if nxdomain { 3 } else { 0 };
             if cx.query.opcode() == Opcode::QUERY {
                 flags |= cx.query.flags() & 0x0110;
             }
-            let mut builder = MessageBuilder::new(cx.response, max, cx.query.id(), flags)
-                .map_err(Error::Build)?;
+            let mut builder = crate::response_builder(
+                cx.response,
+                cx.query,
+                cx.protocol,
+                cx.max_response_size,
+                flags,
+            )?;
             builder
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(Error::Build)?;
             // RFC 6303 §3: Include SOA records for negative caching and update discovery.
             let rtype = answer_type.unwrap_or(Type::SOA);
             // RFC 1035 §3.4.1 and RFC 3596 §2.2: encode A and AAAA loopback addresses.
-            let mut soa = [0u8; 255 + 36];
+            let mut soa = [0u8; 255 + crate::EMPTY_ZONE_SOA_TAIL.len()];
             let rdata: &[u8] = match rtype {
                 Type::A => &[127, 0, 0, 1],
                 Type::AAAA => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
@@ -254,9 +255,9 @@ impl Local {
                 _ => {
                     // RFC 2181 §7.3: make SOA MNAME match the resolvable local NS target.
                     soa[..LOCALHOST.len()].copy_from_slice(LOCALHOST);
-                    soa[LOCALHOST.len()..LOCALHOST.len() + SOA_TAIL.len()]
-                        .copy_from_slice(SOA_TAIL);
-                    &soa[..LOCALHOST.len() + SOA_TAIL.len()]
+                    soa[LOCALHOST.len()..LOCALHOST.len() + crate::EMPTY_ZONE_SOA_TAIL.len()]
+                        .copy_from_slice(crate::EMPTY_ZONE_SOA_TAIL);
+                    &soa[..LOCALHOST.len() + crate::EMPTY_ZONE_SOA_TAIL.len()]
                 }
             };
             // RFC 2181 §7.2: SOA answers retain a nonzero TTL instead of forcing TTL zero.

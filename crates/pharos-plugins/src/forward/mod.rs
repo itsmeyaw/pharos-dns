@@ -9,7 +9,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use pharos_proto::{Message, Name, NameRef, Rcode};
+use pharos_proto::{Class, Message, Name, NameRef, Rcode};
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol, metrics::ForwardMetrics};
 use tokio::time::{Instant, timeout_at};
 
@@ -188,6 +188,12 @@ impl Forward {
                     .map_err(|_| cursor.error(format!("invalid Domain {name}")))
             };
             let from = parse_name(&config.from)?;
+            // RFC 6761 §§6.1–6.2: explicit special-use forwarding Zones are opt-in by configuration.
+            let configured_special_zone = from.as_wire() != [0]
+                && NameRef::parse(from.as_wire(), 0)
+                    .ok()
+                    .and_then(crate::special_use)
+                    .is_some_and(crate::SpecialUse::permits_upstream);
             let ignored = config
                 .except
                 .iter()
@@ -243,7 +249,7 @@ impl Forward {
                 failover: config.failover.into_iter().map(Rcode).collect(),
                 next: config.next.into_iter().map(Rcode).collect(),
                 next_on_nodata: config.next_on_nodata,
-                allow_special: config.allow_special,
+                allow_special: config.allow_special || configured_special_zone,
             });
         }
         Ok(result)
@@ -281,7 +287,7 @@ impl Forward {
     }
 }
 
-// RFC 6761 §6.2: Explicit forward zones enable upstream lookup for test names.
+// RFC 6761 §§6.1–6.2: opt in via allow_special or a non-root special-use Forward Zone.
 impl Plugin for Forward {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let query = cx.query;
@@ -290,16 +296,24 @@ impl Plugin for Forward {
             || NameRef::parse(&root, 0).expect("root"),
             |question| question.name,
         );
-        if let Some(special) = crate::special_use(name)
+        let special = cx
+            .query
+            .questions()
+            .next()
+            .filter(|question| question.qclass == Class::IN)
+            .and_then(|question| crate::special_use(question.name));
+        if let Some(special) = special
             && (!special.permits_upstream() || !self.allows_special(name))
         {
             // RFC 6761 §§6.1, 6.2 and 6.4: special names never reach public Upstreams by default.
-            return crate::special_negative(
+            return crate::special_nxdomain(
                 cx.response,
                 query,
                 cx.protocol,
                 cx.max_response_size,
-                Rcode::NXDOMAIN,
+                special,
+                false,
+                true,
             );
         }
         // RFC 6761 §6.5: Forward example names like other DNS names.
