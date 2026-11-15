@@ -41,6 +41,18 @@ fn coredns_secondary_setup_cases() {
             "secondary catalog.example {\n transfer from 127.0.0.1\n catalog example.org\n catalog\n}",
             false,
         ),
+        (
+            "secondary {\n transfer from 127.0.0.1\n max_records 10\n max_bytes 4096\n}",
+            true,
+        ),
+        (
+            "secondary {\n transfer from 127.0.0.1\n max_records 0\n}",
+            false,
+        ),
+        (
+            "secondary {\n transfer from 127.0.0.1\n max_bytes x\n}",
+            false,
+        ),
     ] {
         let corefile = format!("example.org:53 {{\n {directive}\n}}");
         let parsed = pharos_corefile::parse("Corefile", &corefile).unwrap();

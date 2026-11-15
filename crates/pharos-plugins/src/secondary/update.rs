@@ -165,6 +165,13 @@ fn zone_record(record: Record<'_>, scratch: &mut Vec<u8>) -> io::Result<ZoneReco
     })
 }
 
+fn over_limit(name: &str, limit: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("AXFR exceeds {name} {limit}; raise it in the secondary block"),
+    )
+}
+
 type Built = (crate::zone::Zone, Option<super::catalog::Catalog>);
 
 fn build(apex: Name, mut records: Vec<ZoneRecord>, want_catalog: bool) -> Result<Built, String> {
@@ -208,20 +215,41 @@ async fn transfer_inner(
     for address in addresses {
         let mut records = Vec::new();
         let mut scratch = Vec::with_capacity(512);
-        let result = pharos_server::transfer::axfr(
-            address,
-            &zone.config.apex,
-            random_id(),
-            Duration::from_secs(5),
-            |message| {
-                // RFC 5936 §2.2: Ignore duplicate resource records in an AXFR stream.
-                for record in message.answers() {
-                    records.push(zone_record(record, &mut scratch)?);
-                }
-                Ok(())
-            },
+        let mut bytes = 0usize;
+        let limits = zone.config.limits;
+        // Bound the whole transfer: the per-frame deadline lets a slow Primary Server hold it open.
+        let result = tokio::time::timeout(
+            limits.timeout,
+            pharos_server::transfer::axfr(
+                address,
+                &zone.config.apex,
+                random_id(),
+                Duration::from_secs(5),
+                |message| {
+                    // RFC 5936 §2.2: Ignore duplicate resource records in an AXFR stream.
+                    for record in message.answers() {
+                        // Refuse before allocating once the Zone outgrows its memory budget.
+                        if records.len() >= limits.max_records {
+                            return Err(over_limit("max_records", limits.max_records));
+                        }
+                        let item = zone_record(record, &mut scratch)?;
+                        bytes = bytes.saturating_add(item.owner.as_wire().len() + item.rdata.len());
+                        if bytes > limits.max_bytes {
+                            return Err(over_limit("max_bytes", limits.max_bytes));
+                        }
+                        records.push(item);
+                    }
+                    Ok(())
+                },
+            ),
         )
-        .await;
+        .await
+        .unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "AXFR exceeded its total deadline",
+            ))
+        });
         match result {
             Ok(()) => {
                 let apex = zone.config.apex.clone();

@@ -198,6 +198,7 @@ pub(super) fn apply(shared: &Arc<Shared>, source: &SecondaryZone, catalog: Catal
             apex: member.zone.clone(),
             from: source.config.from.clone(),
             catalog: None,
+            limits: source.config.limits,
         }));
         if let Some(old) = preserve {
             zone.current.store(old.current.load_full());

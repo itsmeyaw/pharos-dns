@@ -136,6 +136,7 @@ async fn serve_axfr(
 
 fn plain_zone(from: std::net::SocketAddr) -> SecondaryZone {
     SecondaryZone::new(ZoneConfig {
+        limits: Default::default(),
         apex: "example.org.".parse().unwrap(),
         from: vec![from.to_string()],
         catalog: None,
@@ -169,6 +170,89 @@ async fn secondary_axfr_stores_compressed_rdata_names_uncompressed() {
         .find(|record| record.rtype == Type::NS)
         .unwrap();
     assert_eq!(ns.rdata, zone.config.apex.as_wire());
+}
+
+#[test]
+fn secondary_setup_applies_transfer_limits() {
+    let corefile = "example.org:53 {\n secondary {\n transfer from 127.0.0.1\n max_records 10\n max_bytes 4096\n }\n}";
+    let blocks = pharos_corefile::parse("Corefile", corefile).unwrap();
+    let configured =
+        pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+    let secondary = configured[0].config.secondary.as_ref().unwrap();
+    let limits = secondary.shared.zones.load()[0].config.limits;
+    assert_eq!((limits.max_records, limits.max_bytes), (10, 4096));
+}
+
+#[tokio::test]
+async fn secondary_rejects_axfr_over_record_cap_and_keeps_no_zone() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut zone = plain_zone(listener.local_addr().unwrap());
+    zone.config.limits.max_records = 2;
+    let primary = tokio::spawn(serve_axfr(listener, 1, |builder, apex| {
+        for _ in 0..3 {
+            builder
+                .record(
+                    pharos_proto::Section::Answer,
+                    apex,
+                    Type::A,
+                    Class::IN,
+                    60,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+        }
+    }));
+    let (shared, _, _) = catalog_shared();
+    let error = update::transfer(&shared, &zone).await.unwrap_err();
+    primary.await.unwrap();
+    assert!(error.to_string().contains("max_records"), "{error}");
+    assert!(zone.current.load().is_none());
+}
+
+#[tokio::test]
+async fn secondary_rejects_axfr_over_byte_cap_and_keeps_no_zone() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut zone = plain_zone(listener.local_addr().unwrap());
+    zone.config.limits.max_bytes = 40;
+    let primary = tokio::spawn(serve_axfr(listener, 1, |builder, apex| {
+        builder
+            .record(
+                pharos_proto::Section::Answer,
+                apex,
+                Type::TXT,
+                Class::IN,
+                60,
+                &[30; 31],
+            )
+            .unwrap();
+    }));
+    let (shared, _, _) = catalog_shared();
+    let error = update::transfer(&shared, &zone).await.unwrap_err();
+    primary.await.unwrap();
+    assert!(error.to_string().contains("max_bytes"), "{error}");
+    assert!(zone.current.load().is_none());
+}
+
+#[tokio::test]
+async fn secondary_axfr_has_a_total_deadline() {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut zone = plain_zone(listener.local_addr().unwrap());
+    zone.config.limits.timeout = std::time::Duration::from_millis(100);
+    let primary = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        // Read the query, then stay silent: only the total deadline ends this before the 5 s frame deadline.
+        let length = socket.read_u16().await.unwrap();
+        let mut input = vec![0; usize::from(length)];
+        socket.read_exact(&mut input).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    });
+    let (shared, _, _) = catalog_shared();
+    let started = std::time::Instant::now();
+    let error = update::transfer(&shared, &zone).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    primary.abort();
 }
 
 #[tokio::test]
@@ -253,6 +337,7 @@ async fn secondary_deduplicates_axfr_records_and_skips_failed_primary() {
         let second = tokio::spawn(primary(second, 1));
         let (shared, _, _) = catalog_shared();
         let zone = SecondaryZone::new(ZoneConfig {
+            limits: Default::default(),
             apex: "example.org.".parse().unwrap(),
             from,
             catalog: None,
@@ -335,6 +420,7 @@ async fn secondary_soa_check_matches_response_id_and_question() {
         }
     });
     let zone = SecondaryZone::new(ZoneConfig {
+        limits: Default::default(),
         apex: "example.org.".parse().unwrap(),
         from: vec![address.to_string()],
         catalog: None,
@@ -393,6 +479,7 @@ async fn notify_refresh_queries_the_sending_primary() {
         socket.write_all(&wire).await.unwrap();
     });
     let zone = SecondaryZone::new(ZoneConfig {
+        limits: Default::default(),
         apex: "example.org.".parse().unwrap(),
         from: vec![source.to_string()],
         catalog: None,
@@ -609,6 +696,7 @@ async fn secondary_ignores_malformed_notify_and_non_soa_question() {
 #[test]
 fn zero_soa_timers_use_one_second_floor() {
     let zone = SecondaryZone::new(ZoneConfig {
+        limits: Default::default(),
         apex: "example.org.".parse().unwrap(),
         from: vec![],
         catalog: None,
@@ -684,6 +772,7 @@ async fn failed_refresh_expires_the_zone() {
     });
     let (shared, _, _) = catalog_shared();
     let zone = Arc::new(SecondaryZone::new(ZoneConfig {
+        limits: Default::default(),
         apex: "example.org.".parse().unwrap(),
         from: vec![address.to_string()],
         catalog: None,
@@ -724,6 +813,7 @@ async fn failed_refresh_expires_the_zone() {
 fn catalog_shared() -> (Arc<Shared>, Arc<SecondaryZone>, Arc<SecondaryZone>) {
     let source = |apex: &str| {
         Arc::new(SecondaryZone::new(ZoneConfig {
+            limits: Default::default(),
             apex: apex.parse().unwrap(),
             from: vec!["127.0.0.1:1".into()],
             catalog: Some(vec![".".parse().unwrap()]),
@@ -889,6 +979,7 @@ async fn coredns_catalog_id_change_resets_zone_and_restrictions_reject_members()
     assert!(!Arc::ptr_eq(&first, &changed));
     assert!(changed.current.load().is_none());
     let restricted = SecondaryZone::new(ZoneConfig {
+        limits: Default::default(),
         apex: old.config.apex.clone(),
         from: old.config.from.clone(),
         catalog: Some(vec!["other.example.".parse().unwrap()]),
@@ -955,6 +1046,7 @@ async fn catalog_migration_respects_restrictions_and_changed_identity() {
         crate::zone::Zone::from_records(first.config.apex.clone(), records).unwrap(),
     )));
     let restricted = SecondaryZone::new(ZoneConfig {
+        limits: Default::default(),
         apex: new.config.apex.clone(),
         from: new.config.from.clone(),
         catalog: Some(vec!["other.example.".parse().unwrap()]),
@@ -1031,6 +1123,7 @@ async fn broken_catalog_cannot_authorize_member_migration() {
 async fn empty_catalog_scope_rejects_all_members() {
     let (shared, old, _) = catalog_shared();
     let restricted = SecondaryZone::new(ZoneConfig {
+        limits: Default::default(),
         apex: old.config.apex.clone(),
         from: old.config.from.clone(),
         catalog: Some(Vec::new()),
@@ -1143,6 +1236,7 @@ async fn invalid_catalog_transfer_retains_zone_but_regular_zone_accepts_it() {
         });
         let (shared, _, _) = catalog_shared();
         let zone = SecondaryZone::new(ZoneConfig {
+            limits: Default::default(),
             apex: "catalog.example.".parse().unwrap(),
             from: vec![address.to_string()],
             catalog: catalog.then(Vec::new),

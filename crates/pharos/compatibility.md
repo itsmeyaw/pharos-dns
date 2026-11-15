@@ -373,6 +373,7 @@
 - **Server and protocol**
 
 - DSO Primary-TLV parsing remains unsupported; ID-zero DSO requests are suppressed without inspecting Primary TLVs (RFC 8490 §5.4.1; conf/server #101).
+- `secondary` accepts the Pharos-only `max_records` and `max_bytes` properties and abandons an AXFR that runs longer than 10 minutes, so an oversized or stalled primary cannot exhaust memory; CoreDNS applies no bound. Defaults are 4,000,000 records and 1 GiB of owner and RDATA octets.
 - Secondary SOA timers retain a one-second floor to prevent an immediate refresh/retry loop; zero-timer semantics remain deferred (RFC 1034 §4.3.5; conf/secondary #98).
 - When the DNSSEC plugin is in-chain, any explicit QTYPE 128 receives FORMERR, including names outside signed zones (RFC 9824 §3.5).
 

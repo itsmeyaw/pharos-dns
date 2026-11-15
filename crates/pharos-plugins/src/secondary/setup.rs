@@ -31,6 +31,7 @@ pub(super) fn parse(
         let mut from = Vec::new();
         let mut catalog: Option<Vec<Name>> = None;
         let mut has_transfer = false;
+        let mut limits = super::TransferLimits::default();
         while cursor.next_block() {
             let option = cursor.val().to_owned();
             let args = cursor.remaining_args();
@@ -71,6 +72,22 @@ pub(super) fn parse(
                         None => catalog = Some(names),
                     }
                 }
+                // Pharos extension: bound memory used by one AXFR.
+                "max_records" | "max_bytes" => {
+                    let [value] = args.as_slice() else {
+                        return Err(cursor.arg_err());
+                    };
+                    let value = value
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| cursor.arg_err())?;
+                    if option == "max_records" {
+                        limits.max_records = value;
+                    } else {
+                        limits.max_bytes = value;
+                    }
+                }
                 "fallthrough" => {
                     fallthrough.clear();
                     let names = if args.is_empty() {
@@ -98,6 +115,7 @@ pub(super) fn parse(
                 apex,
                 from: from.clone(),
                 catalog: catalog.clone(),
+                limits,
             });
         }
     }

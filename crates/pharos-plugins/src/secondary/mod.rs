@@ -18,11 +18,31 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+/// Bounds on one AXFR so a large or stalled Primary Server cannot exhaust memory or hold the task.
+#[derive(Debug, Clone, Copy)]
+struct TransferLimits {
+    max_records: usize,
+    /// Owner wire octets plus RDATA octets, excluding per-record overhead.
+    max_bytes: usize,
+    timeout: std::time::Duration,
+}
+
+impl Default for TransferLimits {
+    fn default() -> Self {
+        Self {
+            max_records: 4_000_000,
+            max_bytes: 1 << 30,
+            timeout: std::time::Duration::from_secs(600),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ZoneConfig {
     apex: Name,
     from: Vec<String>,
     catalog: Option<Vec<Name>>,
+    limits: TransferLimits,
 }
 
 #[derive(Debug)]
