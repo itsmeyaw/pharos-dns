@@ -38,6 +38,18 @@ struct Stanza {
     next_on_nodata: bool,
 }
 
+#[derive(Clone, Copy)]
+enum QueryMode {
+    Unsigned,
+    UnsignedEcs,
+    Signed,
+}
+
+fn should_preserve_tsig_response(query_signed: bool, response: &[u8]) -> bool {
+    // RFC 8945 §5.5: Preserve a parseable TSIG response only for a signed forwarded Query.
+    query_signed && TsigRecord::parse(response).is_ok()
+}
+
 /// Multiple forward Directives form one contiguous Plugin Chain segment.
 #[derive(Default)]
 pub struct Forward {
@@ -329,6 +341,22 @@ impl Plugin for Forward {
             } else {
                 original_query
             };
+            // RFC 8945 §5.5: Preserve upstream TSIG only for a TSIG-bearing client Query.
+            let query_signed = cx.query.additionals().any(|rr| rr.rtype == Type::TSIG);
+            let query_has_ecs = if query_signed {
+                false
+            } else if cx.query.wire_changed() {
+                proxy::has_unsigned_ecs(query_wire)
+            } else {
+                proxy::has_unsigned_ecs_message(&cx.query)
+            };
+            let query_mode = if query_signed {
+                QueryMode::Signed
+            } else if query_has_ecs {
+                QueryMode::UnsignedEcs
+            } else {
+                QueryMode::Unsigned
+            };
             order.clear();
             order.extend(0..count);
             match stanza.policy {
@@ -352,12 +380,10 @@ impl Plugin for Forward {
             }
             // RFC 1035 §4.2.1: Retry lost UDP queries after timeout, trying other servers first.
             let deadline = Instant::now() + Duration::from_secs(5);
-            let can_retry_ecs = if cx.query.wire_changed() {
-                proxy::has_unsigned_ecs(query_wire)
-            } else {
-                proxy::has_unsigned_ecs_message(&cx.query)
-            };
-            let attempt_limit = primary_attempt_limit(stanza.max_connect_attempts, can_retry_ecs);
+            let attempt_limit = primary_attempt_limit(
+                stanza.max_connect_attempts,
+                matches!(query_mode, QueryMode::UnsignedEcs),
+            );
             upstream_attempts.clear();
             upstream_attempts.resize(count, 0);
             let mut i = 0;
@@ -463,19 +489,21 @@ impl Plugin for Forward {
                         continue;
                     }
                 };
-                let (mut rcode, mut answer_count, mut is_tsig_signed) = {
+                let (mut rcode, mut answer_count, mut preserve_tsig_response) = {
                     let response =
                         Message::parse(&wire[..exchange.len]).expect("proxy validated Response");
                     (
                         response.rcode(),
                         response.answer_count(),
-                        response.additionals().any(|rr| rr.rtype == Type::TSIG)
-                            && TsigRecord::parse(&wire[..exchange.len]).is_ok(),
+                        should_preserve_tsig_response(
+                            matches!(query_mode, QueryMode::Signed),
+                            &wire[..exchange.len],
+                        ),
                     )
                 };
                 // RFC 7871 §7.1.3: Keep the original REFUSED candidate when fallback fails.
                 let mut use_refused_fallback = false;
-                if can_retry_ecs
+                if matches!(query_mode, QueryMode::UnsignedEcs)
                     && rcode == Rcode::REFUSED
                     && let Some(fallback_len) =
                         proxy::without_ecs(query_wire, fallback_buffer, protocol)
@@ -506,9 +534,10 @@ impl Plugin for Forward {
                                 .expect("proxy validated ECS-free Response");
                             rcode = response.rcode();
                             answer_count = response.answer_count();
-                            is_tsig_signed =
-                                response.additionals().any(|rr| rr.rtype == Type::TSIG)
-                                    && TsigRecord::parse(&wire[..exchange.len]).is_ok();
+                            preserve_tsig_response = should_preserve_tsig_response(
+                                matches!(query_mode, QueryMode::Signed),
+                                &wire[..exchange.len],
+                            );
                         }
                         _ => use_refused_fallback = true,
                     }
@@ -533,8 +562,8 @@ impl Plugin for Forward {
                     break;
                 }
                 if use_refused_fallback {
-                    // RFC 8945 §5.5: Do not alter a TSIG Response covered by its MAC.
-                    if !is_tsig_signed {
+                    // RFC 8945 §§4.3, 5.3.1: Rewriting the Response invalidates its TSIG MAC.
+                    if !preserve_tsig_response {
                         // RFC 4035 §4.6: Ignore AD from an upstream without a secure channel.
                         cx.response[3] &= !0x20;
                     }
@@ -547,8 +576,8 @@ impl Plugin for Forward {
                 cx.response.clear();
                 // RFC 5625 §4.3: return Responses without filtering RRs by TYPE or CLASS.
                 cx.response.extend_from_slice(answer);
-                // RFC 8945 §5.5: Do not alter a TSIG Response covered by its MAC.
-                if !is_tsig_signed {
+                // RFC 8945 §§4.3, 5.3.1: Rewriting the Response invalidates its TSIG MAC.
+                if !preserve_tsig_response {
                     // RFC 4035 §4.6: Ignore AD from an upstream without a secure channel.
                     cx.response[3] &= !0x20;
                 }

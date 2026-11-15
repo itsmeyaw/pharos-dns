@@ -3,7 +3,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
-use pharos_proto::{EdnsOption, Message, Name, Rcode};
+use pharos_proto::{EdnsOption, Message, Name, Rcode, TsigAlgorithm, TsigKey};
 use pharos_server::{Action, Context, Handler, Metadata, Outcome, Protocol, Transport};
 use tokio::net::UdpSocket;
 
@@ -185,7 +185,7 @@ async fn forwards_query_and_restores_client_id() {
 }
 
 #[tokio::test]
-async fn opt_out_nsec3_response_does_not_preserve_ad() {
+async fn nsec3_response_clears_ad() {
     // RFC 5155 §9.2: An Opt-Out proof cannot establish authenticated denial.
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = upstream.local_addr().unwrap();
@@ -206,6 +206,38 @@ async fn opt_out_nsec3_response_does_not_preserve_ad() {
     let (outcome, response, _) = run(&chain).await;
 
     assert_eq!(outcome, Outcome::Response);
+    assert!(!Message::parse(&response).unwrap().ad());
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn unsigned_query_clears_ad_from_spoofed_tsig_response() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let key = TsigKey::new(
+        "spoof.example.".parse().unwrap(),
+        TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let task = tokio::spawn(async move {
+        let mut query = [0; 512];
+        let (len, peer) = upstream.recv_from(&mut query).await.unwrap();
+        let mut reply = query[..len].to_vec();
+        key.sign(&mut reply, now, 300, None).unwrap();
+        reply[2] |= 0x80;
+        reply[3] |= 0x20;
+        upstream.send_to(&reply, peer).await.unwrap();
+    });
+    let chain = chain(&format!(".:0 {{\n forward . {address}\n}}"));
+
+    let (outcome, response, _) = run(&chain).await;
+
+    assert_eq!(outcome, Outcome::Response);
+    // RFC 4035 §4.6: An upstream TSIG cannot authenticate an unsigned client Query.
     assert!(!Message::parse(&response).unwrap().ad());
     task.await.unwrap();
 }

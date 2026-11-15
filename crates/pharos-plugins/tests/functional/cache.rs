@@ -501,7 +501,7 @@ async fn miss_requests_authenticated_upstream_data_for_later_ad_clients() {
 
 #[cfg(feature = "plugin-forward")]
 #[tokio::test]
-async fn authenticated_refresh_sets_ad_on_forwarded_wire() {
+async fn authenticated_refresh_clears_untrusted_ad() {
     let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = upstream.local_addr().unwrap();
     let task = tokio::spawn(async move {
