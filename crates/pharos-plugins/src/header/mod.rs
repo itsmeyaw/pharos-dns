@@ -40,10 +40,10 @@ impl Header {
             let _ = cursor.remaining_args();
             let mut any = false;
             while cursor.next_block() {
-                let rules = if cursor.val().eq_ignore_ascii_case("query") {
-                    &mut header.query
+                let (rules, is_response) = if cursor.val().eq_ignore_ascii_case("query") {
+                    (&mut header.query, false)
                 } else if cursor.val().eq_ignore_ascii_case("response") {
-                    &mut header.response
+                    (&mut header.response, true)
                 } else {
                     return Err(cursor.error("invalid header selector"));
                 };
@@ -69,6 +69,10 @@ impl Header {
                     } else {
                         return Err(cursor.error("unsupported header flag"));
                     };
+                    // RFC 1035 §4.1.1: Response RD is copied from the Query, not overridden.
+                    if is_response && bit == 0x0100 {
+                        return Err(cursor.error("response RD is copied from the Query"));
+                    }
                     rules.add(bit, set);
                     any = true;
                 }
