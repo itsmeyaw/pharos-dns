@@ -15,10 +15,17 @@ struct ScriptedChain {
     initial_aa_ra: u16,
     initial_soa: bool,
     initial_cname: bool,
-    initial_mapped_aaaa: bool,
+    initial_aaaa: InitialAaaa,
     fallback_rcode: u16,
     fallback_answers: bool,
     truncated: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum InitialAaaa {
+    None,
+    MappedOnly,
+    UsableAndMapped,
 }
 
 impl pharos_server::Chain for ScriptedChain {
@@ -54,10 +61,21 @@ impl Next for ScriptedNext<'_> {
             };
         let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), flags).unwrap();
         builder.question(q.name, q.qtype, q.qclass).unwrap();
-        if !fallback && self.0.initial_mapped_aaaa {
+        if !fallback
+            && matches!(
+                self.0.initial_aaaa,
+                InitialAaaa::MappedOnly | InitialAaaa::UsableAndMapped
+            )
+        {
             let mapped = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 42];
             builder
                 .record(Section::Answer, q.name, Type::AAAA, Class::IN, 60, &mapped)
+                .unwrap();
+        }
+        if !fallback && self.0.initial_aaaa == InitialAaaa::UsableAndMapped {
+            let usable = [0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+            builder
+                .record(Section::Answer, q.name, Type::AAAA, Class::IN, 60, &usable)
                 .unwrap();
         }
         if !fallback && self.0.initial_cname {
@@ -126,7 +144,7 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
         role_flags,
         expected_code,
         expected_ttls,
-        initial_mapped_aaaa,
+        initial_aaaa,
         translate_all,
     ) in [
         (
@@ -138,7 +156,7 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
             0x0480,
             0,
             vec![60, 70],
-            false,
+            InitialAaaa::None,
             false,
         ),
         (
@@ -150,7 +168,7 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
             0x0480,
             0,
             vec![60, 600],
-            false,
+            InitialAaaa::None,
             false,
         ),
         (
@@ -162,16 +180,93 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
             0x0480,
             0,
             vec![60, 70],
-            false,
+            InitialAaaa::None,
             false,
         ),
-        (0, true, 0, true, false, 0, 0, vec![60, 70], false, false),
-        (0, true, 0, false, false, 0x0480, 0, vec![], false, false),
-        (0, false, 2, false, false, 0x0480, 2, vec![], false, false),
-        (0, false, 5, false, false, 0x0480, 5, vec![], false, false),
-        (0, false, 1, false, false, 0x0480, 1, vec![], false, false),
-        (0, false, 3, false, false, 0x0480, 3, vec![], false, false),
-        (0, false, 4, false, false, 0x0480, 4, vec![], false, false),
+        (
+            0,
+            true,
+            0,
+            true,
+            false,
+            0,
+            0,
+            vec![60, 70],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            true,
+            0,
+            false,
+            false,
+            0x0480,
+            0,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            2,
+            false,
+            false,
+            0x0480,
+            2,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            5,
+            false,
+            false,
+            0x0480,
+            5,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            1,
+            false,
+            false,
+            0x0480,
+            1,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            3,
+            false,
+            false,
+            0x0480,
+            3,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            4,
+            false,
+            false,
+            0x0480,
+            4,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
         (
             0,
             true,
@@ -181,10 +276,33 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
             0x0480,
             0,
             vec![60, 70],
-            true,
+            InitialAaaa::MappedOnly,
             false,
         ),
-        (0, true, 0, false, false, 0x0480, 0, vec![], true, true),
+        (
+            0,
+            true,
+            0,
+            true,
+            false,
+            0x0480,
+            0,
+            vec![60],
+            InitialAaaa::UsableAndMapped,
+            false,
+        ),
+        (
+            0,
+            true,
+            0,
+            false,
+            false,
+            0x0480,
+            0,
+            vec![],
+            InitialAaaa::MappedOnly,
+            true,
+        ),
     ] {
         let config = if translate_all {
             ".:53 {\n dns64 {\n  translate_all\n }\n}"
@@ -202,7 +320,7 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
             initial_aa_ra: role_flags,
             initial_soa: soa,
             initial_cname: false,
-            initial_mapped_aaaa,
+            initial_aaaa,
             fallback_rcode: fallback,
             fallback_answers: answers,
             truncated,
@@ -270,7 +388,7 @@ async fn nxdomain_with_cname_does_not_trigger_dns64_synthesis() {
         initial_aa_ra: 0,
         initial_soa: false,
         initial_cname: true,
-        initial_mapped_aaaa: false,
+        initial_aaaa: InitialAaaa::None,
         fallback_rcode: 0,
         fallback_answers: true,
         truncated: false,
