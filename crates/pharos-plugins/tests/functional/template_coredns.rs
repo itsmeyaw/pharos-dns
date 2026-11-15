@@ -398,8 +398,8 @@ template IN MX example. {
     let (outcome, wire) = query(&chain, "something.example.", Type::MX, Class::IN, &[]).await;
     assert_servfail(outcome, &wire);
     let (outcome, wire) = query(&chain, "elsewhere.invalid.", Type::A, Class::IN, &[]).await;
-    assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
-    assert!(wire.is_empty());
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::NXDOMAIN);
 }
 
 // CoreDNS template.match accepts ANY Questions and tries each match pattern.

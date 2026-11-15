@@ -4,7 +4,7 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
-use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
+use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 fn configured(text: &str) -> Result<Chain, String> {
     let blocks = parse("Corefile", &format!(".:53 {{\n{text}\n}}")).map_err(|e| e.to_string())?;
@@ -12,13 +12,6 @@ fn configured(text: &str) -> Result<Chain, String> {
         .map_err(|e| e.to_string())?
         .remove(0)
         .config)
-}
-
-struct NextDrop;
-impl Next for NextDrop {
-    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
-        Outcome::Drop
-    }
 }
 
 async fn query(chain: &Chain, name: &str, qtype: Type) -> (Outcome, Vec<u8>) {
@@ -47,7 +40,7 @@ async fn query_class(chain: &Chain, name: &str, qtype: Type, qclass: Class) -> (
         response: &mut response,
         max_response_size: 512,
     };
-    let outcome = chain.local.as_ref().unwrap().serve(&mut cx, NextDrop).await;
+    let outcome = chain.serve(&mut cx).await;
     (outcome, response)
 }
 
@@ -162,7 +155,7 @@ async fn coredns_local_cases() {
             Type::MX,
             Rcode::NOERROR,
             None,
-            Some("a.localhost."),
+            Some("localhost."),
         ),
         (
             "1.0.0.127.in-addr.arpa.",
@@ -303,10 +296,9 @@ async fn serves_rfc6303_reverse_zones_authoritatively() {
 #[tokio::test]
 async fn local_reverse_zone_can_be_disabled_individually() {
     let chain = configured("local {\n disable 10.in-addr.arpa\n}").unwrap();
-    assert_eq!(
-        query(&chain, "1.10.in-addr.arpa.", Type::PTR).await.0,
-        Outcome::Drop
-    );
+    let (outcome, wire) = query(&chain, "1.10.in-addr.arpa.", Type::PTR).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::NXDOMAIN);
     assert_eq!(
         query(&chain, "1.16.172.in-addr.arpa.", Type::PTR).await.0,
         Outcome::Response
@@ -320,8 +312,18 @@ async fn local_passes_non_in_questions_to_next_plugin() {
         query_class(&chain, "localhost.", Type::A, Class::CH)
             .await
             .0,
-        Outcome::Drop
+        Outcome::Error(pharos_server::Error::NoNextPlugin)
     );
+}
+
+#[tokio::test]
+async fn local_disable_honors_localhost_and_allows_later_hosts() {
+    let chain =
+        configured("local {\n disable localhost\n}\nhosts {\n 192.0.2.44 localhost\n}").unwrap();
+    let (outcome, wire) = query(&chain, "localhost.", Type::A).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.answers().next().unwrap().rdata, [192, 0, 2, 44]);
 }
 
 #[tokio::test]
@@ -330,7 +332,10 @@ async fn coredns_localhost_prefix_and_next() {
     let off = configured("local {\n localhost_prefix off\n}").unwrap();
     for name in ["localhost.example.net.", "LOCALHOST.Example.net."] {
         assert_eq!(query(&on, name, Type::A).await.0, Outcome::Response);
-        assert_eq!(query(&off, name, Type::A).await.0, Outcome::Drop);
+        assert_eq!(
+            query(&off, name, Type::A).await.0,
+            Outcome::Error(pharos_server::Error::NoNextPlugin)
+        );
     }
     for name in ["a.localhost.", "a.LOCALHOST."] {
         assert_eq!(query(&off, name, Type::AAAA).await.0, Outcome::Response);
@@ -345,13 +350,28 @@ async fn coredns_localhost_prefix_and_next() {
         NameRef::parse(soa.rdata, 0).unwrap().to_string(),
         "localhost."
     );
+    let (outcome, wire) = query(&on, "a.localhost.", Type::MX).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .authorities()
+            .next()
+            .unwrap()
+            .name
+            .to_string(),
+        "localhost."
+    );
     for name in [
         "example.net.",
         "notlocalhost.",
         "notlocalhost.example.net.",
         "1.ip6.arpa.",
     ] {
-        assert_eq!(query(&on, name, Type::A).await.0, Outcome::Drop);
+        assert_eq!(
+            query(&on, name, Type::A).await.0,
+            Outcome::Error(pharos_server::Error::NoNextPlugin)
+        );
     }
 }
 

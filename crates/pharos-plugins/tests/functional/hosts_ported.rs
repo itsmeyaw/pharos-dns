@@ -281,3 +281,26 @@ async fn cache_passes_special_test_names_to_later_hosts_records() {
     assert_eq!(response.answers().next().unwrap().rdata, [192, 0, 2, 44]);
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
 }
+
+#[tokio::test]
+async fn hosts_only_special_miss_returns_nxdomain() {
+    let file = HostsFile::with_contents("192.0.2.44 example.org\n");
+    let path = file.0.to_str().unwrap().replace('"', "\\\"");
+    let corefile = format!(".:0 {{\n hosts \"{path}\" example.org\n}}");
+    let blocks = parse("Corefile", &corefile).unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    chain.lifecycle.run(Phase::Startup).await.unwrap();
+    for name in ["missing.test.", "missing.invalid."] {
+        let (outcome, wire) = query(&chain, name, Type::A).await;
+        assert_eq!(outcome, Outcome::Response, "{name}");
+        assert_eq!(
+            Message::parse(&wire).unwrap().rcode(),
+            Rcode::NXDOMAIN,
+            "{name}"
+        );
+    }
+    chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+}

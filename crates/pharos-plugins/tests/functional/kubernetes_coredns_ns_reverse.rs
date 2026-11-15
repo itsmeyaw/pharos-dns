@@ -245,7 +245,7 @@ fn soa(zone: &str) -> String {
 async fn cache_passes_special_reverse_ptr_to_kubernetes() {
     let (endpoint, task) = api("192.0.2.200".parse().unwrap()).await;
     let corefile = format!(
-        ".:53 {{\n cache\n kubernetes {ZONES} {{\n endpoint {endpoint}\n startup_timeout 3s\n }}\n}}"
+        ".:53 {{\n local\n cache\n kubernetes {ZONES} {{\n endpoint {endpoint}\n startup_timeout 3s\n }}\n}}"
     );
     let blocks = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
     let chain = blocks.into_iter().next().unwrap().config;
@@ -262,6 +262,28 @@ async fn cache_passes_special_reverse_ptr_to_kubernetes() {
         "cache passes reserved reverse PTR to kubernetes",
     );
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+    task.abort();
+}
+
+#[tokio::test]
+async fn kubernetes_only_special_miss_returns_nxdomain() {
+    let (endpoint, task) = api("192.0.2.200".parse().unwrap()).await;
+    let corefile = format!(
+        ".:53 {{\n kubernetes {ZONES} {{\n endpoint {endpoint}\n startup_timeout 3s\n }}\n}}"
+    );
+    let chain = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    for name in ["missing.test.", "missing.invalid."] {
+        let (outcome, wire) = query_chain(&chain, name, Type::A).await;
+        assert_eq!(outcome, Outcome::Response, "{name}");
+        assert_eq!(
+            Message::parse(&wire).unwrap().rcode(),
+            Rcode::NXDOMAIN,
+            "{name}"
+        );
+    }
     task.abort();
 }
 

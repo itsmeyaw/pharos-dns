@@ -3,7 +3,9 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
-use pharos_proto::{Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Type};
+use pharos_proto::{
+    Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Section, Type,
+};
 use pharos_server::{Action, Context, Handler, Metadata, Outcome, Protocol, Transport};
 use std::sync::{
     Arc,
@@ -137,6 +139,50 @@ async fn counting_upstream() -> (
     (address, requests, task)
 }
 
+async fn answering_upstream() -> (
+    std::net::SocketAddr,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&requests);
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        loop {
+            let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+            count.fetch_add(1, Ordering::Relaxed);
+            let query = Message::parse(&wire[..len]).unwrap();
+            let question = query.questions().next().unwrap();
+            let mut response = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(
+                &mut response,
+                512,
+                query.id(),
+                0x8180 | (query.flags() & 0x0100),
+            )
+            .unwrap();
+            builder
+                .question(question.name, question.qtype, question.qclass)
+                .unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::A,
+                    Class::IN,
+                    60,
+                    &[192, 0, 2, 44],
+                )
+                .unwrap();
+            let _ = builder.finish();
+            socket.send_to(&response, peer).await.unwrap();
+        }
+    });
+    (address, requests, task)
+}
+
 #[tokio::test]
 async fn cache_and_forward_block_reserved_names_without_upstream_queries() {
     let (address, requests, upstream) = counting_upstream().await;
@@ -166,13 +212,19 @@ async fn cache_and_forward_block_reserved_names_without_upstream_queries() {
             .find(|record| record.rtype == Type::SOA)
             .unwrap();
         assert_eq!(soa.ttl, 604_800, "{name}");
-        assert!(matches!(
-            soa.data().unwrap(),
+        match soa.data().unwrap() {
             Rdata::Soa {
-                minimum: 604_800,
+                mname,
+                rname,
+                minimum,
                 ..
+            } => {
+                assert_eq!(mname.to_string(), "localhost.");
+                assert_eq!(rname.to_string(), "nobody.invalid.");
+                assert_eq!(minimum, 604_800);
             }
-        ));
+            other => panic!("expected SOA, got {other:?}"),
+        }
     }
     let forward_only = format!(".:0 {{\n forward . {address}\n}}");
     let blocks =
@@ -244,27 +296,64 @@ async fn allow_special_opt_in_forwards_test_and_reverse_but_never_invalid() {
 }
 
 #[tokio::test]
-async fn cache_and_forward_do_not_intercept_non_in_special_names() {
+async fn cache_and_forward_block_special_names_for_non_in_classes() {
     let (address, requests, upstream) = counting_upstream().await;
     let corefile = format!(".:0 {{\n cache\n forward . {address}\n}}");
     let blocks = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
     let (mut listeners, _) = servers(blocks).unwrap();
     let (_, server) = listeners.drain().next().unwrap();
-    let mut response = Vec::with_capacity(65535);
-    assert_eq!(
-        server
-            .handle(
-                &named_query_class("service.test.", Class::CH),
-                "127.0.0.1:1000".parse().unwrap(),
-                Protocol::Udp,
-                &mut response,
-            )
-            .await,
-        Action::Respond
-    );
-    let response = Message::parse(&response).unwrap();
-    assert_eq!(response.rcode(), Rcode::NOERROR);
-    assert_eq!(response.questions().next().unwrap().qclass, Class::CH);
+    for class in [Class::CH, Class::ANY] {
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &named_query_class("service.test.", class),
+                    "127.0.0.1:1000".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response,
+                )
+                .await,
+            Action::Respond
+        );
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+        assert_eq!(response.questions().next().unwrap().qclass, class);
+        assert_eq!(response.authorities().next().unwrap().class, class);
+    }
+    assert_eq!(requests.load(Ordering::Relaxed), 0);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn cache_stores_opted_in_special_upstream_answers() {
+    let (address, requests, upstream) = answering_upstream().await;
+    let corefile = format!(".:0 {{\n cache\n forward . {address} {{\n allow_special\n }}\n}}");
+    let blocks = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    for _ in 0..2 {
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &named_query("service.test."),
+                    "127.0.0.1:1000".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response,
+                )
+                .await,
+            Action::Respond
+        );
+        assert_eq!(
+            Message::parse(&response)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .rdata,
+            [192, 0, 2, 44]
+        );
+    }
     assert_eq!(requests.load(Ordering::Relaxed), 1);
     upstream.abort();
 }
@@ -310,6 +399,30 @@ async fn explicit_special_forward_zones_opt_in_without_allow_special() {
     }
     assert_eq!(requests.load(Ordering::Relaxed), 2);
     upstream.abort();
+}
+
+#[test]
+fn explicit_invalid_forward_zone_is_rejected() {
+    let corefile = ".:0 {\n forward invalid. 127.0.0.1:5300\n}";
+    let blocks = parse("Corefile", corefile).unwrap();
+    assert!(configure::<Chain>(&blocks, directives()).is_err());
+}
+
+#[cfg(feature = "plugin-secondary")]
+#[tokio::test]
+async fn cache_and_secondary_special_miss_returns_nxdomain() {
+    let corefile = concat!(
+        ".:0 {\n",
+        " cache\n",
+        " secondary example.org {\n",
+        "  transfer from 127.0.0.1:5300\n",
+        " }\n",
+        "}"
+    );
+    let secondary = chain(corefile);
+    let (outcome, response, _) = run_query(&secondary, &named_query("missing.invalid.")).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NXDOMAIN);
 }
 
 #[tokio::test]

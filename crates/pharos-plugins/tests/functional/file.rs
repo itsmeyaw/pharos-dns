@@ -86,7 +86,7 @@ async fn special_use_names_are_negative_unless_an_explicit_zone_matches() {
     let (action, wire) = handle_query(&unconfigured, "service.test.").await;
     assert_eq!(action, Action::Respond);
     let response = Message::parse(&wire).unwrap();
-    assert!(response.aa());
+    assert!(!response.aa());
     assert_eq!(response.rcode(), Rcode::NXDOMAIN);
     let soa = response
         .authorities()
@@ -94,8 +94,9 @@ async fn special_use_names_are_negative_unless_an_explicit_zone_matches() {
         .unwrap();
     assert_eq!(soa.name.to_string(), "test.");
     assert_eq!(soa.ttl, 604_800);
-    assert_eq!(soa.rdata.len(), 42);
+    assert_eq!(soa.rdata.len(), 47);
     let mname = NameRef::parse(soa.rdata, 0).unwrap();
+    assert_eq!(mname.to_string(), "localhost.");
     let rname = NameRef::parse(soa.rdata, mname.wire_len()).unwrap();
     assert_eq!(rname.to_string(), "nobody.invalid.");
     assert!(matches!(
@@ -160,7 +161,7 @@ async fn cache_special_fallback_returns_nxdomain_after_plugins_pass() {
     assert_eq!(action, Action::Respond);
     let response = Message::parse(&wire).unwrap();
     assert!(!response.aa());
-    assert_ne!(response.flags() & 0x0080, 0);
+    assert_eq!(response.flags() & 0x0080, 0);
     assert_eq!(response.rcode(), Rcode::NXDOMAIN);
     assert_eq!(
         response
