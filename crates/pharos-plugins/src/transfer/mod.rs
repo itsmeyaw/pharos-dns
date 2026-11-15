@@ -72,19 +72,20 @@ impl Transfer {
             return Ok(());
         };
         let mut errors = Vec::new();
-        // RFC 1996 §4.6: Send NOTIFY to each configured server destination.
+        let mut addressed = false;
+        let mut cidr = false;
+        // RFC 1996 §§4.5, 4.6: Send NOTIFY to each configured server destination.
         for destination in &rule.destinations {
             let (host, port) = match destination {
                 Destination::Address { host, port } => (host, port),
                 Destination::All => continue,
-                Destination::Network { address, prefix } => {
-                    // RFC 1996 §2.1: A CIDR ACL does not name a NOTIFY recipient.
-                    errors.push(format!(
-                        "{address}/{prefix}: CIDR is not a NOTIFY destination"
-                    ));
+                Destination::Network { .. } => {
+                    // RFC 1996 §2.1: the Notify Set lists servers; a CIDR range names none (warned at setup).
+                    cidr = true;
                     continue;
                 }
             };
+            addressed = true;
             // RFC 5952 §6: Bracket IPv6 literals when combining them with port numbers.
             let endpoint = if host.contains(':') {
                 format!("[{host}]:{port}")
@@ -116,7 +117,9 @@ impl Transfer {
                 errors.push(format!("{endpoint}: {error}"));
             }
         }
-        if errors.is_empty() {
+        if errors.is_empty() && cidr && !addressed {
+            Err(std::io::Error::other("CIDR is not a NOTIFY destination"))
+        } else if errors.is_empty() {
             Ok(())
         } else {
             Err(std::io::Error::other(errors.join("; ")))
@@ -157,6 +160,15 @@ impl Transfer {
                         );
                     }
                     _ => return Err(cursor.arg_err()),
+                }
+            }
+            for destination in &destinations {
+                if let Destination::Network { address, prefix } = destination {
+                    pharos_server::logging::log(
+                        "WARN",
+                        "transfer",
+                        &format!("to {address}/{prefix} is an ACL only; NOTIFY skips it"),
+                    );
                 }
             }
             // RFC 5936 §5: Require an explicit transfer policy instead of open access.
@@ -260,6 +272,7 @@ impl Transfer {
                 });
             match (serial, authority.next()) {
                 (Some(serial), None) => serial,
+                // RFC 1995 §3 defines no RCODE for a bad Authority SOA; SERVFAIL is a Pharos choice.
                 _ => return Some(Outcome::Unanswered(Rcode::SERVFAIL)),
             }
         } else {

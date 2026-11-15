@@ -32,6 +32,7 @@ impl Zone {
         // RFC 1982 §7: Serial zero is an ordinary SOA serial value.
         let only_soa = request.qtype == Type::IXFR
             && (request.protocol == Protocol::Udp || serial_at_least(request.serial, current));
+        // CoreDNS parity (#75): a TCP up-to-date IXFR answer carries no AA; RFC 1995 §2 is silent.
         let authoritative = !(only_soa && request.protocol == Protocol::Tcp);
         let id = request.id;
         let flags = request.flags;

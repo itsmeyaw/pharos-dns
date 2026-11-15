@@ -11,3 +11,5 @@ See the [CoreDNS secondary documentation](https://github.com/coredns/coredns/tre
   plus RDATA octets) cap one AXFR. A transfer that exceeds either is rejected with a WARN log, keeping
   the Zone in service. One AXFR must also finish within 10 minutes. CoreDNS has no such bounds.
 - A failed NOTIFY-triggered SOA check or transfer enters the RETRY state (RFC 1996 §3.11; RFC 1034 §4.3.5).
+- SOA checks and AXFR are not TSIG-signed, matching CoreDNS; RFC 5936 §6 recommends TSIG for AXFR (RFC 8945).
+- No IXFR client (RFC 1995): every change costs a full AXFR (RFC 5936).
