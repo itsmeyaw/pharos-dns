@@ -4,6 +4,7 @@ pub(crate) mod setup;
 mod store;
 
 use std::{
+    cmp::Ordering,
     net::SocketAddr,
     sync::{Arc, Mutex, OnceLock, Weak},
     time::{Instant, SystemTime},
@@ -663,69 +664,66 @@ impl Cache {
             (self.config.success_min_ttl, self.config.success_max_ttl)
         };
         let minimum = minimum.as_secs().min(u64::from(u32::MAX)) as u32;
-        // RFC 8767 §4: Cached TTLs must not exceed the recommended one-week maximum.
+        // RFC 8767 §4: Use its recommended 604800-second cap for cached TTLs.
         let maximum = cached_maximum(maximum.as_secs());
-        let rrset_minima = rrset_minimum_ttls(&response);
+        let mut records = index_response_rrsets(&response);
         let malformed_non_authoritative_rrset =
-            !response.aa() && rrset_minima.iter().any(|rrset| rrset.mixed_ttl);
+            !response.aa() && records.iter().any(|record| record.mixed_ttl);
         // RFC 4033 §8.1: Keep cached data within every RRSIG's validity interval.
-        let signature_remaining = response
-            .answers()
-            .chain(response.authorities())
-            .chain(
-                response
-                    .additionals()
-                    .filter(|record| record.rtype != Type::OPT),
-            )
-            .filter(|record| record.rtype == Type::RRSIG)
-            .filter_map(|record| match record.data() {
-                Ok(Rdata::Rrsig { expiration, .. }) => Some(signature_ttl(expiration, now as u32)),
-                _ => None,
+        let signature_remaining = records
+            .iter()
+            .filter_map(|record| {
+                record
+                    .rrsig_expiration
+                    .map(|expiration| signature_ttl(expiration, now as u32))
             })
             .min()
             .unwrap_or(u32::MAX);
-        let response_ttl_for = |record| {
-            if failure {
+        // RFC 2308 §§3, 5: Cache negative Authority data no longer than its SOA-derived TTL.
+        let negative_ttl =
+            if !failure && matches!(response_type, ResponseType::NxDomain | ResponseType::NoData) {
+                records
+                    .iter()
+                    .filter(|record| {
+                        record.section == RecordSection::Authority && record.key.rtype == Type::SOA
+                    })
+                    .filter_map(|record| {
+                        record
+                            .soa_minimum
+                            .map(|minimum| record.minimum_ttl.min(minimum))
+                    })
+                    .min()
+                    .map(|ttl| cap_ttl_at_signature(ttl.min(maximum), signature_remaining))
+            } else {
+                None
+            };
+        let mut ttl = maximum;
+        // RFC 2181 §5.2: Normalize TTLs to each RRset's minimum, not the whole Response's.
+        for record in &mut records {
+            let record_ttl = if failure {
                 self.config.fail_ttl.as_secs().min(u64::from(u32::MAX)) as u32
             } else {
-                normalized_record_ttl(
-                    record,
-                    &rrset_minima,
-                    denial,
-                    minimum,
-                    maximum,
+                cap_ttl_at_signature(
+                    normalized_rrset_ttl(
+                        record.key.rtype,
+                        record.minimum_ttl,
+                        record.soa_minimum,
+                        denial,
+                        minimum,
+                        maximum,
+                    ),
                     signature_remaining,
                 )
+            };
+            let record_ttl = if record.section == RecordSection::Authority {
+                record_ttl.min(negative_ttl.unwrap_or(u32::MAX))
+            } else {
+                record_ttl
+            };
+            record.ttl = record_ttl;
+            if record.section != RecordSection::Additional {
+                ttl = ttl.min(record_ttl);
             }
-        };
-        let mut ttl = maximum;
-        let mut ttl_updates = Vec::new();
-        let mut found = false;
-        // RFC 2181 §5.2: Normalize TTLs to each RRset's minimum, not the whole Response's.
-        for record in response.answers().chain(response.authorities()) {
-            let record_ttl = response_ttl_for(record);
-            found = true;
-            ttl = ttl.min(record_ttl);
-            ttl_updates.push((record.ttl_offset, record_ttl));
-        }
-        // RFC 2181 §5.2: Normalize non-OPT Additional RRsets on the miss Response too.
-        for record in response
-            .additionals()
-            .filter(|record| record.rtype != Type::OPT)
-        {
-            let record_ttl = response_ttl_for(record);
-            ttl_updates.push((record.ttl_offset, record_ttl));
-        }
-        if !found
-            || !matches!(
-                response_type,
-                ResponseType::Positive
-                    | ResponseType::Referral
-                    | ResponseType::NxDomain
-                    | ResponseType::NoData
-            )
-        {
-            ttl = 5;
         }
         if failure {
             // RFC 9520 §3.2: Cache SERVFAIL and REFUSED with the failure backoff.
@@ -736,14 +734,14 @@ impl Cache {
             ttl = self.config.fail_ttl.as_secs() as u32;
         }
         if failure || response_type == ResponseType::ServerError {
-            for (_, record_ttl) in &mut ttl_updates {
-                *record_ttl = ttl;
+            for record in &mut records {
+                record.ttl = ttl;
             }
         }
         let matches = response.questions().next().is_some_and(|q| {
             q.name == question.name && q.qtype == question.qtype && q.qclass == question.qclass
         });
-        // RFC 1035 §7.4: Reject truncated responses that may contain incomplete RRsets.
+        // RFC 2181 §9: Reject truncated responses that may contain incomplete RRsets.
         let eligible = !response.tc()
             && ttl > 0
             && (!incomplete || has_soa)
@@ -763,7 +761,7 @@ impl Cache {
         {
             metrics.drop_response();
         }
-        // RFC 2181 §5.4.1: Check relevance only after cheap cache-admission tests.
+        // RFC 2181 §5.4 / RFC 5452 §6: Cache only query-relevant, in-domain response data.
         let eligible = eligible
             && matches
             && response_records_relevant(question.name, question.qtype, question.qclass, &response);
@@ -777,7 +775,12 @@ impl Cache {
         let cacheable = cacheable
             && !has_explicit_wildcard(question.name)
             && !disabled.iter().any(|zone| contains(question.name, zone));
+        let mut ttl_updates = Vec::with_capacity(records.len());
+        for record in records {
+            ttl_updates.push((record.ttl_offset, record.ttl));
+        }
         for (offset, record_ttl) in ttl_updates {
+            let offset = offset as usize;
             cx.response[offset..offset + 4].copy_from_slice(&record_ttl.to_be_bytes());
         }
         // RFC 1035 §7.4: retain complete responses for later matching queries.
@@ -862,87 +865,155 @@ struct RrsetKey<'a> {
 }
 
 // RFC 4343 §3 / RFC 1035 §2.3.3: RRset owner names compare case-insensitively.
-impl<'a> RrsetKey<'a> {
-    fn new(record: pharos_proto::Record<'a>) -> Self {
-        RrsetKey {
-            name: record.name,
-            rtype: record.rtype,
-            class: record.class,
-            // RFC 4034 §3.1.1: RRSIG RRsets are partitioned by Type Covered.
-            covered_type: if record.rtype == Type::RRSIG {
-                match record.data() {
-                    Ok(Rdata::Rrsig { type_covered, .. }) => Some(type_covered),
-                    _ => None,
-                }
-            } else {
-                None
-            },
-        }
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordSection {
+    Answer,
+    Authority,
+    Additional,
 }
 
-struct RrsetMinimum<'a> {
+struct IndexedRecord<'a> {
     key: RrsetKey<'a>,
+    section: RecordSection,
+    ttl_offset: u32,
+    ttl: u32,
+    soa_minimum: Option<u32>,
+    rrsig_expiration: Option<u32>,
     minimum_ttl: u32,
     mixed_ttl: bool,
 }
 
-// RFC 2181 §5.2: Scan common small Responses without allocating a hash table.
-fn rrset_minimum_ttls<'a>(message: &Message<'a>) -> Vec<RrsetMinimum<'a>> {
-    let mut minima: Vec<RrsetMinimum<'a>> = Vec::with_capacity(8);
-    for record in message.answers().chain(message.authorities()).chain(
-        message
-            .additionals()
-            .filter(|record| record.rtype != Type::OPT),
-    ) {
-        let key = RrsetKey::new(record);
-        if let Some(rrset) = minima.iter_mut().find(|rrset| rrset.key == key) {
-            rrset.mixed_ttl |= rrset.minimum_ttl != record.ttl;
-            rrset.minimum_ttl = rrset.minimum_ttl.min(record.ttl);
-        } else {
-            minima.push(RrsetMinimum {
-                key,
-                minimum_ttl: record.ttl,
-                mixed_ttl: false,
-            });
+impl<'a> IndexedRecord<'a> {
+    fn new(record: pharos_proto::Record<'a>, section: RecordSection) -> Self {
+        let mut covered_type = None;
+        let mut soa_minimum = None;
+        let mut rrsig_expiration = None;
+        if record.rtype == Type::RRSIG {
+            if let Ok(Rdata::Rrsig {
+                type_covered,
+                expiration,
+                ..
+            }) = record.data()
+            {
+                covered_type = Some(type_covered);
+                rrsig_expiration = Some(expiration);
+            }
+        } else if record.rtype == Type::SOA
+            && let Ok(Rdata::Soa { minimum, .. }) = record.data()
+        {
+            soa_minimum = Some(minimum);
+        }
+        Self {
+            key: RrsetKey {
+                name: record.name,
+                rtype: record.rtype,
+                class: record.class,
+                // RFC 4034 §3.1.1: RRSIG TTL groups are keyed by Type Covered.
+                covered_type,
+            },
+            section,
+            // RFC 1035 §4.2.2: DNS Message lengths fit in the 16-bit offset space.
+            ttl_offset: record.ttl_offset as u32,
+            ttl: record.ttl,
+            soa_minimum,
+            rrsig_expiration,
+            minimum_ttl: record.ttl,
+            mixed_ttl: false,
         }
     }
-    minima
 }
 
-fn normalized_record_ttl(
-    record: pharos_proto::Record<'_>,
-    minima: &[RrsetMinimum<'_>],
-    denial: bool,
-    minimum: u32,
-    maximum: u32,
-    signature_remaining: u32,
-) -> u32 {
-    let rrset_minimum = minima
-        .iter()
-        .find(|rrset| rrset.key == RrsetKey::new(record))
-        .map_or(record.ttl, |rrset| rrset.minimum_ttl);
-    cap_ttl_at_signature(
-        normalized_rrset_ttl(record, rrset_minimum, denial, minimum, maximum),
-        signature_remaining,
-    )
+fn compare_name_refs(left: NameRef<'_>, right: NameRef<'_>) -> Ordering {
+    let mut left_labels = left.labels();
+    let mut right_labels = right.labels();
+    loop {
+        match (left_labels.next(), right_labels.next()) {
+            (Some(left), Some(right)) => {
+                let order = left
+                    .iter()
+                    .map(|byte| byte.to_ascii_lowercase())
+                    .cmp(right.iter().map(|byte| byte.to_ascii_lowercase()));
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+        }
+    }
+}
+
+fn compare_rrset_keys(left: &RrsetKey<'_>, right: &RrsetKey<'_>) -> Ordering {
+    compare_name_refs(left.name, right.name)
+        .then_with(|| left.class.0.cmp(&right.class.0))
+        .then_with(|| left.rtype.0.cmp(&right.rtype.0))
+        .then_with(|| {
+            left.covered_type
+                .map(|rtype| rtype.0)
+                .cmp(&right.covered_type.map(|rtype| rtype.0))
+        })
+}
+
+// RFC 2181 §5.2: Sort RRset keys once, then reuse per-record TTL metadata.
+fn index_response_rrsets<'a>(message: &Message<'a>) -> Vec<IndexedRecord<'a>> {
+    let capacity = usize::from(message.answer_count())
+        + usize::from(message.authority_count())
+        + usize::from(message.additional_count());
+    let mut records = Vec::with_capacity(capacity);
+    records.extend(
+        message
+            .answers()
+            .map(|record| IndexedRecord::new(record, RecordSection::Answer)),
+    );
+    records.extend(
+        message
+            .authorities()
+            .map(|record| IndexedRecord::new(record, RecordSection::Authority)),
+    );
+    records.extend(
+        message
+            .additionals()
+            .filter(|record| record.rtype != Type::OPT)
+            .map(|record| IndexedRecord::new(record, RecordSection::Additional)),
+    );
+    records.sort_unstable_by(|left, right| compare_rrset_keys(&left.key, &right.key));
+
+    let mut start = 0;
+    while start < records.len() {
+        let mut end = start + 1;
+        while end < records.len() && records[end].key == records[start].key {
+            end += 1;
+        }
+        let rrset = &records[start..end];
+        let minimum_ttl = rrset
+            .iter()
+            .map(|record| record.ttl)
+            .min()
+            .unwrap_or_default();
+        let mixed_ttl = rrset.iter().any(|record| record.ttl != rrset[0].ttl);
+        for record in &mut records[start..end] {
+            record.minimum_ttl = minimum_ttl;
+            record.mixed_ttl = mixed_ttl;
+        }
+        start = end;
+    }
+    records
 }
 
 fn normalized_rrset_ttl(
-    record: pharos_proto::Record<'_>,
+    rtype: Type,
     rrset_minimum: u32,
+    soa_minimum: Option<u32>,
     denial: bool,
     minimum: u32,
     maximum: u32,
 ) -> u32 {
-    let mut ttl = rrset_minimum;
-    if denial
-        && record.rtype == Type::SOA
-        && let Ok(Rdata::Soa { minimum, .. }) = record.data()
-    {
-        // RFC 2308 §4: Bound negative SOA lifetime by SOA.MINIMUM.
-        ttl = ttl.min(minimum);
-    }
+    let ttl = if denial && rtype == Type::SOA {
+        soa_minimum.map_or(rrset_minimum, |minimum| rrset_minimum.min(minimum))
+    } else {
+        rrset_minimum
+    };
     bound_ttl(ttl, denial, minimum, maximum)
 }
 
@@ -953,7 +1024,8 @@ fn response_records_relevant(
     qclass: Class,
     response: &Message<'_>,
 ) -> bool {
-    let mut chain = vec![qname];
+    let mut chain = Vec::with_capacity(8);
+    chain.push(qname);
     if qtype != Type::CNAME {
         loop {
             let Some(&current) = chain.last() else {
@@ -984,12 +1056,14 @@ fn response_records_relevant(
             chain.push(target);
         }
     }
-    let denial_zones = response
-        .authorities()
-        .filter(|record| matches!(record.rtype, Type::SOA | Type::NS))
-        .map(|record| record.name)
-        .filter(|zone| chain.iter().any(|name| contains_ref(*name, *zone)))
-        .collect::<Vec<_>>();
+    let mut denial_zones = Vec::with_capacity(4);
+    for record in response.authorities() {
+        if matches!(record.rtype, Type::SOA | Type::NS)
+            && chain.iter().any(|name| contains_ref(*name, record.name))
+        {
+            denial_zones.push(record.name);
+        }
+    }
     for record in response.answers() {
         if qclass != Class::ANY && record.class != qclass {
             return false;
@@ -1040,17 +1114,17 @@ fn response_records_relevant(
         if qclass != Class::ANY && record.class != qclass {
             return false;
         }
-        let nsec3 = record.rtype == Type::NSEC3
+        let denial_proof = matches!(record.rtype, Type::NSEC | Type::NSEC3)
             || (record.rtype == Type::RRSIG
                 && matches!(
                     record.data(),
                     Ok(Rdata::Rrsig {
-                        type_covered: Type::NSEC3,
+                        type_covered: Type::NSEC | Type::NSEC3,
                         ..
                     })
                 ));
-        // RFC 5452 §6: Keep NSEC3 proof owners inside the question's authority zone.
-        let in_zone = nsec3
+        // RFC 2308 §5: Denial proof owners need only belong to the question's authority zone.
+        let in_zone = denial_proof
             && denial_zones
                 .iter()
                 .any(|zone| contains_ref(record.name, *zone));
@@ -1120,7 +1194,7 @@ fn answers_question(message: &Message<'_>) -> bool {
     }
     // RFC 1034 §3.6.2: follow CNAME chains and detect loops.
     let mut name = question.name;
-    let mut visited = Vec::new();
+    let mut visited = Vec::with_capacity(8);
     loop {
         if visited.contains(&name) {
             return false;
