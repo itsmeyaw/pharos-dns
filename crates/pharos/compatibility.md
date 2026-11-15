@@ -81,6 +81,7 @@
 
 - [forward Plugin notes](../crates/pharos-plugins/src/forward/README.md)
 - `forward { allow_special }` permits upstream resolution for `.test` and RFC 6303 reverse names. `forward` returns NXDOMAIN for `.invalid`; an earlier explicit file Zone retains precedence (RFC 6761 §§6.1, 6.2, 6.4).
+- **Partial**: Without the optional `local` Plugin, cache/forward may send `localhost.` queries upstream rather than synthesize loopback/negative answers (RFC 6761 §6.3).
 
 ## header
 
@@ -109,7 +110,7 @@
 ## local
 
 - [local Plugin notes](../crates/pharos-plugins/src/local/README.md)
-- Pharos serves the complete RFC 6303 empty-zone catalogue by default and allows per-zone `disable`; configured file Zones and `allow_special` forwarding take precedence for reverse names.
+- Pharos serves the complete RFC 6303 empty-zone catalogue by default and allows per-zone `disable`; because `local` precedes `hosts`, `kubernetes`, `auto`, and `secondary`, disable any reverse Zone owned by those Plugins. See [`MIGRATION.md`](../MIGRATION.md).
 
 ## log
 
