@@ -43,13 +43,15 @@ impl Plugin for Dnssec {
             // RFC 4035 §3.1: DNSSEC proof processing applies only to signed zones.
             has_zone_key.then_some((question, zone))
         });
+        // RFC 1035 §3.2.5: QCLASS=CH requests Chaos data, not the configured IN signing key.
+        let class_matches = matching
+            .as_ref()
+            .is_some_and(|(question, _)| matches!(question.qclass, Class::IN | Class::ANY));
         // RFC 4033 §9: DO queries in configured zones receive DNSSEC records.
-        let do_bit = matching.is_some() && cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
-        // RFC 2181 §5.1; RFC 1035 §3.2.3: IN and ANY queries may use configured IN DNSKEYs.
+        let do_bit = class_matches && cx.query.opt().is_some_and(|opt| opt.dnssec_ok());
+        // RFC 1035 §3.2.5: IN and ANY queries may use configured IN DNSKEYs.
         let intercepted = matching.is_some_and(|(question, zone)| {
-            matches!(question.qclass, Class::IN | Class::ANY)
-                && question.qtype == Type::DNSKEY
-                && question.name == *zone
+            class_matches && question.qtype == Type::DNSKEY && question.name == *zone
         });
         let outcome = if intercepted {
             match self.dnskey(cx) {
@@ -236,7 +238,7 @@ mod tests {
         assert_eq!(reply.answers().count(), 0);
     }
 
-    // RFC 2181 §5.1: A DNSKEY answer must not cross the Query's class boundary.
+    // RFC 1035 §3.2.5: Explicit QCLASS CH must not receive an IN DNSKEY RRset.
     #[tokio::test]
     async fn non_in_dnskey_query_passes_through_without_in_records() {
         let key = concat!(
@@ -286,9 +288,10 @@ mod tests {
             Outcome::Response
         );
         let reply = Message::parse(cx.response).unwrap();
-        assert_eq!(reply.answers().count(), 2);
-        assert!(reply.answers().all(|rr| rr.class == Class::CH));
-        assert!(reply.answers().any(|rr| rr.rtype == Type::RRSIG));
+        let answers: Vec<_> = reply.answers().collect();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].class, Class::CH);
+        assert!(!answers.iter().any(|rr| rr.rtype == Type::RRSIG));
     }
 
     // RFC 1035 §3.2.3: QCLASS=ANY selects DNSKEY data in any class.
