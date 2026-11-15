@@ -237,10 +237,11 @@ fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
     let Some(question) = cx.query.questions().next() else {
         return Outcome::Drop;
     };
-    // RFC 1996 §§3.2, 3.3: NOTIFY uses AA, one IN SOA Question, and zero undefined fields.
+    // RFC 1996 §§3.2, 3.3: NOTIFY uses AA, an IN SOA Question, and zero undefined fields.
     if cx.query.flags() & 0x83ff != 0
         || cx.query.flags() & 0x0400 == 0
-        || cx.query.question_count() != 1
+        // RFC 1996 §3.7: a NOTIFY request has QDCOUNT>0; the first Question names the zone.
+        || cx.query.question_count() == 0
         || question.qtype != Type::SOA
         || question.qclass != Class::IN
         || question.name != zone.config.apex

@@ -263,6 +263,33 @@ fn unknown_notify_logging_is_rate_limited_per_zone() {
     assert!(log_unknown_notify(1024));
 }
 
+#[test]
+fn notify_with_extra_questions_is_acknowledged() {
+    use pharos_proto::{Message, MessageBuilder};
+    use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
+    let zone = plain_zone("127.0.0.1:53".parse().unwrap());
+    let apex = NameRef::parse(zone.config.apex.as_wire(), 0).unwrap();
+    let mut request = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut request, 512, 7, 0x2400).unwrap();
+    builder.question(apex, Type::SOA, Class::IN).unwrap();
+    builder.question(apex, Type::NS, Class::IN).unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [None; 8];
+    let mut cx = Context {
+        query: Message::parse(&request).unwrap(),
+        client: "127.0.0.1:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &zone.config.apex,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(handle_notify(&zone, &mut cx), Outcome::Response);
+}
+
 #[tokio::test]
 async fn secondary_rejects_axfr_over_record_cap_and_keeps_no_zone() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
