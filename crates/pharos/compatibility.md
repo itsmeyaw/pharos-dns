@@ -254,6 +254,7 @@
 - TSIG accepts RFC 8945-permitted truncated MACs and enforces their minimum length and optional local policy; miekg/dns v1.1.73's default provider compares only full-length MACs.
 - TSIG rejects misplaced, duplicate, non-ANY, nonzero-TTL, or malformed TSIG records and compressed algorithm names; miekg/dns does not enforce all of these checks.
 - TSIG maps an unsupported algorithm on a known key to BADSIG, as CoreDNS does, rather than RFC 8945's BADKEY. Each `TsigKey` is pinned to one supported algorithm; CoreDNS accepts any supported algorithm for a configured secret.
+- TSIG Messages with unknown keys pass unchanged to Next when no matching `require` rule demands local validation, so a forwarder can relay a key shared with its Upstream (RFC 8945 §5.5).
 - Stream verification includes unsigned intermediate Messages in the running MAC and requires signed first and last Messages, following RFC 8945; miekg/dns does not accumulate unsigned intermediates.
 - Subsequent stream TSIGs with an Error or Other Data are rejected because those fields are not authenticated by the stream MAC; miekg/dns does not reject them.
 - Stream signatures reject decreasing Time Signed values; miekg/dns does not track previous times. The stream API also permits callers to feed unsigned intermediate Messages for legacy interoperability, although RFC 8945 requires senders to sign every Response.
@@ -261,6 +262,7 @@
 - BADTIME Responses retain the Query's Fudge as RFC 8945 requires; CoreDNS's TSIG Plugin defaults it to 300 seconds.
 - TSIG error Responses retain the Query TSIG's Original ID; CoreDNS's TSIG Plugin uses the Response header ID.
 - TSIG key-file parsing takes UTF-8 input, reads lines beyond Go's 64 KiB scanner limit, and uses Rust Unicode lowercasing, which can differ from Go for names such as a word-final capital sigma. CoreDNS can silently stop reading an overlong key-file line.
+- TSIG accepts secrets shorter than HMAC output lengths for CoreDNS compatibility; setup warns for decoded secrets shorter than 64 octets (RFC 8945 §8).
 - TSIG Response signing and verification require a valid-length Query MAC. The RFC 8945 exception for a signed Response to an unsigned TKEY Query is not supported by this API; miekg/dns allows generating a Response without a Query MAC.
 - Pharos rejects compression pointers that do not point backwards, while miekg/dns follows them until its hop limit.
 - Pharos also rejects targets whose encoding overlaps the pointer; miekg/dns accepts them.
@@ -274,7 +276,7 @@
 - Zero-question QUERY Messages route to the root Server Block when configured; CoreDNS's standard query path also permits QDCOUNT=0 (RFC 9619 §4; conf/server #101).
 - For DS at a configured zone cut, Pharos uses the parent Server Block; if no parent is configured, it routes to the child and returns authoritative NODATA, as RFC 4035 §3.1.4.1 requires (conf/server #101).
 - Response OPT advertises Pharos's 4096-octet responder capacity, as RFC 6891 §§6.2.3–6.2.4 and RFC 3226 §3 recommend. The UDP send limit remains the normalized request size capped at 4096 (512 when OPT is absent). CoreDNS `bufsize` echoes its reduced size in the response OPT; Pharos keeps server capacity in the OPT instead (conf/server #101).
-- AD is preserved on local Responses, but cleared on forwarded Responses from ordinary UDP/TCP Upstreams because those channels do not authenticate the Response (RFC 4035 §4.6). The Listener also clears AD when it re-signs a forwarded Response without upstream transaction security (RFC 8945 §5.5); `forward` has no upstream TSIG mode.
+- AD is preserved on local Responses, but cleared on unsigned forwarded Responses from ordinary UDP/TCP Upstreams because those channels do not authenticate the Response (RFC 4035 §4.6). TSIG Responses are relayed unchanged to preserve their MAC. The Listener also clears AD when it re-signs a forwarded Response without upstream transaction security (RFC 8945 §5.5); `forward` has no upstream TSIG mode.
 - Message-level RRSIG inception and expiration validation uses RFC 4034 §3.1.5 serial arithmetic from RFC 1982 §3.2; logging and offline signer refresh comparisons remain open (conf/server #101).
 - DNS RCODE 16 metrics use BADVERS. TSIG Error 16 is BADSIG and is not a DNS RCODE label (RFC 6895 §2.3; RFC 8945 §3; conf/server #101).
 - CoreDNS returns FORMERR on option unpacking errors; HTTP and QUIC report transport errors.

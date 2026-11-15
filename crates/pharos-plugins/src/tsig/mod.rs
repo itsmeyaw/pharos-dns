@@ -54,6 +54,15 @@ impl std::fmt::Debug for Secret {
 
 impl Plugin for Tsig {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        // RFC 8945 §5.2: TSIG is not valid in the Answer or Authority section.
+        if cx
+            .query
+            .answers()
+            .chain(cx.query.authorities())
+            .any(|rr| rr.rtype == Type::TSIG)
+        {
+            return Outcome::Unanswered(Rcode::FORMERR);
+        }
         // RFC 8945 §5.2: TSIG must be the final record in the Additional section.
         let mut tsig_seen = false;
         for rr in cx.query.additionals() {
@@ -62,6 +71,15 @@ impl Plugin for Tsig {
             }
             tsig_seen = rr.rtype == Type::TSIG;
         }
+        // RFC 8945 §5.2: Reject malformed TSIGs even outside configured zones.
+        let record = if tsig_seen {
+            match TsigRecord::parse(cx.query.as_wire()) {
+                Ok(record) => Some(record),
+                Err(_) => return Outcome::Unanswered(Rcode::FORMERR),
+            }
+        } else {
+            None
+        };
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
@@ -82,7 +100,9 @@ impl Plugin for Tsig {
             return next.run(cx).await;
         }
         if tsig_seen {
-            return self.signed(cx, next).await;
+            return self
+                .signed(cx, next, record.expect("TSIG parsed above"))
+                .await;
         }
         if self.all_types
             || self.types.contains(&question.qtype)
@@ -121,11 +141,13 @@ impl Tsig {
     }
 
     // RFC 5936 §5: TSIG can authenticate AXFR clients for transfer access control.
-    async fn signed<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+    async fn signed<'q, 'a, N: Next + Send>(
+        &self,
+        cx: &mut Context<'q, 'a>,
+        next: N,
+        record: TsigRecord<'q>,
+    ) -> Outcome {
         let wire = cx.query.as_wire();
-        let Ok(record) = TsigRecord::parse(wire) else {
-            return Outcome::Unanswered(Rcode::FORMERR);
-        };
         let listener = pharos_server::ListenerKey {
             transport: cx.transport,
             address: cx.local,
@@ -138,9 +160,29 @@ impl Tsig {
             .unwrap_or(&self.secrets);
         // RFC 8945 §5.2.1: An unknown key gets an unsigned NOTAUTH/BADKEY response.
         let Some(secret) = secrets.iter().find(|secret| record.owner == secret.name) else {
-            return tsig_error(cx, &record, 17, None, 0);
+            pharos_server::logging::log(
+                "WARN",
+                "tsig",
+                &format!("unknown key {}", record.owner),
+            );
+            if cx.query.questions().next().is_some_and(|question| {
+                self.all_types
+                    || self.types.contains(&question.qtype)
+                    || self.all_opcodes
+                    || self.opcodes.contains(&cx.query.opcode())
+            }) {
+                // RFC 8945 §5.5: Only transparent forwarding can bypass explicit key validation.
+                return tsig_error(cx, &record, 17, None, 0);
+            }
+            // RFC 8945 §5.5: Forward a signed Message unchanged when its key is not shared.
+            return next.run(cx).await;
         };
         let Some(keys) = &secret.keys else {
+            pharos_server::logging::log(
+                "WARN",
+                "tsig",
+                &format!("key {} has no usable secret", record.owner),
+            );
             return tsig_error(cx, &record, 16, None, 0);
         };
         let names = [
@@ -154,6 +196,11 @@ impl Tsig {
             .iter()
             .position(|name| record.algorithm == NameRef::parse(name, 0).expect("valid algorithm"));
         let Some(key) = algorithm.map(|i| &keys[i]) else {
+            pharos_server::logging::log(
+                "WARN",
+                "tsig",
+                &format!("unsupported algorithm {} for key {}", record.algorithm, record.owner),
+            );
             return tsig_error(cx, &record, 16, None, 0);
         };
         let now = std::time::SystemTime::now()
@@ -162,10 +209,24 @@ impl Tsig {
         match key.verify(wire, now, None, 0) {
             Ok(_) => {}
             // RFC 8945 §5.2.3: Sign BADTIME with the key, request time, server time, and fudge.
-            Err(TsigError::BadTime) => return tsig_error(cx, &record, 18, Some(key), now),
+            Err(TsigError::BadTime) => {
+                pharos_server::logging::log(
+                    "WARN",
+                    "tsig",
+                    &format!("BADTIME for key {}", record.owner),
+                );
+                return tsig_error(cx, &record, 18, Some(key), now);
+            }
             Err(TsigError::Format) => return Outcome::Unanswered(Rcode::FORMERR),
             // RFC 8945 §5.2.2: A failed MAC gets unsigned NOTAUTH/BADSIG.
-            Err(_) => return tsig_error(cx, &record, 16, None, 0),
+            Err(_) => {
+                pharos_server::logging::log(
+                    "WARN",
+                    "tsig",
+                    &format!("MAC verification failed for key {}", record.owner),
+                );
+                return tsig_error(cx, &record, 16, None, 0);
+            }
         }
         cx.metadata.set_validated_tsig(&secret.name);
         let index = algorithm.expect("checked above");
