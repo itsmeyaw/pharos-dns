@@ -504,13 +504,12 @@ async fn scoped_acl_client(policy: &str) -> (Outcome, Vec<u8>) {
         response: &mut response,
         max_response_size: 512,
     };
-    let outcome =
-        chain
-            .acl
-            .as_ref()
-            .unwrap()
-            .serve(&mut cx, NextAllowed)
-            .await;
+    let outcome = chain
+        .acl
+        .as_ref()
+        .unwrap()
+        .serve(&mut cx, NextAllowed)
+        .await;
     (outcome, response)
 }
 
@@ -544,8 +543,7 @@ async fn unscoped_filter_catches_scoped_link_local_client() {
 
 #[tokio::test]
 async fn unscoped_allow_does_not_exempt_scoped_client_from_block_all() {
-    let (outcome, response) =
-        scoped_acl_client("allow net fe80::/10\nblock").await;
+    let (outcome, response) = scoped_acl_client("allow net fe80::/10\nblock net *").await;
     assert_eq!(outcome, Outcome::Response);
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
 }
