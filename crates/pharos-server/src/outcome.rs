@@ -341,18 +341,84 @@ fn scrub(
 fn required_section_end(
     message: Message<'_>,
     question_end: usize,
-    mut end: usize,
+    end: usize,
 ) -> (usize, u16, u16) {
+    let end = contiguous_rrset_end(message, question_end, end)
+        .unwrap_or_else(|| spanning_rrset_end(message, question_end, end));
+    let answer_count = message
+        .answers()
+        .take_while(|record| record.rdata_offset + record.rdata.len() <= end)
+        .count() as u16;
+    let authority_count = message
+        .authorities()
+        .take_while(|record| record.rdata_offset + record.rdata.len() <= end)
+        .count() as u16;
+    (end, answer_count, authority_count)
+}
+
+fn rrset_key<'a>(record: &pharos_proto::Record<'a>) -> RrsetKey<'a> {
+    RrsetKey {
+        name: record.name,
+        rtype: record.rtype,
+        class: record.class,
+    }
+}
+
+// RFC 2181 §9: Contiguous RRsets cannot overlap; only a key seen on both sides of the cutoff can
+// widen a span, and that case returns None for the exact analysis. Allocation-free.
+fn contiguous_rrset_end(
+    message: Message<'_>,
+    question_end: usize,
+    cut: usize,
+) -> Option<usize> {
+    const MAX_LEFT_RUNS: usize = 64;
+    let mut left = [0u64; MAX_LEFT_RUNS];
+    let mut left_runs = 0;
+    let mut end = cut;
+    let mut run: Option<(RrsetKey<'_>, usize, usize)> = None;
+    let mut start = question_end;
+    let close = |run: Option<(RrsetKey<'_>, usize, usize)>, end: &mut usize| {
+        if let Some((_, run_start, run_end)) = run
+            && run_start < cut
+            && cut < run_end
+        {
+            *end = run_start;
+        }
+    };
+    for record in message.answers().chain(message.authorities()) {
+        let key = rrset_key(&record);
+        let record_end = record.rdata_offset + record.rdata.len();
+        match run.as_mut() {
+            Some((run_key, _, run_end)) if *run_key == key => *run_end = record_end,
+            _ => {
+                close(run.take(), &mut end);
+                let fingerprint = key.fingerprint();
+                if start < cut {
+                    if left_runs == MAX_LEFT_RUNS || left[..left_runs].contains(&fingerprint) {
+                        return None;
+                    }
+                    left[left_runs] = fingerprint;
+                    left_runs += 1;
+                } else if left[..left_runs].contains(&fingerprint) {
+                    return None;
+                }
+                run = Some((key, start, record_end));
+            }
+        }
+        start = record_end;
+    }
+    close(run.take(), &mut end);
+    Some(end)
+}
+
+// RFC 2181 §9: Interleaved RRsets span other records, so merge overlapping spans.
+fn spanning_rrset_end(message: Message<'_>, question_end: usize, mut end: usize) -> usize {
     let mut rrsets = std::collections::HashMap::new();
     let mut start = question_end;
     for record in message.answers().chain(message.authorities()) {
         let record_end = record.rdata_offset + record.rdata.len();
         rrsets
-            .entry(RrsetKey {
-                name: record.name,
-                rtype: record.rtype,
-                class: record.class,
-            })
+            .entry(rrset_key(&record))
             .and_modify(|range: &mut (usize, usize)| range.1 = record_end)
             .or_insert((start, record_end));
         start = record_end;
@@ -376,15 +442,7 @@ fn required_section_end(
     if let Some(first) = component.filter(|first| *first < end && end < component_end) {
         end = first;
     }
-    let answer_count = message
-        .answers()
-        .take_while(|record| record.rdata_offset + record.rdata.len() <= end)
-        .count() as u16;
-    let authority_count = message
-        .authorities()
-        .take_while(|record| record.rdata_offset + record.rdata.len() <= end)
-        .count() as u16;
-    (end, answer_count, authority_count)
+    end
 }
 
 #[derive(Clone, Copy)]
@@ -402,17 +460,24 @@ impl PartialEq for RrsetKey<'_> {
 
 impl Eq for RrsetKey<'_> {}
 
-impl Hash for RrsetKey<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // RFC 4343 §3: Hash owner labels with ASCII case folding, matching DNS equality.
+impl RrsetKey<'_> {
+    // RFC 4343 §3: Fold ASCII case so equal owner names share a fingerprint (FNV-1a over label bytes).
+    fn fingerprint(&self) -> u64 {
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut hash = 0xcbf2_9ce4_8422_2325 ^ (u64::from(self.rtype.0) << 16 | u64::from(self.class.0));
         for label in self.name.labels() {
-            label.len().hash(state);
+            hash = (hash ^ label.len() as u64).wrapping_mul(PRIME);
             for byte in label {
-                byte.to_ascii_lowercase().hash(state);
+                hash = (hash ^ u64::from(byte.to_ascii_lowercase())).wrapping_mul(PRIME);
             }
         }
-        self.rtype.hash(state);
-        self.class.hash(state);
+        hash
+    }
+}
+
+impl Hash for RrsetKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.fingerprint());
     }
 }
 

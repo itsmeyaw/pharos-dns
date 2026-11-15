@@ -66,3 +66,49 @@ fn edns_finalization_preserves_existing_options_without_allocating() {
     assert_eq!(after.allocations - before.allocations, 0);
     assert_eq!(after.reallocations - before.reallocations, 0);
 }
+
+#[test]
+fn truncating_contiguous_rrsets_does_not_allocate() {
+    let question: Name = "q.test.".parse().unwrap();
+    let question = NameRef::parse(question.as_wire(), 0).unwrap();
+    let mut query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x0100).unwrap();
+    builder.question(question, Type::A, Class::IN).unwrap();
+    let _ = builder.finish();
+    let query = Message::parse(&query).unwrap();
+    let mut source = Vec::with_capacity(4096);
+    let mut builder = MessageBuilder::new(&mut source, 4096, 1, 0x8180).unwrap();
+    builder.question(question, Type::A, Class::IN).unwrap();
+    for label in [b'a', b'b', b'c', b'd'] {
+        let wire = [1, label, 0];
+        let name = NameRef::parse(&wire, 0).unwrap();
+        for _ in 0..2 {
+            builder
+                .record(Section::Answer, name, Type::TXT, Class::IN, 10, &[7; 100])
+                .unwrap();
+        }
+    }
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(4096);
+    let before = GLOBAL.stats();
+    for _ in 0..100 {
+        response.clear();
+        response.extend_from_slice(&source);
+        assert_eq!(
+            finish_outcome(
+                query,
+                Protocol::Udp,
+                Outcome::Response,
+                &mut response,
+                |_| panic!("unexpected error")
+            ),
+            Action::Respond
+        );
+        let message = Message::parse(&response).unwrap();
+        assert!(message.tc());
+        assert_eq!(message.answer_count(), 4);
+    }
+    let after = GLOBAL.stats();
+    assert_eq!(after.allocations - before.allocations, 0);
+    assert_eq!(after.reallocations - before.reallocations, 0);
+}
