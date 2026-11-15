@@ -30,5 +30,6 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
 - For a non-EDNS Query, the Listener removes the `ederror` OPT from the
   Response; CoreDNS can retain it. See the Server notes in `docs/compatibility.md`.
 - CNAME Self Lookup allocates; #86 tracks allocation-free Self Lookup.
-- Answer CNAMEs restart Self Lookup for every non-CNAME QTYPE, unlike CoreDNS v1.15.0, which follows only A/AAAA. Each matched CNAME can spawn an allocating lookup; #86 tracks that cost (RFC 1034 §3.6.2; [`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- Answer CNAMEs restart Self Lookup for every QTYPE except CNAME and ANY, unlike CoreDNS v1.15.0, which follows only A/AAAA. Each matched CNAME can spawn an allocating lookup; #86 tracks that cost (RFC 1034 §§3.4.1, 3.6.2; [`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
 - For authoritative NXDOMAIN, a generated SOA is placed in Authority even when configured in Answer (RFC 2308 §3); CoreDNS v1.15.0 preserves the configured section ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- For NODATA, a configured SOA stays in its configured section, including Answer (RFC 2308 §2.2).

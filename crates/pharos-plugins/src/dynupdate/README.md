@@ -4,7 +4,7 @@
 
 ## dynupdate
 
-- Seed, stored, and updated Zones require an apex NS RRset and reject out-of-zone owners; an update cannot remove the last apex NS (RFC 2181 §6.1; RFC 1034 §4.2).
+- Seed, stored, and updated Zones require an apex NS RRset and confine owners to the Zone; an update cannot remove the last apex NS (RFC 2181 §6.1; RFC 1034 §4.2).
 - Shared Zone CNAME/DNAME Self Lookup allocates for missing Zone-tree names,
   including empty nonterminals, and for NS or apex SOA targets. This matches
   CoreDNS routing but is an exception to the Query allocation rule until #86.

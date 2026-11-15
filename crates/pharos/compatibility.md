@@ -11,7 +11,7 @@
 ## auto
 
 - [auto Plugin notes](../crates/pharos-plugins/src/auto/README.md)
-- RFC 4343 §3: Uppercase discovered origins remain case-insensitive; Pharos no longer turns them into apex referrals.
+- RFC 4343 §3: Auto uses case-insensitive name matching; no case-dependent Zone Cut logic remains.
 
 ## autopath
 
@@ -53,7 +53,8 @@
 ## dynupdate
 
 - [dynupdate Plugin notes](../crates/pharos-plugins/src/dynupdate/README.md)
-- Seed, stored, and candidate dynamic Zones require apex NS; deleting the final apex NS fails validation (RFC 2181 §6.1). CoreDNS v1.15.0's file parser only requires SOA.
+- Seed, stored, and candidate dynamic Zones require apex NS (RFC 2181 §6.1). UPDATE attempts to delete the final apex NS are ignored, not rejected (RFC 2136 §2.5.4).
+- Existing persistent databases without apex NS now fail startup with an error naming the missing RRset and repair. Back up first; before upgrade, add apex NS through an authorized UPDATE or export the complete Zone and recreate the database from a corrected seed. Pharos fails fast rather than load-with-warning because an NS-less authoritative Zone violates RFC 2181 §6.1.
 
 ## errors
 
@@ -67,7 +68,7 @@
 
 - [file Plugin notes](../crates/pharos-plugins/src/file/README.md)
 - Pharos intentionally differs from CoreDNS where RFC-conformant Zone behavior requires it:
-  - Zone construction requires apex NS and rejects out-of-zone owners, including secondary transfers and dynamic zones (RFC 2181 §6.1; RFC 1034 §4.2; RFC 5936 §3.1); CoreDNS v1.15.0's file parser checks SOA ownership but does not require apex NS.
+  - Zone construction requires apex NS and confines owners to the Zone (RFC 1034 §4.2; RFC 2181 §6.1; for AXFR, see RFC 5936 §3.1). CoreDNS v1.15.0's file parser checks SOA ownership but does not require apex NS.
   - At an apex, conflicting ZONEMD records with the same Scheme/Hash Algorithm are rejected, while identical duplicates are deduplicated (RFC 8976 §2.5); CoreDNS v1.15.0 retains duplicate tree entries.
   - QCLASS=ANY Zone replies can contain selected-class records but clear AA; CoreDNS v1.15.0 keeps file replies authoritative (RFC 1035 §6.2).
   - An apex query for an absent type returns NOERROR/NODATA with the SOA (RFC 2308 §2.2); CoreDNS v1.15.0 returns NXDOMAIN for an SOA/NS-only apex.
@@ -79,7 +80,7 @@
 ## secondary
 
 - [secondary Plugin notes](../crates/pharos-plugins/src/secondary/README.md)
-- AXFR snapshots without apex NS or with out-of-zone owners are rejected before publish (RFC 2181 §6.1; RFC 5936 §3.1); CoreDNS v1.15.0's file Zone insertion does not enforce those boundaries.
+- AXFR snapshots without apex NS or with out-of-zone owners are rejected before publish (RFC 1034 §4.2; RFC 2181 §6.1; see RFC 5936 §3.1 for AXFR processing); CoreDNS v1.15.0's file Zone insertion does not enforce those boundaries.
 
 ## forward
 
@@ -97,7 +98,7 @@
 
 - [hosts Plugin notes](../crates/pharos-plugins/src/hosts/README.md)
 - RFC 4592 §§2.2.1, 3.3: `hosts` replaces only the leftmost QNAME label for wildcard lookup and does not search closest-encloser ancestors, matching CoreDNS v1.15.0 (ADR 0002).
-- RFC 1035 §6.2: `hosts` answers QCLASS=ANY with selected IN data but clears AA; CoreDNS v1.15.0 leaves AA set.
+- RFC 1035 §6.2 / RFC 2308 §2: `hosts` answers positive QCLASS=ANY hits with selected IN data and AA clear; missing/negative names pass through instead of asserting denial from IN-only data. CoreDNS v1.15.0 leaves AA set on positive answers and can return SERVFAIL for unmapped names.
 
 ## k8s_external
 
@@ -114,6 +115,7 @@
 ## local
 
 - [local Plugin notes](../crates/pharos-plugins/src/local/README.md)
+- RFC 1035 §6.2 / RFC 2308 §2: `local` answers positive QCLASS=ANY hits with selected IN data and AA clear; negative/NODATA cases pass through rather than asserting a denial from IN-only data.
 
 ## log
 
@@ -187,8 +189,9 @@
 ## template
 
 - [template Plugin notes](../crates/pharos-plugins/src/template/README.md)
-- RFC 1034 §3.6.2: template CNAME targets restart for every non-CNAME QTYPE; CoreDNS v1.15.0 restarts only A/AAAA ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- RFC 1034 §§3.4.1, 3.6.2: template CNAME targets restart for every QTYPE except CNAME and ANY; CoreDNS v1.15.0 restarts only A/AAAA ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
 - RFC 2308 §3: an authoritative NXDOMAIN template SOA is placed in Authority even if configured as Answer; CoreDNS v1.15.0 keeps the configured section ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- RFC 2308 §2.2: a configured NODATA SOA stays in its configured section, including Answer.
 - RFC 1035 §6.2: QCLASS=ANY template replies can contain selected-class records but clear AA; CoreDNS v1.15.0 marks template replies authoritative.
 
 ## view
