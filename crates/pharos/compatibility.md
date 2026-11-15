@@ -388,7 +388,7 @@
 - A successful empty A lookup returns the original AAAA response unless it contains excluded IPv4-mapped AAAA, which Pharos removes (RFC 6147 §§5.1.4, 5.4); this differs from the former Pharos behavior.
 - The `header` plugin can override AA on Queries and non-authoritative Responses; this retains CoreDNS v1.15.0 `plugin/header` behavior (RFC 1035 §4.1.1).
 - Header query rules still rewrite RD sent to Next, but Response RD copies the received Query as RFC 1035 §4.1.1 requires; response RD rules are rejected at setup, unlike CoreDNS overrides.
-- ACL scoped IPv6 rules accept numeric zone IDs; unscoped `block`/`drop` matches all zones to prevent fail-open, while unscoped `allow`/`filter` does not match scoped clients (RFC 4007 §§11–12).
+- ACL scoped IPv6 rules accept numeric zone IDs; unscoped `block`/`drop`/`filter` matches all zones to prevent fail-open, while unscoped `allow` does not match scoped clients. Thus `allow net fe80::/10` followed by `block` blocks scoped link-local clients; a scoped allow can match first (RFC 4007 §§11–12).
 - Rewrite `edns0 subnet` applies only to IN Queries and caps prefixes at /24 IPv4, /56 IPv6, and the incoming ECS SOURCE; no cap opt-out is provided (RFC 7871 §§5, 7.1.1, 11.1).
 
 - **Kubernetes and forwarding**

@@ -466,13 +466,10 @@ async fn coredns_acl_matches_ordered_policies_and_response_codes() {
     }
 }
 
-#[tokio::test]
-async fn unscoped_link_local_block_catches_scoped_clients() {
-    let blocks = parse(
-        "Corefile",
-        ".:53 {\n acl example.org {\n  block net fe80::/10\n }\n}",
-    )
-    .unwrap();
+async fn scoped_acl_client(policy: &str) -> (Outcome, Vec<u8>) {
+    let policy = policy.replace('\n', "\n  ");
+    let corefile = format!(".:53 {{\n acl example.org {{\n  {policy}\n }}\n}}");
+    let blocks = parse("Corefile", &corefile).unwrap();
     let chain = configure::<Chain>(&blocks, directives())
         .unwrap()
         .remove(0)
@@ -507,14 +504,54 @@ async fn unscoped_link_local_block_catches_scoped_clients() {
         response: &mut response,
         max_response_size: 512,
     };
-    assert_eq!(
+    let outcome =
         chain
             .acl
             .as_ref()
             .unwrap()
             .serve(&mut cx, NextAllowed)
-            .await,
-        Outcome::Response
+            .await;
+    (outcome, response)
+}
+
+#[tokio::test]
+async fn unscoped_block_catches_scoped_link_local_client() {
+    let (outcome, response) = scoped_acl_client("block net fe80::/10").await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+}
+
+#[tokio::test]
+async fn unscoped_drop_catches_scoped_link_local_client() {
+    let (outcome, _) = scoped_acl_client("drop net fe80::/10").await;
+    assert_eq!(outcome, Outcome::Drop);
+}
+
+#[tokio::test]
+async fn unscoped_filter_catches_scoped_link_local_client() {
+    let (outcome, response) = scoped_acl_client("filter net fe80::/10").await;
+    assert_eq!(outcome, Outcome::Response);
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.rcode(), Rcode::NOERROR);
+    assert_eq!(
+        message.opt().unwrap().options().iter().next().unwrap(),
+        EdnsOption::ExtendedError {
+            info_code: 17,
+            extra_text: &[]
+        }
     );
-    assert_eq!(Message::parse(cx.response).unwrap().rcode(), Rcode::REFUSED);
+}
+
+#[tokio::test]
+async fn unscoped_allow_does_not_exempt_scoped_client_from_block_all() {
+    let (outcome, response) =
+        scoped_acl_client("allow net fe80::/10\nblock").await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+}
+
+#[tokio::test]
+async fn scoped_allow_before_unscoped_block_preserves_policy_order() {
+    let (outcome, _) = scoped_acl_client("allow net fe80::%7/10\nblock net fe80::/10").await;
+    assert_eq!(outcome, Outcome::Unanswered(Rcode::NOERROR));
 }

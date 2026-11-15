@@ -257,13 +257,14 @@ impl Plugin for Acl {
                     (policy.types.contains(&Type::NONE) || policy.types.contains(&question.qtype))
                         && (policy.networks.is_empty()
                             || policy.networks.iter().any(|&(network, prefix, scope)| {
+                                // RFC 4007 §§11–12: Allow must not match scoped clients without a zone.
                                 network_matches(
                                     network,
                                     prefix,
                                     scope,
                                     ip,
                                     client_scope,
-                                    matches!(policy.action, Action::Block | Action::Drop),
+                                    !matches!(policy.action, Action::Allow),
                                 )
                             }))
                 })
@@ -363,14 +364,14 @@ fn network_matches(
     scope: Option<u32>,
     client: IpAddr,
     client_scope: u32,
-    deny: bool,
+    restrictive: bool,
 ) -> bool {
     if !crate::ipnet::contains(network, prefix, client) {
         return false;
     }
     if requires_scope(client) {
-        // RFC 4007 §§11–12: Unscoped deny rules must not fail open across interfaces.
-        scope.map_or(deny, |scope| scope == client_scope)
+        // RFC 4007 §§11–12: Unscoped restrictive rules must not fail open across interfaces.
+        scope.map_or(restrictive, |scope| scope == client_scope)
     } else {
         scope.is_none()
     }
