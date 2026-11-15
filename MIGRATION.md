@@ -133,9 +133,9 @@ be written to stderr.
 
 Pharos's `cache` and `forward` do not send `test.` or RFC 6303 reverse names
 upstream by default. Add `allow_special` to a matching `forward` stanza to
-permit upstream resolution for those names. `invalid.` remains NXDOMAIN in
-`forward`. Explicit `file` Zones keep precedence, including Zones under these
-suffixes.
+permit upstream resolution and cache its answers. `invalid.` always gets a
+terminal NXDOMAIN; explicit `forward .invalid` is rejected. Explicit `file`
+Zones keep precedence, including Zones under these suffixes.
 
 The `local` Plugin serves the full RFC 6303 empty-zone catalogue; CoreDNS
 v1.15.0's `plugin/local/local.go` defaults only to `localhost.`,
@@ -144,7 +144,9 @@ retains CoreDNS's `255.in-addr.arpa.` alias alongside RFC 6303's full broadcast
 reverse Zone. Source: [CoreDNS v1.15.0 `plugin/local/local.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/local/local.go).
 
 Because `local` runs before `hosts`, `kubernetes`, `auto`, and `secondary`,
-disable any reverse Zone owned by those Plugins, for example:
+reverse lookups now reach those Plugins before local empty-zone answers. Use
+`disable` only when you want to turn off local synthesis for a zone, including
+`localhost`, for example:
 
 ```corefile
 local {
@@ -154,5 +156,5 @@ local {
 
 Disabling a Zone stops only `local`'s synthetic answer. Later `hosts`,
 `kubernetes`, `auto`, or `secondary` data can answer it; forwarding still needs
-`allow_special`. `localhost.` apex NS/SOA Queries now return negative NODATA
-instead of CoreDNS's positive records (RFC 6761 §6.3).
+`allow_special`. `localhost.` apex NS/SOA Queries return negative NODATA rather
+than CoreDNS's positive records (RFC 6761 §6.3).

@@ -110,7 +110,7 @@
 ## local
 
 - [local Plugin notes](../crates/pharos-plugins/src/local/README.md)
-- Pharos serves the complete RFC 6303 empty-zone catalogue by default and allows per-zone `disable`; because `local` precedes `hosts`, `kubernetes`, `auto`, and `secondary`, disable any reverse Zone owned by those Plugins. See [`MIGRATION.md`](../MIGRATION.md).
+- Pharos serves the complete RFC 6303 empty-zone catalogue by default and allows per-zone `disable`; reverse Queries reach later `hosts`, `kubernetes`, `auto`, and `secondary` owners before local empty-zone answers. See [`MIGRATION.md`](../MIGRATION.md).
 
 ## log
 

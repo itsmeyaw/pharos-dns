@@ -14,7 +14,7 @@
 - Encrypted Upstreams (`tls://`, `quic://` and `https://`) and `tls` or `tls_servername` options fail setup rather than silently downgrade; TLS is deferred to M3.
 - Hostname Upstreams resolve at setup using the system resolver or the configured `resolver`.
 - `doh_method` has no effect on plain DNS.
-- Special names `test.` and RFC 6303 reverse domains return immediate NXDOMAIN without an Upstream by default. Add `allow_special` to a `forward` stanza to permit upstream resolution for those names; `forward` returns NXDOMAIN for `invalid.` (an earlier explicit file Zone still takes precedence).
+- Special names `test.` and RFC 6303 reverse domains defer to the Chain's terminal NXDOMAIN unless a matching stanza opts into upstream lookup with `allow_special` or an explicit special-use `from` Zone. `invalid.` always gets terminal NXDOMAIN; explicit `forward .invalid` setup is rejected (RFC 6761 §§6.1, 6.2, 6.4).
 - Without the `local` Plugin, `forward` may send `localhost.` Queries upstream instead of synthesizing loopback/negative replies (RFC 6761 §6.3; documented Partial).
 - Upstream and resolver ports must be numeric and fit in 16 bits; CoreDNS can also accept service names and out-of-range ports at setup.
 - Like CoreDNS, IPv6 scopes are stripped from numeric Upstreams, including resolv.conf entries.
