@@ -366,11 +366,7 @@ fn rrset_key<'a>(record: &pharos_proto::Record<'a>) -> RrsetKey<'a> {
 
 // RFC 2181 §9: Contiguous RRsets cannot overlap; only a key seen on both sides of the cutoff can
 // widen a span, and that case returns None for the exact analysis. Allocation-free.
-fn contiguous_rrset_end(
-    message: Message<'_>,
-    question_end: usize,
-    cut: usize,
-) -> Option<usize> {
+fn contiguous_rrset_end(message: Message<'_>, question_end: usize, cut: usize) -> Option<usize> {
     const MAX_LEFT_RUNS: usize = 64;
     let mut left = [0u64; MAX_LEFT_RUNS];
     let mut left_runs = 0;
@@ -464,7 +460,8 @@ impl RrsetKey<'_> {
     // RFC 4343 §3: Fold ASCII case so equal owner names share a fingerprint (FNV-1a over label bytes).
     fn fingerprint(&self) -> u64 {
         const PRIME: u64 = 0x0000_0100_0000_01b3;
-        let mut hash = 0xcbf2_9ce4_8422_2325 ^ (u64::from(self.rtype.0) << 16 | u64::from(self.class.0));
+        let mut hash =
+            0xcbf2_9ce4_8422_2325 ^ (u64::from(self.rtype.0) << 16 | u64::from(self.class.0));
         for label in self.name.labels() {
             hash = (hash ^ label.len() as u64).wrapping_mul(PRIME);
             for byte in label {
