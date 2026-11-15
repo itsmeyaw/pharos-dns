@@ -100,7 +100,7 @@ fn add_secret(
     // RFC 8945 §8: Recommend secrets at least as long as each HMAC output.
     if secret.as_ref().is_some_and(|secret| secret.len() < 64) {
         pharos_server::logging::log(
-            "WARN",
+            "INFO",
             "tsig",
             &format!("shared secret for key {name} is shorter than 64 octets"),
         );

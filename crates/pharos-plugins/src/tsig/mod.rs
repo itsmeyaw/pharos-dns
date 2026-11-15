@@ -1,7 +1,7 @@
 pub(crate) mod setup;
 
 use pharos_proto::{
-    MessageBuilder, Name, NameRef, Opcode, Rcode, TsigError, TsigKey, TsigRecord, Type,
+    Message, MessageBuilder, Name, NameRef, Opcode, Rcode, TsigError, TsigKey, TsigRecord, Type,
 };
 use pharos_server::{Context, Error, Next, Outcome, Plugin};
 use std::{
@@ -52,25 +52,34 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+fn tsig_presence_with_valid_placement(query: &Message<'_>) -> Option<bool> {
+    // RFC 8945 §5.2: TSIG may appear only once, as the final Additional RR.
+    let mut tsig_seen = false;
+    for (records, additional) in [
+        (query.answers(), false),
+        (query.authorities(), false),
+        (query.additionals(), true),
+    ] {
+        for rr in records {
+            if additional && tsig_seen {
+                return None;
+            }
+            if rr.rtype == Type::TSIG {
+                if !additional {
+                    return None;
+                }
+                tsig_seen = true;
+            }
+        }
+    }
+    Some(tsig_seen)
+}
+
 impl Plugin for Tsig {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        // RFC 8945 §5.2: TSIG is not valid in the Answer or Authority section.
-        if cx
-            .query
-            .answers()
-            .chain(cx.query.authorities())
-            .any(|rr| rr.rtype == Type::TSIG)
-        {
+        let Some(tsig_seen) = tsig_presence_with_valid_placement(&cx.query) else {
             return Outcome::Unanswered(Rcode::FORMERR);
-        }
-        // RFC 8945 §5.2: TSIG must be the final record in the Additional section.
-        let mut tsig_seen = false;
-        for rr in cx.query.additionals() {
-            if tsig_seen {
-                return Outcome::Unanswered(Rcode::FORMERR);
-            }
-            tsig_seen = rr.rtype == Type::TSIG;
-        }
+        };
         let Some(question) = cx.query.questions().next() else {
             // RFC 8945 §5.2: Reject malformed TSIGs even without a Question.
             if tsig_seen && TsigRecord::parse(cx.query.as_wire()).is_err() {
@@ -153,26 +162,15 @@ impl Tsig {
             .find(|(key, _)| *key == listener)
             .and_then(|(_, ring)| ring.get())
             .unwrap_or(&self.secrets);
-        // RFC 8945 §5.2.1: An unknown key gets an unsigned NOTAUTH/BADKEY response.
+        // RFC 8945 §5.2.1: In-zone unknown keys return unsigned NOTAUTH/BADKEY.
         let Some(secret) = secrets.iter().find(|secret| record.owner == secret.name) else {
-            pharos_server::logging::log("WARN", "tsig", &format!("unknown key {}", record.owner));
-            if cx.query.questions().next().is_some_and(|question| {
-                self.all_types
-                    || self.types.contains(&question.qtype)
-                    || self.all_opcodes
-                    || self.opcodes.contains(&cx.query.opcode())
-            }) {
-                // RFC 8945 §5.5: Only transparent forwarding can bypass explicit key validation.
-                return tsig_error(cx, &record, 17, None, 0);
-            }
-            // RFC 8945 §5.5: Forward a signed Message unchanged when its key is not shared.
-            return next.run(cx).await;
+            pharos_server::logging::log_debug("tsig", format_args!("unknown key {}", record.owner));
+            return tsig_error(cx, &record, 17, None, 0);
         };
         let Some(keys) = &secret.keys else {
-            pharos_server::logging::log(
-                "WARN",
+            pharos_server::logging::log_debug(
                 "tsig",
-                &format!("key {} has no usable secret", record.owner),
+                format_args!("key {} has no usable secret", record.owner),
             );
             return tsig_error(cx, &record, 16, None, 0);
         };
@@ -187,10 +185,9 @@ impl Tsig {
             .iter()
             .position(|name| record.algorithm == NameRef::parse(name, 0).expect("valid algorithm"));
         let Some(key) = algorithm.map(|i| &keys[i]) else {
-            pharos_server::logging::log(
-                "WARN",
+            pharos_server::logging::log_debug(
                 "tsig",
-                &format!(
+                format_args!(
                     "unsupported algorithm {} for key {}",
                     record.algorithm, record.owner
                 ),
@@ -204,20 +201,18 @@ impl Tsig {
             Ok(_) => {}
             // RFC 8945 §5.2.3: Sign BADTIME with the key, request time, server time, and fudge.
             Err(TsigError::BadTime) => {
-                pharos_server::logging::log(
-                    "WARN",
+                pharos_server::logging::log_debug(
                     "tsig",
-                    &format!("BADTIME for key {}", record.owner),
+                    format_args!("BADTIME for key {}", record.owner),
                 );
                 return tsig_error(cx, &record, 18, Some(key), now);
             }
             Err(TsigError::Format) => return Outcome::Unanswered(Rcode::FORMERR),
             // RFC 8945 §5.2.2: A failed MAC gets unsigned NOTAUTH/BADSIG.
             Err(_) => {
-                pharos_server::logging::log(
-                    "WARN",
+                pharos_server::logging::log_debug(
                     "tsig",
-                    &format!("MAC verification failed for key {}", record.owner),
+                    format_args!("MAC verification failed for key {}", record.owner),
                 );
                 return tsig_error(cx, &record, 16, None, 0);
             }
