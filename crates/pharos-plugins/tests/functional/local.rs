@@ -256,6 +256,9 @@ async fn local_qclass_any_answer_is_not_authoritative() {
     assert!(!response.aa());
     let answer = response.answers().next().unwrap();
     assert_eq!((answer.rtype, answer.class), (Type::A, Class::IN));
+    let (outcome, wire) = query_class(&chain, "localhost.", Type::MX, Class::ANY).await;
+    assert_eq!(outcome, Outcome::Drop);
+    assert!(wire.is_empty());
 }
 
 #[tokio::test]

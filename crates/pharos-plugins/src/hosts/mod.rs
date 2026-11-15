@@ -318,6 +318,10 @@ impl pharos_server::Plugin for Hosts {
             && names1.is_none()
             && names2.is_none();
         let negative = ips.0.is_empty() && ips.1.is_empty() && names1.is_none() && names2.is_none();
+        // RFC 1035 §6.2 and RFC 2308 §2: IN-only host data cannot prove QCLASS=ANY denial.
+        if question.qclass == Class::ANY && negative {
+            return next.run(cx).await;
+        }
         if missing && fallthrough {
             return next.run(cx).await;
         }

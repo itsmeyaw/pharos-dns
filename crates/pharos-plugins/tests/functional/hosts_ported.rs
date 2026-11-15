@@ -147,6 +147,9 @@ async fn coredns_lookup_cases() {
     assert!(!response.aa());
     let answer = response.answers().next().unwrap();
     assert_eq!((answer.rtype, answer.class), (Type::A, Class::IN));
+    let (outcome, wire) = query_class(&chain, "missing.example.org.", Type::A, Class::ANY).await;
+    assert_eq!(outcome, Outcome::Error(Error::NoNextPlugin));
+    assert!(wire.is_empty());
 
     for (name, expected) in [
         ("1.0.0.10.in-addr.arpa.", vec!["example.org."]),

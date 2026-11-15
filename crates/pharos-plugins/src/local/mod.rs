@@ -143,6 +143,10 @@ impl Local {
         } else {
             None
         };
+        // RFC 1035 §6.2 and RFC 2308 §2: IN-only local data cannot prove QCLASS=ANY denial.
+        if question.qclass == Class::ANY && answer_type.is_none() {
+            return None;
+        }
         // RFC 2308 §2: distinguish name errors from existing names without matching records.
         let nxdomain = !special && !apex && !reverse_ptr;
         // RFC 1035 §3.1: encode Domain names as length-prefixed labels ending in zero.
