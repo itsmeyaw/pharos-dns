@@ -71,16 +71,11 @@ impl Plugin for Tsig {
             }
             tsig_seen = rr.rtype == Type::TSIG;
         }
-        // RFC 8945 §5.2: Reject malformed TSIGs even outside configured zones.
-        let record = if tsig_seen {
-            match TsigRecord::parse(cx.query.as_wire()) {
-                Ok(record) => Some(record),
-                Err(_) => return Outcome::Unanswered(Rcode::FORMERR),
-            }
-        } else {
-            None
-        };
         let Some(question) = cx.query.questions().next() else {
+            // RFC 8945 §5.2: Reject malformed TSIGs even without a Question.
+            if tsig_seen && TsigRecord::parse(cx.query.as_wire()).is_err() {
+                return Outcome::Unanswered(Rcode::FORMERR);
+            }
             return next.run(cx).await;
         };
         // RFC 1034 §3.1: Domain membership follows the case-insensitive label suffix.
@@ -97,12 +92,14 @@ impl Plugin for Tsig {
                     .all(|(a, b)| a.eq_ignore_ascii_case(b))
         });
         if !matches {
+            // RFC 8945 §5.2: Reject malformed TSIGs even outside configured zones.
+            if tsig_seen && TsigRecord::parse(cx.query.as_wire()).is_err() {
+                return Outcome::Unanswered(Rcode::FORMERR);
+            }
             return next.run(cx).await;
         }
         if tsig_seen {
-            return self
-                .signed(cx, next, record.expect("TSIG parsed above"))
-                .await;
+            return self.signed(cx, next).await;
         }
         if self.all_types
             || self.types.contains(&question.qtype)
@@ -141,13 +138,11 @@ impl Tsig {
     }
 
     // RFC 5936 §5: TSIG can authenticate AXFR clients for transfer access control.
-    async fn signed<'q, 'a, N: Next + Send>(
-        &self,
-        cx: &mut Context<'q, 'a>,
-        next: N,
-        record: TsigRecord<'q>,
-    ) -> Outcome {
+    async fn signed<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let wire = cx.query.as_wire();
+        let Ok(record) = TsigRecord::parse(wire) else {
+            return Outcome::Unanswered(Rcode::FORMERR);
+        };
         let listener = pharos_server::ListenerKey {
             transport: cx.transport,
             address: cx.local,
