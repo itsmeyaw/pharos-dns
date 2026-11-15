@@ -237,6 +237,51 @@ async fn tkey_query_returns_notimp_without_running_chain() {
     assert_eq!(chain_calls.load(Ordering::SeqCst), 0);
 }
 
+// RFC 2930 §3: TKEY over TCP receives NOTIMP on the same connection.
+#[tokio::test]
+async fn tkey_query_over_tcp_returns_notimp() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    let chain_calls = Arc::new(AtomicUsize::new(0));
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(TkeyProbe(Arc::clone(&chain_calls))),
+        vec![],
+    );
+    let listener =
+        pharos_server::Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+            .await
+            .unwrap();
+    let name: Name = "example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 0x4242, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::TKEY,
+            Class::ANY,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut stream = tokio::net::TcpStream::connect(listener.local_addr())
+        .await
+        .unwrap();
+    stream.write_u16(wire.len() as u16).await.unwrap();
+    stream.write_all(&wire).await.unwrap();
+    let mut response = vec![0; usize::from(stream.read_u16().await.unwrap())];
+    stream.read_exact(&mut response).await.unwrap();
+    assert_eq!(&response[..2], &[0x42, 0x42]);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTIMP);
+    assert_eq!(chain_calls.load(Ordering::SeqCst), 0);
+    drop(stream);
+    listener.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn zero_question_query_is_not_rejected_as_malformed() {
     let key = ListenerKey {
