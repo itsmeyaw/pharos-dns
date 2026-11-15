@@ -123,6 +123,28 @@ async fn apex_dnskey_without_do_is_authoritative() {
     assert_eq!(reply.answers().next().unwrap().ttl, 3600);
 }
 
+struct NonApexDnskey;
+impl Next for NonApexDnskey {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder =
+            MessageBuilder::new(cx.response, cx.max_response_size, cx.query.id(), 0x8400).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        builder
+            .record(
+                Section::Answer,
+                q.name,
+                Type::DNSKEY,
+                Class::IN,
+                300,
+                &[1, 0, 3, 13, 1],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
 // RFC 4034 §3.1.4: the Original TTL is the covered DNSKEY RRset's TTL.
 #[tokio::test]
 async fn apex_dnskey_signature_uses_key_rrset_ttl() {
@@ -259,6 +281,80 @@ async fn split_keys_sign_dnskey_with_ksk_only() {
     verify_signatures(&reply.answers().collect::<Vec<_>>());
 }
 
+// RFC 6781 §3.1: Only the ZSK signs non-apex DNSKEY RRsets in a split-key Zone.
+#[tokio::test]
+async fn split_keys_use_zsk_for_non_apex_dnskey_rrsets() {
+    let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/dnssec/");
+    let text = format!(
+        "miek.nl {{\n dnssec {{\n key file {directory}Kmiek.nl.+013+59725 {directory}miek-zsk\n }}\n}}"
+    );
+    let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let domain: Name = "miek.nl.".parse().unwrap();
+    let name: Name = "child.miek.nl.".parse().unwrap();
+    let mut wire = Vec::with_capacity(1232);
+    let mut builder = MessageBuilder::new(&mut wire, 1232, 2, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::DNSKEY,
+            Class::IN,
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(1232),
+            0x8000,
+            &[],
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(1232);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 1232,
+    };
+    assert_eq!(
+        chain[0]
+            .config
+            .dnssec
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, NonApexDnskey)
+            .await,
+        Outcome::Response
+    );
+    let reply = Message::parse(cx.response).unwrap();
+    let zsk =
+        pharos_dnssec::keys::parse_dnskey(include_str!("../fixtures/dnssec/miek-zsk.key")).unwrap();
+    let mut zsk_rdata = zsk.flags.to_be_bytes().to_vec();
+    zsk_rdata.extend_from_slice(&[zsk.protocol, zsk.algorithm]);
+    zsk_rdata.extend_from_slice(&zsk.public_key);
+    let zsk_tag = pharos_dnssec::digest::key_tag(&zsk_rdata).unwrap();
+    let tags: Vec<_> = reply
+        .answers()
+        .filter_map(|rr| match rr.data().unwrap() {
+            pharos_proto::Rdata::Rrsig {
+                type_covered: Type::DNSKEY,
+                key_tag,
+                ..
+            } => Some(key_tag),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tags, [zsk_tag]);
+}
+
 struct Negative(bool);
 impl Next for Negative {
     async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
@@ -284,6 +380,39 @@ impl Next for Negative {
         )
         .unwrap();
         let _ = b.finish();
+        Outcome::Response
+    }
+}
+
+struct ExistingNoData;
+impl Next for ExistingNoData {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        use pharos_dnssec::denial::type_bitmap;
+
+        let q = cx.query.questions().next().unwrap();
+        let mut builder =
+            MessageBuilder::new(cx.response, cx.max_response_size, cx.query.id(), 0x8400).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        let apex = NameRef::parse(cx.domain.as_wire(), 0).unwrap();
+        builder
+            .record(
+                Section::Authority,
+                apex,
+                Type::SOA,
+                Class::IN,
+                60,
+                &[
+                    0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5,
+                ],
+            )
+            .unwrap();
+        let next: Name = "zzz.miek.nl.".parse().unwrap();
+        let mut nsec = next.as_wire().to_vec();
+        nsec.extend_from_slice(&type_bitmap(&[Type::A, Type::NSEC, Type::RRSIG]).unwrap());
+        builder
+            .record(Section::Authority, q.name, Type::NSEC, Class::IN, 60, &nsec)
+            .unwrap();
+        let _ = builder.finish();
         Outcome::Response
     }
 }
@@ -733,6 +862,74 @@ async fn nxdomain_gets_signed_black_lie_and_nodata_rcode() {
         1
     );
     verify_signatures(&reply.authorities().collect::<Vec<_>>());
+}
+
+// RFC 4035 §3.1.3.1: Existing-name NODATA uses its exact-owner NSEC proof.
+#[tokio::test]
+async fn existing_name_nodata_uses_the_real_nsec_record() {
+    let base = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/dnssec/Kmiek.nl.+013+59725"
+    );
+    let text = format!("miek.nl {{\n dnssec {{\n key file {base}\n }}\n}}");
+    let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let domain: Name = "miek.nl.".parse().unwrap();
+    let name: Name = "www.miek.nl.".parse().unwrap();
+    let mut wire = Vec::with_capacity(1232);
+    let mut builder = MessageBuilder::new(&mut wire, 1232, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AAAA,
+            Class::IN,
+        )
+        .unwrap();
+    builder
+        .record(
+            Section::Additional,
+            NameRef::parse(&[0], 0).unwrap(),
+            Type::OPT,
+            Class(1232),
+            0x8000,
+            &[],
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(1232);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 1232,
+    };
+
+    assert_eq!(
+        chain[0]
+            .config
+            .dnssec
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, ExistingNoData)
+            .await,
+        Outcome::Response
+    );
+    let reply = Message::parse(cx.response).unwrap();
+    let nsecs: Vec<_> = reply
+        .authorities()
+        .filter(|rr| rr.rtype == Type::NSEC)
+        .collect();
+    assert_eq!(nsecs.len(), 1);
+    assert_eq!(nsecs[0].name.to_name(), name);
+    assert!(matches!(
+        nsecs[0].data().unwrap(),
+        pharos_proto::Rdata::Nsec { next, .. } if next.to_name().to_string() == "zzz.miek.nl."
+    ));
 }
 
 #[tokio::test]

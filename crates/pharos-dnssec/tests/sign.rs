@@ -42,31 +42,50 @@ fn rsa_signer_accepts_4096_bits_and_rejects_8192_bits() {
     ));
 }
 
+// RFC 6605 §4: DNSSEC ECDSA verification must cover both P-256 and P-384.
 #[test]
 fn ecdsa_signatures_are_fixed_width_dns_wire_format() {
     let random = SystemRandom::new();
-    for (number, signer, verifier, size) in [
-        (
-            13,
-            &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-            &signature::ECDSA_P256_SHA256_FIXED,
-            64,
-        ),
-        (
-            14,
-            &signature::ECDSA_P384_SHA384_FIXED_SIGNING,
-            &signature::ECDSA_P384_SHA384_FIXED,
-            96,
-        ),
+    for (number, signer, size) in [
+        (13, &signature::ECDSA_P256_SHA256_FIXED_SIGNING, 64),
+        (14, &signature::ECDSA_P384_SHA384_FIXED_SIGNING, 96),
     ] {
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(signer, &random).unwrap();
         let original = EcdsaKeyPair::from_pkcs8(signer, pkcs8.as_ref()).unwrap();
         let key = SigningKey::from_pkcs8(number, pkcs8.as_ref()).unwrap();
         let signed = key.sign(MESSAGE).unwrap();
-        let verifier = UnparsedPublicKey::new(verifier, original.public_key().as_ref());
+        let public_key = original.public_key();
         assert_eq!(signed.len(), size);
-        assert!(verifier.verify(MESSAGE, &signed).is_ok());
-        assert!(verifier.verify(b"altered", &signed).is_err());
+        assert!(pharos_dnssec::sign::verify_ecdsa(
+            number,
+            &public_key.as_ref()[1..],
+            MESSAGE,
+            &signed
+        ));
+        assert!(!pharos_dnssec::sign::verify_ecdsa(
+            number,
+            &public_key.as_ref()[2..],
+            MESSAGE,
+            &signed
+        ));
+        assert!(!pharos_dnssec::sign::verify_ecdsa(
+            number,
+            &public_key.as_ref()[1..],
+            MESSAGE,
+            &signed[..signed.len() - 1]
+        ));
+        assert!(!pharos_dnssec::sign::verify_ecdsa(
+            8,
+            &public_key.as_ref()[1..],
+            MESSAGE,
+            &signed
+        ));
+        assert!(!pharos_dnssec::sign::verify_ecdsa(
+            number,
+            &public_key.as_ref()[1..],
+            b"altered",
+            &signed
+        ));
     }
 }
 

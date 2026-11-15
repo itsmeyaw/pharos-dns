@@ -117,15 +117,37 @@ fn loads_generated_p384_bind_pkcs8_and_pem() {
     let key =
         signature::EcdsaKeyPair::generate(&signature::ECDSA_P384_SHA384_FIXED_SIGNING).unwrap();
     let encoded = key.to_pkcs8v1().unwrap();
+    let source_public = key.public_key();
+    let encoded_text = STANDARD.encode(encoded.as_ref());
     let public = format!(
         "example. IN DNSKEY 257 3 14 {}",
-        STANDARD.encode(&key.public_key().as_ref()[1..])
+        STANDARD.encode(&source_public.as_ref()[1..])
     );
+    // RFC 7468 §2: Parsers tolerate preamble/trailing text and non-base64 body characters.
     let pem = format!(
-        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
-        STANDARD.encode(encoded.as_ref())
+        "Key follows:\n-----BEGIN PRIVATE KEY-----\n{}!\n-----END PRIVATE KEY-----\nTrailing note\n",
+        encoded_text
     );
-    assert!(parse_pkcs8(&public, pem.as_bytes()).is_ok());
+    let parsed = parse_pkcs8(&public, pem.as_bytes()).unwrap();
+    assert_eq!(
+        parsed.public.public_key.as_slice(),
+        &source_public.as_ref()[1..]
+    );
+    assert_eq!(
+        (
+            parsed.public.flags,
+            parsed.public.protocol,
+            parsed.public.algorithm
+        ),
+        (257, 3, 14)
+    );
+    for url_safe in ['-', '_'] {
+        let malformed = pem.replace(
+            &format!("{encoded_text}!"),
+            &format!("{encoded_text}{url_safe}!"),
+        );
+        assert!(parse_pkcs8(&public, malformed.as_bytes()).is_err());
+    }
     let private = format!(
         "Private-key-format: v1.3\nAlgorithm: 14\nPrivateKey: {}\n",
         STANDARD.encode(ec_scalar(encoded.as_ref()))

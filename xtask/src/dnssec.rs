@@ -3,6 +3,7 @@ use pharos_dnssec::{
     canonical::{CanonicalRecord, signed_data},
     digest::{key_tag, signature_valid_at},
     keys::Dnskey,
+    sign::verify_ecdsa,
 };
 use pharos_proto::{Message, Rdata, Type};
 
@@ -16,17 +17,15 @@ pub(crate) fn validate_response(
     rdata.extend_from_slice(&key.public_key);
     // RFC 4034 Appendix B: The DNSKEY RDATA key tag selects a matching key.
     let tag = key_tag(&rdata).ok_or("invalid DNSKEY")?;
-    let (algorithm, public): (&dyn signature::VerificationAlgorithm, Vec<u8>) = match key.algorithm
-    {
-        13 => (
-            &signature::ECDSA_P256_SHA256_FIXED,
-            [&[4][..], &key.public_key].concat(),
-        ),
+    let verifier = match key.algorithm {
+        13 | 14 => None,
         // RFC 8080 §3: Ed25519 DNSKEY public keys are raw 32-octet verification keys.
-        15 => (&signature::ED25519, key.public_key.clone()),
+        15 => Some(signature::UnparsedPublicKey::new(
+            &signature::ED25519,
+            key.public_key.clone(),
+        )),
         _ => return Err("unsupported test DNSKEY algorithm".into()),
     };
-    let verifier = signature::UnparsedPublicKey::new(algorithm, public);
     let mut checked = 0;
     for records in [
         message.answers().collect::<Vec<_>>(),
@@ -77,10 +76,16 @@ pub(crate) fn validate_response(
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             let input = signed_data(&data, &rrset).map_err(|e| e.to_string())?;
-            // RFC 8032 §5.1.7: Verify Ed25519 signatures using the key and signed data.
-            verifier
-                .verify(&input, signature)
-                .map_err(|_| "invalid DNSSEC signature")?;
+            let valid = if let Some(verifier) = &verifier {
+                // RFC 8032 §5.1.7: Verify Ed25519 signatures using the key and signed data.
+                verifier.verify(&input, signature).is_ok()
+            } else {
+                // RFC 6605 §4: Use the shared fixed-width P-256/P-384 verifier.
+                verify_ecdsa(key.algorithm, &key.public_key, &input, signature)
+            };
+            if !valid {
+                return Err("invalid DNSSEC signature".into());
+            }
             checked += 1;
         }
         for record in records.iter().filter(|r| r.rtype != Type::RRSIG) {

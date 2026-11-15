@@ -222,10 +222,15 @@ impl Dnssec {
             return Err(Error::Internal);
         }
         let referral = kind == ResponseType::Referral && message.authority_count() > 0;
-        let make_lie =
-            denial || (referral && !message.authorities().any(|rr| rr.rtype == Type::DS));
         let question = message.questions().next().ok_or(Error::InvalidQuery)?;
         let zone = self.zone_for(question.name).ok_or(Error::InvalidQuery)?;
+        // RFC 4035 §3.1.3.1: Exact-name NODATA uses its authoritative NSEC proof.
+        let existing_nsec = kind == ResponseType::NoData
+            && message
+                .authorities()
+                .any(|rr| rr.rtype == Type::NSEC && rr.name == question.name);
+        let make_lie = (denial && !existing_nsec)
+            || (referral && !message.authorities().any(|rr| rr.rtype == Type::DS));
         let mut lie_wire = Vec::new();
         if make_lie {
             // shortcut: CoreDNS-style spans are not checked against zone inventory; validate when authoritative names are available.

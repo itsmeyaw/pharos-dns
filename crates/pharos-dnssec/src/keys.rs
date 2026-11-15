@@ -193,20 +193,29 @@ pub fn parse_pkcs8(public: &str, private: &[u8]) -> Result<KeyPair, KeyError> {
     refuse_signing_algorithm(public.algorithm)?;
     // RFC 7468 §10: a PKCS#8 PEM uses the PRIVATE KEY textual label.
     let decoded;
-    // RFC 7468 §3: PEM parsing accepts standard encapsulation and Base64 lines of any length.
-    let private = if private.starts_with(b"-----BEGIN") {
-        // RFC 7468 §2: Malformed textual encodings return errors without panicking.
-        let text = std::str::from_utf8(private)
-            .map_err(|_| invalid("invalid PEM"))?
-            .trim();
+    // RFC 7468 §2: Allow text outside boundaries and ignore non-Base64 body characters.
+    let text = std::str::from_utf8(private).ok();
+    let pem = text.and_then(|text| {
+        text.find("-----BEGIN PRIVATE KEY-----")
+            .map(|start| &text[start..])
+    });
+    let private = if let Some(text) = pem {
         let body = text
-            // RFC 7468 §2: PKCS#8 PEM boundaries use exact BEGIN and END delimiters.
             .strip_prefix("-----BEGIN PRIVATE KEY-----")
-            .and_then(|s| s.strip_suffix("-----END PRIVATE KEY-----"))
+            .and_then(|text| text.split_once("-----END PRIVATE KEY-----"))
+            .map(|(body, _)| body)
             .ok_or_else(|| invalid("invalid PKCS#8 PEM"))?;
-        // RFC 4648 §§3.3,4 and RFC 7468 §2: Strip whitespace; reject invalid Base64 input.
+        // RFC 4648 §4: Reject URL-safe alphabet characters rather than silently dropping them.
+        if body.bytes().any(|byte| matches!(byte, b'-' | b'_')) {
+            return Err(invalid("invalid PEM base64"));
+        }
+        let base64 = body
+            .bytes()
+            .filter(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'+' | b'/' | b'='))
+            .map(char::from)
+            .collect::<String>();
         decoded = STANDARD
-            .decode(body.split_whitespace().collect::<String>())
+            .decode(base64)
             .map_err(|_| invalid("invalid PEM base64"))?;
         decoded.as_slice()
     } else {
@@ -344,10 +353,14 @@ pub fn parse_dnskey(input: &str) -> Result<Dnskey, KeyError> {
 // RFC 3110 §2: RSA DNSKEY contains an exponent length, exponent, and modulus.
 fn rsa_public_der(public: &[u8]) -> Result<Vec<u8>, KeyError> {
     let (length, start) = match public.first() {
-        Some(0) if public.len() >= 3 => (
-            usize::from(u16::from_be_bytes([public[1], public[2]])),
-            3usize,
-        ),
+        Some(0) if public.len() >= 3 => {
+            let length = usize::from(u16::from_be_bytes([public[1], public[2]]));
+            // RFC 3110 §2: Use the three-octet length form only for exponents of 256+ octets.
+            if length <= usize::from(u8::MAX) {
+                return Err(invalid("invalid RSA DNSKEY exponent length"));
+            }
+            (length, 3usize)
+        }
         Some(&n) if n != 0 => (usize::from(n), 1),
         _ => return Err(invalid("invalid RSA DNSKEY exponent length")),
     };
@@ -356,6 +369,12 @@ fn rsa_public_der(public: &[u8]) -> Result<Vec<u8>, KeyError> {
         .ok_or_else(|| invalid("invalid RSA DNSKEY"))?;
     if length == 0 || end >= public.len() {
         return Err(invalid("invalid RSA DNSKEY"));
+    }
+    // RFC 3110 §2: The exponent and modulus are unsigned and have no leading zero octets.
+    if public[start] == 0 || public[end] == 0 {
+        return Err(invalid(
+            "RSA DNSKEY exponent or modulus has a leading zero octet",
+        ));
     }
     // RFC 3110 §2 and RFC 5702 §§2.1–2.2: RSA exponent and modulus are at most 4096 bits.
     if significant_octets(&public[start..end]) > 512 || significant_octets(&public[end..]) > 512 {
@@ -426,5 +445,22 @@ mod tests {
         oversized_exponent.extend(vec![1; 513]);
         oversized_exponent.push(3);
         assert!(rsa_public_der(&oversized_exponent).is_err());
+    }
+
+    // RFC 3110 §2: Reject noncanonical exponent lengths and leading zero octets.
+    #[test]
+    fn rsa_dnskey_rejects_noncanonical_exponent_lengths_and_leading_zeroes() {
+        let mut extended_short_exponent = vec![0, 0, 255];
+        extended_short_exponent.extend(vec![1; 255]);
+        extended_short_exponent.push(3);
+        assert!(rsa_public_der(&extended_short_exponent).is_err());
+
+        assert!(rsa_public_der(&[2, 0, 3, 5]).is_err());
+        assert!(rsa_public_der(&[1, 3, 0, 5]).is_err());
+
+        let mut extended_long_exponent = vec![0, 1, 0];
+        extended_long_exponent.extend(vec![1; 256]);
+        extended_long_exponent.push(3);
+        assert!(rsa_public_der(&extended_long_exponent).is_ok());
     }
 }

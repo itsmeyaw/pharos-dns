@@ -54,29 +54,7 @@ fn nsec3_short_hash_keeps_miekg_fixed_length_octet() {
     );
 }
 
-#[test]
-fn rrsig_dates_use_miekg_serial_arithmetic() {
-    let result = parse(
-        Type::RRSIG,
-        &[
-            "A",
-            "8",
-            "2",
-            "3600",
-            "19691231235959",
-            "22000101000000",
-            "123",
-            "example.",
-            "AQID",
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        &result[8..16],
-        &[0xff, 0xff, 0xff, 0xff, 0xb0, 0x9e, 0x19, 0x00]
-    );
-}
-
+// RFC 4034 §3.1.5: Calendar RRSIG timestamps outside the serial window are rejected.
 #[test]
 fn generic_known_types_follow_wire_layouts() {
     for (rtype, length, data, expected) in [

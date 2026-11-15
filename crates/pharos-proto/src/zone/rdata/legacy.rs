@@ -11,6 +11,7 @@ pub(super) fn parse(
     bad: &[bool],
     raw_non_ascii: &[bool],
     origin: &Name,
+    timestamp_now: Option<i64>,
 ) -> Option<Result<Vec<u8>, (usize, String)>> {
     let mut out = Vec::new();
     let mut index = 0;
@@ -248,6 +249,7 @@ pub(super) fn parse(
                     bad,
                     raw_non_ascii,
                     origin,
+                    timestamp_now,
                 )
                 .map_err(|(i, error)| {
                     index = i;
@@ -386,7 +388,7 @@ mod tests {
             (Type::SIG, &["A", "8"][..], 2),
         ] {
             assert_eq!(
-                parse(rtype, fields, &[], &[], &origin)
+                parse(rtype, fields, &[], &[], &origin, None)
                     .unwrap()
                     .unwrap_err()
                     .0,
@@ -409,7 +411,7 @@ mod tests {
             (Type::ISDN, &["x", long.as_str(), "x"][..], 2),
         ] {
             assert_eq!(
-                parse(rtype, fields, &[], &[], &origin)
+                parse(rtype, fields, &[], &[], &origin, None)
                     .unwrap()
                     .unwrap_err()
                     .0,
