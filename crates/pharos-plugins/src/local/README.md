@@ -4,7 +4,7 @@
 
 ## local
 
-- Non-IN classes other than ANY pass through. QCLASS=ANY positive hits may receive selected IN local data with AA clear; negative/NODATA cases pass through (RFC 1035 §6.2; RFC 2308 §2).
+- Non-IN classes other than ANY pass through. QCLASS=ANY positive hits may receive selected IN local data with AA clear; negative/NODATA cases pass through (RFC 1035 §6.2; RFC 2308 §2). A terminal pass-through becomes SERVFAIL; unlike CoreDNS, recognized `localhost.` NODATA is not answered locally for QCLASS=ANY.
 - Pharos sets AA on intercepted IN-class local answers, including NXDOMAIN (RFC 1034 §4.3.2).
 - Local NS and SOA MNAME use resolvable `localhost.`; SOA RNAME is `nobody.invalid.` (RFC 2181 §7.3; RFC 6303 §3).
 - `localhost.` apex NS/SOA queries keep positive answers for CoreDNS compatibility (RFC 6761 §6.3).
