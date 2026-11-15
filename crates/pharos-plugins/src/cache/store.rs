@@ -208,7 +208,7 @@ impl Store {
         }
         // RFC 8767 §4: Set the response TTL for served stale records.
         output.clear();
-        // RFC 5155 §9.1: Return complete responses with required NSEC3 records.
+        // RFC 5155 §9.1: Retain complete NSEC3 proof sets in cached responses.
         output.extend_from_slice(&item.wire);
         // RFC 1035 §4.1.1: Copy the query ID into the response.
         output[..2].copy_from_slice(&query.id().to_be_bytes());
@@ -244,7 +244,7 @@ impl Store {
                 record_ttl
             } else {
                 // RFC 2308 §6: Age each cached RRset TTL by cache time.
-                record_ttl - elapsed as u32
+                record_ttl.saturating_sub(elapsed as u32)
             };
             output[offset..offset + 4].copy_from_slice(&ttl.to_be_bytes());
         }
