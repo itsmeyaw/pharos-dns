@@ -115,13 +115,28 @@ const EMPTY_RECORD: Record = Record {
 };
 
 struct Scratch {
-    records: [Record; 5957],
-    order: [Record; 5957],
-    original: [u8; 65535],
-    pointers: [Pointer; 32768],
-    seen: [u8; 8192],
-    direct: [u8; 8192],
-    labels: [u8; 8192],
+    records: Box<[Record]>,
+    order: Box<[Record]>,
+    original: Box<[u8]>,
+    pointers: Box<[Pointer]>,
+    seen: Box<[u8]>,
+    direct: Box<[u8]>,
+    labels: Box<[u8]>,
+}
+
+impl Scratch {
+    // Heap-allocated once per thread: inline TLS of this size is carved from every thread's stack.
+    fn new() -> Self {
+        Self {
+            records: vec![EMPTY_RECORD; 5957].into(),
+            order: vec![EMPTY_RECORD; 5957].into(),
+            original: vec![0; 65535].into(),
+            pointers: vec![Pointer::default(); 32768].into(),
+            seen: vec![0; 8192].into(),
+            direct: vec![0; 8192].into(),
+            labels: vec![0; 8192].into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -187,15 +202,7 @@ impl Subnet {
 }
 
 thread_local! {
-    static SCRATCH: std::cell::RefCell<Scratch> = const { std::cell::RefCell::new(Scratch {
-        records: [EMPTY_RECORD; 5957],
-        order: [EMPTY_RECORD; 5957],
-        original: [0; 65535],
-        pointers: [Pointer { source: 0, destination: 0, target: 0, original_target: 0 }; 32768],
-        seen: [0; 8192],
-        direct: [0; 8192],
-        labels: [0; 8192],
-    }) };
+    static SCRATCH: std::cell::RefCell<Option<Scratch>> = const { std::cell::RefCell::new(None) };
     static RANDOM: std::cell::Cell<u64> = {
         let mut seed = [0; 8];
         let _ = getrandom::getrandom(&mut seed);
@@ -354,7 +361,7 @@ fn shuffle(wire: &mut [u8], weights: Option<&weighted::Weights>, prefer: &[Subne
             seen,
             direct,
             labels,
-        } = &mut *scratch;
+        } = scratch.get_or_insert_with(Scratch::new);
         // RFC 1035 §4.1.3: Each RR occupies at least 11 bytes.
         // Every RR occupies at least 11 bytes; no valid DNS Message can exceed this bound.
         let mut sections = [(0usize, 0usize); 3];
