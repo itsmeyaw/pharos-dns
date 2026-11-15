@@ -68,10 +68,11 @@ fn coredns_catalog_sorts_members_and_groups() {
 
 #[test]
 fn coredns_serial_comparison_wraps() {
-    assert!(!update::serial_less(0, u32::MAX));
-    assert!(update::serial_less(u32::MAX, 0));
-    assert!(update::serial_less(4_000_000_000, 12_345));
-    assert!(update::serial_less(7, 9));
+    use crate::serial::serial_at_least;
+    assert!(serial_at_least(0, u32::MAX));
+    assert!(!serial_at_least(u32::MAX, 0));
+    assert!(!serial_at_least(4_000_000_000, 12_345));
+    assert!(!serial_at_least(7, 9));
 }
 
 #[test]
@@ -110,9 +111,17 @@ async fn serve_axfr(
     serial: u32,
     extra: impl FnOnce(&mut pharos_proto::MessageBuilder<'_>, NameRef<'_>),
 ) {
+    let (socket, _) = listener.accept().await.unwrap();
+    serve_axfr_on(socket, serial, extra).await;
+}
+
+async fn serve_axfr_on(
+    mut socket: tokio::net::TcpStream,
+    serial: u32,
+    extra: impl FnOnce(&mut pharos_proto::MessageBuilder<'_>, NameRef<'_>),
+) {
     use pharos_proto::{Message, MessageBuilder, Section};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (mut socket, _) = listener.accept().await.unwrap();
     let length = socket.read_u16().await.unwrap();
     let mut input = vec![0; usize::from(length)];
     socket.read_exact(&mut input).await.unwrap();
@@ -181,6 +190,45 @@ fn secondary_setup_applies_transfer_limits() {
     let secondary = configured[0].config.secondary.as_ref().unwrap();
     let limits = secondary.shared.zones.load()[0].config.limits;
     assert_eq!((limits.max_records, limits.max_bytes), (10, 4096));
+}
+
+#[tokio::test]
+async fn secondary_serializes_transfers_and_never_publishes_an_older_serial() {
+    use std::sync::atomic::AtomicUsize;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let zone = Arc::new(plain_zone(listener.local_addr().unwrap()));
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let primary = {
+        let (active, peak) = (Arc::clone(&active), Arc::clone(&peak));
+        tokio::spawn(async move {
+            let mut handlers = Vec::new();
+            // The first connection offers the newer serial; the second an older one.
+            for serial in [5, 3] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let (active, peak) = (Arc::clone(&active), Arc::clone(&peak));
+                handlers.push(tokio::spawn(async move {
+                    peak.fetch_max(active.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    serve_axfr_on(socket, serial, |_, _| {}).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                }));
+            }
+            for handler in handlers {
+                handler.await.unwrap();
+            }
+        })
+    };
+    let (shared, _, _) = catalog_shared();
+    let (first, second) = tokio::join!(
+        update::transfer(&shared, &zone),
+        update::transfer(&shared, &zone)
+    );
+    first.unwrap();
+    second.unwrap();
+    primary.await.unwrap();
+    assert_eq!(peak.load(Ordering::SeqCst), 1);
+    assert_eq!(zone.current.load_full().unwrap().serial(), Some(5));
 }
 
 #[tokio::test]

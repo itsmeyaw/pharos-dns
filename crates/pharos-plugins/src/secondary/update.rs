@@ -1,4 +1,5 @@
 use super::*;
+use crate::serial::serial_at_least;
 use pharos_proto::{Message, MessageBuilder, NameRef, Record, Section, Type, zone::ZoneRecord};
 use std::{fmt::Write, io, net::SocketAddr, time::Duration};
 use tokio::io::AsyncReadExt;
@@ -200,6 +201,8 @@ async fn transfer_inner(
     zone: &SecondaryZone,
     primary: Option<SocketAddr>,
 ) -> io::Result<()> {
+    // RFC 1034 §4.3.5: one transfer per Zone at a time, so an older copy cannot land last.
+    let _transfer = zone.transfer_lock.lock().await;
     let mut error = io::Error::other("no Primary Server");
     let mut addresses = Vec::new();
     if let Some(primary) = primary {
@@ -252,6 +255,18 @@ async fn transfer_inner(
         });
         match result {
             Ok(()) => {
+                // RFC 1982 §3.2: never replace a Zone with one whose serial is not newer.
+                let local = zone.current.load().as_ref().and_then(|zone| zone.serial());
+                let fetched = records
+                    .first()
+                    .filter(|record| record.rtype == Type::SOA)
+                    .and_then(|record| soa_field(&record.rdata, 0));
+                if let (Some(local), Some(fetched)) = (local, fetched)
+                    && serial_at_least(local, fetched)
+                    && !zone.expired.load(Ordering::Relaxed)
+                {
+                    return Ok(());
+                }
                 let apex = zone.config.apex.clone();
                 let want_catalog = zone.config.catalog.is_some();
                 // Sorting and indexing a large Zone would stall the async worker's other tasks.
@@ -373,7 +388,8 @@ async fn should_transfer_at(zone: &SecondaryZone, primary: SocketAddr) -> io::Re
                 return Ok(current
                     .as_ref()
                     .and_then(|zone| zone.serial())
-                    .is_none_or(|local| serial_less(local, serial)));
+                    // RFC 1982 §3.2: transfer only when the Primary's serial is newer.
+                    .is_none_or(|local| !serial_at_least(local, serial)));
             }
         }
         Err(io::Error::other("SOA Response has no apex SOA"))
@@ -382,13 +398,10 @@ async fn should_transfer_at(zone: &SecondaryZone, primary: SocketAddr) -> io::Re
     result.map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err))?
 }
 
-// RFC 1982 §3.2: compare serial numbers modulo 2^32.
-pub(super) fn serial_less(a: u32, b: u32) -> bool {
-    if a < b {
-        b - a <= i32::MAX as u32
-    } else {
-        a - b > i32::MAX as u32
-    }
+// RFC 1035 §3.3.13: SOA RDATA ends with SERIAL, REFRESH, RETRY, EXPIRE and MINIMUM.
+fn soa_field(rdata: &[u8], offset: usize) -> Option<u32> {
+    let tail = rdata.get(rdata.len().checked_sub(20)? + offset..)?;
+    Some(u32::from_be_bytes(tail.get(..4)?.try_into().ok()?))
 }
 
 // RFC 1035 §3.3.13: SOA supplies refresh, retry and expire intervals.
@@ -398,16 +411,10 @@ pub(super) fn timers(zone: &SecondaryZone) -> (Duration, Duration, Duration) {
         .as_ref()
         .and_then(|zone| zone.records().iter().find(|rr| rr.rtype == Type::SOA));
     let value = |offset: usize| {
-        // RFC 1034 §4.3.5: shortcut: 1s floor avoids hot polling; upgrade after a bounded zero-timer policy exists.
-        soa.and_then(|rr| {
-            rr.rdata
-                .get(rr.rdata.len().checked_sub(20)? + offset..)?
-                .get(..4)
-        })
-        .and_then(|bytes| bytes.try_into().ok())
-        .map(u32::from_be_bytes)
-        .unwrap_or(1)
-        .max(1)
+        // RFC 1034 §4.3.5: shortcut: 1s floor avoids hot polling; upgrade once a bounded zero-timer policy exists (conf/secondary #98).
+        soa.and_then(|rr| soa_field(&rr.rdata, offset))
+            .unwrap_or(1)
+            .max(1)
     };
     (
         Duration::from_secs(u64::from(value(4))),

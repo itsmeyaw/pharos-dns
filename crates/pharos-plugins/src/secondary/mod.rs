@@ -53,6 +53,7 @@ struct SecondaryZone {
     notify: tokio::sync::Notify,
     notify_source: Mutex<Option<SocketAddr>>,
     task: Mutex<Option<tokio::task::AbortHandle>>,
+    transfer_lock: tokio::sync::Mutex<()>,
 }
 
 impl SecondaryZone {
@@ -64,6 +65,7 @@ impl SecondaryZone {
             notify: tokio::sync::Notify::new(),
             notify_source: Mutex::new(None),
             task: Mutex::new(None),
+            transfer_lock: tokio::sync::Mutex::new(()),
         }
     }
 }
