@@ -1,5 +1,5 @@
 use super::*;
-use pharos_proto::{Message, MessageBuilder, NameRef, Section, Type, zone::ZoneRecord};
+use pharos_proto::{Message, MessageBuilder, NameRef, Record, Section, Type, zone::ZoneRecord};
 use std::{fmt::Write, io, net::SocketAddr, time::Duration};
 use tokio::io::AsyncReadExt;
 
@@ -102,6 +102,69 @@ pub(super) async fn transfer_from(
     transfer_inner(shared, zone, Some(primary)).await
 }
 
+// RFC 3597 §4: only these types are known to carry no domain names in RDATA.
+fn has_no_names(rtype: Type) -> bool {
+    matches!(
+        rtype,
+        Type::A
+            | Type::AAAA
+            | Type::TXT
+            | Type::HINFO
+            | Type::CAA
+            | Type::URI
+            | Type::DS
+            | Type::CDS
+            | Type::DNSKEY
+            | Type::CDNSKEY
+            | Type::TLSA
+            | Type::SSHFP
+            | Type::NSEC3PARAM
+            | Type::ZONEMD
+    )
+}
+
+// Offset of RDATA in a one-record Message with a root owner: header, owner, TYPE, CLASS, TTL, RDLENGTH.
+const ROOT_RDATA_OFFSET: usize = 12 + 1 + 10;
+
+fn zone_record(record: Record<'_>, scratch: &mut Vec<u8>) -> io::Result<ZoneRecord> {
+    let data = record.data().map_err(io::Error::other)?;
+    let rdata = if has_no_names(record.rtype) {
+        record.rdata.to_vec()
+    } else {
+        // RFC 5936 §3.4: re-encode RDATA without compressed names.
+        let mut builder =
+            MessageBuilder::new(&mut *scratch, 65535, 0, 0).map_err(io::Error::other)?;
+        let written = builder
+            .record_with(
+                Section::Answer,
+                NameRef::parse(&[0], 0).map_err(io::Error::other)?,
+                record.rtype,
+                record.class,
+                record.ttl,
+                |writer| {
+                    writer.disable_compression();
+                    data.write(writer)
+                },
+            )
+            .map_err(io::Error::other)?;
+        if !written {
+            return Err(io::Error::other("record exceeds Message limit"));
+        }
+        let _ = builder.finish();
+        scratch
+            .get(ROOT_RDATA_OFFSET..)
+            .ok_or_else(|| io::Error::other("missing record"))?
+            .to_vec()
+    };
+    Ok(ZoneRecord {
+        owner: record.name.to_name(),
+        rtype: record.rtype,
+        class: record.class,
+        ttl: record.ttl,
+        rdata,
+    })
+}
+
 async fn transfer_inner(
     shared: &Arc<Shared>,
     zone: &SecondaryZone,
@@ -121,6 +184,7 @@ async fn transfer_inner(
     }
     for address in addresses {
         let mut records = Vec::new();
+        let mut scratch = Vec::with_capacity(512);
         let result = pharos_server::transfer::axfr(
             address,
             &zone.config.apex,
@@ -129,41 +193,7 @@ async fn transfer_inner(
             |message| {
                 // RFC 5936 §2.2: Ignore duplicate resource records in an AXFR stream.
                 for record in message.answers() {
-                    let data = record.data().map_err(io::Error::other)?;
-                    // RFC 5936 §3.4: re-encode RDATA without compressed names.
-                    let mut wire = Vec::with_capacity(512);
-                    let mut builder =
-                        MessageBuilder::new(&mut wire, 65535, 0, 0).map_err(io::Error::other)?;
-                    let written = builder
-                        .record_with(
-                            Section::Answer,
-                            record.name,
-                            record.rtype,
-                            record.class,
-                            record.ttl,
-                            |writer| {
-                                writer.disable_compression();
-                                data.write(writer)
-                            },
-                        )
-                        .map_err(io::Error::other)?;
-                    if !written {
-                        return Err(io::Error::other("record exceeds Message limit"));
-                    }
-                    let _ = builder.finish();
-                    let parsed = Message::parse(&wire).map_err(io::Error::other)?;
-                    let expanded = parsed
-                        .answers()
-                        .next()
-                        .ok_or_else(|| io::Error::other("missing record"))?;
-                    let expanded = ZoneRecord {
-                        owner: record.name.to_name(),
-                        rtype: record.rtype,
-                        class: record.class,
-                        ttl: record.ttl,
-                        rdata: expanded.rdata.to_vec(),
-                    };
-                    records.push(expanded);
+                    records.push(zone_record(record, &mut scratch)?);
                 }
                 Ok(())
             },

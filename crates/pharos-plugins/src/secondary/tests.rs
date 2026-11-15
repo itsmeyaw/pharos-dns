@@ -96,6 +96,81 @@ fn coredns_notify_checks_ip_spelling_and_scope() {
     assert!(!update::primary_matches("[fe80::1]:53", scoped));
 }
 
+fn soa_rdata(serial: u32) -> Vec<u8> {
+    let mut soa = vec![0, 0];
+    for value in [serial, 1, 1, 1000, 60] {
+        soa.extend_from_slice(&value.to_be_bytes());
+    }
+    soa
+}
+
+/// Serve one AXFR: opening SOA, `extra` records, closing SOA.
+async fn serve_axfr(
+    listener: tokio::net::TcpListener,
+    serial: u32,
+    extra: impl FnOnce(&mut pharos_proto::MessageBuilder<'_>, NameRef<'_>),
+) {
+    use pharos_proto::{Message, MessageBuilder, Section};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let length = socket.read_u16().await.unwrap();
+    let mut input = vec![0; usize::from(length)];
+    socket.read_exact(&mut input).await.unwrap();
+    let query = Message::parse(&input).unwrap();
+    let q = query.questions().next().unwrap();
+    let mut output = Vec::new();
+    let mut builder = MessageBuilder::new(&mut output, 65535, query.id(), 0x8400).unwrap();
+    builder.question(q.name, q.qtype, q.qclass).unwrap();
+    let soa = soa_rdata(serial);
+    builder
+        .record(Section::Answer, q.name, Type::SOA, Class::IN, 60, &soa)
+        .unwrap();
+    extra(&mut builder, q.name);
+    builder
+        .record(Section::Answer, q.name, Type::SOA, Class::IN, 60, &soa)
+        .unwrap();
+    let _ = builder.finish();
+    socket.write_u16(output.len() as u16).await.unwrap();
+    socket.write_all(&output).await.unwrap();
+}
+
+fn plain_zone(from: std::net::SocketAddr) -> SecondaryZone {
+    SecondaryZone::new(ZoneConfig {
+        apex: "example.org.".parse().unwrap(),
+        from: vec![from.to_string()],
+        catalog: None,
+    })
+}
+
+#[tokio::test]
+async fn secondary_axfr_stores_compressed_rdata_names_uncompressed() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let zone = plain_zone(listener.local_addr().unwrap());
+    let primary = tokio::spawn(serve_axfr(listener, 1, |builder, apex| {
+        // The target compresses against the Question name.
+        builder
+            .record_with(
+                pharos_proto::Section::Answer,
+                apex,
+                Type::NS,
+                Class::IN,
+                60,
+                |writer| writer.write_name(apex),
+            )
+            .unwrap();
+    }));
+    let (shared, _, _) = catalog_shared();
+    update::transfer(&shared, &zone).await.unwrap();
+    primary.await.unwrap();
+    let snapshot = zone.current.load_full().unwrap();
+    let ns = snapshot
+        .records()
+        .iter()
+        .find(|record| record.rtype == Type::NS)
+        .unwrap();
+    assert_eq!(ns.rdata, zone.config.apex.as_wire());
+}
+
 #[tokio::test]
 async fn secondary_deduplicates_axfr_records_and_skips_failed_primary() {
     use pharos_proto::{Class, Message, MessageBuilder, Section};
