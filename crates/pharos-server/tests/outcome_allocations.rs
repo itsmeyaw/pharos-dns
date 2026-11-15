@@ -79,7 +79,7 @@ fn truncating_contiguous_rrsets_does_not_allocate() {
     let mut source = Vec::with_capacity(4096);
     let mut builder = MessageBuilder::new(&mut source, 4096, 1, 0x8180).unwrap();
     builder.question(question, Type::A, Class::IN).unwrap();
-    for label in [b'a', b'b', b'c', b'd'] {
+    for label in *b"abcd" {
         let wire = [1, label, 0];
         let name = NameRef::parse(&wire, 0).unwrap();
         for _ in 0..2 {
