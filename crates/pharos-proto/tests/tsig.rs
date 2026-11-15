@@ -346,6 +346,7 @@ fn truncated_response_mac_is_not_shorter_than_query_mac() {
         .unwrap();
 
     assert!(TsigRecord::parse(&response).unwrap().mac.len() >= query_mac.len());
+    key.verify(&response, 1000, Some(&query_mac), 0).unwrap();
 }
 
 #[test]
