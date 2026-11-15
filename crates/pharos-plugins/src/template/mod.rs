@@ -680,6 +680,18 @@ impl Plugin for Template {
                 }
             }
         }
+        let matches_qtype = |kind| question.qtype == Type::ANY || question.qtype == kind;
+        let has_qtype_answer = hit
+            .records
+            .iter()
+            .any(|(section, rr)| *section == Section::Answer && matches_qtype(rr.rtype))
+            || lookups.iter().any(|(_, wire)| {
+                Message::parse(wire)
+                    .ok()
+                    .is_some_and(|response| response.answers().any(|rr| matches_qtype(rr.rtype)))
+            });
+        // RFC 2308 §§2.2, 3: An authoritative NOERROR response without matching answers is NODATA.
+        let nodata = hit.rule.rcode == Rcode::NOERROR && !has_qtype_answer;
         let max = cx.max_response_size.max(512);
         if cx.response.capacity() < max {
             if cx.protocol == Protocol::Tcp {
@@ -729,11 +741,11 @@ impl Plugin for Template {
                     let owner =
                         NameRef::parse(rr.owner.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
                     // RFC 1035 §4.1.3: Encode owner, type, class, TTL, and RDATA.
-                    let response_section = if hit.rule.rcode == Rcode::NXDOMAIN
+                    let response_section = if (hit.rule.rcode == Rcode::NXDOMAIN || nodata)
                         && section == Section::Answer
                         && rr.rtype == Type::SOA
                     {
-                        // RFC 2308 §3: An authoritative NXDOMAIN's SOA belongs in Authority.
+                        // RFC 2308 §3: Authoritative negative SOAs belong in Authority.
                         Section::Authority
                     } else {
                         section

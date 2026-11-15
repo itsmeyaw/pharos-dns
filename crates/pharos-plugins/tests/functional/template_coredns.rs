@@ -549,6 +549,30 @@ template ANY ANY example. {
     );
 }
 
+#[tokio::test]
+async fn nodata_soa_moves_to_authority_but_positive_soa_stays_in_answer() {
+    let chain = chain(
+        r#"
+template ANY ANY example. {
+ match ^(nodata|soa)[.]example[.]$
+ answer "{{ .Name }} 60 IN SOA ns.example. hostmaster.example. 1 60 60 60 60"
+}
+"#,
+    );
+
+    let (outcome, wire) = query(&chain, "nodata.example.", Type::A, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.answer_count(), 0);
+    assert!(response.authorities().any(|rr| rr.rtype == Type::SOA));
+
+    let (outcome, wire) = query(&chain, "soa.example.", Type::SOA, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert!(response.answers().any(|rr| rr.rtype == Type::SOA));
+    assert!(!response.authorities().any(|rr| rr.rtype == Type::SOA));
+}
+
 // Derived from CoreDNS TestVar and TestExpr.
 #[tokio::test]
 async fn coredns_variables_expressions_and_metadata() {
