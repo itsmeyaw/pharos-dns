@@ -892,7 +892,7 @@ impl Listener {
         bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
         bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
     ) -> io::Result<Self> {
-        // RFC 7766 §5: Reject a Listener configuration that cannot serve UDP Queries.
+        // A Listener without a UDP worker cannot serve UDP Queries; reject the configuration.
         if workers == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1449,8 +1449,12 @@ impl ListenerRegistry {
                 ));
             }
         }
-        // RFC 7766 §5: Every DNS Listener must retain at least one UDP worker.
-        if servers.values().any(|server| server.udp_workers() == 0) {
+        // A reload must keep at least one UDP worker per Listener.
+        let workers: HashMap<_, _> = servers
+            .iter()
+            .map(|(key, server)| (*key, server.udp_workers()))
+            .collect();
+        if workers.values().any(|count| *count == 0) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "UDP worker count must be greater than zero",
@@ -1484,7 +1488,7 @@ impl ListenerRegistry {
         let mut replacements = Vec::new();
         for (key, server) in &servers {
             let listener = &self.listeners[key];
-            let count = server.udp_workers();
+            let count = workers[key];
             if count == listener.udp_tasks.len() && listener.shed == server.shed_metrics().is_some()
             {
                 continue;
