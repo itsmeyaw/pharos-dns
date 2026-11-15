@@ -997,7 +997,12 @@ async fn ttl_rewrite_keeps_a_rrset_at_its_lowest_ttl() {
         max_response_size: 512,
     };
     assert_eq!(
-        chain.rewrite.as_ref().unwrap().serve(&mut cx, MixedTtl).await,
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, MixedTtl)
+            .await,
         Outcome::Response
     );
     assert_eq!(
@@ -1043,7 +1048,12 @@ async fn name_rewrite_without_ttl_rule_preserves_received_ttls() {
         max_response_size: 512,
     };
     assert_eq!(
-        chain.rewrite.as_ref().unwrap().serve(&mut cx, MixedTtl).await,
+        chain
+            .rewrite
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, MixedTtl)
+            .await,
         Outcome::Response
     );
     assert_eq!(

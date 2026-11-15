@@ -482,7 +482,11 @@ async fn unscoped_link_local_block_catches_scoped_clients() {
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
     builder
-        .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN)
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
         .unwrap();
     let _ = builder.finish();
     let mut response = Vec::with_capacity(512);

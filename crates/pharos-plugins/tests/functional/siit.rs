@@ -262,16 +262,7 @@ async fn coredns_siit_translation_fallback_and_eam() {
         }
     }
     for initial in [2, 5] {
-        let wire = query(
-            "",
-            initial,
-            false,
-            false,
-            0,
-            0x0480,
-            &["64:ff9b::8.8.8.1"],
-        )
-        .await;
+        let wire = query("", initial, false, false, 0, 0x0480, &["64:ff9b::8.8.8.1"]).await;
         assert_eq!(
             Message::parse(&wire).unwrap().answers().next().unwrap().ttl,
             600
@@ -287,16 +278,7 @@ async fn coredns_siit_translation_fallback_and_eam() {
 
 #[tokio::test]
 async fn well_known_prefix_does_not_translate_non_global_ipv4() {
-    let wire = query(
-        "",
-        0,
-        false,
-        false,
-        0,
-        0x0480,
-        &["64:ff9b::192.0.2.1"],
-    )
-    .await;
+    let wire = query("", 0, false, false, 0, 0x0480, &["64:ff9b::192.0.2.1"]).await;
     let message = Message::parse(&wire).unwrap();
     assert_eq!(message.rcode(), Rcode::NOERROR);
     assert_eq!(message.answers().count(), 0);

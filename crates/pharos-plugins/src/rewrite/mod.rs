@@ -112,7 +112,11 @@ impl<'a> RrsetTtls<'a> {
 // shortcut: Keep 256 RRsets inline; scan overflow until a reusable buffer is justified.
 fn rrset_minimum_ttls<'a>(message: &Message<'a>) -> RrsetTtls<'a> {
     let mut minimums = RrsetTtls::new();
-    for records in [message.answers(), message.authorities(), message.additionals()] {
+    for records in [
+        message.answers(),
+        message.authorities(),
+        message.additionals(),
+    ] {
         for record in records {
             if record.rtype == Type::OPT {
                 continue;
@@ -131,7 +135,11 @@ fn rrset_minimum_ttls<'a>(message: &Message<'a>) -> RrsetTtls<'a> {
 // shortcut: Overflow scans are bounded by one 65,535-octet Message; raise inline capacity if common.
 fn rrset_minimum_ttl(message: &Message<'_>, key: &RrsetKey<'_>) -> Option<u32> {
     let mut minimum = None;
-    for records in [message.answers(), message.authorities(), message.additionals()] {
+    for records in [
+        message.answers(),
+        message.authorities(),
+        message.additionals(),
+    ] {
         for record in records {
             if record.rtype == Type::OPT {
                 continue;
@@ -457,7 +465,8 @@ impl Rewrite {
                         // RFC 4343 §3: Regex CNAME matchers ignore ASCII case like other DNS names.
                         let pattern = format!("(?i:{lower})");
                         Matcher::Regex(Box::new(
-                            RegexMatcher::new(&pattern).map_err(|_| cursor.error("invalid regex"))?,
+                            RegexMatcher::new(&pattern)
+                                .map_err(|_| cursor.error("invalid regex"))?,
                         ))
                     }
                     _ => return Err(cursor.error("invalid CNAME match type")),
@@ -951,7 +960,8 @@ fn cname_replacement(
             text.write_str(input.get(from.len()..)?).ok()?;
         }
         Matcher::Suffix(from) => {
-            text.write_str(input.get(..input.len().checked_sub(from.len())?)?).ok()?;
+            text.write_str(input.get(..input.len().checked_sub(from.len())?)?)
+                .ok()?;
             text.write_str(replacement).ok()?;
         }
         Matcher::Substring(from) if from.is_empty() => {
@@ -1428,7 +1438,9 @@ fn subnet_data(
     };
     // RFC 7871 §§7.1.1, 11.1: Cap configured and outgoing source prefixes.
     let cap = if family == 1 { 24 } else { 56 };
-    let prefix = configured_prefix.min(cap).min(source_limit.unwrap_or(u8::MAX));
+    let prefix = configured_prefix
+        .min(cap)
+        .min(source_limit.unwrap_or(u8::MAX));
     output[..2].copy_from_slice(&family.to_be_bytes());
     output[2] = prefix;
     output[3] = 0;
@@ -1688,9 +1700,7 @@ fn apply_edns(
             let mut subnet = [0; 20];
             let source_limit = query.opt().and_then(|opt| {
                 opt.options().iter().find_map(|option| match option {
-                    pharos_proto::EdnsOption::ClientSubnet(subnet) => {
-                        Some(subnet.source_prefix())
-                    }
+                    pharos_proto::EdnsOption::ClientSubnet(subnet) => Some(subnet.source_prefix()),
                     _ => None,
                 })
             });
@@ -2102,10 +2112,10 @@ fn build_reverted_response<'q>(
         // RFC 1035 §4.1.3: Re-encode each resource record with its current fields.
         for rr in records {
             let key = RrsetKey {
-                    owner: rr.name,
-                    rtype: rr.rtype,
-                    class: rr.class,
-                };
+                owner: rr.name,
+                rtype: rr.rtype,
+                class: rr.class,
+            };
             let mut ttl = if rr.rtype == Type::OPT || !rewrites_ttl {
                 rr.ttl
             } else {

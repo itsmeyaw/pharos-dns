@@ -129,9 +129,42 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
         initial_mapped_aaaa,
         translate_all,
     ) in [
-        (0, true, 0, true, false, 0x0480, 0, vec![60, 70], false, false),
-        (5, false, 0, true, false, 0x0480, 0, vec![60, 600], false, false),
-        (0, true, 0, true, true, 0x0480, 0, vec![60, 70], false, false),
+        (
+            0,
+            true,
+            0,
+            true,
+            false,
+            0x0480,
+            0,
+            vec![60, 70],
+            false,
+            false,
+        ),
+        (
+            5,
+            false,
+            0,
+            true,
+            false,
+            0x0480,
+            0,
+            vec![60, 600],
+            false,
+            false,
+        ),
+        (
+            0,
+            true,
+            0,
+            true,
+            true,
+            0x0480,
+            0,
+            vec![60, 70],
+            false,
+            false,
+        ),
         (0, true, 0, true, false, 0, 0, vec![60, 70], false, false),
         (0, true, 0, false, false, 0x0480, 0, vec![], false, false),
         (0, false, 2, false, false, 0x0480, 2, vec![], false, false),
@@ -139,7 +172,18 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
         (0, false, 1, false, false, 0x0480, 1, vec![], false, false),
         (0, false, 3, false, false, 0x0480, 3, vec![], false, false),
         (0, false, 4, false, false, 0x0480, 4, vec![], false, false),
-        (0, true, 0, true, false, 0x0480, 0, vec![60, 70], true, false),
+        (
+            0,
+            true,
+            0,
+            true,
+            false,
+            0x0480,
+            0,
+            vec![60, 70],
+            true,
+            false,
+        ),
         (0, true, 0, false, false, 0x0480, 0, vec![], true, true),
     ] {
         let config = if translate_all {
@@ -367,7 +411,14 @@ impl Next for MixedAaaa {
             .question(question.name, question.qtype, question.qclass)
             .unwrap();
         builder
-            .record(Section::Answer, question.name, Type::AAAA, Class::IN, 60, &mapped)
+            .record(
+                Section::Answer,
+                question.name,
+                Type::AAAA,
+                Class::IN,
+                60,
+                &mapped,
+            )
             .unwrap();
         builder
             .record(
@@ -735,11 +786,11 @@ async fn dns64_follows_a_lookup_cname_to_terminal_address() {
     let message = Message::parse(&response).unwrap();
     assert_eq!(message.answer_count(), 2);
     assert!(message.answers().any(|rr| rr.rtype == Type::CNAME));
-    let aaaa = message
-        .answers()
-        .find(|rr| rr.rtype == Type::AAAA)
-        .unwrap();
-    assert_eq!(aaaa.rdata, &[0, 100, 255, 155, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 1]);
+    let aaaa = message.answers().find(|rr| rr.rtype == Type::AAAA).unwrap();
+    assert_eq!(
+        aaaa.rdata,
+        &[0, 100, 255, 155, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 1]
+    );
 }
 
 struct CyclicDns64(pharos_plugins::dns64::Dns64);

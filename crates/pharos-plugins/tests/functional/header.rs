@@ -120,7 +120,9 @@ async fn coredns_query_and_response_rules_and_precedence() {
 
 #[tokio::test]
 async fn rules_are_ordered_and_non_response_outcomes_are_preserved() {
-    let chain = configured("header {\n query set aa ra rd\n query clear aa rd\n response set aa\n}").unwrap();
+    let chain =
+        configured("header {\n query set aa ra rd\n query clear aa rd\n response set aa\n}")
+            .unwrap();
     let wire = [0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1];
     let domain: Name = ".".parse().unwrap();
     for outcome in [

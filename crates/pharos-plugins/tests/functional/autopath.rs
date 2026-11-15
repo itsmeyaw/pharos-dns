@@ -565,7 +565,11 @@ async fn existing_question_cname_is_not_duplicated_by_autopath() {
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
     builder
-        .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN)
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
         .unwrap();
     let _ = builder.finish();
     let mut response = Vec::with_capacity(65535);

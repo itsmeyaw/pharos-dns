@@ -76,7 +76,10 @@ mod tests {
             "224.0.0.1",
             "240.0.0.1",
         ] {
-            assert!(!is_global_ipv4(address.parse::<Ipv4Addr>().unwrap()), "{address}");
+            assert!(
+                !is_global_ipv4(address.parse::<Ipv4Addr>().unwrap()),
+                "{address}"
+            );
         }
         assert!(is_global_ipv4("8.8.8.8".parse().unwrap()));
         assert!(is_global_ipv4("192.0.0.9".parse().unwrap()));

@@ -11,9 +11,7 @@ use std::{
 };
 
 use pharos_corefile::{Cursor, Error};
-use pharos_proto::{
-    Class, Message, MessageBuilder, Opcode, Rcode, Rdata, Section, Type,
-};
+use pharos_proto::{Class, Message, MessageBuilder, Opcode, Rcode, Rdata, Section, Type};
 use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin, Protocol};
 
 #[derive(Debug)]
@@ -115,10 +113,7 @@ fn is_excluded_aaaa(rdata: &[u8]) -> bool {
     Ipv6Addr::from(bytes).to_ipv4_mapped().is_some()
 }
 
-fn filter_excluded_aaaa(
-    cx: &mut Context<'_, '_>,
-    original_wire: &[u8],
-) -> Result<(), ServerError> {
+fn filter_excluded_aaaa(cx: &mut Context<'_, '_>, original_wire: &[u8]) -> Result<(), ServerError> {
     let original = Message::parse(original_wire).map_err(|_| ServerError::InvalidQuery)?;
     let max = cx.max_response_size.max(512);
     if cx.response.capacity() < max {
@@ -332,9 +327,7 @@ impl Plugin for Dns64 {
                                 rr.rtype,
                                 rr.class,
                                 rr.ttl,
-                                |writer| {
-                                data.write(writer)
-                                },
+                                |writer| data.write(writer),
                             )
                             .map_err(ServerError::Build)?;
                     }

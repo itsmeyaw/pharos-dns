@@ -5,8 +5,8 @@ use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Type};
 use pharos_server::{
-    Action, Context, Error, Handler, ListenerKey, Metadata, Next, Outcome, Plugin, Protocol, Router,
-    Server, Transport,
+    Action, Context, Error, Handler, ListenerKey, Metadata, Next, Outcome, Plugin, Protocol,
+    Router, Server, Transport,
 };
 
 fn chain(directives_text: &str) -> Chain {
@@ -713,7 +713,11 @@ async fn template_cname_chase_uses_terminal_rcode() {
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x100).unwrap();
     builder
-        .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN)
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
         .unwrap();
     let _ = builder.finish();
     let mut response = Vec::with_capacity(4096);
