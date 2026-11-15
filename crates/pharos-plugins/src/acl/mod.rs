@@ -257,7 +257,14 @@ impl Plugin for Acl {
                     (policy.types.contains(&Type::NONE) || policy.types.contains(&question.qtype))
                         && (policy.networks.is_empty()
                             || policy.networks.iter().any(|&(network, prefix, scope)| {
-                                network_matches(network, prefix, scope, ip, client_scope)
+                                network_matches(
+                                    network,
+                                    prefix,
+                                    scope,
+                                    ip,
+                                    client_scope,
+                                    matches!(policy.action, Action::Block | Action::Drop),
+                                )
                             }))
                 })
                 .map(|policy| policy.action);
@@ -339,14 +346,14 @@ impl Plugin for Acl {
     }
 }
 
-// RFC 4007 §§11–12: Link-local unicast and multicast addresses need zone IDs.
+// RFC 4007 §§11–12: Link/site-local unicast and interface/link-local multicast need zone IDs.
 fn requires_scope(ip: IpAddr) -> bool {
     let IpAddr::V6(ip) = ip else {
         return false;
     };
     let octets = ip.octets();
-    (octets[0] == 0xfe && octets[1] & 0xc0 == 0x80)
-        || (octets[0] == 0xff && octets[1] & 0x0f == 2)
+    (octets[0] == 0xfe && matches!(octets[1] & 0xc0, 0x80 | 0xc0))
+        || (octets[0] == 0xff && matches!(octets[1] & 0x0f, 1 | 2))
 }
 
 // RFC 4007 §§11–12: Match scoped IPv6 addresses only with their configured zone ID.
@@ -356,13 +363,17 @@ fn network_matches(
     scope: Option<u32>,
     client: IpAddr,
     client_scope: u32,
+    deny: bool,
 ) -> bool {
-    crate::ipnet::contains(network, prefix, client)
-        && if requires_scope(client) {
-            scope.is_some_and(|scope| scope == client_scope)
-        } else {
-            scope.is_none()
-        }
+    if !crate::ipnet::contains(network, prefix, client) {
+        return false;
+    }
+    if requires_scope(client) {
+        // RFC 4007 §§11–12: Unscoped deny rules must not fail open across interfaces.
+        scope.map_or(deny, |scope| scope == client_scope)
+    } else {
+        scope.is_none()
+    }
 }
 
 #[cfg(test)]
@@ -371,11 +382,13 @@ mod tests {
     use std::net::IpAddr;
 
     #[test]
-    fn link_local_acl_requires_matching_zone_id() {
-        let network: IpAddr = "fe80::".parse().unwrap();
-        let client: IpAddr = "fe80::1".parse().unwrap();
-        assert!(!network_matches(network, 64, None, client, 2));
-        assert!(network_matches(network, 64, Some(2), client, 2));
-        assert!(!network_matches(network, 64, Some(3), client, 2));
+    fn scoped_ipv6_acl_handles_link_site_and_multicast_scopes() {
+        for address in ["fe80::1", "fec0::1", "ff01::1", "ff02::1"] {
+            let client: IpAddr = address.parse().unwrap();
+            assert!(!network_matches(client, 128, None, client, 2, false));
+            assert!(network_matches(client, 128, None, client, 2, true));
+            assert!(network_matches(client, 128, Some(2), client, 2, false));
+            assert!(!network_matches(client, 128, Some(3), client, 2, true));
+        }
     }
 }

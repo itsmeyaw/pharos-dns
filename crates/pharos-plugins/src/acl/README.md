@@ -7,7 +7,7 @@
 - For a Query without EDNS, Pharos omits the OPT record from blocked and
   filtered Responses as required by RFC 6891 §7. CoreDNS sends its EDE OPT
   even when the Query did not include an OPT record.
-- Link-local IPv6 ACL networks require a numeric zone ID, such as `fe80::%2/64`; unqualified networks do not match scoped clients (RFC 4007 §§11–12).
+- Scoped IPv6 rules accept numeric zone IDs, such as `fe80::%2/64`; unscoped `block`/`drop` rules match any zone to prevent fail-open, while unscoped `allow`/`filter` rules do not match scoped clients (RFC 4007 §§11–12).
 
 ## Differential scenarios
 

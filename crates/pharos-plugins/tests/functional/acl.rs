@@ -465,3 +465,52 @@ async fn coredns_acl_matches_ordered_policies_and_response_codes() {
         }
     }
 }
+
+#[tokio::test]
+async fn unscoped_link_local_block_catches_scoped_clients() {
+    let blocks = parse(
+        "Corefile",
+        ".:53 {\n acl example.org {\n  block net fe80::/10\n }\n}",
+    )
+    .unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "www.example.org.".parse().unwrap();
+    let domain: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, Class::IN)
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            1234,
+            0,
+            7,
+        )),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain
+            .acl
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, NextAllowed)
+            .await,
+        Outcome::Response
+    );
+    assert_eq!(Message::parse(cx.response).unwrap().rcode(), Rcode::REFUSED);
+}

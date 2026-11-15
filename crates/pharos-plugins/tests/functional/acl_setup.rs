@@ -73,6 +73,8 @@ fn coredns_acl_setup_cases() {
             true,
         ),
         ("acl {\n block net fe80::%2/64\n}", true),
+        ("acl {\n block net fec0::%2/10\n}", true),
+        ("acl {\n block net ff01::%2/16\n}", true),
         ("acl {\n block net fe80::%en0/64\n}", false),
         ("acl {\n block net 2001:db8::%2/64\n}", false),
         (
