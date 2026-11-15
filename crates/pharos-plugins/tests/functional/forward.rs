@@ -107,9 +107,13 @@ fn named_query(name: &str) -> Vec<u8> {
 }
 
 fn named_query_class(name: &str, class: Class) -> Vec<u8> {
+    named_query_with_opcode(name, class, 0)
+}
+
+fn named_query_with_opcode(name: &str, class: Class, opcode: u16) -> Vec<u8> {
     let name: Name = name.parse().unwrap();
     let mut wire = Vec::with_capacity(512);
-    let mut builder = MessageBuilder::new(&mut wire, 512, 7, 0x0100).unwrap();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 7, (opcode << 11) | 0x0100).unwrap();
     builder
         .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, class)
         .unwrap();
@@ -206,6 +210,7 @@ async fn cache_and_forward_block_reserved_names_without_upstream_queries() {
         );
         let response = Message::parse(&response).unwrap();
         assert_eq!(response.rcode(), Rcode::NXDOMAIN, "{name}");
+        assert_eq!(response.aa(), name.ends_with("arpa."), "{name}");
         assert_ne!(response.flags() & 0x0080, 0, "RA must be set: {name}");
         let soa = response
             .authorities()
@@ -317,11 +322,31 @@ async fn cache_and_forward_block_special_names_for_non_in_classes() {
         );
         let response = Message::parse(&response).unwrap();
         assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+        assert!(!response.aa());
         assert_eq!(response.questions().next().unwrap().qclass, class);
-        assert_eq!(response.authorities().next().unwrap().class, class);
+        assert_eq!(
+            response.authorities().next().unwrap().class,
+            if class == Class::ANY {
+                Class::IN
+            } else {
+                class
+            }
+        );
     }
     assert_eq!(requests.load(Ordering::Relaxed), 0);
     upstream.abort();
+}
+
+#[tokio::test]
+async fn terminal_special_fallback_ignores_non_query_opcodes() {
+    let chain = chain(".:0 {\n cache\n forward . 127.0.0.1:5300\n}");
+    let (outcome, response, _) = run_query(
+        &chain,
+        &named_query_with_opcode("service.test.", Class::IN, 5),
+    )
+    .await;
+    assert_eq!(outcome, Outcome::Error(pharos_server::Error::NoNextPlugin));
+    assert!(response.is_empty());
 }
 
 #[tokio::test]

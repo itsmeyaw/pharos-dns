@@ -298,6 +298,7 @@ async fn local_reverse_zone_can_be_disabled_individually() {
     let chain = configured("local {\n disable 10.in-addr.arpa\n}").unwrap();
     let (outcome, wire) = query(&chain, "1.10.in-addr.arpa.", Type::PTR).await;
     assert_eq!(outcome, Outcome::Response);
+    assert!(Message::parse(&wire).unwrap().aa());
     assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::NXDOMAIN);
     assert_eq!(
         query(&chain, "1.16.172.in-addr.arpa.", Type::PTR).await.0,
