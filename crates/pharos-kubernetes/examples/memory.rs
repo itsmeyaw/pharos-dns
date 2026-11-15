@@ -102,6 +102,22 @@ fn initial_watch(resource: Resource, unready_percent: usize) -> String {
     out
 }
 
+fn api_path_exists(path: &str) -> bool {
+    // RFC 9110 §15.5.5: Existing memory-fixture targets are known without building their bodies.
+    Resource::from_path(path).is_some()
+        || matches!(
+            path,
+            "/version"
+                | "/api"
+                | "/apis"
+                | "/api/v1"
+                | "/apis/discovery.k8s.io"
+                | "/apis/discovery.k8s.io/v1"
+                | "/healthz"
+                | "/readyz"
+        )
+}
+
 fn api_response(path: &str, query: Option<&str>) -> Response<Body> {
     let query = query.unwrap_or_default();
     let watch = query.split('&').any(|part| part == "watch=true");
@@ -204,7 +220,7 @@ async fn serve(address: &str) -> Result<(), Box<dyn std::error::Error>> {
     kubeconfig.flush()?;
     println!("API_URL={url}\nKUBECONFIG={}", kubeconfig.path().display());
     std::io::stdout().flush()?;
-    api::serve(listener, api_response).await
+    api::serve(listener, api_path_exists, api_response).await
 }
 
 async fn client(url: &str) -> Result<(), Box<dyn std::error::Error>> {

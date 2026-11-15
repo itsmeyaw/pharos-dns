@@ -21,7 +21,7 @@ async fn request(address: std::net::SocketAddr, method: &str, path: &str) -> Str
 
 // Derived from CoreDNS v1.15.0 plugin/health/health_test.go.
 #[tokio::test]
-async fn health_answers_all_methods_and_only_its_path() {
+async fn health_allows_get_head_and_rejects_other_methods() {
     let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = socket.local_addr().unwrap();
     drop(socket);
@@ -29,16 +29,29 @@ async fn health_answers_all_methods_and_only_its_path() {
     let blocks = parse("Corefile", &input).unwrap();
     let (_, lifecycle) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
     lifecycle.run(Phase::Startup).await.unwrap();
-    for method in ["GET", "POST", "PUT"] {
-        let response = request(address, method, "/health?check=1").await;
-        // RFC 9110 §15.3.1: 200 indicates that the request succeeded.
-        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
-        assert!(response.ends_with("\r\n\r\nOK"), "{response}");
-    }
+    let response = request(address, "GET", "/health?check=1").await;
+    // RFC 9110 §15.3.1: 200 indicates that the request succeeded.
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(response.ends_with("\r\n\r\nOK"), "{response}");
     // RFC 9110 §9.3.2: HEAD responses omit representation content.
     let response = request(address, "HEAD", "/health").await;
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     assert!(response.ends_with("\r\n\r\n"), "{response}");
+    for method in ["POST", "PUT", "TRACE"] {
+        let response = request(address, method, "/health").await;
+        // RFC 9110 §9.1: Recognized methods not allowed for this resource return 405.
+        assert!(
+            response.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+            "{response}"
+        );
+        assert!(response.contains("allow: GET, HEAD\r\n"), "{response}");
+    }
+    let response = request(address, "get", "/health").await;
+    // RFC 9110 §9.1: Method tokens are case-sensitive and unsupported tokens return 501.
+    assert!(
+        response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
+        "{response}"
+    );
     let response = request(address, "GET", "/other").await;
     // RFC 9110 §15.5.5: 404 means no current representation exists for the target resource.
     assert!(

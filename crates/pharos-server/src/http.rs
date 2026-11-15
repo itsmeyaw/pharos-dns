@@ -14,11 +14,14 @@ use http_body_util::Full;
 use hyper::{
     Request, Response, StatusCode,
     body::Incoming,
-    header::{CONTENT_TYPE, HeaderValue},
+    header::{
+        ALLOW, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MATCH, IF_NONE_MATCH,
+    },
     server::conn::http1,
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
+use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{
     net::TcpListener,
@@ -28,6 +31,7 @@ use tokio::{
 
 const MAX_CONNECTIONS: usize = 1024;
 const TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_HTTP1_BUFFER_SIZE: usize = 16 * 1024;
 
 /// HTTP listener whose callback maps GET paths to `(content_type, body)`.
 /// The callback runs on a Tokio worker and must not block it.
@@ -98,6 +102,8 @@ async fn health_request(address: &str) -> io::Result<()> {
         .uri("/health")
         // RFC 9110 §7.2: Send the target authority in the Host field.
         .header("host", address)
+        // RFC 9110 §10.1.5: Identify this robotic user agent.
+        .header("user-agent", "Pharos health probe")
         .body(Full::<Bytes>::default())
         .map_err(io::Error::other)?;
     let response = sender.send_request(request);
@@ -128,13 +134,24 @@ impl Listener {
         F: Fn(&str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
     {
         Self::bind_with_methods(address, move |method, path| {
-            // RFC 9110 §9.3.1: GET retrieves the current representation for a metrics route.
-            (method == "GET").then(|| route(path)).flatten()
+            if method == "GET" {
+                // RFC 9110 §9.3.1: GET retrieves the current representation for a metrics route.
+                route(path)
+            } else {
+                // RFC 9110 §9.1: Existing resources reject recognized methods with 405.
+                route(path).map(|_| {
+                    (
+                        405,
+                        "text/plain; charset=utf-8",
+                        "Method Not Allowed\n".into(),
+                    )
+                })
+            }
         })
         .await
     }
 
-    /// Bind an endpoint that can route all HTTP methods.
+    /// Bind an endpoint callback that receives a method and path; the listener only serves GET and HEAD.
     pub async fn bind_with_methods<F>(address: &str, route: F) -> io::Result<Self>
     where
         F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
@@ -189,31 +206,14 @@ impl Listener {
                         connections.spawn(async move {
                             // RFC 9110 §6.5.1: Do not merge trailer fields into headers.
                             let service = service_fn(move |request: Request<Incoming>| {
-                                // RFC 9110 §9.3.1: GET content does not change routing.
-                                let response = route(request.method().as_str(), request.uri().path());
-                                async move {
-                                    // RFC 9110 §6.5.1: Do not generate trailer fields.
-                                    let mut result = Response::new(Full::default());
-                                    match response {
-                                        Some((status, content_type, body)) => match (StatusCode::from_u16(status), HeaderValue::from_str(content_type)) {
-                                            (Ok(status), Ok(content_type)) => {
-                                                *result.status_mut() = status;
-                                                // RFC 9110 §5.1: Content-Type is registered.
-                                                result.headers_mut().insert(CONTENT_TYPE, content_type);
-                                                // RFC 9110 §6.4: Send endpoint content as body.
-                                                *result.body_mut() = Full::new(Bytes::from(body));
-                                            }
-                                            // RFC 9110 §15.6.1: 500 reports a server failure.
-                                            _ => *result.status_mut() = StatusCode::INTERNAL_SERVER_ERROR,
-                                        },
-                                        // RFC 9110 §15.5: 4xx reports a client error.
-                                        None => *result.status_mut() = StatusCode::NOT_FOUND,
-                                    }
-                                    Ok::<_, Infallible>(result)
-                                }
+                                std::future::ready(Ok::<_, Infallible>(response_for_request(
+                                    route.as_ref(),
+                                    request,
+                                )))
                             });
                             // RFC 9110 §5.6.7: Hyper emits dates in IMF-fixdate format.
-                            let connection = http1::Builder::new().serve_connection(TokioIo::new(stream), service);
+                            // RFC 9110 §17.5: Bound combined request-target and field buffering.
+                            let connection = http1::Builder::new().max_buf_size(MAX_HTTP1_BUFFER_SIZE).serve_connection(TokioIo::new(stream), service);
                             tokio::pin!(connection);
                             tokio::select! {
                                 _ = &mut connection => {},
@@ -285,6 +285,209 @@ fn ipv6_unavailable(error: &io::Error) -> bool {
         || error.raw_os_error() == Some(libc::EAFNOSUPPORT)
 }
 
+fn response_for_request<F>(route: &F, request: Request<Incoming>) -> Response<Full<Bytes>>
+where
+    F: Fn(&str, &str) -> Option<(u16, &'static str, String)>,
+{
+    let method = request.method().as_str();
+    let path = request.uri().path();
+    let is_metrics = path == "/metrics";
+    let response = if request.uri().scheme_str() == Some("https") {
+        // RFC 9110 §7.4: Cleartext listeners reject absolute HTTPS targets.
+        Some((
+            421,
+            "text/plain; charset=utf-8",
+            "Misdirected Request\n".into(),
+        ))
+    } else if method == "PUT" && request.headers().contains_key("content-range") {
+        // RFC 9110 §14.5: Reject partial PUT when this resource does not support it.
+        Some((400, "text/plain; charset=utf-8", "Bad Request\n".into()))
+    } else if matches!(method, "GET" | "HEAD") {
+        // RFC 9110 §9.3.2: HEAD uses GET's selected representation metadata.
+        route("GET", path)
+    } else if recognized_method(method) {
+        // RFC 9110 §9.1: Existing resources reject recognized methods with 405.
+        route(method, path).map(|_| {
+            (
+                405,
+                "text/plain; charset=utf-8",
+                "Method Not Allowed\n".into(),
+            )
+        })
+    } else {
+        // RFC 9110 §9.1: Unsupported method tokens receive 501.
+        Some((501, "text/plain; charset=utf-8", "Not Implemented\n".into()))
+    };
+    let headers = request.into_parts().0.headers;
+    let has_preconditions = headers.contains_key(IF_MATCH) || headers.contains_key(IF_NONE_MATCH);
+    let mut result = Response::new(Full::default());
+    match response {
+        Some((status, content_type, mut body)) => {
+            match (
+                StatusCode::from_u16(status),
+                HeaderValue::from_str(content_type),
+            ) {
+                (Ok(status), Ok(content_type)) => {
+                    *result.status_mut() = status;
+                    // RFC 9110 §5.1: Content-Type is registered.
+                    result.headers_mut().insert(CONTENT_TYPE, content_type);
+                    if status == StatusCode::METHOD_NOT_ALLOWED {
+                        // RFC 9110 §10.2.1: Advertise the methods allowed for this resource.
+                        result
+                            .headers_mut()
+                            .insert(ALLOW, HeaderValue::from_static("GET, HEAD"));
+                    }
+                    if status == StatusCode::SERVICE_UNAVAILABLE {
+                        // RFC 9110 §15.6.4: Explain that readiness failure is temporary.
+                        body = format!("Service temporarily unavailable: {body}");
+                    }
+                    if status == StatusCode::OK && (!is_metrics || has_preconditions) {
+                        // RFC 9110 §8.8.3.1 deviation: Defer metrics tags to avoid hashing every scrape.
+                        if let Ok(tag) = entity_tag(&body) {
+                            result.headers_mut().insert(ETAG, tag);
+                        }
+                    }
+                    // RFC 9110 §6.4: Send endpoint content as body.
+                    *result.body_mut() = Full::new(Bytes::from(body));
+                    if status.is_success() || status == StatusCode::PRECONDITION_FAILED {
+                        apply_preconditions(&mut result, &headers);
+                    }
+                }
+                // RFC 9110 §15.6.1: 500 reports a server failure.
+                _ => {
+                    *result.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                    *result.headers_mut() = [(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("text/plain; charset=utf-8"),
+                    )]
+                    .into_iter()
+                    .collect();
+                    *result.body_mut() = Full::new(Bytes::from_static(b"Internal Server Error\n"));
+                }
+            }
+        }
+        // RFC 9110 §15.5.5: Explain missing operational resources.
+        None => {
+            *result.status_mut() = StatusCode::NOT_FOUND;
+            *result.headers_mut() = [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            )]
+            .into_iter()
+            .collect();
+            *result.body_mut() = Full::new(Bytes::from_static(b"Not Found\n"));
+        }
+    }
+    result
+}
+
+fn recognized_method(method: &str) -> bool {
+    // RFC 9110 §9.1: These standard methods are recognized but not implemented by operational routes.
+    matches!(
+        method,
+        "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "CONNECT" | "OPTIONS" | "TRACE" | "PATCH"
+    )
+}
+
+fn entity_tag(body: &str) -> Result<HeaderValue, hyper::header::InvalidHeaderValue> {
+    // RFC 9110 §8.8.3.1: Hash the exact selected representation bytes for a strong validator.
+    let digest = Sha256::digest(body.as_bytes());
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut tag = String::with_capacity(66);
+    tag.push('"');
+    for byte in digest.iter() {
+        tag.push(char::from(HEX[usize::from(*byte >> 4)]));
+        tag.push(char::from(HEX[usize::from(*byte & 0x0f)]));
+    }
+    tag.push('"');
+    HeaderValue::from_str(&tag)
+}
+
+fn apply_preconditions(response: &mut Response<Full<Bytes>>, headers: &HeaderMap) {
+    let Some(current) = response.headers().get(ETAG) else {
+        return;
+    };
+    let current = current.as_bytes();
+    let if_match = conditional_tag_matches(headers, &IF_MATCH, current, false);
+    if if_match == Some(false) {
+        // RFC 9110 §§13.1.1, 13.2.2: A failed strong If-Match precedes If-None-Match.
+        *response.status_mut() = StatusCode::PRECONDITION_FAILED;
+        response.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        *response.body_mut() = Full::new(Bytes::from_static(b"Precondition Failed\n"));
+        return;
+    }
+    if conditional_tag_matches(headers, &IF_NONE_MATCH, current, true) == Some(true) {
+        // RFC 9110 §§13.1.2, 15.4.5: Matching If-None-Match returns 304 for GET and HEAD.
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        response.headers_mut().remove(CONTENT_TYPE);
+        *response.body_mut() = Full::default();
+    }
+}
+
+fn conditional_tag_matches(
+    headers: &HeaderMap,
+    name: &HeaderName,
+    current: &[u8],
+    weak_comparison: bool,
+) -> Option<bool> {
+    let values = headers.get_all(name);
+    let mut present = false;
+    for value in values {
+        present = true;
+        let value = value.as_bytes();
+        if trim_ows(value) == b"*" {
+            // RFC 9110 §§13.1.1–13.1.2: A wildcard matches an existing selected representation.
+            return Some(true);
+        }
+        let mut start = 0;
+        let mut quoted = false;
+        // RFC 9110 §5.6.1: Commas inside quoted entity-tags are not list delimiters.
+        for (index, byte) in value.iter().enumerate() {
+            if *byte == b'"' {
+                quoted = !quoted;
+            } else if *byte == b',' && !quoted {
+                if entity_tag_matches(trim_ows(&value[start..index]), current, weak_comparison) {
+                    return Some(true);
+                }
+                start = index + 1;
+            }
+        }
+        if !quoted && entity_tag_matches(trim_ows(&value[start..]), current, weak_comparison) {
+            return Some(true);
+        }
+    }
+    present.then_some(false)
+}
+
+fn entity_tag_matches(candidate: &[u8], current: &[u8], weak_comparison: bool) -> bool {
+    // RFC 9110 §§13.1.1–13.1.2: If-Match is strong; If-None-Match is weak.
+    let candidate_is_weak = candidate.starts_with(b"W/");
+    let candidate = candidate.strip_prefix(b"W/").unwrap_or(candidate);
+    let current = current.strip_prefix(b"W/").unwrap_or(current);
+    candidate.len() >= 2
+        && candidate.first() == Some(&b'"')
+        && candidate.last() == Some(&b'"')
+        && candidate[1..candidate.len() - 1]
+            .iter()
+            .all(|byte| *byte == b'!' || (0x23..=0x7e).contains(byte) || *byte >= 0x80)
+        && (weak_comparison || !candidate_is_weak)
+        && candidate == current
+}
+
+fn trim_ows(mut value: &[u8]) -> &[u8] {
+    // RFC 9110 §5.6.3: Optional whitespace around list members is SP or HTAB.
+    while matches!(value.first(), Some(b' ' | b'\t')) {
+        value = &value[1..];
+    }
+    while matches!(value.last(), Some(b' ' | b'\t')) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
 impl Drop for Listener {
     fn drop(&mut self) {
         self.stop.send_replace(true);
@@ -293,10 +496,10 @@ impl Drop for Listener {
 
 #[cfg(test)]
 mod tests {
-    use super::Listener;
+    use super::{Listener, MAX_HTTP1_BUFFER_SIZE, health_request};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+    use tokio::net::{TcpListener, TcpStream};
 
     async fn request(addr: std::net::SocketAddr, request: &str) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -304,6 +507,51 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).await.unwrap();
         response
+    }
+
+    async fn operational_request(addr: std::net::SocketAddr, headers: &str) -> String {
+        request(
+            addr,
+            &format!(
+                "GET /ready HTTP/1.1\r\nHost: localhost\r\n{headers}Connection: close\r\n\r\n"
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn health_probe_identifies_its_robotic_user_agent() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            loop {
+                let count = stream.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(
+                request.contains("user-agent: pharos health probe"),
+                "{request}"
+            );
+            // RFC 9110 §10.1.2: Do not send From when no user address is configured.
+            assert!(!request.contains("from:"), "{request}");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            let mut closed = [0];
+            let _ = stream.read(&mut closed).await;
+        });
+        let probe_result = health_request(&address.to_string()).await;
+        let server_result = server.await;
+        assert!(server_result.is_ok(), "{server_result:?}");
+        assert!(probe_result.is_ok(), "{probe_result:?}");
     }
 
     #[tokio::test]
@@ -319,6 +567,7 @@ mod tests {
         )
         .await;
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(!response.contains("\netag: "), "{response}");
         assert!(response.ends_with("not-ready"));
         listener.shutdown().await.unwrap();
     }
@@ -339,16 +588,256 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("content-type: text/plain; version=0.0.4\r\n"));
         assert!(response.ends_with("metric 1\n"));
-        for req in ["GET /missing", "POST /metrics"] {
-            let response = request(
-                address,
-                &format!("{req} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
-            )
-            .await;
-            assert!(response.starts_with("HTTP/1.1 404 Not Found\r\n"));
-        }
+        let response = request(
+            address,
+            "GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        let response = request(
+            address,
+            "POST /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+        assert!(response.contains("allow: GET, HEAD\r\n"));
+        assert!(!response.contains("\netag: "), "{response}");
         listener.shutdown().await.unwrap();
         assert!(TcpStream::connect(address).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn operational_routes_apply_method_target_and_precondition_semantics() {
+        let listener = Listener::bind_with_status("127.0.0.1:0", |path| {
+            (path == "/ready").then(|| (200, "text/plain", "ready".into()))
+        })
+        .await
+        .unwrap();
+        let address = listener.local_addr();
+
+        let response = operational_request(address, "").await;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        // RFC 9110 §8.8.3.1: A 200 readiness representation carries a strong validator.
+        let etag = response
+            .lines()
+            .find_map(|line| line.strip_prefix("etag: "))
+            .unwrap();
+        assert!(etag.starts_with('"') && etag.ends_with('"'), "{response}");
+        let get_content_length = response
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .map(str::to_owned);
+        assert_eq!(
+            etag,
+            "\"b24d6d33736ecd5604a4b17bc9c6481039fac362bb7df044ef1c10a2bfd21db6\""
+        );
+
+        let response = request(
+            address,
+            "HEAD /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(
+            response.contains(&format!("etag: {etag}\r\n")),
+            "{response}"
+        );
+        assert!(
+            response.contains("content-type: text/plain\r\n"),
+            "{response}"
+        );
+        let head_content_length = response
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .map(str::to_owned);
+        assert_eq!(head_content_length, get_content_length);
+        assert!(response.ends_with("\r\n\r\n"), "{response}");
+
+        let response = request(
+            address,
+            "FROB /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
+            "{response}"
+        );
+        assert!(!response.contains("\netag: "), "{response}");
+
+        let response = request(
+            address,
+            "POST /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+            "{response}"
+        );
+        assert!(response.contains("allow: GET, HEAD\r\n"), "{response}");
+        assert!(response.ends_with("Method Not Allowed\n"), "{response}");
+        assert!(!response.contains("\netag: "), "{response}");
+
+        let response = operational_request(address, &format!("If-None-Match: {etag}\r\n")).await;
+        assert!(
+            response.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+            "{response}"
+        );
+        assert!(response.ends_with("\r\n\r\n"), "{response}");
+        assert!(
+            response.contains(&format!("etag: {etag}\r\n")),
+            "{response}"
+        );
+
+        let response = request(
+            address,
+            "HEAD /ready HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: *\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains(&format!("etag: {etag}\r\n")),
+            "{response}"
+        );
+        assert!(response.ends_with("\r\n\r\n"), "{response}");
+
+        let response = operational_request(address, "If-None-Match: *\r\n").await;
+        assert!(
+            response.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+            "{response}"
+        );
+
+        let response = operational_request(address, &format!("If-None-Match: W/{etag}\r\n")).await;
+        assert!(
+            response.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+            "{response}"
+        );
+
+        let response = operational_request(address, "If-Match: \"different\"\r\n").await;
+        assert!(
+            response.starts_with("HTTP/1.1 412 Precondition Failed\r\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains(&format!("etag: {etag}\r\n")),
+            "{response}"
+        );
+        assert!(response.ends_with("Precondition Failed\n"), "{response}");
+
+        let response =
+            operational_request(address, "If-Match: \"different\"\r\nIf-None-Match: *\r\n").await;
+        assert!(
+            response.starts_with("HTTP/1.1 412 Precondition Failed\r\n"),
+            "{response}"
+        );
+
+        let response = operational_request(address, &format!("If-Match: W/{etag}\r\n")).await;
+        assert!(
+            response.starts_with("HTTP/1.1 412 Precondition Failed\r\n"),
+            "{response}"
+        );
+
+        let response = operational_request(address, "If-Match: *\r\n").await;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+
+        let response = operational_request(address, "Range: bytes=0-0\r\n").await;
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.ends_with("\r\n\r\nready"), "{response}");
+
+        let response = request(
+            address,
+            "GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{response}"
+        );
+        assert!(response.ends_with("Not Found\n"), "{response}");
+        assert!(!response.contains("\netag: "), "{response}");
+
+        let response = request(
+            address,
+            "PUT /ready HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-1/2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "{response}"
+        );
+        assert!(!response.contains("\netag: "), "{response}");
+
+        for scheme in ["https", "HTTPS"] {
+            let response = request(
+                address,
+                &format!("GET {scheme}://localhost/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            )
+            .await;
+            assert!(
+                response.starts_with("HTTP/1.1 421 Misdirected Request\r\n"),
+                "{response}"
+            );
+            assert!(!response.contains("\netag: "), "{response}");
+        }
+
+        listener.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_request_target_is_rejected_by_http1_buffer_limit() {
+        let listener = Listener::bind("127.0.0.1:0", |_| None).await.unwrap();
+        let mut stream = TcpStream::connect(listener.local_addr()).await.unwrap();
+        let target = format!("/{}", "x".repeat(MAX_HTTP1_BUFFER_SIZE));
+        let request =
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let _ = stream.write_all(request.as_bytes()).await;
+        let mut response = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+            .await
+            .expect("oversized request was not closed");
+        // RFC 9110 §§17.5, 15.5.15: Bound request targets; 414 is defined for overlong URIs.
+        if !response.is_empty() {
+            assert!(!response.starts_with(b"HTTP/1.1 2"), "{response:?}");
+        }
+        if let Err(error) = read {
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                ),
+                "{error}"
+            );
+        }
+        listener.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_endpoint_responses_return_explanatory_server_error() {
+        let listener = Listener::bind_with_status("127.0.0.1:0", |path| match path {
+            "/status" => Some((99, "text/plain", String::new())),
+            "/content-type" => Some((200, "invalid\r\nheader", String::new())),
+            _ => None,
+        })
+        .await
+        .unwrap();
+        for path in ["/status", "/content-type"] {
+            let response = request(
+                listener.local_addr(),
+                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            )
+            .await;
+            assert!(
+                response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+                "{response}"
+            );
+            assert!(!response.contains("\netag: "), "{response}");
+            assert!(response.ends_with("Internal Server Error\n"), "{response}");
+        }
+        listener.shutdown().await.unwrap();
     }
 
     #[tokio::test]

@@ -144,7 +144,7 @@ fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
         let response = http(ready, "/ready");
         // RFC 9110 §15.6.4: 503 indicates temporary inability to handle a request.
         if response.starts_with("HTTP/1.1 503") {
-            assert!(response.ends_with("\r\n\r\nShutting down"));
+            assert!(response.ends_with("Service temporarily unavailable: Shutting down"));
             break;
         }
         assert!(Instant::now() < deadline, "readiness did not change");
@@ -164,7 +164,10 @@ fn sigterm_lameduck_keeps_dns_and_health_while_ready_is_unavailable() {
     assert!(pidfile.exists());
     thread::sleep(Duration::from_secs(1));
     let response = http(ready, "/ready");
-    assert!(response.starts_with("HTTP/1.1 503") && response.ends_with("\r\n\r\nShutting down"));
+    assert!(
+        response.starts_with("HTTP/1.1 503")
+            && response.ends_with("Service temporarily unavailable: Shutting down")
+    );
     let response = http(health, "/health");
     assert!(response.starts_with("HTTP/1.1 200") && response.ends_with("\r\n\r\nOK"));
     assert_eq!(process.0.wait().unwrap().code(), Some(0));

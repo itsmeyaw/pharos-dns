@@ -15,6 +15,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 pharos-proto = { version = "0.1.0", path = "../pharos-proto" }
 socket2 = { version = "0.6", features = ["all"] }
+sha2 = "0.11"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
