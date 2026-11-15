@@ -190,11 +190,12 @@ async fn malformed_tsig_is_formerr_even_outside_configured_zone() {
         .as_secs();
     let mut wire = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1];
     key.sign(&mut wire, now, 300, None).unwrap();
-    let tsig_offset = {
+    let class_offset = {
         let query = Message::parse(&wire).unwrap();
-        query.additionals().next().unwrap().name.offset()
+        let record = query.additionals().next().unwrap();
+        record.name.offset() + record.name.wire_len() + 2
     };
-    wire[tsig_offset + 2..tsig_offset + 4].copy_from_slice(&1_u16.to_be_bytes());
+    wire[class_offset..class_offset + 2].copy_from_slice(&1_u16.to_be_bytes());
     let domain: Name = ".".parse().unwrap();
     let mut response = Vec::with_capacity(512);
     let mut slots = [];
@@ -547,9 +548,10 @@ async fn badsig_edns_response_keeps_opt_before_tsig() {
     );
     let message = Message::parse(&response).unwrap();
     assert!(message.opt().is_some());
+    // RFC 8945 §5.2.2: A known key with a failed MAC returns BADSIG (16).
     assert_eq!(
         pharos_proto::TsigRecord::parse(&response).unwrap().error,
-        17
+        16
     );
 }
 

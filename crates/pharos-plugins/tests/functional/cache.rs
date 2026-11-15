@@ -550,7 +550,8 @@ async fn authenticated_refresh_sets_ad_on_forwarded_wire() {
                 .unwrap(),
             Outcome::Response
         );
-        assert_eq!(Message::parse(cx.response).unwrap().ad(), ad);
+        // RFC 4035 §4.6: Do not trust AD received from the unsecured Forward upstream.
+        assert!(!Message::parse(cx.response).unwrap().ad());
         assert_eq!(cx.query.ad(), ad, "the client Query must be restored");
     }
     task.await.unwrap();
