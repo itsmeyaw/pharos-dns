@@ -7,7 +7,7 @@ use pharos_server::{Context, Metadata, Outcome, Plugin, Protocol, Transport};
 use tokio::net::UdpSocket;
 
 #[tokio::test]
-async fn forward_preserves_ad_for_listener_tsig_finalization() {
+async fn forward_clears_unsecured_ad_for_listener_tsig_finalization() {
     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let address = upstream.local_addr().unwrap();
     let task = tokio::spawn(async move {
@@ -52,8 +52,8 @@ async fn forward_preserves_ad_for_listener_tsig_finalization() {
     };
     let outcome = configured[0].config.serve(&mut cx).await;
     assert_eq!(outcome, Outcome::Response);
-    // RFC 8945 §5.5: Listener clears AD only when it re-signs without upstream transaction security.
-    assert!(Message::parse(cx.response).unwrap().ad());
+    // RFC 4035 §4.6: Disregard AD received from an upstream over an unsecured channel.
+    assert!(!Message::parse(cx.response).unwrap().ad());
     assert!(cx.metadata.take_tsig_signing().is_some());
     task.await.unwrap();
 }
@@ -177,6 +177,74 @@ async fn nonfinal_tsig_is_formerr_even_outside_domain() {
         configured[0].config.serve(&mut cx).await,
         Outcome::Unanswered(Rcode::FORMERR)
     );
+}
+
+#[tokio::test]
+async fn malformed_tsig_is_formerr_even_outside_configured_zone() {
+    let blocks = parse("Corefile", ". {\n tsig example.com\n whoami\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut wire = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1];
+    key.sign(&mut wire, now, 300, None).unwrap();
+    let class_offset = {
+        let query = Message::parse(&wire).unwrap();
+        let record = query.additionals().next().unwrap();
+        record.name.offset() + record.name.wire_len() + 2
+    };
+    wire[class_offset..class_offset + 2].copy_from_slice(&1_u16.to_be_bytes());
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+
+    assert_eq!(
+        configured[0].config.serve(&mut cx).await,
+        Outcome::Unanswered(Rcode::FORMERR)
+    );
+}
+
+#[tokio::test]
+async fn misplaced_tsig_is_formerr_even_outside_configured_zone() {
+    let blocks = parse("Corefile", ". {\n tsig example.com\n whoami\n}").unwrap();
+    let configured = configure::<Chain>(&blocks, directives()).unwrap();
+    let domain: Name = ".".parse().unwrap();
+    for count_offset in [6, 8] {
+        let mut wire = vec![0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1];
+        wire[count_offset..count_offset + 2].copy_from_slice(&1_u16.to_be_bytes());
+        wire.extend_from_slice(&[0xc0, 0x0c, 0, 250, 0, 255, 0, 0, 0, 0, 0, 0]);
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+
+        assert_eq!(
+            configured[0].config.serve(&mut cx).await,
+            Outcome::Unanswered(Rcode::FORMERR)
+        );
+    }
 }
 
 #[tokio::test]
@@ -317,7 +385,133 @@ async fn signed_edns_response_survives_listener_finalization() {
 }
 
 #[tokio::test]
-async fn unknown_key_and_bad_mac_return_tsig_errors() {
+async fn out_of_zone_unknown_tsig_key_is_forwarded_unchanged() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let upstream_key = TsigKey::new("other.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let task = tokio::spawn(async move {
+        let mut received = [0; 512];
+        let (len, peer) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            upstream.recv_from(&mut received),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let request = received[..len].to_vec();
+        let prior_mac = pharos_proto::TsigRecord::parse(&request)
+            .unwrap()
+            .mac
+            .to_vec();
+        let mut reply = Vec::with_capacity(512);
+        Message::parse(&request)
+            .unwrap()
+            .without_final_tsig()
+            .unwrap()
+            .copy_wire(&mut reply);
+        reply[2] |= 0x80;
+        reply[3] |= 0x20;
+        upstream_key
+            .sign(&mut reply, now, 300, Some(&prior_mac))
+            .unwrap();
+        upstream.send_to(&reply, peer).await.unwrap();
+        request
+    });
+    let text = format!(
+        ".:0 {{\n tsig example.com {{\n secret key. c2VjcmV0\n }}\n forward . {address}\n}}"
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let client_key = TsigKey::new("other.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let verification_key =
+        TsigKey::new("other.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let mut wire = vec![
+        0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 5, b'o', b't', b'h', b'e', b'r', 0, 0, 1, 0, 1,
+    ];
+    client_key.sign(&mut wire, now, 300, None).unwrap();
+    let query_mac = pharos_proto::TsigRecord::parse(&wire).unwrap().mac.to_vec();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+
+    assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+    assert_eq!(task.await.unwrap(), wire);
+    assert!(Message::parse(cx.response).unwrap().ad());
+    verification_key
+        .verify(cx.response, now, Some(&query_mac), 0)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn in_zone_unknown_key_returns_badkey_with_or_without_require() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let key = TsigKey::new("other.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+
+    for require in ["", "\n  require A"] {
+        let text = format!(
+            ".:0 {{\n tsig example.com {{\n  secret key. c2VjcmV0{require}\n }}\n whoami\n}}"
+        );
+        let configured =
+            configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        let mut wire = vec![
+            0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 7, b'e', b'x', b'a', b'm', b'p', b'l',
+            b'e', 3, b'c', b'o', b'm', 0, 0, 1, 0, 1,
+        ];
+        key.sign(&mut wire, now, 300, None).unwrap();
+        let query = Message::parse(&wire).unwrap();
+        let domain: Name = ".".parse().unwrap();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [];
+        let mut cx = Context {
+            query,
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+
+        assert_eq!(configured[0].config.serve(&mut cx).await, Outcome::Response);
+        let signing = cx.metadata.take_tsig_signing();
+        pharos_server::finish_outcome_signed(
+            Message::parse(&wire).unwrap(),
+            Protocol::Udp,
+            Outcome::Response,
+            &mut response,
+            signing,
+            |error| panic!("{error}"),
+        );
+        let message = Message::parse(&response).unwrap();
+        assert_eq!(message.rcode(), Rcode::NOTAUTH);
+        // RFC 8945 §5.2.1: In-zone unknown keys receive unsigned BADKEY (17).
+        let tsig = pharos_proto::TsigRecord::parse(&response).unwrap();
+        assert_eq!(tsig.error, 17);
+        assert!(tsig.mac.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn bad_mac_returns_tsig_error() {
     let blocks = parse(
         "Corefile",
         ". {\n tsig {\n secret key. c2VjcmV0\n }\n whoami\n}",
@@ -328,51 +522,49 @@ async fn unknown_key_and_bad_mac_return_tsig_errors() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    for (name, secret, code) in [("other.", b"secret".as_slice(), 17), ("key.", b"wrong", 16)] {
-        let key = TsigKey::new(name.parse().unwrap(), TsigAlgorithm::Sha256, secret);
-        let mut wire = Vec::with_capacity(512);
-        wire.extend_from_slice(&[0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1]);
-        key.sign(&mut wire, now, 300, None).unwrap();
-        let domain: Name = ".".parse().unwrap();
-        let mut response = Vec::with_capacity(512);
-        let mut slots = [];
-        let mut cx = Context {
-            query: Message::parse(&wire).unwrap(),
-            client: "127.0.0.1:1234".parse().unwrap(),
-            local: "127.0.0.1:53".parse().unwrap(),
-            transport: Transport::Dns,
-            protocol: Protocol::Udp,
-            domain: &domain,
-            metadata: Metadata::new(&mut slots),
-            response: &mut response,
-            max_response_size: 512,
-        };
-        let outcome = configured[0].config.serve(&mut cx).await;
-        let signing = cx.metadata.take_tsig_signing();
-        pharos_server::finish_outcome_signed(
-            Message::parse(&wire).unwrap(),
-            Protocol::Udp,
-            outcome,
-            &mut response,
-            signing,
-            |e| panic!("{e}"),
-        );
-        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTAUTH);
-        let tsig = pharos_proto::TsigRecord::parse(&response).unwrap();
-        assert_eq!(tsig.error, code);
-        assert!(tsig.mac.is_empty());
-    }
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"wrong");
+    let mut wire = Vec::with_capacity(512);
+    wire.extend_from_slice(&[0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, b'a', 0, 0, 1, 0, 1]);
+    key.sign(&mut wire, now, 300, None).unwrap();
+    let domain: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    let outcome = configured[0].config.serve(&mut cx).await;
+    let signing = cx.metadata.take_tsig_signing();
+    pharos_server::finish_outcome_signed(
+        Message::parse(&wire).unwrap(),
+        Protocol::Udp,
+        outcome,
+        &mut response,
+        signing,
+        |e| panic!("{e}"),
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTAUTH);
+    let tsig = pharos_proto::TsigRecord::parse(&response).unwrap();
+    assert_eq!(tsig.error, 16);
+    assert!(tsig.mac.is_empty());
 }
 
 #[tokio::test]
-async fn badkey_edns_response_keeps_opt_before_tsig() {
-    let blocks = parse("Corefile", ". {\n tsig\n whoami\n}").unwrap();
+async fn badsig_edns_response_keeps_opt_before_tsig() {
+    let blocks = parse(
+        "Corefile",
+        ". {\n tsig {\n secret missing. c2VjcmV0\n }\n whoami\n}",
+    )
+    .unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
-    let key = TsigKey::new(
-        "missing.".parse().unwrap(),
-        TsigAlgorithm::Sha256,
-        b"secret",
-    );
+    let key = TsigKey::new("missing.".parse().unwrap(), TsigAlgorithm::Sha256, b"wrong");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -410,9 +602,10 @@ async fn badkey_edns_response_keeps_opt_before_tsig() {
     );
     let message = Message::parse(&response).unwrap();
     assert!(message.opt().is_some());
+    // RFC 8945 §5.2.2: A known key with a failed MAC returns BADSIG (16).
     assert_eq!(
         pharos_proto::TsigRecord::parse(&response).unwrap().error,
-        17
+        16
     );
 }
 

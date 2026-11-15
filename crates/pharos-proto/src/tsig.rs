@@ -149,6 +149,12 @@ impl TsigKey {
         {
             return Err(TsigError::Format);
         }
+        let mac_len = if wire.get(2).is_some_and(|flags| flags & 0x80 != 0) {
+            // RFC 8945 §7: Response MACs should be at least as long as Query MACs.
+            mac_len.max(prior_mac.map_or(0, |mac| mac.len()))
+        } else {
+            mac_len
+        };
         // RFC 8945 §5.2.2.1: truncated MACs have a mandatory minimum size.
         // RFC 8945 §6: The MAC floor permits the recommended 96-bit SHA-1 truncation.
         if mac_len > self.algorithm.len() || mac_len < 10.max(self.algorithm.len() / 2) {

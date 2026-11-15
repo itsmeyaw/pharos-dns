@@ -3,7 +3,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
-use pharos_proto::{EdnsOption, Message, Name, Rcode};
+use pharos_proto::{EdnsOption, Message, Name, Rcode, TsigAlgorithm, TsigKey};
 use pharos_server::{Action, Context, Handler, Metadata, Outcome, Protocol, Transport};
 use tokio::net::UdpSocket;
 
@@ -181,6 +181,64 @@ async fn forwards_query_and_restores_client_id() {
     let answer = Message::parse(context.response).unwrap();
     assert_eq!(answer.id(), 0x1234);
     assert!(answer.qr());
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn nsec3_response_clears_ad() {
+    // RFC 5155 §9.2: An Opt-Out proof cannot establish authenticated denial.
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = upstream.recv_from(&mut wire).await.unwrap();
+        let mut reply = wire[..len].to_vec();
+        reply[2] |= 0x80;
+        reply[3] |= 0x20;
+        reply[10..12].copy_from_slice(&1_u16.to_be_bytes());
+        reply.extend_from_slice(&[
+            0xc0, 0x0c, 0, 50, 0, 1, 0, 0, 0, 30, 0, 10, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0x40,
+        ]);
+        upstream.send_to(&reply, peer).await.unwrap();
+    });
+    let chain = chain(&format!(".:0 {{\n forward . {address}\n}}"));
+
+    let (outcome, response, _) = run(&chain).await;
+
+    assert_eq!(outcome, Outcome::Response);
+    assert!(!Message::parse(&response).unwrap().ad());
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn unsigned_query_clears_ad_from_spoofed_tsig_response() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let key = TsigKey::new(
+        "spoof.example.".parse().unwrap(),
+        TsigAlgorithm::Sha256,
+        b"secret",
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let task = tokio::spawn(async move {
+        let mut query = [0; 512];
+        let (len, peer) = upstream.recv_from(&mut query).await.unwrap();
+        let mut reply = query[..len].to_vec();
+        key.sign(&mut reply, now, 300, None).unwrap();
+        reply[2] |= 0x80;
+        reply[3] |= 0x20;
+        upstream.send_to(&reply, peer).await.unwrap();
+    });
+    let chain = chain(&format!(".:0 {{\n forward . {address}\n}}"));
+
+    let (outcome, response, _) = run(&chain).await;
+
+    assert_eq!(outcome, Outcome::Response);
+    // RFC 4035 §4.6: An upstream TSIG cannot authenticate an unsigned client Query.
+    assert!(!Message::parse(&response).unwrap().ad());
     task.await.unwrap();
 }
 

@@ -96,8 +96,17 @@ fn add_secret(
     if plugin.secrets.iter().any(|existing| existing.name == name) {
         return Err(cursor.error("key redefined"));
     }
+    let secret = pharos_proto::decode_secret(secret).ok();
+    // RFC 8945 §8: Recommend secrets at least as long as each HMAC output.
+    if secret.as_ref().is_some_and(|secret| secret.len() < 64) {
+        pharos_server::logging::log(
+            "INFO",
+            "tsig",
+            &format!("shared secret for key {name} is shorter than 64 octets"),
+        );
+    }
     // RFC 8945 §6: Support the mandatory HMAC-SHA1 and HMAC-SHA256 TSIG algorithms.
-    let keys = pharos_proto::decode_secret(secret).ok().map(|secret| {
+    let keys = secret.map(|secret| {
         [
             TsigAlgorithm::Sha1,
             TsigAlgorithm::Sha224,

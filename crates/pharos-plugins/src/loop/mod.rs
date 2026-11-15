@@ -191,6 +191,18 @@ impl State {
         if message.id() != id {
             return Err(io::Error::other("probe response ID mismatch"));
         }
+        // RFC 5452 §9.1: Match the response's complete Question to the probe.
+        let expected_name = NameRef::parse(name.as_wire(), 0).map_err(io::Error::other)?;
+        let Some(question) = message.questions().next() else {
+            return Err(io::Error::other("probe response Question missing"));
+        };
+        if message.question_count() != 1
+            || question.name != expected_name
+            || question.qtype != Type::HINFO
+            || question.qclass != Class::IN
+        {
+            return Err(io::Error::other("probe response Question mismatch"));
+        }
         Ok(())
     }
 }
@@ -352,5 +364,33 @@ mod tests {
         );
         assert!(plugin.state.disabled.load(Ordering::Acquire));
         lifecycle.run(Phase::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_probe_rejects_mismatched_question_fields() {
+        for mismatch in 0..3 {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let address = socket.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                let mut wire = [0; 512];
+                let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+                let query = Message::parse(&wire[..len]).unwrap();
+                let question = query.questions().next().unwrap();
+                let qtype_offset = 12 + question.name.wire_len();
+                match mismatch {
+                    0 => wire[13] = if wire[13] == b'0' { b'1' } else { b'0' },
+                    1 => wire[qtype_offset..qtype_offset + 2].copy_from_slice(&1_u16.to_be_bytes()),
+                    _ => wire[qtype_offset + 2..qtype_offset + 4]
+                        .copy_from_slice(&3_u16.to_be_bytes()),
+                }
+                wire[2] |= 0x80;
+                socket.send_to(&wire[..len], peer).await.unwrap();
+            });
+            let plugin = Loop::new(".");
+            let mut response = [0; 512];
+
+            assert!(plugin.state.exchange(address, &mut response).await.is_err());
+            task.await.unwrap();
+        }
     }
 }
