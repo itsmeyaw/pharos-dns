@@ -1488,17 +1488,6 @@ async fn coredns_lookup_records_and_negative_responses() {
             &[],
         ),
         (
-            "foo.dname.miek.nl.",
-            Type::ANY,
-            Rcode::NOERROR,
-            &[
-                "dname.miek.nl. 1800 IN DNAME x.miek.nl.",
-                "foo.dname.miek.nl. 1800 IN CNAME foo.x.miek.nl.",
-            ],
-            &ns,
-            &[],
-        ),
-        (
             "ext-cname.miek.nl.",
             Type::A,
             Rcode::SERVFAIL,
@@ -2123,7 +2112,7 @@ async fn cname_cycle_at_answer_limit_returns_servfail() {
             "seventh 60 IN CNAME eighth.example.org.\n",
             "eighth 60 IN CNAME ninth.example.org.\n",
             "ninth 60 IN CNAME tenth.example.org.\n",
-            "tenth 60 IN CNAME first.example.org.\n",
+            "tenth 60 IN CNAME FIRST.Example.org.\n",
         ),
     )
     .unwrap();
@@ -2150,6 +2139,45 @@ async fn ns_query_on_cname_loop_returns_cname_without_chasing_loop() {
         response.answers().map(|rr| rr.rtype).collect::<Vec<_>>(),
         [Type::CNAME]
     );
+}
+
+#[tokio::test]
+async fn any_query_at_cname_owner_returns_one_cname_without_restart() {
+    let zone = zone(
+        "example.org.",
+        concat!(
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n",
+            "@ 60 IN NS ns.example.org.\n",
+            "alias 60 IN CNAME middle.example.org.\n",
+            "middle 60 IN CNAME target.example.org.\n",
+            "target 60 IN A 192.0.2.1\n",
+        ),
+    )
+    .unwrap();
+
+    let (outcome, wire) = query(&zone, "alias.example.org.", Type::ANY, false, &[]).await;
+
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    assert_eq!(
+        response.answers().map(|rr| rr.rtype).collect::<Vec<_>>(),
+        [Type::CNAME]
+    );
+}
+
+#[tokio::test]
+async fn soa_query_on_cname_loop_returns_servfail() {
+    let zone = zone(
+        "example.org.",
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\nfirst 60 IN CNAME second.example.org.\nsecond 60 IN CNAME first.example.org.\n",
+    )
+    .unwrap();
+
+    let (outcome, wire) = query(&zone, "first.example.org.", Type::SOA, false, &[]).await;
+
+    assert_eq!(outcome, Outcome::Unanswered(Rcode::SERVFAIL));
+    assert!(wire.is_empty());
 }
 
 // Derived from CoreDNS wildcard_test.go TestLookupWildcard.

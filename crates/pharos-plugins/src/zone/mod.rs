@@ -75,6 +75,70 @@ struct ZoneNode {
     tree_exists: bool,
     // RFC 9460 §2.4.1: Track AliasMode per type to suppress ServiceMode records.
     alias_modes: u8,
+    // RFC 1034 §3.6.2: Cache whether a CNAME path from this owner reaches a loop.
+    cname_loop: bool,
+}
+
+// RFC 1034 §3.6.2: Resolve loop reachability once per immutable snapshot, not on query overflow.
+fn mark_cname_loops(nodes: &mut [ZoneNode], records: &[ZoneRecord]) {
+    let mut states = vec![0_u8; nodes.len()];
+    let mut path = Vec::new();
+    for start in 0..nodes.len() {
+        if states[start] != 0 || !nodes[start].types.contains_key(&Type::CNAME.0) {
+            continue;
+        }
+        path.clear();
+        let mut current = start;
+        let mut loops = false;
+        loop {
+            match states[current] {
+                1 => {
+                    loops = true;
+                    break;
+                }
+                2 => {
+                    loops = nodes[current].cname_loop;
+                    break;
+                }
+                _ => {}
+            }
+            states[current] = 1;
+            path.push(current);
+            let target = nodes[current]
+                .types
+                .get(&Type::CNAME.0)
+                .and_then(|indices| indices.first())
+                .and_then(|index| records.get(*index))
+                .and_then(|record| NameRef::parse(&record.rdata, 0).ok());
+            let Some(target) = target else {
+                break;
+            };
+            // RFC 1035 §3.1: Expand the borrowed target into bounded wire form for name lookup.
+            let mut target_wire = [0_u8; 255];
+            let mut target_len = 0;
+            for label in target.labels() {
+                target_wire[target_len] = label.len() as u8;
+                target_len += 1;
+                target_wire[target_len..target_len + label.len()].copy_from_slice(label);
+                target_len += label.len();
+            }
+            target_wire[target_len] = 0;
+            target_len += 1;
+            let Ok(next) = nodes.binary_search_by(|node| {
+                canonical_cmp(node.name.as_wire(), &target_wire[..target_len])
+            }) else {
+                break;
+            };
+            if !nodes[next].types.contains_key(&Type::CNAME.0) {
+                break;
+            }
+            current = next;
+        }
+        for index in path.drain(..) {
+            states[index] = 2;
+            nodes[index].cname_loop = loops;
+        }
+    }
 }
 
 impl Zone {
@@ -458,6 +522,7 @@ impl Zone {
                     tree: false,
                     tree_exists: false,
                     alias_modes: 0,
+                    cname_loop: false,
                 });
                 node.tree_exists |= !apex_record;
                 if suffix.len() == record.owner.as_wire().len() {
@@ -481,7 +546,8 @@ impl Zone {
                 suffix = &suffix[1 + usize::from(suffix[0])..];
             }
         }
-        let names: Vec<_> = nodes.into_values().collect();
+        let mut names: Vec<_> = nodes.into_values().collect();
+        mark_cname_loops(&mut names, &records);
         let tree = names
             .iter()
             .enumerate()
@@ -658,37 +724,6 @@ fn same_wire_name(left: &[u8], right: &[u8]) -> bool {
         .ok()
         .zip(NameRef::parse(right, 0).ok())
         .is_some_and(|(left, right)| left == right)
-}
-
-// RFC 1034 §3.6.2: Floyd traversal detects every CNAME cycle with constant extra storage.
-fn cname_target_before_cut<'a>(zone: &'a Zone, name: &[u8], qtype: Type) -> Option<&'a [u8]> {
-    // RFC 2136 §§2.5.2–2.5.3: Empty update RDATA is not a CNAME target name.
-    if name.is_empty() {
-        return None;
-    }
-    // RFC 1034 §4.3.2: Match the main lookup's NS, cut, and apex-SOA stopping rules.
-    if qtype == Type::NS || zone.cut(name, qtype).is_some() {
-        return None;
-    }
-    let target = zone.records_at(name, Type::CNAME).next()?.rdata.as_slice();
-    (qtype != Type::SOA || !target.eq_ignore_ascii_case(zone.apex.as_wire())).then_some(target)
-}
-
-fn cname_chain_loops(zone: &Zone, start: &[u8], qtype: Type) -> bool {
-    let mut slow = Some(start);
-    let mut fast = Some(start);
-    loop {
-        slow = slow.and_then(|name| cname_target_before_cut(zone, name, qtype));
-        fast = fast
-            .and_then(|name| cname_target_before_cut(zone, name, qtype))
-            .and_then(|name| cname_target_before_cut(zone, name, qtype));
-        let (Some(slow_name), Some(fast_name)) = (slow, fast) else {
-            return false;
-        };
-        if slow_name.eq_ignore_ascii_case(fast_name) {
-            return true;
-        }
-    }
 }
 
 // RFC 2308 §3: Negative cache TTL is min(SOA TTL, SOA MINIMUM).
@@ -1000,10 +1035,9 @@ impl Zone {
             cut = zone.cut(target, question.qtype);
         }
         // DNAME NS targets without a Referral use Self Lookup instead of local alias walking.
-        // RFC 1034 §§3.4.1, 3.6.2: CNAME and ANY queries do not restart at the canonical name.
+        // RFC 1034 §§3.4.1, 3.6.2: CNAME matches itself; ANY takes one CNAME hop.
         if cut.is_none()
             && question.qtype != Type::CNAME
-            && question.qtype != Type::ANY
             && !yxdomain
             && !(dname.is_some() && question.qtype == Type::NS)
         {
@@ -1012,7 +1046,7 @@ impl Zone {
             let mut next_alias = zone.records_at(target, Type::CNAME).next();
             while let Some(alias) = next_alias {
                 if count == chain.len() {
-                    if cname_chain_loops(zone, target, question.qtype) {
+                    if zone.node(target).is_some_and(|node| node.cname_loop) {
                         return Outcome::Unanswered(Rcode::SERVFAIL);
                     }
                     chain_limited = true;
@@ -1038,7 +1072,7 @@ impl Zone {
                 target = &alias.rdata;
                 cut = zone.cut(target, question.qtype);
                 if cut.is_some()
-                    || question.qtype == Type::NS
+                    || matches!(question.qtype, Type::NS | Type::ANY)
                     || question.qtype == Type::SOA
                         && target.eq_ignore_ascii_case(zone.apex.as_wire())
                 {
@@ -1048,20 +1082,21 @@ impl Zone {
             }
         }
         let mut lookup_failed = false;
-        // RFC 1034 §§3.4.1, 3.6.2: ANY includes synthesized CNAME and skips DNAME target lookup.
         let lookup = if cut.is_none()
             && !chain_limited
             && !empty_alias
             && !yxdomain
-            // RFC 1034 §3.6.2: An NS lookup stops after one CNAME; do not re-enter another alias.
+            // Deviation from RFC 1034 §3.6.2: NS alias chasing stops to preserve referral handling.
             && !(question.qtype == Type::NS
                 && zone.records_at(target, Type::CNAME).next().is_some())
-            && (count > 0
+            && (count > 0 && question.qtype != Type::ANY
                 || dname.is_some()
                     && question.qtype != Type::CNAME
-                    && question.qtype != Type::ANY)
+                    && (question.qtype != Type::ANY || count == 0))
             && (!zone.exact(target)
                 || question.qtype == Type::NS
+                // RFC 6672 §3.2: A DNAME substitution restarts even when QTYPE is ANY.
+                || dname.is_some() && question.qtype == Type::ANY
                 || question.qtype == Type::SOA && target.eq_ignore_ascii_case(zone.apex.as_wire()))
         {
             let target = match NameRef::parse(target, 0) {
