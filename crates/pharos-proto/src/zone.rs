@@ -49,6 +49,8 @@ pub struct ZoneParser<R> {
     origin: Name,
     file: String,
     file_path: PathBuf,
+    // RFC 4034 §3.1.5: Share one clock sample across all RRSIGs in this Zone parse.
+    timestamp_now: Option<i64>,
     line: usize,
     entry_end: (usize, usize),
     owner: Option<Name>,
@@ -96,12 +98,26 @@ impl std::ops::Deref for Token {
 impl<R: BufRead> ZoneParser<R> {
     #[must_use]
     pub fn new(reader: R, origin: Name, filename: impl Into<String>) -> Self {
-        let file = filename.into();
+        Self::new_with_timestamp_now(
+            reader,
+            origin,
+            filename.into(),
+            rdata::current_timestamp_seconds(),
+        )
+    }
+
+    fn new_with_timestamp_now(
+        reader: R,
+        origin: Name,
+        file: String,
+        timestamp_now: Option<i64>,
+    ) -> Self {
         Self {
             reader,
             origin,
             file_path: PathBuf::from(&file),
             file,
+            timestamp_now,
             line: 0,
             entry_end: (1, 1),
             owner: None,
@@ -393,8 +409,12 @@ impl<R: BufRead> ZoneParser<R> {
                 } else {
                     self.origin.clone()
                 };
-                let mut child =
-                    ZoneParser::new(BufReader::new(file), origin, path.to_string_lossy());
+                let mut child = ZoneParser::new_with_timestamp_now(
+                    BufReader::new(file),
+                    origin,
+                    path.to_string_lossy().into_owned(),
+                    self.timestamp_now,
+                );
                 child.file_path = path;
                 child.ttl = self.ttl;
                 child.directive_ttl = self.directive_ttl;
@@ -565,14 +585,14 @@ impl<R: BufRead> ZoneParser<R> {
         {
             return Err(err_at(i + 2 + index, "invalid SvcParam escape"));
         }
-        let rdata = rdata::parse_rdata_located(rtype, &fields, &bad, &self.origin).map_err(
-            |(index, message)| {
-                err_at(
-                    field_tokens.get(index).copied().unwrap_or(tokens.len()),
-                    &message,
-                )
-            },
-        )?;
+        let rdata =
+            rdata::parse_rdata_located(rtype, &fields, &bad, &self.origin, self.timestamp_now)
+                .map_err(|(index, message)| {
+                    err_at(
+                        field_tokens.get(index).copied().unwrap_or(tokens.len()),
+                        &message,
+                    )
+                })?;
         // RFC 2308 §4: omitted legacy SIG TTL comes from its Original TTL field.
         let ttl = if rtype == Type::SIG && !saw_ttl {
             let Some(original_ttl) = rdata.get(4..8) else {

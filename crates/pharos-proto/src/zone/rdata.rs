@@ -36,7 +36,10 @@ pub fn parse_rdata(
     fields: &[&str],
     origin: &Name,
 ) -> Result<Vec<u8>, RdataParseError> {
-    parse_rdata_located(rtype, fields, &[], origin).map_err(|(field, message)| {
+    let timestamp_now = matches!(rtype, Type::RRSIG | Type::SIG)
+        .then(current_timestamp_seconds)
+        .flatten();
+    parse_rdata_located(rtype, fields, &[], origin, timestamp_now).map_err(|(field, message)| {
         if message.starts_with("unsupported RDATA type ") {
             RdataParseError::UnsupportedType { field, message }
         } else if field >= fields.len() || message.starts_with("missing ") {
@@ -53,9 +56,19 @@ pub(crate) fn parse_rdata_located(
     fields: &[&str],
     bad: &[bool],
     origin: &Name,
+    timestamp_now: Option<i64>,
 ) -> Result<Vec<u8>, (usize, String)> {
     let mut index = 0;
-    parse_rdata_inner(rtype, fields, bad, origin, &mut index).map_err(|message| (index, message))
+    parse_rdata_inner(rtype, fields, bad, origin, timestamp_now, &mut index)
+        .map_err(|message| (index, message))
+}
+
+// RFC 4034 §3.1.5: Supply the reference time for calendar-form RRSIG timestamps.
+pub(super) fn current_timestamp_seconds() -> Option<i64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|time| i64::try_from(time.as_secs()).ok())
 }
 
 fn parse_rdata_inner(
@@ -63,6 +76,7 @@ fn parse_rdata_inner(
     fields: &[&str],
     bad: &[bool],
     origin: &Name,
+    timestamp_now: Option<i64>,
     index: &mut usize,
 ) -> Result<Vec<u8>, String> {
     macro_rules! at {
@@ -107,7 +121,7 @@ fn parse_rdata_inner(
         *index = field;
         return Err(INVALID_ESCAPE.into());
     }
-    if let Some(result) = legacy::parse(rtype, fields, bad, origin)
+    if let Some(result) = legacy::parse(rtype, fields, bad, origin, timestamp_now)
         .or_else(|| advanced::parse(rtype, fields, bad, origin))
     {
         return result.map_err(|(field, message)| {
@@ -325,8 +339,8 @@ fn parse_rdata_inner(
             out.push(num!(1, dnssec_algorithm(fields[1], false))?);
             out.push(num!(2, number(fields[2]))?);
             num!(3, put32(&mut out, fields[3]))?;
-            out.extend(num!(4, timestamp(fields[4]))?.to_be_bytes());
-            out.extend(num!(5, timestamp(fields[5]))?.to_be_bytes());
+            out.extend(num!(4, timestamp(fields[4], timestamp_now))?.to_be_bytes());
+            out.extend(num!(5, timestamp(fields[5], timestamp_now))?.to_be_bytes());
             num!(6, put16(&mut out, fields[6]))?;
             at!(7, name(&mut out, fields[7], origin))?;
             out.extend(at!(
@@ -1254,15 +1268,14 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
 }
 
 // RFC 4034 §3.1.5: timestamps are UTC dates in YYYYMMDDHHMMSS form.
-fn timestamp(value: &str) -> Result<u32, String> {
+fn timestamp(value: &str, now: Option<i64>) -> Result<u32, String> {
     if value.len() != 14 {
         return number(value);
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "system clock is before Unix epoch")?;
-    let now = i64::try_from(now.as_secs()).map_err(|_| "system clock is out of range")?;
-    timestamp_at(value, now)
+    timestamp_at(
+        value,
+        now.ok_or("system clock is before Unix epoch or out of range")?,
+    )
 }
 
 fn timestamp_at(value: &str, now: i64) -> Result<u32, String> {
@@ -1345,7 +1358,7 @@ mod tests {
             (Type::SRV, vec!["1", "2", "3"], 3),
         ] {
             assert_eq!(
-                parse_rdata_located(rtype, &fields, &[], &origin)
+                parse_rdata_located(rtype, &fields, &[], &origin, None)
                     .unwrap_err()
                     .0,
                 expected
