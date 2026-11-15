@@ -193,6 +193,13 @@ async fn coredns_local_cases() {
             Some("0.in-addr.arpa."),
         ),
         (
+            "x.255.in-addr.arpa.",
+            Type::AAAA,
+            Rcode::NXDOMAIN,
+            None,
+            Some("255.in-addr.arpa."),
+        ),
+        (
             "x.255.255.255.255.in-addr.arpa.",
             Type::AAAA,
             Rcode::NXDOMAIN,
@@ -251,6 +258,7 @@ async fn serves_rfc6303_reverse_zones_authoritatively() {
         "2.0.192.in-addr.arpa.",
         "100.51.198.in-addr.arpa.",
         "113.0.203.in-addr.arpa.",
+        "255.in-addr.arpa.",
         "255.255.255.255.in-addr.arpa.",
         "d.f.ip6.arpa.",
         "8.e.f.ip6.arpa.",

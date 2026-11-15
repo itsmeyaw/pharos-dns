@@ -3,7 +3,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
-use pharos_proto::{Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Type};
+use pharos_proto::{Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Type};
 use pharos_server::{Action, Context, Handler, Metadata, Outcome, Protocol, Transport};
 use std::sync::{
     Arc,
@@ -101,15 +101,15 @@ fn chain(text: &str) -> Chain {
 }
 
 fn named_query(name: &str) -> Vec<u8> {
+    named_query_class(name, Class::IN)
+}
+
+fn named_query_class(name: &str, class: Class) -> Vec<u8> {
     let name: Name = name.parse().unwrap();
     let mut wire = Vec::with_capacity(512);
     let mut builder = MessageBuilder::new(&mut wire, 512, 7, 0x0100).unwrap();
     builder
-        .question(
-            NameRef::parse(name.as_wire(), 0).unwrap(),
-            Type::A,
-            Class::IN,
-        )
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), Type::A, class)
         .unwrap();
     let _ = builder.finish();
     wire
@@ -158,11 +158,21 @@ async fn cache_and_forward_block_reserved_names_without_upstream_queries() {
             Action::Respond,
             "{name}"
         );
-        assert_eq!(
-            Message::parse(&response).unwrap().rcode(),
-            Rcode::NXDOMAIN,
-            "{name}"
-        );
+        let response = Message::parse(&response).unwrap();
+        assert_eq!(response.rcode(), Rcode::NXDOMAIN, "{name}");
+        assert_ne!(response.flags() & 0x0080, 0, "RA must be set: {name}");
+        let soa = response
+            .authorities()
+            .find(|record| record.rtype == Type::SOA)
+            .unwrap();
+        assert_eq!(soa.ttl, 604_800, "{name}");
+        assert!(matches!(
+            soa.data().unwrap(),
+            Rdata::Soa {
+                minimum: 604_800,
+                ..
+            }
+        ));
     }
     let forward_only = format!(".:0 {{\n forward . {address}\n}}");
     let blocks =
@@ -230,6 +240,101 @@ async fn allow_special_opt_in_forwards_test_and_reverse_but_never_invalid() {
     );
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NXDOMAIN);
     assert_eq!(requests.load(Ordering::Relaxed), 2);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn cache_and_forward_do_not_intercept_non_in_special_names() {
+    let (address, requests, upstream) = counting_upstream().await;
+    let corefile = format!(".:0 {{\n cache\n forward . {address}\n}}");
+    let blocks = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &named_query_class("service.test.", Class::CH),
+                "127.0.0.1:1000".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let response = Message::parse(&response).unwrap();
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    assert_eq!(response.questions().next().unwrap().qclass, Class::CH);
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn example_domains_follow_normal_forwarding() {
+    let (address, requests, upstream) = counting_upstream().await;
+    let corefile = format!(".:0 {{\n cache\n forward . {address}\n}}");
+    let blocks = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    for name in ["example.", "example.com.", "example.net.", "example.org."] {
+        let mut response = Vec::with_capacity(65535);
+        assert_eq!(
+            server
+                .handle(
+                    &named_query(name),
+                    "127.0.0.1:1000".parse().unwrap(),
+                    Protocol::Udp,
+                    &mut response,
+                )
+                .await,
+            Action::Respond,
+            "{name}"
+        );
+        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    }
+    assert_eq!(requests.load(Ordering::Relaxed), 4);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn explicit_special_forward_zones_opt_in_without_allow_special() {
+    let (address, requests, upstream) = counting_upstream().await;
+    for (from, name) in [
+        ("corp.test", "service.corp.test."),
+        ("10.in-addr.arpa", "1.10.in-addr.arpa."),
+    ] {
+        let forward = chain(&format!(".:0 {{\n forward {from} {address}\n}}"));
+        let (outcome, response, _) = run_query(&forward, &named_query(name)).await;
+        assert_eq!(outcome, Outcome::Response, "{from}");
+        assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    }
+    assert_eq!(requests.load(Ordering::Relaxed), 2);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn local_disable_with_cache_and_forward_uses_opted_in_upstream() {
+    let (address, requests, upstream) = counting_upstream().await;
+    let corefile = format!(
+        ".:0 {{\n local {{\n disable 10.in-addr.arpa\n }}\n cache\n forward . {address} {{\n allow_special\n }}\n}}"
+    );
+    let blocks = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let (mut listeners, _) = servers(blocks).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &named_query("1.10.in-addr.arpa."),
+                "127.0.0.1:1000".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOERROR);
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
     upstream.abort();
 }
 

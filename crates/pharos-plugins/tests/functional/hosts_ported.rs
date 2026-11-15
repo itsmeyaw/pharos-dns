@@ -28,6 +28,10 @@ struct HostsFile(PathBuf);
 
 impl HostsFile {
     fn new() -> Self {
+        Self::with_contents(HOSTS)
+    }
+
+    fn with_contents(contents: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         loop {
             let path = std::env::temp_dir().join(format!(
@@ -41,7 +45,7 @@ impl HostsFile {
                 .open(&path)
             {
                 Ok(mut file) => {
-                    file.write_all(HOSTS.as_bytes()).unwrap();
+                    file.write_all(contents.as_bytes()).unwrap();
                     return Self(path);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -256,5 +260,24 @@ async fn missing_names_without_fallthrough_return_authoritative_nxdomain() {
         assert_eq!(response.rcode(), Rcode::NXDOMAIN, "{qtype:?}");
         assert_eq!(response.answer_count(), 0, "{qtype:?}");
     }
+    chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn cache_passes_special_test_names_to_later_hosts_records() {
+    let file = HostsFile::with_contents("192.0.2.44 app.test\n");
+    let path = file.0.to_str().unwrap().replace('"', "\\\"");
+    let corefile = format!(".:0 {{\n cache\n hosts \"{path}\" {{\n reload 0\n }}\n}}");
+    let blocks = parse("Corefile", &corefile).unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    chain.lifecycle.run(Phase::Startup).await.unwrap();
+    let (outcome, wire) = query(&chain, "app.test.", Type::A).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.rcode(), Rcode::NOERROR);
+    assert_eq!(response.answers().next().unwrap().rdata, [192, 0, 2, 44]);
     chain.lifecycle.run(Phase::Shutdown).await.unwrap();
 }

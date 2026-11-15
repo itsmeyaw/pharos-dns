@@ -16,17 +16,21 @@ async fn warm_dynamic_and_unrelated_cached_queries_do_not_allocate() {
         .join(format!("pharos-dynupdate-alloc-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
     let database = root.join("database");
+    let external_zone = root.join("external.zone");
+    // RFC 6761 §6.5: keep this unrelated cache probe outside the newly special `.test` suffix.
+    std::fs::write(
+        &external_zone,
+        "@ 60 IN SOA ns.external.example. hostmaster.external.example. 1 7200 3600 1209600 60\n@ 60 IN NS ns.external.example.\nleaf 60 IN A 192.0.2.88\n",
+    )
+    .unwrap();
     let seed = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/file/example.zone"
     );
-    let other = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/file/external.zone"
-    );
     let text = format!(
-        ".:0 {{\n cache\n dynupdate example.org {{\n file {seed}\n database {}\n allow key.example.org. * A\n }}\n file {other} external.test {{\n reload 0\n }}\n}}",
-        database.display()
+        ".:0 {{\n cache\n dynupdate example.org {{\n file {seed}\n database {}\n allow key.example.org. * A\n }}\n file {} external.example {{\n reload 0\n }}\n}}",
+        database.display(),
+        external_zone.display()
     );
     let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
     let (mut servers, _) = servers(configured).unwrap();
@@ -34,7 +38,7 @@ async fn warm_dynamic_and_unrelated_cached_queries_do_not_allocate() {
     let queries = [
         "www.example.org.",
         "missing.example.org.",
-        "leaf.external.test.",
+        "leaf.external.example.",
     ]
     .map(|text| {
         let name: Name = text.parse().unwrap();

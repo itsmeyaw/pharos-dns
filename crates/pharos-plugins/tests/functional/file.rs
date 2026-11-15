@@ -2,7 +2,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
-use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
+use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Type};
 use pharos_server::{Action, Context, Handler, Metadata, Outcome, Phase, Protocol, Transport};
 
 async fn handle_query(text: &str, name: &str) -> (Action, Vec<u8>) {
@@ -94,9 +94,17 @@ async fn special_use_names_are_negative_unless_an_explicit_zone_matches() {
         .unwrap();
     assert_eq!(soa.name.to_string(), "test.");
     assert_eq!(soa.ttl, 604_800);
+    assert_eq!(soa.rdata.len(), 42);
     let mname = NameRef::parse(soa.rdata, 0).unwrap();
     let rname = NameRef::parse(soa.rdata, mname.wire_len()).unwrap();
     assert_eq!(rname.to_string(), "nobody.invalid.");
+    assert!(matches!(
+        soa.data().unwrap(),
+        Rdata::Soa {
+            minimum: 604_800,
+            ..
+        }
+    ));
 
     let path = std::env::temp_dir().join(format!("pharos-special-{}.zone", std::process::id()));
     std::fs::write(
@@ -143,6 +151,25 @@ async fn special_use_names_are_negative_unless_an_explicit_zone_matches() {
             .unwrap()
             .rdata,
         [192, 0, 2, 10]
+    );
+}
+
+#[tokio::test]
+async fn cache_special_fallback_returns_nxdomain_after_plugins_pass() {
+    let (action, wire) = handle_query(".:0 {\n local\n cache\n}", "service.test.").await;
+    assert_eq!(action, Action::Respond);
+    let response = Message::parse(&wire).unwrap();
+    assert!(!response.aa());
+    assert_ne!(response.flags() & 0x0080, 0);
+    assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+    assert_eq!(
+        response
+            .authorities()
+            .find(|record| record.rtype == Type::SOA)
+            .unwrap()
+            .name
+            .to_string(),
+        "test."
     );
 }
 
