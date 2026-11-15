@@ -99,7 +99,7 @@ fn coredns_notify_checks_ip_spelling_and_scope() {
 
 fn soa_rdata(serial: u32) -> Vec<u8> {
     let mut soa = vec![0, 0];
-    for value in [serial, 1, 1, 1000, 60] {
+    for value in [serial, 3600, 1, 3600, 60] {
         soa.extend_from_slice(&value.to_be_bytes());
     }
     soa
@@ -229,6 +229,30 @@ async fn secondary_serializes_transfers_and_never_publishes_an_older_serial() {
     primary.await.unwrap();
     assert_eq!(peak.load(Ordering::SeqCst), 1);
     assert_eq!(zone.current.load_full().unwrap().serial(), Some(5));
+}
+
+#[tokio::test]
+async fn failed_notify_check_enters_retry_instead_of_waiting_for_refresh() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let zone = Arc::new(plain_zone(address));
+    let (shared, _, _) = catalog_shared();
+    let task = tokio::spawn(update::run(shared, Arc::clone(&zone)));
+    let (socket, _) = listener.accept().await.unwrap();
+    // REFRESH is 3600 s and RETRY 1 s: only the NOTIFY failure can cause a second check soon.
+    serve_axfr_on(socket, 1, |_, _| {}).await;
+    while zone.current.load().is_none() {
+        tokio::task::yield_now().await;
+    }
+    *zone.notify_source.lock().unwrap() = Some(address);
+    zone.notify.notify_one();
+    // The NOTIFY SOA check fails when the primary drops the connection.
+    drop(listener.accept().await.unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+        .await
+        .expect("failed NOTIFY did not trigger a RETRY check")
+        .unwrap();
+    task.abort();
 }
 
 #[tokio::test]

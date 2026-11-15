@@ -51,6 +51,8 @@ struct SecondaryZone {
     current: ZoneHolder,
     expired: AtomicBool,
     notify: tokio::sync::Notify,
+    // Wakes the refresh loop after a NOTIFY-triggered check or transfer fails.
+    retry: tokio::sync::Notify,
     notify_source: Mutex<Option<SocketAddr>>,
     task: Mutex<Option<tokio::task::AbortHandle>>,
     transfer_lock: tokio::sync::Mutex<()>,
@@ -63,6 +65,7 @@ impl SecondaryZone {
             current: ZoneHolder::empty(),
             expired: AtomicBool::new(false),
             notify: tokio::sync::Notify::new(),
+            retry: tokio::sync::Notify::new(),
             notify_source: Mutex::new(None),
             task: Mutex::new(None),
             transfer_lock: tokio::sync::Mutex::new(()),

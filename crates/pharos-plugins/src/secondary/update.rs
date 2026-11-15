@@ -443,22 +443,30 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
             };
             // RFC 1996 §4.4: Defer duplicate NOTIFY work until current check completes.
             // RFC 1996 §3.11: Query and transfer from the master that sent NOTIFY.
-            match should_transfer_from(&notify_zone, source).await {
-                Ok(true) => {
-                    if let Err(error) = transfer_from(&notify_shared, &notify_zone, source).await {
+            let failed = match should_transfer_from(&notify_zone, source).await {
+                Ok(true) => transfer_from(&notify_shared, &notify_zone, source)
+                    .await
+                    .inspect_err(|error| {
                         pharos_server::logging::log(
                             "WARN",
                             "secondary",
                             &format!("NOTIFY transfer {}: {error}", notify_zone.config.apex),
                         );
-                    }
+                    })
+                    .is_err(),
+                Ok(false) => false,
+                Err(error) => {
+                    pharos_server::logging::log(
+                        "WARN",
+                        "secondary",
+                        &format!("NOTIFY check {}: {error}", notify_zone.config.apex),
+                    );
+                    true
                 }
-                Ok(false) => {}
-                Err(error) => pharos_server::logging::log(
-                    "WARN",
-                    "secondary",
-                    &format!("NOTIFY check {}: {error}", notify_zone.config.apex),
-                ),
+            };
+            if failed {
+                // RFC 1996 §3.11: a NOTIFY acts as an expired REFRESH; a failed one enters RETRY (RFC 1034 §4.3.5).
+                notify_zone.retry.notify_one();
             }
         }
     }));
@@ -488,6 +496,10 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
             let jitter = tokio::select! {
                 _ = refresh.tick(), if !retry_active => 5000,
                 _ = retry.tick(), if retry_active => 2000,
+                _ = zone.retry.notified() => {
+                    retry_active = true;
+                    continue;
+                }
                 _ = tokio::time::sleep_until(expire_at), if retry_active && !zone.expired.load(Ordering::Relaxed) => {
                     zone.expired.store(true, Ordering::Relaxed);
                     super::catalog::invalidate(&shared, &zone);
