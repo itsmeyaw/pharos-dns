@@ -247,7 +247,7 @@ impl Zone {
                     });
                     changed |= before != records.len();
                 }
-                // RFC 2136 §3.4.2.4: Delete the RR, keeping apex SOA and the final apex NS.
+                // RFC 2136 §§2.5.4, 3.4.2.4: Ignore deletes of apex SOA and final NS.
                 Class::NONE => {
                     if apex && update.rtype == Type::SOA {
                         continue;

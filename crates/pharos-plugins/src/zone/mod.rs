@@ -233,7 +233,7 @@ impl Zone {
             .iter()
             .any(|record| record.owner == apex && record.rtype == Type::NS)
         {
-            return Err("Zone apex has no NS record".into());
+            return Err("Zone apex has no NS record; add an NS RRset at the Zone apex".into());
         }
         // RFC 8976 §§2.1, 2.5: Only apex ZONEMD tuples are unique; identical RRs dedupe below.
         let mut zonemd = std::collections::HashMap::<(u8, u8), &[u8]>::new();
@@ -284,7 +284,7 @@ impl Zone {
                 }
             {
                 let end = normalize_rdata_name(&mut rdata, offset, true);
-                // RFC 2136 §2.5: Empty update RDATA retains its special wire meaning.
+                // RFC 2136 §§2.5.2–2.5.3: Empty RDATA selects RRset or all-name deletion.
                 if end.is_err()
                     || record.rtype == Type::SOA
                         && end.is_ok_and(|end| normalize_rdata_name(&mut rdata, end, true).is_err())
@@ -662,17 +662,16 @@ fn same_wire_name(left: &[u8], right: &[u8]) -> bool {
 
 // RFC 1034 §3.6.2: Floyd traversal detects every CNAME cycle with constant extra storage.
 fn cname_target_before_cut<'a>(zone: &'a Zone, name: &[u8], qtype: Type) -> Option<&'a [u8]> {
-    // RFC 2136 §2.5: Empty update RDATA has no name to chase.
+    // RFC 2136 §§2.5.2–2.5.3: Empty update RDATA is not a CNAME target name.
     if name.is_empty() {
         return None;
     }
-    // RFC 1034 §4.3.2: Do not chase aliases across a Zone Cut.
-    if zone.cut(name, qtype).is_some() {
+    // RFC 1034 §4.3.2: Match the main lookup's NS, cut, and apex-SOA stopping rules.
+    if qtype == Type::NS || zone.cut(name, qtype).is_some() {
         return None;
     }
-    zone.records_at(name, Type::CNAME)
-        .next()
-        .map(|record| record.rdata.as_slice())
+    let target = zone.records_at(name, Type::CNAME).next()?.rdata.as_slice();
+    (qtype != Type::SOA || !target.eq_ignore_ascii_case(zone.apex.as_wire())).then_some(target)
 }
 
 fn cname_chain_loops(zone: &Zone, start: &[u8], qtype: Type) -> bool {
@@ -1001,22 +1000,34 @@ impl Zone {
             cut = zone.cut(target, question.qtype);
         }
         // DNAME NS targets without a Referral use Self Lookup instead of local alias walking.
-        // RFC 1034 §3.6.2: CNAME queries do not restart at the canonical name.
+        // RFC 1034 §§3.4.1, 3.6.2: CNAME and ANY queries do not restart at the canonical name.
         if cut.is_none()
             && question.qtype != Type::CNAME
+            && question.qtype != Type::ANY
             && !yxdomain
             && !(dname.is_some() && question.qtype == Type::NS)
         {
             // RFC 1034 §4.3.2: Follow a matched CNAME and restart lookup at its target.
             // RFC 2181 §10.2: PTR lookup names may alias even though PTR targets may not.
             let mut next_alias = zone.records_at(target, Type::CNAME).next();
-            if next_alias.is_some() && cname_chain_loops(zone, target, question.qtype) {
-                return Outcome::Unanswered(Rcode::SERVFAIL);
-            }
             while let Some(alias) = next_alias {
                 if count == chain.len() {
+                    if cname_chain_loops(zone, target, question.qtype) {
+                        return Outcome::Unanswered(Rcode::SERVFAIL);
+                    }
                     chain_limited = true;
                     break;
+                }
+                // RFC 1034 §3.6.2: Reject self-aliases and repeated CNAME owners in the emitted chain.
+                if same_wire_name(alias.owner.as_wire(), &alias.rdata)
+                    || chain[..count].iter().flatten().any(|previous| {
+                        previous
+                            .owner
+                            .as_wire()
+                            .eq_ignore_ascii_case(alias.owner.as_wire())
+                    })
+                {
+                    return Outcome::Unanswered(Rcode::SERVFAIL);
                 }
                 chain[count] = Some(alias);
                 count += 1;
@@ -1037,11 +1048,18 @@ impl Zone {
             }
         }
         let mut lookup_failed = false;
+        // RFC 1034 §§3.4.1, 3.6.2: ANY includes synthesized CNAME and skips DNAME target lookup.
         let lookup = if cut.is_none()
             && !chain_limited
             && !empty_alias
             && !yxdomain
-            && (count > 0 || dname.is_some() && question.qtype != Type::CNAME)
+            // RFC 1034 §3.6.2: An NS lookup stops after one CNAME; do not re-enter another alias.
+            && !(question.qtype == Type::NS
+                && zone.records_at(target, Type::CNAME).next().is_some())
+            && (count > 0
+                || dname.is_some()
+                    && question.qtype != Type::CNAME
+                    && question.qtype != Type::ANY)
             && (!zone.exact(target)
                 || question.qtype == Type::NS
                 || question.qtype == Type::SOA && target.eq_ignore_ascii_case(zone.apex.as_wire()))

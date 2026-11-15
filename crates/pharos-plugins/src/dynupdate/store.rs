@@ -434,6 +434,64 @@ mod tests {
     }
 
     #[test]
+    fn rejects_durable_database_missing_apex_ns_with_repair_guidance() {
+        use pharos_proto::Type;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-no-apex-ns-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = acquire(&config).unwrap();
+        let records = shared
+            .current
+            .load()
+            .records()
+            .iter()
+            .filter(|record| record.rtype != Type::NS)
+            .cloned()
+            .collect::<Vec<_>>();
+        shared
+            .db
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .commit(
+                config.origin.canonical().as_bytes(),
+                &super::wire::encode(&records).unwrap(),
+            )
+            .unwrap();
+        drop(shared);
+
+        let error = validate(&config).err().unwrap().to_string();
+        assert!(error.contains("Zone apex has no NS record"), "{error}");
+        assert!(
+            error.contains("add an NS RRset at the Zone apex"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn concurrent_prerequisites_apply_to_the_committed_snapshot() {
         use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

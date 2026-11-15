@@ -223,7 +223,13 @@ async fn secondary_validates_axfr_apex_ns_and_deduplicates_records() {
         from: vec![from],
         catalog: None,
     });
-    assert!(update::transfer(&shared, &missing_ns).await.is_err());
+    let error = update::transfer(&shared, &missing_ns).await.unwrap_err();
+    assert!(error.to_string().contains("Zone apex has no NS record"));
+    assert!(
+        error
+            .to_string()
+            .contains("add an NS RRset at the Zone apex")
+    );
     assert!(missing_ns.current.load_full().is_none());
     primary.await.unwrap();
 }

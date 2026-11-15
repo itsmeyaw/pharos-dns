@@ -743,12 +743,22 @@ mod tests {
         let apex: Name = "example.org.".parse().unwrap();
         for text in [
             "$TTL 1M\n$ORIGIN example.org.\n@ IN SOA ns. admin. foobarbaz 1200 144 1814400 2h\n",
-            "$TTL 1M\n$ORIGIN example.org.\n@ IN SOA ns. admin. 1 1200 144 1814400 2h\n",
             "$TTL 1M\n$ORIGIN example.org.\nwww IN A 192.0.2.14\n",
         ] {
             std::fs::write(&path, text).unwrap();
             assert!(sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).is_err());
         }
+        std::fs::write(
+            &path,
+            "$TTL 1M\n$ORIGIN example.org.\n@ IN SOA ns. admin. 1 1200 144 1814400 2h\n",
+        )
+        .unwrap();
+        let error = sign(&apex, &path, &[key()], 1_700_000_000, 0, 0).unwrap_err();
+        assert!(error.contains("Zone apex has no NS record"), "{error}");
+        assert!(
+            error.contains("add an NS RRset at the Zone apex"),
+            "{error}"
+        );
         std::fs::remove_file(path).unwrap();
     }
 
