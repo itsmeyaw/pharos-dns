@@ -255,6 +255,14 @@ async fn failed_notify_check_enters_retry_instead_of_waiting_for_refresh() {
     task.abort();
 }
 
+#[test]
+fn unknown_notify_logging_is_rate_limited_per_zone() {
+    assert!(log_unknown_notify(0));
+    assert!(!log_unknown_notify(1));
+    assert!(!log_unknown_notify(1023));
+    assert!(log_unknown_notify(1024));
+}
+
 #[tokio::test]
 async fn secondary_rejects_axfr_over_record_cap_and_keeps_no_zone() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -622,6 +630,12 @@ async fn coredns_notify_accepts_only_known_primary() {
     assert_eq!(
         secondary.serve_with(&mut cx, TestNext, true).await,
         Outcome::Drop
+    );
+    assert_eq!(
+        secondary.shared.zones.load()[0]
+            .unknown_notify
+            .load(Ordering::Relaxed),
+        1
     );
     cx.client = "127.0.0.1:1000".parse().unwrap();
     assert_eq!(
