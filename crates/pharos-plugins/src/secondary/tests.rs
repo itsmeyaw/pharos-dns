@@ -134,6 +134,17 @@ async fn serve_axfr_on(
     builder
         .record(Section::Answer, q.name, Type::SOA, Class::IN, 60, &soa)
         .unwrap();
+    // RFC 1034 §4.2.1 / RFC 1035 §5.2: a zone needs an apex NS RRset to be loadable.
+    builder
+        .record(
+            Section::Answer,
+            q.name,
+            Type::NS,
+            Class::IN,
+            60,
+            b"\x02ns\x07example\x03org\x00",
+        )
+        .unwrap();
     extra(&mut builder, q.name);
     builder
         .record(Section::Answer, q.name, Type::SOA, Class::IN, 60, &soa)
@@ -173,12 +184,12 @@ async fn secondary_axfr_stores_compressed_rdata_names_uncompressed() {
     update::transfer(&shared, &zone).await.unwrap();
     primary.await.unwrap();
     let snapshot = zone.current.load_full().unwrap();
-    let ns = snapshot
-        .records()
-        .iter()
-        .find(|record| record.rtype == Type::NS)
-        .unwrap();
-    assert_eq!(ns.rdata, zone.config.apex.as_wire());
+    assert!(
+        snapshot
+            .records()
+            .iter()
+            .any(|record| record.rtype == Type::NS && record.rdata == zone.config.apex.as_wire())
+    );
 }
 
 #[test]
@@ -489,6 +500,7 @@ async fn secondary_validates_axfr_apex_ns_and_deduplicates_records() {
         apex: "example.org.".parse().unwrap(),
         from: vec![from],
         catalog: None,
+        limits: Default::default(),
     });
     let error = update::transfer(&shared, &missing_ns).await.unwrap_err();
     assert!(error.to_string().contains("Zone apex has no NS record"));
