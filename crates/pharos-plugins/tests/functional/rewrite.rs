@@ -1010,6 +1010,52 @@ async fn ttl_rewrite_keeps_a_rrset_at_its_lowest_ttl() {
     );
 }
 
+#[tokio::test]
+async fn name_rewrite_without_ttl_rule_preserves_received_ttls() {
+    let config = ".:53 {\n rewrite name example.com. internal.example.\n}";
+    let chain = configure::<Chain>(&parse("Corefile", config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.com.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        chain.rewrite.as_ref().unwrap().serve(&mut cx, MixedTtl).await,
+        Outcome::Response
+    );
+    assert_eq!(
+        Message::parse(cx.response)
+            .unwrap()
+            .answers()
+            .map(|record| record.ttl)
+            .collect::<Vec<_>>(),
+        [30, 60]
+    );
+}
+
 // Derived from CoreDNS v1.15.0 plugin/rewrite/ttl_test.go TestTtlRewrite.
 #[tokio::test]
 async fn coredns_ttl_answer_rows() {

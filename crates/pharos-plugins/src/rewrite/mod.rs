@@ -128,7 +128,7 @@ fn rrset_minimum_ttls<'a>(message: &Message<'a>) -> RrsetTtls<'a> {
     minimums
 }
 
-// shortcut: Scan only after 256 distinct RRsets; raise inline capacity if large Responses are common.
+// shortcut: Overflow scans are bounded by one 65,535-octet Message; raise inline capacity if common.
 fn rrset_minimum_ttl(message: &Message<'_>, key: &RrsetKey<'_>) -> Option<u32> {
     let mut minimum = None;
     for records in [message.answers(), message.authorities(), message.additionals()] {
@@ -243,6 +243,26 @@ impl Matcher {
             Self::Prefix(value) => name.starts_with(value),
             Self::Suffix(value) => name.ends_with(value),
             Self::Substring(value) => name.contains(value),
+            Self::Regex(value) => value.is_match(name),
+        }
+    }
+
+    // RFC 4343 §3: CNAME matcher comparisons ignore ASCII letter case.
+    fn matches_cname(&self, name: &str) -> bool {
+        match self {
+            Self::Any => false,
+            Self::Exact(value) => name.eq_ignore_ascii_case(value),
+            Self::Prefix(value) => name
+                .get(..value.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(value)),
+            Self::Suffix(value) => name
+                .get(name.len().saturating_sub(value.len())..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(value)),
+            Self::Substring(value) if value.is_empty() => true,
+            Self::Substring(value) => name
+                .as_bytes()
+                .windows(value.len())
+                .any(|window| window.eq_ignore_ascii_case(value.as_bytes())),
             Self::Regex(value) => value.is_match(name),
         }
     }
@@ -434,8 +454,10 @@ impl Rewrite {
                         if lower.len() > 10_000 {
                             return Err(cursor.error("regex pattern too long"));
                         }
+                        // RFC 4343 §3: Regex CNAME matchers ignore ASCII case like other DNS names.
+                        let pattern = format!("(?i:{lower})");
                         Matcher::Regex(Box::new(
-                            RegexMatcher::new(&lower).map_err(|_| cursor.error("invalid regex"))?,
+                            RegexMatcher::new(&pattern).map_err(|_| cursor.error("invalid regex"))?,
                         ))
                     }
                     _ => return Err(cursor.error("invalid CNAME match type")),
@@ -892,15 +914,30 @@ fn cname_replacement(
     };
     write!(source, "{value}").ok()?;
     let input = std::str::from_utf8(&source.bytes[..source.len]).ok()?;
-    let mut folded = NameText {
-        bytes: [0; 1024],
-        len: source.len,
-    };
-    folded.bytes[..source.len].copy_from_slice(input.as_bytes());
-    // RFC 4343 §3: Compare DNS names without ASCII letter case.
-    folded.bytes[..folded.len].make_ascii_lowercase();
-    let folded = std::str::from_utf8(&folded.bytes[..folded.len]).ok()?;
-    if !matcher.matches(folded) {
+    if let Matcher::Regex(pattern) = matcher {
+        if !pattern.is_match(input) {
+            return None;
+        }
+        // shortcut: Regex CNAME capture replacement allocates; literal matching stays allocation-free.
+        let captures = pattern.captures(input)?;
+        let mut result = replacement.to_owned();
+        for (index, capture) in captures.iter().enumerate() {
+            result = result.replace(
+                &format!("{{{index}}}"),
+                capture.map_or("", |value| value.as_str()),
+            );
+        }
+        let mut text = NameText {
+            bytes: [0; 1024],
+            len: 0,
+        };
+        text.write_str(&result).ok()?;
+        let text = std::str::from_utf8(&text.bytes[..text.len]).ok()?;
+        let mut wire = [0; 255];
+        let wire = Name::parse_absolute_into(text, &mut wire).ok()?;
+        return Some((source, NameRef::parse(wire, 0).ok()?.to_name()));
+    }
+    if !matcher.matches_cname(input) {
         return None;
     }
     let mut text = NameText {
@@ -917,33 +954,42 @@ fn cname_replacement(
             text.write_str(input.get(..input.len().checked_sub(from.len())?)?).ok()?;
             text.write_str(replacement).ok()?;
         }
+        Matcher::Substring(from) if from.is_empty() => {
+            for (index, part) in input.split(from).enumerate() {
+                if index > 0 {
+                    text.write_str(replacement).ok()?;
+                }
+                text.write_str(part).ok()?;
+            }
+        }
         Matcher::Substring(from) => {
             let mut position = 0;
-            for (index, _) in folded.match_indices(from) {
+            while let Some(offset) = find_ascii_case_insensitive(&input[position..], from) {
+                let index = position + offset;
                 text.write_str(input.get(position..index)?).ok()?;
                 text.write_str(replacement).ok()?;
                 position = index + from.len();
             }
             text.write_str(input.get(position..)?).ok()?;
         }
-        Matcher::Regex(pattern) => {
-            // shortcut: regex captures allocate; non-regex rules remain allocation-free.
-            let captures = pattern.captures(folded)?;
-            let mut result = replacement.to_owned();
-            for (index, capture) in captures.iter().enumerate() {
-                result = result.replace(
-                    &format!("{{{index}}}"),
-                    capture.map_or("", |value| input.get(value.range()).unwrap_or("")),
-                );
-            }
-            text.write_str(&result).ok()?;
-        }
+        Matcher::Regex(_) => unreachable!("regex matchers are handled above"),
         Matcher::Any => return None,
     }
     let text = std::str::from_utf8(&text.bytes[..text.len]).ok()?;
     let mut wire = [0; 255];
     let wire = Name::parse_absolute_into(text, &mut wire).ok()?;
     Some((source, NameRef::parse(wire, 0).ok()?.to_name()))
+}
+
+// RFC 4343 §3: Find substring matches without copying or lowercasing the DNS name.
+fn find_ascii_case_insensitive(value: &str, pattern: &str) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+    value
+        .as_bytes()
+        .windows(pattern.len())
+        .position(|window| window.eq_ignore_ascii_case(pattern.as_bytes()))
 }
 
 fn remap<'a>(
@@ -2024,11 +2070,7 @@ fn build_reverted_response<'q>(
                 |bits| bits[index] != 0,
             )
     });
-    let rrset_ttls = if rewrites_ttl {
-        rrset_minimum_ttls(&response)
-    } else {
-        RrsetTtls::new()
-    };
+    let rrset_ttls = rewrites_ttl.then(|| rrset_minimum_ttls(&response));
     // RFC 1035 §4.1.2: Restore the original QNAME, QTYPE, and QCLASS in the response.
     let original = original_query
         .questions()
@@ -2064,11 +2106,12 @@ fn build_reverted_response<'q>(
                     rtype: rr.rtype,
                     class: rr.class,
                 };
-            let mut ttl = if rr.rtype == Type::OPT {
+            let mut ttl = if rr.rtype == Type::OPT || !rewrites_ttl {
                 rr.ttl
             } else {
                 rrset_ttls
-                    .get(&key)
+                    .as_ref()
+                    .and_then(|ttls| ttls.get(&key))
                     .or_else(|| rrset_minimum_ttl(&response, &key))
                     .unwrap_or(rr.ttl)
             };
@@ -2076,7 +2119,7 @@ fn build_reverted_response<'q>(
                 has_opt = true;
                 // RFC 6891 §6.1.3: OPT carries the high RCODE bits, not an RR TTL.
                 ttl = (ttl & 0x00ff_ffff) | (u32::from(rcode >> 4) << 24);
-            } else {
+            } else if rewrites_ttl {
                 // RFC 2181 §5.2: Apply the same TTL clamp to each RRSet member.
                 for (index, rule) in rules[..end].iter().enumerate().rev() {
                     let active = recorded.map_or_else(
@@ -2625,15 +2668,20 @@ mod tests {
 
     #[test]
     fn cname_match_ignores_ascii_case() {
-        let matcher = Matcher::Exact("old.example.".into());
         let value: pharos_proto::Name = "Old.Example.".parse().unwrap();
-        assert_eq!(
-            cname_replacement(&matcher, "new.example.", pharos_proto::NameRef::parse(value.as_wire(), 0).unwrap())
-                .unwrap()
-                .1
-                .to_string(),
-            "new.example."
-        );
+        let value = pharos_proto::NameRef::parse(value.as_wire(), 0).unwrap();
+        for matcher in [
+            Matcher::Exact("old.example.".into()),
+            Matcher::Regex(Box::new(RegexMatcher::new(r"(?i:old\.example\.)").unwrap())),
+        ] {
+            assert_eq!(
+                cname_replacement(&matcher, "new.example.", value)
+                    .unwrap()
+                    .1
+                    .to_string(),
+                "new.example."
+            );
+        }
     }
 
     // RFC 2181 §5.2: Overflow RRsets keep the same lowest-TTL semantics.
