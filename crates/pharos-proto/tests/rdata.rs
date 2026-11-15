@@ -69,7 +69,7 @@ fn hinfo_borrowed_fields_and_malformed_lengths() {
 }
 
 #[test]
-fn caa_and_uri_fields_and_miekg_octet_escaping() {
+fn caa_and_uri_display_preserves_literal_backslashes() {
     let caa = b"\x80\x05issuea\\046\\.\\255\\";
     let data = Rdata::parse(Type::CAA, caa).unwrap();
     assert_eq!(
@@ -80,7 +80,7 @@ fn caa_and_uri_fields_and_miekg_octet_escaping() {
             value: b"a\\046\\.\\255\\"
         }
     );
-    assert_eq!(data.to_string(), r#"128 issue "a.\.\255""#);
+    assert_eq!(data.to_string(), r#"128 issue "a\\046\\.\\255\\""#);
     let uri = b"\x00\x0a\x00\x01http://example/\\\"\x00";
     let data = Rdata::parse(Type::URI, uri).unwrap();
     assert_eq!(
@@ -91,13 +91,23 @@ fn caa_and_uri_fields_and_miekg_octet_escaping() {
             target: b"http://example/\\\"\x00"
         }
     );
-    assert_eq!(data.to_string(), r#"10 1 "http://example/\"\000""#);
+    assert_eq!(data.to_string(), r#"10 1 "http://example/\\\"\000""#);
     for invalid in [&b""[..], &b"\x00"[..], &b"\x00\x03ab"[..]] {
         assert!(Rdata::parse(Type::CAA, invalid).is_err());
     }
     for len in 0..4 {
         assert!(Rdata::parse(Type::URI, &uri[..len]).is_err());
     }
+    assert!(Rdata::parse(Type::URI, b"\x00\x00\x00\x00").is_err());
+}
+
+#[test]
+fn naptr_wire_preserves_non_utf8_character_strings() {
+    let data = Rdata::parse(Type::NAPTR, b"\x00\x01\x00\x01\x00\x01\xff\x00\x00").unwrap();
+    let Rdata::Naptr { services, .. } = data else {
+        panic!("expected NAPTR")
+    };
+    assert_eq!(services, &[0xff]);
 }
 
 #[test]
@@ -169,6 +179,11 @@ fn text_builders_reject_unrepresentable_fields_and_opaque_impersonation() {
             tag: &long,
             value: b"",
         },
+        Rdata::Uri {
+            priority: 0,
+            weight: 0,
+            target: b"",
+        },
         Rdata::Unknown(Type::TXT, b"\x00"),
         Rdata::Unknown(Type::HINFO, b"\x00\x00"),
         Rdata::Unknown(Type::CAA, b"\x00\x00"),
@@ -215,7 +230,7 @@ fn text_builders_reject_unrepresentable_fields_and_opaque_impersonation() {
 }
 
 #[test]
-fn miekg_wire_string_escape_cases() {
+fn wire_string_escape_cases_preserve_octets() {
     // Adapted from miekg/dns parse_test.go TestDomainNameAndTXTEscapes.
     for (byte, text) in [
         (b'.', "."),
@@ -242,14 +257,9 @@ fn miekg_wire_string_escape_cases() {
         Rdata::parse(Type::URI, b"\x00\x00\x00\x00\\256\\\\\\.")
             .unwrap()
             .to_string(),
-        r#"0 0 "\000\\\.""#
+        r#"0 0 "\\256\\\\\\.""#
     );
-    assert_eq!(
-        Rdata::parse(Type::URI, b"\x00\x00\x00\x00")
-            .unwrap()
-            .to_string(),
-        "0 0 \"\""
-    );
+    assert!(Rdata::parse(Type::URI, b"\x00\x00\x00\x00").is_err());
 }
 
 #[test]

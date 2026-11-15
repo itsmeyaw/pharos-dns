@@ -405,8 +405,11 @@ mod tests {
             let mut wire = Vec::with_capacity(512);
             let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x2800).unwrap();
             builder.question(name, Type::SOA, Class::IN).unwrap();
+            // RFC 6742 §2.4.1.2: Use the raw hook to model received compressed LP data.
             builder
-                .record(Section::Authority, name, kind, Class::IN, 60, &rdata)
+                .record_with(Section::Authority, name, kind, Class::IN, 60, |writer| {
+                    writer.write_bytes(&rdata)
+                })
                 .unwrap();
             let _ = builder.finish();
             let message = Message::parse(&wire).unwrap();

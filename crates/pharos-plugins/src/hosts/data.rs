@@ -28,6 +28,7 @@ impl Map {
         auto_reverse: bool,
         source: &str,
     ) -> Self {
+        const INVALID_NAME_LOG_LIMIT: usize = 10;
         let mut map = Self::default();
         let mut field = Vec::new();
         let mut oversized = false;
@@ -35,6 +36,7 @@ impl Map {
         let mut line = 1;
         let mut comment = false;
         let mut address = None;
+        let mut invalid_names = 0;
         for result in BufReader::new(input)
             .bytes()
             .chain(std::iter::once(Ok(b'\n')))
@@ -79,7 +81,20 @@ impl Map {
                                 ip => ip,
                             });
                     } else if let Some(ip) = address {
-                        map.add(&field, ip, domains, auto_reverse);
+                        // RFC 4343 §2.1: Report host names whose ASCII presentation is invalid.
+                        if let Err(reason) = map.add(&field, ip, domains, auto_reverse) {
+                            if invalid_names < INVALID_NAME_LOG_LIMIT {
+                                let skipped = String::from_utf8_lossy(&field);
+                                pharos_server::logging::log(
+                                    "ERROR",
+                                    "hosts",
+                                    &format!(
+                                        "{source}, line {line}: {reason}, skipping name {skipped:?}"
+                                    ),
+                                );
+                            }
+                            invalid_names += 1;
+                        }
                     }
                     field.clear();
                     oversized = false;
@@ -99,13 +114,27 @@ impl Map {
                 }
             }
         }
+        if invalid_names > INVALID_NAME_LOG_LIMIT {
+            pharos_server::logging::log(
+                "ERROR",
+                "hosts",
+                &format!(
+                    "{source}: skipped {invalid_names} invalid names; suppressed {} further entries",
+                    invalid_names - INVALID_NAME_LOG_LIMIT
+                ),
+            );
+        }
         map
     }
 
-    fn add(&mut self, field: &[u8], ip: IpAddr, domains: &[Name], auto_reverse: bool) {
-        let Ok(text) = std::str::from_utf8(field) else {
-            return;
-        };
+    fn add(
+        &mut self,
+        field: &[u8],
+        ip: IpAddr,
+        domains: &[Name],
+        auto_reverse: bool,
+    ) -> Result<(), &'static str> {
+        let text = std::str::from_utf8(field).map_err(|_| "invalid UTF-8 host name")?;
         // RFC 4343 §3: DNS name lookup compares ASCII letters case-insensitively.
         let text = text.to_ascii_lowercase();
         let text = if text.ends_with('.') {
@@ -113,12 +142,13 @@ impl Map {
         } else {
             format!("{text}.")
         };
-        let Ok(name) = text.parse::<Name>() else {
-            return;
-        };
+        // RFC 4343 §2.1: DNS presentation requires escapes for non-ASCII label octets.
+        let name = text
+            .parse::<Name>()
+            .map_err(|_| "invalid DNS presentation name")?;
         // RFC 1034 §3.1: a subdomain is contained within its parent domain.
         if !domains.iter().any(|domain| name.is_subdomain_of(domain)) {
-            return;
+            return Ok(());
         }
         let wildcard = text.starts_with("*.");
         let key = name.as_wire().to_ascii_lowercase();
@@ -129,6 +159,7 @@ impl Map {
         if auto_reverse && !wildcard {
             self.reverse.entry(ip).or_default().push(name);
         }
+        Ok(())
     }
 
     pub(super) fn lookup_key(&self, key: &[u8], v4: bool) -> &[IpAddr] {
@@ -239,6 +270,22 @@ mod tests {
         assert_eq!(
             map.lookup("bar.", true),
             ["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn invalid_raw_unicode_host_names_are_skipped() {
+        let root: Name = ".".parse().unwrap();
+        let map = Map::parse(
+            &b"192.0.2.1 m\xc3\xbcnich.example\n192.0.2.2 m\\195\\188nich.example\n"[..],
+            &[root],
+            false,
+            "test hosts",
+        );
+        assert_eq!(map.v4.len(), 1);
+        assert_eq!(
+            map.lookup(r"m\195\188nich.example.", true),
+            ["192.0.2.2".parse::<IpAddr>().unwrap()]
         );
     }
 

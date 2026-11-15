@@ -107,11 +107,13 @@ pub(crate) fn setup(cursor: &mut Cursor<'_>, block: &mut BlockContext<Chain>) ->
                     );
                 }
                 "rcode" if !args.is_empty() => {
-                    // CoreDNS accepts the NOTIMPL alias that miekg/dns keeps for NOTIMP.
-                    let rcode = if args[0] == "NOTIMPL" {
-                        Some(Rcode::NOTIMP)
-                    } else {
-                        Rcode::from_mnemonic(&args[0]).filter(|rcode| rcode.to_string() == args[0])
+                    // CoreDNS accepts NOTIMPL and TSIG's BADSIG name for value 16.
+                    let rcode = match args[0].as_str() {
+                        "NOTIMPL" => Some(Rcode::NOTIMP),
+                        // RFC 8945 §3: Preserve BADSIG input while DNS RCODE display uses BADVERS.
+                        "BADSIG" => Some(Rcode::BADSIG),
+                        _ => Rcode::from_mnemonic(&args[0])
+                            .filter(|rcode| rcode.to_string() == args[0]),
                     };
                     rule.rcode = rcode.ok_or_else(|| cursor.error("unknown rcode"))?
                 }

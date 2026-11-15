@@ -1,14 +1,15 @@
 use crate::{Name, Type};
 
 use super::{
-    base64, bitmap, character_string, count, dnssec_algorithm, hex, length_bytes, name, number,
-    put16, put32, type_code, unescape,
+    base64, character_string, count, dnssec_algorithm, hex, length_bytes, name, number, put16,
+    put32, type_code, unescape,
 };
 
 pub(super) fn parse(
     rtype: Type,
     fields: &[&str],
     bad: &[bool],
+    raw_non_ascii: &[bool],
     origin: &Name,
 ) -> Option<Result<Vec<u8>, (usize, String)>> {
     let mut out = Vec::new();
@@ -33,13 +34,13 @@ pub(super) fn parse(
             // RFC 1348 §NSAP-PTR RR and RFC 1035 §3.3: these RDATA consist of one domain name.
             Type::NSAP_PTR | Type::MR | Type::MB | Type::MG | Type::MF | Type::MD => {
                 at!(fields.len().min(1), count(fields, 1))?;
-                at!(0, name(&mut out, fields[0], origin))?;
+                at!(0, name(&mut out, fields[0], origin, raw_non_ascii, 0))?;
             }
             // RFC 1183 §2.2 and RFC 1035 §3.3.7: two domain names follow each other.
             Type::RP | Type::MINFO | Type::TALINK => {
                 at!(fields.len().min(2), count(fields, 2))?;
                 for (i, field) in fields.iter().enumerate() {
-                    at!(i, name(&mut out, field, origin))?;
+                    at!(i, name(&mut out, field, origin, raw_non_ascii, i))?;
                 }
             }
             // RFC 1183 §§1,3.3, RFC 2230 §3.1 and RFC 6742 §3.4: a preference precedes a name.
@@ -49,15 +50,15 @@ pub(super) fn parse(
                 // RFC 6742 §2.4.2: LP preference is an unsigned decimal 16-bit integer.
                 num!(0, put16(&mut out, fields[0]))?;
                 // RFC 6742 §2.4.2: LP target is a domain name referencing L32 or L64 records.
-                at!(1, name(&mut out, fields[1], origin))?;
+                at!(1, name(&mut out, fields[1], origin, raw_non_ascii, 1))?;
             }
             // RFC 2163 §4.3: A PX MCGAM record carries a preference, RFC822 name, and X.400 name.
             Type::PX => {
                 at!(fields.len().min(3), count(fields, 3))?;
                 num!(0, put16(&mut out, fields[0]))?;
                 // RFC 3597 §4: Names in PX RDATA are emitted without compression.
-                at!(1, name(&mut out, fields[1], origin))?;
-                at!(2, name(&mut out, fields[2], origin))?;
+                at!(1, name(&mut out, fields[1], origin, raw_non_ascii, 1))?;
+                at!(2, name(&mut out, fields[2], origin, raw_non_ascii, 2))?;
             }
             // RFC 1183 §§3.1-3.2: X25 and ISDN use character-strings.
             Type::X25 => {
@@ -245,6 +246,7 @@ pub(super) fn parse(
                     Type::RRSIG,
                     &fields[..fields.len().min(8)],
                     bad,
+                    raw_non_ascii,
                     origin,
                 )
                 .map_err(|(i, error)| {
@@ -253,18 +255,28 @@ pub(super) fn parse(
                 })?;
                 out.extend(binary(fields, 8, true, out.len(), &mut index)?);
             }
-            // RFC 4034 §4.1.2: miekg encodes NXT using NSEC's windowed bitmap.
-            // RFC 2535 §7.3: NXT presentation is the next name followed by type mnemonics.
+            // RFC 2535 §§5.2, 7.3: NXT uses an unwindowed bitmap for types 0 through 127.
             Type::NXT => {
                 if fields.is_empty() {
                     index = fields.len();
                     return Err("missing NXT name".into());
                 }
-                at!(0, name(&mut out, fields[0], origin))?;
+                at!(0, name(&mut out, fields[0], origin, raw_non_ascii, 0))?;
+                let mut bitmap = [0; 16];
+                let mut bitmap_len = 0;
                 for (i, field) in fields.iter().enumerate().skip(1) {
-                    at!(i, type_code(field))?;
+                    let ty = at!(i, type_code(field))?;
+                    if ty > 127 {
+                        return Err("NXT bitmap type must be at most 127".into());
+                    }
+                    let octet = usize::from(ty / 8);
+                    bitmap[octet] |= 0x80 >> (ty % 8);
+                    bitmap_len = bitmap_len.max(octet + 1);
                 }
-                bitmap(&mut out, &fields[1..])?;
+                // RFC 2535 §5.2: NXT is present in its own bitmap, requiring four octets.
+                bitmap[3] |= 0x02;
+                bitmap_len = bitmap_len.max(4);
+                out.extend_from_slice(&bitmap[..bitmap_len]);
             }
             // RFC 1035 §3.2.1: RDATA is an octet sequence; Nimrod presents these fields as hex.
             Type::EID | Type::NIMLOC => out.extend(binary(fields, 0, false, 0, &mut index)?),
@@ -374,7 +386,10 @@ mod tests {
             (Type::SIG, &["A", "8"][..], 2),
         ] {
             assert_eq!(
-                parse(rtype, fields, &[], &origin).unwrap().unwrap_err().0,
+                parse(rtype, fields, &[], &[], &origin)
+                    .unwrap()
+                    .unwrap_err()
+                    .0,
                 expected,
                 "{rtype}"
             );
@@ -394,7 +409,10 @@ mod tests {
             (Type::ISDN, &["x", long.as_str(), "x"][..], 2),
         ] {
             assert_eq!(
-                parse(rtype, fields, &[], &origin).unwrap().unwrap_err().0,
+                parse(rtype, fields, &[], &[], &origin)
+                    .unwrap()
+                    .unwrap_err()
+                    .0,
                 expected,
                 "{rtype}"
             );

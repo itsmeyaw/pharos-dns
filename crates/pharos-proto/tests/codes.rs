@@ -17,7 +17,7 @@ fn presentation_matches_miekg_special_cases() {
     assert_eq!(Class::NONE.to_string(), "NONE");
     assert_eq!(Class::ANY.to_string(), "CLASS255");
     assert_eq!(Rcode::BADVERS, Rcode::BADSIG);
-    assert_eq!(Rcode::BADVERS.to_string(), "BADSIG");
+    assert_eq!(Rcode::BADVERS.to_string(), "BADVERS");
 }
 
 #[test]
@@ -89,4 +89,10 @@ fn standard_and_extended_codes_have_expected_values() {
     ] {
         assert_eq!(code.to_string(), expected);
     }
+}
+
+#[test]
+fn rcode_sixteen_displays_as_badvers() {
+    assert_eq!(Rcode::BADVERS.to_string(), "BADVERS");
+    assert_eq!(Rcode(16).to_string(), "BADVERS");
 }

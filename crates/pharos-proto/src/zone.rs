@@ -346,6 +346,9 @@ impl<R: BufRead> ZoneParser<R> {
                     return Err(err_at(2, "invalid origin"));
                 }
                 reject_quote(&tokens[1])?;
+                if has_raw_non_ascii(&tokens[1].raw) {
+                    return Err(err_at(1, "non-ASCII octet must be escaped"));
+                }
                 self.origin = Name::parse(&normalize_escapes(&tokens[1]), &self.origin)
                     .map_err(|e| err_at(1, &e.to_string()))?;
             // RFC 2308 §4: $TTL sets the default TTL for following non-SIG records without one.
@@ -388,6 +391,9 @@ impl<R: BufRead> ZoneParser<R> {
                 };
                 let file = File::open(&path).map_err(|e| err_at(1, &e.to_string()))?;
                 let origin = if tokens.len() == 3 {
+                    if has_raw_non_ascii(&tokens[2].raw) {
+                        return Err(err_at(2, "non-ASCII octet must be escaped"));
+                    }
                     Name::parse(&normalize_escapes(&tokens[2]), &self.origin)
                         .map_err(|e| err_at(2, &e.to_string()))?
                 } else {
@@ -445,6 +451,10 @@ impl<R: BufRead> ZoneParser<R> {
             self.owner.clone().ok_or_else(|| err("missing owner"))?
         } else {
             i += 1;
+            // RFC 4343 §2.1: Raw non-ASCII octets in owner names need escapes.
+            if has_raw_non_ascii(&tokens[0].raw) {
+                return Err(err_at(0, "non-ASCII octet must be escaped"));
+            }
             Name::parse(&normalize_escapes(&tokens[0]), &self.origin)
                 .map_err(|e| err(&e.to_string()))?
         };
@@ -515,6 +525,7 @@ impl<R: BufRead> ZoneParser<R> {
             );
         let mut normalized = Vec::new();
         let mut bad = Vec::new();
+        let mut raw_non_ascii = Vec::new();
         let mut field_tokens = Vec::new();
         for (index, token) in tokens[i..].iter().enumerate() {
             let svc_param = !generic && (rtype == Type::SVCB || rtype == Type::HTTPS) && index >= 2;
@@ -543,11 +554,13 @@ impl<R: BufRead> ZoneParser<R> {
             if split_strings {
                 for part in parts {
                     bad.push(has_invalid_digit_escape(part));
+                    raw_non_ascii.push(has_raw_non_ascii(&token.raw));
                     normalized.push(normalize_escapes(part));
                     field_tokens.push(i + index);
                 }
             } else {
                 bad.push(!svc_param && has_invalid_digit_escape(&token.text));
+                raw_non_ascii.push(has_raw_non_ascii(&token.raw));
                 normalized.push(if svc_param {
                     token.text.clone()
                 } else {
@@ -565,14 +578,13 @@ impl<R: BufRead> ZoneParser<R> {
         {
             return Err(err_at(i + 2 + index, "invalid SvcParam escape"));
         }
-        let rdata = rdata::parse_rdata_located(rtype, &fields, &bad, &self.origin).map_err(
-            |(index, message)| {
+        let rdata = rdata::parse_rdata_located(rtype, &fields, &bad, &raw_non_ascii, &self.origin)
+            .map_err(|(index, message)| {
                 err_at(
                     field_tokens.get(index).copied().unwrap_or(tokens.len()),
                     &message,
                 )
-            },
-        )?;
+            })?;
         // RFC 2308 §4: omitted legacy SIG TTL comes from its Original TTL field.
         let ttl = if rtype == Type::SIG && !saw_ttl {
             let Some(original_ttl) = rdata.get(4..8) else {
@@ -698,16 +710,34 @@ fn has_invalid_digit_escape(value: &str) -> bool {
     false
 }
 
-// RFC 9460 §2.1: SvcParam decimal escapes must encode a single octet.
+// RFC 4343 §2.1: Raw non-ASCII octets are not ASCII DNS presentation escapes.
+fn has_raw_non_ascii(value: &[u8]) -> bool {
+    let mut i = 0;
+    while i < value.len() {
+        if value[i] == b'\\' {
+            i += 2;
+        } else if value[i] >= 128 {
+            return true;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+// RFC 9460 §2.1: Digit escapes require three decimal digits and one octet value.
 fn invalid_svc_escape(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            if let Some(digits) = bytes
-                .get(i + 1..i + 4)
-                .filter(|d| d.iter().all(u8::is_ascii_digit))
-            {
+            if bytes[i + 1].is_ascii_digit() {
+                let Some(digits) = bytes
+                    .get(i + 1..i + 4)
+                    .filter(|d| d.iter().all(u8::is_ascii_digit))
+                else {
+                    return true;
+                };
                 let number = u16::from(digits[0] - b'0') * 100
                     + u16::from(digits[1] - b'0') * 10
                     + u16::from(digits[2] - b'0');
@@ -969,7 +999,13 @@ fn parse_class(value: &str) -> Option<Class> {
         "CS" => Class::CS,
         "NONE" => Class::NONE,
         "ANY" => Class::ANY,
-        _ => Class(upper.strip_prefix("CLASS")?.parse().ok()?),
+        _ => {
+            let digits = upper.strip_prefix("CLASS")?;
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            Class(digits.parse().ok()?)
+        }
     })
 }
 

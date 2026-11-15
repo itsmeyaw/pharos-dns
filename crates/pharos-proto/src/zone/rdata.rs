@@ -36,7 +36,7 @@ pub fn parse_rdata(
     fields: &[&str],
     origin: &Name,
 ) -> Result<Vec<u8>, RdataParseError> {
-    parse_rdata_located(rtype, fields, &[], origin).map_err(|(field, message)| {
+    parse_rdata_located(rtype, fields, &[], &[], origin).map_err(|(field, message)| {
         if message.starts_with("unsupported RDATA type ") {
             RdataParseError::UnsupportedType { field, message }
         } else if field >= fields.len() || message.starts_with("missing ") {
@@ -47,21 +47,24 @@ pub fn parse_rdata(
     })
 }
 
-/// `bad[i]` marks fields whose invalid digit escape the lexer already dropped (`\9` -> `9`).
+/// `bad[i]` marks invalid digit escapes dropped by the lexer; `raw_non_ascii[i]` marks raw bytes.
 pub(crate) fn parse_rdata_located(
     rtype: Type,
     fields: &[&str],
     bad: &[bool],
+    raw_non_ascii: &[bool],
     origin: &Name,
 ) -> Result<Vec<u8>, (usize, String)> {
     let mut index = 0;
-    parse_rdata_inner(rtype, fields, bad, origin, &mut index).map_err(|message| (index, message))
+    parse_rdata_inner(rtype, fields, bad, raw_non_ascii, origin, &mut index)
+        .map_err(|message| (index, message))
 }
 
 fn parse_rdata_inner(
     rtype: Type,
     fields: &[&str],
     bad: &[bool],
+    raw_non_ascii: &[bool],
     origin: &Name,
     index: &mut usize,
 ) -> Result<Vec<u8>, String> {
@@ -92,6 +95,16 @@ fn parse_rdata_inner(
             return Err("missing generic RDATA length".into());
         }
         let len: u16 = num!(1, number(fields[1]))?;
+        // RFC 3597 §5: Every generic hexadecimal word has an even digit count.
+        if let Some((field, _)) = fields
+            .iter()
+            .enumerate()
+            .skip(2)
+            .find(|(_, word)| !word.len().is_multiple_of(2))
+        {
+            *index = field;
+            return Err("generic RDATA hex word has odd length".into());
+        }
         let data = at!(hex_error_index(fields, 2), hex(&fields[2..].concat()))?;
         if data.len() != usize::from(len) {
             return Err("generic RDATA length mismatch".into());
@@ -107,8 +120,8 @@ fn parse_rdata_inner(
         *index = field;
         return Err(INVALID_ESCAPE.into());
     }
-    if let Some(result) = legacy::parse(rtype, fields, bad, origin)
-        .or_else(|| advanced::parse(rtype, fields, bad, origin))
+    if let Some(result) = legacy::parse(rtype, fields, bad, raw_non_ascii, origin)
+        .or_else(|| advanced::parse(rtype, fields, bad, raw_non_ascii, origin))
     {
         return result.map_err(|(field, message)| {
             *index = field;
@@ -145,18 +158,18 @@ fn parse_rdata_inner(
         // RFC 1034 §3.6.2: CNAME RDATA identifies the canonical name of an alias.
         Type::NS | Type::CNAME | Type::PTR | Type::DNAME => {
             at!(fields.len().min(1), count(fields, 1))?;
-            at!(0, name(&mut out, fields[0], origin))?;
+            at!(0, name(&mut out, fields[0], origin, raw_non_ascii, 0))?;
         }
         Type::MX => {
             at!(fields.len().min(2), count(fields, 2))?;
             num!(0, put16(&mut out, fields[0]))?;
-            at!(1, name(&mut out, fields[1], origin))?;
+            at!(1, name(&mut out, fields[1], origin, raw_non_ascii, 1))?;
         }
         Type::SOA => {
             // RFC 1035 §3.3.13: SOA RDATA has two names followed by five unsigned 32-bit fields.
             at!(fields.len().min(7), count(fields, 7))?;
-            at!(0, name(&mut out, fields[0], origin))?;
-            at!(1, name(&mut out, fields[1], origin))?;
+            at!(0, name(&mut out, fields[0], origin, raw_non_ascii, 0))?;
+            at!(1, name(&mut out, fields[1], origin, raw_non_ascii, 1))?;
             num!(2, put32(&mut out, fields[2]))?;
             // RFC 2308 §4: SOA timers accept TTL unit suffixes; the serial remains decimal.
             // RFC 1035 §3.3.13: SOA timer fields are 32-bit intervals measured in seconds.
@@ -194,7 +207,7 @@ fn parse_rdata_inner(
             for (i, field) in fields[..3].iter().enumerate() {
                 num!(i, put16(&mut out, field))?;
             }
-            at!(3, name(&mut out, fields[3], origin))?;
+            at!(3, name(&mut out, fields[3], origin, raw_non_ascii, 3))?;
         }
         // RFC 3403 §3: DDDS rules are inserted as NAPTR records in DNS zones.
         Type::NAPTR => {
@@ -202,7 +215,12 @@ fn parse_rdata_inner(
             num!(0, put16(&mut out, fields[0]))?;
             num!(1, put16(&mut out, fields[1]))?;
             for (i, field) in fields[2..5].iter().enumerate() {
+                let start = out.len();
                 at!(i + 2, character_string(&mut out, field))?;
+                // RFC 3403 §3: NAPTR flags, services, and regexp values are UTF-8.
+                if std::str::from_utf8(&out[start + 1..]).is_err() {
+                    return Err("NAPTR strings must be UTF-8".into());
+                }
                 if i == 0 && !field.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
                     return Err("invalid NAPTR flags".into());
                 }
@@ -211,7 +229,7 @@ fn parse_rdata_inner(
                 *index = 5;
                 return Err("NAPTR regexp requires root replacement".into());
             }
-            at!(5, name(&mut out, fields[5], origin))?;
+            at!(5, name(&mut out, fields[5], origin, raw_non_ascii, 5))?;
         }
         // RFC 8659 §4: CAA has flags, a length-prefixed tag, and an unframed value.
         Type::CAA => {
@@ -235,7 +253,12 @@ fn parse_rdata_inner(
             at!(fields.len().min(3), count(fields, 3))?;
             num!(0, put16(&mut out, fields[0]))?;
             num!(1, put16(&mut out, fields[1]))?;
-            out.extend(at!(2, unescape(fields[2]))?);
+            let target = at!(2, unescape(fields[2]))?;
+            // RFC 7553 §4.4: URI Target must contain at least one octet.
+            if target.is_empty() {
+                return Err("URI Target must not be empty".into());
+            }
+            out.extend(target);
         }
         // RFC 4034 §5 and RFC 7344 §3.1: DS/CDS digest is hexadecimal.
         Type::DS | Type::CDS => {
@@ -328,19 +351,19 @@ fn parse_rdata_inner(
             out.extend(num!(4, timestamp(fields[4]))?.to_be_bytes());
             out.extend(num!(5, timestamp(fields[5]))?.to_be_bytes());
             num!(6, put16(&mut out, fields[6]))?;
-            at!(7, name(&mut out, fields[7], origin))?;
+            at!(7, name(&mut out, fields[7], origin, raw_non_ascii, 7))?;
             out.extend(at!(
                 base64_error_index(fields, 8),
                 base64(&fields[8..].concat())
             )?);
         }
-        // RFC 4034 §4.1.2 and RFC 5155 §3.2: NSEC bitmaps use ordered windows.
+        // RFC 4034 §4.1.2: NSEC Type Bit Maps contain one or more nonempty ordered windows.
         Type::NSEC => {
-            if fields.is_empty() {
+            if fields.len() < 2 {
                 *index = fields.len();
-                return Err("missing NSEC name or bitmap".into());
+                return Err("NSEC bitmap must not be empty".into());
             }
-            at!(0, name(&mut out, fields[0], origin))?;
+            at!(0, name(&mut out, fields[0], origin, raw_non_ascii, 0))?;
             for (i, field) in fields[1..].iter().enumerate() {
                 if at!(i + 1, type_code(field))? == 0 {
                     return Err("TYPE0 is not a bitmap RR type".into());
@@ -398,7 +421,7 @@ fn parse_rdata_inner(
             // RFC 9460 §2.1: SvcPriority is an unsigned 16-bit integer.
             num!(0, put16(&mut out, fields[0]))?;
             // RFC 9460 §2.1: TargetName is a domain name.
-            at!(1, name(&mut out, fields[1], origin))?;
+            at!(1, name(&mut out, fields[1], origin, raw_non_ascii, 1))?;
             *index = 2.min(fields.len());
             svc_params(&mut out, &fields[2..], index)?;
         }
@@ -408,7 +431,7 @@ fn parse_rdata_inner(
                 *index = fields.len().min(9);
                 return Err("invalid TSIG fields".into());
             }
-            at!(0, name(&mut out, fields[0], origin))?;
+            at!(0, name(&mut out, fields[0], origin, raw_non_ascii, 0))?;
             let time = num!(1, timestamp64(fields[1]))?;
             if time >= 1 << 48 {
                 return Err("TSIG time out of range".into());
@@ -468,6 +491,10 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
     if rtype == Type::NSAP && (data.is_empty() || data.last() != Some(&0)) {
         return Err("NSAP NSel octet must be zero".into());
     }
+    // RFC 7553 §4.4: URI Target must contain at least one octet.
+    if rtype == Type::URI && data.len() == 4 {
+        return Err("URI Target must not be empty".into());
+    }
     // RFC 8976 §2.2.3: SHA384/SHA512 ZONEMD digests have exact lengths.
     if rtype == Type::ZONEMD {
         let expected = match data.get(5) {
@@ -495,7 +522,8 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
         25 | 43 | 48 | 57 | 59 | 60 | 32768 | 32769 => b"211r",
         26 => b"2nn",
         29 => b"1111444",
-        30 | 47 => b"nb",
+        30 => b"nu",
+        47 => b"nb",
         31 | 32 | 49 | 61 | 10 => b"r",
         33 => b"222n",
         35 => b"22sssn",
@@ -585,6 +613,10 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                 }
             }
             b'b' => {
+                // RFC 4034 §4.1.2: NSEC requires at least one type-bitmap window.
+                if rtype == Type::NSEC && pos == data.len() {
+                    return Err("empty generic NSEC bitmap".into());
+                }
                 let mut last = None;
                 while pos < data.len() {
                     let h = data.get(pos..pos + 2).ok_or("truncated generic bitmap")?;
@@ -602,6 +634,17 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                     pos += 2 + len;
                     last = Some(window);
                 }
+            }
+            b'u' => {
+                // RFC 2535 §5.2: NXT includes TYPE30, has 4–16 octets, and omits trailing zeros.
+                if !(4..=16).contains(&remaining.len())
+                    || remaining[3] & 0x02 == 0
+                    || remaining.last() == Some(&0)
+                {
+                    return Err("invalid generic NXT bitmap".into());
+                }
+                out.extend_from_slice(remaining);
+                pos = data.len();
             }
             b'p' => {
                 // RFC 9460 §2.2: SvcParams require valid ordered keys and values.
@@ -670,15 +713,15 @@ fn generic_rdata(rtype: Type, data: &[u8]) -> Result<Vec<u8>, String> {
                         .get(pos + 4..pos + 4 + len)
                         .ok_or("truncated generic EDNS option")?;
                     if code == 8 {
+                        // RFC 7871 §6: ECS defines address families 1 (IPv4) and 2 (IPv6).
                         let prefix = value.get(..4).ok_or("truncated generic ECS")?;
                         let family = u16::from_be_bytes([prefix[0], prefix[1]]);
                         let bits = match family {
-                            0 => 0,
                             1 => 32,
                             2 => 128,
                             _ => return Err("invalid generic ECS family".into()),
                         };
-                        if prefix[2] > bits || (family != 0 && prefix[3] > bits) {
+                        if prefix[2] > bits || prefix[3] > bits {
                             return Err("invalid generic ECS prefix".into());
                         }
                         let size = usize::from(prefix[2]).div_ceil(8);
@@ -919,7 +962,17 @@ fn put32(out: &mut Vec<u8>, value: &str) -> Result<(), String> {
     out.extend(number::<u32>(value)?.to_be_bytes());
     Ok(())
 }
-fn name(out: &mut Vec<u8>, value: &str, origin: &Name) -> Result<(), String> {
+fn name(
+    out: &mut Vec<u8>,
+    value: &str,
+    origin: &Name,
+    raw_non_ascii: &[bool],
+    field: usize,
+) -> Result<(), String> {
+    // RFC 4343 §2.1: Raw non-ASCII bytes are not DNS name presentation escapes.
+    if raw_non_ascii.get(field).copied().unwrap_or(false) {
+        return Err("non-ASCII octet must be escaped".into());
+    }
     out.extend(
         Name::parse(value, origin)
             .map_err(|e| e.to_string())?
@@ -1185,10 +1238,9 @@ fn svc_params(out: &mut Vec<u8>, fields: &[&str], index: &mut usize) -> Result<(
             }
             // RFC 9460 §7.1.1: alpn is a list of nonempty length-prefixed protocol IDs.
             1 => {
-                if let Some(value) = value.filter(|value| !value.is_empty()) {
-                    for bytes in svc_list(value)? {
-                        length_bytes(&mut data, &bytes)?;
-                    }
+                let value = value.ok_or("missing alpn list")?;
+                for bytes in svc_list(value)? {
+                    length_bytes(&mut data, &bytes)?;
                 }
             }
             // RFC 9540 §4: the ohttp parameter's presentation and wire values are empty.
@@ -1333,7 +1385,7 @@ mod tests {
             (Type::SRV, vec!["1", "2", "3"], 3),
         ] {
             assert_eq!(
-                parse_rdata_located(rtype, &fields, &[], &origin)
+                parse_rdata_located(rtype, &fields, &[], &[], &origin)
                     .unwrap_err()
                     .0,
                 expected

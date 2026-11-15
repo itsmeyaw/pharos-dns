@@ -191,7 +191,7 @@ fn type_bitmaps_require_type_mnemonics() {
         Ok(vec![(
             30,
             vec![
-                1, b'0', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0, 0, 1, 128
+                1, b'0', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0, 128, 0, 0, 2
             ]
         )])
     );
@@ -263,10 +263,16 @@ fn quoted_strings_are_not_domain_names() {
 }
 
 #[test]
-fn escaped_blank_does_not_split_hinfo_into_empty_cpu() {
-    // RFC 1035 §5.1: `\X` needs a character X, so a lone backslash is not an empty string.
-    assert!(parse(b"a IN HINFO \\ b\n").is_err());
-    assert!(parse(b"a IN HINFO x\\ b\n").is_err());
+fn escaped_blank_is_data_in_hinfo_character_strings() {
+    // RFC 1035 §5.1: `\X` quotes any non-digit character, including a blank.
+    assert_eq!(
+        parse(b"a IN HINFO \\ b os\n"),
+        Ok(vec![(13, b"\x02 b\x02os".to_vec())])
+    );
+    assert_eq!(
+        parse(b"a IN HINFO x\\ y os\n"),
+        Ok(vec![(13, b"\x03x y\x02os".to_vec())])
+    );
 }
 
 #[test]

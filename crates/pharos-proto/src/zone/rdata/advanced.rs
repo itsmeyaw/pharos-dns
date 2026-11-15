@@ -8,6 +8,7 @@ pub(super) fn parse(
     rtype: Type,
     fields: &[&str],
     bad: &[bool],
+    raw_non_ascii: &[bool],
     origin: &Name,
 ) -> Option<Result<Vec<u8>, (usize, String)>> {
     let mut out = Vec::new();
@@ -117,7 +118,10 @@ pub(super) fn parse(
                 // RFC 8005 §4.1: RVS names use the origin, including the owner name.
                 for (offset, field) in fields[3..].iter().enumerate() {
                     // RFC 8005 §5.6: HIP appends uncompressed RVS names in preference order.
-                    at!(offset + 3, name(&mut out, field, origin))?;
+                    at!(
+                        offset + 3,
+                        name(&mut out, field, origin, raw_non_ascii, offset + 3,)
+                    )?;
                     at!(offset + 3, check_size(&out))?;
                 }
             }
@@ -215,7 +219,10 @@ pub(super) fn parse(
                     (kind & 0x7f, fields.get(3).copied().unwrap_or(""))
                 };
                 let mut addr = Vec::new();
-                at!(3, gateway_wire(&mut addr, kind, gateway, origin))?;
+                at!(
+                    3,
+                    gateway_wire(&mut addr, kind, gateway, origin, raw_non_ascii,)
+                )?;
                 if rtype == Type::AMTRELAY && fields.len() > 4 {
                     index = 4;
                     return Err("extra AMTRELAY fields".into());
@@ -259,7 +266,7 @@ pub(super) fn parse(
             Type::TKEY => {
                 at!(fields.len().min(5), super::count(fields, 5))?;
                 // RFC 1035 §5.1: relative algorithm names resolve against the current origin.
-                at!(0, name(&mut out, fields[0], origin))?;
+                at!(0, name(&mut out, fields[0], origin, raw_non_ascii, 0,))?;
                 out.extend([0; 12]);
                 let key_len: u16 = num!(1, number(fields[1]))?;
                 let key = at!(2, hex(fields[2]))?;
@@ -607,7 +614,13 @@ fn loc_precision(field: &str) -> Result<u8, String> {
 
 // RFC 4025 §2.3: only gateway types 0-3 have defined encodings.
 // RFC 8777 §4.2.4: The relay field is an address or uncompressed domain name selected by type.
-fn gateway_wire(out: &mut Vec<u8>, kind: u8, field: &str, origin: &Name) -> Result<(), String> {
+fn gateway_wire(
+    out: &mut Vec<u8>,
+    kind: u8,
+    field: &str,
+    origin: &Name,
+    raw_non_ascii: &[bool],
+) -> Result<(), String> {
     // RFC 4025 §2.5: IP addresses use network-order octets and names use uncompressed wire form.
     match kind {
         // RFC 4025 §3.1: gateway type 0 requires "." when no gateway is indicated.
@@ -626,7 +639,7 @@ fn gateway_wire(out: &mut Vec<u8>, kind: u8, field: &str, origin: &Name) -> Resu
         }
         3 if field.is_empty() => return Err("invalid gateway name".into()),
         // RFC 4025 §2.3: Gateway type 3 contains an uncompressed wire-format domain name.
-        3 => name(out, field, origin)?,
+        3 => name(out, field, origin, raw_non_ascii, 3)?,
         _ => {}
     }
     Ok(())
@@ -710,13 +723,16 @@ mod tests {
         let huge_hex = "ab".repeat(65_536);
         let hip = ["2", huge_hex.as_str(), "AQID", "extra."];
         assert_eq!(
-            parse(Type::HIP, &hip, &[], &origin).unwrap().unwrap_err().0,
+            parse(Type::HIP, &hip, &[], &[], &origin)
+                .unwrap()
+                .unwrap_err()
+                .0,
             1
         );
         let tkey_hex = "ab".repeat(65_535);
         let tkey = [".", "65535", tkey_hex.as_str(), "1", "ff"];
         assert_eq!(
-            parse(Type::TKEY, &tkey, &[], &origin)
+            parse(Type::TKEY, &tkey, &[], &[], &origin)
                 .unwrap()
                 .unwrap_err()
                 .0,
@@ -725,7 +741,7 @@ mod tests {
         let huge_base64 = "AAAA".repeat(21_845);
         let cert = ["PKIX", "1", "8", huge_base64.as_str(), "AAAA"];
         assert_eq!(
-            parse(Type::CERT, &cert, &[], &origin)
+            parse(Type::CERT, &cert, &[], &[], &origin)
                 .unwrap()
                 .unwrap_err()
                 .0,
@@ -733,7 +749,10 @@ mod tests {
         );
         let apl = vec!["1:0.0.0.0/0"; 16_385];
         assert_eq!(
-            parse(Type::APL, &apl, &[], &origin).unwrap().unwrap_err().0,
+            parse(Type::APL, &apl, &[], &[], &origin)
+                .unwrap()
+                .unwrap_err()
+                .0,
             16_383
         );
     }

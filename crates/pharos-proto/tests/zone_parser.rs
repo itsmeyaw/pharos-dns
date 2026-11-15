@@ -20,6 +20,83 @@ fn parses_origin_ttl_and_inherited_owner() {
 }
 
 #[test]
+fn owner_names_escape_non_ascii_wire_octets() {
+    // RFC 4343 §2.1: Raw non-ASCII bytes are not ASCII DNS presentation.
+    let origin: Name = ".".parse().unwrap();
+    assert!(
+        ZoneParser::new(
+            Cursor::new("tést.example. 60 IN A 192.0.2.1\n"),
+            origin.clone(),
+            "unicode.zone"
+        )
+        .collect::<Result<Vec<_>, _>>()
+        .is_err()
+    );
+    let records = ZoneParser::new(
+        Cursor::new(r"t\195\169st.example. 60 IN A 192.0.2.1".to_owned() + "\n"),
+        origin,
+        "escaped.zone",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    assert_eq!(records[0].owner.to_string(), r"t\195\169st.example.");
+}
+
+#[test]
+fn unquoted_raw_utf8_char_strings_are_data_but_names_require_escapes() {
+    let origin: Name = ".".parse().unwrap();
+    let records = ZoneParser::new(
+        Cursor::new(
+            "txt.example. 60 IN TXT héllo\nhost.example. 60 IN HINFO héllo linux\ncaa.example. 60 IN CAA 0 issue héllo\n",
+        ),
+        origin.clone(),
+        "utf8-strings.zone",
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+    assert_eq!(records[0].rdata, [6, b'h', 0xc3, 0xa9, b'l', b'l', b'o']);
+    assert_eq!(
+        records[1].rdata,
+        [
+            6, b'h', 0xc3, 0xa9, b'l', b'l', b'o', 5, b'l', b'i', b'n', b'u', b'x'
+        ]
+    );
+    assert_eq!(
+        records[2].rdata,
+        [
+            0, 5, b'i', b's', b's', b'u', b'e', b'h', 0xc3, 0xa9, b'l', b'l', b'o'
+        ]
+    );
+    assert!(
+        ZoneParser::new(
+            Cursor::new("alias.example. 60 IN CNAME héllo.example.\n"),
+            origin,
+            "utf8-name.zone",
+        )
+        .next()
+        .unwrap()
+        .is_err()
+    );
+}
+
+#[test]
+fn raw_utf8_is_rejected_in_legacy_and_gateway_name_fields() {
+    let origin: Name = ".".parse().unwrap();
+    for record in [
+        "rt.example. 60 IN RT 10 héllo.example.\n",
+        "key.example. 60 IN IPSECKEY 0 3 0 héllo.example.\n",
+    ] {
+        assert!(
+            ZoneParser::new(Cursor::new(record), origin.clone(), "utf8-rdata.zone")
+                .next()
+                .unwrap()
+                .is_err(),
+            "{record}"
+        );
+    }
+}
+
+#[test]
 fn any_class_matches_miekg_rejection() {
     let parser = ZoneParser::new(
         Cursor::new("a 60 ANY A 192.0.2.1\n"),
@@ -39,6 +116,60 @@ fn known_type_mnemonic_accepts_generic_rdata() {
     let records = parser.collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(records[0].rtype, Type::A);
     assert_eq!(records[0].rdata, [192, 0, 2, 1]);
+}
+
+#[test]
+fn rejects_invalid_class_and_odd_generic_rdata_words() {
+    // RFC 3597 §5: CLASS codes are decimal and each generic hexadecimal word has even length.
+    for input in [
+        "a 60 CLASS+1 A 192.0.2.1\n".to_owned(),
+        r"a 60 TYPE65000 \# 1 A A".to_owned() + "\n",
+    ] {
+        assert!(
+            ZoneParser::new(
+                Cursor::new(input.as_bytes()),
+                ".".parse().unwrap(),
+                "strict"
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .is_err(),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_svcparam_digit_escapes_and_empty_alpn() {
+    // RFC 9460 §§2.1, 7.1.1: digit escapes use exactly three digits and alpn lists are nonempty.
+    for input in [
+        r"a 60 SVCB 1 . key9=\9".to_owned() + "\n",
+        r"a 60 SVCB 1 . key9=\99".to_owned() + "\n",
+        r"a 60 SVCB 1 . key9=\12x".to_owned() + "\n",
+        "a 60 SVCB 1 . alpn=\n".to_owned(),
+        "a 60 SVCB 1 . alpn\n".to_owned(),
+    ] {
+        assert!(
+            ZoneParser::new(
+                Cursor::new(input.as_bytes()),
+                ".".parse().unwrap(),
+                "strict"
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .is_err(),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_non_utf8_naptr_character_strings() {
+    // RFC 3403 §3: NAPTR flags, services, and regexp values are UTF-8.
+    let input = "a 60 NAPTR 1 1 \"U\" \"\\255\" \"\" .\n";
+    assert!(
+        ZoneParser::new(Cursor::new(input), ".".parse().unwrap(), "strict")
+            .collect::<Result<Vec<_>, _>>()
+            .is_err()
+    );
 }
 
 #[test]

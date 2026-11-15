@@ -7,7 +7,8 @@ proptest! {
         labels in prop::collection::vec("[a-zA-Z0-9]{1,10}", 0..5),
         id in any::<u16>(), flags in any::<u16>(),
         qtype in any::<u16>(), class in any::<u16>(),
-        answers in prop::collection::vec((any::<u16>().prop_filter("OPT belongs in Additional", |kind| *kind != Type::OPT.0), any::<u16>(), any::<u32>(), prop::collection::vec(any::<u8>(), 0..24)), 0..10),
+        // RFC 6891 §6.1.1 / RFC 6742 §2.4.1.2: OPT and structured LP need special fixtures.
+        answers in prop::collection::vec((any::<u16>().prop_filter("OPT and LP use structured data", |kind| *kind != Type::OPT.0 && *kind != Type::LP.0), any::<u16>(), any::<u32>(), prop::collection::vec(any::<u8>(), 0..24)), 0..10),
     ) {
         let text = if labels.is_empty() { ".".to_owned() } else { format!("{}.", labels.join(".")) };
         let name: Name = text.parse().unwrap();

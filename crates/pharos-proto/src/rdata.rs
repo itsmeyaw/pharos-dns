@@ -406,28 +406,9 @@ fn display_quoted(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     f.write_str("\"")
 }
 
-fn display_octets(f: &mut fmt::Formatter<'_>, mut bytes: &[u8]) -> fmt::Result {
+fn display_octets(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     f.write_str("\"")?;
-    while let Some((&byte, rest)) = bytes.split_first() {
-        bytes = rest;
-        if byte != b'\\' {
-            display_bytes(f, &[byte])?;
-        } else if let Some((&next, rest)) = bytes.split_first() {
-            if next == b'.' {
-                f.write_str("\\.")?;
-                bytes = rest;
-            } else if bytes.len() >= 3 && bytes[..3].iter().all(u8::is_ascii_digit) {
-                let value = u16::from(bytes[0] - b'0') * 100
-                    + u16::from(bytes[1] - b'0') * 10
-                    + u16::from(bytes[2] - b'0');
-                display_bytes(f, &[value as u8])?;
-                bytes = &bytes[3..];
-            } else {
-                display_bytes(f, &[next])?;
-                bytes = rest;
-            }
-        }
-    }
+    display_bytes(f, bytes)?;
     f.write_str("\"")
 }
 
@@ -820,6 +801,10 @@ impl<'a> Rdata<'a> {
             // RFC 7553 §4.5: URI RDATA has 16-bit priority and weight followed by target.
             Type::URI => {
                 let header = bytes.get(..4).ok_or(RdataError)?;
+                // RFC 7553 §4.4: URI Target must contain at least one octet.
+                if bytes.len() == 4 {
+                    return Err(RdataError);
+                }
                 Ok(Self::Uri {
                     priority: u16::from_be_bytes([header[0], header[1]]),
                     weight: u16::from_be_bytes([header[2], header[3]]),
@@ -842,6 +827,7 @@ impl<'a> Rdata<'a> {
             }
             // RFC 3403 §4.1: NAPTR has order, preference, three strings, and replacement.
             Type::NAPTR => {
+                // RFC 3403 §3: Preserve received strings as octets for CoreDNS compatibility.
                 let header = bytes.get(..4).ok_or(RdataError)?;
                 let (flags, rest) = character_string(&bytes[4..])?;
                 let (services, rest) = character_string(rest)?;
@@ -1200,6 +1186,10 @@ impl<'a> Rdata<'a> {
                 weight,
                 target,
             } => {
+                // RFC 7553 §4.4: URI Target must contain at least one octet.
+                if target.is_empty() {
+                    return Err(BuildError::InvalidRdata);
+                }
                 writer.write_bytes(&priority.to_be_bytes())?;
                 writer.write_bytes(&weight.to_be_bytes())?;
                 writer.write_bytes(target)
@@ -1539,7 +1529,10 @@ impl fmt::Display for Rdata<'_> {
             }
             Self::Caa { flags, tag, value } => {
                 write!(f, "{flags} ")?;
-                display_bytes(f, tag)?;
+                // RFC 8659 §4.1.1: Canonical CAA presentation lowercases tag octets.
+                for &byte in tag.iter() {
+                    display_bytes(f, &[byte.to_ascii_lowercase()])?;
+                }
                 f.write_str(" ")?;
                 display_octets(f, value)
             }

@@ -42,8 +42,8 @@ fn zonemd_packs_unknown_hash_digest_lengths() {
 }
 
 #[test]
-fn nsec_without_bitmap_matches_miekg() {
-    assert_eq!(parse(Type::NSEC, &["next."]).unwrap(), b"\x04next\0");
+fn nsec_requires_a_type_bitmap() {
+    assert!(parse(Type::NSEC, &["next."]).is_err());
 }
 
 #[test]
@@ -83,6 +83,12 @@ fn generic_known_types_follow_wire_layouts() {
         (Type::A, "4", "7f000001", vec![127, 0, 0, 1]),
         (Type::NS, "3", "016100", vec![1, b'a', 0]),
         (
+            Type::NXT,
+            "10",
+            "046e6578740060000002",
+            b"\x04next\0\x60\0\0\x02".to_vec(),
+        ),
+        (
             Type::ZONEMD,
             "18",
             "000000010203000000000000000000000000",
@@ -101,6 +107,12 @@ fn generic_known_types_follow_wire_layouts() {
             "000800050001010080",
             vec![0, 8, 0, 5, 0, 1, 1, 0, 128],
         ),
+        (
+            Type::OPT,
+            "7",
+            "000f00030001ff",
+            vec![0, 15, 0, 3, 0, 1, 0xff],
+        ),
         (Type(65000), "1", "ff", vec![255]),
     ] {
         assert_eq!(
@@ -111,6 +123,11 @@ fn generic_known_types_follow_wire_layouts() {
     }
     for (rtype, length, data) in [
         (Type::A, "0", ""),
+        (Type::NSAP, "2", "4701"),
+        (Type::NSEC, "6", "046e65787400"),
+        (Type::NXT, "7", "046e6578740060"),
+        (Type::NXT, "11", "046e657874006000000200"),
+        (Type::URI, "4", "00000000"),
         (Type::A, "5", "7f000001ff"),
         (Type::MX, "2", "000a"),
         (Type::DS, "2", "0001"),
@@ -126,12 +143,21 @@ fn generic_known_types_follow_wire_layouts() {
         (Type(55), "5", "01010001aa"),
         (Type(42), "4", "00032000"),
         (Type(41), "2", "0001"),
+        (Type::OPT, "8", "0008000400000000"),
     ] {
         assert!(
             parse(rtype, &[r"\#", length, data]).is_err(),
             "{rtype} {data}"
         );
     }
+    assert!(parse(Type::URI, &["0", "0", ""]).is_err());
+    assert!(parse(Type(65000), &[r"\#", "1", "A", "A"]).is_err());
+}
+
+#[test]
+fn generic_nsec_rejects_an_all_zero_bitmap_window() {
+    // RFC 4034 §4.1.2: A type-bitmap window cannot be all zeroes.
+    assert!(parse(Type::NSEC, &[r"\#", "9", "046e65787400000100"]).is_err());
 }
 
 #[test]
@@ -225,10 +251,8 @@ fn dnssec_algorithm_mnemonics() {
 
 #[test]
 fn svcb_enforces_cross_parameter_rules() {
-    assert_eq!(
-        parse(Type::SVCB, &["1", ".", "alpn="]).unwrap(),
-        b"\x00\x01\x00\x00\x01\x00\x00"
-    );
+    // RFC 9460 §7.1.1: alpn must list at least one protocol ID.
+    assert!(parse(Type::SVCB, &["1", ".", "alpn="]).is_err());
     assert!(parse(Type::SVCB, &["1", ".", "mandatory=port"]).is_err());
     assert!(parse(Type::SVCB, &["1", ".", "mandatory=alpn,alpn"]).is_err());
     assert!(parse(Type::SVCB, &["1", ".", "mandatory=unknown"]).is_err());

@@ -1,7 +1,7 @@
 use std::fmt;
 
 macro_rules! dns_code {
-    ($(#[$doc:meta])* $name:ident, $raw:ty, $prefix:literal, { $($constant:ident = $value:literal => $text:literal),* $(,)? }) => {
+    (@define $(#[$doc:meta])* $name:ident, $raw:ty, $prefix:literal, { $($constant:ident = $value:literal => $text:literal),* $(,)? }) => {
         $(#[$doc])*
         #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
         pub struct $name(pub $raw);
@@ -15,14 +15,25 @@ macro_rules! dns_code {
                 $(if value.eq_ignore_ascii_case($text) { return Some(Self($value)); })*
                 None
             }
+
+            fn presentation_name(self) -> Option<&'static str> {
+                match self.0 {
+                    $($value => Some($text),)*
+                    _ => None,
+                }
+            }
         }
 
+    };
+
+    ($(#[$doc:meta])* $name:ident, $raw:ty, $prefix:literal, { $($constant:ident = $value:literal => $text:literal),* $(,)? }) => {
+        dns_code!(@define $(#[$doc])* $name, $raw, $prefix, { $($constant = $value => $text,)* });
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                match self.0 {
-                    $($value => f.write_str($text),)*
+                match self.presentation_name() {
+                    Some(name) => f.write_str(name),
                     // RFC 3597 §5: Unknown types and classes use TYPE or CLASS plus decimal code.
-                    value => write!(f, "{}{value}", $prefix),
+                    None => write!(f, "{}{}", $prefix, self.0),
                 }
             }
         }
@@ -51,6 +62,7 @@ impl Opcode {
 
 // RFC 1035 §4.1.1: RCODE identifies the response status.
 dns_code! {
+    @define
     // RFC 6895 §2.3: Header, OPT, TSIG, and TKEY share RCODEs, with context exceptions 9 and 16.
     /// A DNS Response code, including extended RCODEs. Unknown values display as a decimal number.
     Rcode, u16, "", {
@@ -68,7 +80,7 @@ dns_code! {
         NOTZONE = 10 => "NOTZONE",
         // RFC 8490 §5.4.1: DSOTYPENI is RCODE 11.
         DSOTYPENI = 11 => "DSOTYPENI",
-        // RFC 8945 §3: DNS RCODE BADSIG is 16.
+        // RFC 8945 §3: TSIG calls RCODE value 16 BADSIG.
         BADSIG = 16 => "BADSIG",
         // RFC 8945 §3: DNS RCODE BADKEY is 17.
         BADKEY = 17 => "BADKEY",
@@ -81,6 +93,19 @@ dns_code! {
         // RFC 8945 §3: DNS RCODE BADTRUNC is 22.
         BADTRUNC = 22 => "BADTRUNC",
         BADCOOKIE = 23 => "BADCOOKIE",
+    }
+}
+
+impl fmt::Display for Rcode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // RFC 6895 §2.3 / RFC 6891 §9: DNS RCODE 16 is BADVERS, unlike TSIG BADSIG.
+        if self.0 == 16 {
+            return formatter.write_str("BADVERS");
+        }
+        match self.presentation_name() {
+            Some(name) => formatter.write_str(name),
+            None => write!(formatter, "{}", self.0),
+        }
     }
 }
 

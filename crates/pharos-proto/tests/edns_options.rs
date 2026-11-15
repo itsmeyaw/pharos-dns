@@ -130,6 +130,7 @@ fn rejects_malformed_framing_and_structured_payloads() {
         &[0, 15, 0, 1, 0][..],
         &[0, 11, 0, 3, 0, 1, 3][..],
         &[0, 8, 0, 3, 0, 1, 0][..],
+        &[0, 8, 0, 4, 0, 0, 0, 0][..],
         &[0, 8, 0, 4, 0, 1, 33, 0][..],
         &[0, 8, 0, 5, 0, 1, 16, 0, 192][..],
         &[0, 8, 0, 5, 0, 1, 1, 0, 0xff][..],
@@ -150,6 +151,14 @@ fn builder_rejects_oversized_data_without_modifying_output() {
         EdnsOption::ExtendedError {
             info_code: 1,
             extra_text: &data
+        }
+        .encode(&mut output)
+        .is_err()
+    );
+    assert!(
+        EdnsOption::ExtendedError {
+            info_code: 1,
+            extra_text: &[0xff]
         }
         .encode(&mut output)
         .is_err()
@@ -181,12 +190,22 @@ fn empty_options_and_unknown_ede_codes() {
 }
 
 #[test]
-fn zero_prefix_and_family_zero_roundtrip() {
-    let cases: &[&[u8]] = &[
-        &[0, 8, 0, 4, 0, 0, 0, 0],
-        &[0, 8, 0, 4, 0, 1, 0, 32],
-        &[0, 8, 0, 4, 0, 2, 0, 128],
-    ];
+fn received_ede_with_invalid_utf8_keeps_bytes_and_displays_replacement() {
+    let wire = [0, 15, 0, 3, 0xff, 0xff, 0xff];
+    let option = EdnsOptions::parse(&wire).unwrap().iter().next().unwrap();
+    assert_eq!(
+        option,
+        EdnsOption::ExtendedError {
+            info_code: u16::MAX,
+            extra_text: &[0xff]
+        }
+    );
+    assert_eq!(option.to_string(), "65535: (\u{fffd})");
+}
+
+#[test]
+fn zero_prefix_roundtrips_and_family_zero_is_rejected() {
+    let cases: &[&[u8]] = &[&[0, 8, 0, 4, 0, 1, 0, 32], &[0, 8, 0, 4, 0, 2, 0, 128]];
     for wire in cases {
         let options = EdnsOptions::parse(wire).unwrap();
         let mut output = Vec::new();
@@ -195,6 +214,7 @@ fn zero_prefix_and_family_zero_roundtrip() {
         }
         assert_eq!(&output, wire);
     }
+    assert!(EdnsOptions::parse(&[0, 8, 0, 4, 0, 0, 0, 0]).is_err());
 }
 
 #[test]
