@@ -864,7 +864,7 @@ async fn nxdomain_gets_signed_black_lie_and_nodata_rcode() {
     verify_signatures(&reply.authorities().collect::<Vec<_>>());
 }
 
-// RFC 4470 §3: Existing names use their real NSEC record for NODATA proofs.
+// RFC 4035 §3.1.3.1: Existing-name NODATA uses its exact-owner NSEC proof.
 #[tokio::test]
 async fn existing_name_nodata_uses_the_real_nsec_record() {
     let base = concat!(

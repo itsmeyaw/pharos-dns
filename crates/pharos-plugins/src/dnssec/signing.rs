@@ -224,7 +224,7 @@ impl Dnssec {
         let referral = kind == ResponseType::Referral && message.authority_count() > 0;
         let question = message.questions().next().ok_or(Error::InvalidQuery)?;
         let zone = self.zone_for(question.name).ok_or(Error::InvalidQuery)?;
-        // RFC 4470 §3: Existing-name NODATA uses its authoritative NSEC instead of a synthetic lie.
+        // RFC 4035 §3.1.3.1: Exact-name NODATA uses its authoritative NSEC proof.
         let existing_nsec = kind == ResponseType::NoData
             && message
                 .authorities()
