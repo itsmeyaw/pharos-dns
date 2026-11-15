@@ -58,7 +58,7 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
     }
 }
 
-// RFC 1996 §3.11: Keep the notifying primary IP and use its configured service port.
+// RFC 1996 §3.11: Query the master that sent the NOTIFY. Pharos keeps its IP and uses the configured port.
 pub(super) fn primary_address(address: &str, client: SocketAddr) -> Option<SocketAddr> {
     if !primary_matches(address, client) {
         return None;

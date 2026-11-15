@@ -15,6 +15,15 @@ use tokio::{
     time::timeout,
 };
 
+// Bind the configured source address, else the unspecified address of the target's family.
+fn source_or_any(source: Option<IpAddr>, target: SocketAddr) -> IpAddr {
+    source.unwrap_or(if target.is_ipv4() {
+        Ipv4Addr::UNSPECIFIED.into()
+    } else {
+        Ipv6Addr::UNSPECIFIED.into()
+    })
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -39,7 +48,6 @@ pub async fn notify_from(
 ) -> io::Result<()> {
     // shortcut: one Query buffer allocation per NOTIFY; reuse it when callers batch Zones.
     let mut query = Vec::with_capacity(512);
-    // RFC 1996 §3.7: NOTIFY has opcode 4, AA set, and an SOA Question.
     // RFC 1996 §4.5: NOTIFY has opcode 4, AA set, and an SOA Question.
     let mut builder = MessageBuilder::new(&mut query, 512, id, 0x2400).map_err(io::Error::other)?;
     builder
@@ -50,19 +58,11 @@ pub async fn notify_from(
         )
         .map_err(io::Error::other)?;
     let _ = builder.finish();
-    let bind = SocketAddr::new(
-        source.unwrap_or_else(|| {
-            if address.is_ipv4() {
-                Ipv4Addr::UNSPECIFIED.into()
-            } else {
-                Ipv6Addr::UNSPECIFIED.into()
-            }
-        }),
-        0,
-    );
+    let bind = SocketAddr::new(source_or_any(source, address), 0);
     let socket = UdpSocket::bind(bind).await?;
     socket.connect(address).await?;
-    let mut wire = [0; 65535];
+    // A NOTIFY Response echoes one Question, so a 1232-octet buffer (RFC 6891 §6.2.5) is ample.
+    let mut wire = [0; 1232];
     let mut last_error = invalid("NOTIFY was not accepted");
     // RFC 1996 §3.6: a master retransmits NOTIFY until a matching Response or the retry limit.
     for _ in 0..3 {
@@ -131,13 +131,7 @@ async fn notify_tcp(
         } else {
             TcpSocket::new_v6()?
         };
-        let source = source.unwrap_or_else(|| {
-            if address.is_ipv4() {
-                Ipv4Addr::UNSPECIFIED.into()
-            } else {
-                Ipv6Addr::UNSPECIFIED.into()
-            }
-        });
+        let source = source_or_any(source, address);
         // RFC 1996 §3.4: Preserve configured source address on TCP fallback.
         socket.bind(SocketAddr::new(source, 0))?;
         let mut socket = socket.connect(address).await?;
