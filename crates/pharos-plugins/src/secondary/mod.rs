@@ -207,7 +207,7 @@ impl Secondary {
 
 // Spoofed UDP must not flood the log: keep the first entry and then one per 1024 attempts.
 fn log_unknown_notify(seen: u64) -> bool {
-    seen % 1024 == 0
+    seen.is_multiple_of(1024)
 }
 
 fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
