@@ -205,6 +205,10 @@ pub fn parse_pkcs8(public: &str, private: &[u8]) -> Result<KeyPair, KeyError> {
             .and_then(|text| text.split_once("-----END PRIVATE KEY-----"))
             .map(|(body, _)| body)
             .ok_or_else(|| invalid("invalid PKCS#8 PEM"))?;
+        // RFC 4648 §4: Reject URL-safe alphabet characters rather than silently dropping them.
+        if body.bytes().any(|byte| matches!(byte, b'-' | b'_')) {
+            return Err(invalid("invalid PEM base64"));
+        }
         let base64 = body
             .bytes()
             .filter(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'+' | b'/' | b'='))
