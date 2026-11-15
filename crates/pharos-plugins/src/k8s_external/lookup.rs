@@ -58,6 +58,7 @@ fn uses_endpoints(svc: &Service, req: &Request<'_>, headless: bool) -> bool {
 
 pub(super) fn parse<'a>(labels: &'a [&'a [u8]]) -> Result<Request<'a>, Rcode> {
     let Some((&namespace, remaining)) = labels.split_last() else {
+        // RFC 1035 §3.1: The empty relative-label slice is not the encoded root name.
         return Err(Rcode::SERVFAIL);
     };
     let mut req = Request {
