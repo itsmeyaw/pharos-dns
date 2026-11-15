@@ -127,20 +127,27 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
         expected_code,
         expected_ttls,
         initial_mapped_aaaa,
+        translate_all,
     ) in [
-        (0, true, 0, true, false, 0x0480, 0, vec![60, 70], false),
-        (5, false, 0, true, false, 0x0480, 0, vec![60, 600], false),
-        (0, true, 0, true, true, 0x0480, 0, vec![60, 70], false),
-        (0, true, 0, true, false, 0, 0, vec![60, 70], false),
-        (0, true, 0, false, false, 0x0480, 0, vec![], false),
-        (0, false, 2, false, false, 0x0480, 2, vec![], false),
-        (0, false, 5, false, false, 0x0480, 5, vec![], false),
-        (0, false, 1, false, false, 0x0480, 1, vec![], false),
-        (0, false, 3, false, false, 0x0480, 3, vec![], false),
-        (0, false, 4, false, false, 0x0480, 4, vec![], false),
-        (0, true, 0, true, false, 0x0480, 0, vec![60, 70], true),
+        (0, true, 0, true, false, 0x0480, 0, vec![60, 70], false, false),
+        (5, false, 0, true, false, 0x0480, 0, vec![60, 600], false, false),
+        (0, true, 0, true, true, 0x0480, 0, vec![60, 70], false, false),
+        (0, true, 0, true, false, 0, 0, vec![60, 70], false, false),
+        (0, true, 0, false, false, 0x0480, 0, vec![], false, false),
+        (0, false, 2, false, false, 0x0480, 2, vec![], false, false),
+        (0, false, 5, false, false, 0x0480, 5, vec![], false, false),
+        (0, false, 1, false, false, 0x0480, 1, vec![], false, false),
+        (0, false, 3, false, false, 0x0480, 3, vec![], false, false),
+        (0, false, 4, false, false, 0x0480, 4, vec![], false, false),
+        (0, true, 0, true, false, 0x0480, 0, vec![60, 70], true, false),
+        (0, true, 0, false, false, 0x0480, 0, vec![], true, true),
     ] {
-        let blocks = parse("Corefile", ".:53 {\n dns64\n}").unwrap();
+        let config = if translate_all {
+            ".:53 {\n dns64 {\n  translate_all\n }\n}"
+        } else {
+            ".:53 {\n dns64\n}"
+        };
+        let blocks = parse("Corefile", config).unwrap();
         let mut chain = configure::<Chain>(&blocks, directives())
             .unwrap()
             .remove(0)

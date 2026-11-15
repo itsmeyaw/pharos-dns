@@ -189,6 +189,7 @@ impl Plugin for Dns64 {
         }
         if !self.translate_all && has_usable_aaaa(&original) {
             if has_excluded_aaaa(&original) {
+                // RFC 1035 §4.1.4: Snapshot this rare path before re-encoding compression pointers.
                 let original_wire = cx.response.clone();
                 return match filter_excluded_aaaa(cx, &original_wire) {
                     Ok(()) => outcome,
@@ -216,6 +217,14 @@ impl Plugin for Dns64 {
         };
         // RFC 6147 §5.4: if the successful A lookup is empty, return the original AAAA response.
         if response.rcode() == pharos_proto::Rcode::NOERROR && response.answer_count() == 0 {
+            if has_excluded_aaaa(&original) {
+                // RFC 1035 §4.1.4: Snapshot this rare path before re-encoding compression pointers.
+                let original_wire = cx.response.clone();
+                return match filter_excluded_aaaa(cx, &original_wire) {
+                    Ok(()) => outcome,
+                    Err(error) => Outcome::Error(error),
+                };
+            }
             return outcome;
         }
         let mut lookup_chain = Vec::new();
