@@ -892,8 +892,13 @@ impl Listener {
         bind_ipv6: fn(SocketAddr) -> io::Result<TcpListener>,
         bind_udp: fn(SocketAddr) -> io::Result<std::net::UdpSocket>,
     ) -> io::Result<Self> {
-        // RFC 1035 §4.2.1: Retain one worker so the Listener can serve UDP Queries.
-        let workers = workers.max(1);
+        // A Listener without a UDP worker cannot serve UDP Queries; reject the configuration.
+        if workers == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP worker count must be greater than zero",
+            ));
+        }
         let wildcard = address.is_ipv6() && address.ip().is_unspecified();
         let mut ipv4_only = false;
         // Port 0 picks a free TCP port; the same UDP port may be taken, so retry.
@@ -1084,6 +1089,17 @@ mod wildcard_tests {
         }
     }
 
+    #[derive(Debug)]
+    struct WorkerCount(usize);
+    impl Handler for WorkerCount {
+        fn udp_workers(&self) -> usize {
+            self.0
+        }
+        async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+            Action::Drop
+        }
+    }
+
     #[tokio::test]
     async fn listener_binds_the_requested_number_of_udp_sockets() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1106,24 +1122,52 @@ mod wildcard_tests {
     }
 
     #[tokio::test]
-    async fn listener_keeps_one_udp_worker_when_zero_is_configured() {
+    async fn listener_rejects_zero_udp_workers() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static BINDS: AtomicUsize = AtomicUsize::new(0);
         fn counting_bind(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
             BINDS.fetch_add(1, Ordering::SeqCst);
             udp::bind(address)
         }
-        let listener = Listener::bind_with_ipv6(
+        let result = Listener::bind_with_ipv6(
             "127.0.0.1:0".parse().unwrap(),
             Echo,
             0,
             bind_ipv6_dual,
             counting_bind,
         )
-        .await
-        .unwrap();
-        assert_eq!(BINDS.load(Ordering::SeqCst), 1);
-        listener.shutdown().await.unwrap();
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(listener) => {
+                listener.shutdown().await.unwrap();
+                panic!("zero UDP workers must be rejected");
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(BINDS.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn listener_registry_rejects_zero_udp_workers_for_existing_listener() {
+        let key = super::ListenerKey {
+            transport: super::Transport::Dns,
+            address: "127.0.0.1:0".parse().unwrap(),
+        };
+        let mut registry = super::ListenerRegistry::default();
+        registry
+            .apply(std::collections::HashMap::from([(key, WorkerCount(1))]))
+            .await
+            .unwrap();
+        let address = registry.get(&key).unwrap().local_addr();
+
+        let error = registry
+            .apply(std::collections::HashMap::from([(key, WorkerCount(0))]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(registry.get(&key).unwrap().local_addr(), address);
+        registry.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1405,6 +1449,17 @@ impl ListenerRegistry {
                 ));
             }
         }
+        // A reload must keep at least one UDP worker per Listener.
+        let workers: HashMap<_, _> = servers
+            .iter()
+            .map(|(key, server)| (*key, server.udp_workers()))
+            .collect();
+        if workers.values().any(|count| *count == 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP worker count must be greater than zero",
+            ));
+        }
         let mut added: Vec<(ListenerKey, Listener, Arc<ArcSwap<H>>)> = Vec::new();
         let new_keys: Vec<_> = servers
             .keys()
@@ -1433,7 +1488,7 @@ impl ListenerRegistry {
         let mut replacements = Vec::new();
         for (key, server) in &servers {
             let listener = &self.listeners[key];
-            let count = server.udp_workers();
+            let count = workers[key];
             if count == listener.udp_tasks.len() && listener.shed == server.shed_metrics().is_some()
             {
                 continue;

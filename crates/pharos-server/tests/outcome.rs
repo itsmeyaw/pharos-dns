@@ -45,8 +45,33 @@ fn response(count: usize) -> Vec<u8> {
     wire
 }
 
+fn response_with_two_rrsets() -> Vec<u8> {
+    let mut wire = Vec::with_capacity(65535);
+    let first = NameRef::parse(&[1, b'a', 0], 0).unwrap();
+    let second = NameRef::parse(&[1, b'b', 0], 0).unwrap();
+    let mut builder = MessageBuilder::new(&mut wire, 65535, 0x1234, 0x8180).unwrap();
+    builder.question(first, Type::A, Class::IN).unwrap();
+    builder
+        .record(Section::Answer, first, Type::TXT, Class::IN, 10, &[1; 10])
+        .unwrap();
+    for _ in 0..8 {
+        builder
+            .record(
+                Section::Answer,
+                second,
+                Type::TXT,
+                Class::IN,
+                10,
+                &[42; 150],
+            )
+            .unwrap();
+    }
+    let _ = builder.finish();
+    wire
+}
+
 #[test]
-fn truncates_at_record_boundary_and_preserves_compression() {
+fn truncation_does_not_emit_a_partial_required_rrset() {
     let wire = query(false);
     let query = Message::parse(&wire).unwrap();
     let mut response = response(8);
@@ -63,10 +88,106 @@ fn truncates_at_record_boundary_and_preserves_compression() {
     let message = Message::parse(&response).unwrap();
     assert!(response.len() <= 512);
     assert!(message.tc());
-    assert_eq!(message.answer_count(), 3);
+    assert_eq!(message.answer_count(), 0);
     assert_eq!(message.authority_count(), 0);
     assert_eq!(message.additional_count(), 0);
-    assert!(message.answers().all(|rr| rr.name.to_string() == "a."));
+}
+
+#[test]
+fn truncation_keeps_earlier_complete_rrsets() {
+    let mut response = response_with_two_rrsets();
+    assert_eq!(
+        finish_outcome(
+            Message::parse(&query(false)).unwrap(),
+            Protocol::Udp,
+            Outcome::Response,
+            &mut response,
+            |_| panic!()
+        ),
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    assert!(message.tc());
+    assert_eq!(message.answer_count(), 1);
+    assert_eq!(message.answers().next().unwrap().name.to_string(), "a.");
+}
+
+fn truncated(sections: &[(Section, &[u8], usize)]) -> Message<'static> {
+    let mut wire = Vec::with_capacity(65535);
+    let question = NameRef::parse(&[1, b'q', 0], 0).unwrap();
+    let mut builder = MessageBuilder::new(&mut wire, 65535, 0x1234, 0x8180).unwrap();
+    builder.question(question, Type::A, Class::IN).unwrap();
+    for (section, name, len) in sections {
+        let name = NameRef::parse(name, 0).unwrap();
+        builder
+            .record(*section, name, Type::TXT, Class::IN, 10, &vec![7; *len])
+            .unwrap();
+    }
+    let _ = builder.finish();
+    let query = query(false);
+    finish_outcome(
+        Message::parse(&query).unwrap(),
+        Protocol::Udp,
+        Outcome::Response,
+        &mut wire,
+        |_| panic!(),
+    );
+    assert!(wire.len() <= 512);
+    // Leak the small buffer so the parsed Message can outlive this helper.
+    Message::parse(Box::leak(wire.into_boxed_slice())).unwrap()
+}
+
+const A: &[u8] = &[1, b'a', 0];
+const B: &[u8] = &[1, b'b', 0];
+const UPPER_A: &[u8] = &[1, b'A', 0];
+
+// RFC 2181 §9: An RRset interleaved with another and split by the cutoff is dropped whole.
+#[test]
+fn truncation_drops_an_interleaved_rrset_split_by_the_cutoff() {
+    let message = truncated(&[
+        (Section::Answer, A, 200),
+        (Section::Answer, B, 200),
+        (Section::Answer, A, 200),
+    ]);
+    assert!(message.tc());
+    assert_eq!(message.answer_count(), 0);
+}
+
+// RFC 2181 §9: An RRset repeated in Answer and Authority is one set for truncation.
+#[test]
+fn truncation_groups_an_rrset_across_answer_and_authority() {
+    let message = truncated(&[
+        (Section::Answer, A, 200),
+        (Section::Answer, B, 200),
+        (Section::Authority, A, 200),
+    ]);
+    assert!(message.tc());
+    assert_eq!((message.answer_count(), message.authority_count()), (0, 0));
+}
+
+// RFC 4343 §3: Owner names that differ only in case belong to one RRset.
+#[test]
+fn truncation_groups_case_variant_owner_names() {
+    let message = truncated(&[
+        (Section::Answer, A, 200),
+        (Section::Answer, B, 200),
+        (Section::Answer, UPPER_A, 200),
+    ]);
+    assert!(message.tc());
+    assert_eq!(message.answer_count(), 0);
+}
+
+// RFC 2181 §9: Truncation inside Authority keeps earlier complete Answer RRsets.
+#[test]
+fn authority_rrset_split_by_the_cutoff_is_dropped() {
+    let message = truncated(&[
+        (Section::Answer, A, 50),
+        (Section::Authority, B, 200),
+        (Section::Authority, B, 200),
+        (Section::Authority, B, 200),
+    ]);
+    assert!(message.tc());
+    assert_eq!((message.answer_count(), message.authority_count()), (1, 0));
 }
 
 #[test]

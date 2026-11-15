@@ -12,20 +12,20 @@ fn valid() -> Vec<u8> {
 #[test]
 fn rejects_invalid_queries_and_honors_class_flag() {
     let mut response = Vec::with_capacity(512);
-    for wire in [&[][..], &[0][..], &[0, 1][..], &[0, 1, 1][..]] {
-        assert!(matches!(admit(wire, false, &mut response), Admission::Drop));
+    // RFC 5625 §6.3: packets shorter than a DNS header are dropped, never answered.
+    for len in 0..12 {
+        assert!(matches!(
+            admit(&[0xff; 12][..len], false, &mut response),
+            Admission::Drop
+        ));
     }
-    assert!(matches!(
-        admit(&[0; 11], false, &mut response),
-        Admission::Respond
-    ));
-    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::FORMERR);
     let mut wire = valid();
     wire[2] = 0x10;
     assert!(matches!(
         admit(&wire, false, &mut response),
         Admission::Respond
     ));
+    assert_eq!(&response[..2], &[0x12, 0x34]);
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTIMP);
     wire = valid();
     wire.truncate(15);
@@ -33,6 +33,7 @@ fn rejects_invalid_queries_and_honors_class_flag() {
         admit(&wire, false, &mut response),
         Admission::Respond
     ));
+    assert_eq!(&response[..2], &[0x12, 0x34]);
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::FORMERR);
     wire = valid();
     *wire.last_mut().unwrap() = 3;
@@ -40,6 +41,7 @@ fn rejects_invalid_queries_and_honors_class_flag() {
         admit(&wire, false, &mut response),
         Admission::Respond
     ));
+    assert_eq!(&response[..2], &[0x12, 0x34]);
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
     assert!(matches!(
         admit(&wire, true, &mut response),
@@ -250,4 +252,19 @@ fn malformed_update_formerr_preserves_opcode() {
     let message = Message::parse(&response).unwrap();
     assert_eq!(message.opcode().0, 5);
     assert_eq!(message.rcode(), Rcode::FORMERR);
+}
+
+#[test]
+fn malformed_update_without_enabled_handler_returns_notimp() {
+    let mut wire = valid();
+    wire[2] = 0x28;
+    wire[5] = 2;
+    let mut response = Vec::with_capacity(512);
+    assert!(matches!(
+        admit_with_update(&wire, false, false, &mut response),
+        Admission::Respond
+    ));
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.opcode().0, 5);
+    assert_eq!(message.rcode(), Rcode::NOTIMP);
 }

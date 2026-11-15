@@ -115,6 +115,17 @@ impl Chain for UpdateProbe {
     }
 }
 
+struct TkeyProbe(Arc<AtomicUsize>);
+impl Chain for TkeyProbe {
+    async fn serve(&self, _: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Outcome::Unanswered(Rcode::REFUSED)
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
 #[tokio::test]
 async fn update_admission_is_listener_and_block_scoped() {
     let key = ListenerKey {
@@ -182,6 +193,93 @@ async fn update_admission_is_listener_and_block_scoped() {
         );
         assert_eq!(Message::parse(&response).unwrap().rcode(), expected);
     }
+}
+
+#[tokio::test]
+async fn tkey_query_returns_notimp_without_running_chain() {
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    let chain_calls = Arc::new(AtomicUsize::new(0));
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(TkeyProbe(Arc::clone(&chain_calls))),
+        vec![],
+    );
+    let server = Server::new(router, key);
+    let name: Name = "example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::TKEY,
+            Class::ANY,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTIMP);
+    assert_eq!(chain_calls.load(Ordering::SeqCst), 0);
+}
+
+// RFC 2930 §3: TKEY over TCP receives NOTIMP on the same connection.
+#[tokio::test]
+async fn tkey_query_over_tcp_returns_notimp() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    let chain_calls = Arc::new(AtomicUsize::new(0));
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(TkeyProbe(Arc::clone(&chain_calls))),
+        vec![],
+    );
+    let listener =
+        pharos_server::Listener::bind("127.0.0.1:0".parse().unwrap(), Server::new(router, key))
+            .await
+            .unwrap();
+    let name: Name = "example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 0x4242, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::TKEY,
+            Class::ANY,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut stream = tokio::net::TcpStream::connect(listener.local_addr())
+        .await
+        .unwrap();
+    stream.write_u16(wire.len() as u16).await.unwrap();
+    stream.write_all(&wire).await.unwrap();
+    let mut response = vec![0; usize::from(stream.read_u16().await.unwrap())];
+    stream.read_exact(&mut response).await.unwrap();
+    assert_eq!(&response[..2], &[0x42, 0x42]);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NOTIMP);
+    assert_eq!(chain_calls.load(Ordering::SeqCst), 0);
+    drop(stream);
+    listener.shutdown().await.unwrap();
 }
 
 #[tokio::test]

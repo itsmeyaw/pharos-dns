@@ -1,5 +1,10 @@
-use pharos_proto::{Message, MessageBuilder, Opt, Rcode, Section, TsigKey, TsigRecord, Type};
-use std::sync::Arc;
+use pharos_proto::{
+    Message, MessageBuilder, NameRef, Opt, Rcode, Section, TsigKey, TsigRecord, Type,
+};
+use std::{
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 use crate::{Action, Error, Outcome, Protocol, admission::write_error};
 
@@ -242,6 +247,7 @@ fn scrub(
     if end > budget {
         return Err(Error::ResponseBufferTooSmall);
     }
+    let question_end = end;
     let mut counts = [message.question_count(), 0, 0, 0];
     let original = [
         message.question_count(),
@@ -250,7 +256,7 @@ fn scrub(
         message.additional_count() - u16::from(existing.is_some()),
     ];
     let mut stopped = false;
-    // RFC 1035 §6.2: Truncate from the end to preserve earlier Answer and Authority records.
+    let mut required_truncated = false;
     for (section, records) in [
         (1, message.answers()),
         (2, message.authorities()),
@@ -265,6 +271,7 @@ fn scrub(
             let next = record.rdata_offset + record.rdata.len();
             if next > budget {
                 stopped = true;
+                required_truncated = section != 3;
                 break;
             }
             end = next;
@@ -273,6 +280,15 @@ fn scrub(
         if stopped {
             break;
         }
+    }
+    if required_truncated {
+        // RFC 2181 §9: Keep earlier complete RRsets and drop any group split by the cutoff.
+        let (safe_end, answer_count, authority_count) =
+            required_section_end(message, question_end, end);
+        end = safe_end;
+        counts[1] = answer_count;
+        counts[2] = authority_count;
+        counts[3] = 0;
     }
     // RFC 2181 §9 and RFC 4035 §3.1.1: optional Additional omissions alone do not set TC.
     let truncated = counts[1..3] != original[1..3];
@@ -319,6 +335,147 @@ fn scrub(
         wire[4 + 2 * i..6 + 2 * i].copy_from_slice(&count.to_be_bytes());
     }
     Ok(())
+}
+
+// RFC 2181 §9: move truncation before every required RRset that crosses the size limit.
+fn required_section_end(
+    message: Message<'_>,
+    question_end: usize,
+    end: usize,
+) -> (usize, u16, u16) {
+    let end = contiguous_rrset_end(message, question_end, end)
+        .unwrap_or_else(|| spanning_rrset_end(message, question_end, end));
+    let answer_count = message
+        .answers()
+        .take_while(|record| record.rdata_offset + record.rdata.len() <= end)
+        .count() as u16;
+    let authority_count = message
+        .authorities()
+        .take_while(|record| record.rdata_offset + record.rdata.len() <= end)
+        .count() as u16;
+    (end, answer_count, authority_count)
+}
+
+fn rrset_key<'a>(record: &pharos_proto::Record<'a>) -> RrsetKey<'a> {
+    RrsetKey {
+        name: record.name,
+        rtype: record.rtype,
+        class: record.class,
+    }
+}
+
+// RFC 2181 §9: Contiguous RRsets cannot overlap; only a key seen on both sides of the cutoff can
+// widen a span, and that case returns None for the exact analysis. Allocation-free.
+fn contiguous_rrset_end(message: Message<'_>, question_end: usize, cut: usize) -> Option<usize> {
+    const MAX_LEFT_RUNS: usize = 64;
+    let mut left = [0u64; MAX_LEFT_RUNS];
+    let mut left_runs = 0;
+    let mut end = cut;
+    let mut run: Option<(RrsetKey<'_>, usize, usize)> = None;
+    let mut start = question_end;
+    let close = |run: Option<(RrsetKey<'_>, usize, usize)>, end: &mut usize| {
+        if let Some((_, run_start, run_end)) = run
+            && run_start < cut
+            && cut < run_end
+        {
+            *end = run_start;
+        }
+    };
+    for record in message.answers().chain(message.authorities()) {
+        let key = rrset_key(&record);
+        let record_end = record.rdata_offset + record.rdata.len();
+        match run.as_mut() {
+            Some((run_key, _, run_end)) if *run_key == key => *run_end = record_end,
+            _ => {
+                close(run.take(), &mut end);
+                let fingerprint = key.fingerprint();
+                if start < cut {
+                    if left_runs == MAX_LEFT_RUNS || left[..left_runs].contains(&fingerprint) {
+                        return None;
+                    }
+                    left[left_runs] = fingerprint;
+                    left_runs += 1;
+                } else if left[..left_runs].contains(&fingerprint) {
+                    return None;
+                }
+                run = Some((key, start, record_end));
+            }
+        }
+        start = record_end;
+    }
+    close(run.take(), &mut end);
+    Some(end)
+}
+
+// RFC 2181 §9: Interleaved RRsets span other records, so merge overlapping spans.
+fn spanning_rrset_end(message: Message<'_>, question_end: usize, mut end: usize) -> usize {
+    let mut rrsets = std::collections::HashMap::new();
+    let mut start = question_end;
+    for record in message.answers().chain(message.authorities()) {
+        let record_end = record.rdata_offset + record.rdata.len();
+        rrsets
+            .entry(rrset_key(&record))
+            .and_modify(|range: &mut (usize, usize)| range.1 = record_end)
+            .or_insert((start, record_end));
+        start = record_end;
+    }
+    let mut ranges = rrsets.into_values().collect::<Vec<_>>();
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+    let mut component = None;
+    let mut component_end = 0;
+    for (start, range_end) in ranges {
+        if start < component_end {
+            component_end = component_end.max(range_end);
+        } else {
+            if let Some(first) = component.filter(|first| *first < end && end < component_end) {
+                end = first;
+                break;
+            }
+            component = Some(start);
+            component_end = range_end;
+        }
+    }
+    if let Some(first) = component.filter(|first| *first < end && end < component_end) {
+        end = first;
+    }
+    end
+}
+
+#[derive(Clone, Copy)]
+struct RrsetKey<'a> {
+    name: NameRef<'a>,
+    rtype: Type,
+    class: pharos_proto::Class,
+}
+
+impl PartialEq for RrsetKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.rtype == other.rtype && self.class == other.class
+    }
+}
+
+impl Eq for RrsetKey<'_> {}
+
+impl RrsetKey<'_> {
+    // RFC 4343 §3: Fold ASCII case so equal owner names share a fingerprint (FNV-1a over label bytes).
+    fn fingerprint(&self) -> u64 {
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut hash =
+            0xcbf2_9ce4_8422_2325 ^ (u64::from(self.rtype.0) << 16 | u64::from(self.class.0));
+        for label in self.name.labels() {
+            hash = (hash ^ label.len() as u64).wrapping_mul(PRIME);
+            for byte in label {
+                hash = (hash ^ u64::from(byte.to_ascii_lowercase())).wrapping_mul(PRIME);
+            }
+        }
+        hash
+    }
+}
+
+impl Hash for RrsetKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.fingerprint());
+    }
 }
 
 fn append_tsig(
