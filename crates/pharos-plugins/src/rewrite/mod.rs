@@ -62,14 +62,17 @@ impl Hash for RrsetKey<'_> {
 
 const INLINE_RRSET_TTLS: usize = 256;
 
-enum RrsetTtls<'a> {
-    Inline([Option<(RrsetKey<'a>, u32)>; INLINE_RRSET_TTLS]),
-    Heap(HashMap<RrsetKey<'a>, u32>),
+struct RrsetTtls<'a> {
+    inline: [Option<(RrsetKey<'a>, u32)>; INLINE_RRSET_TTLS],
+    overflow: Option<HashMap<RrsetKey<'a>, u32>>,
 }
 
 impl<'a> RrsetTtls<'a> {
     fn new() -> Self {
-        Self::Inline([None; INLINE_RRSET_TTLS])
+        Self {
+            inline: [None; INLINE_RRSET_TTLS],
+            overflow: None,
+        }
     }
 
     fn insert_inline(
@@ -98,45 +101,35 @@ impl<'a> RrsetTtls<'a> {
     }
 
     fn insert_min(&mut self, key: RrsetKey<'a>, ttl: u32, capacity: usize) {
-        if let Self::Heap(values) = self {
+        if let Some(values) = &mut self.overflow {
             values
                 .entry(key)
                 .and_modify(|minimum| *minimum = (*minimum).min(ttl))
                 .or_insert(ttl);
             return;
         }
-        if let Self::Inline(inline) = self
-            && Self::insert_inline(inline, key, ttl)
-        {
+        if Self::insert_inline(&mut self.inline, key, ttl) {
             return;
         }
         // RFC 2181 §5.2: Allocate overflow storage only after 256 distinct RRsets.
-        let inline = match std::mem::replace(self, Self::Heap(HashMap::with_capacity(capacity))) {
-            Self::Inline(inline) => inline,
-            Self::Heap(_) => unreachable!("overflow map was checked above"),
-        };
-        let Self::Heap(values) = self else {
-            unreachable!("overflow map was installed above");
-        };
-        for (key, ttl) in inline.into_iter().flatten() {
+        let mut values = HashMap::with_capacity(capacity);
+        for (key, ttl) in self.inline.iter().flatten().copied() {
             values.insert(key, ttl);
         }
         values.insert(key, ttl);
+        self.overflow = Some(values);
     }
 
     fn get(&self, key: &RrsetKey<'a>) -> Option<u32> {
-        if let Self::Heap(values) = self {
+        if let Some(values) = &self.overflow {
             return values.get(key).copied();
         }
-        let Self::Inline(inline) = self else {
-            unreachable!("heap map was handled above");
-        };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
         let start = hasher.finish() as usize & (INLINE_RRSET_TTLS - 1);
         for offset in 0..INLINE_RRSET_TTLS {
             let slot = (start + offset) & (INLINE_RRSET_TTLS - 1);
-            match inline[slot] {
+            match self.inline[slot] {
                 Some((existing, minimum)) if existing == *key => return Some(minimum),
                 None => return None,
                 _ => {}
@@ -1798,6 +1791,11 @@ fn build_cname_response_scratch(
     target: &Name,
 ) -> Result<(), ServerError> {
     // RFC 1035 §4.1.4: Snapshot only live wire bytes before rebuilding compressed names.
+    if cx.response.len() <= 512 {
+        let mut scratch = [0; 512];
+        let len = cx.response.len();
+        return build_cname_response(cx, lookup, from, target, &mut scratch[..len]);
+    }
     let mut scratch = cx.response.to_vec();
     build_cname_response(cx, lookup, from, target, &mut scratch)
 }
@@ -2063,6 +2061,19 @@ fn build_reverted_response_scratch<'q>(
     end_and_rcode: (usize, u16),
 ) -> Result<(), ServerError> {
     // RFC 1035 §4.1.4: Snapshot only live wire bytes before rebuilding compressed names.
+    if cx.response.len() <= 512 {
+        let mut scratch = [0; 512];
+        let len = cx.response.len();
+        return build_reverted_response(
+            cx,
+            original_query,
+            rules,
+            recorded,
+            history,
+            end_and_rcode,
+            &mut scratch[..len],
+        );
+    }
     let mut scratch = cx.response.to_vec();
     build_reverted_response(
         cx,
