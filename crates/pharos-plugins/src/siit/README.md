@@ -5,6 +5,8 @@
 ## siit
 
 - Rejects non-/96 use of the RFC 6052 Well-Known Prefix (RFC 6052 §2.1).
+- Translates with the Well-Known Prefix only for globally reachable IPv4 addresses (RFC 6052 §3.1); explicit EAMs and configured Network-Specific Prefixes remain available.
+- Defaults to the Well-Known Prefix; stateless translation deployments should configure a Network-Specific Prefix (RFC 6052 §3.3).
 - AAAA Self Lookup allocates per Query; issue #86 tracks allocation-free Self
   Lookup. Queries that do not need it do not allocate in this Plugin.
 - Self Lookup uses Listener size and EDNS handling, which can truncate the

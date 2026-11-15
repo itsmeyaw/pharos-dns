@@ -2,7 +2,11 @@
 
 pub(crate) mod setup;
 
-use std::fmt::Write;
+use std::{
+    collections::HashMap,
+    fmt::Write,
+    hash::{Hash, Hasher},
+};
 
 use pharos_corefile::{Cursor, Error};
 use pharos_proto::{
@@ -25,6 +29,142 @@ type EdnsHistory<'a, 'q> = (
     &'a [EdnsSnapshot],
     &'a NameHistory<'q>,
 );
+
+#[derive(Clone, Copy)]
+struct RrsetKey<'a> {
+    owner: NameRef<'a>,
+    rtype: Type,
+    class: Class,
+}
+
+impl PartialEq for RrsetKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner == other.owner && self.rtype == other.rtype && self.class == other.class
+    }
+}
+
+impl Eq for RrsetKey<'_> {}
+
+// RFC 4343 §3: Hash owner labels using ASCII-insensitive DNS equality.
+impl Hash for RrsetKey<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for label in self.owner.labels() {
+            state.write_u8(label.len() as u8);
+            for byte in label {
+                state.write_u8(byte.to_ascii_lowercase());
+            }
+        }
+        state.write_u8(0);
+        state.write_u16(self.rtype.0);
+        state.write_u16(self.class.0);
+    }
+}
+
+const INLINE_RRSET_TTLS: usize = 256;
+
+struct RrsetTtls<'a> {
+    inline: [Option<(RrsetKey<'a>, u32)>; INLINE_RRSET_TTLS],
+    overflow: Option<HashMap<RrsetKey<'a>, u32>>,
+}
+
+impl<'a> RrsetTtls<'a> {
+    fn new() -> Self {
+        Self {
+            inline: [None; INLINE_RRSET_TTLS],
+            overflow: None,
+        }
+    }
+
+    fn insert_inline(
+        inline: &mut [Option<(RrsetKey<'a>, u32)>; INLINE_RRSET_TTLS],
+        key: RrsetKey<'a>,
+        ttl: u32,
+    ) -> bool {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let start = hasher.finish() as usize & (INLINE_RRSET_TTLS - 1);
+        for offset in 0..INLINE_RRSET_TTLS {
+            let slot = (start + offset) & (INLINE_RRSET_TTLS - 1);
+            match &mut inline[slot] {
+                Some((existing, minimum)) if *existing == key => {
+                    *minimum = (*minimum).min(ttl);
+                    return true;
+                }
+                None => {
+                    inline[slot] = Some((key, ttl));
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn insert_min(&mut self, key: RrsetKey<'a>, ttl: u32, capacity: usize) {
+        if let Some(values) = &mut self.overflow {
+            values
+                .entry(key)
+                .and_modify(|minimum| *minimum = (*minimum).min(ttl))
+                .or_insert(ttl);
+            return;
+        }
+        if Self::insert_inline(&mut self.inline, key, ttl) {
+            return;
+        }
+        // RFC 2181 §5.2: Allocate overflow storage only after 256 distinct RRsets.
+        let mut values = HashMap::with_capacity(capacity);
+        for (key, ttl) in self.inline.iter().flatten().copied() {
+            values.insert(key, ttl);
+        }
+        values.insert(key, ttl);
+        self.overflow = Some(values);
+    }
+
+    fn get(&self, key: &RrsetKey<'a>) -> Option<u32> {
+        if let Some(values) = &self.overflow {
+            return values.get(key).copied();
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let start = hasher.finish() as usize & (INLINE_RRSET_TTLS - 1);
+        for offset in 0..INLINE_RRSET_TTLS {
+            let slot = (start + offset) & (INLINE_RRSET_TTLS - 1);
+            match self.inline[slot] {
+                Some((existing, minimum)) if existing == *key => return Some(minimum),
+                None => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+}
+
+// RFC 2181 §5.2: Treat each RRset as having its lowest received TTL.
+// Keep small responses inline; size the overflow map from the Response record count.
+fn rrset_minimum_ttls<'a>(message: &Message<'a>) -> RrsetTtls<'a> {
+    let mut minimums = RrsetTtls::new();
+    let capacity = usize::from(message.answer_count())
+        + usize::from(message.authority_count())
+        + usize::from(message.additional_count());
+    for records in [
+        message.answers(),
+        message.authorities(),
+        message.additionals(),
+    ] {
+        for record in records {
+            if record.rtype == Type::OPT {
+                continue;
+            }
+            let key = RrsetKey {
+                owner: record.name,
+                rtype: record.rtype,
+                class: record.class,
+            };
+            minimums.insert_min(key, record.ttl, capacity);
+        }
+    }
+    minimums
+}
 
 #[derive(Debug)]
 enum Action {
@@ -120,6 +260,26 @@ impl Matcher {
             Self::Prefix(value) => name.starts_with(value),
             Self::Suffix(value) => name.ends_with(value),
             Self::Substring(value) => name.contains(value),
+            Self::Regex(value) => value.is_match(name),
+        }
+    }
+
+    // RFC 4343 §3: CNAME matcher comparisons ignore ASCII letter case.
+    fn matches_cname(&self, name: &str) -> bool {
+        match self {
+            Self::Any => false,
+            Self::Exact(value) => name.eq_ignore_ascii_case(value),
+            Self::Prefix(value) => name
+                .get(..value.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(value)),
+            Self::Suffix(value) => name
+                .get(name.len().saturating_sub(value.len())..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(value)),
+            Self::Substring(value) if value.is_empty() => true,
+            Self::Substring(value) => name
+                .as_bytes()
+                .windows(value.len())
+                .any(|window| window.eq_ignore_ascii_case(value.as_bytes())),
             Self::Regex(value) => value.is_match(name),
         }
     }
@@ -308,11 +468,14 @@ impl Rewrite {
                     "suffix" => Matcher::Suffix(lower),
                     "substring" => Matcher::Substring(lower),
                     "regex" => {
-                        if lower.len() > 10_000 {
+                        if from.len() > 10_000 {
                             return Err(cursor.error("regex pattern too long"));
                         }
+                        // RFC 4343 §3: Regex CNAME matchers ignore ASCII case like other DNS names.
+                        let pattern = format!("(?i:{from})");
                         Matcher::Regex(Box::new(
-                            RegexMatcher::new(&lower).map_err(|_| cursor.error("invalid regex"))?,
+                            RegexMatcher::new(&pattern)
+                                .map_err(|_| cursor.error("invalid regex"))?,
                         ))
                     }
                     _ => return Err(cursor.error("invalid CNAME match type")),
@@ -768,8 +931,32 @@ fn cname_replacement(
         len: 0,
     };
     write!(source, "{value}").ok()?;
+    // RFC 4343 §3: DNS CNAME comparisons ignore ASCII letter case.
     let input = std::str::from_utf8(&source.bytes[..source.len]).ok()?;
-    if !matcher.matches(input) {
+    if let Matcher::Regex(pattern) = matcher {
+        if !pattern.is_match(input) {
+            return None;
+        }
+        // shortcut: Regex CNAME capture replacement allocates; literal matching stays allocation-free.
+        let captures = pattern.captures(input)?;
+        let mut result = replacement.to_owned();
+        for (index, capture) in captures.iter().enumerate() {
+            result = result.replace(
+                &format!("{{{index}}}"),
+                capture.map_or("", |value| value.as_str()),
+            );
+        }
+        let mut text = NameText {
+            bytes: [0; 1024],
+            len: 0,
+        };
+        text.write_str(&result).ok()?;
+        let text = std::str::from_utf8(&text.bytes[..text.len]).ok()?;
+        let mut wire = [0; 255];
+        let wire = Name::parse_absolute_into(text, &mut wire).ok()?;
+        return Some((source, NameRef::parse(wire, 0).ok()?.to_name()));
+    }
+    if !matcher.matches_cname(input) {
         return None;
     }
     let mut text = NameText {
@@ -780,13 +967,14 @@ fn cname_replacement(
         Matcher::Exact(_) => text.write_str(replacement).ok()?,
         Matcher::Prefix(from) => {
             text.write_str(replacement).ok()?;
-            text.write_str(input.strip_prefix(from)?).ok()?;
+            text.write_str(input.get(from.len()..)?).ok()?;
         }
         Matcher::Suffix(from) => {
-            text.write_str(input.strip_suffix(from)?).ok()?;
+            text.write_str(input.get(..input.len().checked_sub(from.len())?)?)
+                .ok()?;
             text.write_str(replacement).ok()?;
         }
-        Matcher::Substring(from) => {
+        Matcher::Substring(from) if from.is_empty() => {
             for (index, part) in input.split(from).enumerate() {
                 if index > 0 {
                     text.write_str(replacement).ok()?;
@@ -794,24 +982,34 @@ fn cname_replacement(
                 text.write_str(part).ok()?;
             }
         }
-        Matcher::Regex(pattern) => {
-            // shortcut: regex captures allocate; non-regex rules remain allocation-free.
-            let captures = pattern.captures(input)?;
-            let mut result = replacement.to_owned();
-            for (index, capture) in captures.iter().enumerate() {
-                result = result.replace(
-                    &format!("{{{index}}}"),
-                    capture.map_or("", |value| value.as_str()),
-                );
+        Matcher::Substring(from) => {
+            let mut position = 0;
+            while let Some(offset) = find_ascii_case_insensitive(input.get(position..)?, from) {
+                let index = position + offset;
+                text.write_str(input.get(position..index)?).ok()?;
+                text.write_str(replacement).ok()?;
+                position = index + from.len();
             }
-            text.write_str(&result).ok()?;
+            text.write_str(input.get(position..)?).ok()?;
         }
+        Matcher::Regex(_) => unreachable!("regex matchers are handled above"),
         Matcher::Any => return None,
     }
     let text = std::str::from_utf8(&text.bytes[..text.len]).ok()?;
     let mut wire = [0; 255];
     let wire = Name::parse_absolute_into(text, &mut wire).ok()?;
     Some((source, NameRef::parse(wire, 0).ok()?.to_name()))
+}
+
+// RFC 4343 §3: Find substring matches without copying or lowercasing the DNS name.
+fn find_ascii_case_insensitive(value: &str, pattern: &str) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+    value
+        .as_bytes()
+        .windows(pattern.len())
+        .position(|window| window.eq_ignore_ascii_case(pattern.as_bytes()))
 }
 
 fn remap<'a>(
@@ -1197,7 +1395,7 @@ fn apply_history<'a, 'q>(
         let Some(before_len) = copy_name(before.name, &mut before_wire) else {
             return Err(ServerError::InvalidQuery);
         };
-        before_wire[..before_len].make_ascii_lowercase();
+        // RFC 4343 §4.1: Keep the original QNAME spelling when restoring rewritten answers.
         let before_name = NameRef::parse(&before_wire[..before_len], 0).expect("validated name");
         let suffix = match (&rules[index].matcher, auto) {
             (Matcher::Suffix(from), true) => Some((target.as_str(), from.as_str())),
@@ -1233,8 +1431,14 @@ struct EdnsState<'a> {
 }
 
 // RFC 7871 §6: ECS encodes family, source prefix, zero scope, and the truncated address.
-fn subnet_data(ip: std::net::IpAddr, v4: u8, v6: u8, output: &mut [u8; 20]) -> &[u8] {
-    let (family, prefix, address): (u16, u8, [u8; 16]) = match ip {
+fn subnet_data(
+    ip: std::net::IpAddr,
+    v4: u8,
+    v6: u8,
+    source_limit: Option<u8>,
+    output: &mut [u8; 20],
+) -> &[u8] {
+    let (family, configured_prefix, address): (u16, u8, [u8; 16]) = match ip {
         std::net::IpAddr::V4(ip) => {
             let mut address = [0; 16];
             address[..4].copy_from_slice(&ip.octets());
@@ -1242,6 +1446,11 @@ fn subnet_data(ip: std::net::IpAddr, v4: u8, v6: u8, output: &mut [u8; 20]) -> &
         }
         std::net::IpAddr::V6(ip) => (2, v6, ip.octets()),
     };
+    // RFC 7871 §§7.1.1, 11.1: Cap configured and outgoing source prefixes.
+    let cap = if family == 1 { 24 } else { 56 };
+    let prefix = configured_prefix
+        .min(cap)
+        .min(source_limit.unwrap_or(u8::MAX));
     output[..2].copy_from_slice(&family.to_be_bytes());
     output[2] = prefix;
     output[3] = 0;
@@ -1487,9 +1696,25 @@ fn apply_edns(
             edns_variable(cx, query, variable, &mut data, snapshots).map(|value| (value, false, 0))
         }
         EdnsValue::Nsid => Some((&[][..], true, 1)),
+        EdnsValue::Subnet(..)
+            if *action != EdnsAction::Unset
+                && !query
+                    .questions()
+                    .next()
+                    .is_some_and(|question| question.qclass == Class::IN) =>
+        {
+            // RFC 7871 §5: ECS rewriting applies only to IN-class Queries.
+            None
+        }
         EdnsValue::Subnet(v4, v6) => {
             let mut subnet = [0; 20];
-            let bytes = subnet_data(cx.client.ip(), *v4, *v6, &mut subnet);
+            let source_limit = query.opt().and_then(|opt| {
+                opt.options().iter().find_map(|option| match option {
+                    pharos_proto::EdnsOption::ClientSubnet(subnet) => Some(subnet.source_prefix()),
+                    _ => None,
+                })
+            });
+            let bytes = subnet_data(cx.client.ip(), *v4, *v6, source_limit, &mut subnet);
             data[..bytes.len()].copy_from_slice(bytes);
             Some((&data[..bytes.len()], false, 2))
         }
@@ -1559,14 +1784,19 @@ fn edns_query(query: Message<'_>, options: &[u8], output: &mut [u8]) -> Result<u
 }
 
 #[inline(never)]
-fn build_cname_response_stack(
+fn build_cname_response_scratch(
     cx: &mut Context<'_, '_>,
     lookup: Message<'_>,
     from: &NameText,
     target: &Name,
 ) -> Result<(), ServerError> {
-    // shortcut: 64 KiB stack zeroed per Query without an edns0 rule; reuse scratch if profiling shows it matters.
-    let mut scratch = [0u8; 65535];
+    // RFC 1035 §4.1.4: Snapshot only live wire bytes before rebuilding compressed names.
+    if cx.response.len() <= 512 {
+        let mut scratch = [0; 512];
+        let len = cx.response.len();
+        return build_cname_response(cx, lookup, from, target, &mut scratch[..len]);
+    }
+    let mut scratch = cx.response.to_vec();
     build_cname_response(cx, lookup, from, target, &mut scratch)
 }
 
@@ -1583,8 +1813,8 @@ fn build_cname_response(
     scratch[..cx.response.len()].copy_from_slice(cx.response);
     let response =
         Message::parse(&scratch[..cx.response.len()]).map_err(|_| ServerError::InvalidQuery)?;
-    // RFC 1035 §4.1.1: TC indicates that the response was truncated for the transport.
-    let flags = (response.flags() & !0x0200) | (lookup.flags() & 0x0200);
+    // RFC 6604 §3: The final CNAME lookup determines the response RCODE and TC.
+    let flags = (response.flags() & !0x020f) | (lookup.flags() & 0x020f);
     let mut builder = MessageBuilder::new(
         cx.response,
         cx.max_response_size.max(512),
@@ -1822,7 +2052,7 @@ fn revert_edns_response<'q>(
 }
 
 #[inline(never)]
-fn build_reverted_response_stack<'q>(
+fn build_reverted_response_scratch<'q>(
     cx: &mut Context<'_, '_>,
     original_query: Message<'q>,
     rules: &[Rule],
@@ -1830,8 +2060,21 @@ fn build_reverted_response_stack<'q>(
     history: &NameHistory<'q>,
     end_and_rcode: (usize, u16),
 ) -> Result<(), ServerError> {
-    // shortcut: 64 KiB stack zeroed per Query without an edns0 rule; reuse scratch if profiling shows it matters.
-    let mut scratch = [0u8; 65535];
+    // RFC 1035 §4.1.4: Snapshot only live wire bytes before rebuilding compressed names.
+    if cx.response.len() <= 512 {
+        let mut scratch = [0; 512];
+        let len = cx.response.len();
+        return build_reverted_response(
+            cx,
+            original_query,
+            rules,
+            recorded,
+            history,
+            end_and_rcode,
+            &mut scratch[..len],
+        );
+    }
+    let mut scratch = cx.response.to_vec();
     build_reverted_response(
         cx,
         original_query,
@@ -1858,6 +2101,21 @@ fn build_reverted_response<'q>(
     scratch[..cx.response.len()].copy_from_slice(cx.response);
     let response =
         Message::parse(&scratch[..cx.response.len()]).map_err(|_| ServerError::InvalidQuery)?;
+    let rewrites_ttl = rules[..end].iter().enumerate().any(|(index, rule)| {
+        matches!(&rule.action, Action::Ttl(..))
+            && recorded.map_or_else(
+                || active_at(rules, index, original_query, &cx.metadata, history),
+                |bits| bits[index] != 0,
+            )
+    });
+    // RFC 2181 §5.2: Build minima only for matched TTL rules and non-OPT RRsets.
+    let rrset_ttls = (rewrites_ttl
+        && response
+            .answers()
+            .chain(response.authorities())
+            .chain(response.additionals())
+            .any(|rr| rr.rtype != Type::OPT))
+    .then(|| rrset_minimum_ttls(&response));
     // RFC 1035 §4.1.2: Restore the original QNAME, QTYPE, and QCLASS in the response.
     let original = original_query
         .questions()
@@ -1888,12 +2146,24 @@ fn build_reverted_response<'q>(
     ] {
         // RFC 1035 §4.1.3: Re-encode each resource record with its current fields.
         for rr in records {
-            let mut ttl = rr.ttl;
+            let key = RrsetKey {
+                owner: rr.name,
+                rtype: rr.rtype,
+                class: rr.class,
+            };
+            let mut ttl = if rr.rtype == Type::OPT || !rewrites_ttl {
+                rr.ttl
+            } else {
+                rrset_ttls
+                    .as_ref()
+                    .and_then(|ttls| ttls.get(&key))
+                    .unwrap_or(rr.ttl)
+            };
             if rr.rtype == Type::OPT {
                 has_opt = true;
                 // RFC 6891 §6.1.3: OPT carries the high RCODE bits, not an RR TTL.
                 ttl = (ttl & 0x00ff_ffff) | (u32::from(rcode >> 4) << 24);
-            } else {
+            } else if rewrites_ttl {
                 // RFC 2181 §5.2: Apply the same TTL clamp to each RRSet member.
                 for (index, rule) in rules[..end].iter().enumerate().rev() {
                     let active = recorded.map_or_else(
@@ -2188,9 +2458,6 @@ impl Plugin for Rewrite {
                 let Action::Cname(matcher, replacement) = &rule.action else {
                     continue;
                 };
-                if cx.self_lookup_depth() > 8 {
-                    continue;
-                }
                 if !matches.as_deref().map_or_else(
                     || {
                         active_at(
@@ -2219,6 +2486,10 @@ impl Plugin for Rewrite {
                         cname_replacement(matcher, replacement, value)
                     });
                 if let Some((from, target)) = matched {
+                    if cx.self_lookup_depth() > 8 {
+                        // RFC 1034 §3.6.2: A bounded CNAME loop must fail, not return NOERROR.
+                        return Outcome::Error(ServerError::SelfLookupDepth);
+                    }
                     let Some(question) = rewritten_query.questions().next() else {
                         return outcome;
                     };
@@ -2249,7 +2520,7 @@ impl Plugin for Rewrite {
                                 &target,
                                 &mut scratch.response,
                             ),
-                            None => build_cname_response_stack(cx, lookup, &from, &target),
+                            None => build_cname_response_scratch(cx, lookup, &from, &target),
                         }
                     {
                         return Outcome::Error(error);
@@ -2382,7 +2653,7 @@ impl Plugin for Rewrite {
                     &mut scratch.response,
                 )
             } else {
-                build_reverted_response_stack(
+                build_reverted_response_scratch(
                     cx,
                     original_query,
                     &self.rules,
@@ -2401,7 +2672,10 @@ impl Plugin for Rewrite {
 
 #[cfg(test)]
 mod tests {
-    use super::RegexMatcher;
+    use super::{
+        Action, INLINE_RRSET_TTLS, RegexMatcher, RrsetKey, cname_replacement, rrset_minimum_ttls,
+    };
+    use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
 
     #[test]
     fn cached_regex_matches_the_capture_engine() {
@@ -2433,5 +2707,110 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cname_match_ignores_ascii_case() {
+        let blocks = pharos_corefile::parse(
+            "Corefile",
+            r".:53 {
+ rewrite cname Old.Example. new.example.
+ rewrite cname regex old\.example\. new.example.
+}",
+        )
+        .unwrap();
+        let mut chains =
+            pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+        let rewrite = chains.remove(0).config.rewrite.unwrap();
+        let value: pharos_proto::Name = "Old.Example.".parse().unwrap();
+        let value = pharos_proto::NameRef::parse(value.as_wire(), 0).unwrap();
+        for rule in &rewrite.rules {
+            let Action::Cname(matcher, replacement) = &rule.action else {
+                panic!("expected CNAME rule parsed from Corefile");
+            };
+            assert_eq!(
+                cname_replacement(matcher, replacement, value)
+                    .unwrap()
+                    .1
+                    .to_string(),
+                "new.example."
+            );
+        }
+    }
+
+    #[test]
+    fn cname_regex_setup_preserves_uppercase_escapes() {
+        for (pattern, candidate, expected) in [
+            (r"^\D+\.example\.$", "letters.example.", true),
+            (r"^\D+\.example\.$", "123.example.", false),
+            (r"^\W+\.example\.$", "-.example.", true),
+            (r"^\W+\.example\.$", "letters.example.", false),
+        ] {
+            let corefile = format!(".:53 {{\n rewrite cname regex {pattern} target.example.\n}}");
+            let blocks = pharos_corefile::parse("Corefile", &corefile).unwrap();
+            let mut chains =
+                pharos_corefile::configure::<crate::Chain>(&blocks, crate::directives()).unwrap();
+            let rewrite = chains.remove(0).config.rewrite.unwrap();
+            let Action::Cname(matcher, replacement) = &rewrite.rules[0].action else {
+                panic!("expected parsed CNAME regex rule");
+            };
+            let name: Name = candidate.parse().unwrap();
+            let name = NameRef::parse(name.as_wire(), 0).unwrap();
+            assert_eq!(
+                cname_replacement(matcher, replacement, name).is_some(),
+                expected,
+                "{pattern} against {candidate}"
+            );
+        }
+    }
+
+    // RFC 2181 §5.2: Overflow RRsets keep the same lowest-TTL semantics.
+    #[test]
+    fn rrset_ttl_table_keeps_minimum_above_inline_capacity() {
+        let root: Name = ".".parse().unwrap();
+        let mut wire = Vec::with_capacity(16_384);
+        let mut builder = MessageBuilder::new(&mut wire, 16_384, 1, 0x8180).unwrap();
+        builder
+            .question(
+                NameRef::parse(root.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+            )
+            .unwrap();
+        let mut names = Vec::new();
+        for index in 0..=INLINE_RRSET_TTLS {
+            let name: Name = format!("n{index}.example.").parse().unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    NameRef::parse(name.as_wire(), 0).unwrap(),
+                    Type::A,
+                    Class::IN,
+                    index as u32,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+            names.push(name);
+        }
+        builder
+            .record(
+                Section::Answer,
+                NameRef::parse(names.last().unwrap().as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+                1,
+                &[192, 0, 2, 2],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let message = Message::parse(&wire).unwrap();
+        let ttls = rrset_minimum_ttls(&message);
+        let overflow = NameRef::parse(names.last().unwrap().as_wire(), 0).unwrap();
+        let key = RrsetKey {
+            owner: overflow,
+            rtype: Type::A,
+            class: Class::IN,
+        };
+        assert_eq!(ttls.get(&key), Some(1));
     }
 }

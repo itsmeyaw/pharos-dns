@@ -496,6 +496,105 @@ async fn coredns_first_success_with_different_owner_adds_cname() {
     assert_eq!(target.to_string(), "other.example.org.");
 }
 
+struct ExistingCname(pharos_plugins::autopath::AutoPath);
+impl pharos_server::Chain for ExistingCname {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, CnameBackend).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct CnameBackend;
+impl Next for CnameBackend {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let target: Name = "actual.example.".parse().unwrap();
+        let answer_name: Name = "elsewhere.example.".parse().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        builder
+            .record(
+                Section::Answer,
+                q.name,
+                Type::CNAME,
+                Class::IN,
+                60,
+                target.as_wire(),
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                NameRef::parse(answer_name.as_wire(), 0).unwrap(),
+                Type::A,
+                Class::IN,
+                60,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn existing_question_cname_is_not_duplicated_by_autopath() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/autopath-search.conf"
+    );
+    let config = format!(".:53 {{\n autopath example.org {path}\n}}");
+    let mut chain = configure::<Chain>(&parse("Corefile", &config).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(ExistingCname(chain.autopath.take().unwrap())),
+        vec![],
+    );
+    let server = Server::new(router, key);
+    let name: Name = "b.example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    let cnames: Vec<_> = message
+        .answers()
+        .filter_map(|rr| match rr.data().unwrap() {
+            Rdata::Cname(target) => Some(target.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cnames, ["actual.example."]);
+}
+
 // Derived from CoreDNS v1.15.0 plugin/autopath/autopath_test.go.
 #[tokio::test]
 async fn coredns_autopath_search_and_passthrough() {

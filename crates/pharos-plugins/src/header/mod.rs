@@ -40,10 +40,10 @@ impl Header {
             let _ = cursor.remaining_args();
             let mut any = false;
             while cursor.next_block() {
-                let rules = if cursor.val().eq_ignore_ascii_case("query") {
-                    &mut header.query
+                let (rules, is_response) = if cursor.val().eq_ignore_ascii_case("query") {
+                    (&mut header.query, false)
                 } else if cursor.val().eq_ignore_ascii_case("response") {
-                    &mut header.response
+                    (&mut header.response, true)
                 } else {
                     return Err(cursor.error("invalid header selector"));
                 };
@@ -69,6 +69,10 @@ impl Header {
                     } else {
                         return Err(cursor.error("unsupported header flag"));
                     };
+                    // RFC 1035 §4.1.1: Response RD is copied from the Query, not overridden.
+                    if is_response && bit == 0x0100 {
+                        return Err(cursor.error("response RD is copied from the Query"));
+                    }
                     rules.add(bit, set);
                     any = true;
                 }
@@ -83,6 +87,7 @@ impl Header {
 
 impl Plugin for Header {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
+        let original_rd = cx.query.flags() & 0x0100;
         let query_flags = self.query.apply(cx.query.flags());
         // RFC 1035 §4.1.1: a rule cannot set AA in a Query.
         let query_flags = if self.query.set & 0x0400 != 0 {
@@ -101,6 +106,8 @@ impl Plugin for Header {
             } else {
                 flags
             };
+            // RFC 1035 §4.1.1: Response RD copies the received Query, not rewritten flags.
+            let flags = (flags & !0x0100) | original_rd;
             cx.response[2..4].copy_from_slice(&flags.to_be_bytes());
         }
         outcome

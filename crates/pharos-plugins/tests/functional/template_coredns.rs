@@ -4,7 +4,10 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Type};
-use pharos_server::{Context, Error, Metadata, Outcome, Protocol, Transport};
+use pharos_server::{
+    Action, Context, Error, Handler, ListenerKey, Metadata, Next, Outcome, Plugin, Protocol,
+    Router, Server, Transport,
+};
 
 fn chain(directives_text: &str) -> Chain {
     let text = format!(".:53 {{\n{directives_text}\n}}");
@@ -653,6 +656,83 @@ template ANY ANY invalid. {
             info_code: 21,
             extra_text: b"Blocked due to RFC2606",
         }));
+}
+
+#[tokio::test]
+async fn code_zero_extended_error_includes_explanatory_text() {
+    let chain = chain("template ANY ANY {\n ederror 0\n}");
+    let (outcome, wire) = query(&chain, "example.", Type::A, Class::IN, &[]).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    // RFC 8914 §4.1: Code 0 SHOULD include text explaining the error.
+    assert!(response.opt().unwrap().options().iter().any(|option| option
+        == EdnsOption::ExtendedError {
+            info_code: 0,
+            extra_text: b"Other error",
+        }));
+}
+
+struct CnameTemplate(pharos_plugins::template::Template);
+impl pharos_server::Chain for CnameTemplate {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, NxBackend).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct NxBackend;
+impl Next for NxBackend {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let q = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8183).unwrap();
+        builder.question(q.name, q.qtype, q.qclass).unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn template_cname_chase_uses_terminal_rcode() {
+    let configured = chain(
+        "template IN A example.net. {\n answer \"example.net. 60 IN CNAME target.example.com.\"\n}",
+    );
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(CnameTemplate(configured.template.unwrap())),
+        vec![],
+    );
+    let server = Server::new(router, key);
+    let name: Name = "example.net.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(4096);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NXDOMAIN);
 }
 
 // Derived from CoreDNS TestVar: GroupMissing, QueryFunctions, BoolInTemplateCondition and NoVars.

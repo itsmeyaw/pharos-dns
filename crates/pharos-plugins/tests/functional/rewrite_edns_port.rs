@@ -226,7 +226,6 @@ async fn coredns_edns_multiple_rules_rows() {
     const NSID: &[u8] = b"\0\x03\0\0";
     const LOCAL_NSID: &[u8] = b"\xff\xee\0\x06foobar\0\x03\0\0";
     const SUBNET_ZERO: &[u8] = b"\0\x08\0\x04\0\x01\0\0";
-    const SUBNET_FULL: &[u8] = b"\0\x08\0\x08\0\x01\x20\0\x0a\xf0\0\x01";
     for (first, second, original, expected) in [
         (
             "local replace 0xffee abcdef",
@@ -292,7 +291,7 @@ async fn coredns_edns_multiple_rules_rows() {
             "subnet replace 32 56",
             "subnet set 0 56",
             SUBNET_ZERO,
-            SUBNET_FULL,
+            SUBNET_ZERO,
         ),
         (
             "subnet replace 32 56 revert",

@@ -36,6 +36,8 @@ fn coredns_setup_cases() {
         "header {\n query foo\n}",
         "header {\n query foo rd\n}",
         "header {\n query set ad\n}",
+        "header {\n response set rd\n}",
+        "header {\n response clear rd\n}",
     ] {
         assert!(configured(directive).is_err(), "{directive}");
     }
@@ -62,7 +64,6 @@ async fn coredns_query_and_response_rules_and_precedence() {
     for (selector, initial, action, flag, expected) in [
         ("response", 0_u16, "set", "ra", 0x80),
         ("response", 0x80, "clear", "ra", 0),
-        ("response", 0, "set", "rd", 0x100),
         ("response", 0, "set", "aa", 0),
         ("query", 0, "set", "ra", 0x80),
         ("query", 0, "set", "rd", 0x100),
@@ -93,6 +94,7 @@ async fn coredns_query_and_response_rules_and_precedence() {
         } else {
             initial
         };
+        let response_expected = (expected & !0x0100) | (initial & 0x0100);
         assert_eq!(
             chain
                 .header
@@ -110,7 +112,7 @@ async fn coredns_query_and_response_rules_and_precedence() {
         );
         assert_eq!(
             Message::parse(cx.response).unwrap().flags(),
-            expected,
+            response_expected,
             "{directive}"
         );
     }
@@ -118,7 +120,9 @@ async fn coredns_query_and_response_rules_and_precedence() {
 
 #[tokio::test]
 async fn rules_are_ordered_and_non_response_outcomes_are_preserved() {
-    let chain = configured("header {\n query set aa ra rd\n query clear aa rd\n response set aa rd\n response clear rd\n}").unwrap();
+    let chain =
+        configured("header {\n query set aa ra rd\n query clear aa rd\n response set aa\n}")
+            .unwrap();
     let wire = [0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1];
     let domain: Name = ".".parse().unwrap();
     for outcome in [
@@ -155,7 +159,14 @@ async fn rules_are_ordered_and_non_response_outcomes_are_preserved() {
                 .await,
             outcome
         );
-        assert_eq!(Message::parse(cx.response).unwrap().flags(), 0x80);
+        assert_eq!(
+            Message::parse(cx.response).unwrap().flags(),
+            if outcome == Outcome::Response {
+                0x180
+            } else {
+                0x80
+            }
+        );
     }
 }
 

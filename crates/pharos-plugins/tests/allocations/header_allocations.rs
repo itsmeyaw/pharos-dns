@@ -21,7 +21,7 @@ fn header_rules_do_not_allocate_per_query() {
     }
     let blocks = parse(
         "Corefile",
-        ". {\n header {\n query set rd\n response set ra aa\n response clear rd\n }\n whoami\n}",
+        ". {\n header {\n query set rd\n response set ra aa\n }\n whoami\n}",
     )
     .unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();

@@ -26,7 +26,7 @@ struct Rule {
 struct Policy {
     action: Action,
     types: Vec<Type>,
-    networks: Vec<(IpAddr, u8)>,
+    networks: Vec<(IpAddr, u8, Option<u32>)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -105,10 +105,24 @@ impl Acl {
                             let (ip, prefix) = token
                                 .split_once('/')
                                 .map_or((token.as_str(), None), |(ip, prefix)| (ip, Some(prefix)));
+                            // RFC 4007 §11: Parse a numeric zone ID for scoped IPv6 prefixes.
+                            let (ip, scope) = if let Some((ip, scope)) = ip.rsplit_once('%') {
+                                let scope = scope
+                                    .parse::<u32>()
+                                    .ok()
+                                    .filter(|scope| *scope != 0)
+                                    .ok_or_else(|| cursor.error("invalid acl scope"))?;
+                                (ip, Some(scope))
+                            } else {
+                                (ip, None)
+                            };
                             // RFC 4291 §2.2: Parse conventional IPv6 address text.
                             let ip: IpAddr = ip
                                 .parse()
                                 .map_err(|_| cursor.error("invalid acl network"))?;
+                            if scope.is_some() && !requires_scope(ip) {
+                                return Err(cursor.error("scope requires link-local IPv6 network"));
+                            }
                             let max = if ip.is_ipv4() { 32 } else { 128 };
                             let prefix = prefix
                                 .map(|p| p.parse::<u8>())
@@ -119,7 +133,7 @@ impl Acl {
                                 return Err(cursor.error("invalid acl prefix"));
                             }
                             if !all_networks {
-                                networks.push((ip, prefix));
+                                networks.push((ip, prefix, scope));
                             }
                         }
                     }
@@ -198,6 +212,10 @@ impl Plugin for Acl {
             IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
             ip => ip,
         };
+        let client_scope = match cx.client {
+            SocketAddr::V6(address) => address.scope_id(),
+            SocketAddr::V4(_) => 0,
+        };
         for rule in &self.rules {
             // RFC 4343 §3: DNS name comparisons ignore ASCII letter case.
             let matched_domain = rule
@@ -238,8 +256,16 @@ impl Plugin for Acl {
                 .find(|policy| {
                     (policy.types.contains(&Type::NONE) || policy.types.contains(&question.qtype))
                         && (policy.networks.is_empty()
-                            || policy.networks.iter().any(|&(network, prefix)| {
-                                crate::ipnet::contains(network, prefix, ip)
+                            || policy.networks.iter().any(|&(network, prefix, scope)| {
+                                // RFC 4007 §§11–12: Allow must not match scoped clients without a zone.
+                                network_matches(
+                                    network,
+                                    prefix,
+                                    scope,
+                                    ip,
+                                    client_scope,
+                                    !matches!(policy.action, Action::Allow),
+                                )
                             }))
                 })
                 .map(|policy| policy.action);
@@ -318,5 +344,52 @@ impl Plugin for Acl {
             metrics.increment(0);
         }
         next.run(cx).await
+    }
+}
+
+// RFC 4007 §§11–12: Link/site-local unicast and interface/link-local multicast need zone IDs.
+fn requires_scope(ip: IpAddr) -> bool {
+    let IpAddr::V6(ip) = ip else {
+        return false;
+    };
+    let octets = ip.octets();
+    (octets[0] == 0xfe && matches!(octets[1] & 0xc0, 0x80 | 0xc0))
+        || (octets[0] == 0xff && matches!(octets[1] & 0x0f, 1 | 2))
+}
+
+// RFC 4007 §§11–12: Match scoped IPv6 addresses only with their configured zone ID.
+fn network_matches(
+    network: IpAddr,
+    prefix: u8,
+    scope: Option<u32>,
+    client: IpAddr,
+    client_scope: u32,
+    restrictive: bool,
+) -> bool {
+    if !crate::ipnet::contains(network, prefix, client) {
+        return false;
+    }
+    if requires_scope(client) {
+        // RFC 4007 §§11–12: Unscoped restrictive rules must not fail open across interfaces.
+        scope.map_or(restrictive, |scope| scope == client_scope)
+    } else {
+        scope.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::network_matches;
+    use std::net::IpAddr;
+
+    #[test]
+    fn scoped_ipv6_acl_handles_link_site_and_multicast_scopes() {
+        for address in ["fe80::1", "fec0::1", "ff01::1", "ff02::1"] {
+            let client: IpAddr = address.parse().unwrap();
+            assert!(!network_matches(client, 128, None, client, 2, false));
+            assert!(network_matches(client, 128, None, client, 2, true));
+            assert!(network_matches(client, 128, Some(2), client, 2, false));
+            assert!(!network_matches(client, 128, Some(3), client, 2, true));
+        }
     }
 }

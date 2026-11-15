@@ -35,7 +35,7 @@ independent Corefile examples. Skipped entries explain why they cannot run.
 | rewrite: CNAME regex chain | `rewrite-cname-readme` |
 | autopath: resolv.conf; Kubernetes | `autopath-resolv`; `autopath-kubernetes` |
 | acl: block A; filter A; exception; allow two networks; zone; drop | `acl-block-loopback`; `acl-filter-loopback`; `acl-allow`. `acl-block` and `acl-filter` run the README networks, which the loopback client never matches, so they compare only the default allow; `acl-exception`, `acl-zone` and `acl-drop` do the same. The loopback variants compare the block and filter actions with EDNS Queries; CoreDNS's non-EDNS EDE OPT is the documented Server deviation in `docs/compatibility.md`. Other documented non-loopback client addresses cannot be sourced by the harness; matching branches have Rust tests. |
-| header: set RA; set RA/AA and clear RD; set query RD | `header-response-ra`; `header-response-flags`; `header-query-rd` |
+| header: set RA; set RA/AA; set query RD | `header-response-ra`; `header-response-flags`; `header-query-rd` |
 | dnssec: whoami key; AWS key; Kubernetes key | `dnssec-whoami`; AWS skipped because live credentials and a secret are required; `dnssec-kubernetes` |
 | minimal: whoami and forwarding | `minimal-readme` |
 | template: all NXDOMAIN; invalid TLD | `template-nxdomain`; `template-invalid` |

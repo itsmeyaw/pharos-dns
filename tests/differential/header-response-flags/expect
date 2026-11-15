@@ -1,1 +1,2 @@
+# RD comes from the Query; response RD overrides are rejected.
 mask additional.srv.port

@@ -6,11 +6,14 @@
 
 - CNAME Self Lookup allocates per Query; issue #86 tracks allocation-free Self Lookup.
 - The CNAME rewrite depth limit counts all Self Lookups, including those from other Plugins; CoreDNS counts only CNAME rewrites.
+- Reaching that depth limit now returns SERVFAIL instead of a partial NOERROR chain (RFC 1034 §3.6.2).
 - EDNS rewrites use preallocated scratch storage and serialize Queries at the same Self Lookup depth; independent depths use separate buffers.
 - If the original Query had no OPT record, Pharos omits OPT from the Response as required by RFC 6891 §7. CoreDNS can return an OPT created by `rewrite edns0` to that client.
 - Regex rules use Rust regex syntax rather than Go RE2; character classes such as `\d` and `\w` are Unicode-aware by default, unlike Go. Regex captures allocate per Query.
 - Regex matchers share a preallocated, synchronized cache per pattern, so concurrent matches of the same pattern briefly serialize.
 - TTL rewrites leave OPT's extended RCODE, version and flags untouched as required by RFC 6891 §6.1.3; CoreDNS applies its TTL rule to OPT records as well.
+- Non-TTL rewrites preserve each Response record's received TTL; active TTL rules apply RRset-minimum semantics (RFC 2181 §5.2).
+- `edns0 subnet` rewrites only IN Queries. Prefixes are capped at /24 IPv4 and /56 IPv6, and never exceed an incoming ECS SOURCE; `/0` stays `/0`. There is no cap opt-out (RFC 7871 §§5, 7.1.1, 11.1).
 - Rebuilding a rewritten Query or Response rejects malformed or unsupported name-bearing RDATA with SERVFAIL instead of copying it as CoreDNS does.
 
 ## Differential scenarios

@@ -30,3 +30,5 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
 - For a non-EDNS Query, the Listener removes the `ederror` OPT from the
   Response; CoreDNS can retain it. See the Server notes in `docs/compatibility.md`.
 - CNAME Self Lookup allocates; #86 tracks allocation-free Self Lookup.
+- A chased CNAME uses the terminal Self Lookup's RCODE when no non-NOERROR RCODE is configured (RFC 6604 §3).
+- `ederror` EXTRA-TEXT is UTF-8; code 0 with no configured reason emits `Other error` (RFC 8914 §4.1).

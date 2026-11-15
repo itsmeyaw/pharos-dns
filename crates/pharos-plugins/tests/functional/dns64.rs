@@ -15,9 +15,17 @@ struct ScriptedChain {
     initial_aa_ra: u16,
     initial_soa: bool,
     initial_cname: bool,
+    initial_aaaa: InitialAaaa,
     fallback_rcode: u16,
     fallback_answers: bool,
     truncated: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum InitialAaaa {
+    None,
+    MappedOnly,
+    UsableAndMapped,
 }
 
 impl pharos_server::Chain for ScriptedChain {
@@ -53,6 +61,23 @@ impl Next for ScriptedNext<'_> {
             };
         let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), flags).unwrap();
         builder.question(q.name, q.qtype, q.qclass).unwrap();
+        if !fallback
+            && matches!(
+                self.0.initial_aaaa,
+                InitialAaaa::MappedOnly | InitialAaaa::UsableAndMapped
+            )
+        {
+            let mapped = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 42];
+            builder
+                .record(Section::Answer, q.name, Type::AAAA, Class::IN, 60, &mapped)
+                .unwrap();
+        }
+        if !fallback && self.0.initial_aaaa == InitialAaaa::UsableAndMapped {
+            let usable = [0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+            builder
+                .record(Section::Answer, q.name, Type::AAAA, Class::IN, 60, &usable)
+                .unwrap();
+        }
         if !fallback && self.0.initial_cname {
             let target: Name = "missing.example.net.".parse().unwrap();
             builder
@@ -74,7 +99,7 @@ impl Next for ScriptedNext<'_> {
                     Type::A,
                     Class::IN,
                     60,
-                    &[192, 0, 2, 42],
+                    &[8, 8, 8, 42],
                 )
                 .unwrap();
             builder
@@ -84,7 +109,7 @@ impl Next for ScriptedNext<'_> {
                     Type::A,
                     Class::IN,
                     5000,
-                    &[192, 0, 2, 43],
+                    &[8, 8, 8, 43],
                 )
                 .unwrap();
         }
@@ -110,19 +135,181 @@ impl Next for ScriptedNext<'_> {
 // Derived from CoreDNS TestDNS64 and TestDNS64FallbackError.
 #[tokio::test]
 async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
-    for (initial, soa, fallback, answers, truncated, role_flags, expected_code, expected_ttls) in [
-        (0, true, 0, true, false, 0x0480, 0, vec![60, 70]),
-        (5, false, 0, true, false, 0x0480, 0, vec![60, 600]),
-        (0, true, 0, true, true, 0x0480, 0, vec![60, 70]),
-        (0, true, 0, true, false, 0, 0, vec![60, 70]),
-        (0, true, 0, false, false, 0x0480, 0, vec![]),
-        (0, false, 2, false, false, 0x0480, 2, vec![]),
-        (0, false, 5, false, false, 0x0480, 5, vec![]),
-        (0, false, 1, false, false, 0x0480, 1, vec![]),
-        (0, false, 3, false, false, 0x0480, 3, vec![]),
-        (0, false, 4, false, false, 0x0480, 4, vec![]),
+    for (
+        initial,
+        soa,
+        fallback,
+        answers,
+        truncated,
+        role_flags,
+        expected_code,
+        expected_ttls,
+        initial_aaaa,
+        translate_all,
+    ) in [
+        (
+            0,
+            true,
+            0,
+            true,
+            false,
+            0x0480,
+            0,
+            vec![60, 70],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            5,
+            false,
+            0,
+            true,
+            false,
+            0x0480,
+            0,
+            vec![60, 600],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            true,
+            0,
+            true,
+            true,
+            0x0480,
+            0,
+            vec![60, 70],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            true,
+            0,
+            true,
+            false,
+            0,
+            0,
+            vec![60, 70],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            true,
+            0,
+            false,
+            false,
+            0x0480,
+            0,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            2,
+            false,
+            false,
+            0x0480,
+            2,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            5,
+            false,
+            false,
+            0x0480,
+            5,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            1,
+            false,
+            false,
+            0x0480,
+            1,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            3,
+            false,
+            false,
+            0x0480,
+            3,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            false,
+            4,
+            false,
+            false,
+            0x0480,
+            4,
+            vec![],
+            InitialAaaa::None,
+            false,
+        ),
+        (
+            0,
+            true,
+            0,
+            true,
+            false,
+            0x0480,
+            0,
+            vec![60, 70],
+            InitialAaaa::MappedOnly,
+            false,
+        ),
+        (
+            0,
+            true,
+            0,
+            true,
+            false,
+            0x0480,
+            0,
+            vec![60],
+            InitialAaaa::UsableAndMapped,
+            false,
+        ),
+        (
+            0,
+            true,
+            0,
+            false,
+            false,
+            0x0480,
+            0,
+            vec![],
+            InitialAaaa::MappedOnly,
+            true,
+        ),
     ] {
-        let blocks = parse("Corefile", ".:53 {\n dns64\n}").unwrap();
+        let config = if translate_all {
+            ".:53 {\n dns64 {\n  translate_all\n }\n}"
+        } else {
+            ".:53 {\n dns64\n}"
+        };
+        let blocks = parse("Corefile", config).unwrap();
         let mut chain = configure::<Chain>(&blocks, directives())
             .unwrap()
             .remove(0)
@@ -133,6 +320,7 @@ async fn coredns_dns64_fallback_rcodes_soa_ttl_and_truncation() {
             initial_aa_ra: role_flags,
             initial_soa: soa,
             initial_cname: false,
+            initial_aaaa,
             fallback_rcode: fallback,
             fallback_answers: answers,
             truncated,
@@ -200,6 +388,7 @@ async fn nxdomain_with_cname_does_not_trigger_dns64_synthesis() {
         initial_aa_ra: 0,
         initial_soa: false,
         initial_cname: true,
+        initial_aaaa: InitialAaaa::None,
         fallback_rcode: 0,
         fallback_answers: true,
         truncated: false,
@@ -284,7 +473,7 @@ impl Next for ExpiredNx {
 }
 
 #[tokio::test]
-async fn dns64_classifies_expired_signed_nxdomain_like_coredns() {
+async fn expired_signed_nxdomain_does_not_trigger_dns64_synthesis() {
     let blocks = parse("Corefile", ". {\n dns64\n}").unwrap();
     let chain = configure::<Chain>(&blocks, directives())
         .unwrap()
@@ -321,8 +510,94 @@ async fn dns64_classifies_expired_signed_nxdomain_like_coredns() {
             .unwrap()
             .serve(&mut cx, ExpiredNx)
             .await,
-        Outcome::Error(Error::SelfLookupUnavailable)
+        Outcome::Response
     );
+    let response = Message::parse(cx.response).unwrap();
+    // RFC 6147 §5.1.2: RCODE NXDOMAIN remains a name error even with an expired RRSIG.
+    assert_eq!(response.rcode(), Rcode::NXDOMAIN);
+    assert_eq!(response.authorities().next().unwrap().rtype, Type::RRSIG);
+}
+
+struct MixedAaaa;
+impl Next for MixedAaaa {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let question = cx.query.questions().next().unwrap();
+        let mapped = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 1];
+        let usable: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::AAAA,
+                Class::IN,
+                60,
+                &mapped,
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::AAAA,
+                Class::IN,
+                60,
+                &usable.octets(),
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn dns64_does_not_return_ipv4_mapped_aaaa() {
+    let blocks = parse("Corefile", ".:53 {\n dns64\n}").unwrap();
+    let config = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = "example.com.".parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AAAA,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "[::1]:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(
+        config
+            .dns64
+            .as_ref()
+            .unwrap()
+            .serve(&mut cx, MixedAaaa)
+            .await,
+        Outcome::Response
+    );
+    let message = Message::parse(cx.response).unwrap();
+    assert_eq!(message.answer_count(), 1);
+    let usable: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    assert_eq!(message.answers().next().unwrap().rdata, &usable.octets());
 }
 
 impl Next for FakeNext {
@@ -501,4 +776,222 @@ async fn synthesizes_prefixes_through_self_lookup() {
             "{metrics}"
         );
     }
+}
+
+#[tokio::test]
+async fn well_known_prefix_does_not_synthesize_non_global_ipv4() {
+    let config = ".:53 {\n dns64\n hosts /nonexistent {\n  192.0.2.1 example.org\n  ttl 60\n }\n}";
+    let blocks = parse("Corefile", config).unwrap();
+    let (mut listeners, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (_, server) = listeners.drain().next().unwrap();
+    let name: Name = "example.org.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AAAA,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "[::1]:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.rcode(), Rcode::NOERROR);
+    assert_eq!(message.answers().count(), 0);
+}
+
+struct ChasingDns64(pharos_plugins::dns64::Dns64);
+impl pharos_server::Chain for ChasingDns64 {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, Dns64Backend).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct Dns64Backend;
+impl Next for Dns64Backend {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let question = cx.query.questions().next().unwrap();
+        let name = question.name.to_string();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        if name == "alias.example." && question.qtype == Type::A {
+            let target: Name = "target.example.".parse().unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::CNAME,
+                    Class::IN,
+                    60,
+                    target.as_wire(),
+                )
+                .unwrap();
+        } else if name == "target.example." && question.qtype == Type::A {
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::A,
+                    Class::IN,
+                    60,
+                    &[8, 8, 8, 1],
+                )
+                .unwrap();
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn dns64_follows_a_lookup_cname_to_terminal_address() {
+    let blocks = parse("Corefile", ".:53 {\n dns64\n}").unwrap();
+    let mut config = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(ChasingDns64(config.dns64.take().unwrap())),
+        vec![],
+    );
+    let server = pharos_server::Server::new(router, key);
+    let name: Name = "alias.example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AAAA,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "[::1]:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.answer_count(), 2);
+    assert!(message.answers().any(|rr| rr.rtype == Type::CNAME));
+    let aaaa = message.answers().find(|rr| rr.rtype == Type::AAAA).unwrap();
+    assert_eq!(
+        aaaa.rdata,
+        &[0, 100, 255, 155, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 1]
+    );
+}
+
+struct CyclicDns64(pharos_plugins::dns64::Dns64);
+impl pharos_server::Chain for CyclicDns64 {
+    async fn serve(&self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.serve(cx, CnameCycleBackend).await
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+struct CnameCycleBackend;
+impl Next for CnameCycleBackend {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        let question = cx.query.questions().next().unwrap();
+        let name = question.name.to_string();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8180).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        if question.qtype == Type::A {
+            let target: Name = if name == "alias.example." {
+                "target.example.".parse().unwrap()
+            } else {
+                "alias.example.".parse().unwrap()
+            };
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::CNAME,
+                    Class::IN,
+                    60,
+                    target.as_wire(),
+                )
+                .unwrap();
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+#[tokio::test]
+async fn dns64_cname_cycle_returns_server_error_at_the_hop_limit() {
+    let blocks = parse("Corefile", ".:53 {\n dns64\n}").unwrap();
+    let mut config = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = pharos_server::ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = pharos_server::Router::default();
+    router.add(
+        key,
+        ".".parse().unwrap(),
+        Some(CyclicDns64(config.dns64.take().unwrap())),
+        vec![],
+    );
+    let server = pharos_server::Server::new(router, key);
+    let name: Name = "alias.example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AAAA,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(
+                &wire,
+                "[::1]:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+        Action::Respond
+    );
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::SERVFAIL);
 }

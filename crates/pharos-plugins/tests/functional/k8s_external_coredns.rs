@@ -411,6 +411,8 @@ async fn coredns_scenario() {
             [],
             []
         ),
+        // RFC 1035 §3.1: Apex is the Zone root; it is handled before relative-name parsing.
+        case!("example.com.", A, NOERROR, [], [SOA], []),
         case!("example.com.", SOA, NOERROR, [SOA], [], []),
         case!(
             "example.com.",

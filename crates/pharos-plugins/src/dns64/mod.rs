@@ -3,7 +3,7 @@
 pub(crate) mod setup;
 
 use std::{
-    net::SocketAddr,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -11,9 +11,7 @@ use std::{
 };
 
 use pharos_corefile::{Cursor, Error};
-use pharos_proto::{
-    Class, Message, MessageBuilder, Opcode, ResponseType, Section, Type, typify_response,
-};
+use pharos_proto::{Class, Message, MessageBuilder, Opcode, Rcode, Rdata, Section, Type};
 use pharos_server::{Context, Error as ServerError, Next, Outcome, Plugin, Protocol};
 
 #[derive(Debug)]
@@ -94,6 +92,66 @@ fn parse_prefix(cursor: &Cursor<'_>, value: &str) -> Result<([u8; 16], u8), Erro
     })
 }
 
+// RFC 6147 §5.1.4: IPv4-mapped AAAA records do not suppress DNS64 synthesis.
+fn has_usable_aaaa(message: &Message<'_>) -> bool {
+    message
+        .answers()
+        .any(|rr| rr.rtype == Type::AAAA && !is_excluded_aaaa(rr.rdata))
+}
+
+fn has_excluded_aaaa(message: &Message<'_>) -> bool {
+    message
+        .answers()
+        .any(|rr| rr.rtype == Type::AAAA && is_excluded_aaaa(rr.rdata))
+}
+
+// RFC 6147 §5.1.4: The default exclusion set is IPv4-mapped IPv6 addresses.
+fn is_excluded_aaaa(rdata: &[u8]) -> bool {
+    let Ok(bytes) = <[u8; 16]>::try_from(rdata) else {
+        return false;
+    };
+    Ipv6Addr::from(bytes).to_ipv4_mapped().is_some()
+}
+
+fn filter_excluded_aaaa(cx: &mut Context<'_, '_>, original_wire: &[u8]) -> Result<(), ServerError> {
+    let original = Message::parse(original_wire).map_err(|_| ServerError::InvalidQuery)?;
+    let max = cx.max_response_size.max(512);
+    if cx.response.capacity() < max {
+        if cx.protocol == Protocol::Tcp {
+            cx.response.reserve(max.saturating_sub(cx.response.len()));
+        } else {
+            return Err(ServerError::ResponseBufferTooSmall);
+        }
+    }
+    let mut builder = MessageBuilder::new(cx.response, max, original.id(), original.flags())
+        .map_err(ServerError::Build)?;
+    for question in original.questions() {
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .map_err(ServerError::Build)?;
+    }
+    for (section, records) in [
+        (Section::Answer, original.answers()),
+        (Section::Authority, original.authorities()),
+        (Section::Additional, original.additionals()),
+    ] {
+        for rr in records {
+            // RFC 6147 §5.1.4: Do not return AAAA records from the excluded IPv4-mapped range.
+            if section == Section::Answer && rr.rtype == Type::AAAA && is_excluded_aaaa(rr.rdata) {
+                continue;
+            }
+            let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+            builder
+                .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
+                    data.write(writer)
+                })
+                .map_err(ServerError::Build)?;
+        }
+    }
+    let _ = builder.finish();
+    Ok(())
+}
+
 impl Plugin for Dns64 {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let query = cx.query;
@@ -119,15 +177,20 @@ impl Plugin for Dns64 {
             Err(_) => return Outcome::Error(ServerError::InvalidQuery),
         };
         let original_flags = original.flags();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| {
-                i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-            });
         // RFC 6147 §5.1.1: return existing AAAA data without synthesis by default.
-        if typify_response(Some(&original), now) == ResponseType::NxDomain
-            || (!self.translate_all && original.answers().any(|rr| rr.rtype == Type::AAAA))
-        {
+        // RFC 6147 §5.1.2: NXDOMAIN remains a name error even when signatures are expired.
+        if original.rcode() == Rcode::NXDOMAIN {
+            return outcome;
+        }
+        if !self.translate_all && has_usable_aaaa(&original) {
+            if has_excluded_aaaa(&original) {
+                // RFC 1035 §4.1.4: Snapshot this rare path before re-encoding compression pointers.
+                let original_wire = cx.response.clone();
+                return match filter_excluded_aaaa(cx, &original_wire) {
+                    Ok(()) => outcome,
+                    Err(error) => Outcome::Error(error),
+                };
+            }
             return outcome;
         }
         // RFC 6147 §5.1.7: cap synthesized TTL at the negative SOA TTL or 600 seconds.
@@ -139,17 +202,56 @@ impl Plugin for Dns64 {
         let name = question.name.to_name();
         // shortcut: Self Lookup allocates; remove when issue #86 makes it allocation-free.
         // RFC 6147 §5.1.6: Retrieve A records when the AAAA lookup provides no usable AAAA answer.
-        let lookup = match cx.self_lookup(&name, Type::A).await {
+        let mut lookup = match cx.self_lookup(&name, Type::A).await {
             Ok(wire) => wire,
             Err(error) => return Outcome::Error(error),
         };
-        let response = match Message::parse(&lookup) {
+        let mut response = match Message::parse(&lookup) {
             Ok(message) => message,
             Err(_) => return Outcome::Error(ServerError::InvalidQuery),
         };
         // RFC 6147 §5.4: if the successful A lookup is empty, return the original AAAA response.
         if response.rcode() == pharos_proto::Rcode::NOERROR && response.answer_count() == 0 {
+            if has_excluded_aaaa(&original) {
+                // RFC 1035 §4.1.4: Snapshot this rare path before re-encoding compression pointers.
+                let original_wire = cx.response.clone();
+                return match filter_excluded_aaaa(cx, &original_wire) {
+                    Ok(()) => outcome,
+                    Err(error) => Outcome::Error(error),
+                };
+            }
             return outcome;
+        }
+        let mut lookup_chain = Vec::new();
+        let mut cname_hops = 0;
+        loop {
+            let target = if response.rcode() == Rcode::NOERROR
+                && !response.answers().any(|rr| rr.rtype == Type::A)
+            {
+                response.answers().find_map(|rr| match rr.data().ok()? {
+                    Rdata::Cname(target) => Some(target.to_name()),
+                    _ => None,
+                })
+            } else {
+                None
+            };
+            let Some(target) = target else { break };
+            // RFC 1034 §3.6.2: Bound alias chasing so cycles terminate with an error.
+            // shortcut: allow eight A-target lookups; raise only with cycle-safe chain tracking.
+            if cname_hops >= 8 {
+                return Outcome::Error(ServerError::SelfLookupDepth);
+            }
+            cname_hops += 1;
+            // RFC 6147 §5.1.5: Continue A lookup at each CNAME target until terminal data.
+            lookup_chain.push(lookup);
+            lookup = match cx.self_lookup(&target, Type::A).await {
+                Ok(wire) => wire,
+                Err(error) => return Outcome::Error(error),
+            };
+            response = match Message::parse(&lookup) {
+                Ok(message) => message,
+                Err(_) => return Outcome::Error(ServerError::InvalidQuery),
+            };
         }
         let result = (|| {
             let max = cx.max_response_size.max(512);
@@ -179,16 +281,20 @@ impl Plugin for Dns64 {
                 .question(question.name, question.qtype, question.qclass)
                 .map_err(ServerError::Build)?;
             // RFC 6147 §5.1.5: Preserve CNAME or DNAME chains with synthesized AAAA records.
-            for (section, records) in [
-                (Section::Answer, response.answers()),
-                (Section::Authority, response.authorities()),
-                (Section::Additional, response.additionals()),
-            ] {
-                for rr in records {
+            for wire in lookup_chain.iter().chain(std::iter::once(&lookup)) {
+                let message = Message::parse(wire).map_err(|_| ServerError::InvalidQuery)?;
+                for rr in message.answers() {
                     // RFC 6147 §5.3.2: Synthesize AAAA records from Answer-section A records.
-                    if section == Section::Answer && rr.rtype == Type::A {
+                    if rr.rtype == Type::A {
                         let ipv4: [u8; 4] =
                             rr.rdata.try_into().map_err(|_| ServerError::InvalidQuery)?;
+                        // RFC 6052 §3.1: Do not use the Well-Known Prefix for non-global IPv4.
+                        if self.prefix_len == 96
+                            && self.prefix == crate::rfc6052::WELL_KNOWN_PREFIX
+                            && !crate::rfc6052::is_global_ipv4(Ipv4Addr::from(ipv4))
+                        {
+                            continue;
+                        }
                         // RFC 6147 §5.2: Embed IPv4 in the prefix, skipping byte 8.
                         let mut ipv6 = self.prefix;
                         let mut index = usize::from(self.prefix_len / 8);
@@ -204,7 +310,7 @@ impl Plugin for Dns64 {
                         builder
                             // RFC 6147 §5.1.7: Preserve NAME and CLASS and encode AAAA RDATA.
                             .record(
-                                section,
+                                Section::Answer,
                                 rr.name,
                                 Type::AAAA,
                                 rr.class,
@@ -212,15 +318,33 @@ impl Plugin for Dns64 {
                                 &ipv6,
                             )
                             .map_err(ServerError::Build)?;
-                    // RFC 9460 §4.2.1: DNS64 leaves SvcParam IP hints unchanged.
                     } else {
                         let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
                         builder
-                            .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
-                                data.write(writer)
-                            })
+                            .record_with(
+                                Section::Answer,
+                                rr.name,
+                                rr.rtype,
+                                rr.class,
+                                rr.ttl,
+                                |writer| data.write(writer),
+                            )
                             .map_err(ServerError::Build)?;
                     }
+                }
+            }
+            for (section, records) in [
+                (Section::Authority, response.authorities()),
+                (Section::Additional, response.additionals()),
+            ] {
+                for rr in records {
+                    // RFC 9460 §4.2.1: DNS64 leaves SvcParam IP hints unchanged.
+                    let data = rr.data().map_err(|_| ServerError::InvalidQuery)?;
+                    builder
+                        .record_with(section, rr.name, rr.rtype, rr.class, rr.ttl, |writer| {
+                            data.write(writer)
+                        })
+                        .map_err(ServerError::Build)?;
                 }
             }
             let _ = builder.finish();

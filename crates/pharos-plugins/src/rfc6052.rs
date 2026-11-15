@@ -1,7 +1,27 @@
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub(crate) const WELL_KNOWN_PREFIX: [u8; 16] =
     [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+// RFC 6052 §3.1: The Well-Known Prefix must not represent non-global IPv4 addresses.
+pub(crate) fn is_global_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, d] = ip.octets();
+    !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !ip.is_broadcast()
+        && a != 0
+        && !(a == 100 && b & 0xc0 == 0x40)
+        && !(a == 192 && b == 0 && c == 0 && !matches!(d, 9 | 10))
+        && !(a == 192 && b == 88 && c == 99)
+        && !(a == 192 && b == 0 && c == 2)
+        && !(a == 198 && (b == 18 || b == 19))
+        && !(a == 198 && b == 51 && c == 100)
+        && !(a == 203 && b == 0 && c == 113)
+        && a < 240
+}
 
 pub(crate) enum PrefixError {
     Format,
@@ -35,4 +55,33 @@ fn normalize(bytes: &mut [u8; 16], len: u8) -> Result<(), PrefixError> {
         return Err(PrefixError::ReservedOctet);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_global_ipv4;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn globally_reachable_ipv4_excludes_special_use_ranges() {
+        for address in [
+            "0.1.2.3",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.0.1",
+            "192.0.2.1",
+            "198.18.0.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "240.0.0.1",
+        ] {
+            assert!(
+                !is_global_ipv4(address.parse::<Ipv4Addr>().unwrap()),
+                "{address}"
+            );
+        }
+        assert!(is_global_ipv4("8.8.8.8".parse().unwrap()));
+        assert!(is_global_ipv4("192.0.0.9".parse().unwrap()));
+    }
 }
