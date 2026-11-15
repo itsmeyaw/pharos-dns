@@ -221,20 +221,6 @@ pub(super) fn sign_with_owner(
             owners.entry(rr.owner.clone()).or_default().push(rr.rtype);
         }
     }
-    // RFC 4035 §2.3; RFC 4592 §§2.2.2,4.9: Empty non-terminals are authoritative NSEC owners.
-    for rr in &records {
-        if !authoritative(&rr.owner) {
-            continue;
-        }
-        let mut parent = rr.owner.parent();
-        while let Some(name) = parent {
-            if !name.is_subdomain_of(apex) || !authoritative(&name) {
-                break;
-            }
-            owners.entry(name.clone()).or_default();
-            parent = name.parent();
-        }
-    }
     let names: Vec<_> = owners.into_iter().collect();
     // RFC 4034 §4.1: NSEC links authoritative names in canonical order and lists their types.
     for (index, (owner, types)) in names.iter().enumerate() {
@@ -526,9 +512,9 @@ mod tests {
         assert!(!nsecs.is_empty());
     }
 
-    // RFC 4592 §4.7; RFC 4034 §4.1.1: Empty non-terminals need NSEC records.
+    // RFC 4035 §2.3; RFC 4592 §2.2.2; RFC 7129 §5: ENTs exist but own no NSEC.
     #[test]
-    fn nsec_chain_includes_wildcard_and_plain_empty_nonterminals() {
+    fn nsec_chain_omits_wildcard_and_plain_empty_nonterminals() {
         let path =
             std::env::temp_dir().join(format!("pharos-sign-wildcard-ent-{}", std::process::id()));
         std::fs::write(
@@ -541,16 +527,18 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         for owner in ["*.miek.nl.", "b.miek.nl."] {
             let owner: Name = owner.parse().unwrap();
-            let nsec = records
-                .iter()
-                .find(|rr| rr.owner == owner && rr.rtype == Type::NSEC)
-                .unwrap();
-            let Rdata::Nsec { bitmap, .. } = Rdata::parse(Type::NSEC, &nsec.rdata).unwrap() else {
-                panic!("expected NSEC")
-            };
-            assert_eq!(
-                bitmap,
-                pharos_dnssec::denial::type_bitmap(&[Type::NSEC, Type::RRSIG]).unwrap()
+            assert!(
+                !records.iter().any(|rr| {
+                    rr.owner == owner && matches!(rr.rtype, Type::NSEC | Type::RRSIG)
+                })
+            );
+        }
+        for owner in ["leaf.*.miek.nl.", "a.b.miek.nl."] {
+            let owner: Name = owner.parse().unwrap();
+            assert!(
+                records
+                    .iter()
+                    .any(|rr| rr.owner == owner && rr.rtype == Type::NSEC)
             );
         }
     }
