@@ -32,3 +32,6 @@ See the [CoreDNS template documentation](https://github.com/coredns/coredns/blob
 - CNAME Self Lookup allocates; #86 tracks allocation-free Self Lookup.
 - A chased CNAME uses the terminal Self Lookup's RCODE when no non-NOERROR RCODE is configured (RFC 6604 §3).
 - `ederror` EXTRA-TEXT is UTF-8; code 0 with no configured reason emits `Other error` (RFC 8914 §4.1).
+- Answer CNAMEs restart Self Lookup for every QTYPE except CNAME and ANY, unlike CoreDNS v1.15.0, which follows only A/AAAA. Each matched CNAME can spawn an allocating lookup; #86 tracks that cost (RFC 1034 §§3.4.1, 3.6.2; [`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- For authoritative NXDOMAIN, a generated SOA is placed in Authority even when configured in Answer (RFC 2308 §3); CoreDNS v1.15.0 preserves the configured section ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- For NODATA, a SOA configured in Answer moves to Authority as RFC 2308 §§2.2, 3 require; CoreDNS v1.15.0 preserves the configured section ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)). A positive QTYPE=SOA answer stays in Answer.

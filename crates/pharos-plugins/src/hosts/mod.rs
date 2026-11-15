@@ -254,8 +254,8 @@ impl pharos_server::Plugin for Hosts {
         let Some(question) = cx.query.questions().next() else {
             return next.run(cx).await;
         };
-        // RFC 1034 §4.3.1: answer only Internet-class Questions with IN records.
-        if question.qclass != Class::IN {
+        // RFC 1034 §4.3.1: Hosts data is IN-class; RFC 1035 §6.2 permits QCLASS=ANY.
+        if question.qclass != Class::IN && question.qclass != Class::ANY {
             return next.run(cx).await;
         }
         // RFC 1035 §3.1: wire names are at most 255 octets and end with a zero-length label.
@@ -318,6 +318,10 @@ impl pharos_server::Plugin for Hosts {
             && names1.is_none()
             && names2.is_none();
         let negative = ips.0.is_empty() && ips.1.is_empty() && names1.is_none() && names2.is_none();
+        // RFC 1035 §6.2 and RFC 2308 §2: IN-only host data cannot prove QCLASS=ANY denial.
+        if question.qclass == Class::ANY && negative {
+            return next.run(cx).await;
+        }
         if missing && fallthrough {
             return next.run(cx).await;
         }
@@ -338,7 +342,15 @@ impl pharos_server::Plugin for Hosts {
         }
         // RFC 1035 §4.1.1: Responses set QR and copy the query opcode and RD bit.
         // RFC 1034 §4.3.2: return an authoritative NXDOMAIN for an unmapped owner.
-        let mut flags = 0x8400 | (cx.query.flags() & 0x7800) | if missing { 3 } else { 0 };
+        // RFC 1035 §6.2: QCLASS=ANY cannot be authoritative for selected-class host data.
+        let mut flags = 0x8000
+            | if question.qclass == Class::ANY {
+                0
+            } else {
+                0x0400
+            }
+            | (cx.query.flags() & 0x7800)
+            | if missing { 3 } else { 0 };
         if cx.query.opcode() == Opcode::QUERY {
             flags |= cx.query.flags() & 0x0110;
         }

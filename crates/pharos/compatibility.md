@@ -11,6 +11,7 @@
 ## auto
 
 - [auto Plugin notes](../crates/pharos-plugins/src/auto/README.md)
+- RFC 4343 §3: Auto uses case-insensitive name matching; no case-dependent Zone Cut logic remains.
 
 ## autopath
 
@@ -58,6 +59,12 @@
 ## dynupdate
 
 - [dynupdate Plugin notes](../crates/pharos-plugins/src/dynupdate/README.md)
+- Seed, stored, and candidate dynamic Zones require apex NS (RFC 2181 §6.1). The server ignores a final-apex-NS deletion (RFC 2136 §3.4.2.4; §2.5.4 defines single-RR deletion syntax).
+- Before upgrading a persistent NS-less database:
+  1. Back up the database.
+  2. Run the previous build and UPDATE to add apex NS; if UPDATE is unavailable, AXFR the full Zone, add apex NS to the export, and recreate the database from it.
+  3. Verify apex NS, then upgrade. Alternatively, recreate the database from a corrected complete seed.
+  Startup fails fast rather than load-with-warning; the error names the database path and repair. Serving an NS-less authoritative Zone violates RFC 2181 §6.1.
 
 ## errors
 
@@ -71,8 +78,13 @@
 
 - [file Plugin notes](../crates/pharos-plugins/src/file/README.md)
 - Pharos intentionally differs from CoreDNS where RFC-conformant Zone behavior requires it:
+  - Zone construction requires apex NS and confines owners to the Zone (RFC 1034 §4.2; RFC 2181 §6.1; for AXFR, see RFC 5936 §3.1). CoreDNS v1.15.0's file parser checks SOA ownership but does not require apex NS.
+  - At an apex, conflicting ZONEMD records with the same Scheme/Hash Algorithm are rejected, while identical duplicates are deduplicated (RFC 8976 §2.5); CoreDNS v1.15.0 retains duplicate tree entries.
+  - QCLASS=ANY Zone replies can contain selected-class records but clear AA; CoreDNS v1.15.0 keeps file replies authoritative (RFC 1035 §6.2).
   - An apex query for an absent type returns NOERROR/NODATA with the SOA (RFC 2308 §2.2); CoreDNS v1.15.0 returns NXDOMAIN for an SOA/NS-only apex.
   - Master-file loading rejects multiple SOAs, CNAME RRsets with multiple targets, and DNAME descendant data; CoreDNS retains the last SOA and can retain conflicting aliases.
+  - Pharos stops an NS-QTYPE CNAME chain after one alias before target referral processing; RFC 1034 §3.6.2 otherwise restarts for QTYPEs other than CNAME.
+  - DNAME substitution restarts at its target even for QTYPE=ANY (RFC 6672 §3.2); a target CNAME then answers ANY without another restart (RFC 1034 §§3.4.1, 3.6.2).
   - SOA serial 0 is valid for initial load and refresh (RFC 1982 §7); CoreDNS's file loader uses 0 as its initial no-change sentinel.
   - When an SVCB/HTTPS RRset contains AliasMode and ServiceMode, Zone queries ignore ServiceMode records as RFC 9460 §2.4.1 requires; CoreDNS can return the mixed RRset.
   - Overlong DNAME substitution returns YXDOMAIN with exactly one DNAME and no Self Lookup (RFC 6672 §2.2); the older Pharos path returned SERVFAIL and could recurse through Self Lookup.
@@ -80,6 +92,7 @@
 ## secondary
 
 - [secondary Plugin notes](../crates/pharos-plugins/src/secondary/README.md)
+- AXFR snapshots without apex NS or with out-of-zone owners are rejected before publish (RFC 1034 §4.2; RFC 2181 §6.1; see RFC 5936 §3.1 for AXFR processing); CoreDNS v1.15.0's file Zone insertion does not enforce those boundaries.
 
 ## forward
 
@@ -97,6 +110,8 @@
 ## hosts
 
 - [hosts Plugin notes](../crates/pharos-plugins/src/hosts/README.md)
+- RFC 4592 §§2.2.1, 3.3: `hosts` replaces only the leftmost QNAME label for wildcard lookup and does not search closest-encloser ancestors, matching CoreDNS v1.15.0 (ADR 0002).
+- RFC 1035 §6.2 / RFC 2308 §2: `hosts` answers positive QCLASS=ANY hits with selected IN data and AA clear; missing/negative names pass through instead of asserting denial from IN-only data. A terminal miss maps to SERVFAIL ([Listener mapping](../pharos-server/src/server.rs#L583)), matching CoreDNS v1.15.0's unmapped-host response; CoreDNS leaves AA set on positive answers.
 
 ## k8s_external
 
@@ -113,6 +128,7 @@
 ## local
 
 - [local Plugin notes](../crates/pharos-plugins/src/local/README.md)
+- RFC 1035 §6.2 / RFC 2308 §2: `local` answers positive QCLASS=ANY hits with selected IN data and AA clear; negative/NODATA cases pass through rather than asserting a denial from IN-only data. A terminal pass-through maps to SERVFAIL ([Listener mapping](../pharos-server/src/server.rs#L583)); this matches CoreDNS for names outside intercepted zones. For recognized `localhost.` NODATA, CoreDNS returns a synthetic SOA instead.
 
 ## log
 
@@ -164,6 +180,7 @@
 ## sign
 
 - [sign Plugin notes](../crates/pharos-plugins/src/sign/README.md)
+- The signer rejects source Zones without apex NS or with out-of-zone owners, following the shared Zone invariant (RFC 2181 §6.1; RFC 1034 §4.2).
 
 ## tsig
 
@@ -193,6 +210,10 @@
 ## template
 
 - [template Plugin notes](../crates/pharos-plugins/src/template/README.md)
+- RFC 1034 §§3.4.1, 3.6.2: template CNAME targets restart for every QTYPE except CNAME and ANY; CoreDNS v1.15.0 restarts only A/AAAA ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- RFC 2308 §3: an authoritative NXDOMAIN template SOA is placed in Authority even if configured as Answer; CoreDNS v1.15.0 keeps the configured section ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)).
+- RFC 2308 §§2.2, 3: Pharos moves a configured NODATA SOA from Answer to Authority; CoreDNS v1.15.0 preserves the configured section ([`plugin/template/template.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/template/template.go)). Positive QTYPE=SOA answers stay in Answer.
+- RFC 1035 §6.2: QCLASS=ANY template replies can contain selected-class records but clear AA; CoreDNS v1.15.0 marks template replies authoritative.
 
 ## view
 

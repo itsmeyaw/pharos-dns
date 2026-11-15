@@ -13,6 +13,7 @@
 
 - CoreDNS shares key records across multiple origins in one Directive and leaves their owner set to the last origin. Pharos follows this behavior: earlier Zones may lack their apex DNSKEY and produce invalid DNSSEC. Configure one `sign` Directive per origin.
 - The source file's SOA owner must match the configured origin; otherwise signing fails because the RRSIG Signer's Name would identify a different zone (RFC 4034 §3.1.7).
+- Signing rejects Zones without an apex NS RRset and owners outside the configured Zone (RFC 2181 §6.1; RFC 1034 §4.2).
 - Offline RRSIG TTL and Original TTL use the covered RRset's minimum TTL; mixed-TTL RRsets are normalized to that value (RFC 2181 §5.2).
 - Offline NSEC TTL is `min(SOA TTL, SOA.MINIMUM)` (RFC 9077 §3.1); apex NS RRSIG TTL matches the NS RRset TTL (RFC 4034 §3).
 - Offline signing omits NSEC/RRSIG at empty non-terminals: RFC 4035 §2.3 forbids introducing owners without pre-sign RRsets; §3.1.3.1 NODATA applies to names with RRsets, while §3.1.3.2 handles ENT name errors with a covering proof. RFC 7129 §5 confirms NSEC chains omit ENTs. Re-signing removes prior Pharos-generated ENT proofs; CoreDNS v1.15.0 also walks stored RR owners (`plugin/sign/signer.go`, `plugin/file/tree/auth_walk.go`).

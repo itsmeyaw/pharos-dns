@@ -99,6 +99,86 @@ async fn serves_aliases_wildcards_and_referrals() {
     }
 }
 
+// RFC 6672 §3.2: DNAME restarts ANY through its target; CNAME ANY stops at the owner.
+#[tokio::test]
+async fn any_cname_stops_but_dname_any_restarts() {
+    use pharos_server::{Action, Handler, ListenerKey, Router, Server};
+    use std::sync::Arc;
+
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    async fn query(server: &Arc<Server<Chain>>, name: &str) -> Vec<Type> {
+        let name: Name = name.parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut wire, 512, 7, 0x0100).unwrap();
+        builder
+            .question(
+                NameRef::parse(name.as_wire(), 0).unwrap(),
+                Type::ANY,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(4096);
+        assert_eq!(
+            Handler::handle_shared(
+                server,
+                &wire,
+                "127.0.0.1:1234".parse().unwrap(),
+                Protocol::Udp,
+                &mut response,
+            )
+            .await,
+            Action::Respond
+        );
+        Message::parse(&response)
+            .unwrap()
+            .answers()
+            .map(|rr| rr.rtype)
+            .collect()
+    }
+
+    let path = std::env::temp_dir().join(format!("pharos-any-alias-{}.zone", std::process::id()));
+    let _cleanup = Cleanup(path.clone());
+    std::fs::write(
+        &path,
+        concat!(
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n",
+            "@ 60 IN NS ns.example.org.\n",
+            "alias 60 IN CNAME middle.example.org.\n",
+            "middle 60 IN CNAME target.example.org.\n",
+            "target 60 IN A 192.0.2.1\n",
+            "d 60 IN DNAME target.example.org.\n",
+            "x.target 60 IN CNAME leaf.target.example.org.\n",
+            "leaf.target 60 IN A 192.0.2.2\n",
+        ),
+    )
+    .unwrap();
+    let corefile = format!("example.org:53 {{\n file {}\n}}", path.display());
+    let chain = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, "example.org.".parse().unwrap(), Some(chain), vec![]);
+    let server = Arc::new(Server::new(router, key));
+
+    assert_eq!(query(&server, "alias.example.org.").await, [Type::CNAME]);
+    assert_eq!(
+        query(&server, "x.d.example.org.").await,
+        [Type::DNAME, Type::CNAME, Type::CNAME]
+    );
+}
+
 #[tokio::test]
 async fn reload_replaces_only_changed_serial() {
     let path =

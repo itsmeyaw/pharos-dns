@@ -74,6 +74,58 @@ async fn file_queries_do_not_allocate_body() {
 }
 
 #[tokio::test]
+async fn svcb_target_processing_does_not_allocate_after_warmup() {
+    if crate::run_isolated(
+        "file_allocations::svcb_target_processing_does_not_allocate_after_warmup",
+    ) {
+        return;
+    }
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/svcb-additional.zone"
+    );
+    let text = format!("example.org:0 {{\n file {path} {{\n reload 0\n }}\n}}");
+    let blocks = parse("Corefile", &text).unwrap();
+    let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
+    let (_, server) = servers.drain().next().unwrap();
+    let name: Name = "svc.example.org.".parse().unwrap();
+    let mut query = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut query, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::SVCB,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let client = "127.0.0.1:1001".parse().unwrap();
+    let mut response = Vec::with_capacity(65535);
+    assert_eq!(
+        server
+            .handle(&query, client, Protocol::Udp, &mut response)
+            .await,
+        Action::Respond
+    );
+    let message = Message::parse(&response).unwrap();
+    assert!(message.additionals().any(|rr| rr.rtype == Type::SVCB));
+    assert!(message.additionals().any(|rr| rr.rtype == Type::A));
+
+    let before = INSTRUMENTED_SYSTEM.stats();
+    for _ in 0..100 {
+        assert_eq!(
+            server
+                .handle(&query, client, Protocol::Udp, &mut response)
+                .await,
+            Action::Respond
+        );
+    }
+    let after = INSTRUMENTED_SYSTEM.stats();
+    assert_eq!(after.allocations - before.allocations, 0);
+    assert_eq!(after.reallocations - before.reallocations, 0);
+}
+
+#[tokio::test]
 async fn dname_self_lookup_allocates_and_resolves_target() {
     if crate::run_isolated("file_allocations::dname_self_lookup_allocates_and_resolves_target") {
         return;

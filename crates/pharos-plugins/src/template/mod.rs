@@ -668,17 +668,30 @@ impl Plugin for Template {
         for (index, (section, rr)) in hit.records.iter().enumerate() {
             if *section == Section::Answer
                 && rr.rtype == Type::CNAME
-                && matches!(question.qtype, Type::A | Type::AAAA)
+                && question.qtype != Type::CNAME
+                && question.qtype != Type::ANY
                 // RFC 1035 §3.3.1: CNAME RDATA names the canonical target.
                 && let Ok(target) = NameRef::parse(&rr.rdata, 0)
             {
-                // RFC 1034 §3.6.2: a CNAME answer restarts the lookup at its target.
-                // shortcut: Self Lookup allocates; remove when #86 makes it allocation-free.
+                // RFC 1034 §§3.4.1, 3.6.2: ANY includes CNAME and does not restart target lookup.
+                // shortcut: Each other QTYPE can allocate one Self Lookup per answer CNAME; #86 removes it.
                 if let Ok(response) = cx.self_lookup(&target.to_name(), question.qtype).await {
                     lookups.push((index, response));
                 }
             }
         }
+        let matches_qtype = |kind| question.qtype == Type::ANY || question.qtype == kind;
+        let has_qtype_answer = hit
+            .records
+            .iter()
+            .any(|(section, rr)| *section == Section::Answer && matches_qtype(rr.rtype))
+            || lookups.iter().any(|(_, wire)| {
+                Message::parse(wire)
+                    .ok()
+                    .is_some_and(|response| response.answers().any(|rr| matches_qtype(rr.rtype)))
+            });
+        // RFC 2308 §§2.2, 3: An authoritative NOERROR response without matching answers is NODATA.
+        let nodata = hit.rule.rcode == Rcode::NOERROR && !has_qtype_answer;
         let max = cx.max_response_size.max(512);
         if cx.response.capacity() < max {
             if cx.protocol == Protocol::Tcp {
@@ -700,8 +713,14 @@ impl Plugin for Template {
             } else {
                 hit.rule.rcode
             };
-            // RFC 1035 §4.1.1: Set AA and the selected response code.
-            let flags = 0x8400
+            // RFC 1035 §4.1.1: Set the selected response code and AA.
+            // RFC 1035 §6.2: QCLASS=ANY cannot be authoritative for selected-class data.
+            let flags = 0x8000
+                | if question.qclass == Class::ANY {
+                    0
+                } else {
+                    0x0400
+                }
                 | (query.flags() & 0x7800)
                 | if query.opcode() == pharos_proto::Opcode::QUERY {
                     query.flags() & 0x0110
@@ -728,8 +747,24 @@ impl Plugin for Template {
                     let owner =
                         NameRef::parse(rr.owner.as_wire(), 0).map_err(|_| Error::InvalidQuery)?;
                     // RFC 1035 §4.1.3: Encode owner, type, class, TTL, and RDATA.
+                    let response_section = if (hit.rule.rcode == Rcode::NXDOMAIN || nodata)
+                        && section == Section::Answer
+                        && rr.rtype == Type::SOA
+                    {
+                        // RFC 2308 §3: Authoritative negative SOAs belong in Authority.
+                        Section::Authority
+                    } else {
+                        section
+                    };
                     builder
-                        .record(section, owner, rr.rtype, rr.class, rr.ttl, &rr.rdata)
+                        .record(
+                            response_section,
+                            owner,
+                            rr.rtype,
+                            rr.class,
+                            rr.ttl,
+                            &rr.rdata,
+                        )
                         .map_err(Error::Build)?;
                     for (_, wire) in lookups
                         .iter()

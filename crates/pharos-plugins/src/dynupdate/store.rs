@@ -212,6 +212,20 @@ fn load(db: &bbolt::Store, config: &Config) -> io::Result<Zone> {
     .map_err(invalid)
 }
 
+fn database_load_error(path: &std::path::Path, error: io::Error) -> io::Error {
+    let message = error.to_string();
+    // RFC 2181 §6.1: A durable authoritative Zone without apex NS needs repair before startup.
+    let repair = if message.contains("Zone apex has no NS record") {
+        "; repair: restore/UPDATE NS on previous build, or recreate DB from corrected seed"
+    } else {
+        ""
+    };
+    io::Error::new(
+        error.kind(),
+        format!("database {}: {message}{repair}", path.display()),
+    )
+}
+
 // CoreDNS plugin/dynupdate/store.go:44-71: overlapping instances share a store by file identity.
 pub(super) fn validate(config: &Config) -> io::Result<Arc<Zone>> {
     let Some(path) = &config.database else {
@@ -240,7 +254,9 @@ pub(super) fn validate(config: &Config) -> io::Result<Arc<Zone>> {
     }
     let file = File::open(path)?;
     lock(&file, true)?;
-    load(&bbolt::Store::open_limited(file, config.max_bytes)?, config).map(Arc::new)
+    load(&bbolt::Store::open_limited(file, config.max_bytes)?, config)
+        .map(Arc::new)
+        .map_err(|error| database_load_error(path, error))
 }
 
 pub(super) fn acquire(config: &Config) -> io::Result<Arc<Shared>> {
@@ -319,7 +335,7 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
         (db, zone)
     } else {
         let db = bbolt::Store::open_limited(file, config.max_bytes)?;
-        let zone = load(&db, config)?;
+        let zone = load(&db, config).map_err(|error| database_load_error(path, error))?;
         (db, zone)
     };
     let shared = Arc::new(Shared {
@@ -410,7 +426,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let text = "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}";
@@ -434,6 +450,71 @@ mod tests {
     }
 
     #[test]
+    fn rejects_durable_database_missing_apex_ns_with_repair_guidance() {
+        use pharos_proto::Type;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-no-apex-ns-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        let shared = acquire(&config).unwrap();
+        let database = dir.join("db").canonicalize().unwrap();
+        let records = shared
+            .current
+            .load()
+            .records()
+            .iter()
+            .filter(|record| record.rtype != Type::NS)
+            .cloned()
+            .collect::<Vec<_>>();
+        shared
+            .db
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .commit(
+                config.origin.canonical().as_bytes(),
+                &super::wire::encode(&records).unwrap(),
+            )
+            .unwrap();
+        drop(shared);
+
+        let error = validate(&config).err().unwrap().to_string();
+        assert!(error.contains("Zone apex has no NS record"), "{error}");
+        assert!(
+            error.contains("add an NS RRset at the Zone apex"),
+            "{error}"
+        );
+        assert!(error.contains(&database.display().to_string()), "{error}");
+        assert!(
+            error.contains("restore/UPDATE NS on previous build"),
+            "{error}"
+        );
+        assert!(error.contains("recreate DB from corrected seed"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn concurrent_prerequisites_apply_to_the_committed_snapshot() {
         use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -446,7 +527,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let text = "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}";
@@ -527,7 +608,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -575,7 +656,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -688,7 +769,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -731,7 +812,7 @@ mod tests {
             }
         });
         assert_eq!(new.current.load().serial(), Some(26));
-        assert_eq!(new.current.load().records().len(), 17);
+        assert_eq!(new.current.load().records().len(), 18);
         drop(old);
         assert_eq!(new.current.load().serial(), Some(26));
         drop(new);
@@ -753,7 +834,7 @@ mod tests {
                 std::fs::create_dir(&dir).unwrap();
                 std::fs::write(
                     dir.join("seed"),
-                    "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+                    "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
                 )
                 .unwrap();
                 let database = if durable { "database db\n" } else { "" };
@@ -815,7 +896,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -880,7 +961,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let first_text = "dynupdate {\nfile seed\ndatabase first\nallow key.example.org. * A\n}";
@@ -949,7 +1030,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1082,7 +1163,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1123,7 +1204,7 @@ mod tests {
         let seed = dir.join("seed");
         std::fs::write(
             &seed,
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         std::fs::hard_link(&seed, dir.join("alias")).unwrap();
@@ -1159,7 +1240,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1207,7 +1288,7 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join("seed"), "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\nwww 60 IN A 192.0.2.1\n").unwrap();
+        std::fs::write(dir.join("seed"), "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\nwww 60 IN A 192.0.2.1\n").unwrap();
         let tokens = lex(
             "Corefile",
             "dynupdate {\nfile seed\nallow key.example.org. www.example.org. ANY\n}",
@@ -1348,7 +1429,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1389,7 +1470,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1444,7 +1525,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 10 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         let tokens = lex(
@@ -1507,7 +1588,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("seed"),
-            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n",
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
         )
         .unwrap();
         std::os::unix::fs::symlink("actual", dir.join("alias")).unwrap();

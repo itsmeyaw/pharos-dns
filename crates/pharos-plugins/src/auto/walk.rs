@@ -62,12 +62,10 @@ impl Shared {
                             &format!("Inserting Zone {origin} from {}", path.display()),
                         );
                         added.push(apex.clone());
-                        let case_mismatch = origin.bytes().any(|byte| byte.is_ascii_uppercase());
                         zones.insert(
                             origin.clone(),
                             Arc::new(Entry {
                                 origin,
-                                case_mismatch,
                                 apex,
                                 path: Mutex::new(path.to_owned()),
                                 current: ZoneHolder::from(Some(Arc::new(zone))),

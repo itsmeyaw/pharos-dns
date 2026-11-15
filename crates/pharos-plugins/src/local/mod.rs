@@ -56,12 +56,12 @@ impl Local {
 
 impl Plugin for Local {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        // RFC 1034 §4.3.1: answer only Internet-class Questions with IN records.
+        // RFC 1034 §4.3.1: Local data is IN-class; RFC 1035 §6.2 permits QCLASS=ANY.
         if cx
             .query
             .questions()
             .next()
-            .is_some_and(|question| question.qclass != Class::IN)
+            .is_some_and(|question| question.qclass != Class::IN && question.qclass != Class::ANY)
         {
             return next.run(cx).await;
         }
@@ -143,6 +143,10 @@ impl Local {
         } else {
             None
         };
+        // RFC 1035 §6.2 and RFC 2308 §2: IN-only local data cannot prove QCLASS=ANY denial.
+        if question.qclass == Class::ANY && answer_type.is_none() {
+            return None;
+        }
         // RFC 2308 §2: distinguish name errors from existing names without matching records.
         let nxdomain = !special && !apex && !reverse_ptr;
         // RFC 1035 §3.1: encode Domain names as length-prefixed labels ending in zero.
@@ -176,7 +180,15 @@ impl Local {
             }
             // RFC 1035 §4.1.1 and RFC 4035 §3.2.2: mark a Response and copy opcode, RD and CD.
             // RFC 1034 §4.3.2: mark local-zone answers, including NXDOMAIN, authoritative.
-            let mut flags = 0x8400 | (cx.query.flags() & 0x7800) | if nxdomain { 3 } else { 0 };
+            // RFC 1035 §6.2: QCLASS=ANY cannot be authoritative for selected-class local data.
+            let mut flags = 0x8000
+                | if question.qclass == Class::ANY {
+                    0
+                } else {
+                    0x0400
+                }
+                | (cx.query.flags() & 0x7800)
+                | if nxdomain { 3 } else { 0 };
             if cx.query.opcode() == Opcode::QUERY {
                 flags |= cx.query.flags() & 0x0110;
             }

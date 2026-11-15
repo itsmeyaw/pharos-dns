@@ -43,8 +43,16 @@ fn coredns_duplicate_warning_names_the_first_file_on_each_scan() {
     std::fs::create_dir_all(&root).unwrap();
     let first = root.join("example.org.zone");
     let second = root.join("example.org.zone.bak-20260528");
-    std::fs::write(&first, "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
-    std::fs::write(&second, "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n").unwrap();
+    std::fs::write(
+        &first,
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &second,
+        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n@ 60 IN NS ns.\n",
+    )
+    .unwrap();
     let auto = Auto::new(
         vec![".".parse().unwrap()],
         root.clone(),
@@ -96,12 +104,12 @@ async fn coredns_symlink_repoint_is_served_after_reload_tick() {
     let new = root.join("new");
     std::fs::write(
         &old,
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\nwww 60 IN A 192.0.2.1\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n",
     )
     .unwrap();
     std::fs::write(
         &new,
-        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\nwww 60 IN A 192.0.2.2\n",
+        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.2\n",
     )
     .unwrap();
     let link = root.join("db.example.org");
@@ -210,7 +218,7 @@ async fn coredns_symlink_repoint_is_served_after_reload_tick() {
     let unchanged = root.join("unchanged");
     std::fs::write(
         &unchanged,
-        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\nwww 60 IN A 192.0.2.99\n",
+        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.99\n",
     )
     .unwrap();
     std::fs::remove_file(&new_link).unwrap();
@@ -251,7 +259,7 @@ async fn coredns_symlink_repoint_is_served_after_reload_tick() {
     );
     std::fs::write(
         &broken,
-        "@ 60 IN SOA ns. hostmaster. 3 2 3 4 5\nwww 60 IN A 192.0.2.3\n",
+        "@ 60 IN SOA ns. hostmaster. 3 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.3\n",
     )
     .unwrap();
     auto.shared.scan();
@@ -285,7 +293,7 @@ async fn restart_during_scan_stops_old_watcher_before_restarting() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let auto = Auto::new(
@@ -420,7 +428,11 @@ fn coredns_walk_rejects_wrong_soa_then_loads_corrected_zone() {
     );
     auto.shared.scan();
     assert!(auto.shared.zones.load().origins.is_empty());
-    std::fs::write(&path, "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
+    std::fs::write(
+        &path,
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
+    )
+    .unwrap();
     auto.shared.scan();
     assert!(
         auto.shared
@@ -438,7 +450,7 @@ fn initial_zone_with_serial_zero_loads() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 0 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 0 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let auto = Auto::new(
@@ -467,7 +479,7 @@ async fn watcher_started_after_shutdown_exits() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let auto = Auto::new(
@@ -494,7 +506,7 @@ fn coredns_walk_adds_removes_and_reload_checks_serial() {
     let root = std::env::temp_dir().join(format!("pharos-auto-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("nested")).unwrap();
-    let text = "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\nwww 60 IN A 192.0.2.1\n";
+    let text = "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n";
     let path = root.join("nested/db.example.org");
     std::fs::write(&path, text).unwrap();
     let auto = Auto::new(
@@ -531,8 +543,16 @@ fn coredns_walk_keeps_first_path_and_follows_root_symlink() {
     std::fs::create_dir_all(&zones).unwrap();
     let first = zones.join("example.org.zone");
     let second = zones.join("example.org.zone.bak");
-    std::fs::write(&first, "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
-    std::fs::write(&second, "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n").unwrap();
+    std::fs::write(
+        &first,
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &second,
+        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n@ 60 IN NS ns.\n",
+    )
+    .unwrap();
     symlink(&zones, root.join("link")).unwrap();
     let auto = Auto::new(
         vec![".".parse().unwrap()],
@@ -570,7 +590,7 @@ fn coredns_transfer_matches_zone_case_exactly() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let auto = Auto::new(
@@ -617,7 +637,11 @@ async fn coredns_watcher_adds_reloads_and_removes_zones() {
     auto.register_hooks(&mut lifecycle);
     lifecycle.run(pharos_server::Phase::Startup).await.unwrap();
     let path = root.join("db.example.org");
-    std::fs::write(&path, "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
+    std::fs::write(
+        &path,
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
+    )
+    .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         while auto.shared.zones.load().origins.is_empty() {
             tokio::task::yield_now().await;
@@ -625,7 +649,11 @@ async fn coredns_watcher_adds_reloads_and_removes_zones() {
     })
     .await
     .unwrap();
-    std::fs::write(&path, "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n").unwrap();
+    std::fs::write(
+        &path,
+        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n@ 60 IN NS ns.\n",
+    )
+    .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         while auto
             .shared
@@ -668,7 +696,11 @@ fn coredns_most_specific_zone_and_template_captures() {
         "www.db.child.example.org",
         "www.db.UPPER.org",
     ] {
-        std::fs::write(root.join(file), "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
+        std::fs::write(
+            root.join(file),
+            "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
+        )
+        .unwrap();
     }
     let auto = Auto::new(
         vec![".".parse().unwrap()],
@@ -703,7 +735,7 @@ async fn newly_scanned_zone_notifies_once() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -762,7 +794,11 @@ async fn changed_serial_sends_notify_without_directory_scan() {
         std::env::temp_dir().join(format!("pharos-auto-change-notify-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("db.example.org");
-    std::fs::write(&path, "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n").unwrap();
+    std::fs::write(
+        &path,
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
+    )
+    .unwrap();
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let text = format!(
         "example.org:53 {{\n transfer {{\n to {}\n }}\n}}",
@@ -783,7 +819,11 @@ async fn changed_serial_sends_notify_without_directory_scan() {
         .bind(configured[0].config.transfer.as_ref());
     auto.shared.scan();
     auto.shared.start_watchers(Duration::from_millis(20));
-    std::fs::write(&path, "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n").unwrap();
+    std::fs::write(
+        &path,
+        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n@ 60 IN NS ns.\n",
+    )
+    .unwrap();
     let mut wire = [0; 512];
     let (len, peer) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut wire))
         .await

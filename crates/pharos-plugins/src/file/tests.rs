@@ -238,6 +238,136 @@ fn static_zone_rejects_multiple_cname_targets() {
 }
 
 #[test]
+fn zone_construction_requires_an_apex_ns_rrset() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text =
+        "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\nwww 60 IN A 192.0.2.1\n";
+    let records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(Zone::from_records(apex.clone(), records).is_err());
+    assert!(
+        Zone::load_reader_with_serial(apex, Path::new("test"), std::io::Cursor::new(text), None)
+            .is_err()
+    );
+}
+
+#[test]
+fn zone_rejects_out_of_zone_owners() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\n";
+    let mut records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    records.push(pharos_proto::zone::ZoneRecord {
+        owner: "outside.test.".parse().unwrap(),
+        class: Class::IN,
+        rtype: Type::A,
+        ttl: 60,
+        rdata: vec![192, 0, 2, 1],
+    });
+
+    assert!(Zone::from_records(apex, records).is_err());
+}
+
+#[test]
+fn zone_rejects_duplicate_zonemd_scheme_and_algorithm_at_an_owner() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\n";
+    let mut records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for digest in [1_u8, 2] {
+        let mut rdata = vec![0, 0, 0, 1, 1, 1];
+        rdata.extend([digest; 48]);
+        records.push(pharos_proto::zone::ZoneRecord {
+            owner: apex.clone(),
+            class: Class::IN,
+            rtype: Type::ZONEMD,
+            ttl: 60,
+            rdata,
+        });
+    }
+
+    assert!(Zone::from_records(apex, records).is_err());
+}
+
+#[test]
+fn zone_deduplicates_identical_apex_zonemd_and_keeps_nonapex_tuples() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\n";
+    let mut records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let zonemd = |owner: &str, digest: u8| {
+        let mut rdata = vec![0, 0, 0, 1, 1, 1];
+        rdata.extend([digest; 48]);
+        pharos_proto::zone::ZoneRecord {
+            owner: owner.parse().unwrap(),
+            class: Class::IN,
+            rtype: Type::ZONEMD,
+            ttl: 60,
+            rdata,
+        }
+    };
+    records.extend([
+        zonemd("example.org.", 1),
+        zonemd("example.org.", 1),
+        zonemd("data.example.org.", 2),
+        zonemd("data.example.org.", 3),
+    ]);
+
+    let zone = Zone::from_records(apex, records).unwrap();
+
+    assert_eq!(
+        zone.rrset(
+            NameRef::parse("example.org.".parse::<Name>().unwrap().as_wire(), 0).unwrap(),
+            Type::ZONEMD
+        )
+        .count(),
+        1
+    );
+    assert_eq!(
+        zone.rrset(
+            NameRef::parse("data.example.org.".parse::<Name>().unwrap().as_wire(), 0).unwrap(),
+            Type::ZONEMD
+        )
+        .count(),
+        2
+    );
+}
+
+#[test]
+fn zone_deduplicates_mb_names_without_case() {
+    let apex: Name = "example.org.".parse().unwrap();
+    let text = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n@ 60 IN NS ns.example.org.\n";
+    let mut records = ZoneParser::new(text.as_bytes(), apex.clone(), "test")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let owner: Name = "mail.example.org.".parse().unwrap();
+    records.extend(
+        ["target.example.org.", "TARGET.EXAMPLE.ORG."].map(|target| {
+            pharos_proto::zone::ZoneRecord {
+                owner: owner.clone(),
+                class: Class::IN,
+                rtype: Type::MB,
+                ttl: 60,
+                rdata: target.parse::<Name>().unwrap().as_wire().to_vec(),
+            }
+        }),
+    );
+
+    let zone = Zone::from_records(apex, records).unwrap();
+
+    assert_eq!(
+        zone.rrset(NameRef::parse(owner.as_wire(), 0).unwrap(), Type::MB)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn shared_zone_snapshot_retains_previous_generation() {
     let apex: Name = "example.org.".parse().unwrap();
     let path = Path::new("tests/fixtures/file/example.zone");

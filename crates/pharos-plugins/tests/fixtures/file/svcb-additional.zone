@@ -1,0 +1,8 @@
+$TTL 60
+$ORIGIN example.org.
+@ IN SOA ns.example.org. hostmaster.example.org. 1 60 60 3600 60
+@ IN NS ns.example.org.
+ns IN A 192.0.2.1
+svc IN SVCB 1 target.example.org. alpn=h2
+target IN SVCB 1 backup.example.org. alpn=h2
+target IN A 192.0.2.10

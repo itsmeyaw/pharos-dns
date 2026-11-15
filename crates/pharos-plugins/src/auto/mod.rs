@@ -21,7 +21,6 @@ use std::{
 #[derive(Debug)]
 struct Entry {
     origin: String,
-    case_mismatch: bool,
     apex: Name,
     path: Mutex<PathBuf>,
     current: ZoneHolder,
@@ -180,7 +179,7 @@ impl Auto {
             Selection::Next => next.run(cx).await,
             Selection::Refused => Outcome::Unanswered(Rcode::REFUSED),
             Selection::Zone(entry) => match entry.current.load_full() {
-                Some(zone) => zone.lookup_auto(cx, next, entry.case_mismatch).await,
+                Some(zone) => zone.lookup_auto(cx, next).await,
                 None => Outcome::Unanswered(Rcode::SERVFAIL),
             },
         }

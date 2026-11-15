@@ -363,7 +363,7 @@ async fn secondary_axfr_has_a_total_deadline() {
 }
 
 #[tokio::test]
-async fn secondary_deduplicates_axfr_records_and_skips_failed_primary() {
+async fn secondary_validates_axfr_apex_ns_and_deduplicates_records() {
     use pharos_proto::{Class, Message, MessageBuilder, Section};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     async fn primary(listener: tokio::net::TcpListener, mode: u8) {
@@ -383,6 +383,18 @@ async fn secondary_deduplicates_axfr_records_and_skips_failed_primary() {
         builder
             .record(Section::Answer, q.name, Type::SOA, Class::IN, 60, &soa)
             .unwrap();
+        if mode != 0 && mode != 3 {
+            builder
+                .record(
+                    Section::Answer,
+                    q.name,
+                    Type::NS,
+                    Class::IN,
+                    60,
+                    "ns.example.org.".parse::<Name>().unwrap().as_wire(),
+                )
+                .unwrap();
+        }
         let owner: Name = if mode == 1 {
             "good.example.org."
         } else {
@@ -468,6 +480,25 @@ async fn secondary_deduplicates_axfr_records_and_skips_failed_primary() {
             0
         );
     }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let from = listener.local_addr().unwrap().to_string();
+    let primary = tokio::spawn(primary(listener, 3));
+    let (shared, _, _) = catalog_shared();
+    let missing_ns = SecondaryZone::new(ZoneConfig {
+        apex: "example.org.".parse().unwrap(),
+        from: vec![from],
+        catalog: None,
+    });
+    let error = update::transfer(&shared, &missing_ns).await.unwrap_err();
+    assert!(error.to_string().contains("Zone apex has no NS record"));
+    assert!(
+        error
+            .to_string()
+            .contains("add an NS RRset at the Zone apex")
+    );
+    assert!(missing_ns.current.load_full().is_none());
+    primary.await.unwrap();
 }
 
 #[tokio::test]
@@ -534,7 +565,7 @@ async fn secondary_soa_check_matches_response_id_and_question() {
     });
     assert!(update::should_transfer(&zone).await.unwrap());
     for serial in [249, 250] {
-        let text = format!("@ 60 IN SOA ns. hostmaster. {serial} 0 0 0 0\n");
+        let text = format!("@ 60 IN SOA ns. hostmaster. {serial} 0 0 0 0\n@ 60 IN NS ns.\n");
         let records = ZoneParser::new(text.as_bytes(), zone.config.apex.clone(), "test")
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -815,7 +846,7 @@ fn zero_soa_timers_use_one_second_floor() {
         catalog: None,
     });
     let records = ZoneParser::new(
-        "@ 60 IN SOA ns. hostmaster. 1 0 0 0 0\n".as_bytes(),
+        "@ 60 IN SOA ns. hostmaster. 1 0 0 0 0\n@ 60 IN NS ns.\n".as_bytes(),
         zone.config.apex.clone(),
         "test",
     )
@@ -864,8 +895,20 @@ async fn failed_refresh_expires_the_zone() {
                 for value in [1u32, 1, 3, 1, 0] {
                     soa.extend_from_slice(&value.to_be_bytes());
                 }
-                let count = if attempt == 0 { 2 } else { 1 };
-                for _ in 0..count {
+                let count = 2;
+                for index in 0..count {
+                    if index + 1 == count {
+                        builder
+                            .record(
+                                Section::Answer,
+                                question.name,
+                                Type::NS,
+                                Class::IN,
+                                60,
+                                "ns.example.org.".parse::<Name>().unwrap().as_wire(),
+                            )
+                            .unwrap();
+                    }
                     builder
                         .record(
                             Section::Answer,
@@ -1005,7 +1048,7 @@ async fn coredns_catalog_ownership_requires_coo_and_preserves_same_id() {
         .unwrap()
         .clone();
     let records = ZoneParser::new(
-        "@ 60 IN SOA ns. hostmaster. 7 10 10 100 60\n".as_bytes(),
+        "@ 60 IN SOA ns. hostmaster. 7 10 10 100 60\n@ 60 IN NS ns.\n".as_bytes(),
         member.config.apex.clone(),
         "member",
     )
@@ -1068,7 +1111,7 @@ async fn coredns_catalog_id_change_resets_zone_and_restrictions_reject_members()
         .unwrap()
         .clone();
     let records = ZoneParser::new(
-        "@ 60 IN SOA ns. hostmaster. 7 10 10 100 60\n".as_bytes(),
+        "@ 60 IN SOA ns. hostmaster. 7 10 10 100 60\n@ 60 IN NS ns.\n".as_bytes(),
         first.config.apex.clone(),
         "member",
     )
@@ -1149,7 +1192,7 @@ async fn catalog_migration_respects_restrictions_and_changed_identity() {
         .unwrap()
         .clone();
     let records = ZoneParser::new(
-        "@ 60 IN SOA ns. hostmaster. 7 10 10 100 60\n".as_bytes(),
+        "@ 60 IN SOA ns. hostmaster. 7 10 10 100 60\n@ 60 IN NS ns.\n".as_bytes(),
         first.config.apex.clone(),
         "member",
     )
@@ -1355,7 +1398,7 @@ async fn invalid_catalog_transfer_retains_zone_but_regular_zone_accepts_it() {
             catalog: catalog.then(Vec::new),
         });
         let records = ZoneParser::new(
-            "@ 60 IN SOA ns. hostmaster. 1 10 10 100 60\n".as_bytes(),
+            "@ 60 IN SOA ns. hostmaster. 1 10 10 100 60\n@ 60 IN NS ns.\n".as_bytes(),
             zone.config.apex.clone(),
             "original",
         )

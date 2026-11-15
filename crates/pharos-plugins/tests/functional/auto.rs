@@ -43,7 +43,7 @@ async fn serves_zone_loaded_on_startup() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\nwww 60 IN A 192.0.2.1\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n",
     )
     .unwrap();
     let text = format!(
@@ -94,7 +94,7 @@ async fn discovered_zones_label_metrics_and_removed_series_remain() {
     use pharos_server::{Action, Handler, Phase, Protocol, metrics::Registry};
     use std::time::Duration;
 
-    async fn query(server: &impl Handler, name: &str) -> u16 {
+    async fn query(server: &impl Handler, name: &str) -> (u16, bool) {
         let name: Name = name.parse().unwrap();
         let mut wire = Vec::with_capacity(512);
         let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x100).unwrap();
@@ -117,7 +117,8 @@ async fn discovered_zones_label_metrics_and_removed_series_remain() {
             .await,
             Action::Respond
         );
-        Message::parse(&response).unwrap().answer_count()
+        let response = Message::parse(&response).unwrap();
+        (response.answer_count(), response.aa())
     }
 
     fn count(registry: &Registry, zone: &str) -> u64 {
@@ -145,7 +146,7 @@ async fn discovered_zones_label_metrics_and_removed_series_remain() {
     ] {
         std::fs::write(
             path,
-            "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\nwww 60 IN A 192.0.2.1\n",
+            "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n",
         )
         .unwrap();
     }
@@ -161,11 +162,11 @@ async fn discovered_zones_label_metrics_and_removed_series_remain() {
     .unwrap();
     lifecycle.run(Phase::Startup).await.unwrap();
     let (_, server) = servers.drain().next().unwrap();
-    assert_eq!(query(&server, "www.example.org.").await, 1);
-    assert_eq!(query(&server, "www.example.net.").await, 1);
-    assert_eq!(query(&server, "WWW.SUB.EXAMPLE.ORG.").await, 1);
-    assert_eq!(query(&server, "www.upper.org.").await, 1);
-    assert_eq!(query(&server, "other.test.").await, 0);
+    assert_eq!(query(&server, "www.example.org.").await.0, 1);
+    assert_eq!(query(&server, "www.example.net.").await.0, 1);
+    assert_eq!(query(&server, "WWW.SUB.EXAMPLE.ORG.").await.0, 1);
+    assert_eq!(query(&server, "www.upper.org.").await, (1, true));
+    assert_eq!(query(&server, "other.test.").await.0, 0);
     assert_eq!(count(&registry, "example.org."), 1);
     assert_eq!(count(&registry, "example.net."), 1);
     assert_eq!(count(&registry, "sub.example.org."), 1);
@@ -188,7 +189,7 @@ async fn discovered_zones_label_metrics_and_removed_series_remain() {
     );
     std::fs::remove_file(&first).unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
-        while query(&server, "www.example.org.").await != 0 {
+        while query(&server, "www.example.org.").await.0 != 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -196,16 +197,16 @@ async fn discovered_zones_label_metrics_and_removed_series_remain() {
     .unwrap();
     let old = count(&registry, "example.org.");
     let fallback = count(&registry, ".");
-    assert_eq!(query(&server, "www.example.org.").await, 0);
+    assert_eq!(query(&server, "www.example.org.").await.0, 0);
     assert_eq!(count(&registry, "example.org."), old);
     assert_eq!(count(&registry, "."), fallback + 1);
     std::fs::write(
         &first,
-        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\nwww 60 IN A 192.0.2.1\n",
+        "@ 60 IN SOA ns. hostmaster. 2 2 3 4 5\n@ 60 IN NS ns.\nwww 60 IN A 192.0.2.1\n",
     )
     .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
-        while query(&server, "www.example.org.").await != 1 {
+        while query(&server, "www.example.org.").await.0 != 1 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -213,7 +214,7 @@ async fn discovered_zones_label_metrics_and_removed_series_remain() {
     .unwrap();
     let restored = count(&registry, "example.org.");
     assert!(restored > old);
-    assert_eq!(query(&server, "www.example.org.").await, 1);
+    assert_eq!(query(&server, "www.example.org.").await.0, 1);
     assert_eq!(count(&registry, "example.org."), restored + 1);
     lifecycle.run(Phase::Shutdown).await.unwrap();
     std::fs::remove_dir_all(root).unwrap();
@@ -233,7 +234,7 @@ async fn discovered_zone_metrics_preserve_inherited_view() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let text = format!(
@@ -287,7 +288,7 @@ async fn discovered_zone_metrics_include_all_server_block_keys() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let text = format!(
@@ -341,7 +342,7 @@ async fn sends_notify_on_startup_but_not_unchanged_rescan() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("db.example.org"),
-        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n",
+        "@ 60 IN SOA ns. hostmaster. 1 2 3 4 5\n@ 60 IN NS ns.\n",
     )
     .unwrap();
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
