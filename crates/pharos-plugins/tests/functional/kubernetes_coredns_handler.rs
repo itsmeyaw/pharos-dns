@@ -325,11 +325,12 @@ fn record(record: Record<'_>, expected_serial: Option<u32>) -> String {
             expire,
             minimum,
         } => {
+            let empty_special_zone = serial == 1 && mname.to_string() == "localhost.";
             assert!(
-                serial == 0 || serial > 1_000_000_000,
+                serial == 0 || serial > 1_000_000_000 || empty_special_zone,
                 "invalid live SOA serial {serial}"
             );
-            if let Some(expected) = expected_serial {
+            if let Some(expected) = expected_serial.filter(|_| !empty_special_zone) {
                 assert_eq!(serial, expected, "SOA serial changed");
             }
             (
@@ -843,12 +844,17 @@ async fn handler_common_and_regular() {
         ),
         positive("regular 9", ext, Type::CNAME, &["ext.interwebs.test."]),
         row(
-            "external target failure keeps alias",
+            "special-use external target returns negative with alias",
             ext,
             Type::A,
-            Rcode::SERVFAIL,
+            Rcode::NXDOMAIN,
             vec![rr(ext, 5, "CNAME", "ext.interwebs.test.")],
-            vec![],
+            vec![rr(
+                "test.",
+                604_800,
+                "SOA",
+                "localhost. nobody.invalid. <serial> 0 0 0 604800",
+            )],
             vec![],
         ),
         row(

@@ -36,6 +36,7 @@ struct Stanza {
     failover: Vec<Rcode>,
     next: Vec<Rcode>,
     next_on_nodata: bool,
+    allow_special: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -139,20 +140,6 @@ impl std::fmt::Debug for Forward {
     }
 }
 
-// RFC 1034 §3.1: a subdomain's name ends with its containing domain's name.
-fn contains(name: NameRef<'_>, domain: &Name) -> bool {
-    let domain = NameRef::parse(domain.as_wire(), 0).expect("valid configured Domain");
-    let count = name.labels().count();
-    let suffix = domain.labels().count();
-    count >= suffix
-        && name
-            .labels()
-            .skip(count - suffix)
-            .zip(domain.labels())
-            // RFC 4343 §3: ASCII letters in DNS names compare without regard to case.
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
-}
-
 fn random(max: usize) -> usize {
     let mut bytes = [0_u8; 8];
     if getrandom::getrandom(&mut bytes).is_err() {
@@ -199,6 +186,16 @@ impl Forward {
                     .map_err(|_| cursor.error(format!("invalid Domain {name}")))
             };
             let from = parse_name(&config.from)?;
+            let from_special = NameRef::parse(from.as_wire(), 0)
+                .ok()
+                .and_then(crate::special_use);
+            // RFC 6761 §6.4: `.invalid` names are guaranteed negative and cannot be forwarded.
+            if from_special == Some(crate::SpecialUse::Invalid) {
+                return Err(cursor.error("cannot forward .invalid"));
+            }
+            // RFC 6761 §§6.1–6.2: explicit special-use forwarding Zones are opt-in by configuration.
+            let configured_special_zone = from.as_wire() != [0]
+                && from_special.is_some_and(crate::SpecialUse::permits_upstream);
             let ignored = config
                 .except
                 .iter()
@@ -254,6 +251,7 @@ impl Forward {
                 failover: config.failover.into_iter().map(Rcode).collect(),
                 next: config.next.into_iter().map(Rcode).collect(),
                 next_on_nodata: config.next_on_nodata,
+                allow_special: config.allow_special || configured_special_zone,
             });
         }
         Ok(result)
@@ -279,9 +277,22 @@ impl Forward {
             }
         }
     }
+
+    pub(crate) fn allows_special(&self, name: NameRef<'_>) -> bool {
+        // RFC 6761 §§6.1–6.2: permit special-name forwarding only inside opted-in, non-excluded stanzas.
+        self.stanzas.iter().any(|stanza| {
+            stanza.allow_special
+                && crate::name_within(name, &stanza.from)
+                && (name == NameRef::parse(stanza.from.as_wire(), 0).expect("configured Domain")
+                    || !stanza
+                        .ignored
+                        .iter()
+                        .any(|ignored| crate::name_within(name, ignored)))
+        })
+    }
 }
 
-// RFC 6761 §6.2: Explicit forward zones enable upstream lookup for test names.
+// RFC 6761 §§6.1–6.2: opt in via allow_special or a non-root special-use Forward Zone.
 impl Plugin for Forward {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
         let root = [0];
@@ -289,11 +300,25 @@ impl Plugin for Forward {
             || NameRef::parse(&root, 0).expect("root"),
             |question| question.name,
         );
+        let special = cx
+            .query
+            .questions()
+            .next()
+            .and_then(|question| crate::special_use(question.name));
+        if let Some(special) = special
+            && (!special.permits_upstream() || !self.allows_special(name))
+        {
+            // RFC 6761 §§6.1, 6.2 and 6.4: defer reserved names to the Chain's terminal answer.
+            return next.run(cx).await;
+        }
         // RFC 6761 §6.5: Forward example names like other DNS names.
         for (index, stanza) in self.stanzas.iter().enumerate() {
-            if !contains(name, &stanza.from)
+            if !crate::name_within(name, &stanza.from)
                 || (name != stanza.from
-                    && stanza.ignored.iter().any(|ignored| contains(name, ignored)))
+                    && stanza
+                        .ignored
+                        .iter()
+                        .any(|ignored| crate::name_within(name, ignored)))
             {
                 continue;
             }

@@ -87,6 +87,53 @@ async fn serves_zone_loaded_on_startup() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn auto_only_special_miss_returns_nxdomain() {
+    use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
+    use pharos_server::{Context, Metadata, Outcome, Phase, Protocol, Transport};
+
+    let root = std::env::temp_dir().join(format!("pharos-auto-special-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let text = format!(
+        ".:53 {{\n auto {{\n directory {}\n reload 0\n }}\n}}",
+        root.display()
+    );
+    let chain = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    chain.lifecycle.run(Phase::Startup).await.unwrap();
+    let name: Name = "missing.test.".parse().unwrap();
+    let domain: Name = ".".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::A,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    assert_eq!(chain.serve(&mut cx).await, Outcome::Response);
+    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::NXDOMAIN);
+    chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(all(feature = "plugin-prometheus", feature = "plugin-whoami"))]
 #[tokio::test]
 async fn discovered_zones_label_metrics_and_removed_series_remain() {

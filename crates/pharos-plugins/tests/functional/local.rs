@@ -4,7 +4,7 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
 use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Type};
-use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
+use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 fn configured(text: &str) -> Result<Chain, String> {
     let blocks = parse("Corefile", &format!(".:53 {{\n{text}\n}}")).map_err(|e| e.to_string())?;
@@ -12,13 +12,6 @@ fn configured(text: &str) -> Result<Chain, String> {
         .map_err(|e| e.to_string())?
         .remove(0)
         .config)
-}
-
-struct NextDrop;
-impl Next for NextDrop {
-    async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
-        Outcome::Drop
-    }
 }
 
 async fn query(chain: &Chain, name: &str, qtype: Type) -> (Outcome, Vec<u8>) {
@@ -47,7 +40,7 @@ async fn query_class(chain: &Chain, name: &str, qtype: Type, qclass: Class) -> (
         response: &mut response,
         max_response_size: 512,
     };
-    let outcome = chain.local.as_ref().unwrap().serve(&mut cx, NextDrop).await;
+    let outcome = chain.serve(&mut cx).await;
     (outcome, response)
 }
 
@@ -59,6 +52,7 @@ fn coredns_setup_cases() {
         "local {\n localhost_prefix on\n}",
         "local {\n localhost_prefix off\n}",
         "local {\n localhost_prefix off\n localhost_prefix on\n}",
+        "local {\n disable 10.in-addr.arpa 16.172.in-addr.arpa\n}",
     ] {
         assert!(configured(text).is_ok(), "{text}");
     }
@@ -68,6 +62,8 @@ fn coredns_setup_cases() {
         "local {\n localhost_prefix maybe\n}",
         "local {\n localhost_prefix\n}",
         "local {\n localhost_prefix on off\n}",
+        "local {\n disable\n}",
+        "local {\n disable a..b\n}",
     ] {
         assert!(configured(text).is_err(), "{text}");
     }
@@ -102,15 +98,15 @@ async fn coredns_local_cases() {
             "localhost.",
             Type::NS,
             Rcode::NOERROR,
-            Some(("localhost.", Type::NS)),
             None,
+            Some("localhost."),
         ),
         (
             "localhost.",
             Type::SOA,
             Rcode::NOERROR,
-            Some(("localhost.", Type::SOA)),
             None,
+            Some("localhost."),
         ),
         (
             "127.in-addr.arpa.",
@@ -159,7 +155,7 @@ async fn coredns_local_cases() {
             Type::MX,
             Rcode::NOERROR,
             None,
-            Some("a.localhost."),
+            Some("localhost."),
         ),
         (
             "1.0.0.127.in-addr.arpa.",
@@ -195,6 +191,13 @@ async fn coredns_local_cases() {
             Rcode::NXDOMAIN,
             None,
             Some("255.in-addr.arpa."),
+        ),
+        (
+            "x.255.255.255.255.in-addr.arpa.",
+            Type::AAAA,
+            Rcode::NXDOMAIN,
+            None,
+            Some("255.255.255.255.in-addr.arpa."),
         ),
     ] {
         let (outcome, wire) = query(&chain, name, qtype).await;
@@ -236,13 +239,81 @@ async fn coredns_local_cases() {
 }
 
 #[tokio::test]
+async fn serves_rfc6303_reverse_zones_authoritatively() {
+    let chain = configured("local").unwrap();
+    let mut zones = [
+        "0.in-addr.arpa.",
+        "127.in-addr.arpa.",
+        "10.in-addr.arpa.",
+        "16.172.in-addr.arpa.",
+        "168.192.in-addr.arpa.",
+        "254.169.in-addr.arpa.",
+        "2.0.192.in-addr.arpa.",
+        "100.51.198.in-addr.arpa.",
+        "113.0.203.in-addr.arpa.",
+        "255.in-addr.arpa.",
+        "255.255.255.255.in-addr.arpa.",
+        "d.f.ip6.arpa.",
+        "8.e.f.ip6.arpa.",
+        "9.e.f.ip6.arpa.",
+        "a.e.f.ip6.arpa.",
+        "b.e.f.ip6.arpa.",
+        "8.b.d.0.1.0.0.2.ip6.arpa.",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    zones.extend((16..=31).map(|second| format!("{second}.172.in-addr.arpa.")));
+    zones.push(format!("{}.ip6.arpa.", vec!["0"; 32].join(".")));
+    let mut loopback_nibbles = vec!["0"; 31];
+    loopback_nibbles.insert(0, "1");
+    zones.push(format!("{}.ip6.arpa.", loopback_nibbles.join(".")));
+    for apex in &zones {
+        let descendant = format!("x.{apex}");
+        for (name, rcode, owner) in [
+            (apex.as_str(), Rcode::NOERROR, apex.as_str()),
+            (descendant.as_str(), Rcode::NXDOMAIN, apex.as_str()),
+        ] {
+            let (outcome, wire) = query(&chain, name, Type::A).await;
+            assert_eq!(outcome, Outcome::Response, "{name}");
+            let response = Message::parse(&wire).unwrap();
+            assert!(response.aa(), "{name}");
+            assert_eq!(response.rcode(), rcode, "{name}");
+            assert_eq!(response.answers().count(), 0, "{name}");
+            assert_eq!(
+                response
+                    .authorities()
+                    .find(|record| record.rtype == Type::SOA)
+                    .unwrap()
+                    .name
+                    .to_string(),
+                owner,
+                "{name}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_reverse_zone_can_be_disabled_individually() {
+    let chain = configured("local {\n disable 10.in-addr.arpa\n}").unwrap();
+    let (outcome, wire) = query(&chain, "1.10.in-addr.arpa.", Type::PTR).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert!(Message::parse(&wire).unwrap().aa());
+    assert_eq!(Message::parse(&wire).unwrap().rcode(), Rcode::NXDOMAIN);
+    assert_eq!(
+        query(&chain, "1.16.172.in-addr.arpa.", Type::PTR).await.0,
+        Outcome::Response
+    );
+}
+
+#[tokio::test]
 async fn local_passes_non_in_questions_to_next_plugin() {
     let chain = configured("local").unwrap();
     assert_eq!(
         query_class(&chain, "localhost.", Type::A, Class::CH)
             .await
             .0,
-        Outcome::Drop
+        Outcome::Error(pharos_server::Error::NoNextPlugin)
     );
 }
 
@@ -262,12 +333,25 @@ async fn local_qclass_any_answer_is_not_authoritative() {
 }
 
 #[tokio::test]
+async fn local_disable_honors_localhost_and_allows_later_hosts() {
+    let chain =
+        configured("local {\n disable localhost\n}\nhosts {\n 192.0.2.44 localhost\n}").unwrap();
+    let (outcome, wire) = query(&chain, "localhost.", Type::A).await;
+    assert_eq!(outcome, Outcome::Response);
+    let response = Message::parse(&wire).unwrap();
+    assert_eq!(response.answers().next().unwrap().rdata, [192, 0, 2, 44]);
+}
+
+#[tokio::test]
 async fn coredns_localhost_prefix_and_next() {
     let on = configured("local").unwrap();
     let off = configured("local {\n localhost_prefix off\n}").unwrap();
     for name in ["localhost.example.net.", "LOCALHOST.Example.net."] {
         assert_eq!(query(&on, name, Type::A).await.0, Outcome::Response);
-        assert_eq!(query(&off, name, Type::A).await.0, Outcome::Drop);
+        assert_eq!(
+            query(&off, name, Type::A).await.0,
+            Outcome::Error(pharos_server::Error::NoNextPlugin)
+        );
     }
     for name in ["a.localhost.", "a.LOCALHOST."] {
         assert_eq!(query(&off, name, Type::AAAA).await.0, Outcome::Response);
@@ -282,13 +366,28 @@ async fn coredns_localhost_prefix_and_next() {
         NameRef::parse(soa.rdata, 0).unwrap().to_string(),
         "localhost."
     );
+    let (outcome, wire) = query(&on, "a.localhost.", Type::MX).await;
+    assert_eq!(outcome, Outcome::Response);
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .authorities()
+            .next()
+            .unwrap()
+            .name
+            .to_string(),
+        "localhost."
+    );
     for name in [
         "example.net.",
         "notlocalhost.",
         "notlocalhost.example.net.",
         "1.ip6.arpa.",
     ] {
-        assert_eq!(query(&on, name, Type::A).await.0, Outcome::Drop);
+        assert_eq!(
+            query(&on, name, Type::A).await.0,
+            Outcome::Error(pharos_server::Error::NoNextPlugin)
+        );
     }
 }
 

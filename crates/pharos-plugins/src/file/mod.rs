@@ -21,7 +21,6 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
-
 #[derive(Debug)]
 struct Loaded {
     apex: Name,
@@ -376,10 +375,15 @@ impl File {
             .filter(|zone| contains(name, &zone.apex))
             .max_by_key(|zone| zone.apex.label_count())
         else {
-            return if has_next {
-                next.run(cx).await
-            } else {
+            if has_next {
+                return next.run(cx).await;
+            }
+            // RFC 6761 §§6.1–6.4: terminal special-name Responses supersede File's no-zone REFUSED.
+            let outcome = next.run(cx).await;
+            return if matches!(&outcome, Outcome::Error(pharos_server::Error::NoNextPlugin)) {
                 Outcome::Unanswered(Rcode::REFUSED)
+            } else {
+                outcome
             };
         };
         let snapshot = loaded.current.load();

@@ -160,6 +160,32 @@ async fn query(chain: &Chain, name: &str, kind: Type) -> (Outcome, Vec<u8>) {
     (outcome, response)
 }
 
+async fn query_chain(chain: &Chain, name: &str, kind: Type) -> (Outcome, Vec<u8>) {
+    let name: Name = name.parse().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let mut request = Vec::with_capacity(4096);
+    let mut builder = MessageBuilder::new(&mut request, 4096, 1, 0x0100).unwrap();
+    builder
+        .question(NameRef::parse(name.as_wire(), 0).unwrap(), kind, Class::IN)
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(4096);
+    let mut slots = [None; 8];
+    let mut cx = Context {
+        query: Message::parse(&request).unwrap(),
+        client: "127.0.0.1:1234".parse().unwrap(),
+        local: "192.0.2.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Udp,
+        domain: &root,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 4096,
+    };
+    let outcome = chain.serve(&mut cx).await;
+    (outcome, response)
+}
+
 fn record(rr: Record<'_>) -> String {
     assert_eq!(rr.class, Class::IN);
     assert_eq!(rr.ttl, 5);
@@ -213,6 +239,52 @@ fn check(
 
 fn soa(zone: &str) -> String {
     format!("{zone} SOA ns.dns.{zone} hostmaster.{zone} 7200 1800 86400 5")
+}
+
+#[tokio::test]
+async fn cache_passes_special_reverse_ptr_to_kubernetes() {
+    let (endpoint, task) = api("192.0.2.200".parse().unwrap()).await;
+    let corefile = format!(
+        ".:53 {{\n local\n cache\n kubernetes {ZONES} {{\n endpoint {endpoint}\n startup_timeout 3s\n }}\n}}"
+    );
+    let blocks = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives()).unwrap();
+    let chain = blocks.into_iter().next().unwrap().config;
+    chain.lifecycle.run(Phase::Startup).await.unwrap();
+    let name = "100.0.0.10.in-addr.arpa.";
+    let (outcome, wire) = query_chain(&chain, name, Type::PTR).await;
+    assert_eq!(outcome, Outcome::Response);
+    check(
+        &wire,
+        Rcode::NOERROR,
+        &[format!("{name} PTR ep1a.svc1.testns.svc.cluster.local.")],
+        &[],
+        &[],
+        "cache passes reserved reverse PTR to kubernetes",
+    );
+    chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+    task.abort();
+}
+
+#[tokio::test]
+async fn kubernetes_only_special_miss_returns_nxdomain() {
+    let (endpoint, task) = api("192.0.2.200".parse().unwrap()).await;
+    let corefile = format!(
+        ".:53 {{\n kubernetes {ZONES} {{\n endpoint {endpoint}\n startup_timeout 3s\n }}\n}}"
+    );
+    let chain = configure::<Chain>(&parse("Corefile", &corefile).unwrap(), directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    for name in ["missing.test.", "missing.invalid."] {
+        let (outcome, wire) = query_chain(&chain, name, Type::A).await;
+        assert_eq!(outcome, Outcome::Response, "{name}");
+        assert_eq!(
+            Message::parse(&wire).unwrap().rcode(),
+            Rcode::NXDOMAIN,
+            "{name}"
+        );
+    }
+    task.abort();
 }
 
 // CoreDNS ns_test.go: TestNsAddrs.
