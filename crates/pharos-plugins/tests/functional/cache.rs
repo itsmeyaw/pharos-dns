@@ -135,6 +135,7 @@ impl Next for PolicyResponse<'_> {
 struct Nsec3Negative<'a> {
     calls: &'a AtomicUsize,
     rcode: u16,
+    outside_zone: bool,
 }
 
 impl Next for Nsec3Negative<'_> {
@@ -142,7 +143,13 @@ impl Next for Nsec3Negative<'_> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let question = cx.query.questions().next().unwrap();
         let zone: Name = "example.com.".parse().unwrap();
-        let owner: Name = "00000000000000000000000000.example.com.".parse().unwrap();
+        let owner: Name = if self.outside_zone {
+            "00000000000000000000000000.attacker.net."
+        } else {
+            "00000000000000000000000000.example.com."
+        }
+        .parse()
+        .unwrap();
         let mut nsec3 = vec![1, 0, 0, 0, 0, 20];
         nsec3.extend([1; 20]);
         nsec3.extend([0, 1, 0x40]);
@@ -1376,6 +1383,29 @@ async fn additional_rrsets_are_normalized_on_cache_misses() {
 }
 
 #[tokio::test]
+async fn cache_hit_omits_additional_records_per_documented_policy() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: true,
+        cname: false,
+        mixed_ttl: false,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        additional_rrset: true,
+    };
+
+    let (_, miss) = query_with(&chain, &query, next()).await;
+    let (_, hit) = query_with(&chain, &query, next()).await;
+    assert_eq!(Message::parse(&miss).unwrap().additional_count(), 2);
+    // RFC 5452 §6: Pin documented asymmetry, not a desired Additional-data policy.
+    assert_eq!(Message::parse(&hit).unwrap().additional_count(), 0);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn nsec3_negative_proofs_are_cached_for_nxdomain_and_nodata() {
     let query = query_wire(Type::A, b"\x07missing\x07example\x03com\0", false);
     for rcode in [3, 0] {
@@ -1388,6 +1418,7 @@ async fn nsec3_negative_proofs_are_cached_for_nxdomain_and_nodata() {
                 Nsec3Negative {
                     calls: &calls,
                     rcode,
+                    outside_zone: false,
                 },
             )
             .await;
@@ -1404,6 +1435,34 @@ async fn nsec3_negative_proofs_are_cached_for_nxdomain_and_nodata() {
         }
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
+}
+
+#[tokio::test]
+async fn nsec3_proof_outside_soa_zone_is_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x07missing\x07example\x03com\0", false);
+    for _ in 0..2 {
+        let (_, wire) = query_with(
+            &chain,
+            &query,
+            Nsec3Negative {
+                calls: &calls,
+                rcode: 3,
+                outside_zone: true,
+            },
+        )
+        .await;
+        assert_eq!(
+            Message::parse(&wire)
+                .unwrap()
+                .authorities()
+                .filter(|record| record.rtype == Type::NSEC3)
+                .count(),
+            1
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
