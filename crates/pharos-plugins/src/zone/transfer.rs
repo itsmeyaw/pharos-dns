@@ -1,5 +1,5 @@
 use super::Zone;
-use crate::transfer::TransferRequest;
+use crate::{serial::serial_at_least, transfer::TransferRequest};
 use pharos_proto::{MessageBuilder, NameRef, Section, Type};
 use pharos_server::{Error, Protocol, Stream};
 use std::sync::Arc;
@@ -27,11 +27,12 @@ impl Zone {
         if request.qclass != zone.class {
             return Err(Error::InvalidQuery);
         }
-        // RFC 1995 §2: an up-to-date IXFR returns only the current SOA.
+        // RFC 1995 §2: equal or newer IXFR serials return only the current SOA.
         // RFC 1995 §6: An unknown requested version falls back to a full TCP zone transfer.
         // RFC 1982 §7: Serial zero is an ordinary SOA serial value.
         let only_soa = request.qtype == Type::IXFR
-            && (request.protocol == Protocol::Udp || request.serial == current);
+            && (request.protocol == Protocol::Udp || serial_at_least(request.serial, current));
+        // CoreDNS parity (#75): a TCP up-to-date IXFR answer carries no AA; RFC 1995 §2 is silent.
         let authoritative = !(only_soa && request.protocol == Protocol::Tcp);
         let id = request.id;
         let flags = request.flags;

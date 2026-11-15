@@ -10,10 +10,19 @@ use pharos_proto::{
     Class, Message, MessageBuilder, Name, NameRef, Rcode, TsigKey, TsigRecord, TsigStream, Type,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, UdpSocket},
+    io::AsyncReadExt,
+    net::{TcpSocket, TcpStream, UdpSocket},
     time::timeout,
 };
+
+// Bind the configured source address, else the unspecified address of the target's family.
+fn source_or_any(source: Option<IpAddr>, target: SocketAddr) -> IpAddr {
+    source.unwrap_or(if target.is_ipv4() {
+        Ipv4Addr::UNSPECIFIED.into()
+    } else {
+        Ipv6Addr::UNSPECIFIED.into()
+    })
+}
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -39,7 +48,6 @@ pub async fn notify_from(
 ) -> io::Result<()> {
     // shortcut: one Query buffer allocation per NOTIFY; reuse it when callers batch Zones.
     let mut query = Vec::with_capacity(512);
-    // RFC 1996 §3.7: NOTIFY has opcode 4, AA set, and an SOA Question.
     // RFC 1996 §4.5: NOTIFY has opcode 4, AA set, and an SOA Question.
     let mut builder = MessageBuilder::new(&mut query, 512, id, 0x2400).map_err(io::Error::other)?;
     builder
@@ -50,19 +58,11 @@ pub async fn notify_from(
         )
         .map_err(io::Error::other)?;
     let _ = builder.finish();
-    let bind = SocketAddr::new(
-        source.unwrap_or_else(|| {
-            if address.is_ipv4() {
-                Ipv4Addr::UNSPECIFIED.into()
-            } else {
-                Ipv6Addr::UNSPECIFIED.into()
-            }
-        }),
-        0,
-    );
+    let bind = SocketAddr::new(source_or_any(source, address), 0);
     let socket = UdpSocket::bind(bind).await?;
     socket.connect(address).await?;
-    let mut wire = [0; 65535];
+    // A NOTIFY Response echoes one Question, so a 1232-octet buffer (RFC 6891 §6.2.5) is ample.
+    let mut wire = [0; 1232];
     let mut last_error = invalid("NOTIFY was not accepted");
     // RFC 1996 §3.6: a master retransmits NOTIFY until a matching Response or the retry limit.
     for _ in 0..3 {
@@ -89,7 +89,7 @@ pub async fn notify_from(
             Err(error) => last_error = io::Error::new(io::ErrorKind::TimedOut, error),
         }
     }
-    notify_tcp(address, zone, id, deadline, &query)
+    notify_tcp(address, source, zone, id, deadline, &query)
         .await
         .map_err(|tcp_error| {
             io::Error::new(
@@ -118,6 +118,7 @@ fn notify_response(wire: &[u8], id: u16, zone: &Name) -> io::Result<Rcode> {
 
 async fn notify_tcp(
     address: SocketAddr,
+    source: Option<IpAddr>,
     zone: &Name,
     id: u16,
     deadline: Duration,
@@ -125,9 +126,16 @@ async fn notify_tcp(
 ) -> io::Result<()> {
     // RFC 1996 §3.4: Use TCP when UDP cannot complete the NOTIFY transaction.
     timeout(deadline, async {
-        let mut socket = TcpStream::connect(address).await?;
-        socket.write_u16(query.len() as u16).await?;
-        socket.write_all(query).await?;
+        let socket = if address.is_ipv4() {
+            TcpSocket::new_v4()?
+        } else {
+            TcpSocket::new_v6()?
+        };
+        let source = source_or_any(source, address);
+        // RFC 1996 §3.4: Preserve configured source address on TCP fallback.
+        socket.bind(SocketAddr::new(source, 0))?;
+        let mut socket = socket.connect(address).await?;
+        crate::write_tcp_frame(&mut socket, query).await?;
         let len = socket.read_u16().await?;
         let mut wire = vec![0; usize::from(len)];
         socket.read_exact(&mut wire).await?;
@@ -221,13 +229,7 @@ async fn axfr_inner(
     // RFC 5936 §2: AXFR sessions use TCP.
     let mut socket = timeout(deadline, TcpStream::connect(address)).await??;
     // RFC 1035 §4.2.2: TCP Messages are prefixed with a two-octet length.
-    timeout(deadline, async {
-        socket
-            .write_all(&(query.len() as u16).to_be_bytes())
-            .await?;
-        socket.write_all(&query).await
-    })
-    .await??;
+    timeout(deadline, crate::write_tcp_frame(&mut socket, &query)).await??;
     let mut wire = Vec::new();
     let mut opening = None;
     loop {

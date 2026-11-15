@@ -164,7 +164,7 @@ async fn reload_replaces_only_changed_serial() {
 
 #[cfg(feature = "plugin-transfer")]
 #[test]
-fn axfr_and_current_ixfr_have_soa_framing() {
+fn axfr_and_current_or_newer_ixfr_have_soa_framing() {
     use pharos_plugins::transfer::{TransferRequest, Transferer};
     let zonefile = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -175,7 +175,12 @@ fn axfr_and_current_ixfr_have_soa_framing() {
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
     let plugin = configured[0].config.file.as_ref().unwrap();
     let apex: Name = "example.org.".parse().unwrap();
-    for (kind, serial, expected) in [(Type::AXFR, 0, 2), (Type::IXFR, 1, 1)] {
+    for (kind, serial, expected, authoritative) in [
+        (Type::AXFR, 0, 2, true),
+        (Type::IXFR, 1, 1, false),
+        (Type::IXFR, 2, 1, false),
+        (Type::IXFR, u32::MAX, 2, true),
+    ] {
         let mut stream = plugin
             .transfer(TransferRequest {
                 zone: NameRef::parse(apex.as_wire(), 0).unwrap(),
@@ -192,7 +197,7 @@ fn axfr_and_current_ixfr_have_soa_framing() {
         let mut types = Vec::new();
         while stream.next(&mut wire).unwrap() {
             let message = Message::parse(&wire).unwrap();
-            assert_eq!(message.aa(), kind == Type::AXFR);
+            assert_eq!(message.aa(), authoritative);
             types.extend(message.answers().map(|record| record.rtype));
         }
         assert_eq!(types.first(), Some(&Type::SOA));

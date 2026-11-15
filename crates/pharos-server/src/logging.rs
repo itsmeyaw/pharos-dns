@@ -49,19 +49,17 @@ pub fn log(level: &str, plugin: &str, message: &str) {
     let _ = io::stdout().lock().write_all(line.as_bytes());
 }
 
-/// Write a bounded debug entry without allocating on the Query path.
+/// Write a bounded entry without allocating on the Query path.
 pub fn log_debug(plugin: &str, message: fmt::Arguments<'_>) {
-    if !debug_enabled() {
-        return;
-    }
     log_bounded("DEBUG", plugin, message);
 }
 
-fn log_bounded(level: &str, plugin: &str, message: fmt::Arguments<'_>) {
-    let mut text = StackText::<2048>::new();
-    if text.write_fmt(message).is_err() {
+/// Write a bounded log entry without allocating.
+pub fn log_bounded(level: &str, plugin: &str, message: fmt::Arguments<'_>) {
+    if level == "DEBUG" && !debug_enabled() {
         return;
     }
+    let text = bounded_text(message);
     let mut line = StackText::<16384>::new();
     let format = if JSON.load(Ordering::Relaxed) {
         LogFormat::Json
@@ -77,6 +75,13 @@ fn log_bounded(level: &str, plugin: &str, message: fmt::Arguments<'_>) {
         text.as_str(),
     );
     let _ = io::stdout().lock().write_all(line.as_str().as_bytes());
+}
+
+// An over-long entry is cut at 2048 octets rather than lost, so the operator still sees its start.
+fn bounded_text(message: fmt::Arguments<'_>) -> StackText<2048> {
+    let mut text = StackText::new();
+    let _ = text.write_fmt(message);
+    text
 }
 
 struct StackText<const N: usize> {
@@ -98,13 +103,17 @@ impl<const N: usize> StackText<N> {
 
 impl<const N: usize> fmt::Write for StackText<N> {
     fn write_str(&mut self, value: &str) -> fmt::Result {
-        let end = self
-            .len
-            .checked_add(value.len())
-            .filter(|end| *end <= N)
-            .ok_or(fmt::Error)?;
-        self.bytes[self.len..end].copy_from_slice(value.as_bytes());
-        self.len = end;
+        let room = N - self.len;
+        let mut take = value.len().min(room);
+        // Cut on a character boundary so the entry stays valid UTF-8.
+        while !value.is_char_boundary(take) {
+            take -= 1;
+        }
+        self.bytes[self.len..self.len + take].copy_from_slice(&value.as_bytes()[..take]);
+        self.len += take;
+        if take < value.len() {
+            return Err(fmt::Error);
+        }
         Ok(())
     }
 }
@@ -222,4 +231,22 @@ fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
         day_seconds % 3600 / 60,
         day_seconds % 60
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn over_long_entry_is_truncated_on_a_character_boundary() {
+        let long = "é".repeat(3000);
+        let text = bounded_text(format_args!("{long}"));
+        assert_eq!(text.as_str().len(), 2048);
+        assert!(text.as_str().chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn short_entry_is_kept_whole() {
+        assert_eq!(bounded_text(format_args!("a {}", 1)).as_str(), "a 1");
+    }
 }

@@ -446,7 +446,9 @@ impl<'a> NameRef<'a> {
     /// Copies this potentially compressed name into an owned name.
     #[must_use]
     pub fn to_name(&self) -> Name {
-        let mut wire = Vec::with_capacity(MAX_NAME_LEN);
+        // Size the copy exactly: retained Zone owners must not each hold 255 octets.
+        let len = self.labels().map(|label| label.len() + 1).sum::<usize>() + 1;
+        let mut wire = Vec::with_capacity(len);
         for label in self.labels() {
             wire.push(label.len() as u8);
             wire.extend_from_slice(label);

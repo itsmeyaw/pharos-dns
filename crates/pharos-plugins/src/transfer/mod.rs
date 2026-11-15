@@ -49,6 +49,7 @@ pub(crate) struct TransferZone {
 pub(crate) enum Destination {
     All,
     Address { host: String, port: String },
+    Network { address: IpAddr, prefix: u8 },
 }
 
 impl Transfer {
@@ -71,11 +72,20 @@ impl Transfer {
             return Ok(());
         };
         let mut errors = Vec::new();
-        // RFC 1996 §4.6: Send NOTIFY to each configured server destination.
+        let mut addressed = false;
+        let mut cidr = false;
+        // RFC 1996 §§4.5, 4.6: Send NOTIFY to each configured server destination.
         for destination in &rule.destinations {
-            let Destination::Address { host, port } = destination else {
-                continue;
+            let (host, port) = match destination {
+                Destination::Address { host, port } => (host, port),
+                Destination::All => continue,
+                Destination::Network { .. } => {
+                    // RFC 1996 §2.1: the Notify Set lists servers; a CIDR range names none (warned at setup).
+                    cidr = true;
+                    continue;
+                }
             };
+            addressed = true;
             // RFC 5952 §6: Bracket IPv6 literals when combining them with port numbers.
             let endpoint = if host.contains(':') {
                 format!("[{host}]:{port}")
@@ -107,7 +117,9 @@ impl Transfer {
                 errors.push(format!("{endpoint}: {error}"));
             }
         }
-        if errors.is_empty() {
+        if errors.is_empty() && cidr && !addressed {
+            Err(std::io::Error::other("CIDR is not a NOTIFY destination"))
+        } else if errors.is_empty() {
             Ok(())
         } else {
             Err(std::io::Error::other(errors.join("; ")))
@@ -148,6 +160,15 @@ impl Transfer {
                         );
                     }
                     _ => return Err(cursor.arg_err()),
+                }
+            }
+            for destination in &destinations {
+                if let Destination::Network { address, prefix } = destination {
+                    pharos_server::logging::log(
+                        "WARN",
+                        "transfer",
+                        &format!("to {address}/{prefix} is an ACL only; NOTIFY skips it"),
+                    );
                 }
             }
             // RFC 5936 §5: Require an explicit transfer policy instead of open access.
@@ -230,6 +251,7 @@ impl Transfer {
             .any(|destination| match destination {
                 Destination::All => true,
                 Destination::Address { host, .. } => host.as_bytes() == &client.bytes[..client.len],
+                Destination::Network { address, prefix } => in_network(ip, *address, *prefix),
             });
         if !allowed {
             // RFC 1035 §4.1.1: REFUSED means policy prevents this transfer.
@@ -241,11 +263,16 @@ impl Transfer {
             let serial = authority
                 .next()
                 .and_then(|record| match record.data().ok()? {
-                    Rdata::Soa { serial, .. } => Some(serial),
+                    Rdata::Soa { serial, .. }
+                        if record.name == question.name && record.class == question.qclass =>
+                    {
+                        Some(serial)
+                    }
                     _ => None,
                 });
             match (serial, authority.next()) {
                 (Some(serial), None) => serial,
+                // RFC 1995 §3 defines no RCODE for a bad Authority SOA; SERVFAIL is a Pharos choice.
                 _ => return Some(Outcome::Unanswered(Rcode::SERVFAIL)),
             }
         } else {
@@ -291,6 +318,13 @@ fn destination(value: &str) -> Option<Destination> {
     if value == "*" {
         return Some(Destination::All);
     }
+    // RFC 5936 §5: A configured network prefix authorizes clients in that range.
+    if let Some((address, prefix)) = value.rsplit_once('/') {
+        let address = address.parse::<IpAddr>().ok()?;
+        let prefix = prefix.parse::<u8>().ok()?;
+        let max = if address.is_ipv4() { 32 } else { 128 };
+        return (prefix <= max).then_some(Destination::Network { address, prefix });
+    }
     let (host, port) = if let Some(rest) = value.strip_prefix('[') {
         let (host, port) = rest.split_once("]:")?;
         (host, if port.is_empty() { "53" } else { port })
@@ -309,6 +343,25 @@ fn destination(value: &str) -> Option<Destination> {
 
 fn ip_without_zone(host: &str) -> &str {
     host.rsplit_once('%').map_or(host, |(address, _)| address)
+}
+
+// RFC 5936 §5: Match transfer clients against configured network prefixes.
+fn in_network(address: IpAddr, network: IpAddr, prefix: u8) -> bool {
+    match (address, network) {
+        (IpAddr::V4(address), IpAddr::V4(network)) if prefix <= 32 => {
+            let mask = u32::MAX
+                .checked_shl(32 - u32::from(prefix))
+                .unwrap_or_default();
+            u32::from(address) & mask == u32::from(network) & mask
+        }
+        (IpAddr::V6(address), IpAddr::V6(network)) if prefix <= 128 => {
+            let mask = u128::MAX
+                .checked_shl(128 - u32::from(prefix))
+                .unwrap_or_default();
+            u128::from(address) & mask == u128::from(network) & mask
+        }
+        _ => false,
+    }
 }
 
 impl Plugin for Transfer {

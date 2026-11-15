@@ -151,6 +151,49 @@ async fn acl_does_not_normalize_configured_ipv6_text() {
     );
 }
 
+#[tokio::test]
+async fn transfer_acl_accepts_cidr_ranges() {
+    let blocks = parse("Corefile", ". {\n transfer {\n to 192.0.2.0/24\n }\n}").unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let name: Name = ".".parse().unwrap();
+    let mut wire = Vec::new();
+    let mut builder = MessageBuilder::new(&mut wire, 512, 1, 0).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::AXFR,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(512);
+    let mut slots = [];
+    let mut cx = Context {
+        query: Message::parse(&wire).unwrap(),
+        client: "192.0.2.42:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &name,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    for (client, allowed) in [("192.0.2.42:1234", true), ("192.0.3.42:1234", false)] {
+        cx.client = client.parse().unwrap();
+        let outcome = chain
+            .transfer
+            .as_ref()
+            .unwrap()
+            .serve_with(&mut cx, DropNext, Some(&Provider))
+            .await;
+        assert_eq!(matches!(outcome, Outcome::Stream(_)), allowed);
+    }
+}
+
 // Derived from CoreDNS v1.15.0 plugin/transfer/notify_test.go, TestNotifyMultipleFailures.
 #[tokio::test]
 async fn notify_reports_each_secondary_failure() {
@@ -190,6 +233,81 @@ async fn notify_reports_each_secondary_failure() {
     assert!(error.contains("REFUSED"), "{error}");
     first_task.await.unwrap();
     second_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn notify_succeeds_when_every_address_succeeds_despite_cidr_acl() {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    let responder = tokio::spawn(async move {
+        let mut wire = [0; 512];
+        let (len, peer) = socket.recv_from(&mut wire).await.unwrap();
+        wire[2] |= 0x80;
+        socket.send_to(&wire[..len], peer).await.unwrap();
+    });
+    let config = format!(".:53 {{\n transfer {{\n to 192.0.2.0/24 {address}\n }}\n}}");
+    let blocks = parse("Corefile", &config).unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    chain
+        .transfer
+        .unwrap()
+        .notify(&"example.org.".parse().unwrap())
+        .await
+        .unwrap();
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn transfer_cidr_acl_matches_ipv4_mapped_ipv6_clients() {
+    let config = ".:53 {\n transfer example.org {\n to 127.0.0.0/8\n }\n}";
+    let blocks = parse("Corefile", config).unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let transfer = chain.transfer.as_ref().unwrap();
+    let root: Name = ".".parse().unwrap();
+    let apex: Name = "example.org.".parse().unwrap();
+    for (client, allowed) in [
+        ("[::ffff:127.9.9.9]:42", true),
+        ("[::ffff:128.0.0.1]:42", false),
+        ("127.9.9.9:42", true),
+    ] {
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 512, 3, 0).unwrap();
+        builder
+            .question(
+                NameRef::parse(apex.as_wire(), 0).unwrap(),
+                Type::AXFR,
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None; 8];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: client.parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Tcp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        let outcome = transfer
+            .serve_with(&mut cx, DropNext, Some(&Provider))
+            .await;
+        if allowed {
+            assert!(matches!(outcome, Outcome::Stream(_)), "{client}");
+        } else {
+            assert_eq!(outcome, Outcome::Unanswered(Rcode::REFUSED), "{client}");
+        }
+    }
 }
 
 #[tokio::test]

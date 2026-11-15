@@ -15,14 +15,34 @@ use pharos_server::{Context, Next, Outcome, Plugin};
 use std::net::SocketAddr;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
+
+/// Bounds on one AXFR so a large or stalled Primary Server cannot exhaust memory or hold the task.
+#[derive(Debug, Clone, Copy)]
+struct TransferLimits {
+    max_records: usize,
+    /// Owner wire octets plus RDATA octets, excluding per-record overhead.
+    max_bytes: usize,
+    timeout: std::time::Duration,
+}
+
+impl Default for TransferLimits {
+    fn default() -> Self {
+        Self {
+            max_records: 4_000_000,
+            max_bytes: 1 << 30,
+            timeout: std::time::Duration::from_secs(600),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ZoneConfig {
     apex: Name,
     from: Vec<String>,
     catalog: Option<Vec<Name>>,
+    limits: TransferLimits,
 }
 
 #[derive(Debug)]
@@ -31,8 +51,12 @@ struct SecondaryZone {
     current: ZoneHolder,
     expired: AtomicBool,
     notify: tokio::sync::Notify,
+    // Wakes the refresh loop after a NOTIFY-triggered check or transfer fails.
+    retry: tokio::sync::Notify,
+    unknown_notify: AtomicU64,
     notify_source: Mutex<Option<SocketAddr>>,
     task: Mutex<Option<tokio::task::AbortHandle>>,
+    transfer_lock: tokio::sync::Mutex<()>,
 }
 
 impl SecondaryZone {
@@ -42,8 +66,11 @@ impl SecondaryZone {
             current: ZoneHolder::empty(),
             expired: AtomicBool::new(false),
             notify: tokio::sync::Notify::new(),
+            retry: tokio::sync::Notify::new(),
+            unknown_notify: AtomicU64::new(0),
             notify_source: Mutex::new(None),
             task: Mutex::new(None),
+            transfer_lock: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -178,6 +205,11 @@ impl Secondary {
     }
 }
 
+// Spoofed UDP must not flood the log: keep the first entry and then one per 1024 attempts.
+fn log_unknown_notify(seen: u64) -> bool {
+    seen.is_multiple_of(1024)
+}
+
 fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
     // RFC 1996 §3.10: Ignore NOTIFY from unconfigured Primary Servers.
     let Some(primary) = zone
@@ -186,15 +218,30 @@ fn handle_notify(zone: &SecondaryZone, cx: &mut Context<'_, '_>) -> Outcome {
         .iter()
         .find_map(|address| update::primary_address(address, cx.client))
     else {
+        // RFC 1996 §3.10: Record NOTIFY attempts from unknown Primary Servers.
+        let seen = zone.unknown_notify.fetch_add(1, Ordering::Relaxed);
+        if log_unknown_notify(seen) {
+            pharos_server::logging::log_bounded(
+                "WARN",
+                "secondary",
+                format_args!(
+                    "NOTIFY from unknown Primary Server {} ({} so far for {})",
+                    cx.client,
+                    seen + 1,
+                    zone.config.apex
+                ),
+            );
+        }
         return Outcome::Drop;
     };
     let Some(question) = cx.query.questions().next() else {
         return Outcome::Drop;
     };
-    // RFC 1996 §§3.2, 3.3: NOTIFY uses AA, one IN SOA Question, and zero undefined fields.
+    // RFC 1996 §§3.2, 3.3: NOTIFY uses AA, an IN SOA Question, and zero undefined fields.
     if cx.query.flags() & 0x83ff != 0
         || cx.query.flags() & 0x0400 == 0
-        || cx.query.question_count() != 1
+        // RFC 1996 §3.7: a NOTIFY request has QDCOUNT>0; the first Question names the zone.
+        || cx.query.question_count() == 0
         || question.qtype != Type::SOA
         || question.qclass != Class::IN
         || question.name != zone.config.apex

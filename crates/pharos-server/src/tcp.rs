@@ -82,7 +82,15 @@ pub async fn write_tcp_frame(
     wire: &[u8],
 ) -> io::Result<()> {
     // RFC 7766 §8: pass the two-octet length and the Message to TCP in one write.
-    let length = (wire.len() as u16).to_be_bytes();
+    // RFC 1035 §4.2.2: Reject Messages that exceed the 16-bit length field.
+    let length = u16::try_from(wire.len())
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DNS Message exceeds 65,535 octets",
+            )
+        })?
+        .to_be_bytes();
     let mut written = 0;
     while written < length.len() + wire.len() {
         let buffers = [
@@ -436,6 +444,22 @@ mod tests {
                 assert_eq!(writer.calls, 1);
             }
         }
+        let mut writer = Writer {
+            bytes: Vec::new(),
+            limit: 100,
+            calls: 0,
+            first_segments: 0,
+        };
+        let oversized = vec![0; usize::from(u16::MAX) + 1];
+        assert_eq!(
+            write_tcp_frame(&mut writer, &oversized)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(writer.calls, 0);
+
         let mut writer = Writer {
             bytes: Vec::new(),
             limit: 0,

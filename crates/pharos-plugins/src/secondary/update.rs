@@ -1,7 +1,8 @@
 use super::*;
-use pharos_proto::{Message, MessageBuilder, NameRef, Section, Type, zone::ZoneRecord};
+use crate::serial::serial_at_least;
+use pharos_proto::{Message, MessageBuilder, NameRef, Record, Section, Type, zone::ZoneRecord};
 use std::{fmt::Write, io, net::SocketAddr, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
     let host = if let Some(value) = address.strip_prefix('[') {
@@ -57,7 +58,7 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
     }
 }
 
-// RFC 1996 §3.11: Keep the notifying primary IP and use its configured service port.
+// RFC 1996 §3.11: Query the master that sent the NOTIFY. Pharos keeps its IP and uses the configured port.
 pub(super) fn primary_address(address: &str, client: SocketAddr) -> Option<SocketAddr> {
     if !primary_matches(address, client) {
         return None;
@@ -102,11 +103,106 @@ pub(super) async fn transfer_from(
     transfer_inner(shared, zone, Some(primary)).await
 }
 
+// RFC 3597 §4: only these types are known to carry no domain names in RDATA.
+fn has_no_names(rtype: Type) -> bool {
+    matches!(
+        rtype,
+        Type::A
+            | Type::AAAA
+            | Type::TXT
+            | Type::HINFO
+            | Type::CAA
+            | Type::URI
+            | Type::DS
+            | Type::CDS
+            | Type::DNSKEY
+            | Type::CDNSKEY
+            | Type::TLSA
+            | Type::SSHFP
+            | Type::NSEC3PARAM
+            | Type::ZONEMD
+    )
+}
+
+// Offset of RDATA in a one-record Message with a root owner: header, owner, TYPE, CLASS, TTL, RDLENGTH.
+const ROOT_RDATA_OFFSET: usize = 12 + 1 + 10;
+
+fn zone_record(record: Record<'_>, scratch: &mut Vec<u8>) -> io::Result<ZoneRecord> {
+    let data = record.data().map_err(io::Error::other)?;
+    let rdata = if has_no_names(record.rtype) {
+        record.rdata.to_vec()
+    } else {
+        // RFC 5936 §3.4: re-encode RDATA without compressed names.
+        let mut builder =
+            MessageBuilder::new(&mut *scratch, 65535, 0, 0).map_err(io::Error::other)?;
+        let written = builder
+            .record_with(
+                Section::Answer,
+                NameRef::parse(&[0], 0).map_err(io::Error::other)?,
+                record.rtype,
+                record.class,
+                record.ttl,
+                |writer| {
+                    writer.disable_compression();
+                    data.write(writer)
+                },
+            )
+            .map_err(io::Error::other)?;
+        if !written {
+            return Err(io::Error::other("record exceeds Message limit"));
+        }
+        let _ = builder.finish();
+        scratch
+            .get(ROOT_RDATA_OFFSET..)
+            .ok_or_else(|| io::Error::other("missing record"))?
+            .to_vec()
+    };
+    Ok(ZoneRecord {
+        owner: record.name.to_name(),
+        rtype: record.rtype,
+        class: record.class,
+        ttl: record.ttl,
+        rdata,
+    })
+}
+
+fn over_limit(name: &str, limit: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("AXFR exceeds {name} {limit}; raise it in the secondary block"),
+    )
+}
+
+type Built = (crate::zone::Zone, Option<super::catalog::Catalog>);
+
+fn build(apex: Name, mut records: Vec<ZoneRecord>, want_catalog: bool) -> Result<Built, String> {
+    // RFC 5936 §2.2: Sort and remove duplicate RRs without a second full-size index.
+    records.sort_unstable_by(|a, b| {
+        a.owner
+            .cmp(&b.owner)
+            .then(a.rtype.cmp(&b.rtype))
+            .then(a.class.cmp(&b.class))
+            .then(a.ttl.cmp(&b.ttl))
+            .then(a.rdata.cmp(&b.rdata))
+    });
+    records.dedup();
+    // RFC 9432 §5.1: Parse the catalog from borrowed records before the Zone takes them.
+    let catalog = if want_catalog {
+        Some(super::catalog::parse(&apex, &records).map_err(str::to_owned)?)
+    } else {
+        None
+    };
+    // RFC 1034 §4.3.5: replace the Zone only with a complete, valid transfer.
+    Ok((crate::zone::Zone::from_records(apex, records)?, catalog))
+}
+
 async fn transfer_inner(
     shared: &Arc<Shared>,
     zone: &SecondaryZone,
     primary: Option<SocketAddr>,
 ) -> io::Result<()> {
+    // RFC 1034 §4.3.5: one transfer per Zone at a time, so an older copy cannot land last.
+    let _transfer = zone.transfer_lock.lock().await;
     let mut error = io::Error::other("no Primary Server");
     let mut addresses = Vec::new();
     if let Some(primary) = primary {
@@ -121,92 +217,75 @@ async fn transfer_inner(
     }
     for address in addresses {
         let mut records = Vec::new();
-        let result = pharos_server::transfer::axfr(
-            address,
-            &zone.config.apex,
-            random_id(),
-            Duration::from_secs(5),
-            |message| {
-                // RFC 5936 §2.2: Ignore duplicate resource records in an AXFR stream.
-                for record in message.answers() {
-                    let data = record.data().map_err(io::Error::other)?;
-                    // RFC 5936 §3.4: re-encode RDATA without compressed names.
-                    let mut wire = Vec::with_capacity(512);
-                    let mut builder =
-                        MessageBuilder::new(&mut wire, 65535, 0, 0).map_err(io::Error::other)?;
-                    let written = builder
-                        .record_with(
-                            Section::Answer,
-                            record.name,
-                            record.rtype,
-                            record.class,
-                            record.ttl,
-                            |writer| {
-                                writer.disable_compression();
-                                data.write(writer)
-                            },
-                        )
-                        .map_err(io::Error::other)?;
-                    if !written {
-                        return Err(io::Error::other("record exceeds Message limit"));
+        let mut scratch = Vec::with_capacity(512);
+        let mut bytes = 0usize;
+        let limits = zone.config.limits;
+        // Bound the whole transfer: the per-frame deadline lets a slow Primary Server hold it open.
+        let result = tokio::time::timeout(
+            limits.timeout,
+            pharos_server::transfer::axfr(
+                address,
+                &zone.config.apex,
+                random_id(),
+                Duration::from_secs(5),
+                |message| {
+                    // RFC 5936 §2.2: Ignore duplicate resource records in an AXFR stream.
+                    for record in message.answers() {
+                        // Refuse before allocating once the Zone outgrows its memory budget.
+                        if records.len() >= limits.max_records {
+                            return Err(over_limit("max_records", limits.max_records));
+                        }
+                        let item = zone_record(record, &mut scratch)?;
+                        bytes = bytes.saturating_add(item.owner.as_wire().len() + item.rdata.len());
+                        if bytes > limits.max_bytes {
+                            return Err(over_limit("max_bytes", limits.max_bytes));
+                        }
+                        records.push(item);
                     }
-                    let _ = builder.finish();
-                    let parsed = Message::parse(&wire).map_err(io::Error::other)?;
-                    let expanded = parsed
-                        .answers()
-                        .next()
-                        .ok_or_else(|| io::Error::other("missing record"))?;
-                    let expanded = ZoneRecord {
-                        owner: record.name.to_name(),
-                        rtype: record.rtype,
-                        class: record.class,
-                        ttl: record.ttl,
-                        rdata: expanded.rdata.to_vec(),
-                    };
-                    records.push(expanded);
-                }
-                Ok(())
-            },
+                    Ok(())
+                },
+            ),
         )
-        .await;
+        .await
+        .unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "AXFR exceeded its total deadline",
+            ))
+        });
         match result {
             Ok(()) => {
-                // RFC 5936 §2.2: Sort and remove duplicate RRs without a second full-size index.
-                records.sort_unstable_by(|a, b| {
-                    a.owner
-                        .cmp(&b.owner)
-                        .then(a.rtype.cmp(&b.rtype))
-                        .then(a.class.cmp(&b.class))
-                        .then(a.ttl.cmp(&b.ttl))
-                        .then(a.rdata.cmp(&b.rdata))
-                });
-                records.dedup();
-                // RFC 5936 §6: publish a validated Zone snapshot atomically after transfer.
-                let next = match crate::zone::Zone::from_records(
-                    zone.config.apex.clone(),
-                    records.clone(),
-                ) {
-                    Ok(next) => next,
-                    Err(err) => {
-                        if zone.config.catalog.is_some() {
+                // RFC 1982 §3.2: never replace a Zone with one whose serial is not newer.
+                let local = zone.current.load().as_ref().and_then(|zone| zone.serial());
+                let fetched = records
+                    .first()
+                    .filter(|record| record.rtype == Type::SOA)
+                    .and_then(|record| soa_field(&record.rdata, 0));
+                if let (Some(local), Some(fetched)) = (local, fetched)
+                    && serial_at_least(local, fetched)
+                    && !zone.expired.load(Ordering::Relaxed)
+                {
+                    return Ok(());
+                }
+                let apex = zone.config.apex.clone();
+                let want_catalog = zone.config.catalog.is_some();
+                // Sorting and indexing a large Zone would stall the async worker's other tasks.
+                let built = tokio::task::spawn_blocking(move || build(apex, records, want_catalog))
+                    .await
+                    .map_err(io::Error::other);
+                let (next, catalog) = match built {
+                    Ok(Ok(built)) => built,
+                    Ok(Err(err)) => {
+                        if want_catalog {
                             super::catalog::invalidate(shared, zone);
                         }
                         error = io::Error::other(err);
                         continue;
                     }
-                };
-                // RFC 9432 §5.1: Apply catalog changes after each valid transfer.
-                let catalog = if zone.config.catalog.is_some() {
-                    match super::catalog::parse(&zone.config.apex, &records) {
-                        Ok(catalog) => Some(catalog),
-                        Err(parse_error) => {
-                            super::catalog::invalidate(shared, zone);
-                            error = io::Error::other(parse_error);
-                            continue;
-                        }
+                    Err(err) => {
+                        error = err;
+                        continue;
                     }
-                } else {
-                    None
                 };
                 zone.current.store(Some(Arc::new(next)));
                 zone.expired.store(false, Ordering::Relaxed);
@@ -275,8 +354,7 @@ async fn should_transfer_at(zone: &SecondaryZone, primary: SocketAddr) -> io::Re
             .map_err(io::Error::other)?;
         let _ = builder.finish();
         // RFC 1035 §4.2.2: TCP DNS messages use a two-octet length prefix.
-        socket.write_u16(query.len() as u16).await?;
-        socket.write_all(&query).await?;
+        pharos_server::write_tcp_frame(&mut socket, &query).await?;
         let len = socket.read_u16().await?;
         let mut response = vec![0; usize::from(len)];
         socket.read_exact(&mut response).await?;
@@ -310,7 +388,8 @@ async fn should_transfer_at(zone: &SecondaryZone, primary: SocketAddr) -> io::Re
                 return Ok(current
                     .as_ref()
                     .and_then(|zone| zone.serial())
-                    .is_none_or(|local| serial_less(local, serial)));
+                    // RFC 1982 §3.2: transfer only when the Primary's serial is newer.
+                    .is_none_or(|local| !serial_at_least(local, serial)));
             }
         }
         Err(io::Error::other("SOA Response has no apex SOA"))
@@ -319,13 +398,10 @@ async fn should_transfer_at(zone: &SecondaryZone, primary: SocketAddr) -> io::Re
     result.map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err))?
 }
 
-// RFC 1982 §3.2: compare serial numbers modulo 2^32.
-pub(super) fn serial_less(a: u32, b: u32) -> bool {
-    if a < b {
-        b - a <= i32::MAX as u32
-    } else {
-        a - b > i32::MAX as u32
-    }
+// RFC 1035 §3.3.13: SOA RDATA ends with SERIAL, REFRESH, RETRY, EXPIRE and MINIMUM.
+fn soa_field(rdata: &[u8], offset: usize) -> Option<u32> {
+    let tail = rdata.get(rdata.len().checked_sub(20)? + offset..)?;
+    Some(u32::from_be_bytes(tail.get(..4)?.try_into().ok()?))
 }
 
 // RFC 1035 §3.3.13: SOA supplies refresh, retry and expire intervals.
@@ -335,16 +411,10 @@ pub(super) fn timers(zone: &SecondaryZone) -> (Duration, Duration, Duration) {
         .as_ref()
         .and_then(|zone| zone.records().iter().find(|rr| rr.rtype == Type::SOA));
     let value = |offset: usize| {
-        // RFC 1034 §4.3.5: shortcut: 1s floor avoids hot polling; upgrade after a bounded zero-timer policy exists.
-        soa.and_then(|rr| {
-            rr.rdata
-                .get(rr.rdata.len().checked_sub(20)? + offset..)?
-                .get(..4)
-        })
-        .and_then(|bytes| bytes.try_into().ok())
-        .map(u32::from_be_bytes)
-        .unwrap_or(1)
-        .max(1)
+        // RFC 1034 §4.3.5: shortcut: 1s floor avoids hot polling; upgrade once a bounded zero-timer policy exists (conf/secondary #98).
+        soa.and_then(|rr| soa_field(&rr.rdata, offset))
+            .unwrap_or(1)
+            .max(1)
     };
     (
         Duration::from_secs(u64::from(value(4))),
@@ -373,22 +443,30 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
             };
             // RFC 1996 §4.4: Defer duplicate NOTIFY work until current check completes.
             // RFC 1996 §3.11: Query and transfer from the master that sent NOTIFY.
-            match should_transfer_from(&notify_zone, source).await {
-                Ok(true) => {
-                    if let Err(error) = transfer_from(&notify_shared, &notify_zone, source).await {
+            let failed = match should_transfer_from(&notify_zone, source).await {
+                Ok(true) => transfer_from(&notify_shared, &notify_zone, source)
+                    .await
+                    .inspect_err(|error| {
                         pharos_server::logging::log(
                             "WARN",
                             "secondary",
                             &format!("NOTIFY transfer {}: {error}", notify_zone.config.apex),
                         );
-                    }
+                    })
+                    .is_err(),
+                Ok(false) => false,
+                Err(error) => {
+                    pharos_server::logging::log(
+                        "WARN",
+                        "secondary",
+                        &format!("NOTIFY check {}: {error}", notify_zone.config.apex),
+                    );
+                    true
                 }
-                Ok(false) => {}
-                Err(error) => pharos_server::logging::log(
-                    "WARN",
-                    "secondary",
-                    &format!("NOTIFY check {}: {error}", notify_zone.config.apex),
-                ),
+            };
+            if failed {
+                // RFC 1996 §3.11: a NOTIFY acts as an expired REFRESH; a failed one enters RETRY (RFC 1034 §4.3.5).
+                notify_zone.retry.notify_one();
             }
         }
     }));
@@ -418,6 +496,10 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
             let jitter = tokio::select! {
                 _ = refresh.tick(), if !retry_active => 5000,
                 _ = retry.tick(), if retry_active => 2000,
+                _ = zone.retry.notified() => {
+                    retry_active = true;
+                    continue;
+                }
                 _ = tokio::time::sleep_until(expire_at), if retry_active && !zone.expired.load(Ordering::Relaxed) => {
                     zone.expired.store(true, Ordering::Relaxed);
                     super::catalog::invalidate(&shared, &zone);

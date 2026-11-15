@@ -91,6 +91,7 @@ pub mod rewrite;
 mod rfc6052;
 #[cfg(feature = "plugin-secondary")]
 pub mod secondary;
+mod serial;
 #[cfg(feature = "plugin-sign")]
 pub mod sign;
 #[cfg(feature = "plugin-siit")]

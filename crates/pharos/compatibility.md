@@ -172,6 +172,11 @@
 ## transfer
 
 - [transfer Plugin notes](../crates/pharos-plugins/src/transfer/README.md)
+- `to` accepts CIDR prefixes as a Pharos extension for incoming AXFR/IXFR ACLs. CIDR entries are not NOTIFY recipients: setup logs one WARN per entry and NOTIFY skips it, succeeding when every IP address succeeds (an error only when no IP address is configured). Use explicit IP addresses for NOTIFY.
+- IXFR requires the Authority SOA owner and class to match the Question; mismatches return SERVFAIL. This is stricter than CoreDNS's parser (RFC 1995 §3); RFC 1995 defines no RCODE for it, so SERVFAIL is a Pharos choice.
+- A TCP IXFR answered with only the current SOA clears AA, as CoreDNS does (#75); RFC 5936 §2.2.1 sets AA on AXFR Responses and RFC 1995 §2 is silent.
+- IXFR treats a client serial of 0 as an ordinary serial (RFC 1982 §7): the current SOA alone is returned when the Zone serial is 0 or 0 is ahead in RFC 1982 order. CoreDNS treats 0 as unknown and sends the full Zone.
+- IXFR serial ordering uses RFC 1982 §3.2, including wraparound. An equal or newer client serial gets one current SOA; CoreDNS's generic and Kubernetes transfer paths check equality only (RFC 1995 §2).
 
 ## root
 
@@ -302,7 +307,8 @@
 - Pharos removes OPT from a Response to a non-EDNS Query, as RFC 6891 requires; CoreDNS may preserve a Plugin-supplied OPT in that case.
 - Pharos answers Plugin errors with SERVFAIL. CoreDNS ignores returned errors and bases the Response on the separately returned RCODE; without `errors` it does not log ordinary chain errors. Pharos likewise logs those errors only when `errors` is configured, while logging recovered panics at the Listener.
 - A UDP IXFR that reaches a Zone Transfer stream returns the current SOA only, following RFC 1995 §2; CoreDNS's `transfer` returns REFUSED instead.
-- The AXFR client API supports TSIG; CoreDNS v1.15.0's `secondary` does not sign transfer requests, even when a TSIG key is configured. Pharos's `secondary` Plugin matches this.
+- The AXFR client API supports TSIG; CoreDNS v1.15.0's `secondary` does not sign transfer requests, even when a TSIG key is configured. Pharos's `secondary` Plugin matches this, so its SOA checks and AXFR are unauthenticated; RFC 5936 §6 recommends TSIG (RFC 8945) for AXFR.
+- `secondary` has no IXFR client (RFC 1995): it polls the SOA serial and always transfers the whole Zone with AXFR (RFC 5936), as CoreDNS does, so every change costs a full transfer.
 - Signed transfer producers must leave room for TSIG within the 65,535-octet Message limit; otherwise the Listener closes the connection rather than emitting an unsigned Message.
 - Pharos also rejects Client Subnet address lengths that do not match the prefix and non-zero host bits, which miekg/dns accepts. It validates the supported typed options and framing; other option codes are passed through without the additional type-specific validation miekg/dns applies to some of them.
 - EDE parsing preserves invalid UTF-8 EXTRA-TEXT bytes and renders replacement characters; encoding rejects invalid UTF-8. This parse/encode asymmetry follows CoreDNS rendering compatibility while RFC 8914 §2 requires UTF-8.
@@ -396,6 +402,7 @@
 - **Server and protocol**
 
 - DSO Primary-TLV parsing remains unsupported; ID-zero DSO requests are suppressed without inspecting Primary TLVs (RFC 8490 §5.4.1; conf/server #101).
+- `secondary` accepts the Pharos-only `max_records` and `max_bytes` properties and abandons an AXFR that runs longer than 10 minutes, so an oversized or stalled primary cannot exhaust memory; CoreDNS applies no bound. Defaults are 4,000,000 records and 1 GiB of owner and RDATA octets.
 - Secondary SOA timers retain a one-second floor to prevent an immediate refresh/retry loop; zero-timer semantics remain deferred (RFC 1034 §4.3.5; conf/secondary #98).
 - When the DNSSEC plugin is in-chain, any explicit QTYPE 128 receives FORMERR, including names outside signed zones (RFC 9824 §3.5).
 
