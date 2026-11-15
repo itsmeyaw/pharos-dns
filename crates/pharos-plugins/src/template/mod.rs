@@ -669,11 +669,12 @@ impl Plugin for Template {
             if *section == Section::Answer
                 && rr.rtype == Type::CNAME
                 && question.qtype != Type::CNAME
+                && question.qtype != Type::ANY
                 // RFC 1035 §3.3.1: CNAME RDATA names the canonical target.
                 && let Ok(target) = NameRef::parse(&rr.rdata, 0)
             {
-                // RFC 1034 §3.6.2: a CNAME answer restarts the lookup at its target.
-                // shortcut: Every non-CNAME QTYPE can allocate one Self Lookup per answer CNAME; #86 removes it.
+                // RFC 1034 §§3.4.1, 3.6.2: ANY includes CNAME and does not restart target lookup.
+                // shortcut: Each other QTYPE can allocate one Self Lookup per answer CNAME; #86 removes it.
                 if let Ok(response) = cx.self_lookup(&target.to_name(), question.qtype).await {
                     lookups.push((index, response));
                 }

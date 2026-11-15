@@ -493,6 +493,62 @@ template IN MX example. {
     );
 }
 
+#[tokio::test]
+async fn cname_answer_does_not_restart_template_lookup_for_any() {
+    use pharos_server::{Action, Handler, ListenerKey, Router, Server};
+    use std::sync::Arc;
+
+    let chain = chain(
+        r#"
+template ANY ANY example. {
+ match ^alias[.]example[.]$
+ answer "alias.example. 60 IN CNAME target.example."
+ fallthrough
+}
+template ANY ANY example. {
+ match ^target[.]example[.]$
+ answer "target.example. 60 IN A 192.0.2.9"
+}
+"#,
+    );
+    let key = ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:53".parse().unwrap(),
+    };
+    let mut router = Router::default();
+    router.add(key, ".".parse().unwrap(), Some(chain), vec![]);
+    let server = Arc::new(Server::new(router, key));
+    let name: Name = "alias.example.".parse().unwrap();
+    let mut wire = Vec::with_capacity(512);
+    let mut builder = MessageBuilder::new(&mut wire, 512, 42, 0x0100).unwrap();
+    builder
+        .question(
+            NameRef::parse(name.as_wire(), 0).unwrap(),
+            Type::ANY,
+            Class::IN,
+        )
+        .unwrap();
+    let _ = builder.finish();
+    let mut response = Vec::with_capacity(4096);
+
+    assert_eq!(
+        Handler::handle_shared(
+            &server,
+            &wire,
+            "127.0.0.1:1234".parse().unwrap(),
+            Protocol::Udp,
+            &mut response,
+        )
+        .await,
+        Action::Respond
+    );
+    let response = Message::parse(&response).unwrap();
+    assert_eq!(
+        response.answers().map(|rr| rr.rtype).collect::<Vec<_>>(),
+        [Type::CNAME]
+    );
+}
+
 // Derived from CoreDNS TestVar and TestExpr.
 #[tokio::test]
 async fn coredns_variables_expressions_and_metadata() {
