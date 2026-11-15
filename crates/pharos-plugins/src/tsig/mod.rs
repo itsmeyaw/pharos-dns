@@ -160,11 +160,7 @@ impl Tsig {
             .unwrap_or(&self.secrets);
         // RFC 8945 §5.2.1: An unknown key gets an unsigned NOTAUTH/BADKEY response.
         let Some(secret) = secrets.iter().find(|secret| record.owner == secret.name) else {
-            pharos_server::logging::log(
-                "WARN",
-                "tsig",
-                &format!("unknown key {}", record.owner),
-            );
+            pharos_server::logging::log("WARN", "tsig", &format!("unknown key {}", record.owner));
             if cx.query.questions().next().is_some_and(|question| {
                 self.all_types
                     || self.types.contains(&question.qtype)
@@ -199,7 +195,10 @@ impl Tsig {
             pharos_server::logging::log(
                 "WARN",
                 "tsig",
-                &format!("unsupported algorithm {} for key {}", record.algorithm, record.owner),
+                &format!(
+                    "unsupported algorithm {} for key {}",
+                    record.algorithm, record.owner
+                ),
             );
             return tsig_error(cx, &record, 16, None, 0);
         };

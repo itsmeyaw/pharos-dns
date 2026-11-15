@@ -506,10 +506,9 @@ impl Plugin for Forward {
                                 .expect("proxy validated ECS-free Response");
                             rcode = response.rcode();
                             answer_count = response.answer_count();
-                            is_tsig_signed = response
-                                .additionals()
-                                .any(|rr| rr.rtype == Type::TSIG)
-                                && TsigRecord::parse(&wire[..exchange.len]).is_ok();
+                            is_tsig_signed =
+                                response.additionals().any(|rr| rr.rtype == Type::TSIG)
+                                    && TsigRecord::parse(&wire[..exchange.len]).is_ok();
                         }
                         _ => use_refused_fallback = true,
                     }

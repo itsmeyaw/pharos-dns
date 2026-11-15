@@ -506,11 +506,7 @@ async fn badsig_edns_response_keeps_opt_before_tsig() {
     )
     .unwrap();
     let configured = configure::<Chain>(&blocks, directives()).unwrap();
-    let key = TsigKey::new(
-        "missing.".parse().unwrap(),
-        TsigAlgorithm::Sha256,
-        b"wrong",
-    );
+    let key = TsigKey::new("missing.".parse().unwrap(), TsigAlgorithm::Sha256, b"wrong");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
