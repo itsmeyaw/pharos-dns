@@ -335,6 +335,20 @@ fn truncated_mac_respects_format_time_and_local_policy_order() {
 }
 
 #[test]
+fn truncated_response_mac_is_not_shorter_than_query_mac() {
+    let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
+    let mut query = hex("c60001000000000000000000");
+    key.sign_truncated(&mut query, 1000, 30, None, 16).unwrap();
+    let query_mac = TsigRecord::parse(&query).unwrap().mac.to_vec();
+    let mut response = hex("c60080000000000000000000");
+
+    key.sign_truncated(&mut response, 1000, 30, Some(&query_mac), 10)
+        .unwrap();
+
+    assert!(TsigRecord::parse(&response).unwrap().mac.len() >= query_mac.len());
+}
+
+#[test]
 fn truncated_signature_fits_a_nearly_full_message() {
     let key = TsigKey::new("key.".parse().unwrap(), TsigAlgorithm::Sha256, b"secret");
     let mut wire = hex("00010000000000000000000100ff00000100000000ffac");
