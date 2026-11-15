@@ -9,7 +9,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use pharos_proto::{Message, Name, NameRef, Rcode};
+use pharos_proto::{Message, Name, NameRef, Rcode, TsigRecord, Type};
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol, metrics::ForwardMetrics};
 use tokio::time::{Instant, timeout_at};
 
@@ -463,10 +463,15 @@ impl Plugin for Forward {
                         continue;
                     }
                 };
-                let (mut rcode, mut answer_count) = {
+                let (mut rcode, mut answer_count, mut is_tsig_signed) = {
                     let response =
                         Message::parse(&wire[..exchange.len]).expect("proxy validated Response");
-                    (response.rcode(), response.answer_count())
+                    (
+                        response.rcode(),
+                        response.answer_count(),
+                        response.additionals().any(|rr| rr.rtype == Type::TSIG)
+                            && TsigRecord::parse(&wire[..exchange.len]).is_ok(),
+                    )
                 };
                 // RFC 7871 §7.1.3: Keep the original REFUSED candidate when fallback fails.
                 let mut use_refused_fallback = false;
@@ -501,6 +506,10 @@ impl Plugin for Forward {
                                 .expect("proxy validated ECS-free Response");
                             rcode = response.rcode();
                             answer_count = response.answer_count();
+                            is_tsig_signed = response
+                                .additionals()
+                                .any(|rr| rr.rtype == Type::TSIG)
+                                && TsigRecord::parse(&wire[..exchange.len]).is_ok();
                         }
                         _ => use_refused_fallback = true,
                     }
@@ -525,8 +534,11 @@ impl Plugin for Forward {
                     break;
                 }
                 if use_refused_fallback {
-                    // RFC 4035 §4.6: Ignore AD from an upstream without a secure channel.
-                    cx.response[3] &= !0x20;
+                    // RFC 8945 §5.5: Do not alter a TSIG Response covered by its MAC.
+                    if !is_tsig_signed {
+                        // RFC 4035 §4.6: Ignore AD from an upstream without a secure channel.
+                        cx.response[3] &= !0x20;
+                    }
                     // RFC 8945 §5.5: Listener clears AD if it re-signs this forwarded Response.
                     cx.metadata.mark_forwarded_response();
                     return Outcome::Response;
@@ -536,8 +548,11 @@ impl Plugin for Forward {
                 cx.response.clear();
                 // RFC 5625 §4.3: return Responses without filtering RRs by TYPE or CLASS.
                 cx.response.extend_from_slice(answer);
-                // RFC 4035 §4.6: Ignore AD from an upstream without a secure channel.
-                cx.response[3] &= !0x20;
+                // RFC 8945 §5.5: Do not alter a TSIG Response covered by its MAC.
+                if !is_tsig_signed {
+                    // RFC 4035 §4.6: Ignore AD from an upstream without a secure channel.
+                    cx.response[3] &= !0x20;
+                }
                 // RFC 8945 §5.5: Listener clears AD if it re-signs this forwarded Response.
                 cx.metadata.mark_forwarded_response();
                 return Outcome::Response;
