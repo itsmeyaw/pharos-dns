@@ -15,6 +15,386 @@ struct Backend<'a> {
     cname: bool,
 }
 
+struct PolicyResponse<'a> {
+    calls: &'a AtomicUsize,
+    authoritative: bool,
+    cname: bool,
+    mixed_ttl: bool,
+    unrelated_answer: bool,
+    unrelated_authority: bool,
+    additional_rrset: bool,
+}
+
+impl Next for PolicyResponse<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let target: Name = "target.example.".parse().unwrap();
+        let unrelated: Name = "unrelated.other.".parse().unwrap();
+        let flags = 0x8080 | (u16::from(self.authoritative) * 0x0400);
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), flags).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        if self.cname {
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::CNAME,
+                    question.qclass,
+                    30,
+                    target.as_wire(),
+                )
+                .unwrap();
+            builder
+                .record(
+                    Section::Answer,
+                    target.as_name_ref(),
+                    Type::A,
+                    question.qclass,
+                    10,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+        } else {
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type::A,
+                    question.qclass,
+                    30,
+                    &[192, 0, 2, 1],
+                )
+                .unwrap();
+            if self.mixed_ttl {
+                builder
+                    .record(
+                        Section::Answer,
+                        question.name,
+                        Type::A,
+                        question.qclass,
+                        10,
+                        &[192, 0, 2, 2],
+                    )
+                    .unwrap();
+            }
+        }
+        if self.unrelated_answer {
+            builder
+                .record(
+                    Section::Answer,
+                    unrelated.as_name_ref(),
+                    Type::A,
+                    question.qclass,
+                    30,
+                    &[192, 0, 2, 3],
+                )
+                .unwrap();
+        }
+        if self.unrelated_authority {
+            builder
+                .record(
+                    Section::Authority,
+                    unrelated.as_name_ref(),
+                    Type::SOA,
+                    question.qclass,
+                    30,
+                    b"\0\0\0\0\0\x01\0\0\0\x02\0\0\0\x03\0\0\0\x04\0\0\0\x03",
+                )
+                .unwrap();
+        }
+        if self.additional_rrset {
+            builder
+                .record(
+                    Section::Additional,
+                    unrelated.as_name_ref(),
+                    Type::A,
+                    question.qclass,
+                    30,
+                    &[192, 0, 2, 3],
+                )
+                .unwrap();
+            builder
+                .record(
+                    Section::Additional,
+                    unrelated.as_name_ref(),
+                    Type::A,
+                    question.qclass,
+                    10,
+                    &[192, 0, 2, 4],
+                )
+                .unwrap();
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct Nsec3Negative<'a> {
+    calls: &'a AtomicUsize,
+    rcode: u16,
+    outside_zone: bool,
+}
+
+impl Next for Nsec3Negative<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let zone: Name = "example.com.".parse().unwrap();
+        let owner: Name = if self.outside_zone {
+            "00000000000000000000000000.attacker.net."
+        } else {
+            "00000000000000000000000000.example.com."
+        }
+        .parse()
+        .unwrap();
+        let mut nsec3 = vec![1, 0, 0, 0, 0, 20];
+        nsec3.extend([1; 20]);
+        nsec3.extend([0, 1, 0x40]);
+        let mut builder =
+            MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080 | self.rcode).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                zone.as_name_ref(),
+                Type::SOA,
+                question.qclass,
+                30,
+                b"\0\0\0\0\0\x01\0\0\0\x02\0\0\0\x03\0\0\0\x04\0\0\0\x03",
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                owner.as_name_ref(),
+                Type::NSEC3,
+                question.qclass,
+                30,
+                &nsec3,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct SiblingNsecNegative<'a>(&'a AtomicUsize);
+
+impl Next for SiblingNsecNegative<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let zone: Name = "example.com.".parse().unwrap();
+        let owner: Name = "a.example.com.".parse().unwrap();
+        let next_owner: Name = "z.example.com.".parse().unwrap();
+        let mut nsec = next_owner.as_wire().to_vec();
+        nsec.extend_from_slice(&[0, 1, 0x40]);
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8083).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                zone.as_name_ref(),
+                Type::SOA,
+                question.qclass,
+                30,
+                b"\0\0\0\0\0\x01\0\0\0\x02\0\0\0\x03\0\0\0\x04\0\0\0\x03",
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                owner.as_name_ref(),
+                Type::NSEC,
+                question.qclass,
+                30,
+                &nsec,
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                zone.as_name_ref(),
+                Type::RRSIG,
+                question.qclass,
+                30,
+                &rrsig(Type::SOA),
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct SignedReferral<'a>(&'a AtomicUsize);
+
+impl Next for SignedReferral<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let owner: Name = "child.example.com.".parse().unwrap();
+        let nameserver: Name = "ns.child.example.com.".parse().unwrap();
+        let next_owner: Name = "z.example.com.".parse().unwrap();
+        let mut nsec = next_owner.as_wire().to_vec();
+        nsec.extend_from_slice(&[0, 6, 0x20, 0, 0, 0, 0, 0x13]);
+        let mut ds = vec![0, 1, 8, 2];
+        ds.extend([0x11; 32]);
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                owner.as_name_ref(),
+                Type::NS,
+                Class::IN,
+                30,
+                nameserver.as_wire(),
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                owner.as_name_ref(),
+                Type::DS,
+                Class::IN,
+                30,
+                &ds,
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                owner.as_name_ref(),
+                Type::NSEC,
+                Class::IN,
+                10,
+                &nsec,
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                owner.as_name_ref(),
+                Type::RRSIG,
+                Class::IN,
+                30,
+                &rrsig(Type::DS),
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Authority,
+                owner.as_name_ref(),
+                Type::RRSIG,
+                Class::IN,
+                10,
+                &rrsig(Type::NSEC),
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+fn rrsig(type_covered: Type) -> Vec<u8> {
+    let mut data = Vec::with_capacity(20);
+    data.extend_from_slice(&type_covered.0.to_be_bytes());
+    data.extend_from_slice(&[8, 0]);
+    data.extend_from_slice(&30_u32.to_be_bytes());
+    data.extend_from_slice(&3_000_000_000_u32.to_be_bytes());
+    data.extend_from_slice(&1_000_000_000_u32.to_be_bytes());
+    data.extend_from_slice(&1_u16.to_be_bytes());
+    data.extend_from_slice(b"\x07example\x03com\0\x01");
+    data
+}
+
+struct DnameResponse<'a>(&'a AtomicUsize);
+
+impl Next for DnameResponse<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let owner: Name = "example.com.".parse().unwrap();
+        let target: Name = "target.net.".parse().unwrap();
+        let alias: Name = "a.target.net.".parse().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 512, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                owner.as_name_ref(),
+                Type::DNAME,
+                question.qclass,
+                30,
+                target.as_wire(),
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::CNAME,
+                question.qclass,
+                30,
+                alias.as_wire(),
+            )
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                alias.as_name_ref(),
+                Type::A,
+                question.qclass,
+                20,
+                &[192, 0, 2, 1],
+            )
+            .unwrap();
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
+struct ManyRrsets<'a> {
+    calls: &'a AtomicUsize,
+    count: u16,
+}
+
+impl Next for ManyRrsets<'_> {
+    async fn run(self, cx: &mut Context<'_, '_>) -> Outcome {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let question = cx.query.questions().next().unwrap();
+        let mut builder = MessageBuilder::new(cx.response, 65535, cx.query.id(), 0x8080).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        for offset in 0..self.count {
+            builder
+                .record(
+                    Section::Answer,
+                    question.name,
+                    Type(1000 + offset),
+                    question.qclass,
+                    30,
+                    &[],
+                )
+                .unwrap();
+        }
+        let _ = builder.finish();
+        Outcome::Response
+    }
+}
+
 struct Unanswered<'a>(&'a AtomicUsize);
 impl Next for Unanswered<'_> {
     async fn run(self, _: &mut Context<'_, '_>) -> Outcome {
@@ -732,19 +1112,13 @@ async fn keepttl_retains_the_inserted_ttl() {
 }
 
 #[tokio::test]
-async fn caches_servfail_and_can_disable_it() {
+async fn servfail_zero_is_cached() {
     let wire = b"\0\x01\x01\0\0\x01\0\0\0\0\0\0\x01x\0\0\x01\0\x01";
-    let chain = cache();
-    let calls = AtomicUsize::new(0);
-    let _ = query(&chain, wire, &calls, 2, false).await;
-    let hit = query(&chain, wire, &calls, 2, false).await;
-    assert_eq!(Message::parse(&hit).unwrap().rcode().0, 2);
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
     let chain = cache_with("cache {\n servfail 0\n}");
     let calls = AtomicUsize::new(0);
     let _ = query(&chain, wire, &calls, 2, false).await;
     let _ = query(&chain, wire, &calls, 2, false).await;
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -862,6 +1236,320 @@ async fn incomplete_positive_without_soa_is_not_cached() {
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
+#[tokio::test]
+async fn cached_rrsets_keep_their_own_minimum_ttls() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: true,
+        cname: true,
+        mixed_ttl: false,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        additional_rrset: false,
+    };
+
+    let _ = query_with(&chain, &query, next()).await;
+    let (_, hit) = query_with(&chain, &query, next()).await;
+    let hit = Message::parse(&hit).unwrap();
+    let mut answers = hit.answers();
+    assert_eq!(answers.next().unwrap().ttl, 30);
+    assert_eq!(answers.next().unwrap().ttl, 10);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn non_authoritative_rrsets_with_mismatched_ttls_are_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: false,
+        cname: false,
+        mixed_ttl: true,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        additional_rrset: false,
+    };
+
+    let (_, miss) = query_with(&chain, &query, next()).await;
+    assert_eq!(
+        Message::parse(&miss)
+            .unwrap()
+            .answers()
+            .map(|record| record.ttl)
+            .collect::<Vec<_>>(),
+        [10, 10]
+    );
+    let _ = query_with(&chain, &query, next()).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn authoritative_mixed_ttl_rrset_uses_its_minimum_ttl() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: true,
+        cname: false,
+        mixed_ttl: true,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        additional_rrset: false,
+    };
+
+    let _ = query_with(&chain, &query, next()).await;
+    let (_, hit) = query_with(&chain, &query, next()).await;
+    let answers = Message::parse(&hit).unwrap();
+    assert_eq!(
+        answers
+            .answers()
+            .map(|record| record.ttl)
+            .collect::<Vec<_>>(),
+        [10, 10]
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn response_with_unrelated_answer_records_is_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: false,
+        cname: false,
+        mixed_ttl: false,
+        unrelated_answer: true,
+        unrelated_authority: false,
+        additional_rrset: false,
+    };
+
+    let _ = query_with(&chain, &query, next()).await;
+    let _ = query_with(&chain, &query, next()).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn response_with_out_of_domain_authority_records_is_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: false,
+        cname: false,
+        mixed_ttl: false,
+        unrelated_answer: false,
+        unrelated_authority: true,
+        additional_rrset: false,
+    };
+
+    let _ = query_with(&chain, &query, next()).await;
+    let _ = query_with(&chain, &query, next()).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn additional_rrsets_are_normalized_on_cache_misses() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = PolicyResponse {
+        calls: &calls,
+        authoritative: true,
+        cname: false,
+        mixed_ttl: false,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        additional_rrset: true,
+    };
+
+    let (_, wire) = query_with(&chain, &query, next).await;
+    assert_eq!(
+        Message::parse(&wire)
+            .unwrap()
+            .additionals()
+            .map(|record| record.ttl)
+            .collect::<Vec<_>>(),
+        [10, 10]
+    );
+}
+
+#[tokio::test]
+async fn cache_hit_omits_additional_records_per_documented_policy() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01x\0", false);
+    let next = || PolicyResponse {
+        calls: &calls,
+        authoritative: true,
+        cname: false,
+        mixed_ttl: false,
+        unrelated_answer: false,
+        unrelated_authority: false,
+        additional_rrset: true,
+    };
+
+    let (_, miss) = query_with(&chain, &query, next()).await;
+    let (_, hit) = query_with(&chain, &query, next()).await;
+    assert_eq!(Message::parse(&miss).unwrap().additional_count(), 2);
+    // RFC 5452 §6: Pin documented asymmetry, not a desired Additional-data policy.
+    assert_eq!(Message::parse(&hit).unwrap().additional_count(), 0);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn nsec3_negative_proofs_are_cached_for_nxdomain_and_nodata() {
+    let query = query_wire(Type::A, b"\x07missing\x07example\x03com\0", false);
+    for rcode in [3, 0] {
+        let chain = cache();
+        let calls = AtomicUsize::new(0);
+        for _ in 0..2 {
+            let (outcome, wire) = query_with(
+                &chain,
+                &query,
+                Nsec3Negative {
+                    calls: &calls,
+                    rcode,
+                    outside_zone: false,
+                },
+            )
+            .await;
+            assert_eq!(outcome, Outcome::Response);
+            let response = Message::parse(&wire).unwrap();
+            assert_eq!(response.rcode().0, rcode);
+            assert_eq!(
+                response
+                    .authorities()
+                    .filter(|record| record.rtype == Type::NSEC3)
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[tokio::test]
+async fn nsec3_proof_outside_soa_zone_is_not_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x07missing\x07example\x03com\0", false);
+    for _ in 0..2 {
+        let (_, wire) = query_with(
+            &chain,
+            &query,
+            Nsec3Negative {
+                calls: &calls,
+                rcode: 3,
+                outside_zone: true,
+            },
+        )
+        .await;
+        assert_eq!(
+            Message::parse(&wire)
+                .unwrap()
+                .authorities()
+                .filter(|record| record.rtype == Type::NSEC3)
+                .count(),
+            1
+        );
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn nxdomain_sibling_nsec_proof_is_cached_with_bounded_ttls() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01b\x07example\x03com\0", false);
+    let _ = query_with(&chain, &query, SiblingNsecNegative(&calls)).await;
+    let (_, hit) = query_with(&chain, &query, SiblingNsecNegative(&calls)).await;
+    let response = Message::parse(&hit).unwrap();
+    let negative_ttl = response
+        .authorities()
+        .find(|record| record.rtype == Type::SOA)
+        .unwrap()
+        .ttl;
+    for record in response.authorities().filter(|record| {
+        record.rtype == Type::NSEC
+            || (record.rtype == Type::RRSIG
+                && matches!(
+                    record.data(),
+                    Ok(pharos_proto::Rdata::Rrsig {
+                        type_covered: Type::SOA,
+                        ..
+                    })
+                ))
+    }) {
+        assert!(record.ttl <= negative_ttl);
+    }
+    assert_eq!(negative_ttl, 3);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn referral_keeps_distinct_rrsig_covered_type_ttls() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x04host\x05child\x07example\x03com\0", false);
+    let _ = query_with(&chain, &query, SignedReferral(&calls)).await;
+    let (_, hit) = query_with(&chain, &query, SignedReferral(&calls)).await;
+    let signatures = Message::parse(&hit)
+        .unwrap()
+        .authorities()
+        .filter(|record| record.rtype == Type::RRSIG)
+        .map(|record| record.ttl)
+        .collect::<Vec<_>>();
+    assert_eq!(signatures, [30, 10]);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn dname_answer_above_the_question_is_cacheable() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::A, b"\x01a\x07example\x03com\0", false);
+    let _ = query_with(&chain, &query, DnameResponse(&calls)).await;
+    let (_, hit) = query_with(&chain, &query, DnameResponse(&calls)).await;
+    assert!(
+        Message::parse(&hit)
+            .unwrap()
+            .answers()
+            .any(|record| record.rtype == Type::DNAME)
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn many_distinct_rrsets_are_indexed_and_cached() {
+    let chain = cache();
+    let calls = AtomicUsize::new(0);
+    let query = query_wire(Type::ANY, b"\x01x\0", false);
+    for _ in 0..2 {
+        let (outcome, response) = query_with_limit(
+            &chain,
+            &query,
+            ManyRrsets {
+                calls: &calls,
+                count: 4096,
+            },
+            65535,
+        )
+        .await;
+        assert_eq!(outcome, Outcome::Response);
+        assert_eq!(Message::parse(&response).unwrap().answer_count(), 4096);
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
 async fn query(
     chain: &Chain,
     wire: &[u8],
@@ -915,8 +1603,17 @@ async fn query_with_cname(
 }
 
 async fn query_with<N: Next + Send>(chain: &Chain, wire: &[u8], next: N) -> (Outcome, Vec<u8>) {
+    query_with_limit(chain, wire, next, 512).await
+}
+
+async fn query_with_limit<N: Next + Send>(
+    chain: &Chain,
+    wire: &[u8],
+    next: N,
+    max_response_size: usize,
+) -> (Outcome, Vec<u8>) {
     let domain: Name = ".".parse().unwrap();
-    let mut response = Vec::with_capacity(512);
+    let mut response = Vec::with_capacity(max_response_size);
     let mut slots = [];
     let mut cx = Context {
         query: Message::parse(wire).unwrap(),
@@ -927,7 +1624,7 @@ async fn query_with<N: Next + Send>(chain: &Chain, wire: &[u8], next: N) -> (Out
         domain: &domain,
         metadata: Metadata::new(&mut slots),
         response: &mut response,
-        max_response_size: 512,
+        max_response_size,
     };
     let outcome = chain.cache.as_ref().unwrap().serve(&mut cx, next).await;
     drop(cx);
