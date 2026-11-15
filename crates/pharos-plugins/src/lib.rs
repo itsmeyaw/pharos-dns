@@ -184,10 +184,10 @@ impl SpecialUse {
     }
 }
 
-// RFC 6761 §§6.1–6.4 and RFC 6303 §4.3: classify reserved suffixes by wire labels without allocating.
+// RFC 6761 §§6.1–6.4 and RFC 6303 §4: classify reserved suffixes by wire labels without allocating.
 #[cfg(pharos_special_use)]
 pub(crate) fn special_use(name: NameRef<'_>) -> Option<SpecialUse> {
-    // RFC 6303 §4.3: avoid reverse-zone storage for names outside `.arpa`.
+    // RFC 6303 §4: avoid reverse-zone storage for names outside `.arpa`.
     let mut last = None;
     for label in name.labels() {
         last = Some(label);
@@ -203,7 +203,7 @@ pub(crate) fn special_use(name: NameRef<'_>) -> Option<SpecialUse> {
         return None;
     }
 
-    // RFC 6303 §4.3: retain the catalogue suffix in bounded stack storage.
+    // RFC 6303 §4: retain the catalogue suffix in bounded stack storage.
     let mut labels = [&[][..]; 34];
     let mut count = 0;
     for label in name.labels() {
@@ -314,17 +314,45 @@ fn has_suffix(labels: &[&[u8]; 34], count: usize, suffix: &[&[u8]]) -> bool {
     feature = "plugin-local"
 ))]
 pub(crate) fn name_within(name: NameRef<'_>, zone: &Name) -> bool {
-    // RFC 1034 §3.1: reuse Zone's established suffix matcher without allocating a Name.
-    let mut wire = [0u8; 255];
-    let mut len = 0;
-    for label in name.labels() {
-        wire[len] = label.len() as u8;
-        len += 1;
-        wire[len..len + label.len()].copy_from_slice(label);
-        len += label.len();
+    #[cfg(any(
+        feature = "plugin-file",
+        feature = "plugin-secondary",
+        feature = "plugin-auto",
+        feature = "plugin-sign",
+        feature = "plugin-dynupdate"
+    ))]
+    {
+        // RFC 1035 §4.1.4: expand compressed NameRef to stack wire for Zone::contains.
+        let mut wire = [0u8; 255];
+        let mut len = 0;
+        for label in name.labels() {
+            wire[len] = label.len() as u8;
+            len += 1;
+            wire[len..len + label.len()].copy_from_slice(label);
+            len += label.len();
+        }
+        wire[len] = 0;
+        crate::zone::contains(&wire[..=len], zone)
     }
-    wire[len] = 0;
-    crate::zone::contains(&wire[..=len], zone)
+    #[cfg(not(any(
+        feature = "plugin-file",
+        feature = "plugin-secondary",
+        feature = "plugin-auto",
+        feature = "plugin-sign",
+        feature = "plugin-dynupdate"
+    )))]
+    {
+        // RFC 1034 §3.1: a Domain contains itself and every name with its label suffix.
+        let zone = NameRef::parse(zone.as_wire(), 0).expect("configured Domain");
+        let count = name.labels().count();
+        let suffix = zone.labels().count();
+        count >= suffix
+            && name
+                .labels()
+                .skip(count - suffix)
+                .zip(zone.labels())
+                .all(|(label, suffix)| label.eq_ignore_ascii_case(suffix))
+    }
 }
 
 // RFC 1035 §4.1.1: share Response buffer validation and MessageBuilder setup across Plugins.
@@ -362,6 +390,10 @@ pub(crate) fn special_nxdomain(
     };
     // RFC 6761 §§6.1, 6.2 and 6.4: answer reserved names locally; RFC 2308 §3: attach an SOA.
     let mut flags = 0x8003 | (query.flags() & 0x7800);
+    // RFC 6303 §3 and RFC 1034 §4.3.2: reverse empty-zone negatives are authoritative.
+    if matches!(special, SpecialUse::Reverse { .. }) {
+        flags |= 0x0400;
+    }
     if recursion_available {
         flags |= 0x0080;
     }
@@ -388,15 +420,21 @@ pub(crate) fn special_nxdomain(
     owner_wire[owner_len] = 0;
     owner_len += 1;
     let owner = NameRef::parse(&owner_wire[..owner_len], 0).expect("special-use Zone suffix");
-    let mut soa = [0u8; 255 + LOCALHOST_NAME.len() + EMPTY_ZONE_SOA_TAIL.len()];
+    let mut soa = [0u8; LOCALHOST_NAME.len() + EMPTY_ZONE_SOA_TAIL.len()];
     soa[..LOCALHOST_NAME.len()].copy_from_slice(LOCALHOST_NAME);
     soa[LOCALHOST_NAME.len()..LOCALHOST_NAME.len() + EMPTY_ZONE_SOA_TAIL.len()]
         .copy_from_slice(EMPTY_ZONE_SOA_TAIL);
+    // RFC 1035 §3.2.5: QCLASS ANY is a wildcard, not a resource-record class.
+    let class = if question.qclass == pharos_proto::Class::ANY {
+        pharos_proto::Class::IN
+    } else {
+        question.qclass
+    };
     if let Err(error) = builder.record(
         pharos_proto::Section::Authority,
         owner,
         pharos_proto::Type::SOA,
-        question.qclass,
+        class,
         604_800,
         &soa[..LOCALHOST_NAME.len() + EMPTY_ZONE_SOA_TAIL.len()],
     ) {

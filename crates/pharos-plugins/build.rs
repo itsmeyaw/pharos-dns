@@ -270,9 +270,11 @@ fn main() {
         writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => {{ let outcome = {call}; if outcome == pharos_server::Outcome::Response && cx.metadata.get(pharos_server::metrics::WRITER_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::metrics::WRITER_METADATA, {name:?}); }} else if matches!(outcome, pharos_server::Outcome::Error(_)) && cx.metadata.get(pharos_server::logging::PLUGIN_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::logging::PLUGIN_METADATA, {name:?}); }} outcome }}, None => self.serve_{next}(cx).await, }} }}").unwrap();
     }
     if special_use_enabled {
+        // RFC 6761 §§6.1–6.4: only terminal QUERYs receive reserved-name negative answers.
+        // The nearest generated serve_i wrapper supplies terminal-response writer metadata.
         code.push_str("async fn serve_");
         write!(code, "{}", enabled.len()).unwrap();
-        code.push_str("(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome { let query = cx.query; if let Some(question) = query.questions().next() && let Some(special) = crate::special_use(question.name) {");
+        code.push_str("(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome { let query = cx.query; if query.opcode() == pharos_proto::Opcode::QUERY && let Some(question) = query.questions().next() && let Some(special) = crate::special_use(question.name) {");
         if enabled.contains(&"local") {
             code.push_str("if let Some(local) = &self.local && let Some(outcome) = local.answer_special(cx, special) { return outcome; }");
         }

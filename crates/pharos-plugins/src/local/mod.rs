@@ -91,7 +91,7 @@ impl Plugin for Local {
                 .last()
                 .is_some_and(|label| label.eq_ignore_ascii_case(b"arpa"))
         }) {
-            // RFC 6303 §4.3: later authoritative Plugins own matching reverse names first.
+            // RFC 6303 §4: later authoritative Plugins own matching reverse names first.
             return next.run(cx).await;
         }
         match self.answer(cx, None) {
@@ -158,7 +158,7 @@ impl Local {
             }
             _ => None,
         };
-        // RFC 6303 §4.3: serve all locally assigned reverse Zones from the shared catalogue.
+        // RFC 6303 §4: serve all locally assigned reverse Zones from the shared catalogue.
         let zone_start = if last.eq_ignore_ascii_case(b"localhost") {
             Some(count - 1)
         } else {
@@ -245,7 +245,7 @@ impl Local {
             // RFC 6303 §3: Include SOA records for negative caching and update discovery.
             let rtype = answer_type.unwrap_or(Type::SOA);
             // RFC 1035 §3.4.1 and RFC 3596 §2.2: encode A and AAAA loopback addresses.
-            let mut soa = [0u8; 255 + crate::EMPTY_ZONE_SOA_TAIL.len()];
+            let mut soa = [0u8; crate::LOCALHOST_NAME.len() + crate::EMPTY_ZONE_SOA_TAIL.len()];
             let rdata: &[u8] = match rtype {
                 Type::A => &[127, 0, 0, 1],
                 Type::AAAA => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],

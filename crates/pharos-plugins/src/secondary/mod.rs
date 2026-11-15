@@ -156,6 +156,7 @@ impl Secondary {
             .max_by_key(|zone| zone.config.apex.label_count())
             .cloned();
         let Some(zone) = zone else {
+            // RFC 6761 §§6.1–6.4: terminal fallback answers unmatched special names.
             if has_next || crate::special_use(question.name).is_some() {
                 return next.run(cx).await;
             }
