@@ -12,6 +12,7 @@
 - Regex rules use Rust regex syntax rather than Go RE2; character classes such as `\d` and `\w` are Unicode-aware by default, unlike Go. Regex captures allocate per Query.
 - Regex matchers share a preallocated, synchronized cache per pattern, so concurrent matches of the same pattern briefly serialize.
 - TTL rewrites leave OPT's extended RCODE, version and flags untouched as required by RFC 6891 §6.1.3; CoreDNS applies its TTL rule to OPT records as well.
+- Non-TTL rewrites preserve each Response record's received TTL; active TTL rules apply RRset-minimum semantics (RFC 2181 §5.2).
 - `edns0 subnet` rewrites only IN Queries. Prefixes are capped at /24 IPv4 and /56 IPv6, and never exceed an incoming ECS SOURCE; `/0` stays `/0`. There is no cap opt-out (RFC 7871 §§5, 7.1.1, 11.1).
 - Rebuilding a rewritten Query or Response rejects malformed or unsupported name-bearing RDATA with SERVFAIL instead of copying it as CoreDNS does.
 
