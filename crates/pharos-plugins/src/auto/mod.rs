@@ -178,6 +178,16 @@ impl Auto {
         // RFC 1035 §4.1.1: REFUSED denies queries; SERVFAIL reports server failure.
         match self.select(cx, has_next) {
             Selection::Next => next.run(cx).await,
+            Selection::Refused
+                if cx
+                    .query
+                    .questions()
+                    .next()
+                    .is_some_and(|question| crate::special_use(question.name).is_some()) =>
+            {
+                // RFC 6761 §§6.1–6.4: leave unmatched special names for terminal fallback.
+                next.run(cx).await
+            }
             Selection::Refused => Outcome::Unanswered(Rcode::REFUSED),
             Selection::Zone(entry) => match entry.current.load_full() {
                 Some(zone) => zone.lookup_auto(cx, next, entry.case_mismatch).await,

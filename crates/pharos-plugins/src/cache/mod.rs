@@ -161,15 +161,30 @@ impl Plugin for Cache {
         let Some(question) = query.questions().next() else {
             return next.run(cx).await;
         };
-        let special = (question.qclass == pharos_proto::Class::IN)
-            .then(|| crate::special_use(question.name))
-            .flatten();
+        let special = crate::special_use(question.name);
+        #[cfg(feature = "plugin-forward")]
+        let upstream_allowed = special.is_some_and(|special| {
+            special.permits_upstream()
+                && self
+                    .chain
+                    .get()
+                    .and_then(Weak::upgrade)
+                    .and_then(|chain| {
+                        chain
+                            .forward
+                            .as_ref()
+                            .map(|forward| forward.allows_special(question.name))
+                    })
+                    .unwrap_or(false)
+        });
+        #[cfg(not(feature = "plugin-forward"))]
+        let upstream_allowed = false;
         let opt = query.opt();
         #[cfg(feature = "plugin-dynupdate")]
         let dynamic = self
             .bypass
             .get()
-            .is_some_and(|zone| contains(question.name, zone));
+            .is_some_and(|zone| crate::name_within(question.name, zone));
         #[cfg(not(feature = "plugin-dynupdate"))]
         let dynamic = false;
         // RFC 8945 §4.1: TSIG records are not cached.
@@ -180,7 +195,7 @@ impl Plugin for Cache {
             // RFC 8945 §4.3.2: TSIG-signed queries bypass cache because the MAC covers the wire.
             || query.additionals().any(|record| record.rtype == Type::TSIG)
             // RFC 6761 §§6.1–6.4: let later owner Plugins handle special names before cache admission.
-            || special.is_some()
+            || special.is_some() && !upstream_allowed
             || question.name.wire_len()
                 != question
                     .name
@@ -192,31 +207,9 @@ impl Plugin for Cache {
                 .config
                 .zones
                 .iter()
-                .any(|zone| contains(question.name, zone))
+                .any(|zone| crate::name_within(question.name, zone))
         {
-            let outcome = next.run(cx).await;
-            if let Some(special) = special
-                && matches!(&outcome, Outcome::Error(pharos_server::Error::NoNextPlugin))
-            {
-                #[cfg(feature = "plugin-file")]
-                let authoritative = self
-                    .chain
-                    .get()
-                    .and_then(Weak::upgrade)
-                    .is_some_and(|chain| chain.file.is_some());
-                #[cfg(not(feature = "plugin-file"))]
-                let authoritative = false;
-                return crate::special_nxdomain(
-                    cx.response,
-                    query,
-                    cx.protocol,
-                    cx.max_response_size,
-                    special,
-                    authoritative,
-                    true,
-                );
-            }
-            return outcome;
+            return next.run(cx).await;
         }
         let metrics = self
             .metrics
@@ -616,7 +609,7 @@ impl Cache {
                     .config
                     .disable_denial
                     .iter()
-                    .any(|zone| contains(question.name, zone))
+                    .any(|zone| crate::name_within(question.name, zone))
             {
                 let ttl = self
                     .denial
@@ -769,7 +762,9 @@ impl Cache {
         // RFC 1034 §4.3.3: Explicit wildcard QNAMEs are never admitted to cache.
         let cacheable = cacheable
             && !has_explicit_wildcard(question.name)
-            && !disabled.iter().any(|zone| contains(question.name, zone));
+            && !disabled
+                .iter()
+                .any(|zone| crate::name_within(question.name, zone));
         if let Ok(mut mutable) = MessageMut::parse(cx.response) {
             mutable.rewrite_ttls(|_| ttl);
         }
@@ -921,19 +916,6 @@ fn answers_question(message: &Message<'_>) -> bool {
             }
         }
     }
-}
-
-fn contains(name: NameRef<'_>, domain: &Name) -> bool {
-    let domain = NameRef::parse(domain.as_wire(), 0).expect("configured Domain");
-    let count = name.labels().count();
-    let suffix = domain.labels().count();
-    count >= suffix
-        && name
-            .labels()
-            .skip(count - suffix)
-            .zip(domain.labels())
-            // RFC 1035 §3.1: DNS labels are compared case-insensitively.
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 struct KeyHash(u64);

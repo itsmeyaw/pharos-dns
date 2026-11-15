@@ -6,8 +6,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-#[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
-use std::sync::{OnceLock, Weak};
 
 use pharos_corefile::{Cursor, Error as CorefileError, normalize_domain};
 use pharos_proto::{Class, Name, NameRef, Opcode, Section, Type};
@@ -15,7 +13,6 @@ use pharos_server::{Context, Error, Next, Outcome, Plugin, metrics::Registry};
 
 // RFC 6303 §3: Set the SOA minimum (negative-cache TTL) equal to the record TTL.
 const TTL: u32 = 604_800;
-const LOCALHOST: &[u8] = b"\x09localhost\0";
 // RFC 1035 §3.3.13: SOA RDATA contains MNAME, RNAME and five 32-bit values.
 // RFC 6303 §3: Serve localhost SOA and NS data to identify empty-zone answers.
 // RFC 6303 §3: Use nobody.invalid. as the SOA RNAME.
@@ -25,8 +22,6 @@ pub struct Local {
     prefix: bool,
     disabled_zones: Vec<Name>,
     counter: Option<Arc<AtomicU64>>,
-    #[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
-    chain: OnceLock<Weak<crate::Chain>>,
 }
 
 impl Local {
@@ -70,14 +65,7 @@ impl Local {
             prefix,
             disabled_zones,
             counter: None,
-            #[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
-            chain: OnceLock::new(),
         })
-    }
-
-    #[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
-    pub(crate) fn bind(&self, chain: &Arc<crate::Chain>) {
-        let _ = self.chain.set(Arc::downgrade(chain));
     }
 
     pub(crate) fn set_metrics(&mut self, registry: &Registry) {
@@ -96,7 +84,17 @@ impl Plugin for Local {
         {
             return next.run(cx).await;
         }
-        match self.answer(cx) {
+        if cx.query.questions().next().is_some_and(|question| {
+            question
+                .name
+                .labels()
+                .last()
+                .is_some_and(|label| label.eq_ignore_ascii_case(b"arpa"))
+        }) {
+            // RFC 6303 §4.3: later authoritative Plugins own matching reverse names first.
+            return next.run(cx).await;
+        }
+        match self.answer(cx, None) {
             Some(outcome) => outcome,
             None => next.run(cx).await,
         }
@@ -104,29 +102,64 @@ impl Plugin for Local {
 }
 
 impl Local {
-    fn answer(&self, cx: &mut Context<'_, '_>) -> Option<Outcome> {
+    pub(crate) fn answer_special(
+        &self,
+        cx: &mut Context<'_, '_>,
+        special: crate::SpecialUse,
+    ) -> Option<Outcome> {
+        self.answer(cx, Some(special))
+    }
+
+    fn answer(
+        &self,
+        cx: &mut Context<'_, '_>,
+        special_use: Option<crate::SpecialUse>,
+    ) -> Option<Outcome> {
         let question = cx.query.questions().next()?;
-        let mut labels = [&[][..]; 127];
+        if question.qclass != Class::IN {
+            return None;
+        }
+        let mut first = None;
+        let mut last = None;
         let mut count = 0;
+        let mut reverse_ptr = true;
         for label in question.name.labels() {
-            labels[count] = label;
+            if count == 0 {
+                first = Some(label);
+            }
+            last = Some(label);
+            let expected = match count {
+                0 => b"1".as_slice(),
+                1 | 2 => b"0",
+                3 => b"127",
+                4 => b"in-addr",
+                5 => b"arpa",
+                _ => {
+                    reverse_ptr = false;
+                    count += 1;
+                    continue;
+                }
+            };
+            reverse_ptr &= label.eq_ignore_ascii_case(expected);
             count += 1;
         }
-        // RFC 4343 §3: compare DNS labels without ASCII case sensitivity.
-        let eq = |i: usize, value: &[u8]| labels[i].eq_ignore_ascii_case(value);
+        let first = first?;
+        let last = last?;
+        let reverse_ptr = reverse_ptr && count == 6;
         // RFC 6761 §6.3: localhost and its subdomains resolve to loopback.
-        let special =
-            count > 1 && (eq(count - 1, b"localhost") || (self.prefix && eq(0, b"localhost")));
-        let reverse_zone_labels = if count > 0 && eq(count - 1, b"localhost") {
-            None
-        } else {
-            match crate::special_use(question.name) {
-                Some(crate::SpecialUse::Reverse { zone_labels }) => Some(zone_labels),
-                _ => None,
+        let special = count > 1
+            && (last.eq_ignore_ascii_case(b"localhost")
+                || (self.prefix && first.eq_ignore_ascii_case(b"localhost")));
+        let reverse_zone_labels = match special_use {
+            Some(crate::SpecialUse::Reverse { zone_labels })
+                if !last.eq_ignore_ascii_case(b"localhost") =>
+            {
+                Some(zone_labels)
             }
+            _ => None,
         };
-        // RFC 6303 §4: serve all locally assigned reverse Zones from the shared catalogue.
-        let zone_start = if count > 0 && eq(count - 1, b"localhost") {
+        // RFC 6303 §4.3: serve all locally assigned reverse Zones from the shared catalogue.
+        let zone_start = if last.eq_ignore_ascii_case(b"localhost") {
             Some(count - 1)
         } else {
             reverse_zone_labels.map(|zone_labels| count - zone_labels)
@@ -135,34 +168,12 @@ impl Local {
             return None;
         }
         // RFC 6303 §3: Let operators disable each locally served reverse Zone independently.
-        if reverse_zone_labels.is_some()
-            && self
-                .disabled_zones
-                .iter()
-                .any(|zone| crate::name_within(question.name, zone))
+        if self
+            .disabled_zones
+            .iter()
+            .any(|zone| crate::name_within(question.name, zone))
         {
             return None;
-        }
-        #[cfg(any(feature = "plugin-file", feature = "plugin-forward"))]
-        if reverse_zone_labels.is_some()
-            && let Some(chain) = self.chain.get().and_then(Weak::upgrade)
-        {
-            #[cfg(feature = "plugin-file")]
-            if chain
-                .file
-                .as_ref()
-                .is_some_and(|file| file.has_zone_for(question.name))
-            {
-                return None;
-            }
-            #[cfg(feature = "plugin-forward")]
-            if chain
-                .forward
-                .as_ref()
-                .is_some_and(|forward| forward.allows_special(question.name))
-            {
-                return None;
-            }
         }
         if special {
             if pharos_server::logging::debug_enabled() {
@@ -181,14 +192,7 @@ impl Local {
             }
         }
         let apex = zone_start == Some(0);
-        let localhost_apex = apex && eq(0, b"localhost");
-        let reverse_ptr = count == 6
-            && eq(0, b"1")
-            && eq(1, b"0")
-            && eq(2, b"0")
-            && eq(3, b"127")
-            && eq(4, b"in-addr")
-            && eq(5, b"arpa");
+        let localhost_apex = apex && first.eq_ignore_ascii_case(b"localhost");
         // RFC 1034 §4.3.2: select records matching the Question type.
         let answer_type = if special || localhost_apex {
             match question.qtype {
@@ -209,7 +213,7 @@ impl Local {
         let mut origin = [0u8; 255];
         let mut len = 0;
         if let Some(start) = zone_start {
-            for label in &labels[start..count] {
+            for label in question.name.labels().skip(start) {
                 origin[len] = label.len() as u8;
                 len += 1;
                 origin[len..len + label.len()].copy_from_slice(label);
@@ -217,14 +221,10 @@ impl Local {
             }
         } else {
             // RFC 6761 §6.3: localhost-prefix aliases use localhost. as their local zone.
-            origin[..LOCALHOST.len()].copy_from_slice(LOCALHOST);
-            len = LOCALHOST.len() - 1;
+            origin[..crate::LOCALHOST_NAME.len()].copy_from_slice(crate::LOCALHOST_NAME);
+            len = crate::LOCALHOST_NAME.len() - 1;
         }
-        let owner = if special || apex {
-            question.name
-        } else {
-            NameRef::parse(&origin[..=len], 0).expect("valid Domain")
-        };
+        let owner = NameRef::parse(&origin[..=len], 0).expect("valid Domain");
         let result = (|| {
             // RFC 1035 §4.1.1 and RFC 4035 §3.2.2: mark a Response and copy opcode, RD and CD.
             // RFC 1034 §4.3.2: mark local-zone answers, including NXDOMAIN, authoritative.
@@ -250,14 +250,15 @@ impl Local {
                 Type::A => &[127, 0, 0, 1],
                 Type::AAAA => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
                 // RFC 6303 §3: use resolvable localhost. as the local NS target.
-                Type::NS => LOCALHOST,
-                Type::PTR => LOCALHOST,
+                Type::NS => crate::LOCALHOST_NAME,
+                Type::PTR => crate::LOCALHOST_NAME,
                 _ => {
                     // RFC 2181 §7.3: make SOA MNAME match the resolvable local NS target.
-                    soa[..LOCALHOST.len()].copy_from_slice(LOCALHOST);
-                    soa[LOCALHOST.len()..LOCALHOST.len() + crate::EMPTY_ZONE_SOA_TAIL.len()]
+                    soa[..crate::LOCALHOST_NAME.len()].copy_from_slice(crate::LOCALHOST_NAME);
+                    soa[crate::LOCALHOST_NAME.len()
+                        ..crate::LOCALHOST_NAME.len() + crate::EMPTY_ZONE_SOA_TAIL.len()]
                         .copy_from_slice(crate::EMPTY_ZONE_SOA_TAIL);
-                    &soa[..LOCALHOST.len() + crate::EMPTY_ZONE_SOA_TAIL.len()]
+                    &soa[..crate::LOCALHOST_NAME.len() + crate::EMPTY_ZONE_SOA_TAIL.len()]
                 }
             };
             // RFC 2181 §7.2: SOA answers retain a nonzero TTL instead of forcing TTL zero.

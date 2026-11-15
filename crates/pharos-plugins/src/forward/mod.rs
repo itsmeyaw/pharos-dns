@@ -9,7 +9,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use pharos_proto::{Class, Message, Name, NameRef, Rcode};
+use pharos_proto::{Message, Name, NameRef, Rcode};
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol, metrics::ForwardMetrics};
 use tokio::time::{Instant, timeout_at};
 
@@ -128,20 +128,6 @@ impl std::fmt::Debug for Forward {
     }
 }
 
-// RFC 1034 §3.1: a subdomain's name ends with its containing domain's name.
-fn contains(name: NameRef<'_>, domain: &Name) -> bool {
-    let domain = NameRef::parse(domain.as_wire(), 0).expect("valid configured Domain");
-    let count = name.labels().count();
-    let suffix = domain.labels().count();
-    count >= suffix
-        && name
-            .labels()
-            .skip(count - suffix)
-            .zip(domain.labels())
-            // RFC 4343 §3: ASCII letters in DNS names compare without regard to case.
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
-}
-
 fn random(max: usize) -> usize {
     let mut bytes = [0_u8; 8];
     if getrandom::getrandom(&mut bytes).is_err() {
@@ -188,12 +174,16 @@ impl Forward {
                     .map_err(|_| cursor.error(format!("invalid Domain {name}")))
             };
             let from = parse_name(&config.from)?;
+            let from_special = NameRef::parse(from.as_wire(), 0)
+                .ok()
+                .and_then(crate::special_use);
+            // RFC 6761 §6.4: `.invalid` names are guaranteed negative and cannot be forwarded.
+            if from_special == Some(crate::SpecialUse::Invalid) {
+                return Err(cursor.error("cannot forward .invalid"));
+            }
             // RFC 6761 §§6.1–6.2: explicit special-use forwarding Zones are opt-in by configuration.
             let configured_special_zone = from.as_wire() != [0]
-                && NameRef::parse(from.as_wire(), 0)
-                    .ok()
-                    .and_then(crate::special_use)
-                    .is_some_and(crate::SpecialUse::permits_upstream);
+                && from_special.is_some_and(crate::SpecialUse::permits_upstream);
             let ignored = config
                 .except
                 .iter()
@@ -280,9 +270,12 @@ impl Forward {
         // RFC 6761 §§6.1–6.2: permit special-name forwarding only inside opted-in, non-excluded stanzas.
         self.stanzas.iter().any(|stanza| {
             stanza.allow_special
-                && contains(name, &stanza.from)
+                && crate::name_within(name, &stanza.from)
                 && (name == NameRef::parse(stanza.from.as_wire(), 0).expect("configured Domain")
-                    || !stanza.ignored.iter().any(|ignored| contains(name, ignored)))
+                    || !stanza
+                        .ignored
+                        .iter()
+                        .any(|ignored| crate::name_within(name, ignored)))
         })
     }
 }
@@ -290,7 +283,6 @@ impl Forward {
 // RFC 6761 §§6.1–6.2: opt in via allow_special or a non-root special-use Forward Zone.
 impl Plugin for Forward {
     async fn serve<N: Next + Send>(&self, cx: &mut Context<'_, '_>, next: N) -> Outcome {
-        let query = cx.query;
         let root = [0];
         let name = cx.query.questions().next().map_or_else(
             || NameRef::parse(&root, 0).expect("root"),
@@ -300,27 +292,21 @@ impl Plugin for Forward {
             .query
             .questions()
             .next()
-            .filter(|question| question.qclass == Class::IN)
             .and_then(|question| crate::special_use(question.name));
         if let Some(special) = special
             && (!special.permits_upstream() || !self.allows_special(name))
         {
-            // RFC 6761 §§6.1, 6.2 and 6.4: special names never reach public Upstreams by default.
-            return crate::special_nxdomain(
-                cx.response,
-                query,
-                cx.protocol,
-                cx.max_response_size,
-                special,
-                false,
-                true,
-            );
+            // RFC 6761 §§6.1, 6.2 and 6.4: defer reserved names to the Chain's terminal answer.
+            return next.run(cx).await;
         }
         // RFC 6761 §6.5: Forward example names like other DNS names.
         for (index, stanza) in self.stanzas.iter().enumerate() {
-            if !contains(name, &stanza.from)
+            if !crate::name_within(name, &stanza.from)
                 || (name != stanza.from
-                    && stanza.ignored.iter().any(|ignored| contains(name, ignored)))
+                    && stanza
+                        .ignored
+                        .iter()
+                        .any(|ignored| crate::name_within(name, ignored)))
             {
                 continue;
             }

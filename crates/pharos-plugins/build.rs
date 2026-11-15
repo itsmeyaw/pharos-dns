@@ -39,6 +39,7 @@ fn registered_handler(name: &str) -> bool {
 
 fn main() {
     println!("cargo:rerun-if-changed=plugin.cfg");
+    println!("cargo:rustc-check-cfg=cfg(pharos_special_use)");
     let source = fs::read_to_string("plugin.cfg").expect("plugin.cfg");
     let enabled: Vec<_> = source
         .lines()
@@ -51,6 +52,10 @@ fn main() {
             env::var_os(feature).map(|_| name)
         })
         .collect();
+    let special_use_enabled = enabled.iter().any(|name| registered_handler(name));
+    if special_use_enabled {
+        println!("cargo:rustc-cfg=pharos_special_use");
+    }
 
     let mut code = String::from(
         "#[derive(Debug, Default)]\npub struct Chain {\npub lifecycle: pharos_server::Lifecycle,\n",
@@ -264,7 +269,22 @@ fn main() {
         };
         writeln!(code, "async fn serve_{i}(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ match &self.r#{name} {{ Some(plugin) => {{ let outcome = {call}; if outcome == pharos_server::Outcome::Response && cx.metadata.get(pharos_server::metrics::WRITER_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::metrics::WRITER_METADATA, {name:?}); }} else if matches!(outcome, pharos_server::Outcome::Error(_)) && cx.metadata.get(pharos_server::logging::PLUGIN_METADATA).is_none_or(str::is_empty) {{ cx.metadata.insert(pharos_server::logging::PLUGIN_METADATA, {name:?}); }} outcome }}, None => self.serve_{next}(cx).await, }} }}").unwrap();
     }
-    writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
+    if special_use_enabled {
+        code.push_str("async fn serve_");
+        write!(code, "{}", enabled.len()).unwrap();
+        code.push_str("(&self, cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome { let query = cx.query; if let Some(question) = query.questions().next() && let Some(special) = crate::special_use(question.name) {");
+        if enabled.contains(&"local") {
+            code.push_str("if let Some(local) = &self.local && let Some(outcome) = local.answer_special(cx, special) { return outcome; }");
+        }
+        let recursion_available = if enabled.contains(&"forward") {
+            "self.forward.is_some()"
+        } else {
+            "false"
+        };
+        writeln!(code, "return crate::special_nxdomain(cx.response, query, cx.protocol, cx.max_response_size, special, {recursion_available}); }} pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}").unwrap();
+    } else {
+        writeln!(code, "async fn serve_{}(&self, _cx: &mut pharos_server::Context<'_>) -> pharos_server::Outcome {{ pharos_server::Outcome::Error(pharos_server::Error::NoNextPlugin) }}", enabled.len()).unwrap();
+    }
     code.push_str("}\n");
     code.push_str("impl pharos_server::Chain for Chain {\n#[inline]\nfn serve(&self, cx: &mut pharos_server::Context<'_>) -> impl std::future::Future<Output = pharos_server::Outcome> + Send { Chain::serve(self, cx) }\nfn is_empty(&self) -> bool { true");
     for name in &enabled {

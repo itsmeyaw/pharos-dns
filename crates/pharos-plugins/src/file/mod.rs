@@ -9,16 +9,12 @@ mod transfer;
 pub use crate::zone::Zone;
 use crate::zone::{ZoneHolder, contains};
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
-#[cfg(feature = "plugin-local")]
-use pharos_proto::NameRef;
-use pharos_proto::{Class, Name, Rcode};
 #[cfg(test)]
-use pharos_proto::{Message, MessageBuilder, Section, Type, zone::ZoneParser};
+use pharos_proto::{Class, Message, MessageBuilder, NameRef, Section, Type, zone::ZoneParser};
+use pharos_proto::{Name, Rcode};
 #[cfg(test)]
 use pharos_server::Protocol;
 use pharos_server::{Context, Next, Outcome, Plugin};
-#[cfg(feature = "plugin-forward")]
-use std::sync::{OnceLock, Weak};
 use std::{
     io::{BufReader, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -132,8 +128,6 @@ pub struct File {
     zones: Vec<Arc<Loaded>>,
     fallthrough: Vec<Name>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    #[cfg(feature = "plugin-forward")]
-    chain: OnceLock<Weak<crate::Chain>>,
     #[cfg(feature = "plugin-transfer")]
     notifier: crate::zone::ZoneNotifier,
     #[cfg(feature = "plugin-transfer")]
@@ -264,8 +258,6 @@ impl File {
             zones,
             fallthrough,
             tasks: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(feature = "plugin-forward")]
-            chain: OnceLock::new(),
             #[cfg(feature = "plugin-transfer")]
             notifier: crate::zone::ZoneNotifier::default(),
             #[cfg(feature = "plugin-transfer")]
@@ -358,18 +350,6 @@ impl File {
 }
 
 impl File {
-    #[cfg(feature = "plugin-forward")]
-    pub(crate) fn bind(&self, chain: &Arc<crate::Chain>) {
-        let _ = self.chain.set(Arc::downgrade(chain));
-    }
-
-    #[cfg(feature = "plugin-local")]
-    pub(crate) fn has_zone_for(&self, name: NameRef<'_>) -> bool {
-        self.zones
-            .iter()
-            .any(|zone| crate::name_within(name, &zone.apex))
-    }
-
     pub(crate) async fn serve_with<N: Next + Send>(
         &self,
         cx: &mut Context<'_, '_>,
@@ -395,57 +375,15 @@ impl File {
             .filter(|zone| contains(name, &zone.apex))
             .max_by_key(|zone| zone.apex.label_count())
         else {
-            if let Some(special) = (question.qclass == Class::IN)
-                .then(|| crate::special_use(question.name))
-                .flatten()
-            {
-                #[cfg(feature = "plugin-forward")]
-                let upstream_allowed = special.permits_upstream()
-                    && self
-                        .chain
-                        .get()
-                        .and_then(Weak::upgrade)
-                        .and_then(|chain| {
-                            chain
-                                .forward
-                                .as_ref()
-                                .map(|forward| forward.allows_special(question.name))
-                        })
-                        .unwrap_or(false);
-                #[cfg(not(feature = "plugin-forward"))]
-                let upstream_allowed = false;
-                // RFC 6761 §§6.1–6.4: let later owner Plugins run before File's terminal negative.
-                if !upstream_allowed {
-                    if !has_next {
-                        return crate::special_nxdomain(
-                            cx.response,
-                            cx.query,
-                            cx.protocol,
-                            cx.max_response_size,
-                            special,
-                            true,
-                            false,
-                        );
-                    }
-                    let outcome = next.run(cx).await;
-                    if matches!(&outcome, Outcome::Error(pharos_server::Error::NoNextPlugin)) {
-                        return crate::special_nxdomain(
-                            cx.response,
-                            cx.query,
-                            cx.protocol,
-                            cx.max_response_size,
-                            special,
-                            true,
-                            false,
-                        );
-                    }
-                    return outcome;
-                }
+            if has_next {
+                return next.run(cx).await;
             }
-            return if has_next {
-                next.run(cx).await
-            } else {
+            // RFC 6761 §§6.1–6.4: terminal special-name Responses supersede File's no-zone REFUSED.
+            let outcome = next.run(cx).await;
+            return if matches!(&outcome, Outcome::Error(pharos_server::Error::NoNextPlugin)) {
                 Outcome::Unanswered(Rcode::REFUSED)
+            } else {
+                outcome
             };
         };
         let snapshot = loaded.current.load();

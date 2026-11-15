@@ -5,8 +5,13 @@
 //! configuration rather than silently accepting it.
 
 use pharos_corefile::{BlockContext, Cursor, Directive, Error};
-#[cfg(feature = "plugin-local")]
+#[cfg(any(
+    feature = "plugin-cache",
+    feature = "plugin-forward",
+    feature = "plugin-local"
+))]
 use pharos_proto::Name;
+#[cfg(pharos_special_use)]
 use pharos_proto::NameRef;
 use pharos_server::{Lifecycle, ListenerKey, Router, Server, Transport};
 use std::{
@@ -146,10 +151,16 @@ pub mod whoami;
 
 include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
 
+#[cfg(pharos_special_use)]
+// RFC 2181 §7.3 and RFC 6303 §3: empty-zone SOA MNAME is resolvable localhost.
+pub(crate) const LOCALHOST_NAME: &[u8] = b"\x09localhost\0";
+
 // RFC 6303 §3 and RFC 1035 §3.3.13: shared SOA RNAME and timers for empty Zones.
+#[cfg(pharos_special_use)]
 pub(crate) const EMPTY_ZONE_SOA_TAIL: &[u8] =
     b"\x06nobody\x07invalid\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\x09\x3a\x80";
 
+#[cfg(pharos_special_use)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SpecialUse {
     Test,
@@ -157,6 +168,7 @@ pub(crate) enum SpecialUse {
     Reverse { zone_labels: usize },
 }
 
+#[cfg(pharos_special_use)]
 impl SpecialUse {
     // RFC 6761 §§6.1–6.2 permit opt-in forwarding only for private reverse and test names.
     #[cfg(feature = "plugin-forward")]
@@ -172,28 +184,31 @@ impl SpecialUse {
     }
 }
 
-// RFC 6761 §§6.1–6.4 and RFC 6303 §4: classify reserved suffixes by wire labels without allocating.
+// RFC 6761 §§6.1–6.4 and RFC 6303 §4.3: classify reserved suffixes by wire labels without allocating.
+#[cfg(pharos_special_use)]
 pub(crate) fn special_use(name: NameRef<'_>) -> Option<SpecialUse> {
-    // RFC 1035 §2.3.4: retain only the longest reserved suffix while walking the name once.
-    let mut labels = [&[][..]; 34];
-    let mut count = 0;
+    // RFC 6303 §4.3: avoid reverse-zone storage for names outside `.arpa`.
+    let mut last = None;
     for label in name.labels() {
-        labels[count % labels.len()] = label;
-        count += 1;
+        last = Some(label);
     }
-    if count == 0 {
-        return None;
-    }
-    let last = labels[(count - 1) % labels.len()];
+    let last = last?;
     if last.eq_ignore_ascii_case(b"test") {
         return Some(SpecialUse::Test);
     }
     if last.eq_ignore_ascii_case(b"invalid") {
         return Some(SpecialUse::Invalid);
     }
-    // RFC 6303 §4: skip the reverse-zone catalogue for ordinary non-reverse QNAMEs.
     if !last.eq_ignore_ascii_case(b"arpa") {
         return None;
+    }
+
+    // RFC 6303 §4.3: retain the catalogue suffix in bounded stack storage.
+    let mut labels = [&[][..]; 34];
+    let mut count = 0;
+    for label in name.labels() {
+        labels[count % labels.len()] = label;
+        count += 1;
     }
     let in_addr = has_suffix(&labels, count, &[b"in-addr", b"arpa"]);
     let ip6 = has_suffix(&labels, count, &[b"ip6", b"arpa"]);
@@ -271,6 +286,7 @@ pub(crate) fn special_use(name: NameRef<'_>) -> Option<SpecialUse> {
     None
 }
 
+#[cfg(pharos_special_use)]
 fn has_ipv6_zone_suffix(labels: &[&[u8]; 34], count: usize, first: &[u8]) -> bool {
     count >= 34
         && (0..34).all(|index| {
@@ -284,6 +300,7 @@ fn has_ipv6_zone_suffix(labels: &[&[u8]; 34], count: usize, first: &[u8]) -> boo
         })
 }
 
+#[cfg(pharos_special_use)]
 fn has_suffix(labels: &[&[u8]; 34], count: usize, suffix: &[&[u8]]) -> bool {
     count >= suffix.len()
         && suffix.iter().rev().enumerate().all(|(index, suffix)| {
@@ -291,39 +308,27 @@ fn has_suffix(labels: &[&[u8]; 34], count: usize, suffix: &[&[u8]]) -> bool {
         })
 }
 
-#[cfg(feature = "plugin-local")]
+#[cfg(any(
+    feature = "plugin-cache",
+    feature = "plugin-forward",
+    feature = "plugin-local"
+))]
 pub(crate) fn name_within(name: NameRef<'_>, zone: &Name) -> bool {
-    #[cfg(feature = "plugin-file")]
-    {
-        // RFC 1034 §3.1: reuse Zone's established suffix matcher without allocating a Name.
-        let mut wire = [0u8; 255];
-        let mut len = 0;
-        for label in name.labels() {
-            wire[len] = label.len() as u8;
-            len += 1;
-            wire[len..len + label.len()].copy_from_slice(label);
-            len += label.len();
-        }
-        wire[len] = 0;
+    // RFC 1034 §3.1: reuse Zone's established suffix matcher without allocating a Name.
+    let mut wire = [0u8; 255];
+    let mut len = 0;
+    for label in name.labels() {
+        wire[len] = label.len() as u8;
         len += 1;
-        crate::zone::contains(&wire[..len], zone)
+        wire[len..len + label.len()].copy_from_slice(label);
+        len += label.len();
     }
-    #[cfg(not(feature = "plugin-file"))]
-    {
-        // RFC 1034 §3.1: a Domain contains itself and every name with its label suffix.
-        let zone = NameRef::parse(zone.as_wire(), 0).expect("configured Domain");
-        let count = name.labels().count();
-        let suffix = zone.labels().count();
-        count >= suffix
-            && name
-                .labels()
-                .skip(count - suffix)
-                .zip(zone.labels())
-                .all(|(label, suffix)| label.eq_ignore_ascii_case(suffix))
-    }
+    wire[len] = 0;
+    crate::zone::contains(&wire[..=len], zone)
 }
 
 // RFC 1035 §4.1.1: share Response buffer validation and MessageBuilder setup across Plugins.
+#[cfg(pharos_special_use)]
 pub(crate) fn response_builder<'a>(
     response: &'a mut Vec<u8>,
     query: pharos_proto::Message<'_>,
@@ -343,23 +348,20 @@ pub(crate) fn response_builder<'a>(
         .map_err(pharos_server::Error::Build)
 }
 
+#[cfg(pharos_special_use)]
 pub(crate) fn special_nxdomain(
     response: &mut Vec<u8>,
     query: pharos_proto::Message<'_>,
     protocol: pharos_server::Protocol,
     max_response_size: usize,
     special: SpecialUse,
-    authoritative: bool,
     recursion_available: bool,
 ) -> pharos_server::Outcome {
     let Some(question) = query.questions().next() else {
         return pharos_server::Outcome::Drop;
     };
-    // RFC 6761 §§6.1, 6.2 and 6.4: answer reserved names locally; RFC 2308 §5: attach an SOA.
+    // RFC 6761 §§6.1, 6.2 and 6.4: answer reserved names locally; RFC 2308 §3: attach an SOA.
     let mut flags = 0x8003 | (query.flags() & 0x7800);
-    if authoritative {
-        flags |= 0x0400;
-    }
     if recursion_available {
         flags |= 0x0080;
     }
@@ -386,21 +388,65 @@ pub(crate) fn special_nxdomain(
     owner_wire[owner_len] = 0;
     owner_len += 1;
     let owner = NameRef::parse(&owner_wire[..owner_len], 0).expect("special-use Zone suffix");
-    let mut soa = [0u8; 255 + EMPTY_ZONE_SOA_TAIL.len()];
-    soa[..owner_len].copy_from_slice(&owner_wire[..owner_len]);
-    soa[owner_len..owner_len + EMPTY_ZONE_SOA_TAIL.len()].copy_from_slice(EMPTY_ZONE_SOA_TAIL);
+    let mut soa = [0u8; 255 + LOCALHOST_NAME.len() + EMPTY_ZONE_SOA_TAIL.len()];
+    soa[..LOCALHOST_NAME.len()].copy_from_slice(LOCALHOST_NAME);
+    soa[LOCALHOST_NAME.len()..LOCALHOST_NAME.len() + EMPTY_ZONE_SOA_TAIL.len()]
+        .copy_from_slice(EMPTY_ZONE_SOA_TAIL);
     if let Err(error) = builder.record(
         pharos_proto::Section::Authority,
         owner,
         pharos_proto::Type::SOA,
-        pharos_proto::Class::IN,
+        question.qclass,
         604_800,
-        &soa[..owner_len + EMPTY_ZONE_SOA_TAIL.len()],
+        &soa[..LOCALHOST_NAME.len() + EMPTY_ZONE_SOA_TAIL.len()],
     ) {
         return pharos_server::Outcome::Error(pharos_server::Error::Build(error));
     }
     let _ = builder.finish();
     pharos_server::Outcome::Response
+}
+
+#[cfg(all(test, pharos_special_use))]
+mod special_use_tests {
+    use super::{SpecialUse, special_use};
+    use pharos_proto::Name;
+
+    fn classify(name: &str) -> Option<SpecialUse> {
+        let name: Name = name.parse().unwrap();
+        special_use(name.as_name_ref())
+    }
+
+    #[test]
+    fn recognizes_reserved_apices_and_mixed_case() {
+        assert_eq!(classify("test."), Some(SpecialUse::Test));
+        assert_eq!(classify("invalid."), Some(SpecialUse::Invalid));
+        assert_eq!(classify("Api.TeSt."), Some(SpecialUse::Test));
+        assert_eq!(classify("InVaLiD."), Some(SpecialUse::Invalid));
+    }
+
+    #[test]
+    fn reverse_catalogue_requires_a_zone_suffix() {
+        assert_eq!(classify("in-addr.arpa."), None);
+        assert_eq!(
+            classify("255.in-addr.arpa."),
+            Some(SpecialUse::Reverse { zone_labels: 3 })
+        );
+    }
+
+    #[test]
+    fn ipv6_reverse_zero_zones_require_34_labels_and_allow_prefixes() {
+        let short = format!("1.{}.ip6.arpa.", vec!["0"; 30].join("."));
+        let zone = format!("1.{}.ip6.arpa.", vec!["0"; 31].join("."));
+        assert_eq!(classify(&short), None);
+        assert_eq!(
+            classify(&zone),
+            Some(SpecialUse::Reverse { zone_labels: 34 })
+        );
+        assert_eq!(
+            classify(&format!("host.{zone}")),
+            Some(SpecialUse::Reverse { zone_labels: 34 })
+        );
+    }
 }
 
 /// Plugin-specific CoreDNS compatibility notes in their documented order.
@@ -777,17 +823,6 @@ pub fn servers_with_registry(
         #[cfg(feature = "plugin-cache")]
         if let Some(cache) = &chain.cache {
             cache.bind(&chain);
-        }
-        #[cfg(all(
-            feature = "plugin-local",
-            any(feature = "plugin-file", feature = "plugin-forward")
-        ))]
-        if let Some(local) = &chain.local {
-            local.bind(&chain);
-        }
-        #[cfg(all(feature = "plugin-file", feature = "plugin-forward"))]
-        if let Some(file) = &chain.file {
-            file.bind(&chain);
         }
         #[cfg(feature = "plugin-forward")]
         if chain.forward.is_some() {

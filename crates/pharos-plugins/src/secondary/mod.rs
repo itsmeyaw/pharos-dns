@@ -156,11 +156,10 @@ impl Secondary {
             .max_by_key(|zone| zone.config.apex.label_count())
             .cloned();
         let Some(zone) = zone else {
-            return if has_next {
-                next.run(cx).await
-            } else {
-                Outcome::Unanswered(Rcode::REFUSED)
-            };
+            if has_next || crate::special_use(question.name).is_some() {
+                return next.run(cx).await;
+            }
+            return Outcome::Unanswered(Rcode::REFUSED);
         };
         if cx.query.opcode() == Opcode::NOTIFY {
             return handle_notify(&zone, cx);
