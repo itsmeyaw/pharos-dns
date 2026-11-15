@@ -165,6 +165,29 @@ fn zone_record(record: Record<'_>, scratch: &mut Vec<u8>) -> io::Result<ZoneReco
     })
 }
 
+type Built = (crate::zone::Zone, Option<super::catalog::Catalog>);
+
+fn build(apex: Name, mut records: Vec<ZoneRecord>, want_catalog: bool) -> Result<Built, String> {
+    // RFC 5936 §2.2: Sort and remove duplicate RRs without a second full-size index.
+    records.sort_unstable_by(|a, b| {
+        a.owner
+            .cmp(&b.owner)
+            .then(a.rtype.cmp(&b.rtype))
+            .then(a.class.cmp(&b.class))
+            .then(a.ttl.cmp(&b.ttl))
+            .then(a.rdata.cmp(&b.rdata))
+    });
+    records.dedup();
+    // RFC 9432 §5.1: Parse the catalog from borrowed records before the Zone takes them.
+    let catalog = if want_catalog {
+        Some(super::catalog::parse(&apex, &records).map_err(str::to_owned)?)
+    } else {
+        None
+    };
+    // RFC 1034 §4.3.5: replace the Zone only with a complete, valid transfer.
+    Ok((crate::zone::Zone::from_records(apex, records)?, catalog))
+}
+
 async fn transfer_inner(
     shared: &Arc<Shared>,
     zone: &SecondaryZone,
@@ -201,42 +224,25 @@ async fn transfer_inner(
         .await;
         match result {
             Ok(()) => {
-                // RFC 5936 §2.2: Sort and remove duplicate RRs without a second full-size index.
-                records.sort_unstable_by(|a, b| {
-                    a.owner
-                        .cmp(&b.owner)
-                        .then(a.rtype.cmp(&b.rtype))
-                        .then(a.class.cmp(&b.class))
-                        .then(a.ttl.cmp(&b.ttl))
-                        .then(a.rdata.cmp(&b.rdata))
-                });
-                records.dedup();
-                // RFC 5936 §6: publish a validated Zone snapshot atomically after transfer.
-                let next = match crate::zone::Zone::from_records(
-                    zone.config.apex.clone(),
-                    records.clone(),
-                ) {
-                    Ok(next) => next,
-                    Err(err) => {
-                        if zone.config.catalog.is_some() {
+                let apex = zone.config.apex.clone();
+                let want_catalog = zone.config.catalog.is_some();
+                // Sorting and indexing a large Zone would stall the async worker's other tasks.
+                let built = tokio::task::spawn_blocking(move || build(apex, records, want_catalog))
+                    .await
+                    .map_err(io::Error::other);
+                let (next, catalog) = match built {
+                    Ok(Ok(built)) => built,
+                    Ok(Err(err)) => {
+                        if want_catalog {
                             super::catalog::invalidate(shared, zone);
                         }
                         error = io::Error::other(err);
                         continue;
                     }
-                };
-                // RFC 9432 §5.1: Apply catalog changes after each valid transfer.
-                let catalog = if zone.config.catalog.is_some() {
-                    match super::catalog::parse(&zone.config.apex, &records) {
-                        Ok(catalog) => Some(catalog),
-                        Err(parse_error) => {
-                            super::catalog::invalidate(shared, zone);
-                            error = io::Error::other(parse_error);
-                            continue;
-                        }
+                    Err(err) => {
+                        error = err;
+                        continue;
                     }
-                } else {
-                    None
                 };
                 zone.current.store(Some(Arc::new(next)));
                 zone.expired.store(false, Ordering::Relaxed);
