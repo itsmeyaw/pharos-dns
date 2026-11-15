@@ -33,7 +33,7 @@
 - RFC 4035 §4.6: Upstream AD is retained for clients requesting AD/DO without a secure-channel policy, matching CoreDNS behavior.
 - RFC 2181 §5.2: Cache hits retain each RRset's own minimum TTL rather than CoreDNS's response-wide minimum.
 - RFC 5452 §6: Cache hits omit non-OPT Additional records, unlike CoreDNS's Extra retention, to avoid caching unvalidated glue.
-- RFC 6672 §§3.2, 3.4: Cached DNAME Answers are not synthesized for descendant QNAMEs; those Queries go upstream.
+- RFC 6672 §§3.2, 3.4.1: Cached DNAME Answers are not synthesized for descendant QNAMEs; those Queries go upstream.
 
 ## cancel
 
