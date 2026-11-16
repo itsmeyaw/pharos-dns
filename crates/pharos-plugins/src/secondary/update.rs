@@ -59,7 +59,7 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
             {
                 false
             } else {
-                // CoreDNS compares interface-name zones literally.
+                // RFC 4007 §11.2: Match textual zones to the peer's interface name.
                 client.scope_id() != 0
                     && nix::net::if_::if_indextoname(client.scope_id())
                         .is_ok_and(|name| name.as_bytes() == scope.as_bytes())
