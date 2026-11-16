@@ -159,20 +159,37 @@ pub async fn axfr(
     deadline: Duration,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(None, address, zone, id, deadline, None, on_message).await
+    let mut connection = AxfrConnection {
+        socket: None,
+        fallback_address: address,
+        received_bytes: false,
+    };
+    axfr_inner(&mut connection, zone, id, deadline, None, on_message).await
 }
 
 /// Receive an AXFR over an existing TCP connection.
 /// RFC 9103 §6.3.1: Reuse the connection that performed the SOA check.
 pub async fn axfr_on_connection(
     socket: TcpStream,
-    address: SocketAddr,
+    fallback_address: SocketAddr,
     zone: &Name,
     id: u16,
     deadline: Duration,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(Some(socket), address, zone, id, deadline, None, on_message).await
+    let mut connection = AxfrConnection {
+        socket: Some(socket),
+        fallback_address,
+        received_bytes: false,
+    };
+    let mut on_message = on_message;
+    match axfr_inner(&mut connection, zone, id, deadline, None, &mut on_message).await {
+        Err(error) if !connection.received_bytes && stale_connection(&error) => {
+            // RFC 9103 §6.3.1: Retry once if the reused connection closed before AXFR data arrived.
+            axfr_inner(&mut connection, zone, id, deadline, None, &mut on_message).await
+        }
+        result => result,
+    }
 }
 
 /// Compatibility alias for [`axfr`] that retains the legacy public name.
@@ -183,7 +200,12 @@ pub async fn axfr_coredns(
     deadline: Duration,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(None, address, zone, id, deadline, None, on_message).await
+    let mut connection = AxfrConnection {
+        socket: None,
+        fallback_address: address,
+        received_bytes: false,
+    };
+    axfr_inner(&mut connection, zone, id, deadline, None, on_message).await
 }
 
 /// Receive an authenticated AXFR incrementally. Discard partial data on error;
@@ -197,12 +219,56 @@ pub async fn axfr_signed(
     key: &TsigKey,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(None, address, zone, id, deadline, Some(key), on_message).await
+    let mut connection = AxfrConnection {
+        socket: None,
+        fallback_address: address,
+        received_bytes: false,
+    };
+    axfr_inner(&mut connection, zone, id, deadline, Some(key), on_message).await
+}
+
+fn stale_connection(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+    )
+}
+
+async fn read_axfr_frame(
+    socket: &mut TcpStream,
+    wire: &mut Vec<u8>,
+    received_bytes: &mut bool,
+) -> io::Result<()> {
+    let mut length = [0; 2];
+    let mut offset = 0;
+    while offset < length.len() {
+        let count = socket.read(&mut length[offset..]).await?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "closed before AXFR response",
+            ));
+        }
+        *received_bytes = true;
+        offset += count;
+    }
+    wire.resize(usize::from(u16::from_be_bytes(length)), 0);
+    socket.read_exact(wire).await?;
+    Ok(())
+}
+
+struct AxfrConnection {
+    socket: Option<TcpStream>,
+    fallback_address: SocketAddr,
+    received_bytes: bool,
 }
 
 async fn axfr_inner(
-    connection: Option<TcpStream>,
-    address: SocketAddr,
+    connection: &mut AxfrConnection,
     zone: &Name,
     id: u16,
     deadline: Duration,
@@ -241,9 +307,9 @@ async fn axfr_inner(
         None
     };
     // RFC 5936 §2: AXFR sessions use TCP.
-    let mut socket = match connection {
+    let mut socket = match connection.socket.take() {
         Some(socket) => socket,
-        None => timeout(deadline, TcpStream::connect(address)).await??,
+        None => timeout(deadline, TcpStream::connect(connection.fallback_address)).await??,
     };
     // RFC 1035 §4.2.2: TCP Messages are prefixed with a two-octet length.
     timeout(deadline, crate::write_tcp_frame(&mut socket, &query)).await??;
@@ -251,12 +317,10 @@ async fn axfr_inner(
     let mut opening = None;
     loop {
         // RFC 5936 §2.3: A closed TCP connection terminates this AXFR session.
-        timeout(deadline, async {
-            let length = socket.read_u16().await?;
-            wire.resize(usize::from(length), 0);
-            socket.read_exact(&mut wire).await?;
-            Ok::<_, io::Error>(())
-        })
+        timeout(
+            deadline,
+            read_axfr_frame(&mut socket, &mut wire, &mut connection.received_bytes),
+        )
         .await??;
         if let Some(verifier) = verifier.as_mut() {
             let now = std::time::SystemTime::now()

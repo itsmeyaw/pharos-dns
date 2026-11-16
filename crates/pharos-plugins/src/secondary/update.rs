@@ -47,15 +47,23 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
         (SocketAddr::V4(_), None) => true,
         (SocketAddr::V6(client), None) => client.scope_id() == 0,
         (SocketAddr::V6(client), Some(scope)) => {
-            // RFC 4007 §11.2: Numeric zone IDs are scope indexes; names identify interfaces.
-            // RFC 4007 §11: a scoped IPv6 address identifies an interface zone.
-            // CoreDNS compares the zone text Go renders: the interface name.
-            client.scope_id() != 0
-                && match scope.parse::<u32>() {
-                    Ok(index) => index == client.scope_id(),
-                    Err(_) => nix::net::if_::if_indextoname(client.scope_id())
-                        .is_ok_and(|name| name.as_bytes() == scope.as_bytes()),
-                }
+            // RFC 4007 §11.2: Numeric zone IDs are ASCII decimal scope indexes; names identify interfaces.
+            if scope.bytes().all(|byte| byte.is_ascii_digit()) {
+                scope.parse::<u32>().ok() == Some(client.scope_id())
+            } else if scope
+                .strip_prefix('+')
+                .or_else(|| scope.strip_prefix('-'))
+                .is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+                })
+            {
+                false
+            } else {
+                // CoreDNS compares interface-name zones literally.
+                client.scope_id() != 0
+                    && nix::net::if_::if_indextoname(client.scope_id())
+                        .is_ok_and(|name| name.as_bytes() == scope.as_bytes())
+            }
         }
         (SocketAddr::V4(_), Some(_)) => false,
     }
@@ -95,7 +103,8 @@ fn random_delay(_: u16) -> u16 {
 
 // RFC 1034 §2.4: name servers periodically refresh zones from master copies.
 pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::Result<()> {
-    transfer_inner(shared, zone, None, None).await
+    let transfer = zone.transfer_lock.lock().await;
+    transfer_inner(shared, zone, None, None, transfer).await
 }
 
 pub(super) async fn transfer_on_connection(
@@ -103,8 +112,20 @@ pub(super) async fn transfer_on_connection(
     zone: &SecondaryZone,
     primary: SocketAddr,
     socket: tokio::net::TcpStream,
+    transfer: Option<tokio::sync::MutexGuard<'_, ()>>,
 ) -> io::Result<()> {
-    transfer_inner(shared, zone, Some(primary), Some(socket)).await
+    let (transfer, connection) = match transfer {
+        Some(transfer) => (transfer, Some(socket)),
+        None => match zone.transfer_lock.try_lock() {
+            Ok(transfer) => (transfer, Some(socket)),
+            Err(_) => {
+                // RFC 9103 §6.3.1: Drop a reused socket rather than hold it idle while waiting for the Zone lock.
+                drop(socket);
+                (zone.transfer_lock.lock().await, None)
+            }
+        },
+    };
+    transfer_inner(shared, zone, Some(primary), connection, transfer).await
 }
 
 // RFC 3597 §4: only these types are known to carry no domain names in RDATA.
@@ -205,9 +226,8 @@ async fn transfer_inner(
     zone: &SecondaryZone,
     primary: Option<SocketAddr>,
     mut connection: Option<tokio::net::TcpStream>,
+    _transfer: tokio::sync::MutexGuard<'_, ()>,
 ) -> io::Result<()> {
-    // RFC 1034 §4.3.5: one transfer per Zone at a time, so an older copy cannot land last.
-    let _transfer = zone.transfer_lock.lock().await;
     let mut error = io::Error::other("no Primary Server");
     let mut addresses = Vec::new();
     if let Some(primary) = primary {
@@ -225,7 +245,6 @@ async fn transfer_inner(
         let mut scratch = Vec::with_capacity(512);
         let mut bytes = 0usize;
         let limits = zone.config.limits;
-        // Bound the whole transfer: the per-frame deadline lets a slow Primary Server hold it open.
         let mut on_message = |message: Message<'_>| {
             // RFC 5936 §2.2: Ignore duplicate resource records in an AXFR stream.
             for record in message.answers() {
@@ -243,6 +262,7 @@ async fn transfer_inner(
             Ok(())
         };
         let id = random_id();
+        // Bound the whole transfer: the per-frame deadline lets a slow Primary Server hold it open.
         let result = tokio::time::timeout(limits.timeout, async {
             match connection.take() {
                 Some(socket) => {
@@ -365,7 +385,7 @@ pub(super) async fn should_transfer_from(
         .map(|(changed, socket)| changed.then_some(socket))
 }
 
-// RFC 9103 §6.3.1: Keep the SOA-check connection open when AXFR is needed.
+// RFC 9103 §6.3.1: Return the SOA-check socket only when a transfer is needed.
 async fn should_transfer_at(
     zone: &SecondaryZone,
     primary: SocketAddr,
@@ -475,22 +495,30 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
             };
             // RFC 1996 §4.4: Defer duplicate NOTIFY work until current check completes.
             // RFC 1996 §3.11: Query and transfer from the master that sent NOTIFY.
+            let transfer = notify_zone.transfer_lock.lock().await;
             let failed = match should_transfer_from(&notify_zone, source).await {
-                // RFC 9103 §6.3.1: Keep the SOA-check connection open for AXFR.
-                Ok(Some(socket)) => {
-                    transfer_on_connection(&notify_shared, &notify_zone, source, socket)
-                        .await
-                        .inspect_err(|error| {
-                            pharos_server::logging::log(
-                                "WARN",
-                                "secondary",
-                                &format!("NOTIFY transfer {}: {error}", notify_zone.config.apex),
-                            );
-                        })
-                        .is_err()
+                Ok(Some(socket)) => transfer_on_connection(
+                    &notify_shared,
+                    &notify_zone,
+                    source,
+                    socket,
+                    Some(transfer),
+                )
+                .await
+                .inspect_err(|error| {
+                    pharos_server::logging::log(
+                        "WARN",
+                        "secondary",
+                        &format!("NOTIFY transfer {}: {error}", notify_zone.config.apex),
+                    );
+                })
+                .is_err(),
+                Ok(None) => {
+                    drop(transfer);
+                    false
                 }
-                Ok(None) => false,
                 Err(error) => {
+                    drop(transfer);
                     pharos_server::logging::log(
                         "WARN",
                         "secondary",
@@ -546,9 +574,9 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
             }
             match should_transfer(&zone).await {
                 Ok(Some((primary, socket))) => {
-                    // RFC 9103 §6.3.1: Keep the SOA-check connection open for AXFR.
+                    // RFC 9103 §6.3.1: Reuse the checked socket when the Zone lock is available.
                     if let Err(error) =
-                        transfer_on_connection(&shared, &zone, primary, socket).await
+                        transfer_on_connection(&shared, &zone, primary, socket, None).await
                     {
                         pharos_server::logging::log(
                             "WARN",
