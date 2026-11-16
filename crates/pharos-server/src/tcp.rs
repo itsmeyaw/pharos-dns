@@ -125,7 +125,13 @@ async fn serve<H: Handler>(
 ) {
     // RFC 7766 §7: send each Response as soon as it is available.
     // RFC 9293 §3.7.4: Nagle would hold it until the previous segment is ACKed.
-    let _ = stream.set_nodelay(true);
+    if let Err(error) = stream.set_nodelay(true) {
+        crate::logging::log(
+            "WARN",
+            "server",
+            &format!("failed to disable Nagle on TCP connection: {error}"),
+        );
+    }
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(Some(writer)));
     let mut queries: JoinSet<Vec<u8>> = JoinSet::new();
