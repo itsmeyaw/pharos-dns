@@ -4,7 +4,7 @@ use std::{
     fmt::{self, Write as _},
     io::{self, Write as _},
     sync::atomic::{AtomicBool, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,10 +195,8 @@ fn json_string(out: &mut impl fmt::Write, value: &str) {
 // RFC 3339 §5.3: Omit fractional seconds, a rarely used option.
 fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
     let seconds = match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs() as i64,
-        Err(error) => {
-            -(error.duration().as_secs() as i64) - i64::from(error.duration().subsec_nanos() != 0)
-        }
+        Ok(duration) => signed_seconds(duration, false),
+        Err(error) => signed_seconds(error.duration(), true),
     };
     // RFC 3339 §5.7: Convert Unix days into a valid Gregorian date.
     let days = seconds.div_euclid(86_400);
@@ -233,9 +231,40 @@ fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
     );
 }
 
+fn signed_seconds(duration: Duration, before_epoch: bool) -> i64 {
+    // RFC 3339 §5.6: Bound conversion before formatting four-digit date-fullyear.
+    let seconds = duration.as_secs().min(i64::MAX as u64) as i64;
+    if before_epoch {
+        -seconds - i64::from(duration.subsec_nanos() != 0)
+    } else {
+        seconds
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamps_clamp_four_digit_years_and_saturate_far_future_seconds() {
+        let before_year_zero = UNIX_EPOCH - std::time::Duration::from_secs(62_167_219_201);
+        let after_year_9999 = UNIX_EPOCH + std::time::Duration::from_secs(253_402_300_800);
+        let far_future = UNIX_EPOCH
+            .checked_add(Duration::from_secs(i64::MAX as u64))
+            .expect("platform supports its maximum signed timestamp");
+
+        assert!(
+            format_line(LogFormat::Text, before_year_zero, "INFO", "", "")
+                .starts_with("0000-01-01T00:00:00Z")
+        );
+        assert!([after_year_9999, far_future].into_iter().all(|time| {
+            format_line(LogFormat::Text, time, "INFO", "", "").starts_with("9999-12-31T23:59:59Z")
+        }));
+        assert_eq!(
+            signed_seconds(Duration::from_secs(u64::MAX), false),
+            i64::MAX
+        );
+    }
 
     #[test]
     fn over_long_entry_is_truncated_on_a_character_boundary() {

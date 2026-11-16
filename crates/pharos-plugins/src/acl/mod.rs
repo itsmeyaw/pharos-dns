@@ -307,17 +307,20 @@ impl Plugin for Acl {
                             .map_err(pharos_server::Error::Build)?;
                         // RFC 8914 §4: EDE 15 and 17 indicate Blocked and Filtered respectively.
                         let ede = [0, 15, 0, 2, 0, if blocked { 15 } else { 17 }];
-                        builder
-                            // RFC 6891 §6.1.1, §6.1.2: Return one root-name OPT RR.
-                            .record(
-                                Section::Additional,
-                                NameRef::parse(&[0], 0).unwrap(),
-                                Type::OPT,
-                                Class(4096),
-                                0x8000,
-                                &ede,
-                            )
-                            .map_err(pharos_server::Error::Build)?;
+                        if let Some(opt) = cx.query.opt() {
+                            // RFC 6891 §7: Do not include OPT when the Query had none.
+                            // RFC 3225 §3: Copy the Query's DO bit into the Response OPT.
+                            builder
+                                .record(
+                                    Section::Additional,
+                                    NameRef::parse(&[0], 0).unwrap(),
+                                    Type::OPT,
+                                    Class(4096),
+                                    if opt.dnssec_ok() { 0x8000 } else { 0 },
+                                    &ede,
+                                )
+                                .map_err(pharos_server::Error::Build)?;
+                        }
                         let _ = builder.finish();
                         Ok(())
                     })();
