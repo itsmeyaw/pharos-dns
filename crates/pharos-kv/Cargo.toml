@@ -1,0 +1,13 @@
+[package]
+name = "pharos-kv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Small durable ordered key-value store: one file, in-place commits, checksummed log"
+
+[lints]
+workspace = true
+
+[dependencies]
+aws-lc-rs = "1"
