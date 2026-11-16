@@ -247,7 +247,7 @@ fn csync_bitmap_must_not_be_empty() {
     assert!(parse(Type::CSYNC, &["66", "4", "A"]).is_err());
 }
 
-// RFC 4025 §2 and RFC 8777 §4: gateways are selected by their type.
+// RFC 4025 §2 and RFC 8777 §§4.2.2–4.2.4: gateways use type-selected encodings; D does not suppress relay data.
 #[test]
 fn gateway_variants() {
     assert_eq!(
@@ -276,9 +276,20 @@ fn gateway_variants() {
         parse(Type::AMTRELAY, &["10", "1", "3", "gw"]).unwrap(),
         b"\x0a\x83\x02gw\x07example\0"
     );
+    assert_eq!(
+        parse(Type::AMTRELAY, &["10", "1", "1", "192.0.2.1"]).unwrap(),
+        [10, 0x81, 192, 0, 2, 1]
+    );
+    assert_eq!(
+        parse(Type::AMTRELAY, &["10", "1", "2", "2001:db8::1"]).unwrap(),
+        [
+            10, 0x82, 0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+        ]
+    );
     assert!(parse(Type::IPSECKEY, &["10", "99", "2"]).is_err());
     assert!(parse(Type::AMTRELAY, &["10", "0", "99"]).is_err());
     assert!(parse(Type::AMTRELAY, &["10", "0", "128"]).is_err());
+    assert!(parse(Type::AMTRELAY, &["10", "0", "255"]).is_err());
     assert!(parse(Type::AMTRELAY, &["10", "2", "0", "."]).is_err());
     assert_eq!(
         parse(Type::IPSECKEY, &["10", "2", "2", "::1"]).unwrap()[3..],
