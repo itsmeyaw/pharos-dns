@@ -1,14 +1,17 @@
 use super::{ExpandedRecord, bbolt, setup::Config, update::build_zone, wire};
 use crate::zone::Zone;
 use arc_swap::ArcSwap;
-#[cfg(test)]
-use pharos_proto::zone::ZoneRecord;
-use pharos_proto::{Name, Rcode, zone::ZoneParser};
+use pharos_kv::{Db, Op};
+use pharos_proto::{
+    Name, Rcode,
+    zone::{ZoneParser, ZoneRecord},
+};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
     io::{self, BufReader, ErrorKind},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
@@ -19,8 +22,14 @@ static STORES: OnceLock<Registry> = OnceLock::new();
 
 pub(super) struct Shared {
     pub(super) current: ArcSwap<Zone>,
-    pub(super) db: Mutex<Option<bbolt::Store>>,
+    pub(super) db: Mutex<Option<Db>>,
 }
+
+// pharos-kv layout: one entry for the origin, and one entry per record whose key is 'r' plus
+// the record's uncompressed wire form (RFC 1035 §4.1.3) and whose value is empty, so an UPDATE
+// commits only the records it adds or removes.
+const ORIGIN_KEY: &[u8] = b"origin";
+const RECORD_PREFIX: u8 = b'r';
 
 impl Shared {
     pub(super) fn memory(zone: Arc<Zone>) -> Self {
@@ -102,15 +111,84 @@ impl Shared {
             return Ok((Rcode::REFUSED, false));
         }
         if let Some(db) = db.as_mut() {
-            db.commit(
-                config.origin.canonical().as_bytes(),
-                &wire::encode(candidate.records())?,
-            )?;
+            db.commit(&record_changes(db, candidate.records())?)?;
         }
         self.current.store(Arc::new(candidate));
         // RFC 2136 §3.4.2.5: Return NOERROR after all Update operations succeed.
         Ok((Rcode::NOERROR, true))
     }
+}
+
+impl Shared {
+    #[cfg(feature = "plugin-dynupdate")]
+    pub(super) fn compaction_due(&self) -> bool {
+        self.db
+            .lock()
+            .is_ok_and(|db| db.as_ref().is_some_and(Db::needs_compaction))
+    }
+
+    // Runs after the client has its reply: UPDATEs that arrive meanwhile wait for the lock.
+    #[cfg(feature = "plugin-dynupdate")]
+    pub(super) fn compact(&self) {
+        let Ok(mut db) = self.db.lock() else { return };
+        if let Some(db) = db.as_mut().filter(|db| db.needs_compaction())
+            && let Err(error) = db.compact()
+        {
+            pharos_server::logging::log(
+                "ERROR",
+                "dynupdate",
+                &format!("database compaction failed, further updates will be refused: {error}"),
+            );
+        }
+    }
+}
+
+fn record_key(record: &ZoneRecord) -> io::Result<Vec<u8>> {
+    let mut key = vec![RECORD_PREFIX];
+    key.extend_from_slice(&wire::encode(std::slice::from_ref(record))?);
+    Ok(key)
+}
+
+fn zone_ops(origin: &Name, records: &[ZoneRecord]) -> io::Result<Vec<Op>> {
+    let mut ops = vec![Op::Put(
+        ORIGIN_KEY.to_vec(),
+        origin.canonical().as_bytes().to_vec(),
+    )];
+    for record in records {
+        ops.push(Op::Put(record_key(record)?, Vec::new()));
+    }
+    Ok(ops)
+}
+
+// The database mirrors the published Zone while the caller holds the store lock, so the
+// difference between its records and the candidate's is exactly what must be written.
+fn record_changes(db: &Db, records: &[ZoneRecord]) -> io::Result<Vec<Op>> {
+    let keys = records
+        .iter()
+        .map(record_key)
+        .collect::<io::Result<Vec<_>>>()?;
+    let stored = db.len().saturating_sub(1);
+    let mut ops = Vec::new();
+    let mut kept = 0usize;
+    for key in &keys {
+        if db.get(key).is_some() {
+            kept += 1;
+        } else {
+            ops.push(Op::Put(key.clone(), Vec::new()));
+        }
+    }
+    if kept != stored {
+        let wanted = keys
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<std::collections::HashSet<_>>();
+        ops.extend(
+            db.iter()
+                .filter(|(key, _)| key.first() == Some(&RECORD_PREFIX) && !wanted.contains(key))
+                .map(|(key, _)| Op::Delete(key.to_vec())),
+        );
+    }
+    Ok(ops)
 }
 
 fn registry() -> &'static Registry {
@@ -140,7 +218,10 @@ fn lock(file: &File, shared: bool) -> io::Result<()> {
                 std::thread::sleep(Duration::from_millis(50))
             }
             Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(io::Error::new(ErrorKind::WouldBlock, "bbolt lock timeout"));
+                return Err(io::Error::new(
+                    ErrorKind::WouldBlock,
+                    "database lock timeout",
+                ));
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error),
         }
@@ -197,12 +278,11 @@ fn seed(config: &Config) -> io::Result<Zone> {
     .map_err(invalid)
 }
 
-fn load(db: &bbolt::Store, config: &Config) -> io::Result<Zone> {
-    let (origin, records) = db.read()?;
+fn zone_from(origin: &[u8], records: &[u8], config: &Config) -> io::Result<Zone> {
     if origin != config.origin.canonical().as_bytes() {
         return Err(invalid("database belongs to another Zone"));
     }
-    let records = wire::decode(&records, config.max_records, config.max_bytes)?;
+    let records = wire::decode(records, config.max_records, config.max_bytes)?;
     build_zone(
         config.origin.clone(),
         records,
@@ -210,6 +290,26 @@ fn load(db: &bbolt::Store, config: &Config) -> io::Result<Zone> {
         config.max_bytes,
     )
     .map_err(invalid)
+}
+
+fn load_bbolt(db: &bbolt::Store, config: &Config) -> io::Result<Zone> {
+    let (origin, records) = db.read()?;
+    zone_from(&origin, &records, config)
+}
+
+fn load(db: &Db, config: &Config) -> io::Result<Zone> {
+    let origin = db
+        .get(ORIGIN_KEY)
+        .ok_or_else(|| invalid("database has no origin"))?;
+    let mut records = Vec::new();
+    for (key, _) in db.iter() {
+        match key.split_first() {
+            Some((&RECORD_PREFIX, record)) => records.extend_from_slice(record),
+            _ if key == ORIGIN_KEY => {}
+            _ => return Err(invalid("database has an unknown key")),
+        }
+    }
+    zone_from(origin, &records, config)
 }
 
 fn database_load_error(path: &std::path::Path, error: io::Error) -> io::Error {
@@ -254,8 +354,13 @@ pub(super) fn validate(config: &Config) -> io::Result<Arc<Zone>> {
     }
     let file = File::open(path)?;
     lock(&file, true)?;
-    load(&bbolt::Store::open_limited(file, config.max_bytes)?, config)
-        .map(Arc::new)
+    // #93: a bbolt database is read as is; only `acquire` converts it.
+    let zone = if Db::looks_like_database(&file)? {
+        load(&Db::open_read_only(file)?, config)
+    } else {
+        load_bbolt(&bbolt::Store::open_limited(file, config.max_bytes)?, config)
+    };
+    zone.map(Arc::new)
         .map_err(|error| database_load_error(path, error))
 }
 
@@ -325,18 +430,15 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
     if initial.is_some() && file.metadata()?.len() != 0 {
         initial = None;
     }
-    let (db, zone) = if let Some(zone) = initial {
-        let mut db = bbolt::Store::create(file)?;
-        db.set_limit(config.max_bytes);
-        db.commit(
-            config.origin.canonical().as_bytes(),
-            &wire::encode(zone.records())?,
-        )?;
-        (db, zone)
-    } else {
-        let db = bbolt::Store::open_limited(file, config.max_bytes)?;
+    let (db, zone, id) = if let Some(zone) = initial {
+        let db = Db::create(file, &zone_ops(&config.origin, zone.records())?)?;
+        (db, zone, id)
+    } else if Db::looks_like_database(&file)? {
+        let db = Db::open(file)?;
         let zone = load(&db, config).map_err(|error| database_load_error(path, error))?;
-        (db, zone)
+        (db, zone, id)
+    } else {
+        import_bbolt(&file, path, config)?
     };
     let shared = Arc::new(Shared {
         current: ArcSwap::from_pointee(zone),
@@ -344,6 +446,76 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
     });
     stores.insert(id, Arc::downgrade(&shared));
     Ok(shared)
+}
+
+fn suffixed(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    name.into()
+}
+
+// #93: convert a bbolt database to pharos-kv. The original inode stays as `<database>.bbolt.bak`
+// (a hard link, so nothing is copied), and the new file replaces the database path atomically.
+fn import_bbolt(old: &File, path: &Path, config: &Config) -> io::Result<(Db, Zone, Identity)> {
+    let zone = load_bbolt(
+        &bbolt::Store::open_limited(old.try_clone()?, config.max_bytes)?,
+        config,
+    )
+    .map_err(|error| database_load_error(path, error))?;
+    let old_meta = old.metadata()?;
+    // The database path may be a symlink; replace its target, not the link.
+    let target = std::fs::canonicalize(path)?;
+    let backup = suffixed(&target, ".bbolt.bak");
+    match std::fs::hard_link(&target, &backup) {
+        Ok(()) => {}
+        // A crash between the link and the rename leaves the same inode under both names.
+        Err(error)
+            if error.kind() == ErrorKind::AlreadyExists
+                && std::fs::metadata(&backup)
+                    .is_ok_and(|b| identity(&b) == identity(&old_meta)) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            return Err(invalid(format!(
+                "{} already exists; move it away to convert the bbolt database",
+                backup.display()
+            )));
+        }
+        Err(error) => return Err(error),
+    }
+    let temp = suffixed(&target, ".import");
+    match std::fs::remove_file(&temp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(old_meta.mode() & 0o777)
+        .open(&temp)?;
+    let created = (|| -> io::Result<(Db, Identity)> {
+        lock(&file, false)?;
+        let id = identity(&file.metadata()?);
+        let db = Db::create(file, &zone_ops(&config.origin, zone.records())?)?;
+        std::fs::rename(&temp, &target)?;
+        if let Some(parent) = target.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok((db, id))
+    })();
+    let (db, id) = created.inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp);
+    })?;
+    pharos_server::logging::log(
+        "INFO",
+        "dynupdate",
+        &format!(
+            "converted bbolt database {} to the pharos-kv format; the original is kept as {}",
+            target.display(),
+            backup.display()
+        ),
+    );
+    Ok((db, zone, id))
 }
 
 #[cfg(test)]
@@ -391,8 +563,14 @@ mod tests {
         );
         assert_eq!(first.current.load().serial(), Some(1));
         assert_eq!(
-            first.db.lock().unwrap().as_ref().unwrap().read().unwrap().0,
-            b"example.org."
+            first
+                .db
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .get(super::ORIGIN_KEY),
+            Some(&b"example.org."[..])
         );
         let before = std::fs::read(dir.join("db")).unwrap();
         std::fs::remove_file(dir.join("seed")).unwrap();
@@ -440,9 +618,13 @@ mod tests {
         let shared = acquire(&config).unwrap();
         {
             let mut db = shared.db.lock().unwrap();
-            let db = db.as_mut().unwrap();
-            let (_, records) = db.read().unwrap();
-            db.commit(b"EXAMPLE.ORG.", &records).unwrap();
+            db.as_mut()
+                .unwrap()
+                .commit(&[pharos_kv::Op::Put(
+                    super::ORIGIN_KEY.to_vec(),
+                    b"EXAMPLE.ORG.".to_vec(),
+                )])
+                .unwrap();
         }
         drop(shared);
         assert!(validate(&config).is_err());
@@ -478,13 +660,13 @@ mod tests {
         .unwrap();
         let shared = acquire(&config).unwrap();
         let database = dir.join("db").canonicalize().unwrap();
-        let records = shared
+        let removed = shared
             .current
             .load()
             .records()
             .iter()
-            .filter(|record| record.rtype != Type::NS)
-            .cloned()
+            .filter(|record| record.rtype == Type::NS)
+            .map(|record| pharos_kv::Op::Delete(super::record_key(record).unwrap()))
             .collect::<Vec<_>>();
         shared
             .db
@@ -492,10 +674,7 @@ mod tests {
             .unwrap()
             .as_mut()
             .unwrap()
-            .commit(
-                config.origin.canonical().as_bytes(),
-                &super::wire::encode(&records).unwrap(),
-            )
+            .commit(&removed)
             .unwrap();
         drop(shared);
 
@@ -624,7 +803,8 @@ mod tests {
         let original = acquire(&config).unwrap();
         let snapshot = original.current.load_full();
         drop(original);
-        let db = super::bbolt::Store::open(std::fs::File::open(dir.join("db")).unwrap()).unwrap();
+        let db =
+            pharos_kv::Db::open_read_only(std::fs::File::open(dir.join("db")).unwrap()).unwrap();
         let shared = super::Shared {
             current: arc_swap::ArcSwap::from(Arc::clone(&snapshot)),
             db: std::sync::Mutex::new(Some(db)),
@@ -674,8 +854,8 @@ mod tests {
         let path = dir.join("db");
         let valid = std::fs::read(&path).unwrap();
         let mut bad_checksum = valid.clone();
-        bad_checksum[72] ^= 1;
-        bad_checksum[4096 + 72] ^= 1;
+        bad_checksum[40] ^= 1;
+        bad_checksum[4096 + 40] ^= 1;
         for damaged in [bad_checksum, valid[..79].to_vec(), Vec::new()] {
             std::fs::write(&path, &damaged).unwrap();
             assert!(validate(&config).is_err());
@@ -733,10 +913,9 @@ mod tests {
                 .unwrap()
                 .as_ref()
                 .unwrap()
-                .read()
-                .unwrap()
-                .1
-                .len()
+                .iter()
+                .map(|(key, _)| key.len())
+                .sum::<usize>()
                 > 65535
         );
         drop(shared);
@@ -1369,7 +1548,6 @@ mod tests {
             if matches!(case, "wrong-zone" | "truncated-records" | "invalid-zone") {
                 let mut guard = shared.db.lock().unwrap();
                 let db = guard.as_mut().unwrap();
-                let (_, records) = db.read().unwrap();
                 let invalid_rr = ZoneRecord {
                     owner: "outside.test.".parse().unwrap(),
                     rtype: Type::A,
@@ -1377,20 +1555,14 @@ mod tests {
                     ttl: 60,
                     rdata: vec![192, 0, 2, 1],
                 };
-                let data = match case {
-                    "truncated-records" => vec![0xff, 1],
-                    "invalid-zone" => super::wire::encode(&[invalid_rr]).unwrap(),
-                    _ => records,
+                let op = match case {
+                    "wrong-zone" => {
+                        pharos_kv::Op::Put(super::ORIGIN_KEY.to_vec(), b"other.example.".to_vec())
+                    }
+                    "truncated-records" => pharos_kv::Op::Put(vec![b'r', 0xff, 1], Vec::new()),
+                    _ => pharos_kv::Op::Put(super::record_key(&invalid_rr).unwrap(), Vec::new()),
                 };
-                db.commit(
-                    if case == "wrong-zone" {
-                        b"other.example."
-                    } else {
-                        b"example.org."
-                    },
-                    &data,
-                )
-                .unwrap();
+                db.commit(&[op]).unwrap();
             }
             drop(shared);
             if case == "unknown-format" {
@@ -1401,7 +1573,10 @@ mod tests {
                     .write(true)
                     .open(path)
                     .unwrap();
-                drop(super::bbolt::Store::create(file).unwrap());
+                drop(
+                    pharos_kv::Db::create(file, &[pharos_kv::Op::Put(b"x".to_vec(), Vec::new())])
+                        .unwrap(),
+                );
             }
             if case == "records" {
                 config.max_records = 1;
@@ -1499,10 +1674,9 @@ mod tests {
                 .create_new(true)
                 .open(dir.join("db"))
                 .unwrap();
-            let mut db = super::bbolt::Store::create(file).unwrap();
-            db.commit(
-                b"example.org.",
-                &super::wire::encode(updated.records()).unwrap(),
+            pharos_kv::Db::create(
+                file,
+                &super::zone_ops(&config.origin, updated.records()).unwrap(),
             )
             .unwrap();
         })
@@ -1614,6 +1788,137 @@ mod tests {
                 .is_symlink()
         );
         drop(shared);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // RFC 2181 §5.2: an RRset is unordered, and the store hands records back in key order.
+    fn record_set(
+        records: &[pharos_proto::zone::ZoneRecord],
+    ) -> std::collections::BTreeSet<Vec<u8>> {
+        records
+            .iter()
+            .map(|r| super::record_key(r).unwrap())
+            .collect()
+    }
+
+    fn bbolt_fixture_config(tag: &str) -> (std::path::PathBuf, crate::dynupdate::setup::Config) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "pharos-dynamic-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed"),
+            "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 60 60 60 60\n@ 60 IN NS ns.example.org.\n",
+        )
+        .unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/dynupdate/coredns.db"
+            ),
+            dir.join("db"),
+        )
+        .unwrap();
+        let tokens = lex(
+            "Corefile",
+            "dynupdate {\nfile seed\ndatabase db\nallow key.example.org. * A\n}",
+        );
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &tokens),
+            &["example.org"],
+            Some(&dir),
+        )
+        .unwrap();
+        (dir, config)
+    }
+
+    #[test]
+    fn bbolt_database_is_converted_on_first_open_and_kept_as_backup() {
+        use pharos_proto::{Class, Name, Rcode, Type, zone::ZoneRecord};
+        let (dir, config) = bbolt_fixture_config("import");
+        let original = std::fs::read(dir.join("db")).unwrap();
+        // `pharos check` reads the bbolt file without converting it.
+        let checked = validate(&config).unwrap();
+        assert_eq!(std::fs::read(dir.join("db")).unwrap(), original);
+        assert!(!dir.join("db.bbolt.bak").exists());
+        let shared = acquire(&config).unwrap();
+        assert_eq!(
+            record_set(shared.current.load().records()),
+            record_set(checked.records())
+        );
+        assert_eq!(std::fs::read(dir.join("db.bbolt.bak")).unwrap(), original);
+        let converted = std::fs::File::open(dir.join("db")).unwrap();
+        assert!(pharos_kv::Db::looks_like_database(&converted).unwrap());
+        let key: Name = "key.example.org.".parse().unwrap();
+        let update = ZoneRecord {
+            owner: "after-import.example.org.".parse().unwrap(),
+            rtype: Type::A,
+            class: Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 77],
+        };
+        assert_eq!(
+            shared.transact(&config, &key, &[], &[update]).unwrap().0,
+            Rcode::NOERROR
+        );
+        let expected = shared.current.load().records().to_vec();
+        drop(shared);
+        assert_eq!(
+            record_set(validate(&config).unwrap().records()),
+            record_set(&expected)
+        );
+        assert_eq!(
+            record_set(acquire(&config).unwrap().current.load().records()),
+            record_set(&expected)
+        );
+        assert_eq!(std::fs::read(dir.join("db.bbolt.bak")).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn existing_backup_blocks_conversion_and_leaves_the_database_alone() {
+        let (dir, config) = bbolt_fixture_config("import-backup");
+        std::fs::write(dir.join("db.bbolt.bak"), b"someone else's file").unwrap();
+        let original = std::fs::read(dir.join("db")).unwrap();
+        assert!(acquire(&config).is_err());
+        assert_eq!(std::fs::read(dir.join("db")).unwrap(), original);
+        assert_eq!(
+            std::fs::read(dir.join("db.bbolt.bak")).unwrap(),
+            b"someone else's file"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn conversion_resumes_after_a_crash_between_backup_and_replace() {
+        let (dir, config) = bbolt_fixture_config("import-resume");
+        std::fs::hard_link(dir.join("db"), dir.join("db.bbolt.bak")).unwrap();
+        std::fs::write(dir.join("db.import"), b"half-written leftover").unwrap();
+        assert!(acquire(&config).is_ok());
+        let converted = std::fs::File::open(dir.join("db")).unwrap();
+        assert!(pharos_kv::Db::looks_like_database(&converted).unwrap());
+        assert!(!dir.join("db.import").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn conversion_replaces_the_symlink_target_not_the_symlink() {
+        let (dir, config) = bbolt_fixture_config("import-link");
+        std::fs::rename(dir.join("db"), dir.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", dir.join("db")).unwrap();
+        drop(acquire(&config).unwrap());
+        assert!(
+            std::fs::symlink_metadata(dir.join("db"))
+                .unwrap()
+                .is_symlink()
+        );
+        let converted = std::fs::File::open(dir.join("real")).unwrap();
+        assert!(pharos_kv::Db::looks_like_database(&converted).unwrap());
+        assert!(dir.join("real.bbolt.bak").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -148,6 +148,7 @@ impl DynUpdate {
             return reply(cx, Rcode::SERVFAIL);
         };
         let config = Arc::clone(&self.config);
+        let maintenance = Arc::clone(&shared);
         // RFC 2136 §3.7: UPDATE transactions publish complete Zone snapshots atomically.
         let result = tokio::task::spawn_blocking(move || {
             shared.transact_expanded(&config, &key, &prereqs, &updates)
@@ -155,6 +156,10 @@ impl DynUpdate {
         .await;
         let code = match result {
             Ok(Ok((code, changed))) => {
+                // Compaction is the slowest step; start it now so the client is not kept waiting.
+                if changed && maintenance.compaction_due() {
+                    tokio::task::spawn_blocking(move || maintenance.compact());
+                }
                 #[cfg(feature = "plugin-transfer")]
                 if changed {
                     self.notify();

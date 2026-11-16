@@ -9,6 +9,7 @@ description = "CoreDNS-compatible Plugins for the Pharos DNS server"
 [dependencies]
 getrandom = "0.2"
 tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
+pharos-kv = { version = "0.1.0", path = "../pharos-kv" }
 pharos-corefile = { version = "0.1.0", path = "../pharos-corefile" }
 pharos-proto = { version = "0.1.0", path = "../pharos-proto" }
 pharos-server = { version = "0.1.0", path = "../pharos-server" }

@@ -2268,6 +2268,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pharos-kv"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+]
+
+[[package]]
 name = "pharos-plugins"
 version = "0.1.0"
 dependencies = [
@@ -2281,6 +2288,7 @@ dependencies = [
  "pharos-corefile",
  "pharos-dnssec",
  "pharos-kubernetes",
+ "pharos-kv",
  "pharos-proto",
  "pharos-server",
  "regex",

@@ -8,13 +8,24 @@
 - Shared Zone CNAME/DNAME Self Lookup allocates for missing Zone-tree names,
   including empty nonterminals, and for NS or apex SOA targets. This matches
   CoreDNS routing but is an exception to the Query allocation rule until #86.
-- If a metadata write or its sync fails, later writes to that open database
-  return SERVFAIL until all overlapping instances release it and it is reopened.
-  The on-disk transaction may have reached the new metadata despite the error;
-  this prevents reusing its pages.
+- The `database` file uses the pharos-kv format (#93), not bbolt, so CoreDNS can no longer read it.
+  An UPDATE writes only the records it adds or removes, in place, and is answered after the
+  write is synced. After a write or sync error the database refuses further updates (SERVFAIL)
+  until it is reopened, because a failed `fsync` may have dropped data.
+- A bbolt database (including one written by CoreDNS) is converted the first time Pharos opens
+  it for serving: the new file replaces the path and the original stays next to it as
+  `<database>.bbolt.bak`, with a log line. `pharos check` reads a bbolt file without converting
+  it. Conversion refuses to run if `<database>.bbolt.bak` already exists as a different file.
+- To roll back to CoreDNS, stop Pharos and put `<database>.bbolt.bak` back. It lacks every UPDATE
+  made after the conversion; to keep them, AXFR the Zone and use the export as CoreDNS's seed.
+- A hard link made to the bbolt file before conversion keeps pointing at the old (backup) file;
+  link the converted file again.
+- After a restart the records of an RRset come back in key order, not insertion order (RFC 2181 §5.2).
+- Compaction of the update log runs after the reply; UPDATEs that arrive during the few
+  milliseconds it takes wait for it.
 - Zone Transfer streams allocate once per transfer, as in the shared Zone code.
 
 ## Sources
 
 - CoreDNS v1.15.0 [`plugin/dynupdate`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/dynupdate).
-- bbolt v1.5.0 [`internal/common`](https://github.com/etcd-io/bbolt/tree/v1.5.0/internal/common) and [`tx.go`](https://github.com/etcd-io/bbolt/blob/v1.5.0/tx.go).
+- bbolt v1.5.0 [`internal/common`](https://github.com/etcd-io/bbolt/tree/v1.5.0/internal/common), read for conversion only.

@@ -61,6 +61,7 @@
 
 - [dynupdate Plugin notes](../crates/pharos-plugins/src/dynupdate/README.md)
 - Seed, stored, and candidate dynamic Zones require apex NS (RFC 2181 §6.1). The server ignores a final-apex-NS deletion (RFC 2136 §3.4.2.4; §2.5.4 defines single-RR deletion syntax).
+- Persistent databases use the pharos-kv format, not bbolt: Pharos converts a bbolt file on first use and keeps the original as `<database>.bbolt.bak`; CoreDNS cannot read the converted file (#93).
 - Before upgrading a persistent NS-less database:
   1. Back up the database.
   2. Run the previous build and UPDATE to add apex NS; if UPDATE is unavailable, AXFR the full Zone, add apex NS to the export, and recreate the database from it.
