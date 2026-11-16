@@ -477,21 +477,18 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
             // RFC 1996 §3.11: Query and transfer from the master that sent NOTIFY.
             let failed = match should_transfer_from(&notify_zone, source).await {
                 // RFC 9103 §6.3.1: Keep the SOA-check connection open for AXFR.
-                Ok(Some(socket)) => transfer_on_connection(
-                    &notify_shared,
-                    &notify_zone,
-                    source,
-                    socket,
-                )
-                    .await
-                    .inspect_err(|error| {
-                        pharos_server::logging::log(
-                            "WARN",
-                            "secondary",
-                            &format!("NOTIFY transfer {}: {error}", notify_zone.config.apex),
-                        );
-                    })
-                    .is_err(),
+                Ok(Some(socket)) => {
+                    transfer_on_connection(&notify_shared, &notify_zone, source, socket)
+                        .await
+                        .inspect_err(|error| {
+                            pharos_server::logging::log(
+                                "WARN",
+                                "secondary",
+                                &format!("NOTIFY transfer {}: {error}", notify_zone.config.apex),
+                            );
+                        })
+                        .is_err()
+                }
                 Ok(None) => false,
                 Err(error) => {
                     pharos_server::logging::log(

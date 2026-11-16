@@ -625,10 +625,7 @@ async fn secondary_reuses_soa_connection_for_axfr() {
             )
             .unwrap();
         let _ = builder.finish();
-        socket
-            .write_u16(response_wire.len() as u16)
-            .await
-            .unwrap();
+        socket.write_u16(response_wire.len() as u16).await.unwrap();
         socket.write_all(&response_wire).await.unwrap();
 
         let mut query_wire = vec![0; usize::from(socket.read_u16().await.unwrap())];
@@ -653,19 +650,13 @@ async fn secondary_reuses_soa_connection_for_axfr() {
                 .unwrap();
         }
         let _ = builder.finish();
-        socket
-            .write_u16(response_wire.len() as u16)
-            .await
-            .unwrap();
+        socket.write_u16(response_wire.len() as u16).await.unwrap();
         socket.write_all(&response_wire).await.unwrap();
     });
 
     let zone = plain_zone(address);
     let (shared, _, _) = catalog_shared();
-    let (primary_address, socket) = update::should_transfer(&zone)
-        .await
-        .unwrap()
-        .unwrap();
+    let (primary_address, socket) = update::should_transfer(&zone).await.unwrap().unwrap();
     update::transfer_on_connection(&shared, &zone, primary_address, socket)
         .await
         .unwrap();
@@ -741,10 +732,12 @@ async fn notify_refresh_queries_the_sending_primary() {
     assert_eq!(handle_notify(&zone, &mut cx), Outcome::Response);
     let target = zone.notify_source.lock().unwrap().take().unwrap();
     assert_eq!(target, source);
-    assert!(update::should_transfer_from(&zone, target)
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        update::should_transfer_from(&zone, target)
+            .await
+            .unwrap()
+            .is_some()
+    );
     primary.await.unwrap();
 }
 
