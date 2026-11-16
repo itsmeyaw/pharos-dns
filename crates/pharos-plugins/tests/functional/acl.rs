@@ -3,7 +3,9 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
-use pharos_proto::{Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type};
+use pharos_proto::{
+    Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type,
+};
 use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 
 struct NextDrop;
@@ -565,7 +567,6 @@ async fn unscoped_allow_does_not_exempt_scoped_client_from_block_all() {
 
 #[tokio::test]
 async fn scoped_allow_before_unscoped_block_preserves_policy_order() {
-    let (outcome, _) =
-        scoped_acl_client("allow net fe80::%7/10\nblock net fe80::/10", None).await;
+    let (outcome, _) = scoped_acl_client("allow net fe80::%7/10\nblock net fe80::/10", None).await;
     assert_eq!(outcome, Outcome::Unanswered(Rcode::NOERROR));
 }
