@@ -158,6 +158,16 @@ fn coredns_rejects_invalid_zone_input() {
     }
 }
 
+// RFC 9606 §3: A RESINFO RRset contains exactly one record.
+#[test]
+fn reusable_zone_rejects_multiple_resinfo_records() {
+    let input = "@ 60 IN SOA ns.example.org. hostmaster.example.org. 1 2 3 4 5\n\
+                 @ 60 IN NS ns.example.org.\n\
+                 @ 60 IN RESINFO \"qnamemin\"\n\
+                 @ 60 IN RESINFO \"qnamemin\"\n";
+    assert!(zone("example.org.", input).is_err());
+}
+
 // RFC 1035 §3.3: Name-bearing RDATA contains a complete domain name.
 #[test]
 fn reusable_zone_rejects_trailing_name_only_rdata() {
