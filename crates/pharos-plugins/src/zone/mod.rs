@@ -233,7 +233,7 @@ impl Zone {
         }
         // RFC 4592 §2: Wildcard owners use ordinary resource-record syntax.
         // RFC 4343 §4.2: Keep master-file owner spelling in stored ZoneRecords.
-        let mut resinfo_owners = std::collections::HashSet::new();
+        let mut resinfo_rdata = std::collections::HashMap::new();
         for record in &mut records {
             // RFC 4592 §4.1: A wildcard SOA owner must be the zone apex.
             if record.rtype == Type::SOA {
@@ -257,9 +257,15 @@ impl Zone {
             {
                 continue;
             }
-            // RFC 9606 §3: A RESINFO RRset contains exactly one record.
-            if record.rtype == Type::RESINFO && !resinfo_owners.insert(record.owner.clone()) {
-                return Err("RESINFO RRset has multiple records".into());
+            // RFC 9606 §3; RFC 2181 §5: A RESINFO RRset contains one distinct record.
+            if record.rtype == Type::RESINFO {
+                if let Some(previous) = resinfo_rdata.get(&record.owner) {
+                    if previous != &record.rdata {
+                        return Err("RESINFO RRset has multiple distinct records".into());
+                    }
+                } else {
+                    resinfo_rdata.insert(record.owner.clone(), record.rdata.clone());
+                }
             }
             // RFC 4034 §3.1: RRSIG Type Covered occupies the first two octets.
             if record.rtype == Type::RRSIG && record.rdata.len() < 2 {
