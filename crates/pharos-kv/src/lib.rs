@@ -550,6 +550,20 @@ impl Db {
         Ok(db)
     }
 
+    /// Whether `file` starts with a pharos-kv header, valid or damaged.
+    ///
+    /// Lets a caller that also reads another format choose the right reader and report the
+    /// right error.
+    pub fn looks_like_database(file: &File) -> io::Result<bool> {
+        let mut magic = [0u8; 8];
+        for slot in [0, BLOCK] {
+            if file.read_exact_at(&mut magic, slot).is_ok() && &magic == HEADER_MAGIC {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Value stored under `key`.
     #[must_use]
     pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
@@ -1026,5 +1040,21 @@ mod tests {
 
     fn events_clear(db: &Db) {
         db.io.fault.events.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn looks_like_database_tells_headers_from_other_files() {
+        let path = path();
+        std::fs::write(&path, b"SQLite format 3\0 and more bytes").unwrap();
+        assert!(!Db::looks_like_database(&File::open(&path).unwrap()).unwrap());
+        std::fs::write(&path, b"").unwrap();
+        assert!(!Db::looks_like_database(&File::open(&path).unwrap()).unwrap());
+        std::fs::remove_file(&path).unwrap();
+        let db = Db::create(rw(&path), &[]).unwrap();
+        drop(db);
+        // A damaged header still looks like ours, so its error is ours.
+        std::os::unix::fs::FileExt::write_all_at(&rw(&path), &[0xff; 4], 40).unwrap();
+        assert!(Db::looks_like_database(&File::open(&path).unwrap()).unwrap());
+        std::fs::remove_file(path).unwrap();
     }
 }
