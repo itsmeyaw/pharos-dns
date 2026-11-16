@@ -12,8 +12,10 @@ use std::{
     io::{self, BufReader, ErrorKind},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, Weak},
-    time::{Duration, Instant},
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 type Identity = (u64, u64);
@@ -23,6 +25,9 @@ static STORES: OnceLock<Registry> = OnceLock::new();
 pub(super) struct Shared {
     pub(super) current: ArcSwap<Zone>,
     pub(super) db: Mutex<Option<Db>>,
+    // Set by a commit that filled the update log, so the request path never has to lock `db`
+    // just to ask.
+    compact_due: AtomicBool,
 }
 
 // pharos-kv layout: one entry for the origin, and one entry per record whose key is 'r' plus
@@ -36,6 +41,7 @@ impl Shared {
         Self {
             current: ArcSwap::from(zone),
             db: Mutex::new(None),
+            compact_due: AtomicBool::new(false),
         }
     }
 
@@ -112,6 +118,9 @@ impl Shared {
         }
         if let Some(db) = db.as_mut() {
             db.commit(&record_changes(db, candidate.records())?)?;
+            if db.needs_compaction() {
+                self.compact_due.store(true, Ordering::Relaxed);
+            }
         }
         self.current.store(Arc::new(candidate));
         // RFC 2136 §3.4.2.5: Return NOERROR after all Update operations succeed.
@@ -122,9 +131,7 @@ impl Shared {
 impl Shared {
     #[cfg(feature = "plugin-dynupdate")]
     pub(super) fn compaction_due(&self) -> bool {
-        self.db
-            .lock()
-            .is_ok_and(|db| db.as_ref().is_some_and(Db::needs_compaction))
+        self.compact_due.swap(false, Ordering::Relaxed)
     }
 
     // Runs after the client has its reply: UPDATEs that arrive meanwhile wait for the lock.
@@ -203,29 +210,8 @@ fn identity(meta: &std::fs::Metadata) -> Identity {
     (meta.dev(), meta.ino())
 }
 
-// bbolt v1.5.0 bolt_unix.go:17-45: acquire a shared or exclusive advisory lock with a one-second timeout.
 fn lock(file: &File, shared: bool) -> io::Result<()> {
-    let start = Instant::now();
-    loop {
-        let result = if shared {
-            file.try_lock_shared()
-        } else {
-            file.try_lock()
-        };
-        match result {
-            Ok(()) => return Ok(()),
-            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < Duration::from_secs(1) => {
-                std::thread::sleep(Duration::from_millis(50))
-            }
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(io::Error::new(
-                    ErrorKind::WouldBlock,
-                    "database lock timeout",
-                ));
-            }
-            Err(std::fs::TryLockError::Error(error)) => return Err(error),
-        }
-    }
+    pharos_kv::lock(file, shared)
 }
 
 fn check_limits(zone: &Zone, config: &Config) -> io::Result<()> {
@@ -427,7 +413,12 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
         return Ok(shared);
     }
     lock(&file, false)?;
-    if initial.is_some() && file.metadata()?.len() != 0 {
+    // #93: a non-empty file with blank headers is an interrupted creation (the first state is
+    // synced before the header that makes it real), so it is initialised again from the seed.
+    let interrupted = file.metadata()?.len() != 0 && Db::is_blank(&file)?;
+    if interrupted && initial.is_none() {
+        initial = Some(seed(config)?);
+    } else if !interrupted && file.metadata()?.len() != 0 {
         initial = None;
     }
     let (db, zone, id) = if let Some(zone) = initial {
@@ -443,6 +434,7 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
     let shared = Arc::new(Shared {
         current: ArcSwap::from_pointee(zone),
         db: Mutex::new(Some(db)),
+        compact_due: AtomicBool::new(false),
     });
     stores.insert(id, Arc::downgrade(&shared));
     Ok(shared)
@@ -587,6 +579,24 @@ mod tests {
         .unwrap();
         let second = acquire(&alias_config).unwrap();
         assert!(Arc::ptr_eq(&first, &second));
+        // An UPDATE through one name is read through the other: both are the same inode.
+        let added = pharos_proto::zone::ZoneRecord {
+            owner: "linked.example.org.".parse().unwrap(),
+            rtype: pharos_proto::Type::A,
+            class: pharos_proto::Class::IN,
+            ttl: 60,
+            rdata: vec![192, 0, 2, 9],
+        };
+        let key: pharos_proto::Name = "key.example.org.".parse().unwrap();
+        first
+            .transact(&config, &key, &[], std::slice::from_ref(&added))
+            .unwrap();
+        let seen = validate(&alias_config).unwrap();
+        assert!(
+            seen.records()
+                .iter()
+                .any(|record| record.owner == added.owner)
+        );
         drop(first);
         drop(second);
         std::fs::remove_dir_all(dir).unwrap();
@@ -808,6 +818,7 @@ mod tests {
         let shared = super::Shared {
             current: arc_swap::ArcSwap::from(Arc::clone(&snapshot)),
             db: std::sync::Mutex::new(Some(db)),
+            compact_due: std::sync::atomic::AtomicBool::new(false),
         };
         let key: Name = "key.example.org.".parse().unwrap();
         let update = ZoneRecord {
@@ -1876,6 +1887,19 @@ mod tests {
             record_set(&expected)
         );
         assert_eq!(std::fs::read(dir.join("db.bbolt.bak")).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn interrupted_creation_is_initialised_again_from_the_seed() {
+        let (dir, config) = bbolt_fixture_config("interrupted");
+        std::fs::write(dir.join("db"), vec![0u8; 100_000]).unwrap();
+        let shared = acquire(&config).unwrap();
+        assert_eq!(shared.current.load().serial(), Some(1));
+        drop(shared);
+        let file = std::fs::File::open(dir.join("db")).unwrap();
+        assert!(pharos_kv::Db::looks_like_database(&file).unwrap());
+        assert!(!dir.join("db.bbolt.bak").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

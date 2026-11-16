@@ -18,6 +18,8 @@
   it. Conversion refuses to run if `<database>.bbolt.bak` already exists as a different file.
 - To roll back to CoreDNS, stop Pharos and put `<database>.bbolt.bak` back. It lacks every UPDATE
   made after the conversion; to keep them, AXFR the Zone and use the export as CoreDNS's seed.
+- A database with a damaged header block is refused instead of falling back to the other header, which could silently drop acknowledged updates; restore it from a backup or an AXFR.
+- The database file grows when the Zone outgrows its regions; the abandoned regions are not reclaimed.
 - A hard link made to the bbolt file before conversion keeps pointing at the old (backup) file;
   link the converted file again.
 - After a restart the records of an RRset come back in key order, not insertion order (RFC 2181 §5.2).

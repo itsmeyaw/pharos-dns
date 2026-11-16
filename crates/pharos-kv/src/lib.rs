@@ -49,7 +49,7 @@ pub enum Op {
     Delete(Vec<u8>),
 }
 
-fn invalid(message: &str) -> io::Error {
+fn invalid(message: impl std::fmt::Display) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, format!("pharos-kv: {message}"))
 }
 
@@ -128,20 +128,24 @@ impl Header {
         if &body[..8] != HEADER_MAGIC || sha(&[body])[..] != *b.get(HEADER_LEN..HEADER_LEN + 32)? {
             return None;
         }
-        let u = |i: usize| u64::from_le_bytes(body[i..i + 8].try_into().unwrap_or_default());
-        let region = |i: usize| Region {
-            off: u(i),
-            cap: u(i + 8),
+        let u = |i: usize| -> Option<u64> {
+            Some(u64::from_le_bytes(body.get(i..i + 8)?.try_into().ok()?))
         };
-        let live = usize::try_from(u(24)).ok().filter(|live| *live < 2)?;
+        let region = |i: usize| {
+            Some(Region {
+                off: u(i)?,
+                cap: u(i + 8)?,
+            })
+        };
+        let live = usize::try_from(u(24)?).ok().filter(|live| *live < 2)?;
         Some(Header {
-            generation: u(8),
-            seq: u(16),
+            generation: u(8)?,
+            seq: u(16)?,
             live,
-            snap_len: u(32),
-            snap_hash: body[40..72].try_into().ok()?,
-            log: region(72),
-            snap: [region(88), region(104)],
+            snap_len: u(32)?,
+            snap_hash: body.get(40..72)?.try_into().ok()?,
+            log: region(72)?,
+            snap: [region(88)?, region(104)?],
         })
     }
 }
@@ -226,11 +230,15 @@ impl Io {
     }
 
     fn read_at(&self, len: u64, off: u64) -> io::Result<Vec<u8>> {
-        let end = off.checked_add(len).ok_or_else(|| invalid("bounds"))?;
+        let end = off
+            .checked_add(len)
+            .ok_or_else(|| invalid(format!("region at {off} of length {len} overflows")))?;
         if end > self.file.metadata()?.len() {
-            return Err(invalid("region beyond end of file"));
+            return Err(invalid(format!(
+                "region at {off} of length {len} is beyond the end of the file"
+            )));
         }
-        let mut buf = vec![0; usize::try_from(len).map_err(|_| invalid("bounds"))?];
+        let mut buf = vec![0; usize::try_from(len).map_err(|_| invalid("region too large"))?];
         self.file.read_exact_at(&mut buf, off)?;
         Ok(buf)
     }
@@ -254,7 +262,7 @@ impl<'a> Cursor<'a> {
         let (head, tail) = self
             .0
             .split_at_checked(n)
-            .ok_or_else(|| invalid("truncated"))?;
+            .ok_or_else(|| invalid("truncated data"))?;
         self.0 = tail;
         Ok(head)
     }
@@ -298,7 +306,7 @@ fn decode_snapshot(data: &[u8]) -> io::Result<BTreeMap<Vec<u8>, Vec<u8>>> {
         cursor
             .take(8)?
             .try_into()
-            .map_err(|_| invalid("truncated"))?,
+            .map_err(|_| invalid("truncated data"))?,
     );
     let mut map = BTreeMap::new();
     for _ in 0..count {
@@ -346,7 +354,7 @@ fn decode_ops(data: &[u8]) -> io::Result<Vec<Op>> {
     Ok(ops)
 }
 
-fn apply(map: &mut BTreeMap<Vec<u8>, Vec<u8>>, ops: Vec<Op>) {
+fn apply(map: &mut BTreeMap<Vec<u8>, Vec<u8>>, ops: impl IntoIterator<Item = Op>) {
     for op in ops {
         match op {
             Op::Put(k, v) => {
@@ -373,6 +381,34 @@ fn slot_capacity(snap_len: u64) -> u64 {
     round_up(snap_len + snap_len / 4 + (64 << 10))
 }
 
+/// Take an advisory lock on `file`, shared or exclusive, waiting up to one second.
+///
+/// Fails with [`ErrorKind::WouldBlock`] if another process holds a conflicting lock.
+pub fn lock(file: &File, shared: bool) -> io::Result<()> {
+    // bbolt v1.5.0 bolt_unix.go:17-45: flock with a one-second timeout and 50 ms retries.
+    let start = Instant::now();
+    loop {
+        let result = if shared {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < Duration::from_secs(1) => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    ErrorKind::WouldBlock,
+                    "pharos-kv: database lock timeout",
+                ));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
+}
+
 /// A durable ordered map of byte keys to byte values.
 pub struct Db {
     io: Io,
@@ -397,42 +433,45 @@ impl Db {
             .truncate(false)
             .mode(0o600)
             .open(path)?;
-        let start = Instant::now();
-        loop {
-            match file.try_lock() {
-                Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock)
-                    if start.elapsed() < Duration::from_secs(1) =>
-                {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    return Err(io::Error::new(
-                        ErrorKind::WouldBlock,
-                        "pharos-kv: lock timeout",
-                    ));
-                }
-                Err(std::fs::TryLockError::Error(error)) => return Err(error),
-            }
-        }
-        if file.metadata()?.len() == 0 {
+        lock(&file, false)?;
+        if Db::is_blank(&file)? {
             Db::create(file, &[])
         } else {
             Db::open(file)
         }
     }
 
-    /// Initialise an empty `file` whose first state is `initial`.
+    /// Whether `file` is empty or has only zeroes where the headers go.
+    ///
+    /// That is what a crash during [`Db::create`] leaves behind, so such a file is safe to
+    /// initialise again.
+    pub fn is_blank(file: &File) -> io::Result<bool> {
+        let mut head = vec![0u8; DATA_START as usize];
+        let mut filled = 0;
+        while filled < head.len() {
+            match file.read_at(&mut head[filled..], filled as u64)? {
+                0 => break,
+                n => filled += n,
+            }
+        }
+        Ok(head[..filled].iter().all(|b| *b == 0))
+    }
+
+    /// Initialise an empty or blank (see [`Db::is_blank`]) `file` whose first state is `initial`.
     ///
     /// The file only becomes a database when the final header write is synced, so a
-    /// crash during creation leaves a file that [`Db::open`] rejects.
+    /// crash during creation leaves a blank file that can be initialised again.
     pub fn create(file: File, initial: &[Op]) -> io::Result<Db> {
-        if file.metadata()?.len() != 0 {
+        Db::create_with(Io::new(file), initial)
+    }
+
+    fn create_with(io: Io, initial: &[Op]) -> io::Result<Db> {
+        if !Db::is_blank(&io.file)? {
             return Err(invalid("file is not empty"));
         }
-        let io = Io::new(file);
+        io.file.set_len(0)?;
         let mut map = BTreeMap::new();
-        apply(&mut map, initial.to_vec());
+        apply(&mut map, initial.iter().cloned());
         let snapshot = encode_snapshot(&map)?;
         let len = snapshot.len() as u64;
         let log = Region {
@@ -503,11 +542,27 @@ impl Db {
         let io = Io::new(file);
         let len = io.file.metadata()?.len();
         let blocks = io.read_at(DATA_START.min(len), 0)?;
-        let header = blocks
-            .chunks(BLOCK as usize)
-            .filter_map(Header::decode)
-            .max_by_key(|h| h.generation)
-            .ok_or_else(|| invalid("no valid header"))?;
+        let mut live_header = None;
+        for (index, block) in blocks.chunks(BLOCK as usize).enumerate() {
+            match Header::decode(block) {
+                Some(header) => {
+                    if live_header
+                        .as_ref()
+                        .is_none_or(|best: &Header| header.generation > best.generation)
+                    {
+                        live_header = Some(header);
+                    }
+                }
+                // A header is one sector, so a block that has the magic but fails its checksum
+                // is rot, not a torn flip. Falling back to the other header could silently
+                // drop acknowledged commits (#93 D8), so refuse instead.
+                None if block.starts_with(HEADER_MAGIC) => {
+                    return Err(invalid(format!("header block {index} is damaged")));
+                }
+                None => {}
+            }
+        }
+        let header = live_header.ok_or_else(|| invalid("no valid header"))?;
         let regions = [header.log, header.snap[0], header.snap[1]];
         if regions
             .iter()
@@ -528,15 +583,23 @@ impl Db {
         while let Some(rest) = log.get(pos..).filter(|r| r.len() >= RECORD_HEAD) {
             let mut head = Cursor(rest);
             let (magic, body_len) = (head.u32()?, head.u32()?);
-            let next =
-                u64::from_le_bytes(head.take(8)?.try_into().map_err(|_| invalid("truncated"))?);
-            let Some(body) = rest.get(RECORD_HEAD..RECORD_HEAD + body_len) else {
+            let next = u64::from_le_bytes(
+                head.take(8)?
+                    .try_into()
+                    .map_err(|_| invalid("truncated data"))?,
+            );
+            let Some(body) = RECORD_HEAD
+                .checked_add(body_len)
+                .and_then(|end| rest.get(RECORD_HEAD..end))
+            else {
                 break;
             };
             if magic != RECORD_MAGIC as usize || next != seq + 1 {
                 break;
             }
-            let check = sha(&[&chain, &next.to_le_bytes(), body]);
+            // #93 D5Z: the checksum chains from the previous record and covers the framing, so a
+            // stale or torn record can neither be replayed nor change the framing unnoticed.
+            let check = sha(&[&chain, &rest[..16], body]);
             if check[..] != rest[16..48] {
                 break;
             }
@@ -612,36 +675,36 @@ impl Db {
             return Ok(());
         }
         let body = encode_ops(ops)?;
+        let body_len = u32::try_from(body.len())
+            .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "pharos-kv: batch over 4 GiB"))?;
         let record_len = round_up((RECORD_HEAD + body.len()) as u64);
         if self.log_pos + record_len > self.header.log.cap {
-            // The record does not fit: fold the batch into a new snapshot instead.
-            let mut next = self.map.clone();
-            apply(&mut next, ops.to_vec());
-            let snapshot = encode_snapshot(&next)?;
+            // The record does not fit: fold the batch into a new snapshot instead. The map is
+            // updated first to avoid a copy; if the install fails the store is poisoned and
+            // never commits again, so the map running ahead of the disk is harmless.
+            apply(&mut self.map, ops.iter().cloned());
+            let snapshot = encode_snapshot(&self.map)?;
             self.seq += 1;
-            if let Err(error) = self.install(&snapshot) {
-                return self.poison(error);
-            }
-            self.map = next;
-            return Ok(());
+            return self.install(&snapshot).or_else(|error| self.poison(error));
         }
         let seq = self.seq + 1;
-        let check = sha(&[&self.chain, &seq.to_le_bytes(), &body]);
         let mut record = Vec::with_capacity(record_len as usize);
         record.extend_from_slice(&RECORD_MAGIC.to_le_bytes());
-        record.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        record.extend_from_slice(&body_len.to_le_bytes());
         record.extend_from_slice(&seq.to_le_bytes());
+        let check = sha(&[&self.chain, &record, &body]);
         record.extend_from_slice(&check);
         record.extend_from_slice(&body);
         record.resize(record_len as usize, 0);
         let written = self
             .io
             .write_at(&record, self.header.log.off + self.log_pos)
+            // POSIX.1-2017 fdatasync(): the record is on the device before the commit returns.
             .and_then(|()| self.io.sync_data());
         if let Err(error) = written {
             return self.poison(error);
         }
-        apply(&mut self.map, ops.to_vec());
+        apply(&mut self.map, ops.iter().cloned());
         self.seq = seq;
         self.chain = check;
         self.log_pos += record_len;
@@ -668,6 +731,8 @@ impl Db {
         self.install(&snapshot).or_else(|error| self.poison(error))
     }
 
+    // shortcut: regions abandoned by a relocation are never reclaimed, so the file grows by about
+    // the size of the Zone each time the Zone outgrows its slots; rewrite the file when that matters.
     // Write `snapshot` into the idle slot (a new region at the end of the file if it does not
     // fit), then publish it by flipping to the other header block.
     fn install(&mut self, snapshot: &[u8]) -> io::Result<()> {
@@ -753,10 +818,14 @@ mod tests {
     }
 
     fn arm(db: &Db, steps: usize, torn: bool) {
+        arm_io(&db.io, steps, torn);
+    }
+
+    fn arm_io(io: &super::Io, steps: usize, torn: bool) {
         use std::sync::atomic::Ordering::SeqCst;
-        let now = db.io.fault.count.load(SeqCst);
-        db.io.fault.at.store(now + steps, SeqCst);
-        db.io.fault.torn.store(torn, SeqCst);
+        let now = io.fault.count.load(SeqCst);
+        io.fault.at.store(now + steps, SeqCst);
+        io.fault.torn.store(torn, SeqCst);
     }
 
     #[test]
@@ -857,16 +926,68 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_newest_header_falls_back_to_the_older_one_without_losing_commits() {
+    fn damaged_header_is_refused_rather_than_rolling_back_commits() {
         let path = path();
         let mut db = Db::create(rw(&path), &[]).unwrap();
         db.commit(&[put("a", "1")]).unwrap();
         db.compact().unwrap();
-        let expected = contents(&db);
+        db.commit(&[put("b", "2")]).unwrap();
         drop(db);
-        // Generation 1 lives in header block 1; the older header still sees the old log.
-        std::os::unix::fs::FileExt::write_all_at(&rw(&path), &[0xaa; 16], 4096 + 10).unwrap();
-        assert_eq!(reopen(&path), expected);
+        // Generation 1 lives in header block 1; the older header would silently lose "b".
+        std::os::unix::fs::FileExt::write_all_at(&rw(&path), &[0xaa; 16], 4096 + 100).unwrap();
+        let error = Db::open(rw(&path)).err().unwrap();
+        assert!(error.to_string().contains("header block 1"), "{error}");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn crash_during_create_leaves_a_file_that_can_be_created_again() {
+        let initial = [put("origin", "x"), put("a", "1")];
+        for torn in [false, true] {
+            for steps in 0..64 {
+                let path = path();
+                let io = super::Io::new(rw(&path));
+                arm_io(&io, steps, torn);
+                let result = Db::create_with(io, &initial);
+                let db = Db::open_path(&path).unwrap();
+                let got = contents(&db);
+                drop(db);
+                std::fs::remove_file(path).unwrap();
+                if result.is_ok() {
+                    assert_eq!(got.len(), 2, "steps {steps}");
+                    break;
+                }
+                assert!(
+                    got.is_empty() || got.len() == 2,
+                    "steps {steps} torn {torn}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn is_blank_accepts_empty_and_zeroed_headers_only() {
+        let path = path();
+        std::fs::write(&path, b"").unwrap();
+        assert!(Db::is_blank(&File::open(&path).unwrap()).unwrap());
+        std::fs::write(&path, vec![0u8; 20000]).unwrap();
+        assert!(Db::is_blank(&File::open(&path).unwrap()).unwrap());
+        std::fs::write(&path, b"SQLite format 3\0").unwrap();
+        assert!(!Db::is_blank(&File::open(&path).unwrap()).unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn record_framing_is_covered_by_the_checksum() {
+        let path = path();
+        let mut db = Db::create(rw(&path), &[]).unwrap();
+        db.commit(&[put("a", "1")]).unwrap();
+        db.commit(&[put("b", "2")]).unwrap();
+        let log = db.header.log.off;
+        drop(db);
+        // Changing the length field of record 1 must end replay there, not skip or misparse.
+        std::os::unix::fs::FileExt::write_all_at(&rw(&path), &[0xff], log + 4).unwrap();
+        assert_eq!(Db::open(rw(&path)).unwrap().len(), 0);
         std::fs::remove_file(path).unwrap();
     }
 
