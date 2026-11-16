@@ -3,7 +3,7 @@
 
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives};
-use pharos_proto::{Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Type};
+use pharos_proto::{Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type};
 use pharos_server::{Context, Metadata, Next, Outcome, Plugin, Protocol, Transport};
 
 struct NextDrop;
@@ -374,13 +374,7 @@ async fn coredns_acl_serve_dns_cases() {
                         Rcode::NOERROR
                     }
                 );
-                assert_eq!(
-                    msg.opt().unwrap().options().iter().next().unwrap(),
-                    EdnsOption::ExtendedError {
-                        info_code: if action == 1 { 15 } else { 17 },
-                        extra_text: &[]
-                    }
-                );
+                assert!(msg.opt().is_none());
             }
         }
     }
@@ -389,37 +383,33 @@ async fn coredns_acl_serve_dns_cases() {
 // Derived from CoreDNS v1.15.0 plugin/acl/acl_test.go.
 #[tokio::test]
 async fn coredns_acl_matches_ordered_policies_and_response_codes() {
-    for (directive, client, typ, expected, ede) in [
+    for (directive, client, typ, expected) in [
         (
             "allow net 192.168.1.0/24\n block net 192.168.0.0/16",
             "192.168.1.2:53",
             Type::A,
             None,
-            0,
         ),
         (
             "allow net 192.168.1.0/24\n block net 192.168.0.0/16",
             "192.168.2.2:53",
             Type::A,
             Some(Rcode::REFUSED),
-            15,
         ),
         (
             "filter type AAAA net 2001:db8::/32",
             "[2001:db8::1]:53",
             Type::AAAA,
             Some(Rcode::NOERROR),
-            17,
         ),
-        ("block type AAAA", "127.0.0.1:53", Type::A, None, 0),
+        ("block type AAAA", "127.0.0.1:53", Type::A, None),
         (
             "block net * net 192.168.1.0/24",
             "127.0.0.1:53",
             Type::A,
             Some(Rcode::REFUSED),
-            15,
         ),
-        ("drop", "127.0.0.1:53", Type::A, None, 0),
+        ("drop", "127.0.0.1:53", Type::A, None),
     ] {
         let text = format!(".:53 {{\n acl {{\n {directive}\n }}\n}}");
         let blocks = parse("Corefile", &text).unwrap();
@@ -453,20 +443,14 @@ async fn coredns_acl_matches_ordered_policies_and_response_codes() {
             assert_eq!(outcome, Outcome::Response, "{directive}");
             let msg = Message::parse(&response).unwrap();
             assert_eq!(msg.rcode(), expected);
-            assert_eq!(
-                msg.opt().unwrap().options().iter().next().unwrap(),
-                EdnsOption::ExtendedError {
-                    info_code: ede,
-                    extra_text: &[]
-                }
-            );
+            assert!(msg.opt().is_none());
         } else {
             assert_eq!(outcome, Outcome::Drop, "{directive}");
         }
     }
 }
 
-async fn scoped_acl_client(policy: &str) -> (Outcome, Vec<u8>) {
+async fn scoped_acl_client(policy: &str, dnssec_ok: Option<bool>) -> (Outcome, Vec<u8>) {
     let policy = policy.replace('\n', "\n  ");
     let corefile = format!(".:53 {{\n acl example.org {{\n  {policy}\n }}\n}}");
     let blocks = parse("Corefile", &corefile).unwrap();
@@ -485,6 +469,19 @@ async fn scoped_acl_client(policy: &str) -> (Outcome, Vec<u8>) {
             Class::IN,
         )
         .unwrap();
+    if let Some(dnssec_ok) = dnssec_ok {
+        // RFC 6891 §6.1.2: An OPT record carries the EDNS request flags.
+        builder
+            .record(
+                Section::Additional,
+                NameRef::parse(&[0], 0).unwrap(),
+                Type::OPT,
+                Class(1232),
+                if dnssec_ok { 0x8000 } else { 0 },
+                &[],
+            )
+            .unwrap();
+    }
     let _ = builder.finish();
     let mut response = Vec::with_capacity(512);
     let mut slots = [];
@@ -515,41 +512,60 @@ async fn scoped_acl_client(policy: &str) -> (Outcome, Vec<u8>) {
 
 #[tokio::test]
 async fn unscoped_block_catches_scoped_link_local_client() {
-    let (outcome, response) = scoped_acl_client("block net fe80::/10").await;
+    let (outcome, response) = scoped_acl_client("block net fe80::/10", None).await;
     assert_eq!(outcome, Outcome::Response);
-    assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
+    let message = Message::parse(&response).unwrap();
+    assert_eq!(message.rcode(), Rcode::REFUSED);
+    assert!(message.opt().is_none());
 }
 
 #[tokio::test]
 async fn unscoped_drop_catches_scoped_link_local_client() {
-    let (outcome, _) = scoped_acl_client("drop net fe80::/10").await;
+    let (outcome, _) = scoped_acl_client("drop net fe80::/10", None).await;
     assert_eq!(outcome, Outcome::Drop);
 }
 
 #[tokio::test]
 async fn unscoped_filter_catches_scoped_link_local_client() {
-    let (outcome, response) = scoped_acl_client("filter net fe80::/10").await;
+    let (outcome, response) = scoped_acl_client("filter net fe80::/10", None).await;
     assert_eq!(outcome, Outcome::Response);
     let message = Message::parse(&response).unwrap();
     assert_eq!(message.rcode(), Rcode::NOERROR);
-    assert_eq!(
-        message.opt().unwrap().options().iter().next().unwrap(),
-        EdnsOption::ExtendedError {
-            info_code: 17,
-            extra_text: &[]
-        }
-    );
+    assert!(message.opt().is_none());
+}
+
+#[tokio::test]
+async fn acl_ede_requires_edns_and_mirrors_dnssec_ok() {
+    for (policy, rcode, ede, dnssec_ok) in [
+        ("block net fe80::/10", Rcode::REFUSED, 15, true),
+        ("filter net fe80::/10", Rcode::NOERROR, 17, false),
+    ] {
+        let (outcome, response) = scoped_acl_client(policy, Some(dnssec_ok)).await;
+        assert_eq!(outcome, Outcome::Response);
+        let message = Message::parse(&response).unwrap();
+        let opt = message.opt().unwrap();
+        assert_eq!(message.rcode(), rcode);
+        assert_eq!(opt.dnssec_ok(), dnssec_ok);
+        assert_eq!(
+            opt.options().iter().next().unwrap(),
+            EdnsOption::ExtendedError {
+                info_code: ede,
+                extra_text: &[]
+            }
+        );
+    }
 }
 
 #[tokio::test]
 async fn unscoped_allow_does_not_exempt_scoped_client_from_block_all() {
-    let (outcome, response) = scoped_acl_client("allow net fe80::/10\nblock net *").await;
+    let (outcome, response) = scoped_acl_client("allow net fe80::/10\nblock net *", None).await;
     assert_eq!(outcome, Outcome::Response);
     assert_eq!(Message::parse(&response).unwrap().rcode(), Rcode::REFUSED);
 }
 
 #[tokio::test]
 async fn scoped_allow_before_unscoped_block_preserves_policy_order() {
-    let (outcome, _) = scoped_acl_client("allow net fe80::%7/10\nblock net fe80::/10").await;
+    let (outcome, _) =
+        scoped_acl_client("allow net fe80::%7/10\nblock net fe80::/10", None).await;
     assert_eq!(outcome, Outcome::Unanswered(Rcode::NOERROR));
 }
