@@ -195,9 +195,10 @@ fn json_string(out: &mut impl fmt::Write, value: &str) {
 // RFC 3339 §5.3: Omit fractional seconds, a rarely used option.
 fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
     let seconds = match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs() as i64,
+        Ok(duration) => duration.as_secs().min(i64::MAX as u64) as i64,
         Err(error) => {
-            -(error.duration().as_secs() as i64) - i64::from(error.duration().subsec_nanos() != 0)
+            -(error.duration().as_secs().min(i64::MAX as u64) as i64)
+                - i64::from(error.duration().subsec_nanos() != 0)
         }
     };
     // RFC 3339 §5.7: Convert Unix days into a valid Gregorian date.
@@ -236,6 +237,19 @@ fn write_timestamp(out: &mut impl fmt::Write, time: SystemTime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamps_keep_four_digit_years_outside_rfc_range() {
+        let before_year_zero = UNIX_EPOCH - std::time::Duration::from_secs(62_167_219_201);
+        let after_year_9999 = UNIX_EPOCH + std::time::Duration::from_secs(253_402_300_800);
+
+        assert!(format_line(LogFormat::Text, before_year_zero, "INFO", "", "").starts_with(
+            "0000-01-01T00:00:00Z"
+        ));
+        assert!(format_line(LogFormat::Text, after_year_9999, "INFO", "", "").starts_with(
+            "9999-12-31T23:59:59Z"
+        ));
+    }
 
     #[test]
     fn over_long_entry_is_truncated_on_a_character_boundary() {
