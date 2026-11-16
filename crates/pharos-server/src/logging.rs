@@ -243,12 +243,14 @@ mod tests {
         let before_year_zero = UNIX_EPOCH - std::time::Duration::from_secs(62_167_219_201);
         let after_year_9999 = UNIX_EPOCH + std::time::Duration::from_secs(253_402_300_800);
 
-        assert!(format_line(LogFormat::Text, before_year_zero, "INFO", "", "").starts_with(
-            "0000-01-01T00:00:00Z"
-        ));
-        assert!(format_line(LogFormat::Text, after_year_9999, "INFO", "", "").starts_with(
-            "9999-12-31T23:59:59Z"
-        ));
+        assert!(
+            format_line(LogFormat::Text, before_year_zero, "INFO", "", "")
+                .starts_with("0000-01-01T00:00:00Z")
+        );
+        assert!(
+            format_line(LogFormat::Text, after_year_9999, "INFO", "", "")
+                .starts_with("9999-12-31T23:59:59Z")
+        );
     }
 
     #[test]
