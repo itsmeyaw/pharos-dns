@@ -21,6 +21,7 @@
 
 - [bind Plugin notes](../crates/pharos-plugins/src/bind/README.md)
 - RFC 5625 §6.2: the default listener uses an unspecified address and can expose a `forward` proxy on every interface; configure `bind` to restrict listener addresses (conf/infra #105).
+- RFC 4007 §11.2: Listener bind addresses still resolve IPv6 zone text only through `if_nametoindex`; decimal zone IDs, including `%0`, remain unsupported.
 
 ## bufsize
 
@@ -96,6 +97,7 @@
 
 - [secondary Plugin notes](../crates/pharos-plugins/src/secondary/README.md)
 - AXFR snapshots without apex NS or with out-of-zone owners are rejected before publish (RFC 1034 §4.2; RFC 2181 §6.1; see RFC 5936 §3.1 for AXFR processing); CoreDNS v1.15.0's file Zone insertion does not enforce those boundaries.
+- RFC 4007 §11.2: secondary primary matching accepts ASCII-decimal zone IDs, including `%0` and leading-zero spellings, and compares the numeric index to the peer scope ID. This RFC behavior differs from CoreDNS's interface-name-only matching (ADR 0002).
 
 ## forward
 
@@ -196,6 +198,7 @@
 
 - [transfer Plugin notes](../crates/pharos-plugins/src/transfer/README.md)
 - `to` accepts CIDR prefixes as a Pharos extension for incoming AXFR/IXFR ACLs. CIDR entries are not NOTIFY recipients: setup logs one WARN per entry and NOTIFY skips it, succeeding when every IP address succeeds (an error only when no IP address is configured). Use explicit IP addresses for NOTIFY.
+- **Partial** — RFC 1996 §2.1: The transfer Plugin has no implicit NOTIFY Set. `to` is required, and outgoing NOTIFY targets only explicit IP destinations; `Transfer::notify` receives the Zone name, not its apex NS RRset or SOA MNAME. CIDR `to` entries remain incoming AXFR/IXFR ACLs and are skipped for NOTIFY; configure explicit IPs.
 - IXFR requires the Authority SOA owner and class to match the Question; mismatches return SERVFAIL. This is stricter than CoreDNS's parser (RFC 1995 §3); RFC 1995 defines no RCODE for it, so SERVFAIL is a Pharos choice.
 - A TCP IXFR answered with only the current SOA clears AA, as CoreDNS does (#75); RFC 5936 §2.2.1 sets AA on AXFR Responses and RFC 1995 §2 is silent.
 - IXFR treats a client serial of 0 as an ordinary serial (RFC 1982 §7): the current SOA alone is returned when the Zone serial is 0 or 0 is ahead in RFC 1982 order. CoreDNS treats 0 as unknown and sends the full Zone.
