@@ -575,7 +575,7 @@ async fn secondary_soa_check_matches_response_id_and_question() {
         from: vec![address.to_string()],
         catalog: None,
     });
-    assert!(update::should_transfer(&zone).await.unwrap());
+    assert!(update::should_transfer(&zone).await.unwrap().is_some());
     for serial in [249, 250] {
         let text = format!("@ 60 IN SOA ns. hostmaster. {serial} 0 0 0 0\n@ 60 IN NS ns.\n");
         let records = ZoneParser::new(text.as_bytes(), zone.config.apex.clone(), "test")
@@ -584,11 +584,92 @@ async fn secondary_soa_check_matches_response_id_and_question() {
         zone.current.store(Some(Arc::new(
             crate::zone::Zone::from_records(zone.config.apex.clone(), records).unwrap(),
         )));
-        assert_eq!(update::should_transfer(&zone).await.unwrap(), serial == 249);
+        assert_eq!(
+            update::should_transfer(&zone).await.unwrap().is_some(),
+            serial == 249
+        );
     }
     assert!(update::should_transfer(&zone).await.is_err());
     assert!(update::should_transfer(&zone).await.is_err());
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn secondary_reuses_soa_connection_for_axfr() {
+    use pharos_proto::{Message, MessageBuilder, Section};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let primary = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut query_wire = vec![0; usize::from(socket.read_u16().await.unwrap())];
+        socket.read_exact(&mut query_wire).await.unwrap();
+        let query = Message::parse(&query_wire).unwrap();
+        let question = query.questions().next().unwrap();
+        assert_eq!(question.qtype, Type::SOA);
+
+        let mut response_wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut response_wire, 512, query.id(), 0x8400).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        builder
+            .record(
+                Section::Answer,
+                question.name,
+                Type::SOA,
+                Class::IN,
+                60,
+                &soa_rdata(2),
+            )
+            .unwrap();
+        let _ = builder.finish();
+        socket
+            .write_u16(response_wire.len() as u16)
+            .await
+            .unwrap();
+        socket.write_all(&response_wire).await.unwrap();
+
+        let mut query_wire = vec![0; usize::from(socket.read_u16().await.unwrap())];
+        socket.read_exact(&mut query_wire).await.unwrap();
+        let query = Message::parse(&query_wire).unwrap();
+        let question = query.questions().next().unwrap();
+        assert_eq!(question.qtype, Type::AXFR);
+
+        let mut response_wire = Vec::with_capacity(512);
+        let mut builder = MessageBuilder::new(&mut response_wire, 512, query.id(), 0x8400).unwrap();
+        builder
+            .question(question.name, question.qtype, question.qclass)
+            .unwrap();
+        for rtype in [Type::SOA, Type::NS, Type::SOA] {
+            let rdata = if rtype == Type::NS {
+                b"\x02ns\x07example\x03org\x00".as_slice()
+            } else {
+                &soa_rdata(2)
+            };
+            builder
+                .record(Section::Answer, question.name, rtype, Class::IN, 60, rdata)
+                .unwrap();
+        }
+        let _ = builder.finish();
+        socket
+            .write_u16(response_wire.len() as u16)
+            .await
+            .unwrap();
+        socket.write_all(&response_wire).await.unwrap();
+    });
+
+    let zone = plain_zone(address);
+    let (shared, _, _) = catalog_shared();
+    let (primary_address, socket) = update::should_transfer(&zone)
+        .await
+        .unwrap()
+        .unwrap();
+    update::transfer_on_connection(&shared, &zone, primary_address, socket)
+        .await
+        .unwrap();
+    primary.await.unwrap();
 }
 
 #[tokio::test]
@@ -660,7 +741,10 @@ async fn notify_refresh_queries_the_sending_primary() {
     assert_eq!(handle_notify(&zone, &mut cx), Outcome::Response);
     let target = zone.notify_source.lock().unwrap().take().unwrap();
     assert_eq!(target, source);
-    assert!(update::should_transfer_from(&zone, target).await.unwrap());
+    assert!(update::should_transfer_from(&zone, target)
+        .await
+        .unwrap()
+        .is_some());
     primary.await.unwrap();
 }
 

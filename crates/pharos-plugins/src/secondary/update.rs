@@ -95,15 +95,16 @@ fn random_delay(_: u16) -> u16 {
 
 // RFC 1034 §2.4: name servers periodically refresh zones from master copies.
 pub(super) async fn transfer(shared: &Arc<Shared>, zone: &SecondaryZone) -> io::Result<()> {
-    transfer_inner(shared, zone, None).await
+    transfer_inner(shared, zone, None, None).await
 }
 
-pub(super) async fn transfer_from(
+pub(super) async fn transfer_on_connection(
     shared: &Arc<Shared>,
     zone: &SecondaryZone,
     primary: SocketAddr,
+    socket: tokio::net::TcpStream,
 ) -> io::Result<()> {
-    transfer_inner(shared, zone, Some(primary)).await
+    transfer_inner(shared, zone, Some(primary), Some(socket)).await
 }
 
 // RFC 3597 §4: only these types are known to carry no domain names in RDATA.
@@ -203,6 +204,7 @@ async fn transfer_inner(
     shared: &Arc<Shared>,
     zone: &SecondaryZone,
     primary: Option<SocketAddr>,
+    mut connection: Option<tokio::net::TcpStream>,
 ) -> io::Result<()> {
     // RFC 1034 §4.3.5: one transfer per Zone at a time, so an older copy cannot land last.
     let _transfer = zone.transfer_lock.lock().await;
@@ -224,31 +226,48 @@ async fn transfer_inner(
         let mut bytes = 0usize;
         let limits = zone.config.limits;
         // Bound the whole transfer: the per-frame deadline lets a slow Primary Server hold it open.
-        let result = tokio::time::timeout(
-            limits.timeout,
-            pharos_server::transfer::axfr(
-                address,
-                &zone.config.apex,
-                random_id(),
-                Duration::from_secs(5),
-                |message| {
-                    // RFC 5936 §2.2: Ignore duplicate resource records in an AXFR stream.
-                    for record in message.answers() {
-                        // Refuse before allocating once the Zone outgrows its memory budget.
-                        if records.len() >= limits.max_records {
-                            return Err(over_limit("max_records", limits.max_records));
-                        }
-                        let item = zone_record(record, &mut scratch)?;
-                        bytes = bytes.saturating_add(item.owner.as_wire().len() + item.rdata.len());
-                        if bytes > limits.max_bytes {
-                            return Err(over_limit("max_bytes", limits.max_bytes));
-                        }
-                        records.push(item);
-                    }
-                    Ok(())
-                },
-            ),
-        )
+        let mut on_message = |message: Message<'_>| {
+            // RFC 5936 §2.2: Ignore duplicate resource records in an AXFR stream.
+            for record in message.answers() {
+                // Refuse before allocating once the Zone outgrows its memory budget.
+                if records.len() >= limits.max_records {
+                    return Err(over_limit("max_records", limits.max_records));
+                }
+                let item = zone_record(record, &mut scratch)?;
+                bytes = bytes.saturating_add(item.owner.as_wire().len() + item.rdata.len());
+                if bytes > limits.max_bytes {
+                    return Err(over_limit("max_bytes", limits.max_bytes));
+                }
+                records.push(item);
+            }
+            Ok(())
+        };
+        let id = random_id();
+        let result = tokio::time::timeout(limits.timeout, async {
+            match connection.take() {
+                Some(socket) => {
+                    pharos_server::transfer::axfr_on_connection(
+                        socket,
+                        address,
+                        &zone.config.apex,
+                        id,
+                        Duration::from_secs(5),
+                        &mut on_message,
+                    )
+                    .await
+                }
+                None => {
+                    pharos_server::transfer::axfr(
+                        address,
+                        &zone.config.apex,
+                        id,
+                        Duration::from_secs(5),
+                        &mut on_message,
+                    )
+                    .await
+                }
+            }
+        })
         .await
         .unwrap_or_else(|_| {
             Err(io::Error::new(
@@ -316,14 +335,17 @@ async fn transfer_inner(
 }
 
 // RFC 1034 §4.3.5: poll the primary SOA serial to detect Zone changes.
-pub(super) async fn should_transfer(zone: &SecondaryZone) -> io::Result<bool> {
+pub(super) async fn should_transfer(
+    zone: &SecondaryZone,
+) -> io::Result<Option<(SocketAddr, tokio::net::TcpStream)>> {
     let mut error = None;
     for primary in &zone.config.from {
         match tokio::net::lookup_host(primary).await {
             Ok(addresses) => {
                 for address in addresses {
                     match should_transfer_at(zone, address).await {
-                        Ok(changed) => return Ok(changed),
+                        Ok((true, socket)) => return Ok(Some((address, socket))),
+                        Ok((false, _)) => return Ok(None),
                         Err(err) => error = Some(err),
                     }
                 }
@@ -331,17 +353,23 @@ pub(super) async fn should_transfer(zone: &SecondaryZone) -> io::Result<bool> {
             Err(err) => error = Some(err),
         }
     }
-    error.map_or(Ok(false), Err)
+    error.map_or(Ok(None), Err)
 }
 
 pub(super) async fn should_transfer_from(
     zone: &SecondaryZone,
     primary: SocketAddr,
-) -> io::Result<bool> {
-    should_transfer_at(zone, primary).await
+) -> io::Result<Option<tokio::net::TcpStream>> {
+    should_transfer_at(zone, primary)
+        .await
+        .map(|(changed, socket)| changed.then_some(socket))
 }
 
-async fn should_transfer_at(zone: &SecondaryZone, primary: SocketAddr) -> io::Result<bool> {
+// RFC 9103 §6.3.1: Keep the SOA-check connection open when AXFR is needed.
+async fn should_transfer_at(
+    zone: &SecondaryZone,
+    primary: SocketAddr,
+) -> io::Result<(bool, tokio::net::TcpStream)> {
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         let mut socket = tokio::net::TcpStream::connect(primary).await?;
         let mut query = Vec::with_capacity(512);
@@ -388,11 +416,12 @@ async fn should_transfer_at(zone: &SecondaryZone, primary: SocketAddr) -> io::Re
                 && let Ok(pharos_proto::Rdata::Soa { serial, .. }) = answer.data()
             {
                 let current = zone.current.load();
-                return Ok(current
+                let changed = current
                     .as_ref()
                     .and_then(|zone| zone.serial())
                     // RFC 1982 §3.2: transfer only when the Primary's serial is newer.
-                    .is_none_or(|local| !serial_at_least(local, serial)));
+                    .is_none_or(|local| !serial_at_least(local, serial));
+                return Ok((changed, socket));
             }
         }
         Err(io::Error::other("SOA Response has no apex SOA"))
@@ -447,7 +476,13 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
             // RFC 1996 §4.4: Defer duplicate NOTIFY work until current check completes.
             // RFC 1996 §3.11: Query and transfer from the master that sent NOTIFY.
             let failed = match should_transfer_from(&notify_zone, source).await {
-                Ok(true) => transfer_from(&notify_shared, &notify_zone, source)
+                // RFC 9103 §6.3.1: Keep the SOA-check connection open for AXFR.
+                Ok(Some(socket)) => transfer_on_connection(
+                    &notify_shared,
+                    &notify_zone,
+                    source,
+                    socket,
+                )
                     .await
                     .inspect_err(|error| {
                         pharos_server::logging::log(
@@ -457,7 +492,7 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                         );
                     })
                     .is_err(),
-                Ok(false) => false,
+                Ok(None) => false,
                 Err(error) => {
                     pharos_server::logging::log(
                         "WARN",
@@ -513,8 +548,11 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                 tokio::time::sleep(Duration::from_millis(u64::from(random_delay(jitter)))).await;
             }
             match should_transfer(&zone).await {
-                Ok(true) => {
-                    if let Err(error) = transfer(&shared, &zone).await {
+                Ok(Some((primary, socket))) => {
+                    // RFC 9103 §6.3.1: Keep the SOA-check connection open for AXFR.
+                    if let Err(error) =
+                        transfer_on_connection(&shared, &zone, primary, socket).await
+                    {
                         pharos_server::logging::log(
                             "WARN",
                             "secondary",
@@ -525,7 +563,7 @@ pub(super) async fn run(shared: Arc<Shared>, zone: Arc<SecondaryZone>) {
                     }
                 }
                 // RFC 1034 §4.3.5: A successful unchanged SOA check renews this secondary copy.
-                Ok(false) => zone.expired.store(false, Ordering::Relaxed),
+                Ok(None) => zone.expired.store(false, Ordering::Relaxed),
                 Err(error) => {
                     pharos_server::logging::log(
                         "WARN",

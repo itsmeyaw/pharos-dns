@@ -159,7 +159,20 @@ pub async fn axfr(
     deadline: Duration,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(address, zone, id, deadline, None, on_message).await
+    axfr_inner(None, address, zone, id, deadline, None, on_message).await
+}
+
+/// Receive an AXFR over an existing TCP connection.
+/// RFC 9103 §6.3.1: Reuse the connection that performed the SOA check.
+pub async fn axfr_on_connection(
+    socket: TcpStream,
+    address: SocketAddr,
+    zone: &Name,
+    id: u16,
+    deadline: Duration,
+    on_message: impl FnMut(Message<'_>) -> io::Result<()>,
+) -> io::Result<()> {
+    axfr_inner(Some(socket), address, zone, id, deadline, None, on_message).await
 }
 
 /// Compatibility alias for [`axfr`] that retains the legacy public name.
@@ -170,7 +183,7 @@ pub async fn axfr_coredns(
     deadline: Duration,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(address, zone, id, deadline, None, on_message).await
+    axfr_inner(None, address, zone, id, deadline, None, on_message).await
 }
 
 /// Receive an authenticated AXFR incrementally. Discard partial data on error;
@@ -184,10 +197,11 @@ pub async fn axfr_signed(
     key: &TsigKey,
     on_message: impl FnMut(Message<'_>) -> io::Result<()>,
 ) -> io::Result<()> {
-    axfr_inner(address, zone, id, deadline, Some(key), on_message).await
+    axfr_inner(None, address, zone, id, deadline, Some(key), on_message).await
 }
 
 async fn axfr_inner(
+    connection: Option<TcpStream>,
     address: SocketAddr,
     zone: &Name,
     id: u16,
@@ -227,7 +241,10 @@ async fn axfr_inner(
         None
     };
     // RFC 5936 §2: AXFR sessions use TCP.
-    let mut socket = timeout(deadline, TcpStream::connect(address)).await??;
+    let mut socket = match connection {
+        Some(socket) => socket,
+        None => timeout(deadline, TcpStream::connect(address)).await??,
+    };
     // RFC 1035 §4.2.2: TCP Messages are prefixed with a two-octet length.
     timeout(deadline, crate::write_tcp_frame(&mut socket, &query)).await??;
     let mut wire = Vec::new();
