@@ -47,12 +47,15 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
         (SocketAddr::V4(_), None) => true,
         (SocketAddr::V6(client), None) => client.scope_id() == 0,
         (SocketAddr::V6(client), Some(scope)) => {
-            // RFC 4007 §11.2: an interface-name zone matches only the peer's own interface.
+            // RFC 4007 §11.2: Numeric zone IDs are scope indexes; names identify interfaces.
             // RFC 4007 §11: a scoped IPv6 address identifies an interface zone.
             // CoreDNS compares the zone text Go renders: the interface name.
             client.scope_id() != 0
-                && nix::net::if_::if_indextoname(client.scope_id())
-                    .is_ok_and(|name| name.as_bytes() == scope.as_bytes())
+                && match scope.parse::<u32>() {
+                    Ok(index) => index == client.scope_id(),
+                    Err(_) => nix::net::if_::if_indextoname(client.scope_id())
+                        .is_ok_and(|name| name.as_bytes() == scope.as_bytes()),
+                }
         }
         (SocketAddr::V4(_), Some(_)) => false,
     }

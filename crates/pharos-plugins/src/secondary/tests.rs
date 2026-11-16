@@ -92,7 +92,7 @@ fn coredns_notify_checks_ip_spelling_and_scope() {
         &format!("[fe80::1%{name}]:53"),
         scoped
     ));
-    assert!(!update::primary_matches("[fe80::1%1]:53", scoped));
+    assert!(update::primary_matches("[fe80::1%1]:53", scoped));
     assert!(!update::primary_matches("[fe80::1%2]:53", scoped));
     assert!(!update::primary_matches("[fe80::1]:53", scoped));
 }
