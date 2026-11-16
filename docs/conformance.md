@@ -1343,7 +1343,7 @@ Summary counts describe the audited commit and do not include later branch fixes
 
 | Section | Code location | Explanation | Documented | Issue | Commits |
 |---|---|---|---|---|---|
-| §3.7.4 Nagle Algorithm | `crates/pharos-server/src/tcp.rs:126-129`, `crates/pharos-plugins/src/proxy/mod.rs:72-84` | **Deviation**: Both DNS-over-TCP server and proxy upstream keep `TCP_NODELAY` enabled to protect tail latency, despite RFC 9293's SHOULD to implement Nagle. Recorded in `docs/compatibility.md` per the project's performance priority. | Yes | — | `3a5a7a12` |
+| §3.7.4 Nagle Algorithm | `crates/pharos-server/src/tcp.rs:126-135`, `crates/pharos-plugins/src/proxy/mod.rs:72-84` | **Deviation**: Both DNS-over-TCP server and proxy upstream keep `TCP_NODELAY` enabled to protect tail latency, despite RFC 9293's SHOULD to implement Nagle. This latency rationale has not yet been benchmarked. Recorded in `docs/compatibility.md` per the project's performance priority. | Yes | — | `3a5a7a12` |
 
 ## RFC 9432: DNS Catalog Zones
 

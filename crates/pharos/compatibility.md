@@ -281,7 +281,7 @@
 
 ## Server
 
-- RFC 9293 §3.7.4: DNS-over-TCP server and proxy upstream connections disable Nagle (`TCP_NODELAY`) to send responses promptly and protect tail latency; this intentionally omits the RFC's SHOULD to implement Nagle.
+- RFC 9293 §3.7.4: DNS-over-TCP server and proxy upstream connections disable Nagle (`TCP_NODELAY`) to send responses promptly and protect tail latency; this intentionally omits the RFC's SHOULD to implement Nagle. The latency rationale has not yet been benchmarked.
 - `/health` and `/ready` 200 responses carry SHA-256 strong ETags; `/metrics` omits ETag on ordinary scrapes and computes one for conditional requests as a performance exception to RFC 9110 §8.8.3.1. 304/412 retain the selected validator. Byte ranges are ignored as RFC 9110 §14.2 permits. Cleartext HTTP rejects absolute-form HTTPS targets with 421, and the listener caps HTTP/1 request buffering at 16 KiB.
 - Each UDP worker handles up to 256 waiting Queries concurrently and retains one
   active or spare slot plus at most 16 completed slots for reuse. Each plain slot reserves 65,535
