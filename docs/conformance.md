@@ -1343,7 +1343,7 @@ Summary counts describe the audited commit and do not include later branch fixes
 
 | Section | Code location | Explanation | Documented | Issue | Commits |
 |---|---|---|---|---|---|
-| §3.7.4 Nagle Algorithm | `crates/pharos-server/src/tcp.rs:112`, `crates/pharos-plugins/src/proxy/mod.rs:70` | **Violation**: SHLD-7 says a TCP implementation SHOULD implement Nagle. Both the DNS-over-TCP server and the proxy upstream always call `set_nodelay(true)` and never enable Nagle. The per-connection disable (MUST-17) is met by the same call. No ADR or plugin README justifies the deviation; the `tcp.rs:111` comment gives a rationale but is not a recorded decision. Skipped on `rem/http`: Nagle behavior is out of scope. | Yes | — | — |
+| §3.7.4 Nagle Algorithm | `crates/pharos-server/src/tcp.rs:126-129`, `crates/pharos-plugins/src/proxy/mod.rs:72-84` | **Deviation**: Both DNS-over-TCP server and proxy upstream keep `TCP_NODELAY` enabled to protect tail latency, despite RFC 9293's SHOULD to implement Nagle. Recorded in `docs/compatibility.md` per the project's performance priority. | Yes | — | `3a5a7a12` |
 
 ## RFC 9432: DNS Catalog Zones
 
