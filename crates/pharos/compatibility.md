@@ -228,6 +228,7 @@
 ## whoami
 
 - [whoami Plugin notes](../crates/pharos-plugins/src/whoami/README.md)
+- RFC 2782 §2: Pharos emits `_whoami._udp.Name` / `_whoami._tcp.Name` SRV owners; CoreDNS emits `_udp.Name` / `_tcp.Name`. Pharos keeps the required `_Service._Proto.Name` format rather than matching CoreDNS.
 
 ## Expressions and templates
 

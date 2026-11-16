@@ -492,7 +492,7 @@ Summary counts describe the audited commit and do not include later branch fixes
 
 | Section | Code location | Explanation | Documented | Issue | Commits |
 |---|---|---|---|---|---|
-| §The format of the SRV RR | `crates/pharos-plugins/src/whoami/mod.rs:41-59` | **Violation**: `whoami` emits `_udp.Name` or `_tcp.Name`, omitting the required `_Service` label from `_Service._Proto.Name`. Its README does not document this format exception. | No | — | — |
+| §The format of the SRV RR | `crates/pharos-plugins/src/whoami/mod.rs:51-72` | **Deviation**: Pharos emits RFC-compliant `_whoami._udp.Name` / `_whoami._tcp.Name` owners, unlike CoreDNS's `_udp.Name` / `_tcp.Name`. Recorded in the whoami README and `docs/compatibility.md`. | Yes | — | `286ad143` |
 | §The format of the SRV RR | `crates/pharos-plugins/src/whoami/mod.rs:30, crates/pharos-plugins/src/whoami/mod.rs:87-94` | **Fixed**: `whoami` emits IN-class SRV records with `_whoami._udp` and `_whoami._tcp` owners. Fixed on `conf/plugins-synth` (#102). | No | #102 | `286ad143` |
 | §The format of the SRV RR | `crates/pharos-plugins/src/k8s_external/transfer.rs:175-204, 238-280` | **Partial**: Query SRV responses enforce target addressability; AXFR still cannot resolve hostname targets synchronously and may emit SRV without address data. Deferred on `conf/k8s` (#103). | No | #103 | `3b67e44e` (partial) |
 | §The format of the SRV RR | `crates/pharos-plugins/src/k8s_external/mod.rs:317-347, 371-432` | **Fixed**: Query SRV records are suppressed when a hostname target has no non-CNAME A/AAAA RRset. Fixed on `conf/k8s` (#103). | No | #103 | `3b67e44e` |
