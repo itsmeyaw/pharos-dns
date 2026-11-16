@@ -548,8 +548,8 @@ Summary counts describe the audited commit and do not include later branch fixes
 
 | Section | Code location | Explanation | Documented | Issue | Commits |
 |---|---|---|---|---|---|
-| §3 Two Digit Years | `crates/pharos-server/src/logging.rs:186-212` | **Violation**: MUST generate four digit years in dates. `{year:04}` pads to a minimum width only; years outside 0000–9999 emit five digits or a sign, same defect as §5.6. | No | — | — |
-| §5.6 Internet Date/Time Format | `crates/pharos-server/src/logging.rs:113-121,186-212` | **Violation**: `year:04` sets a minimum width, not a four-digit limit. A supplied `SystemTime` outside years 0000–9999 produces a value that does not match `date-fullyear = 4DIGIT`. | No | — | — |
+| §3 Two Digit Years | `crates/pharos-server/src/logging.rs:186-223` | **Fixed**: Timestamps clamp dates outside years 0000–9999 to the nearest representable RFC 3339 date. Fixed on `fix/server`. | No | — | `b35128a4` |
+| §5.6 Internet Date/Time Format | `crates/pharos-server/src/logging.rs:113-121,186-233` | **Fixed**: Four-digit year bounds are enforced, including dates outside `SystemTime`'s RFC 3339 range. Fixed on `fix/server`. | No | — | `b35128a4` |
 
 ## RFC 3403: Dynamic Delegation Discovery System (DDDS) Part Three: The Domain Name System (DNS) Database
 
