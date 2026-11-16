@@ -249,15 +249,17 @@ mod tests {
     fn timestamps_clamp_four_digit_years_and_saturate_far_future_seconds() {
         let before_year_zero = UNIX_EPOCH - std::time::Duration::from_secs(62_167_219_201);
         let after_year_9999 = UNIX_EPOCH + std::time::Duration::from_secs(253_402_300_800);
+        let far_future = UNIX_EPOCH
+            .checked_add(Duration::from_secs(i64::MAX as u64))
+            .expect("platform supports its maximum signed timestamp");
 
         assert!(
             format_line(LogFormat::Text, before_year_zero, "INFO", "", "")
                 .starts_with("0000-01-01T00:00:00Z")
         );
-        assert!(
-            format_line(LogFormat::Text, after_year_9999, "INFO", "", "")
-                .starts_with("9999-12-31T23:59:59Z")
-        );
+        assert!([after_year_9999, far_future].into_iter().all(|time| {
+            format_line(LogFormat::Text, time, "INFO", "", "").starts_with("9999-12-31T23:59:59Z")
+        }));
         assert_eq!(
             signed_seconds(Duration::from_secs(u64::MAX), false),
             i64::MAX
