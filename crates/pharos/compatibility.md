@@ -196,6 +196,7 @@
 
 - [transfer Plugin notes](../crates/pharos-plugins/src/transfer/README.md)
 - `to` accepts CIDR prefixes as a Pharos extension for incoming AXFR/IXFR ACLs. CIDR entries are not NOTIFY recipients: setup logs one WARN per entry and NOTIFY skips it, succeeding when every IP address succeeds (an error only when no IP address is configured). Use explicit IP addresses for NOTIFY.
+- RFC 1996 §2.1: The transfer Plugin has no implicit NOTIFY Set. `to` is required, and outgoing NOTIFY targets only explicit IP destinations; `Transfer::notify` receives the Zone name, not its apex NS RRset or SOA MNAME. CIDR `to` entries remain incoming AXFR/IXFR ACLs and are skipped for NOTIFY; configure explicit IPs.
 - IXFR requires the Authority SOA owner and class to match the Question; mismatches return SERVFAIL. This is stricter than CoreDNS's parser (RFC 1995 §3); RFC 1995 defines no RCODE for it, so SERVFAIL is a Pharos choice.
 - A TCP IXFR answered with only the current SOA clears AA, as CoreDNS does (#75); RFC 5936 §2.2.1 sets AA on AXFR Responses and RFC 1995 §2 is silent.
 - IXFR treats a client serial of 0 as an ordinary serial (RFC 1982 §7): the current SOA alone is returned when the Zone serial is 0 or 0 is ahead in RFC 1982 order. CoreDNS treats 0 as unknown and sends the full Zone.
