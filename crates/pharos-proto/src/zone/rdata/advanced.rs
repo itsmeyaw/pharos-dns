@@ -216,7 +216,7 @@ pub(super) fn parse(
                         return Err("invalid AMTRELAY gateway type".into());
                     }
                     out.push(discovery | kind);
-                    (kind & 0x7f, fields.get(3).copied().unwrap_or(""))
+                    (kind, fields.get(3).copied().unwrap_or(""))
                 };
                 let mut addr = Vec::new();
                 at!(

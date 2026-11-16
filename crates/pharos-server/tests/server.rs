@@ -79,19 +79,6 @@ impl Chain for ForwardAdProbe {
         builder
             .question(question.name, question.qtype, question.qclass)
             .unwrap();
-        if cx.query.opt().is_some() {
-            let root = NameRef::parse(&[0], 0).unwrap();
-            builder
-                .record(
-                    Section::Additional,
-                    root,
-                    Type::OPT,
-                    Class(1232),
-                    0x8000,
-                    &[],
-                )
-                .unwrap();
-        }
         let _ = builder.finish();
         Outcome::Response
     }
@@ -349,8 +336,9 @@ async fn child_only_authority_answers_ds_nodata_from_child_zone() {
     assert_eq!(message.authorities().next().unwrap().rtype, Type::SOA);
 }
 
+// RFC 6891 §7: The Listener restores OPT when an EDNS query's response omits it.
 #[tokio::test]
-async fn unsigned_forwarded_response_preserves_upstream_ad() {
+async fn listener_restores_opt_and_preserves_upstream_ad() {
     let key = ListenerKey {
         transport: Transport::Dns,
         address: "127.0.0.1:53".parse().unwrap(),
@@ -394,7 +382,9 @@ async fn unsigned_forwarded_response_preserves_upstream_ad() {
                 .await,
             Action::Respond
         );
-        assert!(Message::parse(&response).unwrap().ad());
+        let response = Message::parse(&response).unwrap();
+        assert!(response.ad());
+        assert_eq!(response.opt().is_some(), dnssec_ok);
     }
 }
 

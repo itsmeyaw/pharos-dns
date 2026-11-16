@@ -192,6 +192,9 @@ async fn coredns_minimization_and_response_types() {
         );
         if !strip {
             assert_eq!(*cx.response, original);
+        } else {
+            // RFC 1035 §4.1.1: the wire ends after the sections named by the retained counts.
+            assert_eq!(cx.response.len(), 12 + 5 + if answer { 15 } else { 0 });
         }
         assert_eq!(result.id(), 7);
         assert_eq!(result.flags(), flags);
