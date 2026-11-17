@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use aws_lc_rs::digest::{SHA256, digest};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{
@@ -21,7 +22,6 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{
     net::TcpListener,
@@ -391,11 +391,11 @@ fn recognized_method(method: &str) -> bool {
 
 fn entity_tag(body: &str) -> Result<HeaderValue, hyper::header::InvalidHeaderValue> {
     // RFC 9110 §8.8.3.1: Hash the exact selected representation bytes for a strong validator.
-    let digest = Sha256::digest(body.as_bytes());
+    let digest = digest(&SHA256, body.as_bytes());
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut tag = String::with_capacity(66);
     tag.push('"');
-    for byte in digest.iter() {
+    for byte in digest.as_ref() {
         tag.push(char::from(HEX[usize::from(*byte >> 4)]));
         tag.push(char::from(HEX[usize::from(*byte & 0x0f)]));
     }
@@ -517,6 +517,40 @@ mod tests {
             ),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn operational_etag_matches_sha256_known_answers() {
+        let listener = Listener::bind("127.0.0.1:0", |path| match path {
+            "/empty" => Some(("text/plain", "".into())),
+            "/abc" => Some(("text/plain", "abc".into())),
+            _ => None,
+        })
+        .await
+        .unwrap();
+        // NIST CAVP SHA-256 short-message vectors include the empty string and "abc".
+        for (path, digest) in [
+            (
+                "/empty",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "/abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ] {
+            let response = request(
+                listener.local_addr(),
+                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            )
+            .await;
+            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+            assert!(
+                response.contains(&format!("\r\netag: \"{digest}\"\r\n")),
+                "{response}"
+            );
+        }
+        listener.shutdown().await.unwrap();
     }
 
     #[tokio::test]
