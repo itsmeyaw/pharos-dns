@@ -387,6 +387,58 @@ fn echoes_ecs_and_preserves_requested_upstream_ad() {
     assert!(message.ad());
 }
 
+// RFC 7871 §7.2.2: Include ECS if and only if the Query included it.
+// RFC 1035 §4.1.3 and RFC 6891 §6.1.2: RDLENGTH counts the OPT RDATA octets.
+#[test]
+fn existing_opt_response_matches_query_ecs_and_wire_length() {
+    let ecs = [0, 8, 0, 7, 0, 1, 24, 0, 192, 0, 2];
+    let other = [0, 3, 0, 1, b'x'];
+    for (query_ecs, upstream_ecs) in [(true, false), (false, true), (true, true), (false, false)] {
+        let mut query_wire = query(true);
+        if query_ecs {
+            query_wire[28..30].copy_from_slice(&(ecs.len() as u16).to_be_bytes());
+            query_wire.extend_from_slice(&ecs);
+        }
+        let mut response_wire = response(0);
+        response_wire[11] = 1;
+        let option_len = other.len() + if upstream_ecs { ecs.len() } else { 0 };
+        response_wire.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0x40, 0]);
+        response_wire.extend_from_slice(&(option_len as u16).to_be_bytes());
+        response_wire.extend_from_slice(&other);
+        if upstream_ecs {
+            response_wire.extend_from_slice(&ecs);
+        }
+        assert_eq!(
+            finish_outcome(
+                Message::parse(&query_wire).unwrap(),
+                Protocol::Udp,
+                Outcome::Response,
+                &mut response_wire,
+                |_| panic!("unexpected error"),
+            ),
+            Action::Respond
+        );
+        let message = Message::parse(&response_wire).unwrap();
+        let record = message.additionals().next().unwrap();
+        let opt = message.opt().unwrap();
+        assert_eq!(
+            record.rdata_offset + record.rdata.len(),
+            response_wire.len()
+        );
+        assert_eq!(
+            record.rdata.len(),
+            other.len() + if query_ecs { ecs.len() } else { 0 }
+        );
+        assert_eq!(&record.rdata[..other.len()], &other);
+        assert_eq!(
+            &record.rdata[other.len()..],
+            if query_ecs { &ecs[..] } else { &[] }
+        );
+        assert_eq!(opt.flags(), 0xc000);
+        assert_eq!(opt.udp_payload_size(), 4096);
+    }
+}
+
 #[test]
 fn unanswered_tcp_response_can_append_edns_to_an_empty_buffer() {
     let mut wire = vec![0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 14];

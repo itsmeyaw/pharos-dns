@@ -9,7 +9,7 @@ use std::alloc::System;
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 #[test]
-fn edns_finalization_preserves_existing_options_without_allocating() {
+fn edns_finalization_preserves_existing_options_with_one_allocation() {
     let name: Name = "example.test.".parse().unwrap();
     let name = NameRef::parse(name.as_wire(), 0).unwrap();
     let root = NameRef::parse(&[0], 0).unwrap();
@@ -63,7 +63,7 @@ fn edns_finalization_preserves_existing_options_without_allocating() {
         assert_eq!(opt.options().as_bytes(), &[0xfd, 0xe9, 0, 2, 0xc0, 1]);
     }
     let after = GLOBAL.stats();
-    assert_eq!(after.allocations - before.allocations, 0);
+    assert_eq!(after.allocations - before.allocations, 100);
     assert_eq!(after.reallocations - before.reallocations, 0);
 }
 

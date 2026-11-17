@@ -222,18 +222,12 @@ fn scrub(
         return Ok(());
     }
     let existing = message.opt();
-    let existing_options = message
-        .additionals()
-        .find(|rr| rr.rtype == Type::OPT)
-        .map(|rr| (rr.rdata_offset, rr.rdata.len()));
     let rcode = message.rcode();
     // RFC 6891 §6.1.1: an EDNS request requires an OPT record in the response.
     // RFC 7828 §3.3.1: UDP keepalive has no effect; only registered options are echoed.
     let response_opt = query
         .opt()
         .map(|opt| opt.response_registered(existing, rcode));
-    // RFC 6891 §§6.2.3–6.2.5: retain the same capped payload value for OPT and truncation.
-    let response_udp_size = response_opt.map(|opt| opt.udp_payload_size());
     let opt_len = response_opt.map_or(0, |opt| opt.wire_len());
     // RFC 6891 §7: a truncated EDNS response must retain the question and OPT record.
     let budget = limit
@@ -292,40 +286,22 @@ fn scrub(
     }
     // RFC 2181 §9 and RFC 4035 §3.1.1: optional Additional omissions alone do not set TC.
     let truncated = counts[1..3] != original[1..3];
-    let existing_flags = existing.map(Opt::flags);
+    // RFC 7871 §7.2.2: Select ECS according to the Query before discarding upstream bytes.
+    // RFC 1035 §4.1.3 and RFC 6891 §6.1.2: Encode RDLENGTH from the selected RDATA.
+    // shortcut: allocate an OPT buffer per EDNS Response; reuse scratch storage when available.
+    let mut encoded_opt = Vec::with_capacity(opt_len);
+    if let Some(opt) = response_opt {
+        opt.encode(&mut encoded_opt).map_err(Error::Build)?;
+        counts[3] += 1;
+    }
     if end + opt_len > wire.capacity() {
         if protocol == Protocol::Udp {
             return Err(Error::ResponseBufferTooSmall);
         }
         wire.reserve((end + opt_len).saturating_sub(wire.len()));
     }
-    if let (Some((offset, len)), Some(query_opt), Some(response_udp_size)) =
-        (existing_options, query.opt(), response_udp_size)
-    {
-        // RFC 6891 §6.1.2: preserve Response options while relocating the OPT record.
-        wire.resize(wire.len().max(end + opt_len), 0);
-        wire.copy_within(offset..offset + len, end + 11);
-        wire.truncate(end + opt_len);
-        wire[end..end + 3].copy_from_slice(&[0, 0, 41]);
-        // RFC 6891 §§6.2.3–6.2.5: echo normalized request size up to responder capacity.
-        wire[end + 3..end + 5].copy_from_slice(&response_udp_size.to_be_bytes());
-        // RFC 3225 §3: Copy the query's DO bit into the response.
-        let ttl = (u32::from((rcode.0 >> 4) as u8) << 24)
-            // RFC 9824 §5.1: preserve CO, but clear reserved EDNS bits.
-            | u32::from(existing_flags.unwrap_or_default() & 0x4000)
-            | if query_opt.dnssec_ok() { 0x8000 } else { 0 };
-        wire[end + 5..end + 9].copy_from_slice(&ttl.to_be_bytes());
-        wire[end + 9..end + 11].copy_from_slice(&(len as u16).to_be_bytes());
-        counts[3] += 1;
-    } else {
-        wire.truncate(end);
-        if let Some(opt) = query.opt() {
-            opt.response_registered(None, rcode)
-                .encode(wire)
-                .map_err(Error::Build)?;
-            counts[3] += 1;
-        }
-    }
+    wire.truncate(end);
+    wire.extend_from_slice(&encoded_opt);
     // RFC 5625 §4.4: Set TC on local truncation and preserve any upstream TC bit.
     if truncated {
         wire[2] |= 0x02;
