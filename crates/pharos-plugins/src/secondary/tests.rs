@@ -83,7 +83,8 @@ fn primary_matches_scoped_numeric_and_named_zones() {
         update::primary_address("[::1]:5353", loopback),
         Some("[::1]:5353".parse().unwrap())
     );
-    assert!(!update::primary_matches("[0:0:0:0:0:0:0:1]:53", loopback));
+    // RFC 4291 §2.2: Equivalent IPv6 representations identify the same address.
+    assert!(update::primary_matches("[0:0:0:0:0:0:0:1]:53", loopback));
     // Index 1 names the first interface (lo0 or lo) on the supported hosts.
     let name = nix::net::if_::if_indextoname(1).unwrap();
     let name = name.to_str().unwrap();
@@ -100,6 +101,23 @@ fn primary_matches_scoped_numeric_and_named_zones() {
     assert!(!update::primary_matches("[fe80::1]:53", scoped));
     let unscoped = std::net::SocketAddrV6::new("fe80::1".parse().unwrap(), 1234, 0, 0).into();
     assert!(update::primary_matches("[fe80::1%0]:53", unscoped));
+}
+
+#[test]
+fn primary_matches_ipv4_mapped_addresses() {
+    // RFC 4291 §2.5.5.2: IPv4-mapped IPv6 addresses represent IPv4 addresses.
+    assert!(update::primary_matches(
+        "192.0.2.1:53",
+        "[::ffff:192.0.2.1]:1234".parse().unwrap()
+    ));
+    assert!(update::primary_matches(
+        "[::ffff:192.0.2.1]:53",
+        "192.0.2.1:1234".parse().unwrap()
+    ));
+    assert!(!update::primary_matches(
+        "[::ffff:192.0.2.2]:53",
+        "192.0.2.1:1234".parse().unwrap()
+    ));
 }
 
 fn soa_rdata(serial: u32) -> Vec<u8> {

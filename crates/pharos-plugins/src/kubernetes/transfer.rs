@@ -1251,7 +1251,7 @@ mod tests {
             zones: vec![TransferZone {
                 domains: vec![".".parse().unwrap()],
                 destinations: vec![Destination::Address {
-                    host: "127.0.0.1".into(),
+                    host: "127.0.0.1".parse().unwrap(),
                     port: socket.local_addr().unwrap().port().to_string(),
                 }],
                 source: None,
@@ -1305,7 +1305,7 @@ mod tests {
             zones: vec![TransferZone {
                 domains: vec![".".parse().unwrap()],
                 destinations: vec![Destination::Address {
-                    host: "127.0.0.1".into(),
+                    host: "127.0.0.1".parse().unwrap(),
                     port: socket.local_addr().unwrap().port().to_string(),
                 }],
                 source: None,
@@ -1364,7 +1364,7 @@ mod tests {
             zones: vec![TransferZone {
                 domains: vec![".".parse().unwrap()],
                 destinations: vec![Destination::Address {
-                    host: "127.0.0.1".into(),
+                    host: "127.0.0.1".parse().unwrap(),
                     port: socket.local_addr().unwrap().port().to_string(),
                 }],
                 source: None,

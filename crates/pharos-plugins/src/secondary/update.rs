@@ -1,7 +1,11 @@
 use super::*;
 use crate::serial::serial_at_least;
 use pharos_proto::{Message, MessageBuilder, NameRef, Record, Section, Type, zone::ZoneRecord};
-use std::{fmt::Write, io, net::SocketAddr, time::Duration};
+use std::{
+    io,
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 use tokio::io::AsyncReadExt;
 
 pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
@@ -19,27 +23,10 @@ pub(super) fn primary_matches(address: &str, client: SocketAddr) -> bool {
     let (host, scope) = host
         .split_once('%')
         .map_or((host, None), |(host, scope)| (host, Some(scope)));
-    struct Text {
-        bytes: [u8; 64],
-        len: usize,
-    }
-    impl std::fmt::Write for Text {
-        fn write_str(&mut self, value: &str) -> std::fmt::Result {
-            let end = self.len.checked_add(value.len()).ok_or(std::fmt::Error)?;
-            self.bytes
-                .get_mut(self.len..end)
-                .ok_or(std::fmt::Error)?
-                .copy_from_slice(value.as_bytes());
-            self.len = end;
-            Ok(())
-        }
-    }
-    let mut rendered = Text {
-        bytes: [0; 64],
-        len: 0,
-    };
-    if write!(rendered, "{}", client.ip()).is_err()
-        || rendered.bytes[..rendered.len] != *host.as_bytes()
+    // RFC 5952 §4 and RFC 4291 §2.5.5.2: Compare addresses, including IPv4-mapped forms.
+    if !host
+        .parse::<IpAddr>()
+        .is_ok_and(|ip| ip.to_canonical() == client.ip().to_canonical())
     {
         return false;
     }

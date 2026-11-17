@@ -7,7 +7,7 @@ pub(crate) mod tests;
 use pharos_corefile::{Cursor, Error, origins_from_args_or_server_block};
 use pharos_proto::{Class, Name, NameRef, Rcode, Rdata, Type};
 use pharos_server::{Context, Next, Outcome, Plugin, Protocol};
-use std::{fmt::Write, net::IpAddr};
+use std::net::IpAddr;
 
 /// Supplies an authoritative Zone's records to the transfer Plugin.
 pub trait Transferer {
@@ -48,7 +48,7 @@ pub(crate) struct TransferZone {
 #[derive(Clone, Debug)]
 pub(crate) enum Destination {
     All,
-    Address { host: String, port: String },
+    Address { host: IpAddr, port: String },
     Network { address: IpAddr, prefix: u8 },
 }
 
@@ -87,7 +87,7 @@ impl Transfer {
             };
             addressed = true;
             // RFC 5952 §6: Bracket IPv6 literals when combining them with port numbers.
-            let endpoint = if host.contains(':') {
+            let endpoint = if host.is_ipv6() {
                 format!("[{host}]:{port}")
             } else {
                 format!("{host}:{port}")
@@ -146,6 +146,14 @@ impl Transfer {
                 match property.as_str() {
                     "to" if !args.is_empty() => {
                         for arg in args {
+                            // RFC 4007 §11.2: Do not discard a destination's zone identifier.
+                            if arg.split_once('%').is_some_and(|(host, _)| {
+                                host.trim_start_matches('[').parse::<IpAddr>().is_ok()
+                            }) {
+                                return Err(
+                                    cursor.error("scoped transfer destinations are unsupported")
+                                );
+                            }
                             destinations.push(
                                 destination(&arg)
                                     .ok_or_else(|| cursor.error("invalid transfer destination"))?,
@@ -233,24 +241,16 @@ impl Transfer {
             .max_by_key(|(count, _)| *count)
             .map(|(_, zone)| zone);
         let rule = rule?;
-        let mut client = IpText {
-            bytes: [0; 45],
-            len: 0,
-        };
-        let ip = match cx.client.ip() {
-            IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
-            ip => ip,
-        };
-        if write!(client, "{ip}").is_err() {
-            return Some(Outcome::Unanswered(Rcode::REFUSED));
-        }
+        // RFC 4291 §2.5.5.2: IPv4-mapped addresses identify IPv4 peers.
+        let ip = cx.client.ip().to_canonical();
         // RFC 5936 §5: Restrict AXFR access to explicitly configured client IP addresses.
         let allowed = rule
             .destinations
             .iter()
             .any(|destination| match destination {
                 Destination::All => true,
-                Destination::Address { host, .. } => host.as_bytes() == &client.bytes[..client.len],
+                // RFC 5952 §4: Accept all legitimate IPv6 text representations.
+                Destination::Address { host, .. } => host.to_canonical() == ip,
                 Destination::Network { address, prefix } => in_network(ip, *address, *prefix),
             });
         if !allowed {
@@ -295,23 +295,6 @@ impl Transfer {
     }
 }
 
-struct IpText {
-    bytes: [u8; 45],
-    len: usize,
-}
-
-impl std::fmt::Write for IpText {
-    fn write_str(&mut self, text: &str) -> std::fmt::Result {
-        let end = self.len.checked_add(text.len()).ok_or(std::fmt::Error)?;
-        self.bytes
-            .get_mut(self.len..end)
-            .ok_or(std::fmt::Error)?
-            .copy_from_slice(text.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
-
 // RFC 5936 §5: An explicit wildcard permits AXFR access to all clients.
 fn destination(value: &str) -> Option<Destination> {
     // RFC 5936 §5: Allow operators to explicitly open AXFR access to all clients.
@@ -328,21 +311,18 @@ fn destination(value: &str) -> Option<Destination> {
     let (host, port) = if let Some(rest) = value.strip_prefix('[') {
         let (host, port) = rest.split_once("]:")?;
         (host, if port.is_empty() { "53" } else { port })
-    } else if ip_without_zone(value).parse::<IpAddr>().is_ok() {
+    } else if value.parse::<IpAddr>().is_ok() {
         (value, "53")
     } else {
         let (host, port) = value.rsplit_once(':')?;
         (host, if port.is_empty() { "53" } else { port })
     };
-    ip_without_zone(host).parse::<IpAddr>().ok()?;
+    // RFC 4291 §2.2: Parse the address rather than comparing its text.
+    let host = host.parse::<IpAddr>().ok()?;
     Some(Destination::Address {
-        host: host.into(),
+        host,
         port: port.into(),
     })
-}
-
-fn ip_without_zone(host: &str) -> &str {
-    host.rsplit_once('%').map_or(host, |(address, _)| address)
 }
 
 // RFC 5936 §5: Match transfer clients against configured network prefixes.

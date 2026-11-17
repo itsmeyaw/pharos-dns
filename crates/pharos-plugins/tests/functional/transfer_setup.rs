@@ -17,9 +17,11 @@ fn coredns_transfer_setup_cases() {
             "transfer example.org {\n to 192.0.2.1\n}\ntransfer example.net {\n to *\n}",
             true,
         ),
-        ("transfer {\n to [fe80::1%eth0]:53\n}", true),
+        // RFC 4007 §11.2: Scoped destinations cannot be accepted without scope matching.
+        ("transfer {\n to [fe80::1%eth0]:53\n}", false),
         ("transfer {\n to [fe80::1%eth0%extra]:53\n}", false),
         ("transfer {\n to 192.0.2.1:domain\n}", true),
+        ("transfer {\n to 192.0.2.1:service%name\n}", true),
         ("transfer {\n to\n}", false),
         ("transfer {\n to *\n source 192.0.2.1 192.0.2.2\n}", false),
         ("transfer example.net example.org {\n}", false),
