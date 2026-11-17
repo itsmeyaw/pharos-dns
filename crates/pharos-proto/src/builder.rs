@@ -412,9 +412,11 @@ impl<'a, B: MessageBuffer> MessageBuilder<'a, B> {
                 .copied()
                 .find(|offset| {
                     let offset = usize::from(*offset);
+                    // RFC 1035 §4.1.4: stored suffixes are builder-written; incomplete names fail.
+                    // RFC 4343 §4.1: match exact octets to preserve the original label case.
                     offset < self.wire.len()
-                        && NameRef::parse(self.wire, offset)
-                            .is_ok_and(|stored| stored.labels().eq(name.labels().skip(index)))
+                        && NameRef::from_validated(self.wire, offset)
+                            .is_some_and(|(stored, _)| stored.labels().eq(name.labels().skip(index)))
                 });
             // RFC 1035 §4.1.4: a pointer has two leading one bits and a 14-bit offset.
             if compress && let Some(offset) = pointer {
