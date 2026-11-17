@@ -101,6 +101,8 @@ impl Store {
         let previous = shard.items.get(&key).filter(|item| item.failure);
         // RFC 9520 §3.2: Exponentially increase repeated failure caching, capped at 5 minutes.
         previous
+            // RFC 9520 §3.2: Treat failures within two TTLs as persistent; reset after that local window.
+            .filter(|item| item.stored.elapsed() < Duration::from_secs(u64::from(item.ttl) * 2))
             .map_or(base, |item| item.ttl.saturating_mul(2).max(base))
             .min(300)
     }
@@ -551,6 +553,41 @@ mod tests {
         assert_eq!(store.next_failure_ttl(3, 5), 20);
         store.insert(3, &response, 300, false, false).unwrap();
         assert_eq!(store.next_failure_ttl(3, 5), 300);
+    }
+
+    #[test]
+    fn expired_failure_backoff_resets_after_a_quiet_period() {
+        let query_wire = message(Type::A, 0x0100, false);
+        let query = Message::parse(&query_wire).unwrap();
+        let response_wire = message(Type::A, 0x8002, false);
+        let response = Message::parse(&response_wire).unwrap();
+        let store = Store::new(1024);
+        let key = keys(&query).exact;
+        // RFC 9520 §3.2: Back off persistent failures; the two-TTL reset window is a local policy.
+        for (ttl, age, expected) in [(5, 6, 10), (5, 10, 5), (300, 301, 300), (300, 604800, 5)] {
+            store.insert(key, &response, ttl, false, false).unwrap();
+            store.shards[key as usize & 255]
+                .lock()
+                .unwrap()
+                .items
+                .get_mut(&key)
+                .unwrap()
+                .stored = Instant::now() - Duration::from_secs(age);
+            let mut output = Vec::with_capacity(128);
+            assert!(
+                store
+                    .serve(
+                        keys(&query),
+                        &query,
+                        &mut output,
+                        &config("cache"),
+                        false,
+                        true
+                    )
+                    .is_none()
+            );
+            assert_eq!(store.next_failure_ttl(key, 5), expected);
+        }
     }
 
     #[test]
