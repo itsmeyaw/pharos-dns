@@ -107,8 +107,6 @@ pub struct Options {
 pub enum Error {
     InvalidRequest,
     UnsupportedRequest,
-    NoHealthy,
-    NoForward,
     Stopped,
     /// The Upstream reply (of this length, left in the Response buffer) does not match the Query.
     Mismatch(usize),
@@ -120,8 +118,6 @@ impl fmt::Display for Error {
         match self {
             Self::InvalidRequest => f.write_str("invalid Query"),
             Self::UnsupportedRequest => f.write_str("unsupported Query"),
-            Self::NoHealthy => f.write_str("no healthy Upstreams"),
-            Self::NoForward => f.write_str("no Upstream configured"),
             Self::Stopped => f.write_str("proxy: transport stopped"),
             Self::Mismatch(_) => f.write_str("Upstream Response does not match Query"),
             Self::CachedClosed => f.write_str("cached connection was closed by peer"),
