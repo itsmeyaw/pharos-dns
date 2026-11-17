@@ -528,7 +528,7 @@ mod tests {
         })
         .await
         .unwrap();
-        // NIST CAVP SHA-256 short-message vectors include the empty string and "abc".
+        // RFC 6234 §8.5: "abc"; NIST CAVP SHA-256 short-message vectors: empty input.
         for (path, digest) in [
             (
                 "/empty",
