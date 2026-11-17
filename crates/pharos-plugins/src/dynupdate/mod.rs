@@ -20,13 +20,14 @@ use pharos_proto::{
 #[cfg(feature = "plugin-dynupdate")]
 use pharos_server::{Context, Next, Outcome, Plugin};
 #[cfg(feature = "plugin-dynupdate")]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(all(feature = "plugin-dynupdate", feature = "plugin-transfer"))]
+use std::sync::Mutex;
 
 #[cfg(feature = "plugin-dynupdate")]
 pub struct DynUpdate {
     config: Arc<setup::Config>,
-    current: ArcSwapOption<store::Shared>,
-    initialize: Mutex<()>,
+    current: Arc<ArcSwapOption<store::Shared>>,
     #[cfg(feature = "plugin-transfer")]
     notifier: crate::zone::ZoneNotifier,
     #[cfg(feature = "plugin-transfer")]
@@ -80,8 +81,7 @@ impl DynUpdate {
             .then(|| Arc::new(store::Shared::memory(zone)));
         Self {
             config: Arc::new(config),
-            current: ArcSwapOption::from(initial),
-            initialize: Mutex::new(()),
+            current: Arc::new(ArcSwapOption::from(initial)),
             #[cfg(feature = "plugin-transfer")]
             notifier: crate::zone::ZoneNotifier::default(),
             #[cfg(feature = "plugin-transfer")]
@@ -90,19 +90,29 @@ impl DynUpdate {
     }
 
     fn snapshot(&self) -> std::io::Result<Arc<store::Shared>> {
-        if let Some(shared) = self.current.load_full() {
-            return Ok(shared);
+        self.current
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("dynamic store not initialized"))
+    }
+
+    fn register_startup(&self, lifecycle: &mut pharos_server::Lifecycle) {
+        if self.config.database.is_none() {
+            return;
         }
-        let _guard = self
-            .initialize
-            .lock()
-            .map_err(|_| std::io::Error::other("dynamic store initialization lock poisoned"))?;
-        if let Some(shared) = self.current.load_full() {
-            return Ok(shared);
-        }
-        let shared = store::acquire(&self.config)?;
-        self.current.store(Some(Arc::clone(&shared)));
-        Ok(shared)
+        let config = Arc::clone(&self.config);
+        let current = Arc::clone(&self.current);
+        lifecycle.register(pharos_server::Phase::Startup, move || {
+            let config = Arc::clone(&config);
+            let current = Arc::clone(&current);
+            async move {
+                // Tokio spawn_blocking docs: blocking filesystem and lock operations must yield the worker.
+                let shared = tokio::task::spawn_blocking(move || store::acquire(&config))
+                    .await
+                    .map_err(std::io::Error::other)??;
+                current.store(Some(shared));
+                Ok(())
+            }
+        });
     }
 
     async fn update(&self, cx: &mut Context<'_, '_>) -> Outcome {
