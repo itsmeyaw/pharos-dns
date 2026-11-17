@@ -810,17 +810,6 @@ fn incidr(ip: &str, cidr: &str) -> Result<bool, &'static str> {
     if prefix > max {
         return Err("invalid CIDR prefix");
     }
-    // RFC 4291 §2.5.5.2: treat IPv4-mapped addresses as their embedded IPv4 address.
-    let ip = match ip {
-        IpAddr::V6(value) => value.to_ipv4_mapped().map_or(ip, IpAddr::V4),
-        _ => ip,
-    };
-    let (network, prefix) = match network {
-        IpAddr::V6(value) if prefix >= 96 => value
-            .to_ipv4_mapped()
-            .map_or((network, prefix), |v4| (IpAddr::V4(v4), prefix - 96)),
-        _ => (network, prefix),
-    };
     Ok(crate::ipnet::contains(network, prefix, ip))
 }
 

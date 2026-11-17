@@ -24,6 +24,7 @@ provides the type to pass to `compile_with_variables` for subsequent variables.
 
 ## Errors and differences
 
+- `incidr` compares IPv4 addresses against IPv6 networks as IPv4-mapped IPv6 addresses (RFC 4291 §§2.3, 2.5.5.2); `::/0` therefore includes IPv4 clients.
 - Like expr-lang v1.17.8 `parser/lexer/utils.go:196-220`, surrogate `\u` escapes decode to U+FFFD.
 - Unknown names, wrong argument types or counts, malformed literals, invalid
   regexes and unsupported constructs fail at setup. Unsupported constructs
