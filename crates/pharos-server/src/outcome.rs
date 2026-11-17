@@ -1,5 +1,5 @@
 use pharos_proto::{
-    Message, MessageBuilder, NameRef, Opt, Rcode, Section, TsigKey, TsigRecord, Type,
+    EdnsOptions, Message, MessageBuilder, NameRef, Opt, Rcode, Section, TsigKey, TsigRecord, Type,
 };
 use std::{
     hash::{Hash, Hasher},
@@ -286,12 +286,8 @@ fn scrub(
     }
     // RFC 2181 §9 and RFC 4035 §3.1.1: optional Additional omissions alone do not set TC.
     let truncated = counts[1..3] != original[1..3];
-    // RFC 7871 §7.2.2: Select ECS according to the Query before discarding upstream bytes.
-    // RFC 1035 §4.1.3 and RFC 6891 §6.1.2: Encode RDLENGTH from the selected RDATA.
-    // shortcut: allocate an OPT buffer per EDNS Response; reuse scratch storage when available.
-    let mut encoded_opt = Vec::with_capacity(opt_len);
-    if let Some(opt) = response_opt {
-        opt.encode(&mut encoded_opt).map_err(Error::Build)?;
+    let existing_options_len = existing.map(|opt| opt.options().as_bytes().len());
+    if response_opt.is_some() {
         counts[3] += 1;
     }
     if end + opt_len > wire.capacity() {
@@ -300,8 +296,23 @@ fn scrub(
         }
         wire.reserve((end + opt_len).saturating_sub(wire.len()));
     }
-    wire.truncate(end);
-    wire.extend_from_slice(&encoded_opt);
+    // RFC 7871 §7.2.2: Select ECS according to the Query, not the upstream alone.
+    // RFC 1035 §4.1.3 and RFC 6891 §6.1.2: Encode RDLENGTH from the selected RDATA.
+    if let Some(opt) = query.opt() {
+        match existing_options_len {
+            None => {
+                wire.truncate(end);
+                opt.response_registered(None, rcode)
+                    .encode(wire)
+                    .map_err(Error::Build)?;
+            }
+            Some(len) if len <= 512 => encode_preserved_opt::<512>(opt, rcode, end, wire)?,
+            Some(len) if len <= 4096 => encode_preserved_opt::<4096>(opt, rcode, end, wire)?,
+            Some(_) => encode_preserved_opt::<65535>(opt, rcode, end, wire)?,
+        }
+    } else {
+        wire.truncate(end);
+    }
     // RFC 5625 §4.4: Set TC on local truncation and preserve any upstream TC bit.
     if truncated {
         wire[2] |= 0x02;
@@ -311,6 +322,36 @@ fn scrub(
         wire[4 + 2 * i..6 + 2 * i].copy_from_slice(&count.to_be_bytes());
     }
     Ok(())
+}
+
+// RFC 6891 §6.1.2: Preserve upstream option bytes while relocating the encoded OPT.
+// RFC 6891 §6.1.2: Keep the maximum-size OPT scratch off the common-path stack.
+#[inline(never)]
+fn encode_preserved_opt<const N: usize>(
+    query: Opt<'_>,
+    rcode: Rcode,
+    end: usize,
+    wire: &mut Vec<u8>,
+) -> Result<(), Error> {
+    let existing = Message::parse(wire)
+        .map_err(|_| Error::InvalidQuery)?
+        .opt()
+        .ok_or(Error::InvalidQuery)?;
+    let mut scratch = [0; N];
+    let len = existing.options().as_bytes().len();
+    scratch[..len].copy_from_slice(existing.options().as_bytes());
+    let existing = Opt::new(
+        existing.udp_payload_size(),
+        existing.extended_rcode(),
+        existing.version(),
+        existing.flags(),
+        EdnsOptions::parse(&scratch[..len]).map_err(|_| Error::InvalidQuery)?,
+    );
+    wire.truncate(end);
+    query
+        .response_registered(Some(existing), rcode)
+        .encode(wire)
+        .map_err(Error::Build)
 }
 
 // RFC 2181 §9: move truncation before every required RRset that crosses the size limit.
