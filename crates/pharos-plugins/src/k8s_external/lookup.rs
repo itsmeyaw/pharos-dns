@@ -253,7 +253,6 @@ mod tests {
                 addresses: vec![EndpointAddress {
                     ip: address.into(),
                     hostname: hostname.into(),
-                    node_name: String::new(),
                     target_ref_name: String::new().into(),
                     ready: true,
                 }],
@@ -352,7 +351,6 @@ mod tests {
             addresses: vec![EndpointAddress {
                 ip: "192.0.2.1".into(),
                 hostname: "node".into(),
-                node_name: String::new(),
                 target_ref_name: String::new().into(),
                 ready: false,
             }],
@@ -482,7 +480,6 @@ mod tests {
         let mut addr = EndpointAddress {
             ip: "2001:db8::".into(),
             hostname: "explicit".into(),
-            node_name: String::new(),
             target_ref_name: "pod".into(),
             ready: true,
         };

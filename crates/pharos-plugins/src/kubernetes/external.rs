@@ -134,7 +134,6 @@ mod tests {
                 .map(|ip| EndpointAddress {
                     ip: ip.into(),
                     hostname: String::new(),
-                    node_name: String::new(),
                     target_ref_name: String::new().into(),
                     ready: true,
                 })

@@ -163,8 +163,6 @@ impl From<kube::core::DynamicObject> for ServiceImport {
 pub struct EndpointAddress {
     pub ip: String,
     pub hostname: String,
-    pub node_name: String,
-    // Box<str> keeps the readiness bit within the original 96-byte address.
     pub target_ref_name: Box<str>,
     pub ready: bool,
 }
@@ -233,7 +231,6 @@ impl Endpoints {
             // KEP-1672 §Design Details: Treat unknown endpoint readiness as ready.
             let ready = endpoint.conditions.and_then(|condition| condition.ready) != Some(false);
             let hostname = endpoint.hostname.unwrap_or_default();
-            let node_name = endpoint.node_name.unwrap_or_default();
             let target_ref_name = endpoint
                 .target_ref
                 .and_then(|target| target.name)
@@ -251,7 +248,6 @@ impl Endpoints {
                 addresses.push(EndpointAddress {
                     ip,
                     hostname: hostname.clone(),
-                    node_name: node_name.clone(),
                     target_ref_name: target_ref_name.clone(),
                     ready,
                 });
