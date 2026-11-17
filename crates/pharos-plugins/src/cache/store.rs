@@ -31,17 +31,31 @@ type Items = HashMap<u64, Item, BuildHasherDefault<ShardHasher>>;
 
 struct Shard {
     items: Items,
+    keys: Vec<u64>,
     random: u64,
+}
+
+impl Shard {
+    // RFC 9520 §3.2: keep bounded eviction and removal in constant expected time.
+    fn remove(&mut self, key: u64) -> Option<Item> {
+        let item = self.items.remove(&key)?;
+        self.keys.swap_remove(item.slot);
+        if let Some(moved) = self.keys.get(item.slot) {
+            self.items.get_mut(moved).unwrap().slot = item.slot;
+        }
+        Some(item)
+    }
 }
 
 // RFC 9520 §3.2: Bound cached resolution failures by configured cache capacity.
 pub(super) struct Store {
-    shards: [Mutex<Shard>; 256],
+    shards: Box<[Mutex<Shard>]>,
     capacity: usize,
     len: AtomicUsize,
 }
 
-struct Item {
+pub(super) struct Item {
+    slot: usize,
     name: Name,
     qtype: Type,
     qclass: Class,
@@ -72,12 +86,15 @@ impl Store {
     pub(super) fn new(capacity: i64) -> Self {
         let capacity = usize::try_from(capacity / 256).unwrap_or(0).max(4);
         Self {
-            shards: std::array::from_fn(|index| {
-                Mutex::new(Shard {
-                    items: Items::default(),
-                    random: (index as u64).wrapping_add(1),
+            shards: (0..256)
+                .map(|index| {
+                    Mutex::new(Shard {
+                        items: Items::default(),
+                        keys: Vec::new(),
+                        random: (index as u64).wrapping_add(1),
+                    })
                 })
-            }),
+                .collect(),
             capacity,
             len: AtomicUsize::new(0),
         }
@@ -105,7 +122,7 @@ impl Store {
             .min(300)
     }
 
-    // RFC 2181 §5.4: replace a complete cached Response; never merge data from separate Responses.
+    #[cfg(test)]
     pub(super) fn insert(
         &self,
         key: u64,
@@ -114,11 +131,27 @@ impl Store {
         preserve_positive: bool,
         preserve_frequency: bool,
     ) -> Option<bool> {
-        let mut item = Item::new(response, ttl)?;
+        Some(self.insert_prepared(
+            key,
+            Item::new(response, ttl)?,
+            preserve_positive,
+            preserve_frequency,
+        ))
+    }
+
+    // RFC 2181 §5.4: replace a complete cached Response; never merge data from separate Responses.
+    pub(super) fn insert_prepared(
+        &self,
+        key: u64,
+        mut item: Item,
+        preserve_positive: bool,
+        preserve_frequency: bool,
+    ) -> bool {
         let mut shard = self.shards[key as usize & 255].lock().unwrap();
         let previous = shard.items.remove(&key);
         let exists = previous.is_some();
         if let Some(mut previous) = previous {
+            item.slot = previous.slot;
             if preserve_frequency {
                 item.hits = previous.hits;
                 item.last_hit = previous.last_hit;
@@ -140,16 +173,20 @@ impl Store {
             random ^= random << 17;
             shard.random = random;
             let index = (random as usize) % shard.items.len();
-            if let Some(old) = shard.items.keys().nth(index).copied() {
-                shard.items.remove(&old);
-                evicted = true;
-            }
+            let old = shard.keys[index];
+            shard.remove(old);
+            evicted = true;
+        }
+        // RFC 9520 §3.2: index each cache key once for bounded random eviction.
+        if !exists {
+            item.slot = shard.keys.len();
+            shard.keys.push(key);
         }
         shard.items.insert(key, item);
         if !exists && !evicted {
             self.len.fetch_add(1, Ordering::Relaxed);
         }
-        Some(evicted)
+        evicted
     }
 
     pub(super) fn serve(
@@ -317,7 +354,7 @@ impl Store {
             .get(&key)
             .is_some_and(|item| item.stored == stored)
         {
-            shard.items.remove(&key);
+            shard.remove(key);
             self.len.fetch_sub(1, Ordering::Relaxed);
             true
         } else {
@@ -328,7 +365,7 @@ impl Store {
 
 impl Item {
     // RFC 2181 §5.4.1: Preserve sections so additional data cannot become an answer.
-    fn new(response: &Message<'_>, ttl: u32) -> Option<Self> {
+    pub(super) fn new(response: &Message<'_>, ttl: u32) -> Option<Self> {
         if response.question_count() != 1 {
             return None;
         }
@@ -363,6 +400,7 @@ impl Item {
         let mut wire = response.as_wire()[..end].to_vec();
         wire[10..12].copy_from_slice(&0_u16.to_be_bytes());
         Some(Self {
+            slot: 0,
             name: question.name.to_name(),
             qtype: question.qtype,
             qclass: question.qclass,
@@ -444,6 +482,38 @@ mod tests {
     #[test]
     fn cached_item_stays_within_the_entry_size_budget() {
         assert!(std::mem::size_of::<super::Item>() <= 160);
+    }
+
+    #[test]
+    fn eviction_tracks_keys_across_replacement_and_removal() {
+        let wire = message(Type::A, 0x8000, false);
+        let response = Message::parse(&wire).unwrap();
+        let store = Store::new(1024);
+        let mut keys = vec![0, 256, 512, 768];
+        for &key in &keys {
+            assert_eq!(store.insert(key, &response, 30, false, false), Some(false));
+        }
+        assert_eq!(store.insert(256, &response, 30, false, false), Some(false));
+        let stored = store.shards[0].lock().unwrap().items[&512].stored;
+        assert!(store.remove_if_stored(512, stored));
+        keys.swap_remove(2);
+        assert_eq!(store.insert(1024, &response, 30, false, false), Some(false));
+        keys.push(1024);
+        let mut random = 1_u64;
+        // RFC 9520 §3.2: bounded eviction retains exactly the non-evicted entries.
+        for index in 5..25 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            keys.swap_remove(random as usize % keys.len());
+            let key = index * 256;
+            keys.push(key);
+            assert_eq!(store.insert(key, &response, 30, false, false), Some(true));
+            assert_eq!(store.len(), 4);
+            let shard = store.shards[0].lock().unwrap();
+            assert_eq!(shard.items.len(), keys.len());
+            assert!(keys.iter().all(|key| shard.items.contains_key(key)));
+        }
     }
 
     #[test]
