@@ -413,9 +413,8 @@ fn acquire_with(config: &Config, after_stat: impl FnOnce()) -> io::Result<Arc<Sh
         return Ok(shared);
     }
     lock(&file, false)?;
-    // #93: a non-empty file with blank headers is an interrupted creation (the first state is
-    // synced before the header that makes it real), so it is initialised again from the seed.
-    let interrupted = file.metadata()?.len() != 0 && Db::is_blank(&file)?;
+    // #93: a blank file (empty or zeroed headers) is an interrupted creation, so seed it again.
+    let interrupted = Db::is_blank(&file)?;
     if interrupted && initial.is_none() {
         initial = Some(seed(config)?);
     } else if !interrupted && file.metadata()?.len() != 0 {
@@ -867,7 +866,7 @@ mod tests {
         let mut bad_checksum = valid.clone();
         bad_checksum[40] ^= 1;
         bad_checksum[4096 + 40] ^= 1;
-        for damaged in [bad_checksum, valid[..79].to_vec(), Vec::new()] {
+        for damaged in [bad_checksum, valid[..79].to_vec()] {
             std::fs::write(&path, &damaged).unwrap();
             assert!(validate(&config).is_err());
             assert!(acquire(&config).is_err());
@@ -1894,6 +1893,19 @@ mod tests {
     fn interrupted_creation_is_initialised_again_from_the_seed() {
         let (dir, config) = bbolt_fixture_config("interrupted");
         std::fs::write(dir.join("db"), vec![0u8; 100_000]).unwrap();
+        let shared = acquire(&config).unwrap();
+        assert_eq!(shared.current.load().serial(), Some(1));
+        drop(shared);
+        let file = std::fs::File::open(dir.join("db")).unwrap();
+        assert!(pharos_kv::Db::looks_like_database(&file).unwrap());
+        assert!(!dir.join("db.bbolt.bak").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn empty_database_is_initialised_again_from_the_seed() {
+        let (dir, config) = bbolt_fixture_config("interrupted-empty");
+        std::fs::write(dir.join("db"), b"").unwrap();
         let shared = acquire(&config).unwrap();
         assert_eq!(shared.current.load().serial(), Some(1));
         drop(shared);
