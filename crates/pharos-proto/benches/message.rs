@@ -1,5 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use pharos_proto::{Class, Message, MessageBuilder, NameRef, Section, Type};
+use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Section, Type};
 use std::hint::black_box;
 
 fn message_benchmarks(criterion: &mut Criterion) {
@@ -45,6 +45,28 @@ fn message_benchmarks(criterion: &mut Criterion) {
             }
             black_box(builder.finish());
         })
+    });
+    let owners: Vec<Name> = (0..100)
+        .map(|i| format!("host{i}.service.example.com.").parse().unwrap())
+        .collect();
+    let mut large_wire = Vec::with_capacity(8192);
+    criterion.bench_function("message/build_large_distinct_owners", |bencher| {
+        bencher.iter(|| {
+            let mut builder = MessageBuilder::new(&mut large_wire, 8192, 0x1234, 0x8180).unwrap();
+            for owner in &owners {
+                builder
+                    .record(
+                        Section::Answer,
+                        owner.as_name_ref(),
+                        Type::A,
+                        Class::IN,
+                        60,
+                        &[192, 0, 2, 1],
+                    )
+                    .unwrap();
+            }
+            black_box(builder.finish());
+        });
     });
 }
 
