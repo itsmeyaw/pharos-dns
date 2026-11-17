@@ -9,6 +9,7 @@
   including empty nonterminals, and for NS or apex SOA targets. This matches
   CoreDNS routing but is an exception to the Query allocation rule until #86.
 - The `database` file uses the pharos-kv format (#93), not bbolt, so CoreDNS can no longer read it.
+  The database opens during startup; failure to open it fails startup or reload rather than retrying on Queries.
   An UPDATE writes only the records it adds or removes, in place, and is answered after the
   write is synced. After a write or sync error the database refuses further updates (SERVFAIL)
   until it is reopened, because a failed `fsync` may have dropped data.

@@ -33,7 +33,8 @@ async fn warm_dynamic_and_unrelated_cached_queries_do_not_allocate() {
         external_zone.display()
     );
     let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
-    let (mut servers, _) = servers(configured).unwrap();
+    let (mut servers, lifecycle) = servers(configured).unwrap();
+    lifecycle.run(pharos_server::Phase::Startup).await.unwrap();
     let (_, server) = servers.drain().next().unwrap();
     let queries = [
         "www.example.org.",

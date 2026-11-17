@@ -4,6 +4,182 @@ use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Section
 use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 
 #[tokio::test]
+async fn startup_reports_database_open_failure() {
+    let seed = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
+    let database = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!("pharos-dynupdate-missing-{}", std::process::id()))
+        .join("db");
+    let text = format!(
+        "example.org:53 {{\n dynupdate {{\n file {seed}\n database {}\n allow key.example.org. * A\n }}\n}}",
+        database.display()
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    assert!(
+        configured[0]
+            .config
+            .lifecycle
+            .run(pharos_server::Phase::Startup)
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn lock_holder_process() {
+    use std::io::{Read, Write};
+    let Some(path) = std::env::var_os("PHAROS_DYNUPDATE_LOCK_HOLDER") else {
+        return;
+    };
+    let file = std::fs::File::create(path).unwrap();
+    // flock(2) §DESCRIPTION: an exclusive lock excludes conflicting locks.
+    file.lock().unwrap();
+    println!("lock acquired");
+    std::io::stdout().flush().unwrap();
+    let _ = std::io::stdin().read(&mut [0]);
+}
+
+#[test]
+fn locked_zone_does_not_block_other_zone_workers() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    async fn query(chain: &Chain, domain: &str, update: bool) -> Rcode {
+        let domain: Name = domain.parse().unwrap();
+        let key: Name = "key.example.org.".parse().unwrap();
+        let mut wire = Vec::with_capacity(512);
+        let mut builder =
+            MessageBuilder::new(&mut wire, 512, 1, if update { 0x2800 } else { 0 }).unwrap();
+        builder
+            .question(
+                NameRef::parse(domain.as_wire(), 0).unwrap(),
+                if update { Type::SOA } else { Type::A },
+                Class::IN,
+            )
+            .unwrap();
+        let _ = builder.finish();
+        let mut response = Vec::with_capacity(512);
+        let mut slots = [None; 8];
+        let mut metadata = Metadata::new(&mut slots);
+        if update {
+            metadata.set_validated_tsig(&key);
+        }
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata,
+            response: &mut response,
+            max_response_size: 512,
+        };
+        match chain.serve(&mut cx).await {
+            Outcome::Response => Message::parse(&response).unwrap().rcode(),
+            Outcome::Unanswered(code) => code,
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("pharos-dynupdate-lock-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let seed = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/file/example.zone"
+    );
+    let database = root.join("database");
+    let text = format!(
+        "example.org:53 {{\n dynupdate {{\n file {seed}\n database {}\n allow key.example.org. * A\n }}\n}}",
+        database.display()
+    );
+    let configured = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+    let chain = Arc::new(configured.into_iter().next().unwrap().config);
+    let other_seed = root.join("other.zone");
+    std::fs::write(&other_seed, "@ 60 IN SOA ns.other.example. hostmaster.other.example. 1 60 60 60 60\n@ 60 IN NS ns.other.example.\n@ 60 IN A 192.0.2.1\n").unwrap();
+    let text = format!(
+        "other.example:53 {{\n dynupdate {{\n file {}\n allow key.other.example. * A\n }}\n}}",
+        other_seed.display()
+    );
+    let other = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives())
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .config;
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "dynupdate::lock_holder_process", "--nocapture"])
+        .env("PHAROS_DYNUPDATE_LOCK_HOLDER", &database)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert_ne!(
+            output.read_line(&mut line).unwrap(),
+            0,
+            "lock holder exited"
+        );
+        if line.contains("lock acquired") {
+            break;
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let startup = runtime.spawn({
+        let chain = Arc::clone(&chain);
+        async move { chain.lifecycle.run(pharos_server::Phase::Startup).await }
+    });
+    let (started, running) = mpsc::channel();
+    let mut blocked_queries = Vec::new();
+    for update in [false, true] {
+        let chain = Arc::clone(&chain);
+        let started = started.clone();
+        blocked_queries.push(runtime.spawn(async move {
+            started.send(()).unwrap();
+            query(&chain, "example.org.", update).await
+        }));
+    }
+    for _ in 0..2 {
+        running.recv_timeout(Duration::from_secs(3)).unwrap();
+    }
+    let (done, result) = mpsc::channel();
+    runtime.spawn(async move {
+        done.send(query(&other, "other.example.", false).await)
+            .unwrap();
+    });
+    // Tokio spawn_blocking docs: a blocked operation must not prevent unrelated futures from running.
+    let answer = result.recv_timeout(Duration::from_millis(500));
+    let startup_result = runtime.block_on(startup).unwrap();
+    let codes = runtime.block_on(async {
+        let mut codes = Vec::new();
+        for task in blocked_queries {
+            codes.push(task.await.unwrap());
+        }
+        codes
+    });
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+    drop(chain);
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(answer.unwrap(), Rcode::NOERROR);
+    assert_eq!(codes, [Rcode::SERVFAIL, Rcode::SERVFAIL]);
+    assert!(startup_result.is_err());
+}
+
+#[tokio::test]
 async fn serves_seed_zone() {
     let seed = concat!(
         env!("CARGO_MANIFEST_DIR"),

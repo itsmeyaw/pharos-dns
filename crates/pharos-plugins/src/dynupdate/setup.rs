@@ -347,6 +347,7 @@ pub(crate) fn setup(
     let config = parse(cursor, &domains, crate::root_path(&block.config))?;
     let zone = super::store::validate(&config).map_err(|error| cursor.error(error.to_string()))?;
     let dynamic = super::DynUpdate::new(config, zone);
+    dynamic.register_startup(&mut block.config.lifecycle);
     #[cfg(feature = "plugin-transfer")]
     dynamic.register_hooks(&mut block.config.lifecycle);
     block.config.dynupdate = Some(dynamic);
