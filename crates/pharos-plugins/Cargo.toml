@@ -158,7 +158,7 @@ required-features = ["plugin-whoami"]
 [[bench]]
 name = "cache"
 harness = false
-required-features = ["plugin-cache", "plugin-whoami"]
+required-features = ["plugin-cache", "plugin-whoami", "plugin-template"]
 
 [[bench]]
 name = "dnssec"

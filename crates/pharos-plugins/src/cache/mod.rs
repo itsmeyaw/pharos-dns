@@ -25,7 +25,7 @@ pub struct Cache {
     chain: OnceLock<Weak<crate::Chain>>,
     #[cfg(feature = "plugin-dynupdate")]
     bypass: OnceLock<Name>,
-    writes: Mutex<()>,
+    writes: Box<[Mutex<()>]>,
 }
 
 const MAX_CACHED_TTL: u32 = 604_800;
@@ -102,6 +102,11 @@ impl std::fmt::Debug for Cache {
 }
 
 impl Cache {
+    // RFC 8767 §5: serialize refresh validation with writes in the same shard.
+    fn lock_writes(&self, key: u64) -> std::sync::MutexGuard<'_, ()> {
+        self.writes[key as usize & 255].lock().unwrap()
+    }
+
     pub(crate) fn parse(
         cursor: &mut pharos_corefile::Cursor<'_>,
         zones: &[String],
@@ -115,7 +120,7 @@ impl Cache {
             chain: OnceLock::new(),
             #[cfg(feature = "plugin-dynupdate")]
             bypass: OnceLock::new(),
-            writes: Mutex::new(()),
+            writes: (0..256).map(|_| Mutex::new(())).collect(),
             config,
         })
     }
@@ -535,7 +540,7 @@ impl Cache {
                             && answers_question(&message)
                     })
                 {
-                    let _write = cache.writes.lock().unwrap();
+                    let _write = cache.lock_writes(hit.key);
                     if cache.denial.remove_if_stored(hit.key, stored)
                         && let Some(metrics) = cache
                             .metrics
@@ -559,8 +564,12 @@ impl Cache {
         denial: bool,
         expected: Option<Expected>,
     ) -> Option<bool> {
-        let _write = self.writes.lock().unwrap();
+        // RFC 2181 §5.4.1: prepare complete response data before synchronizing cache writes.
+        let item = store::Item::new(response, ttl)?;
+        let _write = self.lock_writes(key);
         if let Some(expected) = expected {
+            // RFC 8767 §5: exact and NXDOMAIN keys share a shard for atomic refreshes.
+            debug_assert_eq!(key & 255, expected.key & 255);
             let old = if expected.denial {
                 &self.denial
             } else {
@@ -571,16 +580,17 @@ impl Cache {
             }
         }
         if denial {
-            self.denial
-                .insert(key, response, ttl, false, expected.is_some())
+            Some(
+                self.denial
+                    .insert_prepared(key, item, false, expected.is_some()),
+            )
         } else {
-            self.success.insert(
+            Some(self.success.insert_prepared(
                 key,
-                response,
-                ttl,
+                item,
                 self.config.prefer_positive,
                 expected.is_some(),
-            )
+            ))
         }
     }
 
@@ -1316,6 +1326,29 @@ mod tests {
         builder.question(name, qtype, Class::IN).unwrap();
         let _ = builder.finish();
         wire
+    }
+
+    #[test]
+    fn unrelated_shard_insert_does_not_wait_for_another_writer() {
+        let tokens = pharos_corefile::lex("Corefile", "cache");
+        let cache = Cache::parse(
+            &mut pharos_corefile::Cursor::new("Corefile", &tokens),
+            &[".".into()],
+        )
+        .unwrap();
+        let wire = query(Type::A);
+        let response = Message::parse(&wire).unwrap();
+        let guard = cache.lock_writes(0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let result = cache.insert_response(1, &response, 30, false, None);
+                sender.send(result).unwrap();
+            });
+            let result = receiver.recv_timeout(std::time::Duration::from_secs(2));
+            drop(guard);
+            assert_eq!(result.unwrap(), Some(false));
+        });
     }
 
     #[test]
