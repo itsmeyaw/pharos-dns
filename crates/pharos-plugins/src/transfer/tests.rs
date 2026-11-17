@@ -93,6 +93,42 @@ fn transfer_matches_equivalent_client_addresses() {
 }
 
 #[test]
+fn transfer_ipv6_prefix_matches_ipv4_client() {
+    // RFC 4291 §2.5.5.2: IPv4-mapped IPv6 addresses identify IPv4 peers.
+    let domain: Name = ".".parse().unwrap();
+    let wire = [0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 252, 0, 1];
+    let mut response = Vec::new();
+    let mut slots = [];
+    let cx = Context {
+        query: pharos_proto::Message::parse(&wire).unwrap(),
+        client: "192.0.2.1:1234".parse().unwrap(),
+        local: "127.0.0.1:53".parse().unwrap(),
+        transport: Transport::Dns,
+        protocol: Protocol::Tcp,
+        domain: &domain,
+        metadata: Metadata::new(&mut slots),
+        response: &mut response,
+        max_response_size: 512,
+    };
+    let transfer = Transfer {
+        zones: vec![TransferZone {
+            domains: vec![domain.clone()],
+            destinations: vec![destination("::ffff:192.0.2.0/120").unwrap()],
+            source: None,
+        }],
+    };
+    let provider = TestProvider {
+        id: 1,
+        answer: Answer::Stream,
+        calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    assert!(matches!(
+        transfer.process(&cx, Some(&provider)),
+        Some(Outcome::Stream(_))
+    ));
+}
+
+#[test]
 fn transfer_rejects_scoped_destinations_at_setup() {
     // RFC 4007 §11.2: A zone identifier carries scope and cannot be ignored.
     for address in ["fe80::1%eth0", "[fe80::1%1]:53"] {

@@ -327,21 +327,8 @@ fn destination(value: &str) -> Option<Destination> {
 
 // RFC 5936 §5: Match transfer clients against configured network prefixes.
 fn in_network(address: IpAddr, network: IpAddr, prefix: u8) -> bool {
-    match (address, network) {
-        (IpAddr::V4(address), IpAddr::V4(network)) if prefix <= 32 => {
-            let mask = u32::MAX
-                .checked_shl(32 - u32::from(prefix))
-                .unwrap_or_default();
-            u32::from(address) & mask == u32::from(network) & mask
-        }
-        (IpAddr::V6(address), IpAddr::V6(network)) if prefix <= 128 => {
-            let mask = u128::MAX
-                .checked_shl(128 - u32::from(prefix))
-                .unwrap_or_default();
-            u128::from(address) & mask == u128::from(network) & mask
-        }
-        _ => false,
-    }
+    prefix <= if network.is_ipv4() { 32 } else { 128 }
+        && crate::ipnet::contains(network, prefix, address)
 }
 
 impl Plugin for Transfer {
