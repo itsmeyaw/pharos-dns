@@ -10,6 +10,7 @@
 - NXDOMAIN entries omit QTYPE from their key as RFC 2308 §5 requires; SOA-less NODATA, explicit wildcard QNAMEs, TKEY transactions, and ECS-bearing queries or responses are not cached.
 - Negative max TTL is capped at the positive max, and `keepttl` still ages negative TTLs, following RFC 2308 §§5–6.
 - Cache entries retain only query-relevant Answer/Authority RRsets; non-OPT Additional records are omitted from hits as a conservative bailiwick policy (RFC 5452 §6).
+- Unlike CoreDNS, each cache shard also limits stored wire bytes to 4,096 times its effective entry capacity, including retained last-known-good Responses. Entries that cannot fit bypass caching; metadata and TTL indexes are not part of this byte budget.
 - Cache hits retain each RRset's own minimum TTL rather than CoreDNS's response-wide minimum (RFC 2181 §5.2).
 - Stale responses use a positive 30-second default TTL, following RFC 8767 §4.
 - ECS bypass is conservative: even a scope-0 ECS response is not cached, and ECS queries do not use ordinary cached answers; network-prefix scope matching is not implemented (RFC 7871 §7.3).

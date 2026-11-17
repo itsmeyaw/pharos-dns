@@ -30,6 +30,7 @@
 ## cache
 
 - [cache Plugin notes](../crates/pharos-plugins/src/cache/README.md)
+- Unlike CoreDNS, each cache shard limits stored wire bytes to 4,096 times its effective entry capacity, including retained last-known-good Responses; entries too large for a shard bypass caching. Metadata and TTL indexes are outside this budget.
 - RFC 9520 §3.2: `servfail 0` and sub-second failure TTLs are raised to one second; CoreDNS permits disabling or truncating failure caching below that minimum.
 - RFC 2308 §8: `disable denial` retains CoreDNS behavior and can leave positive caching enabled.
 - RFC 4035 §4.6: Upstream AD is retained for clients requesting AD/DO without a secure-channel policy, matching CoreDNS behavior.
