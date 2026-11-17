@@ -289,6 +289,13 @@ fn incidr_handles_ipv4_ipv6_and_reports_invalid_arguments() {
         "incidr('192.0.2.1', '0.0.0.0/0')",
         "incidr('::ffff:192.0.2.1', '192.0.2.0/24')",
         "incidr('192.0.2.1', '::ffff:192.0.2.0/120')",
+        // RFC 4291 §§2.3, 2.5.5.2: IPv6 prefixes include matching mapped IPv4 addresses.
+        "incidr('192.0.2.1', '::/0')",
+        "incidr('192.0.2.1', '::ffff:0:0/80')",
+        "incidr('::ffff:192.0.2.1', '::/0')",
+        "not incidr('192.0.2.1', '::fffe:0:0/96')",
+        "not incidr('192.0.3.1', '::ffff:192.0.2.0/120')",
+        "not incidr('::192.0.2.1', '192.0.2.0/24')",
         "not incidr('192.0.2.1', '2001:db8::/32')",
     ] {
         assert_eq!(

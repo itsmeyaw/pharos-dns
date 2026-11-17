@@ -28,6 +28,63 @@ async fn coredns_acl_serve_dns_cases() {
     // Each entry contains the Directive, Server Block domain, Query domain,
     // client, type, and expected action: 0=Next, 1=block, 2=filter, 3=drop.
     let cases = [
+        // RFC 4291 §2.5.5.2: IPv4-mapped IPv6 addresses represent IPv4 clients.
+        (
+            "acl example.org {\n block net ::ffff:10.0.0.1\n}",
+            ".",
+            "www.example.org.",
+            "10.0.0.1",
+            Type::A,
+            1,
+        ),
+        (
+            "acl example.org {\n block net ::ffff:0:0/96\n}",
+            ".",
+            "www.example.org.",
+            "10.0.0.1",
+            Type::A,
+            1,
+        ),
+        (
+            "acl example.org {\n block net ::/0\n}",
+            ".",
+            "www.example.org.",
+            "10.0.0.1",
+            Type::A,
+            1,
+        ),
+        (
+            "acl example.org {\n block net ::ffff:0:0/80\n}",
+            ".",
+            "www.example.org.",
+            "10.0.0.1",
+            Type::A,
+            1,
+        ),
+        (
+            "acl example.org {\n block net ::ffff:10.0.0.0/104\n}",
+            ".",
+            "www.example.org.",
+            "::ffff:10.0.0.1",
+            Type::A,
+            1,
+        ),
+        (
+            "acl example.org {\n block net ::ffff:10.0.0.0/104\n}",
+            ".",
+            "www.example.org.",
+            "11.0.0.1",
+            Type::A,
+            0,
+        ),
+        (
+            "acl example.org {\n block net 2001:db8::/32\n}",
+            ".",
+            "www.example.org.",
+            "10.0.0.1",
+            Type::A,
+            0,
+        ),
         // CoreDNS TestNormalize: host bits in a CIDR remain part of its subnet.
         (
             "acl example.org {\n block net 10.218.10.8/24\n}",
