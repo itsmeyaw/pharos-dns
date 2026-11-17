@@ -33,12 +33,15 @@ struct Shard {
     items: Items,
     keys: Vec<u64>,
     random: u64,
+    wire_bytes: usize,
 }
 
 impl Shard {
     // RFC 9520 §3.2: keep bounded eviction and removal in constant expected time.
     fn remove(&mut self, key: u64) -> Option<Item> {
         let item = self.items.remove(&key)?;
+        // CoreDNS cache: account for both the current and retained positive Response.
+        self.wire_bytes -= item.wire_bytes();
         self.keys.swap_remove(item.slot);
         if let Some(moved) = self.keys.get(item.slot) {
             self.items.get_mut(moved).unwrap().slot = item.slot;
@@ -92,6 +95,7 @@ impl Store {
                         items: Items::default(),
                         keys: Vec::new(),
                         random: (index as u64).wrapping_add(1),
+                        wire_bytes: 0,
                     })
                 })
                 .collect(),
@@ -133,12 +137,13 @@ impl Store {
         preserve_positive: bool,
         preserve_frequency: bool,
     ) -> Option<bool> {
-        Some(self.insert_prepared(
+        self.insert_prepared(
             key,
             Item::new(response, ttl)?,
             preserve_positive,
             preserve_frequency,
-        ))
+        )
+        .map(|evictions| evictions > 0)
     }
 
     // RFC 2181 §5.4: replace a complete cached Response; never merge data from separate Responses.
@@ -148,11 +153,32 @@ impl Store {
         mut item: Item,
         preserve_positive: bool,
         preserve_frequency: bool,
-    ) -> bool {
+    ) -> Option<usize> {
         let mut shard = self.shards[key as usize & 255].lock().unwrap();
+        // CoreDNS cache: supplement entry-count capacity with 4 KiB of wire per shard entry.
+        let budget = self.capacity.saturating_mul(4096);
+        let retained = shard
+            .items
+            .get(&key)
+            .filter(|_| preserve_positive && !item.answering);
+        let retained_bytes = retained.map_or(0, |previous| {
+            if previous.answering {
+                previous.wire.len()
+            } else {
+                previous
+                    .last_known_good
+                    .as_ref()
+                    .map_or(0, |good| good.wire.len())
+            }
+        });
+        // CoreDNS cache: reject an entry that cannot fit without discarding its retained positive Response.
+        if item.wire.len() + retained_bytes > budget {
+            return None;
+        }
         let previous = shard.items.remove(&key);
         let exists = previous.is_some();
         if let Some(mut previous) = previous {
+            shard.wire_bytes -= previous.wire_bytes();
             item.slot = previous.slot;
             if preserve_frequency {
                 item.hits = previous.hits;
@@ -166,29 +192,46 @@ impl Store {
                 };
             }
         }
-        let mut evicted = false;
-        // RFC 9520 §3.2: evict entries when a bounded cache shard reaches capacity.
-        if shard.items.len() >= self.capacity && !exists {
+        // CoreDNS cache: replace in place before eviction, preserving the key's slot.
+        let item_bytes = item.wire_bytes();
+        let mut pending = Some(item);
+        if exists {
+            shard.wire_bytes += item_bytes;
+            shard.items.insert(key, pending.take().unwrap());
+        }
+        let mut evictions = 0;
+        // RFC 9520 §3.2: bound each shard by both entry count and retained wire bytes.
+        while shard.items.len() + usize::from(!exists) > self.capacity
+            || shard.wire_bytes + if exists { 0 } else { item_bytes } > budget
+        {
             let mut random = shard.random;
             random ^= random << 13;
             random ^= random >> 7;
             random ^= random << 17;
             shard.random = random;
-            let index = (random as usize) % shard.items.len();
+            // CoreDNS cache: retain the newly admitted Response while choosing a random victim.
+            let mut index = (random as usize) % (shard.items.len() - usize::from(exists));
+            if exists && index >= shard.items[&key].slot {
+                index += 1;
+            }
             let old = shard.keys[index];
             shard.remove(old);
-            evicted = true;
+            evictions += 1;
         }
         // RFC 9520 §3.2: index each cache key once for bounded random eviction.
-        if !exists {
+        if let Some(mut item) = pending {
             item.slot = shard.keys.len();
             shard.keys.push(key);
+            shard.wire_bytes += item_bytes;
+            shard.items.insert(key, item);
         }
-        shard.items.insert(key, item);
-        if !exists && !evicted {
+        if evictions > 0 {
+            self.len.fetch_sub(evictions, Ordering::Relaxed);
+        }
+        if !exists {
             self.len.fetch_add(1, Ordering::Relaxed);
         }
-        evicted
+        Some(evictions)
     }
 
     pub(super) fn serve(
@@ -366,6 +409,15 @@ impl Store {
 }
 
 impl Item {
+    fn wire_bytes(&self) -> usize {
+        // CoreDNS cache: retained positive Responses consume the same wire budget.
+        self.wire.len()
+            + self
+                .last_known_good
+                .as_ref()
+                .map_or(0, |good| good.wire.len())
+    }
+
     // RFC 2181 §5.4.1: Preserve sections so additional data cannot become an answer.
     pub(super) fn new(response: &Message<'_>, ttl: u32) -> Option<Self> {
         if response.question_count() != 1 {
@@ -484,6 +536,119 @@ mod tests {
     #[test]
     fn cached_item_stays_within_the_entry_size_budget() {
         assert!(std::mem::size_of::<super::Item>() <= 160);
+    }
+
+    #[test]
+    fn byte_budget_evicts_before_entry_capacity() {
+        let name = NameRef::parse(b"\x01x\0", 0).unwrap();
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 8192, 1, 0x8000).unwrap();
+        builder.question(name, Type::TXT, Class::IN).unwrap();
+        builder
+            .record(Section::Answer, name, Type::TXT, Class::IN, 30, &[0; 5000])
+            .unwrap();
+        let _ = builder.finish();
+        let response = Message::parse(&wire).unwrap();
+        let store = Store::new(1024);
+        assert_eq!(store.insert(0, &response, 30, false, false), Some(false));
+        assert_eq!(store.insert(256, &response, 30, false, false), Some(false));
+        assert_eq!(store.insert(512, &response, 30, false, false), Some(false));
+        assert_eq!(store.insert(768, &response, 30, false, false), Some(true));
+        assert_eq!(store.len(), 3);
+    }
+
+    #[test]
+    fn retained_positive_counts_toward_byte_budget() {
+        let name = NameRef::parse(b"\x01x\0", 0).unwrap();
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 8192, 1, 0x8000).unwrap();
+        builder.question(name, Type::TXT, Class::IN).unwrap();
+        builder
+            .record(Section::Answer, name, Type::TXT, Class::IN, 30, &[0; 5000])
+            .unwrap();
+        let _ = builder.finish();
+        let response = Message::parse(&wire).unwrap();
+        let failure_wire = message(Type::TXT, 0x8002, false);
+        let failure = Message::parse(&failure_wire).unwrap();
+        let store = Store::new(1024);
+        for key in [0, 256, 512] {
+            assert_eq!(store.insert(key, &response, 30, false, false), Some(false));
+        }
+        assert_eq!(store.insert(0, &failure, 30, true, false), Some(false));
+        assert_eq!(store.insert(768, &response, 30, false, false), Some(true));
+        assert_eq!(store.len(), 3);
+    }
+
+    #[test]
+    fn replacement_and_removal_release_wire_budget() {
+        let name = NameRef::parse(b"\x01x\0", 0).unwrap();
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 8192, 1, 0x8000).unwrap();
+        builder.question(name, Type::TXT, Class::IN).unwrap();
+        builder
+            .record(Section::Answer, name, Type::TXT, Class::IN, 30, &[0; 5000])
+            .unwrap();
+        let _ = builder.finish();
+        let response = Message::parse(&wire).unwrap();
+        let small_wire = message(Type::TXT, 0x8000, false);
+        let small = Message::parse(&small_wire).unwrap();
+        let store = Store::new(1024);
+        for key in [0, 256, 512] {
+            assert_eq!(store.insert(key, &response, 30, false, false), Some(false));
+        }
+        assert_eq!(store.insert(0, &small, 30, false, false), Some(false));
+        assert_eq!(store.insert(768, &response, 30, false, false), Some(false));
+        let stored = store.shards[0].lock().unwrap().items[&256].stored;
+        assert!(store.remove_if_stored(256, stored));
+        assert_eq!(store.insert(1024, &response, 30, false, false), Some(false));
+        assert_eq!(store.len(), 4);
+    }
+
+    #[test]
+    fn response_larger_than_shard_budget_preserves_existing_entry() {
+        let name = NameRef::parse(b"\x01x\0", 0).unwrap();
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 32768, 1, 0x8000).unwrap();
+        builder.question(name, Type::TXT, Class::IN).unwrap();
+        builder
+            .record(Section::Answer, name, Type::TXT, Class::IN, 30, &[0; 16384])
+            .unwrap();
+        let _ = builder.finish();
+        let response = Message::parse(&wire).unwrap();
+        let old_wire = message(Type::TXT, 0x8000, false);
+        let old = Message::parse(&old_wire).unwrap();
+        let store = Store::new(1024);
+        assert_eq!(store.insert(0, &old, 30, false, false), Some(false));
+        assert_eq!(store.insert(0, &response, 30, false, false), None);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn replacing_response_can_evict_multiple_entries() {
+        let name = NameRef::parse(b"\x01x\0", 0).unwrap();
+        let mut wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut wire, 16384, 1, 0x8000).unwrap();
+        builder.question(name, Type::TXT, Class::IN).unwrap();
+        builder
+            .record(Section::Answer, name, Type::TXT, Class::IN, 30, &[0; 5000])
+            .unwrap();
+        let _ = builder.finish();
+        let response = Message::parse(&wire).unwrap();
+        let mut large_wire = Vec::new();
+        let mut builder = MessageBuilder::new(&mut large_wire, 16384, 1, 0x8000).unwrap();
+        builder.question(name, Type::TXT, Class::IN).unwrap();
+        builder
+            .record(Section::Answer, name, Type::TXT, Class::IN, 30, &[0; 12000])
+            .unwrap();
+        let _ = builder.finish();
+        let large = Message::parse(&large_wire).unwrap();
+        let store = Store::new(1024);
+        for key in [0, 256, 512] {
+            assert_eq!(store.insert(key, &response, 30, false, false), Some(false));
+        }
+        let item = super::Item::new(&large, 30).unwrap();
+        assert_eq!(store.insert_prepared(0, item, false, false), Some(2));
+        assert_eq!(store.len(), 1);
     }
 
     #[test]

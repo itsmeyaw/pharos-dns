@@ -556,6 +556,7 @@ impl Cache {
         })
     }
 
+    #[cfg(test)]
     fn insert_response(
         &self,
         key: u64,
@@ -564,6 +565,18 @@ impl Cache {
         denial: bool,
         expected: Option<Expected>,
     ) -> Option<bool> {
+        self.insert_response_counted(key, response, ttl, denial, expected)
+            .map(|evictions| evictions > 0)
+    }
+
+    fn insert_response_counted(
+        &self,
+        key: u64,
+        response: &Message<'_>,
+        ttl: u32,
+        denial: bool,
+        expected: Option<Expected>,
+    ) -> Option<usize> {
         // RFC 2181 §5.4.1: prepare complete response data before synchronizing cache writes.
         let item = store::Item::new(response, ttl)?;
         let _write = self.lock_writes(key);
@@ -580,17 +593,11 @@ impl Cache {
             }
         }
         if denial {
-            Some(
-                self.denial
-                    .insert_prepared(key, item, false, expected.is_some()),
-            )
+            self.denial
+                .insert_prepared(key, item, false, expected.is_some())
         } else {
-            Some(self.success.insert_prepared(
-                key,
-                item,
-                self.config.prefer_positive,
-                expected.is_some(),
-            ))
+            self.success
+                .insert_prepared(key, item, self.config.prefer_positive, expected.is_some())
         }
     }
 
@@ -639,10 +646,11 @@ impl Cache {
                     let _ = builder.finish();
                     if let Ok(response) = Message::parse(cx.response)
                         && let Some(evicted) =
-                            self.insert_response(key, &response, ttl, true, expected)
+                            self.insert_response_counted(key, &response, ttl, true, expected)
                         && let Some(metrics) = metrics
                     {
-                        if evicted {
+                        // CoreDNS cache metrics: count every evicted entry.
+                        for _ in 0..evicted {
                             metrics.evict(true);
                         }
                         metrics.entries(false, self.success.len());
@@ -820,11 +828,13 @@ impl Cache {
             } else {
                 key
             };
-            let inserted = self.insert_response(response_key, &response, ttl, denial, expected);
+            let inserted =
+                self.insert_response_counted(response_key, &response, ttl, denial, expected);
             if let Some(evicted) = inserted
                 && let Some(metrics) = metrics
             {
-                if evicted {
+                // CoreDNS cache metrics: count every evicted entry.
+                for _ in 0..evicted {
                     metrics.evict(denial);
                 }
                 metrics.entries(false, self.success.len());
