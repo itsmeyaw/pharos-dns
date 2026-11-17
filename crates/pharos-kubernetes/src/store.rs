@@ -417,6 +417,54 @@ mod tests {
     }
 
     #[test]
+    fn service_reverse_index_skips_non_ip_cluster_ips() {
+        let store = Store::default();
+        store.with_read(|index| {
+            assert_eq!(index.services_by_ip("None").count(), 0);
+            assert_eq!(index.services_by_ip("").count(), 0);
+        });
+
+        let mut headless = service("None");
+        headless.external_ips.clear();
+        let mut services: Vec<_> = (0..20_000)
+            .map(|i| {
+                let mut item = headless.clone();
+                item.name = format!("headless-{i}").into();
+                item
+            })
+            .collect();
+        let mut alias = service("");
+        alias.name = "alias".into();
+        alias.service_type = "ExternalName".into();
+        alias.external_ips = vec!["None".into(), "".into()];
+        services.push(alias.clone());
+        services.push(service("10.0.0.1"));
+        store.replace_services(services);
+        store.with_read(|index| {
+            assert_eq!(index.service_ips.len(), 1);
+            assert_eq!(index.services_by_ip("None").count(), 0);
+            assert_eq!(index.services_by_ip("").count(), 0);
+            assert_eq!(index.services_by_ip("10.0.0.1").count(), 1);
+            assert_eq!(index.services_by_external_ip("None").count(), 1);
+            assert_eq!(index.services_by_external_ip("").count(), 1);
+            assert!(index.service("prod", "headless-0").unwrap().headless());
+        });
+
+        alias.cluster_ips = vec!["10.0.0.2".into()];
+        store.apply_service(alias.clone());
+        store.with_read(|index| assert_eq!(index.services_by_ip("10.0.0.2").count(), 1));
+        alias.cluster_ips = vec!["".into()];
+        store.apply_service(alias);
+        store.delete_service("prod", "headless-0");
+        store.with_read(|index| {
+            assert_eq!(index.service_ips.len(), 1);
+            assert_eq!(index.services_by_ip("10.0.0.2").count(), 0);
+            assert_eq!(index.services_by_ip("None").count(), 0);
+            assert_eq!(index.services_by_ip("").count(), 0);
+        });
+    }
+
+    #[test]
     fn external_name_index_tracks_updates_and_relists() {
         let store = Store::default();
         let mut alias = service("None");
@@ -1083,7 +1131,12 @@ impl Index {
     fn delete_service(&mut self, namespace: &str, name: &str) {
         remove(&mut self.external_names, namespace, name);
         if let Some(service) = remove(&mut self.services, namespace, name) {
-            for ip in &service.cluster_ips {
+            // Kubernetes DNS spec 1.1.0 §2.3.3, §2.4.3: "None" and "" are not reverse-record IPs.
+            for ip in service
+                .cluster_ips
+                .iter()
+                .filter(|ip| !ip.is_empty() && *ip != "None")
+            {
                 remove_reverse(&mut self.service_ips, ip, &service);
             }
             for ip in &service.external_ips {
@@ -1144,7 +1197,12 @@ impl Index {
         }
         let service = Arc::new(service);
         // KEP-563 §Proposal > CoreDNS Operation: Index ClusterIPs of either IP family.
-        for ip in &service.cluster_ips {
+        // Kubernetes DNS spec 1.1.0 §2.3.3, §2.4.3: "None" and "" are not reverse-record IPs.
+        for ip in service
+            .cluster_ips
+            .iter()
+            .filter(|ip| !ip.is_empty() && *ip != "None")
+        {
             insert_reverse(&mut self.service_ips, ip, &service);
         }
         for ip in &service.external_ips {
