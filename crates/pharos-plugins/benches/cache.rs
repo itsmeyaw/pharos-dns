@@ -53,8 +53,9 @@ fn cache_hit(c: &mut Criterion) {
 fn cache_miss_churn(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache/miss_churn");
     for capacity in [1024_u32, 65_536, 1_000_000] {
-        let corefile =
-            format!(".:0 {{\n cache {{\n success {capacity} 3600 3600\n }}\n whoami\n}}");
+        let corefile = format!(
+            ".:0 {{\n cache {{\n success {capacity} 3600 3600\n }}\n template IN A {{\n answer \"{{{{ .Name }}}} 3600 IN A 192.0.2.1\"\n additional \"{{{{ .Name }}}} 3600 IN A 192.0.2.2\"\n }}\n}}"
+        );
         let blocks = parse("Corefile", &corefile).unwrap();
         let (mut servers, _) = servers(configure::<Chain>(&blocks, directives()).unwrap()).unwrap();
         let (_, server) = servers.drain().next().unwrap();
@@ -62,7 +63,17 @@ fn cache_miss_churn(c: &mut Criterion) {
             *b"\x12\x34\x01\0\0\x01\0\0\0\0\0\0\x0800000000\x07example\x03com\0\0\x01\0\x01";
         let peer = "127.0.0.1:1001".parse().unwrap();
         let mut response = Vec::with_capacity(65535);
-        let mut id = 0_u32;
+        let mut id = 1_u32;
+        assert_eq!(
+            run(server.handle(&query, peer, Protocol::Udp, &mut response)),
+            Action::Respond
+        );
+        assert_eq!(Message::parse(&response).unwrap().additional_count(), 1);
+        assert_eq!(
+            run(server.handle(&query, peer, Protocol::Udp, &mut response)),
+            Action::Respond
+        );
+        assert_eq!(Message::parse(&response).unwrap().additional_count(), 0);
         // RFC 1034 §5.1: use distinct names to exercise cache misses and eviction.
         let mut dispatch = || {
             for (digit, byte) in query[13..21].iter_mut().enumerate() {
