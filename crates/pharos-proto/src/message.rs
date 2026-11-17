@@ -547,11 +547,15 @@ impl<'a> Message<'a> {
     pub fn can_change_flags_in_wire(&self) -> bool {
         // RFC 1035 §4.1.4: compression pointers can refer to earlier header bytes.
         let mut offset = self.starts[0];
-        for question in self.questions() {
+        for _ in 0..self.counts[0] {
             if name_references_header(self.wire, offset) {
                 return false;
             }
-            offset += question.name.wire_len() + 4;
+            // RFC 1035 §4.1.2: advance over the original wire Question, not its rewritten view.
+            let Ok((_, next)) = question(self.wire, offset) else {
+                return false;
+            };
+            offset = next;
         }
         for record in self
             .answers()
@@ -726,11 +730,19 @@ impl<'a> Message<'a> {
 
 fn name_references_header(wire: &[u8], mut offset: usize) -> bool {
     for _ in 0..=255 {
-        match wire[offset] {
+        // RFC 1035 §4.1.4: an incomplete name cannot safely exclude a header pointer.
+        let Some(&octet) = wire.get(offset) else {
+            return true;
+        };
+        match octet {
             0 => return false,
             length @ 1..=63 => offset += 1 + usize::from(length),
             pointer => {
-                let target = (usize::from(pointer & 0x3f) << 8) | usize::from(wire[offset + 1]);
+                // RFC 1035 §4.1.4: a compression pointer requires two octets.
+                let Some(&low) = wire.get(offset + 1) else {
+                    return true;
+                };
+                let target = (usize::from(pointer & 0x3f) << 8) | usize::from(low);
                 if target < HEADER_LEN {
                     return true;
                 }
@@ -857,5 +869,18 @@ impl<'a> MessageMut<'a> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_references_header;
+
+    #[test]
+    fn incomplete_names_are_unsafe_for_header_changes() {
+        // RFC 1035 §4.1.4: truncated names and pointers cannot be classified as safe.
+        assert!(name_references_header(&[], 0));
+        assert!(name_references_header(&[0xc0], 0));
+        assert!(name_references_header(&[1, b'a'], 0));
     }
 }

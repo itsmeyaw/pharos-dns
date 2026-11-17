@@ -79,6 +79,30 @@ fn ad_wire_safety_checks_names_without_treating_edns_data_as_pointers() {
 }
 
 #[test]
+fn flag_safety_checks_raw_questions_after_name_rewrite() {
+    use pharos_proto::{Name, NameRef};
+
+    // RFC 1035 §4.1.2: QDCOUNT describes both questions, regardless of the view's rewrite.
+    let safe = b"\0\x01\x01\0\0\x02\0\0\0\0\0\0\0\0\x01\0\x01\xc0\x0c\0\x01\0\x01";
+    // RFC 1035 §4.1.4: the second QNAME can point into the header.
+    let unsafe_wire = b"\0\x01\x01\0\0\x02\0\0\0\0\0\0\0\0\x01\0\x01\xc0\x03\0\x01\0\x01";
+    let name: Name = "a-much-longer-rewritten-name.example.".parse().unwrap();
+    let name = NameRef::parse(name.as_wire(), 0).unwrap();
+    assert!(
+        Message::parse(safe)
+            .unwrap()
+            .with_question_name(name)
+            .can_change_flags_in_wire()
+    );
+    assert!(
+        !Message::parse(unsafe_wire)
+            .unwrap()
+            .with_question_name(name)
+            .can_change_flags_in_wire()
+    );
+}
+
+#[test]
 fn reads_a_query_and_rejects_truncation() {
     let wire = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x03www\x07example\x03com\0\x00\x01\x00\x01";
     let message = Message::parse(wire).unwrap();

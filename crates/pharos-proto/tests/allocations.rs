@@ -40,6 +40,8 @@ fn parse_and_reused_response_buffer_do_not_allocate() {
     let region = Region::new(GLOBAL);
     let parsed = Message::parse(query).unwrap();
     std::hint::black_box(parsed.questions().next().unwrap());
+    // RFC 1035 §4.1.4: checking compressed names must remain allocation-free.
+    assert!(std::hint::black_box(parsed.can_change_flags_in_wire()));
     let mut builder = MessageBuilder::new(&mut wire, 512, 0x1234, 0x8180).unwrap();
     let opt = b"\0\0\x29\x02\x00\0\0\0\0\0\0";
     builder.reserve(opt.len()).unwrap();
