@@ -977,7 +977,6 @@ mod tests {
             addresses: vec![EndpointAddress {
                 ip: "10.0.0.1".into(),
                 hostname: "node".into(),
-                node_name: String::new(),
                 target_ref_name: String::new().into(),
                 ready: true,
             }],
@@ -1020,7 +1019,6 @@ mod tests {
             addresses: vec![EndpointAddress {
                 ip: "10.0.0.1".into(),
                 hostname: "node".into(),
-                node_name: String::new(),
                 target_ref_name: String::new().into(),
                 ready: false,
             }],
@@ -1079,7 +1077,6 @@ mod tests {
                 .map(|(i, ip)| EndpointAddress {
                     ip: ip.into(),
                     hostname: format!("node{i}"),
-                    node_name: String::new(),
                     target_ref_name: String::new().into(),
                     ready: true,
                 })
@@ -1127,7 +1124,6 @@ mod tests {
             addresses: vec![EndpointAddress {
                 ip: "10.0.0.1".into(),
                 hostname: "node".into(),
-                node_name: String::new(),
                 target_ref_name: String::new().into(),
                 ready: true,
             }],

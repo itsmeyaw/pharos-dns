@@ -1314,7 +1314,6 @@ mod tests {
                 .map(|(i, ip)| EndpointAddress {
                     ip: ip.into(),
                     hostname: format!("node{i}"),
-                    node_name: String::new(),
                     target_ref_name: String::new().into(),
                     ready: true,
                 })
@@ -1389,7 +1388,6 @@ mod tests {
             .map(|hostname| EndpointAddress {
                 ip: "192.0.2.1".into(),
                 hostname,
-                node_name: String::new(),
                 target_ref_name: String::new().into(),
                 ready: true,
             })
@@ -1437,7 +1435,6 @@ mod tests {
             .map(|i| EndpointAddress {
                 ip: format!("192.0.2.{}", i % 24 + 1),
                 hostname: format!("node{}", i % 24),
-                node_name: String::new(),
                 target_ref_name: String::new().into(),
                 ready: true,
             })
@@ -1528,7 +1525,6 @@ mod tests {
             .map(|ip| EndpointAddress {
                 ip: ip.into(),
                 hostname: "node".into(),
-                node_name: String::new(),
                 target_ref_name: String::new().into(),
                 ready: true,
             })
@@ -1587,7 +1583,6 @@ mod tests {
             .map(|hostname| EndpointAddress {
                 ip: "target.example.net".into(),
                 hostname: hostname.into(),
-                node_name: String::new(),
                 target_ref_name: String::new().into(),
                 ready: true,
             })
@@ -1655,7 +1650,6 @@ mod tests {
         .map(|(ip, hostname)| EndpointAddress {
             ip: ip.into(),
             hostname: hostname.into(),
-            node_name: String::new(),
             target_ref_name: String::new().into(),
             ready: true,
         })
@@ -1703,14 +1697,12 @@ mod tests {
                 EndpointAddress {
                     ip: "192.0.2.1".into(),
                     hostname: "node".into(),
-                    node_name: String::new(),
                     target_ref_name: String::new().into(),
                     ready: true,
                 },
                 EndpointAddress {
                     ip: target.into(),
                     hostname: "alias".into(),
-                    node_name: String::new(),
                     target_ref_name: String::new().into(),
                     ready: true,
                 },
@@ -1758,7 +1750,6 @@ mod tests {
         .map(|(ip, hostname)| EndpointAddress {
             ip: ip.into(),
             hostname: hostname.into(),
-            node_name: String::new(),
             target_ref_name: String::new().into(),
             ready: true,
         })
@@ -1817,7 +1808,6 @@ mod tests {
         let address = EndpointAddress {
             ip: "192.0.2.1".into(),
             hostname: String::new(),
-            node_name: String::new(),
             target_ref_name: "pod.region".into(),
             ready: true,
         };
