@@ -174,6 +174,63 @@ async fn prefer_ipv4_subnet_matches_ipv4_mapped_aaaa() {
 }
 
 #[tokio::test]
+async fn prefer_ipv6_subnet_matches_ipv4_mapped_aaaa() {
+    // RFC 4291 §2.5.5.2: IPv4-mapped IPv6 addresses identify IPv4 peers.
+    let blocks = parse(
+        "Corefile",
+        ".:53 {\n loadbalance {\n prefer ::fffe:0:0/95\n }\n}",
+    )
+    .unwrap();
+    let chain = configure::<Chain>(&blocks, directives())
+        .unwrap()
+        .remove(0)
+        .config;
+    let mut wire = vec![0, 1, 0x81, 0x80, 0, 1, 0, 2, 0, 0, 0, 0];
+    wire.extend_from_slice(b"\x07example\x03org\0\0\x1c\0\x01");
+    for address in ["2001:db8::1", "::ffff:192.0.2.1"] {
+        wire.extend_from_slice(&[0xc0, 12, 0, 28, 0, 1, 0, 0, 0, 30, 0, 16]);
+        wire.extend_from_slice(&address.parse::<std::net::Ipv6Addr>().unwrap().octets());
+    }
+    let root: Name = ".".parse().unwrap();
+    let mut response = Vec::with_capacity(512);
+    for _ in 0..50 {
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(&wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &root,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        assert_eq!(
+            chain
+                .loadbalance
+                .as_ref()
+                .unwrap()
+                .serve(&mut cx, Reply(&wire))
+                .await,
+            Outcome::Response
+        );
+        assert_eq!(
+            Message::parse(&response)
+                .unwrap()
+                .answers()
+                .next()
+                .unwrap()
+                .rdata,
+            "::ffff:192.0.2.1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets()
+        );
+    }
+}
+
+#[tokio::test]
 async fn coredns_partition_and_transfer_bypass() {
     let blocks = parse("Corefile", ".:53 {\n loadbalance\n}").unwrap();
     let chain = configure::<Chain>(&blocks, directives())

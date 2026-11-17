@@ -150,7 +150,7 @@ struct Pointer {
 #[derive(Debug)]
 struct Subnet {
     address: IpAddr,
-    prefix: u32,
+    prefix: u8,
 }
 
 impl Subnet {
@@ -161,7 +161,7 @@ impl Subnet {
         if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
-        let mut prefix: u32 = prefix.parse().ok()?;
+        let mut prefix: u8 = prefix.parse().ok()?;
         if prefix > if address.is_ipv4() { 32 } else { 128 } {
             return None;
         }
@@ -187,17 +187,7 @@ impl Subnet {
             _ => return false,
         };
         // RFC 4632 §3.1: Match addresses by the significant bits of the CIDR prefix.
-        match (self.address, address) {
-            (IpAddr::V4(network), IpAddr::V4(ip)) => {
-                let mask = u32::MAX.checked_shl(32 - self.prefix).unwrap_or(0);
-                u32::from(network) & mask == u32::from(ip) & mask
-            }
-            (IpAddr::V6(network), IpAddr::V6(ip)) => {
-                let mask = u128::MAX.checked_shl(128 - self.prefix).unwrap_or(0);
-                u128::from(network) & mask == u128::from(ip) & mask
-            }
-            _ => false,
-        }
+        crate::ipnet::contains(self.address, self.prefix, address)
     }
 }
 
