@@ -10,6 +10,10 @@
   After an unwritten first outcome, SERVFAIL, REFUSED, FORMERR and NOTIMP
   Self Lookup Responses are treated as unwritten: Listener synthesis obscures
   whether a later Plugin actually wrote such a Response.
+- A query for exactly the first search suffix (`default.svc.cluster.local.`) is
+  passed to the next Plugin unchanged. CoreDNS v1.15.0 returns SERVFAIL because
+  `TrimZone` overshoots (#126); Pharos follows RFC 1034 §4.3.2 instead. Names
+  above the first suffix (`svc.cluster.local.`) pass through in both.
 - Resolver files must be UTF-8. Search suffixes that cannot be represented as
   DNS wire names are treated as the root suffix; CoreDNS accepts arbitrary text.
 - A Response containing RDATA that cannot be decoded and relocated by Pharos

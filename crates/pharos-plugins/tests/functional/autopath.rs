@@ -354,7 +354,7 @@ async fn coredns_unwritten_replies_keep_the_first_outcome() {
     }
 }
 
-// Derived from CoreDNS TestInSearchPath; equal first suffix fails TrimZone.
+// Derived from CoreDNS TestInSearchPath; equal first suffix is answered by Next (CoreDNS fails TrimZone).
 #[tokio::test]
 async fn coredns_first_search_suffix_membership() {
     let path = concat!(
@@ -367,10 +367,7 @@ async fn coredns_first_search_suffix_membership() {
     let root: Name = ".".parse().unwrap();
     for (name, expected) in [
         ("google.com.", Outcome::Response),
-        (
-            "default.svc.cluster.local.",
-            Outcome::Error(pharos_server::Error::InvalidQuery),
-        ),
+        ("default.svc.cluster.local.", Outcome::Response),
         (
             "a.default.svc.cluster.local.",
             Outcome::Error(pharos_server::Error::SelfLookupUnavailable),

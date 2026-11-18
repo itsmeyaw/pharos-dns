@@ -16,6 +16,7 @@
 ## autopath
 
 - [autopath Plugin notes](../crates/pharos-plugins/src/autopath/README.md)
+- RFC 1034 §4.3.2: a query for exactly the first search suffix is passed to the next Plugin; CoreDNS v1.15.0 returns SERVFAIL (#126).
 
 ## bind
 

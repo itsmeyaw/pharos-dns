@@ -179,8 +179,9 @@ impl Plugin for AutoPath {
         {
             return next.run(cx).await;
         }
+        // RFC 1034 §4.3.2: an exact zone name is answered from the zone, not by search-path walk.
         if first.labels().count() == question.name.labels().count() {
-            return Outcome::Error(ServerError::InvalidQuery);
+            return next.run(cx).await;
         }
         let outcome = next.run(cx).await;
         if matches!(outcome, Outcome::Error(_) | Outcome::Stream(_)) {
