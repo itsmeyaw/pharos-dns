@@ -43,7 +43,7 @@ impl Handler for Echo {
 
 #[tokio::test(flavor = "current_thread")]
 async fn swappable_listener_does_not_allocate_per_query() {
-    // Tokio coop budget (128): the first exhaustion allocates the scheduler's deferred-waker Vec once; do it before measuring.
+    // tokio 1.54.1 runtime/scheduler/defer.rs and task/coop: the first exhaustion allocates the scheduler's deferred-waker Vec once; do it before measuring.
     for _ in 0..256 {
         tokio::task::consume_budget().await;
     }
