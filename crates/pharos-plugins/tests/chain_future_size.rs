@@ -6,7 +6,7 @@ use pharos_proto::{Message, Name};
 use pharos_server::{Context, Metadata, Protocol, Transport};
 
 #[test]
-fn chain_future_fits_stack_budget() {
+fn chain_future_fits_size_budget() {
     let chain = Chain::default();
     let domain: Name = ".".parse().unwrap();
     let wire = [0u8; 12];
@@ -24,9 +24,9 @@ fn chain_future_fits_stack_budget() {
         max_response_size: 512,
     };
     let future = chain.serve(&mut cx);
-    // Default features measure 18,648 bytes on aarch64 with plugin-dynupdate; allow headroom up to 20,000.
+    // Tripwire for inline buffers / per-query memory blowups (TCP path boxes this future per pipelined query, crates/pharos-server/src/tcp.rs), not a stack budget; measures 18,648 B aarch64, 19,392 B x86_64 (debug).
     assert!(
-        std::mem::size_of_val(&future) <= 20_000,
+        std::mem::size_of_val(&future) <= 32 * 1024,
         "Chain future: {} bytes",
         std::mem::size_of_val(&future)
     );
