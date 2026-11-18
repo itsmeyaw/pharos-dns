@@ -20,6 +20,10 @@ mod compatibility;
 
 use std::process::ExitCode;
 
+// Cache entries are freed by a different worker than allocated them; glibc arena-lock contention made p99.9 ~10x worse at 4 threads (#122).
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Default)]
 struct Options {
     help: bool,
