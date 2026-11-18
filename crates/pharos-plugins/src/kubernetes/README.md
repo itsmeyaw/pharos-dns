@@ -29,7 +29,7 @@
 - The initial list is a consistent paginated list of 500 objects per page (kube-runtime default), served from etcd; CoreDNS uses a streaming WatchList or a `resourceVersion=0` read from the API server's cache. This never returns older data, but costs more etcd load when many DNS Pods restart together.
 - The CA file is read once when the API client is created; a rotated CA needs a restart.
 - An ExternalName name returns its CNAME for every query type (RFC 1034 §4.3.2 step 3a). CoreDNS returns it only for CNAME, A and AAAA queries and answers NODATA for other types such as TXT, SRV, MX and HTTPS (`kubernetes.go:116-121,168-185`). A/AAAA responses use the target lookup's final RCODE and carry its Authority records on negative answers.
-- ExternalName A and AAAA Self Lookups allocate per Query until #86 pools their buffers and futures.
+- ExternalName A and AAAA Self Lookups use pooled buffers and futures (#86) but still allocate per Query: the result is copied out of the pool and the target Name is copied.
 - Shared with CoreDNS v1.15.0: names with no records of their own (`dns.<zone>`, `_tcp.<service>.<namespace>.svc.<zone>`, and TXT at the zone, `svc.<zone>` and `<namespace>.svc.<zone>`) get NXDOMAIN instead of NODATA (RFC 8020; kept for CoreDNS parity, #43).
 - Shared with CoreDNS v1.15.0: `dns-version.<zone>` A and non-PTR queries for existing reverse names get NXDOMAIN instead of NODATA (RFC 2308 §2.2; kept for CoreDNS parity, #43).
 - Shared with CoreDNS v1.15.0: a SOA query for a name that does not exist gets NOERROR instead of NXDOMAIN (RFC 2308; kept for CoreDNS parity, #43).

@@ -361,7 +361,7 @@ impl Plugin for DynUpdate {
         };
         let zone = shared.current.load_full();
         // The Query is already known to be in this Zone and has no Fallthrough.
-        // shortcut: inherited CNAME/DNAME Self Lookup can allocate, upgrade with #86.
+        // shortcut: inherited CNAME/DNAME Self Lookup copies the target Name; buffers and future are pooled, see #86.
         zone.lookup(cx, ZoneTerminal, &[]).await
     }
 }

@@ -1115,7 +1115,7 @@ impl Zone {
                 Err(_) => return Outcome::Unanswered(Rcode::SERVFAIL),
             };
             // RFC 1034 §3.6.2 and RFC 6672 §3.2: restart at CNAME or DNAME targets.
-            // shortcut: CNAME/DNAME Self Lookup allocates for missing tree names, NS, and apex SOA; see #86.
+            // shortcut: the target Name is copied per Self Lookup (buffers and future are pooled); see #86.
             match cx.self_lookup(&target, question.qtype).await {
                 Ok(wire) => Some(wire),
                 Err(_) => {

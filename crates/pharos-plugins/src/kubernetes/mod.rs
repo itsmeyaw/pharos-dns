@@ -902,7 +902,7 @@ impl pharos_server::Plugin for Kubernetes {
                 NameRef::parse(t.as_wire(), 0).is_ok_and(|name| name != lower_name)
             }) {
             if let Some(target) = target {
-                // shortcut: Self Lookup allocates per Query until #86 pools its buffers and futures.
+                // shortcut: the ExternalName result is detached from the pool and the target Name copied per Query, see #86.
                 // RFC 1035 §4.1.1: preserve TC when a chased DNS response was truncated.
                 let result = cx.self_lookup(target, q.qtype).await.ok();
                 chased_rcode = Some(

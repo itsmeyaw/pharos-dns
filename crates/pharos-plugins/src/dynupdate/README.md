@@ -7,7 +7,7 @@
 - Seed, stored, and updated Zones require an apex NS RRset and confine owners to the Zone; an update cannot remove the last apex NS (RFC 2181 §6.1; RFC 1034 §4.2).
 - Shared Zone CNAME/DNAME Self Lookup allocates for missing Zone-tree names,
   including empty nonterminals, and for NS or apex SOA targets. This matches
-  CoreDNS routing but is an exception to the Query allocation rule until #86.
+  CoreDNS routing but is an exception to the Query allocation rule (target Name copy; #86).
 - The `database` file uses the pharos-kv format (#93), not bbolt, so CoreDNS can no longer read it.
   The database opens during startup; failure to open it fails startup or reload rather than retrying on Queries.
   An UPDATE writes only the records it adds or removes, in place, and is answered after the

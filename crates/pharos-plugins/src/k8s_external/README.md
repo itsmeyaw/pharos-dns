@@ -4,7 +4,7 @@
 
 ## k8s_external
 
-- LoadBalancer hostname Self Lookups allocate per Query until #86 pools their buffers and futures.
+- LoadBalancer hostname Self Lookups use pooled buffers and futures (#86) but still allocate per Query: the result is copied out of the pool and the hostname Name is copied.
 - Per-thread Query scratch grows on first use or when larger Services are queried; warmed Queries reuse it without allocating.
 - EndpointSlice updates copy a Service's slice-index vector while an in-flight Query retains its snapshot.
 - Zone Transfers encode the entire Zone under the Kubernetes store read lock before sending. Memory and worker time grow with Zone size; CoreDNS streams batches.

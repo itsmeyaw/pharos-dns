@@ -4,7 +4,7 @@
 
 ## autopath
 
-- Search-path Self Lookups allocate; issue #86 tracks allocation-free Self Lookup.
+- Search-path Self Lookups use pooled buffers and futures (#86), but autopath still snapshots the first Response per search, so it is not allocation-free.
 - Search-path Self Lookups re-enter the Listener rather than CoreDNS's Next,
   so earlier Plugins, routing, Response limits and error handling also apply.
   After an unwritten first outcome, SERVFAIL, REFUSED, FORMERR and NOTIMP

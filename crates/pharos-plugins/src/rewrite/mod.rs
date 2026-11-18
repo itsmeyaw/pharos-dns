@@ -2507,7 +2507,7 @@ impl Plugin for Rewrite {
                     } else {
                         cx.query
                     };
-                    // shortcut: CNAME Self Lookup allocates; remove when issue #86 makes it allocation-free.
+                    // shortcut: CNAME Self Lookup still allocates its target Name and Query copy; buffers and future are pooled, see #86.
                     if let Ok(wire) = cx
                         .self_lookup_with_query(lookup_query, &target, question.qtype)
                         .await
