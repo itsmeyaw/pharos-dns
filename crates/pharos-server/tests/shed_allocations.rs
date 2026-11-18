@@ -55,6 +55,10 @@ impl Handler for Echo {
 
 #[tokio::test(flavor = "current_thread")]
 async fn shed_writer_reuses_buffers_without_per_query_allocations() {
+    // tokio 1.54.1 runtime/scheduler/defer.rs and task/coop: the first exhaustion allocates the scheduler's deferred-waker Vec once; do it before measuring.
+    for _ in 0..256 {
+        tokio::task::consume_budget().await;
+    }
     let counts = Arc::new(Mutex::new(Counts::default()));
     let metrics = Registry::default().shed("dns://:53");
     let listener = Listener::bind(
