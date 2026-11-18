@@ -5,10 +5,18 @@ use pharos_server::{Action, Outcome, Protocol, finish_outcome};
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::alloc::System;
 
+// The allocator counters are process-wide, so parallel tests would count the harness and each other.
+#[test]
+fn outcome_finalization_does_not_allocate() {
+    edns_finalization_preserves_existing_options_without_allocating();
+    edns_ecs_selection_does_not_allocate();
+    edns_finalization_preserves_large_options_without_allocating();
+    truncating_contiguous_rrsets_does_not_allocate();
+}
+
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[test]
 fn edns_finalization_preserves_existing_options_without_allocating() {
     let name: Name = "example.test.".parse().unwrap();
     let name = NameRef::parse(name.as_wire(), 0).unwrap();
@@ -68,7 +76,6 @@ fn edns_finalization_preserves_existing_options_without_allocating() {
 }
 
 // RFC 7871 §7.2.2: ECS presence follows the Query regardless of the upstream Response.
-#[test]
 fn edns_ecs_selection_does_not_allocate() {
     let name: Name = "example.test.".parse().unwrap();
     let name = NameRef::parse(name.as_wire(), 0).unwrap();
@@ -138,7 +145,6 @@ fn edns_ecs_selection_does_not_allocate() {
 }
 
 // RFC 6891 §6.1.2: Large OPT RDATA remains intact when the Response uses TCP.
-#[test]
 fn edns_finalization_preserves_large_options_without_allocating() {
     let name: Name = "example.test.".parse().unwrap();
     let name = NameRef::parse(name.as_wire(), 0).unwrap();
@@ -188,7 +194,6 @@ fn edns_finalization_preserves_large_options_without_allocating() {
     }
 }
 
-#[test]
 fn truncating_contiguous_rrsets_does_not_allocate() {
     let question: Name = "q.test.".parse().unwrap();
     let question = NameRef::parse(question.as_wire(), 0).unwrap();
