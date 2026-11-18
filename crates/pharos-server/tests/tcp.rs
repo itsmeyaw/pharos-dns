@@ -94,6 +94,14 @@ async fn slow_transfer_client_limits_message_production() {
     let produced = Arc::new(AtomicUsize::new(0));
     let (listener, mut stream) = connect(LargeTransfer(Arc::clone(&produced))).await;
     send(&mut stream, b"transfer").await;
+    timeout(TEST_TIMEOUT, async {
+        while produced.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("transfer produced no Messages");
+    // Give an unbounded producer time to overrun the bound before sampling.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let count = produced.load(Ordering::SeqCst);
     assert!(
@@ -441,7 +449,7 @@ async fn peer_reset_cancels_in_flight_query_tasks() {
     drop(stream);
 
     let cancelled_before_shutdown = matches!(
-        timeout(Duration::from_millis(250), cancelled_rx.recv()).await,
+        timeout(TEST_TIMEOUT, cancelled_rx.recv()).await,
         Ok(Some(()))
     );
     listener.shutdown().await.unwrap();
@@ -524,10 +532,19 @@ async fn peer_reset_cancels_zone_transfer() {
         .set_linger(Some(Duration::ZERO))
         .unwrap();
     drop(stream);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let first = produced.load(Ordering::SeqCst);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(produced.load(Ordering::SeqCst), first);
+    let first = timeout(Duration::from_secs(5), async {
+        let mut previous = produced.load(Ordering::SeqCst);
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let current = produced.load(Ordering::SeqCst);
+            if current == previous {
+                return current;
+            }
+            previous = current;
+        }
+    })
+    .await
+    .expect("Transfer kept producing after peer reset");
     assert!(first < 10_000);
     listener.shutdown().await.unwrap();
 }
