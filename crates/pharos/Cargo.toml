@@ -18,10 +18,10 @@ workspace = true
 aws-lc-rs = "1"
 getrandom = "0.2"
 mimalloc = "0.1"
-pharos-plugins = { version = "0.1.0", path = "../pharos-plugins" }
-pharos-corefile = { version = "0.1.0", path = "../pharos-corefile" }
-pharos-server = { version = "0.1.0", path = "../pharos-server" }
+pharos-plugins = { version = "0.2.0", path = "../pharos-plugins" }
+pharos-corefile = { version = "0.2.0", path = "../pharos-corefile" }
+pharos-server = { version = "0.2.0", path = "../pharos-server" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 
 [dev-dependencies]
-pharos-proto = { version = "0.1.0", path = "../pharos-proto" }
+pharos-proto = { version = "0.2.0", path = "../pharos-proto" }
