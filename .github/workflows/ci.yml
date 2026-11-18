@@ -76,7 +76,8 @@ jobs:
   # Opens/updates the release PR: semver bump from conventional commits + cargo-semver-checks, changelog.
   release-pr:
     if: github.event_name == 'push' && github.repository_owner == 'itsmeyaw'
-    needs: [fmt, clippy, test]
+    # After release: otherwise it diffs against pre-release tags and reopens a PR for the just-merged release.
+    needs: [release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
