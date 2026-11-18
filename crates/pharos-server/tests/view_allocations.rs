@@ -64,7 +64,13 @@ impl Chain for CutView {
     }
 }
 
+// The allocator counters are process-wide, so parallel tests would count the harness and each other.
 #[tokio::test(flavor = "current_thread")]
+async fn view_routing_does_not_allocate() {
+    view_routing_and_shared_metadata_do_not_allocate().await;
+    ds_zone_cut_routing_does_not_allocate().await;
+}
+
 async fn view_routing_and_shared_metadata_do_not_allocate() {
     let key = ListenerKey {
         transport: Transport::Dns,
@@ -92,7 +98,6 @@ async fn view_routing_and_shared_metadata_do_not_allocate() {
     assert_eq!(after.reallocations - before.reallocations, 0);
 }
 
-#[tokio::test(flavor = "current_thread")]
 async fn ds_zone_cut_routing_does_not_allocate() {
     use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Type};
 
