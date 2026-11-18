@@ -478,8 +478,8 @@ fn visit_reverse(
     config: &setup::Config,
     mut visit: impl FnMut(NameRef<'_>),
 ) -> bool {
-    let exposed =
-        |namespace: &str| config.namespaces.is_empty() || index.namespace(namespace).is_some();
+    // Pharos divergence from CoreDNS: PTR follows the forward namespace filter, including `namespace_labels`.
+    let exposed = |namespace: &str| index.namespace(namespace).is_some();
     // Kubernetes DNS spec 1.1.0 §2.3.3: a ClusterIP PTR points to its service name.
     if let Some(service) = index
         .services_by_ip_unfiltered(ip)

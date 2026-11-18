@@ -78,17 +78,14 @@ impl External {
         index: &pharos_kubernetes::store::Index,
         cx: &mut Context<'_, '_>,
         zone: &Zone,
-        kubernetes: &crate::kubernetes::Kubernetes,
         ip: &str,
     ) -> Option<Outcome> {
         let q = cx.query.questions().next()?;
         let services = || {
             index
                 .services_by_external_ip_unfiltered(ip)
-                .filter(|service| {
-                    !kubernetes.has_namespace_filter()
-                        || index.namespace_exposed(&service.namespace)
-                })
+                // Pharos divergence from CoreDNS: PTR follows the forward namespace filter, including `namespace_labels`.
+                .filter(|service| index.namespace_exposed(&service.namespace))
         };
         let code = if services().next().is_some() {
             pharos_proto::Rcode::NOERROR
@@ -867,9 +864,8 @@ impl External {
                 None
             };
             if let Some(ip) = &reverse_ip {
-                return store.with_read(|index| {
-                    self.reverse_response(index, cx, zone, kubernetes, ip.as_str())
-                });
+                return store
+                    .with_read(|index| self.reverse_response(index, cx, zone, ip.as_str()));
             }
             let request = lookup::parse(&labels[..relative]);
             // shortcut: hostname targets and Self Lookups allocate per Query until #86 pools buffers and futures.
@@ -1167,7 +1163,6 @@ mod tests {
         kubernetes: &crate::kubernetes::Kubernetes,
         store: &pharos_kubernetes::store::Store,
     ) {
-        assert!(kubernetes.has_namespace_filter());
         store.with_read(|index| {
             assert_eq!(
                 index
@@ -1233,13 +1228,7 @@ mod tests {
                 max_response_size: 512,
             };
             let outcome = index_store.with_read(|index| {
-                external.reverse_response(
-                    index,
-                    &mut cx,
-                    &external.zones[1],
-                    kubernetes,
-                    "192.0.2.1",
-                )
+                external.reverse_response(index, &mut cx, &external.zones[1], "192.0.2.1")
             });
             if let Some(code) = expected {
                 assert!(matches!(outcome, Some(Outcome::Response)));
@@ -1313,6 +1302,135 @@ mod tests {
                 assert!(outcome.is_none());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn reverse_follows_namespace_labels_filter() {
+        use pharos_corefile::configure;
+        use pharos_server::Phase;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = [0; 4096];
+                    let n = socket.read(&mut request).await.unwrap();
+                    let request = String::from_utf8_lossy(&request[..n]);
+                    let (kind, items) = if request.contains("/services") {
+                        (
+                            "ServiceList",
+                            r#"[{"metadata":{"name":"web","namespace":"prod"},"spec":{"externalIPs":["192.0.2.1"]}},{"metadata":{"name":"hidden","namespace":"dev"},"spec":{"externalIPs":["192.0.2.1","192.0.2.3"]}}]"#,
+                        )
+                    } else if request.contains("/endpointslices") {
+                        ("EndpointSliceList", "[]")
+                    } else if request.contains("labelSelector=") {
+                        (
+                            "NamespaceList",
+                            r#"[{"metadata":{"name":"prod","labels":{"team":"a"}}}]"#,
+                        )
+                    } else {
+                        (
+                            "NamespaceList",
+                            r#"[{"metadata":{"name":"prod","labels":{"team":"a"}}},{"metadata":{"name":"dev"}}]"#,
+                        )
+                    };
+                    let body = if request.contains("watch=true") {
+                        String::new()
+                    } else {
+                        format!(
+                            r#"{{"apiVersion":"v1","kind":"{kind}","metadata":{{"resourceVersion":"1"}},"items":{items}}}"#
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let text = format!(
+            ".:53 {{\n kubernetes cluster.local {{\n  endpoint http://{server}\n  namespace_labels team=a\n  startup_timeout 3s\n }}\n}} "
+        );
+        let chain =
+            configure::<crate::Chain>(&parse("Corefile", &text).unwrap(), crate::directives())
+                .unwrap()
+                .remove(0)
+                .config;
+        chain.lifecycle.run(Phase::Startup).await.unwrap();
+        let kubernetes = chain.kubernetes.as_ref().unwrap();
+        let store = kubernetes.store().unwrap();
+        let blocks = parse(
+            "Corefile",
+            ".:53 {\n k8s_external example.com in-addr.arpa\n}",
+        )
+        .unwrap();
+        let config = setup::parse(
+            &mut Cursor::new("Corefile", &blocks[0].directives["k8s_external"]),
+            &["."],
+        )
+        .unwrap();
+        let mut external = External::new(config).unwrap();
+        external.bind_kubernetes(kubernetes);
+        let zone: Name = "in-addr.arpa.".parse().unwrap();
+        for (qname, ip, rcode, targets) in [
+            (
+                "1.2.0.192.in-addr.arpa.",
+                "192.0.2.1",
+                Rcode::NOERROR,
+                &["web.prod.example.com."][..],
+            ),
+            (
+                "3.2.0.192.in-addr.arpa.",
+                "192.0.2.3",
+                Rcode::NXDOMAIN,
+                &[][..],
+            ),
+        ] {
+            let name: Name = qname.parse().unwrap();
+            let mut query = Vec::with_capacity(512);
+            let mut builder = MessageBuilder::new(&mut query, 512, 1, 0).unwrap();
+            builder
+                .question(
+                    NameRef::parse(name.as_wire(), 0).unwrap(),
+                    Type::PTR,
+                    Class::IN,
+                )
+                .unwrap();
+            let _ = builder.finish();
+            let mut response = Vec::with_capacity(512);
+            let mut slots = [None; 8];
+            let mut cx = Context {
+                query: Message::parse(&query).unwrap(),
+                client: "127.0.0.1:1234".parse().unwrap(),
+                local: "127.0.0.1:53".parse().unwrap(),
+                transport: Transport::Dns,
+                protocol: Protocol::Udp,
+                domain: &zone,
+                metadata: Metadata::new(&mut slots),
+                response: &mut response,
+                max_response_size: 512,
+            };
+            let outcome = store.with_read(|index| {
+                external.reverse_response(index, &mut cx, &external.zones[1], ip)
+            });
+            assert!(matches!(outcome, Some(Outcome::Response)), "{qname}");
+            let message = Message::parse(&response).unwrap();
+            assert_eq!(message.rcode(), rcode, "{qname}");
+            let answers: Vec<_> = message
+                .answers()
+                .map(|record| match record.data().unwrap() {
+                    Rdata::Ptr(target) => target.to_string(),
+                    _ => panic!("expected PTR"),
+                })
+                .collect();
+            assert_eq!(answers, targets, "{qname}");
+        }
+        chain.lifecycle.run(Phase::Shutdown).await.unwrap();
+        task.abort();
     }
 
     #[test]

@@ -20,10 +20,6 @@ impl Kubernetes {
         self.config.ttl
     }
 
-    pub(crate) fn has_namespace_filter(&self) -> bool {
-        !self.config.namespaces.is_empty()
-    }
-
     /// Visit addresses while the caller holds the store's read lock.
     /// An invalid CoreDNS IP is represented by `None` (its nil AAAA address).
     pub(crate) fn visit_external_ns(
