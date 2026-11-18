@@ -86,7 +86,8 @@ cmd_run() {
   rsync -az --delete --exclude /target --exclude .git \
     -e "ssh ${SSH_OPTS[*]}" --rsync-path="mkdir -p wt/$name && rsync" \
     ./ "admin@$(host):wt/$name/"
-  rssh "cd wt/$name && . ~/.cargo/env && export CARGO_TARGET_DIR=\$HOME/target/$name \
+  # tests write scratch files to <root>/target, which rsync excludes
+  rssh "cd wt/$name && mkdir -p target && . ~/.cargo/env && export CARGO_TARGET_DIR=\$HOME/target/$name \
     CARGO_INCREMENTAL=0 RUSTC_WRAPPER=\$HOME/sccache-wrap CARGO_BUILD_JOBS=\$((\$(nproc)/2)) \
     RUSTFLAGS='-C linker=clang -C link-arg=-fuse-ld=mold' && $(printf '%q ' "$@")"
 }
