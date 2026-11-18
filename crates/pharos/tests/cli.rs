@@ -170,7 +170,10 @@ fn version_uses_pharos_identity() {
         assert!(output.status.success());
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(
-            text.starts_with("Pharos-0.1.0\nCoreDNS-1.15.0 compatible\n"),
+            text.starts_with(&format!(
+                "Pharos-{}\nCoreDNS-1.15.0 compatible\n",
+                env!("CARGO_PKG_VERSION")
+            )),
             "{text}"
         );
         assert!(
