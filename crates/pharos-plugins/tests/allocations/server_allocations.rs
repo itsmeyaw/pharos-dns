@@ -60,6 +60,10 @@ async fn routed_udp_queries_do_not_allocate() {
     if crate::run_isolated("server::server_allocations::routed_udp_queries_do_not_allocate") {
         return;
     }
+    // tokio 1.54.1 runtime/scheduler/defer.rs and task/coop: the first exhaustion allocates the scheduler's deferred-waker Vec once; do it before measuring.
+    for _ in 0..256 {
+        tokio::task::consume_budget().await;
+    }
     check_routed_udp_queries_do_not_allocate(".:0 {\n whoami\n}").await;
     #[cfg(feature = "plugin-errors")]
     check_routed_udp_queries_do_not_allocate(".:0 {\n errors\n whoami\n}").await;
