@@ -11,6 +11,7 @@
 - `service.alpha.kubernetes.io/tolerate-unready-endpoints=true` makes unready EndpointSlice addresses eligible for DNS answers and transfers.
 - Multicluster ServiceImport endpoints ignore this annotation and include only ready endpoints.
 - With `namespace_labels` and `multicluster`, Pharos watches all ServiceImports and exposes those in matching Namespaces; CoreDNS matches the ServiceImports' own labels against `namespace_labels`, hiding imports in exposed Namespaces.
+- PTR answers (ClusterIP, endpoint and `k8s_external` external-IP) follow the same namespace visibility as forward lookups, including `namespace_labels`, so a Service in a hidden Namespace gets NXDOMAIN. CoreDNS v1.15.0 filters PTR only for `namespaces` and still answers hidden Services under `namespace_labels` (`plugin/kubernetes/reverse.go`, `external.go`). The Kubernetes DNS spec 1.1.0 §§2.3.3 and 2.4.3 do not mention namespace filtering (#119).
 - As in CoreDNS v1.15.0, Kubernetes NS discovery snapshots local addresses per Plugin instance.
 - CoreDNS's CIDR-only selection yields no local NS addresses for explicit `bind` IP literals; Pharos matches that behavior.
 - API client creation and kubeconfig validation occur during Startup rather than Corefile setup.
