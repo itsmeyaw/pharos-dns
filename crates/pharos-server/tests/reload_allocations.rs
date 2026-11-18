@@ -43,6 +43,10 @@ impl Handler for Echo {
 
 #[tokio::test(flavor = "current_thread")]
 async fn swappable_listener_does_not_allocate_per_query() {
+    // Tokio coop budget (128): the first exhaustion allocates the scheduler's deferred-waker Vec once; do it before measuring.
+    for _ in 0..256 {
+        tokio::task::consume_budget().await;
+    }
     let counts = Arc::new(Mutex::new(Counts::default()));
     let key = ListenerKey {
         transport: Transport::Dns,
