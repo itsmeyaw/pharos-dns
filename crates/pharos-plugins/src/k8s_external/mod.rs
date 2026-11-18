@@ -7,7 +7,7 @@ pub mod setup;
 mod transfer;
 
 use pharos_proto::{Class, MessageBuilder, Name, NameError, NameRef, Rcode, Section, Type};
-use pharos_server::{Context, Next, Outcome, Plugin};
+use pharos_server::{Context, LookupResponse, Next, Outcome, Plugin};
 
 pub struct External {
     config: setup::Config,
@@ -868,7 +868,7 @@ impl External {
                     .with_read(|index| self.reverse_response(index, cx, zone, ip.as_str()));
             }
             let request = lookup::parse(&labels[..relative]);
-            // shortcut: hostname targets and Self Lookups allocate per Query until #86 pools buffers and futures.
+            // shortcut: hostname targets and detached Self Lookup results allocate per Query; buffers and future are pooled, see #86.
             let mut chased: Vec<Chased> = Vec::new();
             let (snapshot, code) = match &request {
                 Ok(request) if matches!(q.qtype, Type::A | Type::AAAA | Type::SRV) => store
@@ -940,9 +940,14 @@ impl External {
                         },
                     )
                     .await;
-                entry.answers[0] = Some(lookup.unwrap_or_default());
+                entry.answers[0] =
+                    Some(lookup.map_or_else(|_| Vec::new(), LookupResponse::into_vec));
                 if q.qtype == Type::SRV {
-                    entry.answers[1] = cx.self_lookup(&entry.name, Type::AAAA).await.ok();
+                    entry.answers[1] = cx
+                        .self_lookup(&entry.name, Type::AAAA)
+                        .await
+                        .ok()
+                        .map(LookupResponse::into_vec);
                 }
             }
             return Some(self.service_response(
