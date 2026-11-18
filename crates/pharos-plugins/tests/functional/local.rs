@@ -328,7 +328,11 @@ async fn local_qclass_any_answer_is_not_authoritative() {
     let answer = response.answers().next().unwrap();
     assert_eq!((answer.rtype, answer.class), (Type::A, Class::IN));
     let (outcome, wire) = query_class(&chain, "localhost.", Type::MX, Class::ANY).await;
-    assert_eq!(outcome, Outcome::Drop);
+    // RFC 1035 §6.2, RFC 2308 §2: IN-only data cannot prove an ANY-class denial; pass to Next.
+    assert_eq!(
+        outcome,
+        Outcome::Error(pharos_server::Error::NoNextPlugin)
+    );
     assert!(wire.is_empty());
 }
 

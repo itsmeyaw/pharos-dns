@@ -116,7 +116,8 @@ impl Local {
         special_use: Option<crate::SpecialUse>,
     ) -> Option<Outcome> {
         let question = cx.query.questions().next()?;
-        if question.qclass != Class::IN {
+        // RFC 1035 §6.2: QCLASS=ANY matches the IN-class local data.
+        if question.qclass != Class::IN && question.qclass != Class::ANY {
             return None;
         }
         let mut first = None;
