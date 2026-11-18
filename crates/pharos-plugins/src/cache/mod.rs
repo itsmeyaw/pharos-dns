@@ -812,7 +812,9 @@ impl Cache {
         // RFC 1034 §4.3.3: Explicit wildcard QNAMEs are never admitted to cache.
         let cacheable = cacheable
             && !has_explicit_wildcard(question.name)
-            && !disabled.iter().any(|zone| crate::name_within(question.name, zone));
+            && !disabled
+                .iter()
+                .any(|zone| crate::name_within(question.name, zone));
         let mut ttl_updates = Vec::with_capacity(records.len());
         for record in records {
             ttl_updates.push((record.ttl_offset, record.ttl));

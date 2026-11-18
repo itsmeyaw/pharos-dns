@@ -39,15 +39,17 @@ pub fn parse_rdata(
     let timestamp_now = matches!(rtype, Type::RRSIG | Type::SIG)
         .then(current_timestamp_seconds)
         .flatten();
-    parse_rdata_located(rtype, fields, &[], &[], origin, timestamp_now).map_err(|(field, message)| {
-        if message.starts_with("unsupported RDATA type ") {
-            RdataParseError::UnsupportedType { field, message }
-        } else if field >= fields.len() || message.starts_with("missing ") {
-            RdataParseError::MissingField { field, message }
-        } else {
-            RdataParseError::InvalidField { field, message }
-        }
-    })
+    parse_rdata_located(rtype, fields, &[], &[], origin, timestamp_now).map_err(
+        |(field, message)| {
+            if message.starts_with("unsupported RDATA type ") {
+                RdataParseError::UnsupportedType { field, message }
+            } else if field >= fields.len() || message.starts_with("missing ") {
+                RdataParseError::MissingField { field, message }
+            } else {
+                RdataParseError::InvalidField { field, message }
+            }
+        },
+    )
 }
 
 /// `bad[i]` marks invalid digit escapes dropped by the lexer; `raw_non_ascii[i]` marks raw bytes.

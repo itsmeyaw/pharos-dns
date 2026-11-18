@@ -4,8 +4,8 @@
 use pharos_corefile::{configure, parse};
 use pharos_plugins::{Chain, directives, servers};
 use pharos_proto::{
-    Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Section, TsigAlgorithm,
-    TsigKey, Type,
+    Class, EdnsOption, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Section,
+    TsigAlgorithm, TsigKey, Type,
 };
 use pharos_server::{Action, Context, Handler, Metadata, Outcome, Protocol, Transport};
 use std::sync::{
