@@ -539,11 +539,7 @@ async fn reverse_filtering_and_explicit_fallthrough() {
             Rcode::NOERROR,
             vec!["ep1a.svc1.testns.svc.cluster.local."],
         ),
-        (
-            "namespace_labels dns=yes",
-            Rcode::NOERROR,
-            vec!["ep1a.svc1.testns.svc.cluster.local."],
-        ),
+        ("namespace_labels dns=yes", Rcode::NXDOMAIN, vec![]),
     ] {
         let chain = chain(&endpoint, ZONES, option).await;
         let name = "100.0.0.10.in-addr.arpa.";

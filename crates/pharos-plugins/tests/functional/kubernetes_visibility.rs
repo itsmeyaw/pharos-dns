@@ -273,36 +273,38 @@ async fn ns_discovery_ignores_namespace_restrictions() {
 }
 
 #[tokio::test]
-async fn reverse_namespace_visibility_matches_coredns() {
+async fn reverse_namespace_visibility_follows_forward_filter() {
     let (address, task) = fake_api(&[]).await;
     for (option, qname, expected) in [
         (
             "namespace_labels dns=yes",
             "111.0.0.10.in-addr.arpa.",
-            vec!["dns.hidden.svc.cluster.local."],
+            vec![],
         ),
         (
             "namespace_labels dns=yes",
             "1.1.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.",
-            vec!["dns.hidden.svc.cluster.local."],
+            vec![],
         ),
         (
             "namespace_labels dns=yes",
             "113.0.0.10.in-addr.arpa.",
-            vec!["missing.absent.svc.cluster.local."],
+            vec![],
         ),
         (
             "namespace_labels dns=yes",
             "99.0.0.10.in-addr.arpa.",
-            vec![
-                "double.dns6.hidden.svc.cluster.local.",
-                "double.head.hidden.svc.cluster.local.",
-            ],
+            vec![],
         ),
         (
             "namespace_labels dns=yes",
             "2.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.",
-            vec!["v6.head.hidden.svc.cluster.local."],
+            vec![],
+        ),
+        (
+            "namespace_labels dns=yes",
+            "114.0.0.10.in-addr.arpa.",
+            vec!["visible.visible.svc.cluster.local."],
         ),
         (
             "namespaces hidden absent",
@@ -363,7 +365,14 @@ async fn reverse_namespace_visibility_matches_coredns() {
         if expected.is_empty() {
             let authority = msg.authorities().next().unwrap();
             assert_eq!(authority.rtype, Type::SOA);
-            assert_eq!(authority.name.to_string(), "in-addr.arpa.");
+            assert_eq!(
+                authority.name.to_string(),
+                if qname.ends_with("ip6.arpa.") {
+                    "ip6.arpa."
+                } else {
+                    "in-addr.arpa."
+                }
+            );
         } else {
             assert_eq!(msg.authority_count(), 0);
         }
