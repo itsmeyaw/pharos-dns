@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-corefile"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glob",
  "stats_alloc",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-dns"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-lc-rs",
  "getrandom 0.2.17",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-dnssec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-kubernetes"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures",
@@ -2289,14 +2289,14 @@ dependencies = [
 
 [[package]]
 name = "pharos-kv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-lc-rs",
 ]
 
 [[package]]
 name = "pharos-plugins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "aws-config",
@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "pharos-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",
@@ -3606,7 +3606,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-lc-rs",
  "pharos-dnssec",
