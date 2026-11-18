@@ -683,6 +683,9 @@ fn documented_generic_divergence(case: &Case, miekg: &str, pharos: &str) -> Opti
         if rtype == 63 {
             return Some("RFC 8976 §2.2.3: Pharos enforces SHA-384 ZONEMD digest length.");
         }
+        if (rtype, mutation) == (30, "valid") {
+            return Some("RFC 2535 §5.2: Pharos rejects windowed NXT bitmaps lacking TYPE30.");
+        }
         if rtype == 249 {
             return Some("RFC 2930 §3: Pharos rejects transient TKEY zone records.");
         }
@@ -895,11 +898,11 @@ fn direct_oracle(binary: &Path, zone: &[u8]) -> String {
 }
 
 #[test]
-fn raw_name_octets_preserved_on_wire() {
+fn raw_name_octets_require_escapes() {
     let Some((_dir, binary)) = oracle() else {
         return;
     };
-    // RFC 1035 §3.1: name labels carry the original octets, not Unicode characters.
+    // RFC 4343 §2.1: master files must escape label octets 0x7F-0xFF; miekg accepts them raw.
     for (zone, wire) in [
         (
             b"\xff.example. 60 IN A 192.0.2.1\n".as_slice(),
@@ -917,7 +920,7 @@ fn raw_name_octets_preserved_on_wire() {
         assert_eq!(direct_oracle(&binary, zone), wire, "Go: {zone:?}");
         assert_eq!(
             rust_result(&case("raw-wire", "example.", zone)),
-            wire,
+            "reject\n",
             "Rust: {zone:?}"
         );
     }
@@ -1107,6 +1110,20 @@ fn miekg_live_differential() {
             );
             continue;
         }
+        // RFC 2535 §5.2: NXT bitmap is unwindowed and sets TYPE30; miekg emits an NSEC window.
+        if case.name == "rr-valid-NXT" {
+            let owner = "067265636f7264076578616d706c6500";
+            let next = "046e657874076578616d706c6500";
+            assert_eq!(
+                expected.as_str(),
+                format!("accept\n{owner}\t60\t1\t30\t{next}000160\n")
+            );
+            assert_eq!(
+                actual,
+                format!("accept\n{owner}\t60\t1\t30\t{next}60000002\n")
+            );
+            continue;
+        }
         if matches!(case.name.as_str(), "rr-valid-SPF" | "rr-valid-DLV") {
             assert_eq!(expected, &actual, "{}: wire output", case.name);
             continue;
@@ -1135,6 +1152,11 @@ fn miekg_live_differential() {
                 "{}: expected Go rejection, got {}",
                 case.name, expected
             ));
+        }
+        // RFC 4343 §2.1: master files must escape label octets 0x7F-0xFF; miekg accepts them raw.
+        if case.name.starts_with("byte-") {
+            assert_eq!(actual, "reject\n", "{}: {actual}", case.name);
+            continue;
         }
         if let Some((_, go_expected)) = EMPTY_OWNER_CASES
             .iter()
