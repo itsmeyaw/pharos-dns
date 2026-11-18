@@ -41,11 +41,23 @@ fn missing_kubernetes_exits_one_with_coredns_error() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+// Ephemeral TCP and UDP port spaces are independent, so a same-port pair can collide: retry on a fresh port.
+fn bind_pair_std(ip: std::net::IpAddr) -> (std::net::TcpListener, std::net::UdpSocket) {
+    for _ in 0..16 {
+        let tcp = std::net::TcpListener::bind((ip, 0)).unwrap();
+        match std::net::UdpSocket::bind(tcp.local_addr().unwrap()) {
+            Ok(udp) => return (tcp, udp),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("bind UDP: {error}"),
+        }
+    }
+    panic!("no free same-port TCP/UDP pair on {ip}");
+}
+
 #[test]
 fn missing_kubernetes_wins_over_occupied_dns_port() {
-    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (tcp, _udp) = bind_pair_std(std::net::Ipv4Addr::LOCALHOST.into());
     let port = tcp.local_addr().unwrap().port();
-    let _udp = UdpSocket::bind(("127.0.0.1", port)).unwrap();
     let dir =
         std::env::temp_dir().join(format!("pharos-k8s-occupied-{}-{port}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();

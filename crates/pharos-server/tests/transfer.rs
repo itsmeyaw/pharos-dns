@@ -610,13 +610,25 @@ async fn notify_retries_response_without_qr_or_notify_opcode() {
     responder.await.unwrap();
 }
 
+// Ephemeral TCP and UDP port spaces are independent, so a same-port pair can collide: retry on a fresh port.
+async fn bind_pair(ip: std::net::IpAddr) -> (tokio::net::TcpListener, UdpSocket) {
+    for _ in 0..16 {
+        let tcp = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
+        match UdpSocket::bind(tcp.local_addr().unwrap()).await {
+            Ok(udp) => return (tcp, udp),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("bind UDP: {error}"),
+        }
+    }
+    panic!("no free same-port TCP/UDP pair on {ip}");
+}
+
 #[tokio::test]
 async fn notify_uses_tcp_when_udp_does_not_reply() {
     use pharos_proto::{Message, MessageBuilder};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (tcp, udp) = bind_pair(std::net::Ipv4Addr::LOCALHOST.into()).await;
     let address = tcp.local_addr().unwrap();
-    let udp = UdpSocket::bind(address).await.unwrap();
     let responder = tokio::spawn(async move {
         let (mut socket, _) = tcp.accept().await.unwrap();
         let len = socket.read_u16().await.unwrap();
@@ -650,9 +662,8 @@ async fn notify_tcp_fallback_uses_configured_source_address() {
     use pharos_proto::{Message, MessageBuilder};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (tcp, udp) = bind_pair(std::net::Ipv4Addr::LOCALHOST.into()).await;
     let address = tcp.local_addr().unwrap();
-    let udp = UdpSocket::bind(address).await.unwrap();
     let responder = tokio::spawn(async move {
         let (mut socket, peer) = tokio::time::timeout(Duration::from_secs(1), tcp.accept())
             .await

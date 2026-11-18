@@ -305,11 +305,23 @@ mod tests {
         thread.join().unwrap();
     }
 
+    // Ephemeral TCP and UDP port spaces are independent, so a same-port pair can collide: retry on a fresh port.
+    fn bind_pair_std(ip: std::net::IpAddr) -> (std::net::TcpListener, std::net::UdpSocket) {
+        for _ in 0..16 {
+            let tcp = std::net::TcpListener::bind((ip, 0)).unwrap();
+            match std::net::UdpSocket::bind(tcp.local_addr().unwrap()) {
+                Ok(udp) => return (tcp, udp),
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+                Err(error) => panic!("bind UDP: {error}"),
+            }
+        }
+        panic!("no free same-port TCP/UDP pair on {ip}");
+    }
+
     #[test]
     fn retries_truncated_udp_answer_over_tcp() {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (tcp, udp) = bind_pair_std(std::net::Ipv4Addr::LOCALHOST.into());
         let address = tcp.local_addr().unwrap();
-        let udp = UdpSocket::bind(address).unwrap();
         let thread = std::thread::spawn(move || {
             let mut query = [0; 512];
             let (len, peer) = udp.recv_from(&mut query).unwrap();

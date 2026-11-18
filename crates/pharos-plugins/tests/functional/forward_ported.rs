@@ -8,7 +8,6 @@ use pharos_server::{Context, Metadata, Outcome, Protocol, Transport};
 use std::{
     io::{ErrorKind, Read as StdRead, Write as StdWrite},
     net::SocketAddr,
-    net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -456,13 +455,25 @@ async fn resolver_expands_hostname_and_deduplicates_numeric_address() {
     assert_eq!(counts(&[&first, &second]), vec![1, 2]);
 }
 
+// Ephemeral TCP and UDP port spaces are independent, so a same-port pair can collide: retry on a fresh port.
+fn bind_pair_std(ip: std::net::IpAddr) -> (std::net::TcpListener, std::net::UdpSocket) {
+    for _ in 0..16 {
+        let tcp = std::net::TcpListener::bind((ip, 0)).unwrap();
+        match std::net::UdpSocket::bind(tcp.local_addr().unwrap()) {
+            Ok(udp) => return (tcp, udp),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("bind UDP: {error}"),
+        }
+    }
+    panic!("no free same-port TCP/UDP pair on {ip}");
+}
+
 // RFC 1035 §§4.1.1, 4.1.4, 4.2.2; RFC 7766 §5: encode TC, compressed RRs, and TCP frames.
 #[tokio::test]
 async fn configured_resolver_retries_truncated_udp_over_tcp() {
-    let tcp = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let (tcp, udp) = bind_pair_std(std::net::Ipv4Addr::LOCALHOST.into());
     tcp.set_nonblocking(true).unwrap();
     let resolver_address = tcp.local_addr().unwrap();
-    let udp = StdUdpSocket::bind(resolver_address).unwrap();
     udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     let resolver = std::thread::spawn(move || {
         let mut wire = [0; 512];
