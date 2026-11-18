@@ -1,0 +1,1131 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.2.0](https://github.com/itsmeyaw/pharos-dns/compare/pharos-plugins-v0.1.0...pharos-plugins-v0.2.0) - 2026-11-18
+
+### Added
+
+- *(dynupdate)* store Zone in pharos-kv, import bbolt on first open
+- *(secondary)* cap AXFR records, bytes and duration
+- *(transfer)* accept CIDR ACLs per RFC 5936 §5
+- *(proxy)* retire UDP sockets after use budget, cap idle UDP sockets
+- *(dynupdate)* serve authenticated updates
+- *(zone)* build updated snapshots
+- *(auto)* serve discovered Zones
+- *(secondary)* serve transferred Zones
+- *(file)* expose reusable Zone lookup
+- *(file)* index immutable Zone records
+- *(k8s_external)* serve external services
+- *(file)* publish wildcard Metadata
+- *(file)* synthesize DNAME aliases
+- *(file)* include answer address glue
+- *(file)* add signed denial proofs
+- *(file)* resolve external aliases
+- *(file)* return signed RRsets
+- *(erratic)* serve AXFR and autopath
+- *(file)* stream and notify Zone Transfers
+- *(file)* reload Zones atomically
+- *(file)* answer aliases and referrals
+- *(file)* load basic authoritative zones
+- *(k8s_external)* parse options
+- *(erratic)* add setup and address responses
+- *(expression)* evaluate scoped variables
+- *(expression)* scope variable borrows
+- *(expression)* split retained scratch
+- *(transfer)* try providers in Plugin order
+- *(kubernetes)* serve and notify transfers
+- *(template)* render DNS responses
+- *(view)* connect routing and metadata
+- *(transfer)* expose change notification hook
+- *(view)* evaluate filters with thread scratch
+- *(transfer)* route zone transfer requests
+- *(view)* compile Corefile expressions
+- *(template)* support quoted printf variants
+- *(template)* format scientific float verbs
+- *(template)* support alternate g formatting
+- *(template)* support printf g precision
+- *(template)* render Question values
+- *(template)* parse comments and control spacing
+- *(template)* support printf width and precision
+- *(template)* render Go collection values
+- *(template)* accept reusable scratch storage
+- *(template)* slice Message Questions
+- *(template)* expand printf formatting
+- *(template)* call bound Query utilities
+- *(template)* call bound Query functions
+- *(template)* access Message Questions
+- *(template)* extend formatting and Metadata
+- *(template)* range over pipeline values
+- *(template)* bind scoped range variables
+- *(template)* expose borrowed Query fields
+- *(template)* add Go escaping builtins
+- *(template)* format pipeline output
+- *(dnssec)* sign responses and cache results
+- *(template)* support slice builtin
+- *(template)* support else if branches
+- *(template)* range over named maps
+- *(template)* parse Go string literals
+- *(template)* support nested index pipelines
+- *(template)* add logical comparison builtins
+- *(dnssec)* load AWS secrets with SDK
+- *(template)* evaluate simple pipelines
+- *(template)* evaluate eq and len builtins
+- *(template)* range over capture matches
+- *(template)* support whitespace trim markers
+- *(template)* render if and else blocks
+- *(template)* render expression variables
+- *(expression)* support mixed any predicates
+- *(expression)* support nil literals
+- *(tsig)* enable and compare README cases
+- *(expression)* decode string literals
+- *(expression)* parse numeric literals
+- *(server)* write lazy TCP message streams
+- *(expression)* support negated operators
+- *(expression)* expose variable result types
+- *(expression)* support replace count
+- *(expression)* support replace and any
+- *(expression)* add variables and capture groups
+- *(expression)* evaluate CIDR membership
+- *(expression)* compile regex matching
+- *(expression)* match lists and strings
+- *(expression)* expose query functions
+- *(tsig)* expose validated key to Next
+- *(expression)* parse operators and literals
+- *(expression)* evaluate boolean literals
+- *(tsig)* return authentication errors
+- *(tsig)* verify and sign valid queries
+- *(template)* render captures and parse integers
+- *(tsig)* enforce unsigned query policy
+- *(tsig)* parse Corefile options
+- *(template)* compile name and metadata actions
+- *(autopath)* enable README scenarios
+- *(autopath)* use Kubernetes pod namespace
+- *(autopath)* count successful searches
+- *(autopath)* follow search suffixes
+- *(autopath)* parse search configuration
+- *(debug)* hexdump forward's wrong reply
+- *(rewrite)* revert EDNS options
+- *(rewrite)* expand EDNS variables
+- *(rewrite)* add NSID and subnet options
+- *(rewrite)* add local EDNS actions
+- *(rewrite)* set local EDNS options
+- *(server)* reborrow queries for Next
+- *(rewrite)* rewrite DNAME targets
+- *(rewrite)* match CNAME target patterns
+- *(rewrite)* follow exact CNAME targets
+- *(rewrite)* add answer regex rules
+- *(rewrite)* expand name metadata
+- *(rewrite)* support answer auto
+- *(rewrite)* add regex name captures
+- *(rewrite)* add simple name matchers
+- *(rewrite)* add exact name rewrite
+- *(rewrite)* add type and class rules
+- *(rewrite)* add RCODE rules
+- *(rewrite)* add TTL name matchers
+- *(rewrite)* add exact TTL rules
+- *(siit)* count translated queries
+- *(siit)* synthesize IPv4 answers
+- *(siit)* parse translation settings
+- *(dns64)* count translated responses
+- *(dns64)* synthesize AAAA via Self Lookup
+- *(dns64)* parse synthesis configuration
+- *(acl)* count policy outcomes
+- *(acl)* enforce ordered policies
+- *(acl)* parse access rules
+- *(shed)* bound UDP response queues
+- *(debug)* enable process-wide debug mode
+- *(timeouts)* configure TCP connection limits
+- *(cancel)* bound Query execution
+- *(root)* resolve server block paths
+
+### Fixed
+
+- *(autopath)* pass exact first-suffix query to Next
+- *(local)* answer QCLASS=ANY queries
+- *(kubernetes)* PTR follows namespace_labels filter
+- *(cache)* bound stored wire bytes
+- *(bench)* use cacheable churn responses
+- *(transfer)* match client IP addresses
+- *(secondary)* match primary IP addresses
+- *(cache)* reset stale failure backoff
+- *(acl)* match mapped IPv6 networks
+- *(dynupdate)* open database during startup
+- *(dynupdate)* recover empty database files
+- *(secondary)* harden refresh paths
+- *(acl)* honor query EDNS when returning EDE
+- *(plugins)* dedupe identical RESINFO records
+- *(secondary)* reuse SOA connection for AXFR
+- *(plugins)* reject multiple RESINFO records
+- *(secondary)* match numeric IPv6 zone IDs
+- *(kv)* refuse damaged headers, cover framing in checksum, re-create interrupted files
+- *(secondary)* add apex NS to test fixtures after merge
+- *(loadbalance)* heap-allocate per-thread scratch
+- *(tsig)* distinguish in-zone key failures
+- *(forward)* gate AD on signed client queries
+- *(dynupdate)* explain NS-less database repair
+- *(template)* move NODATA SOA to authority
+- *(zone)* precompute CNAME loop reachability
+- *(tsig)* validate malformed out-of-zone records
+- *(loop)* match probe question fields
+- *(tsig)* forward unknown keys and log errors
+- *(forward)* preserve signed response AD
+- *(plugins)* map terminal special answers
+- *(plugins)* centralize special-name fallback
+- *(cache)* saturate aged RRset TTLs
+- *(sign)* omit NSEC at empty nonterminals
+- *(cache)* index and bound response RRsets
+- *(dnssec)* gate DO signing by QCLASS
+- *(transfer)* NOTIFY skips CIDR ACLs; document IXFR, TSIG choices (RFC 1996 §2.1)
+- *(secondary)* accept NOTIFY with QDCOUNT>0 (RFC 1996 §3.7)
+- *(secondary)* rate-limit unknown NOTIFY log per zone (RFC 1996 §3.10)
+- *(secondary)* enter RETRY after failed NOTIFY refresh (RFC 1996 §3.11)
+- *(secondary)* serialize transfers, keep newest serial (RFC 1982 §3.2)
+- *(rewrite)* bound RRset overflow and preserve escapes
+- *(acl)* fail closed for scoped filters
+- *(template)* skip CNAME restart for ANY
+- *(plugins)* pass through QCLASS=ANY negatives
+- *(zone)* bound alias lookups and report apex NS
+- *(plugins)* preserve special-name fallthrough
+- *(rewrite)* preserve DNS rewrite invariants
+- *(k8s_external)* restore empty-label error (RFC 1035 §3.1)
+- *(header)* reject response RD overrides (RFC 1035 §4.1.1)
+- *(dns64)* filter mapped AAAA on empty A (RFC 6147 §5.1.4)
+- *(acl)* prevent scoped-client deny bypass (RFC 4007 §§11–12)
+- *(http)* document lazy metrics validators
+- *(hosts)* cap invalid-name log volume
+- *(template)* restart all non-CNAME queries
+- *(plugins)* clear AA for QCLASS=ANY
+- *(auto)* remove case-dependent apex referrals
+- *(zone)* enforce apex and RR processing rules
+- *(http)* honor RFC 9110 operations
+- *(rcode)* display value 16 as BADVERS
+- *(names)* reject raw non-ASCII presentation
+- *(template)* propagate chased RCODE and add EDE text
+- *(acl)* match link-local scope IDs (RFC 4007 §§11–12)
+- *(rewrite)* preserve RFC DNS response invariants
+- *(dns64)* enforce RFC 6147 and RFC 6052 rules
+- *(siit)* filter non-global WKP addresses (RFC 6052 §3.1)
+- *(autopath)* avoid conflicting CNAMEs (RFC 2181 §10.1)
+- *(header)* preserve query RD in responses (RFC 1035 §4.1.1)
+- *(k8s_external)* accept root name (RFC 1035 §4.1.1)
+- *(cache)* respect special forwarding zones
+- *(plugins)* handle special-use DNS names
+- *(sign)* use serial arithmetic and include ENTs
+- *(dnssec)* gate DNSKEY interception
+- *(template)* honor CNAME and NXDOMAIN response rules
+- *(zone)* enforce alias and zone integrity rules
+- *(cache)* normalize and filter response data
+- *(secondary)* bound RFC 1996 §3.10 logging
+- *(transfer)* enforce RFC 1995 §3 and RFC 5936 §5
+- *(http)* enforce RFC 9110 endpoint semantics
+- *(cache)* tighten admission and TTLs
+- *(transfer)* write TCP frames per RFC 7766 §8
+- *(secondary)* log unknown NOTIFY senders RFC 1996 §3.10
+- *(sign)* advance stale RFC 4033 SOA serial
+- *(sign)* add RFC 4592 wildcard ENT NSEC
+- *(transfer)* order IXFR serials per RFC 1995 §2
+- *(dnssec)* use real NSEC for existing names
+- *(forward)* clear unsecured upstream AD
+- *(transfer)* validate IXFR SOA per RFC 1995 §3
+- *(dnssec)* honor RFC 2181 DNSKEY class
+- *(proxy)* stop counting TCP as UDP use
+- *(proxy)* treat malformed OPT options as no ECS
+- *(server)* type forwarded AD marker
+- *(edns)* advertise responder capacity
+- *(dnssec)* reject NXNAME in every question
+- *(dynupdate)* resolve RFC review findings
+- *(dnssec)* keep Additional signature groups atomic
+- *(forward)* preserve REFUSED failover
+- *(forward)* cap idle scratch buffers
+- *(kubernetes)* reject malformed multicluster zones
+- *(proxy)* normalize mixed RRset TTLs
+- *(k8s_external)* index chased targets in release
+- *(k8s_external)* index chased targets
+- *(forward)* simplify ECS retry response state
+- *(dnssec)* tighten review tests and citations
+- *(dnssec)* omit optional Additional RRsets atomically
+- *(server)* honor clamped EDNS payload size
+- *(k8s_external)* prefer positive chase results
+- *(zone)* address review edge cases
+- *(kubernetes)* retain empty ClusterSetIP records
+- *(kubernetes)* encode two-label cluster IDs
+- *(zone)* keep signatures tied to covered TTLs
+- *(kubernetes)* suppress unnamed SRV ports
+- *(forward)* cap retries per upstream
+- *(k8s_external)* match SRV chase by target
+- *(dns)* bound parsing and correct DS routing
+- *(proxy)* rearm health expiry in probe loop
+- *(proxy)* align ECS and RRset checks
+- *(zone)* match signatures to covered TTLs
+- *(xfr)* return NOTAUTH on class mismatch
+- *(local)* use resolvable NS target
+- *(hosts)* add SOA to negative answers
+- *(kubernetes)* close conformance gaps
+- *(header)* mask AA only when requested
+- *(sign)* use minimum TTL for signed RRsets
+- *(dnssec)* prepare signing keys before queries
+- *(zone)* address remaining review findings
+- *(header)* keep AA flag truthful
+- *(local)* align SOA MNAME with NS target
+- *(dns64)* follow response assembly rules
+- *(rfc6052)* share masked prefix checks
+- *(any)* use RFC 8482 CPU string
+- *(any)* validate HINFO TTL range
+- *(local)* identify primary server in SOA
+- *(siit)* restrict WKP to /96
+- *(zone)* ignore mixed SVCB service records
+- *(proxy)* sort RRset validation keys
+- *(forward)* inspect transmitted retry query
+- *(proxy)* accept ECS and bound RRset checks
+- *(proxy)* rearm expired health state
+- *(zone)* skip self lookup after YXDOMAIN
+- *(zone)* match RRSIG TTL to covered RRset
+- *(forward)* bound attempts and honor ECS
+- *(proxy)* validate upstream DNS messages
+- *(forward)* validate resolver replies
+- *(cache)* address TTL and key review findings
+- *(any)* configure HINFO TTL
+- *(local)* name local zone apex as NS
+- *(local)* use standard SOA RNAME
+- *(hosts)* pass non-IN questions onward
+- *(whoami)* emit classed service owner
+- *(dns64)* preserve authority flags
+- *(dnssec)* fail closed on incomplete denial proofs
+- *(any)* skip non-IN queries
+- *(dns64)* validate RFC 6052 prefixes
+- *(zone)* preserve DNS name semantics
+- *(hosts)* return authoritative NXDOMAIN
+- *(local)* honor class and set AA
+- *(secondary)* target masters and clear recovered expiry
+- *(xfr)* preserve question and match class
+- *(zone)* enforce authoritative DNS semantics
+- *(dnssec)* validate signer scope
+- *(dnssec)* correct proof and response handling
+- *(sign)* enforce zone signing requirements
+- *(dnssec)* [**breaking**] reject unsafe signing algorithms
+- *(cache)* honor positive TTL and RRSIG expiry
+- *(secondary)* bound SOA timers and ignore peers
+- *(cache)* enforce DNS cache conformance
+- *(secondary)* honor SOA timers and ignore unknown masters
+- *(auto)* keep added-zone notify explicit
+- *(dynupdate)* honor UPDATE wire semantics
+- *(secondary)* validate NOTIFY and catalog transfers
+- *(auto)* preserve serial zero and notify new zones
+- *(udp)* recover probe panics and count drops
+- *(udp)* recycle buffers and admit probes
+- *(dynupdate)* accept relative allow names
+- *(dynupdate)* normalize partial CERT records
+- *(dynupdate)* reject truncated CERT updates
+- *(dynupdate)* clarify safe file opening
+- *(dynupdate)* bound bbolt key lengths
+- *(dynupdate)* create through database symlinks
+- *(dynupdate)* retain concurrent database creation
+- *(dynupdate)* reject compressed stored names
+- *(dynupdate)* handle bbolt allocation failures
+- *(dynupdate)* serve empty name RDATA
+- *(dynupdate)* match empty RDATA updates
+- *(dynupdate)* validate bbolt branch keys
+- *(dynupdate)* split large bbolt trees
+- *(dynupdate)* reclaim closed store entries
+- *(dynupdate)* restrict database permissions
+- *(dynupdate)* bound stored Zone reads
+- *(dynupdate)* reject malformed UPDATE RDATA
+- *(dynupdate)* clear UPDATE reply flags
+- *(dynupdate)* protect live bbolt pages
+- *(zone)* compare legacy record names
+- *(sign)* write plain CAA and URI octets as CoreDNS
+- *(sign)* anchor refresh timer at startup
+- *(sign)* match multi-origin key ownership
+- *(sign)* preserve escaped record values
+- *(sign)* match CoreDNS Zone traversal
+- *(auto)* warn when directory is missing
+- *(auto)* label metrics with discovered Zones
+- *(auto)* match CoreDNS symlink reload timing
+- *(auto)* track unchanged symlink targets
+- *(auto)* reload repointed symlinks on scan
+- *(auto)* report duplicate Zone files
+- *(auto)* reduce Query stack pressure
+- *(auto)* retain case and stop watchers safely
+- *(secondary)* match CoreDNS scoped NOTIFY sources
+- *(secondary)* drop unused shared binding
+- *(secondary)* validate NOTIFY source scopes
+- *(secondary)* report transfer failures
+- *(secondary)* handle refresh and NOTIFY races
+- *(zone)* enable secondary-only builds
+- *(file)* validate name-only RDATA length
+- *(file)* validate SOA before serial check
+- *(file)* match Zone setup ordering
+- *(file)* match reload mtime ordering
+- *(file)* retain repeated apex NS glue
+- *(file)* recover after sticky open errors
+- *(file)* refuse unmatched terminal Zones
+- *(k8s_external)* keep reverse replies consistent
+- *(file)* serialize reload generations
+- *(k8s_external)* handle escaped final dots
+- *(k8s_external)* snapshot endpoint queries
+- *(k8s_external)* preserve transfer target text
+- *(file)* match wildcard alias signatures
+- *(file)* reject negative reload on startup
+- *(file)* retain wildcard Metadata casing
+- *(file)* report reload and NOTIFY errors
+- *(file)* resolve alias NS via Self Lookup
+- *(k8s_external)* retain Service snapshot
+- *(file)* match alias chain limits
+- *(k8s_external)* ignore stale truncation
+- *(k8s_external)* validate dependency in check
+- *(file)* resolve SVCB target glue
+- *(k8s_external)* retain headless base address
+- *(file)* match empty apex lookup
+- *(k8s_external)* validate dependency on startup
+- *(file)* match wildcard empty names
+- *(file)* match denial closest encloser
+- *(file)* match SOA reload checks
+- *(file)* match SOA and empty name proofs
+- *(file)* preserve CoreDNS name casing
+- *(file)* notify repeated Zone entries
+- *(file)* limit Referral glue to Zone Cut
+- *(file)* recover Zone reload safely
+- *(file)* retain aliases on lookup errors
+- *(k8s_external)* document transfer limits
+- *(file)* match current IXFR flags
+- *(file)* drop unsolicited NOTIFY
+- *(file)* build without default features
+- *(file)* fall through empty names
+- *(file)* honor alias target Zone Cuts
+- *(template)* separate rendering scratch
+- *(erratic)* match CoreDNS edge cases
+- *(template)* recover slots after panic
+- *(template)* share scratch across expressions
+- *(engines)* gate rewrite regex cache
+- *(template)* pass view in metric tests
+- *(kubernetes)* notify after initial sync
+- *(template)* label metrics with view
+- *(kubernetes)* transfer Services in CoreDNS name order
+- *(transfer)* keep first of equally long Zone matches
+- *(kubernetes)* retain CoreDNS sentinel SRV
+- *(template)* accept NOTIMPL rcode alias
+- *(transfer)* share the Next future
+- *(view)* share routed chain future
+- *(transfer)* report NOTIFY response codes
+- *(kubernetes)* handle transfer edge cases
+- *(view)* satisfy workspace lint checks
+- *(server)* admit non-IN class with forward
+- *(metrics)* label ACL and cache by view
+- *(test)* enable CHAOS admission for metrics
+- *(transfer)* allow mapped IPv4 clients
+- *(test)* place capture case outside Corefile
+- *(transfer)* match ACL addresses as text
+- *(template)* bound total range iterations
+- *(template)* place escape tests after items
+- *(dnssec)* limit TTL normalization to signed sets
+- *(template)* decode escapes in bounded windows
+- *(template)* cap integer ranges
+- *(engines)* return errors instead of panicking
+- *(dnssec)* align existing signature TTLs
+- *(expression)* bound recursive evaluation
+- *(dnssec)* normalize TTLs across sections
+- *(plugins)* guard compressed size arithmetic
+- *(template)* bound nested worker stack use
+- *(dnssec)* report poisoned cache as panic
+- *(dnssec)* normalize RRset TTLs
+- *(dnssec)* sign with RRset TTL
+- *(expression)* accept padded CIDR prefixes
+- *(template)* quote nonprinting Unicode
+- *(dnssec)* preserve complex negative replies
+- *(template)* reject nil commands at runtime
+- *(template)* validate map index key types
+- *(template)* allow zero-index slice calls
+- *(template)* match printf error output
+- *(template)* match Go float formatting
+- *(template)* bind values in empty ranges
+- *(dnssec)* include cache expiry boundary
+- *(dnssec)* reduce downstream future stack
+- *(dnssec)* validate cached signature inception
+- *(dnssec)* match NSEC query response ordering
+- *(dnssec)* use apex DNSKEY signature TTL
+- *(dnssec)* skip empty signature cache entries
+- *(dnssec)* clamp cache capacity like CoreDNS
+- *(dnssec)* guard response buffer capacity
+- *(dnssec)* match Unicode JSON key folding
+- *(dnssec)* match AWS secret JSON fields
+- *(tsig)* fail closed and truncate safely
+- *(log)* classify transfer streams as meta
+- *(expression)* match mixed list membership
+- *(expression)* match signed remainder behavior
+- *(expression)* hide disabled Metadata
+- *(expression)* bound evaluation stack use
+- *(expression)* reject ordered boolean comparisons
+- *(expression)* format scoped Query addresses
+- *(tsig)* admit UPDATE for signature policy
+- *(tsig)* sign after Listener finalization
+- *(expression)* match floating point arithmetic
+- *(tsig)* share keys per Listener
+- *(tsig)* reject nonfinal TSIG records
+- *(tsig)* retain EDNS on error responses
+- *(tsig)* sign unanswered outcomes
+- *(tsig)* finalize EDNS before signing
+- *(template)* reject unsupported string escapes
+- *(health)* gate setup by feature
+- adapt merged plugins to Context lifetimes
+- *(autopath)* prefer Kubernetes search
+- *(autopath)* parse repeated directives
+- *(autopath)* normalize search suffixes
+- *(autopath)* build without Kubernetes
+- *(autopath)* validate search providers
+- *(autopath)* continue after unwritten reply
+- *(autopath)* synthesize first reply alias
+- *(rewrite)* avoid regex match allocations
+- *(rewrite)* preserve OPT-less responses
+- *(root)* accept repeated root, last wins
+- *(rewrite)* carry EDNS into CNAME lookup
+- *(rewrite)* inspect CNAMEs in all sections
+- *(rewrite)* reject invalid answer names
+- *(server)* isolate borrowed self lookups
+- *(rewrite)* register EDNS codes globally
+- *(rewrite)* match numeric syntax
+- *(rewrite)* distinguish EDNS option types
+- *(rewrite)* snapshot EDNS metadata
+- *(rewrite)* retain metadata name snapshots
+- *(rewrite)* validate exact destinations
+- *(rewrite)* bound response buffer growth
+- *(rewrite)* normalize auto answer names
+- *(rewrite)* preserve compression in responses
+- *(rewrite)* restore invalid query names
+- *(rewrite)* apply all CNAME rules
+- *(rewrite)* apply EDNS revert per record
+- *(rewrite)* preserve EDNS on errors
+- *(rewrite)* retain EDNS match decisions
+- *(rewrite)* restore questions on stop
+- *(rewrite)* restore original question
+- *(rewrite)* answer rewritten error outcomes
+- *(rewrite)* reverse each response rule
+- *(rewrite)* match response rules in order
+- *(rewrite)* match updated query names
+- *(rewrite)* revert name values and subdomains
+- *(dns64)* classify negative responses
+- *(acl)* preserve wildcard networks
+- *(chain)* skip setup-only Plugin frames
+- *(timeouts)* defer idle timer until work ends
+
+### Other
+
+- retry same-port TCP/UDP binds on AddrInUse
+- *(plugins)* retry same-port TCP/UDP pair bind on AddrInUse
+- *(plugins)* warm tokio coop defer Vec in routed UDP alloc test
+- drop hand-written CHANGELOG.md stubs
+- *(release)* add per-crate CHANGELOG.md for release-plz
+- *(plugins)* loosen future-size tripwires to 32 KiB
+- format
+- *(kubernetes)* record PTR namespace-filter divergence from CoreDNS
+- Merge branch 'fix-125'
+- Merge branch 'fix-124'
+- *(loadbalance)* reuse CIDR matcher
+- *(transfer)* reuse CIDR matcher
+- *(kubernetes)* drop unused endpoint node name
+- *(proxy)* remove unused error variants
+- Merge branch 'fix-127' into wave1
+- Merge branch 'fix-123' into wave1
+- Merge branch 'fix-122' into wave1
+- Merge branch 'fix-120' into wave1
+- Merge branch 'fix-115' into wave1
+- *(cache)* add capacity-scaled miss churn
+- *(cache)* isolate writes and index evictions
+- fix/secondary RFC conformance fixes
+- fix/server RFC conformance fixes
+- *(secondary)* clarify named zone matching
+- *(compatibility)* clarify partial RFC behavior
+- *(acl)* format EDNS test changes
+- *(secondary)* format connection reuse paths
+- *(transfer)* record NOTIFY set deviation
+- *(plugins)* verify minimal section bounds
+- *(whoami)* record SRV compatibility deviation
+- rem/special RFC conformance fixes
+- rem/zone RFC conformance fixes
+- rem/synth RFC conformance fixes
+- rem/secondary RFC conformance fixes
+- rem/fwdtsig RFC conformance fixes
+- rem/cache RFC conformance fixes
+- rem/http RFC conformance fixes
+- rem/dnssec RFC conformance fixes
+- rem/proto RFC conformance fixes
+- document DNS review follow-ups
+- format TSIG forwarding paths
+- align forwarding and TSIG expectations
+- *(plugins)* verify terminal DNS flags
+- *(plugins)* clarify special-use precedence
+- *(plugins)* cover special-use regressions
+- *(cache)* pin denial and Additional cases
+- *(dnssec)* clarify class and NSEC behavior
+- *(secondary)* use is_multiple_of
+- *(transfer)* 1232-octet NOTIFY buffer, share source bind, fix RFC 1996 cites
+- *(rewrite)* trim response scratch size
+- *(k8s_external)* cite apex lookup guard
+- *(dns64)* cover mixed mapped and usable AAAA
+- *(acl)* cover wildcard block ordering
+- *(secondary)* build Zone off the async worker without cloning records (RFC 1034 §4.3.5)
+- *(secondary)* copy name-free RDATA directly (RFC 5936 §3.4)
+- record zone compatibility and upgrade notes
+- format synth remediation files
+- *(plugins)* explain special-use behavior
+- *(plugins)* cover special-use routing
+- *(dynupdate)* write compressed LP fixture as wire
+- *(erratic)* document the test-only TC rule
+- *(plugins)* assert response counts and NODATA
+- *(dnssec)* record CoreDNS compatibility edges
+- *(hosts)* record wildcard lookup behavior
+- *(cache)* record RFC compatibility limits
+- *(cache)* store TTL offsets only
+- *(dnssec)* format remediation changes
+- *(dnssec)* verify RFC 6781 KSK scope
+- *(dnssec)* avoid key clones during eviction
+- *(plugins)* sample UDP allocations within reuse budget
+- Merge branch 'main' into integrate
+- *(tsig)* reject malformed required NOTIFY
+- *(dnssec)* bound signature cache bytes, index RRsets once per miss
+- format Rust files
+- *(tsig)* preserve AD until listener finalization
+- *(dns64)* set fixture role flags
+- Merge branch 'conf/server' into integrate
+- Merge branch 'conf/forward' into integrate
+- Merge branch 'conf/k8s' into integrate
+- Merge branch 'conf/plugins-synth' into integrate
+- Merge branch 'issue-106-dnssec-alloc' into integrate
+- Merge branch 'conf/dnssec' into integrate
+- Merge branch 'conf/secondary' into integrate
+- Merge branch 'conf/cache' into integrate
+- Merge branch 'conf/dynupdate' into integrate
+- Merge branch 'conf/zone' into integrate
+- *(dnssec)* record aws-lc-rs signers and measurements
+- *(dnssec)* sign ECDSA and Ed25519 with aws-lc-rs
+- *(dnssec)* add signed cache-miss bench
+- *(plugins)* fix RFC-invalid fixtures
+- *(dnssec)* correct proof and algorithm citations
+- *(dnssec)* cover Additional signature rollback
+- *(dnssec)* cite signed-zone processing scope
+- *(kubernetes)* support IPv6 readiness fixtures
+- *(kubernetes)* clarify readiness compatibility
+- *(dnssec)* link deferred hot-path work
+- *(k8s_external)* cite reverse mapping RFC
+- *(forward)* clarify scratch pool bound
+- *(kubernetes)* clarify multicluster readiness
+- *(kubernetes)* cover tolerated unready transfer data
+- *(k8s_external)* exercise multi-port hostname SRV
+- *(forward)* clarify ECS and health behavior
+- *(forward)* cover warmed ECS allocation paths
+- *(forward)* document remaining RFC behavior
+- *(forward)* cover warmed ECS allocations
+- *(forward)* cover fourth upstream failover
+- *(plugins)* record Kubernetes DNS divergences
+- *(kubernetes)* clarify empty-service behavior
+- *(kubernetes)* cover malformed cluster zones
+- *(kubernetes)* pin empty-service compatibility
+- *(kubernetes)* use compact string fields
+- *(kubernetes)* exclude unnamed SRV transfer
+- *(dnssec)* update release size evidence
+- *(dnssec)* avoid Additional group buffers
+- *(k8s_external)* cache SRV target validation
+- *(kubernetes)* cover unready query paths
+- *(kubernetes)* restore invalid zone setup case
+- *(plugins)* cover negative response consumers
+- *(dnssec)* record crypto backend measurements
+- *(forward)* note scratch buffer growth
+- *(proxy)* remove duplicate health expiry case
+- *(dns)* share authority copying helper
+- *(forward)* bound resolver retry fixture
+- *(forward)* cover resolver TC retry over TCP
+- *(zone)* name sibling glue coverage accurately
+- *(zone)* cite snapshot and transfer rules
+- *(xfr)* assert non-IN admission for mismatch
+- *(dns64)* distinguish response role flags
+- *(any)* accept maximum valid TTL
+- *(dns64)* cover /64 synthesis and TC
+- *(whoami)* assert non-IN pass-through
+- *(dnssec)* explain prepared crypto backends
+- *(dnssec)* clarify cache-miss allocation limit
+- *(plugins)* align protocol expectations
+- *(dnssec)* record RFC behavior differences
+- *(rfc6052)* register shared validator once
+- note localhost apex compatibility
+- *(header)* expect AA cleared from queries
+- cite AA and fallthrough behavior
+- record CoreDNS plugin deviations
+- *(any)* cover non-IN DO pass-through
+- *(whoami)* move shared listener case
+- clarify RFC 6052 and hosts citations
+- *(plugins)* align conformance expectations
+- *(proxy)* reuse parsed OPT offsets
+- *(cache)* cover denial and referral TTL policy
+- *(cache)* record standards deviations and gaps
+- *(cache)* cover conformance cache paths
+- *(whoami)* expect non-IN pass-through
+- *(plugins)* update conformance expectations
+- *(auto)* assert unchanged rescans stay quiet
+- *(dnssec)* trim signer hot path
+- *(dnssec)* trim signer hot path
+- *(cache)* align fixtures with RFC cache rules
+- *(dynupdate)* format RFC changes
+- *(pharos-plugins)* cite spec sections above protocol logic
+- *(diff)* audit M2 README examples
+- record dynupdate Chain future size
+- *(dynupdate)* match shortcut note format
+- *(dynupdate)* cover CNAME update rules
+- shrink TSIG Listener futures
+- shrink template Query future
+- shrink Kubernetes visibility future
+- shrink weighted reload future
+- shrink Kubernetes parse fixture
+- shrink Kubernetes fixture state
+- shrink recursive Listener fixture
+- *(dynupdate)* cover outside Zone fallthrough
+- *(dynupdate)* validate active store read-only
+- *(dynupdate)* reject malformed bbolt pages
+- *(dynupdate)* verify atomic validation
+- *(dynupdate)* cover bbolt lock timeout
+- *(dynupdate)* verify lock-free warm Queries
+- *(dynupdate)* cover record deletion forms
+- *(dynupdate)* port invalid database cases
+- *(dynupdate)* cover ANY permissions
+- *(dynupdate)* port serial and apex cases
+- *(dynupdate)* cover read-only store setup
+- *(dynupdate)* record compatibility notes
+- *(dynupdate)* crash during split page writes
+- *(dynupdate)* cover external alias lookup
+- *(dynupdate)* verify transfer snapshots
+- *(dynupdate)* keep artifacts in worktree
+- *(dynupdate)* reject duplicate directives
+- *(dynupdate)* cover invalid configurations
+- *(dynupdate)* cover rejected metadata types
+- *(dynupdate)* cover UPDATE authorization
+- *(dynupdate)* retain acknowledged updates
+- *(dynupdate)* exercise malformed RR inputs
+- *(dynupdate)* verify NOTIFY coalescing
+- *(dynupdate)* cover accepted Zone types
+- *(dynupdate)* reopen Rust writes in CoreDNS
+- *(dynupdate)* cover store transactions
+- *(dynupdate)* cover durable store failures
+- *(dynupdate)* verify warm Query allocations
+- *(dynupdate)* verify cross-page bbolt files
+- *(dynupdate)* cover bbolt crash points
+- *(dynupdate)* serialize UPDATE transactions
+- *(dynupdate)* share file identity stores
+- *(dynupdate)* validate Zone limits and data
+- *(dynupdate)* support no-default builds
+- *(dynupdate)* round-trip stored Zone records
+- *(dynupdate)* cover meta fallback and links
+- *(dynupdate)* port UPDATE prescan cases
+- *(dynupdate)* port prerequisite cases
+- *(dynupdate)* port policy setup cases
+- *(dynupdate)* read CoreDNS database
+- *(dynupdate)* exercise bbolt interoperability
+- Merge branch 'main' into m2-sign
+- *(sign)* describe CAA and URI escaping
+- *(server)* guard query future size
+- *(plugins)* inline chain entry points
+- *(sign)* note serialized refresh checks
+- *(sign)* format compatibility bullets
+- *(sign)* verify signed denial and refresh
+- *(sign)* record compatibility and sources
+- *(sign)* check Query allocations
+- *(sign)* verify signing interoperability
+- *(sign)* cover CoreDNS SOA cases
+- integrate auto and server changes
+- *(auto)* look up Zones by wire name
+- *(auto)* cover setup and SOA recovery
+- reduce fixture stack pressure
+- *(sign)* add offline signer
+- *(auto)* cover Corefile setup
+- *(server)* disable Nagle and write TCP frames once
+- *(secondary)* make expiry test deterministic
+- *(secondary)* cover catalog migration
+- shrink Kubernetes fixture future
+- *(secondary)* check Query allocations
+- *(zone)* share immutable Zone data
+- *(tsig)* verify cancelled query view
+- *(runtime)* restore default worker stack
+- *(kubernetes)* run fixture on default stack
+- remove oversized chain test stacks
+- *(loop)* reuse startup probe buffer
+- *(cache)* use default test stacks
+- *(chain)* shrink continuation futures
+- *(tsig)* reuse context for query view
+- run merged functional stack tests on 8 MiB stacks
+- run merged allocation tests on 8 MiB stacks
+- Merge branch 'main' into m2-file
+- *(file)* cite NOTIFY drop rule
+- prevent functional stack overflows
+- prevent allocation test stack overflows
+- *(file)* document in-Zone Self Lookup
+- *(file)* reject trailing name-only RDATA
+- *(file)* clarify case table types
+- *(file)* verify mtime reload baseline
+- *(file)* complete delegation apex cases
+- *(file)* port serial reload safeguards
+- *(file)* port name traversal cases
+- *(file)* cover SOA validation precedence
+- *(file)* adapt immutable Zone removal
+- *(file)* verify setup origin records
+- *(file)* port apex reload cases
+- *(file)* cover TSIG IXFR example
+- *(file)* cover README Zone examples
+- *(file)* port closest encloser cases
+- *(file)* port SVCB and glue cases
+- *(file)* port signed wildcard cases
+- *(file)* port alias Referral cases
+- *(file)* port signed lookup and glue cases
+- *(file)* exercise concurrent reload lookups
+- *(file)* port lookup and transfer cases
+- *(file)* port wildcard and lookup cases
+- *(file)* port ENT and delegation cases
+- *(file)* port reload lifecycle cases
+- *(file)* port CoreDNS setup cases
+- *(file)* port Zone parsing cases
+- *(file)* exercise setup snapshot race
+- *(file)* cover setup file snapshot race
+- *(file)* cover setup load ordering
+- *(file)* retain Zone on reload errors
+- *(file)* cover reload mtime race
+- *(file)* cite serial and transfer bounds
+- *(file)* cover sticky open error recovery
+- *(file)* cover DNAME Self Lookup
+- *(file)* cite Zone index standards
+- *(file)* note reload race behavior
+- *(k8s_external)* explain snapshot costs
+- *(k8s_external)* box snapshot fixture
+- *(file)* cover overlapping Zone reloads
+- *(file)* cover multi-message Zone Transfer
+- *(k8s_external)* note bind error order
+- *(file)* enlarge Self Lookup test stack
+- *(file)* cover negative reload interval
+- *(file)* cover wildcard Metadata casing
+- *(k8s_external)* explain scratch use
+- *(k8s_external)* use load balancer ingress
+- *(k8s_external)* cover chased truncation
+- *(k8s_external)* compact transfer keys
+- *(k8s_external)* verify ordered answers
+- *(k8s_external)* deduplicate service ports
+- *(k8s_external)* reuse query dedup scratch
+- *(k8s_external)* deduplicate transfer records
+- *(file)* use larger allocation test stack
+- *(file)* measure signed Query allocations
+- *(k8s_external)* cover large headless sets
+- integrate main
+- *(file)* cover wildcard denial enclosers
+- *(file)* cover zero SOA serial setup
+- *(file)* cover signed empty names and SOA
+- *(file)* cover duplicate Zone NOTIFY
+- *(file)* cover signed Referral glue
+- *(file)* cover failed Restart recovery
+- *(file)* cover setup and opened Zone files
+- *(file)* retain alias on lookup failure
+- *(file)* cover reusable Zone lookup
+- *(file)* cover reusable Zone indexing
+- *(k8s_external)* cover queries and stack
+- main into m2-erratic
+- *(file)* check current IXFR flags
+- *(file)* verify reload safeguards
+- *(file)* cover wildcard Metadata
+- *(erratic)* drop UDP buffer note from deviations
+- Merge branch 'main' into template-perf
+- *(template)* pin README workspace sizes
+- *(template)* mark slot reuse and re-entry limits
+- *(file)* cover incoming NOTIFY
+- *(file)* cover empty name fallthrough
+- *(file)* cover alias target Zone Cuts
+- *(file)* cover DNAME substitution
+- *(file)* verify Zone NOTIFY
+- *(erratic)* enforce transfer ACL
+- *(file)* cover answer address glue
+- *(file)* cover signed NXDOMAIN proof
+- *(file)* reject NSEC3 Zone data
+- *(file)* cover external alias lookups
+- *(file)* check Query allocations
+- *(erratic)* check Query allocations
+- *(file)* cover DNSSEC signed Zones
+- *(file)* cover Zone Transfer framing
+- *(file)* cover Zone reload
+- *(file)* cover aliases and referrals
+- *(file)* cover authoritative responses
+- *(template)* clarify shared render scratch
+- *(template)* measure README rule memory
+- *(template)* verify worker workspace limits
+- *(engines)* simplify cache insertion
+- *(engines)* use worker-local regex caches
+- *(template)* keep worker-local workspaces
+- *(template)* size capture and variable slots
+- Merge branch 'main' into m2-transfer
+- *(template)* pool rule workspaces
+- integrate view into template metrics
+- *(kubernetes)* cover empty Zone NOTIFY
+- *(template)* share expression scratch
+- *(template)* use caller scratch for rendering
+- *(template)* avoid locks for cached metrics
+- *(cache)* run stale tests on 8 MiB stack
+- *(template)* cover scratch boundary
+- *(kubernetes)* count per-transfer Service sorting
+- *(template)* enlarge expression scratch
+- Merge branch 'main' into m2-transfer
+- Merge branch 'main' into m2-view
+- Merge branch 'main' into m2-template
+- *(template)* cite RFC 1034 for CNAME Self Lookup
+- *(template)* complete CoreDNS cases
+- *(server)* cover shared class admission
+- *(view)* route all README CIDRs
+- *(template)* extend CoreDNS parity cases
+- *(template)* record compatibility limits
+- *(view)* refresh compatibility index
+- *(transfer)* format transfer tests
+- *(view)* pin no-view wire and allocations
+- *(template)* port variable rendering cases
+- *(template)* bound metrics-path allocations
+- *(test)* cite DNS truncation flag
+- *(transfer)* check ACL allocation path
+- *(template)* cover groups and wildcard metrics
+- *(transfer)* cover zone selection
+- *(template)* cover truncated CNAME lookup
+- *(template)* wire behavior and metrics cases
+- *(transfer)* cover IXFR and scoped hosts
+- *(template)* cover metrics
+- *(template)* port CoreDNS cases
+- *(transfer)* cover NOTIFY failures
+- *(view)* guard unfinished routing
+- *(template)* cover query allocations
+- *(template)* cover NXDOMAIN Corefile
+- *(template)* clarify budget accounting
+- Merge branch 'main' into m2-engines
+- *(dnssec)* clarify cached TTL coverage
+- *(template)* cite surrogate escape source
+- *(engines)* document surrogate escape parity
+- main into m2-dnssec
+- *(dnssec)* note TTL normalization outside Zones
+- *(engines)* cover setup expressions
+- *(engines)* cover view filter values
+- *(engines)* cover captured variable examples
+- *(dnssec)* verify per-section signatures
+- *(engines)* port CoreDNS expression cases
+- *(template)* cover README record examples
+- *(expression)* cover view README examples
+- *(engines)* cite Query protocol rules
+- *(dnssec)* note TTL scan cost
+- *(dnssec)* format TTL assertion
+- *(dnssec)* record release stack result
+- *(cache)* correct stack workaround note
+- *(rewrite)* mark stack scratch limits
+- *(dnssec)* explain RRset TTL behavior
+- *(dnssec)* share buffer reservation
+- *(dnssec)* cover TTL-specific cache hits
+- *(dnssec)* cite RFC 4034 for RRSIG and DNSKEY fields
+- *(dnssec)* cite RFC 4035 §2.1 for apex DNSKEY
+- *(template)* describe subset and notices
+- *(cache)* bound combined test stack
+- *(template)* verify expression render allocations
+- *(dnssec)* order test modules
+- *(dnssec)* cover signing behavior
+- *(dnssec)* clarify case-folded RRsets
+- *(template)* cover logical short circuit
+- *(dnssec)* note RRset class grouping
+- *(dnssec)* note expired cache retention
+- *(kubernetes)* [**breaking**] type config errors
+- *(plugins)* await asynchronous state
+- *(cache)* wait for refresh completion
+- *(proxy)* verify health probe source
+- *(proxy)* poll connection expiry
+- *(dnssec)* clarify signature modes
+- *(dnssec)* record debug stack limit
+- *(dnssec)* explain JSON key folding
+- *(dnssec)* clarify AWS setup checks
+- *(template)* connect documented expressions
+- *(proxy)* combine TCP query writes
+- *(dnssec)* cover capacity and denial spans
+- *(dnssec)* document and verify parity limits
+- *(rewrite)* reuse EDNS revert buffers
+- *(kubernetes)* index ExternalName targets
+- *(kubernetes)* cite DNS standards
+- *(dnssec)* cover black lies and aliases
+- *(dnssec)* share test key fixtures
+- *(tsig)* explain error reservation size
+- *(dnssec)* verify response signatures
+- *(dnssec)* release cache lock before signing
+- *(dnssec)* keep AWS tests with parser
+- *(dnssec)* cover cached denial allocations
+- *(server)* document signed transfer limits
+- *(tsig)* preserve repeated policy parity
+- *(dnssec)* check secret string Unicode
+- *(dnssec)* cover ignored JSON surrogates
+- *(server)* verify signed transfer interop
+- *(dnssec)* cover AWS JSON edge cases
+- *(dnssec)* refuse SHA-1 AWS keys
+- *(tsig)* compare signed CoreDNS queries
+- Merge branch 'main' into m2-tsig-dnssec
+- *(server)* fix transfer RFC citations, log README
+- *(expression)* cover mapped CIDR addresses
+- *(expression)* cover chained variables
+- *(tsig)* port CoreDNS policy cases
+- *(tsig)* cover supported HMAC algorithms
+- *(tsig)* keep CoreDNS UPDATE admission
+- *(tsig)* cover setup and BADTIME
+- *(expression)* cover IPv6 EDNS and scratch
+- *(expression)* box compiled regex state
+- *(tsig)* record incomplete signing order
+- *(tsig)* capture signing order blocker
+- *(tsig)* verify allocation-free signing
+- record engine subset and gaps
+- isolate shared fixtures and allocator
+- avoid nested module name collisions
+- verify Plugin notes index
+- cite Plugin upstream sources
+- *(log)* retain formatter export
+- *(log)* move formatter into Plugin
+- preserve grouped test isolation
+- isolate allocation measurements
+- serialize grouped Plugin tests
+- group Plugin test sources
+- move Plugin notes into folders
+- format Plugin setup and features
+- *(whoami)* move setup into Plugin
+- *(timeouts)* move setup into Plugin
+- *(siit)* move setup into Plugin
+- *(shed)* move setup into Plugin
+- *(root)* move setup into Plugin
+- *(rewrite)* move setup into Plugin
+- *(reload)* move setup into Plugin
+- *(ready)* move setup into Plugin
+- *(prometheus)* move setup into Plugin
+- *(nsid)* move setup into Plugin
+- *(multisocket)* move setup into Plugin
+- *(minimal)* move setup into Plugin
+- *(metadata)* move setup into Plugin
+- *(loop)* move setup into Plugin
+- *(log)* move setup into Plugin
+- *(local)* move setup into Plugin
+- *(loadbalance)* move setup into Plugin
+- *(kubernetes)* move setup into Plugin
+- *(hosts)* move setup into Plugin
+- *(health)* move setup into Plugin
+- *(header)* move setup into Plugin
+- *(forward)* move setup into Plugin
+- *(errors)* move setup into Plugin
+- *(dns64)* move setup into Plugin
+- *(debug)* move setup into Plugin
+- *(chaos)* move setup into Plugin
+- *(cancel)* move setup into Plugin
+- *(cache)* move setup into Plugin
+- *(bufsize)* move setup into Plugin
+- *(bind)* move setup into Plugin
+- *(autopath)* move setup into Plugin
+- *(any)* move setup into Plugin
+- *(acl)* move setup into Plugin
+- *(whoami)* move Plugin into folder
+- *(timeouts)* move Plugin into folder
+- *(siit)* move Plugin into folder
+- *(shed)* move Plugin into folder
+- *(root)* move Plugin into folder
+- *(rewrite)* move Plugin into folder
+- *(reload)* move Plugin into folder
+- *(ready)* move Plugin into folder
+- *(prometheus)* move Plugin into folder
+- *(nsid)* move Plugin into folder
+- *(minimal)* move Plugin into folder
+- *(metadata)* move Plugin into folder
+- *(loop)* move Plugin into folder
+- *(log)* move Plugin into folder
+- *(local)* move Plugin into folder
+- *(loadbalance)* move Plugin into folder
+- *(hosts)* move Plugin into folder
+- *(health)* move Plugin into folder
+- *(header)* move Plugin into folder
+- *(errors)* move Plugin into folder
+- *(dns64)* move Plugin into folder
+- *(debug)* move Plugin into folder
+- *(chaos)* move Plugin into folder
+- *(cancel)* move Plugin into folder
+- *(bufsize)* move Plugin into folder
+- *(bind)* move Plugin into folder
+- *(autopath)* move Plugin into folder
+- *(any)* move Plugin into folder
+- *(acl)* move Plugin into folder
+- order merged plugin modules
+- main into m2-query-plugins
+- *(autopath)* map parity and limits
+- *(autopath)* check resolv search order
+- *(autopath)* check alias allocations
+- *(autopath)* cover first suffix matches
+- *(autopath)* cover unwritten replies
+- *(autopath)* check allocation-free paths
+- *(rewrite)* clarify raw response coverage
+- *(rewrite)* check unreverted fixtures
+- *(rewrite)* map CoreDNS test cases
+- *(rewrite)* cover non-UTF8 setup seam
+- *(rewrite)* check unmatched regex CNAME
+- *(rewrite)* match EDNS unset fixtures
+- *(rewrite)* match EDNS variable fixtures
+- *(rewrite)* port missing question reverter
+- *(rewrite)* reject invalid rule modes
+- *(rewrite)* port EDNS setup variants
+- *(rewrite)* port record value fixtures
+- *(rewrite)* port unmatched name answers
+- *(rewrite)* port illegal name case
+- *(rewrite)* port RCODE response case
+- *(rewrite)* port empty EDNS scrub case
+- *(rewrite)* port dropped CNAME lookup
+- *(rewrite)* port remap boundary rows
+- *(rewrite)* port reverter answer rows
+- *(rewrite)* cover EDNS append semantics
+- *(rewrite)* port EDNS revert rows
+- *(rewrite)* port missing EDNS labels
+- *(rewrite)* port regex value reversions
+- *(rewrite)* port default answer cases
+- *(rewrite)* port nil response case
+- main into m2-server-plugins
+- *(root)* fmt repeat tests
+- *(rewrite)* port empty RCODE modes
+- *(rewrite)* port CNAME target rows
+- *(rewrite)* port subnet prefix rows
+- *(rewrite)* port chained query rows
+- *(rewrite)* port EDNS rule matrix
+- *(rewrite)* port metadata concurrency case
+- *(rewrite)* port legacy metadata case
+- *(rewrite)* port metadata skip cases
+- *(rewrite)* port name answer rows
+- *(rewrite)* port TTL response rows
+- *(rewrite)* port metadata value cases
+- *(rewrite)* port rule setup matrix
+- *(rewrite)* port EDNS unset cases
+- *(rewrite)* cover empty RCODE response
+- *(rewrite)* cover literal metadata values
+- *(rewrite)* cover CNAME chains
+- *(rewrite)* name replay state
+- *(rewrite)* cover CNAME normalization
+- *(rewrite)* cover typed EDNS chaining
+- *(rewrite)* port response value cases
+- *(rewrite)* check unmatched CNAME path
+- *(rewrite)* cover CNAME lookup failures
+- *(rewrite)* cover subnet wire prefixes
+- *(rewrite)* port name match cases
+- *(rewrite)* cover RCODE and regex limits
+- *(kubernetes)* use shared lookup path
+- *(rewrite)* cover EDNS response rules
+- *(rewrite)* check contended allocations
+- *(rewrite)* satisfy lint checks
+- *(rewrite)* cover missing questions
+- *(rewrite)* port name rule setup cases
+- *(rewrite)* compare suffix answer rewrites
+- *(rewrite)* port setup and TTL cases
+- *(rewrite)* group answer names
+- allow inline query views in fixture
+- *(siit)* verify upstream flags and errors
+- *(siit)* cover mapping and error flags
+- *(siit)* cover recursion and allocations
+- *(dns64)* cover fallback responses
+- *(dns64)* compare README scenarios
+- *(dns64)* check allocation-free fast paths
+- *(dns64)* cover interception cases
+- *(acl)* cover CIDR host bits
+- *(acl)* port CoreDNS policy cases
+- *(acl)* compare README scenarios
+- *(acl)* check allocation-free responses

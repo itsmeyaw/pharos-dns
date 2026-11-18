@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 aws-lc-rs = "1.19"
-pharos-dnssec = { path = "../crates/pharos-dnssec", version = "0.1.0" }
+pharos-dnssec = { path = "../crates/pharos-dnssec", version = "0.2.0" }
 pharos-proto = { path = "../crates/pharos-proto" }
 
 [lints]
