@@ -11,3 +11,6 @@ repository = "https://github.com/itsmeyaw/pharos-dns"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+perf = { level = "warn", priority = -1 }
