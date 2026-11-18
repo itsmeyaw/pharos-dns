@@ -3,6 +3,32 @@ use tokio::net::UdpSocket;
 
 const QUERY: &[u8] = &[0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1];
 
+// Ephemeral TCP and UDP port spaces are independent, so a same-port pair can collide: retry on a fresh port.
+async fn bind_pair(ip: std::net::IpAddr) -> (tokio::net::TcpListener, UdpSocket) {
+    for _ in 0..16 {
+        let tcp = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
+        match UdpSocket::bind(tcp.local_addr().unwrap()).await {
+            Ok(udp) => return (tcp, udp),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("bind UDP: {error}"),
+        }
+    }
+    panic!("no free same-port TCP/UDP pair on {ip}");
+}
+
+// Ephemeral TCP and UDP port spaces are independent, so a same-port pair can collide: retry on a fresh port.
+fn bind_pair_std(ip: std::net::IpAddr) -> (std::net::TcpListener, std::net::UdpSocket) {
+    for _ in 0..16 {
+        let tcp = std::net::TcpListener::bind((ip, 0)).unwrap();
+        match std::net::UdpSocket::bind(tcp.local_addr().unwrap()) {
+            Ok(udp) => return (tcp, udp),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("bind UDP: {error}"),
+        }
+    }
+    panic!("no free same-port TCP/UDP pair on {ip}");
+}
+
 #[tokio::test]
 async fn exchanges_a_query_with_a_udp_upstream() {
     let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -82,13 +108,9 @@ async fn reuses_udp_connection_for_sequential_queries() {
 
 #[tokio::test]
 async fn prefer_udp_retries_truncated_response_over_tcp() {
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
-    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (tcp, udp) = bind_pair(std::net::Ipv4Addr::LOCALHOST.into()).await;
     let address = tcp.local_addr().unwrap();
-    let udp = UdpSocket::bind(address).await.unwrap();
     let task = tokio::spawn(async move {
         let mut wire = [0; 512];
         let (len, peer) = udp.recv_from(&mut wire).await.unwrap();
@@ -293,10 +315,7 @@ async fn signed_query_preserves_its_id_on_the_wire() {
 
 #[tokio::test]
 async fn force_tcp_takes_precedence_in_protocol_selection() {
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     for (client, force_tcp, prefer_udp, expected) in [
         (Transport::Udp, false, false, Transport::Udp),
         (Transport::Tcp, false, false, Transport::Tcp),
@@ -305,9 +324,8 @@ async fn force_tcp_takes_precedence_in_protocol_selection() {
         (Transport::Udp, true, true, Transport::Tcp),
         (Transport::Tcp, true, true, Transport::Tcp),
     ] {
-        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (tcp, udp) = bind_pair(std::net::Ipv4Addr::LOCALHOST.into()).await;
         let address = tcp.local_addr().unwrap();
-        let udp = UdpSocket::bind(address).await.unwrap();
         let upstream = tokio::spawn(async move {
             let mut wire = [0; 512];
             if expected == Transport::Udp {
@@ -487,12 +505,8 @@ async fn malformed_udp_wrong_id_is_ignored_before_valid_response() {
 #[tokio::test]
 async fn idle_cap_applies_per_transport() {
     use std::time::Duration;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
-    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let udp = UdpSocket::bind(tcp.local_addr().unwrap()).await.unwrap();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (tcp, udp) = bind_pair(std::net::Ipv4Addr::LOCALHOST.into()).await;
     let mut proxy = Proxy::new(tcp.local_addr().unwrap());
     proxy.set_max_idle_conns(1);
     let upstream = tokio::spawn(async move {
@@ -692,12 +706,8 @@ async fn fifo_rotated_connections_expire_by_creation_age() {
 #[tokio::test]
 async fn source_address_is_used_by_udp_and_tcp() {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
-    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let udp = UdpSocket::bind(tcp.local_addr().unwrap()).await.unwrap();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (tcp, udp) = bind_pair(std::net::Ipv4Addr::LOCALHOST.into()).await;
     let mut proxy = Proxy::new(tcp.local_addr().unwrap());
     proxy.set_source_address(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
     let upstream = tokio::spawn(async move {
@@ -739,13 +749,10 @@ async fn source_address_is_used_by_udp_and_tcp() {
 async fn health_check_uses_configured_source_address() {
     use pharos_plugins::proxy::{Health, HealthConfig};
     use std::{
-        net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
         time::Duration,
     };
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let target = nix::ifaddrs::getifaddrs()
         .unwrap()
         .filter_map(|interface| {
@@ -756,10 +763,7 @@ async fn health_check_uses_configured_source_address() {
         })
         .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
         .unwrap_or(Ipv4Addr::LOCALHOST);
-    let tcp = TcpListener::bind(SocketAddr::new(target.into(), 0))
-        .await
-        .unwrap();
-    let server = UdpSocket::bind(tcp.local_addr().unwrap()).await.unwrap();
+    let (tcp, server) = bind_pair(target.into()).await;
     let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
     for force_tcp in [false, true] {
         let mut config = HealthConfig::new(server.local_addr().unwrap(), 1);
@@ -853,12 +857,11 @@ async fn stop_closes_idle_connections_and_rejects_queries() {
 fn activity_on_another_worker_sweeps_expired_sockets() {
     use std::{
         io::{Read, Write},
-        net::{TcpListener as StdTcp, UdpSocket as StdUdp},
+        net::UdpSocket as StdUdp,
         sync::{Arc, mpsc},
         time::{Duration, Instant},
     };
-    let server = StdUdp::bind("127.0.0.1:0").unwrap();
-    let tcp = StdTcp::bind(server.local_addr().unwrap()).unwrap();
+    let (tcp, server) = bind_pair_std(std::net::Ipv4Addr::LOCALHOST.into());
     server
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -1023,12 +1026,8 @@ async fn health_probes_bind_requested_loopback_source() {
         net::{IpAddr, Ipv4Addr},
         time::Duration,
     };
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
-    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let udp = UdpSocket::bind(tcp.local_addr().unwrap()).await.unwrap();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (tcp, udp) = bind_pair(std::net::Ipv4Addr::LOCALHOST.into()).await;
     let mut wire = [0; 512];
     for force_tcp in [false, true] {
         let mut config = HealthConfig::new(tcp.local_addr().unwrap(), 2);
