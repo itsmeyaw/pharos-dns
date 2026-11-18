@@ -5,6 +5,11 @@ Pharos is a performance-first Rust DNS server and a Corefile-compatible successo
 Migrating from CoreDNS? See the [migration guide](MIGRATION.md) and
 [compatibility document](docs/compatibility.md).
 
+## Git hooks
+
+Run `git config core.hooksPath .githooks` once after cloning. The pre-commit hook runs
+`cargo fmt` and re-stages staged `.rs` files.
+
 ## Container image
 
 Build for the host with Docker Buildx, Cargo and Python 3 (or use

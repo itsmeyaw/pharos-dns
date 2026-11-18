@@ -1,0 +1,16 @@
+#!/bin/sh
+# Format staged Rust files and re-stage them (lint-staged style). CI runs `cargo fmt --all --check`.
+set -e
+files=$(git diff --cached --name-only --diff-filter=ACMR -z | tr '\0' '\n' | grep '\.rs$' || true)
+[ -z "$files" ] && exit 0
+
+# Re-staging a partially staged file would sneak in unstaged hunks.
+partial=$(echo "$files" | while IFS= read -r f; do git diff --quiet -- "$f" || echo "$f"; done)
+if [ -n "$partial" ]; then
+  echo "pre-commit: partially staged Rust files, stage or stash them fully first:" >&2
+  echo "$partial" >&2
+  exit 1
+fi
+
+cargo fmt --all
+echo "$files" | while IFS= read -r f; do git add -- "$f"; done
