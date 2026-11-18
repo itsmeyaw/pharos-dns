@@ -75,6 +75,21 @@ fn matched_zone_record_allocations_are_bounded() {
 }
 
 #[test]
+fn matched_simple_record_parse_allocations_are_bounded() {
+    if crate::run_isolated("template::cases::matched_simple_record_parse_allocations_are_bounded") {
+        return;
+    }
+    // #91: parsing a simple record does not allocate; the rendered text, owned record and
+    // record vector still do.
+    let corefile =
+        ". {\n template IN A example {\n answer \"{{ .Name }} 60 IN A 192.0.2.1\"\n }\n}";
+    let (outcome, stats) = measure(corefile);
+    assert_eq!(outcome, Poll::Ready(Outcome::Response));
+    assert!(stats.allocations + stats.reallocations <= 6, "{stats:?}");
+    assert!(stats.bytes_allocated <= 512, "{stats:?}");
+}
+
+#[test]
 fn matched_query_with_metrics_allocations_are_bounded() {
     if crate::run_isolated("template::cases::matched_query_with_metrics_allocations_are_bounded") {
         return;

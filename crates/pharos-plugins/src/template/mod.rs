@@ -9,7 +9,7 @@ use crate::{
 use pharos_corefile::Fallthrough;
 use pharos_proto::{
     Class, Message, MessageBuilder, Name, NameRef, Rcode, Section, Type,
-    zone::{ZoneParser, ZoneRecord},
+    zone::{RecordTextError, ZoneParser, ZoneRecord, parse_record_text},
 };
 use pharos_server::{Context, Error, Next, Outcome, Plugin, Protocol};
 use regex_automata::{
@@ -24,11 +24,13 @@ use std::{
     collections::HashMap,
     fmt::{self, Write},
     net::SocketAddr,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, LazyLock, Mutex, Weak},
 };
 
 const EXPRESSION_SCRATCH: usize = 65_535;
 const RENDER_SCRATCH: usize = 65_535;
+
+static ROOT: LazyLock<Name> = LazyLock::new(|| ".".parse().expect("the root name is valid"));
 
 pub struct Template {
     rules: Vec<Rule>,
@@ -607,8 +609,9 @@ fn evaluate_slots<'a>(
     };
     // Rendered records are created only after every expression matches.
     data.variables = variables;
-    // shortcut: rendered strings and record vectors allocate per matched Query; reuse buffers with #91.
+    // shortcut: rendered text, owned records and the record vector allocate per matched Query; keep them in a reusable workspace buffer.
     let mut records = Vec::new();
+    let mut output = String::new();
     for section in [Section::Answer, Section::Additional, Section::Authority] {
         for (index, record) in rule
             .records
@@ -616,7 +619,7 @@ fn evaluate_slots<'a>(
             .enumerate()
             .filter(|(_, record)| record.section == section)
         {
-            let mut output = String::new();
+            output.clear();
             record
                 .compiled
                 .render_with_scratch(&data, &mut output, render_scratch)
@@ -626,17 +629,33 @@ fn evaluate_slots<'a>(
                     }
                     EvaluationError::Record
                 })?;
-            // RFC 1035 §5.1: rendered records are parsed as one zone-file entry.
-            // shortcut: zone-text parse allocates per matched Query; see #91.
-            let origin: Name = ".".parse().map_err(|_| EvaluationError::Record)?;
-            let mut parser = ZoneParser::new(output.as_bytes(), origin, "template");
-            parser.set_default_ttl(3600);
-            let rr = parser.next().and_then(Result::ok).ok_or_else(|| {
+            let rr_failure = || {
                 if let Some(binding) = &binding {
                     binding.failures[index].rr_failure();
                 }
                 EvaluationError::Record
-            })?;
+            };
+            // RFC 1035 §5.1: rendered records are parsed as one zone-file entry.
+            let rr = match parse_record_text(&output, &ROOT, Some(3600), render_scratch) {
+                Ok(parsed) => ZoneRecord {
+                    owner: NameRef::parse(parsed.owner, 0)
+                        .map_err(|_| rr_failure())?
+                        .to_name(),
+                    ttl: parsed.ttl,
+                    class: parsed.class,
+                    rtype: parsed.rtype,
+                    rdata: parsed.rdata.to_vec(),
+                },
+                Err(RecordTextError::Invalid | RecordTextError::BufferTooSmall) => {
+                    return Err(rr_failure());
+                }
+                // shortcut: escapes, comments, other record types and multi-line text allocate in ZoneParser; extend parse_record_text when one matters.
+                Err(RecordTextError::Unsupported) => {
+                    let mut parser = ZoneParser::new(output.as_bytes(), ROOT.clone(), "template");
+                    parser.set_default_ttl(3600);
+                    parser.next().and_then(Result::ok).ok_or_else(rr_failure)?
+                }
+            };
             records.push((record.section, rr));
         }
     }
