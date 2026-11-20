@@ -9,7 +9,8 @@ Each scenario is a directory containing:
 
 - `Corefile`: the same configuration for both processes; `{port}` is replaced
   by the chosen Listener port, `{port2}` by a second DNS Listener port, and
-  `{metrics_port}` by a distinct free port for each process. `{loopback}` is
+  `{metrics_port}` by a distinct free port for each process. `{tls}` is the absolute
+  `tests/fixtures/tls` directory (test CA and `localhost` server certificate). `{loopback}` is
   `lo0` on macOS and `lo` elsewhere. Omit it to exercise each built-in default in an empty working
   directory.
 - `{kubeconfig}` starts one standalone Rust fixture API for the scenario and
@@ -18,7 +19,7 @@ Each scenario is a directory containing:
   `web.default.svc.cluster.local. A` with the fixture's ClusterIP before
   comparing Queries. Scenarios use `{metrics_port}` for the readiness endpoint.
   The API and DNS Listeners use the same non-ephemeral port reservation helper.
-- `queries`: one Query per line, `name type class udp|tcp [flags...]`.
+- `queries`: one Query per line, `name type class udp|tcp|tls [flags...]`; `tls` is DNS over TLS to the same port (a TLS-only Corefile has no UDP Listener) and trusts `tests/fixtures/tls/ca.pem`.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
   `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, `+opcode=NAME` or a number,
   `+ixfr=SERIAL` for an IXFR SOA in Authority,

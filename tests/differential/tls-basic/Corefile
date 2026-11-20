@@ -1,4 +1,7 @@
 tls://.:{port} {
     tls {tls}/server.pem {tls}/server.key.pem
-    whoami
+    template IN A example {
+        match (^|[.])ip-(?P<a>[0-9]*)-(?P<b>[0-9]*)-(?P<c>[0-9]*)-(?P<d>[0-9]*)[.]example[.]$
+        answer "{{ .Name }} 60 IN A {{ .Group.a }}.{{ .Group.b }}.{{ .Group.c }}.{{ .Group.d }}"
+    }
 }

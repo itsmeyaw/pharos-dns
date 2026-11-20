@@ -335,7 +335,6 @@ impl KeyLogFile {
         let absolute = std::path::absolute(path)?;
         // CoreDNS v1.15.0 plugin/tls/tls.go: the log is created 0600 and appended to.
         let file = OpenOptions::new()
-            .write(true)
             .create(true)
             .append(true)
             .mode(0o600)

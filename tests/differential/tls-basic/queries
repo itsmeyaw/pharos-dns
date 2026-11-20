@@ -1,3 +1,3 @@
-example.org. A IN tls
-example.org. AAAA IN tls
-example.org. TXT IN tls +dnssec
+ip-192-0-2-42.example. A IN tls
+www.ip-192-0-2-42.example. A IN tls
+other.example. A IN tls
