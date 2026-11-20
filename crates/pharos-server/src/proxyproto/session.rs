@@ -14,7 +14,7 @@ struct Node {
     key: SocketAddr,
     source: SocketAddr,
     tlv: Box<str>,
-    expires: Instant,
+    seen: Instant,
     newer: usize,
     older: usize,
 }
@@ -53,18 +53,11 @@ impl Sessions {
     }
 
     /// Insert or refresh the session of `key`; a full cache evicts its least recently used entry.
-    pub fn store(
-        &mut self,
-        key: SocketAddr,
-        (source, tlv): (SocketAddr, &str),
-        now: Instant,
-        ttl: Duration,
-    ) {
-        let expires = now + ttl;
+    pub fn store(&mut self, key: SocketAddr, (source, tlv): (SocketAddr, &str), now: Instant) {
         if let Some(&at) = self.index.get(&key) {
             let node = &mut self.nodes[at];
             node.source = source;
-            node.expires = expires;
+            node.seen = now;
             // Only a changed vector allocates, so a steady stream of identical headers does not.
             if *node.tlv != *tlv {
                 node.tlv = tlv.into();
@@ -79,7 +72,7 @@ impl Sessions {
             key,
             source,
             tlv: tlv.into(),
-            expires,
+            seen: now,
             newer: NONE,
             older: NONE,
         };
@@ -106,11 +99,12 @@ impl Sessions {
         tlv: &mut String,
     ) -> Option<SocketAddr> {
         let at = *self.index.get(&key)?;
-        if self.nodes[at].expires <= now {
+        // Reload: the session ages against the TTL in force now, not the one it was stored under.
+        if now.saturating_duration_since(self.nodes[at].seen) >= ttl {
             self.remove(at);
             return None;
         }
-        self.nodes[at].expires = now + ttl;
+        self.nodes[at].seen = now;
         self.touch(at);
         let node = &self.nodes[at];
         tlv.clear();
@@ -166,7 +160,7 @@ mod tests {
     }
 
     fn put(sessions: &mut Sessions, key: &str, source: &str, now: Instant) {
-        sessions.store(addr(key), (addr(source), ""), now, TTL);
+        sessions.store(addr(key), (addr(source), ""), now);
     }
 
     fn lookup(sessions: &mut Sessions, key: &str, now: Instant) -> Option<SocketAddr> {
@@ -247,13 +241,26 @@ mod tests {
     }
 
     #[test]
+    fn shortened_ttl_applies_to_sessions_stored_under_a_longer_one() {
+        let now = Instant::now();
+        let mut sessions = Sessions::new(DEFAULT_MAX_SESSIONS);
+        sessions.store(addr("10.0.0.1:5000"), (addr("192.168.1.1:1"), ""), now);
+        let later = now + Duration::from_millis(30);
+        let short = Duration::from_millis(10);
+        assert_eq!(
+            sessions.lookup(addr("10.0.0.1:5000"), later, short, &mut String::new()),
+            None
+        );
+    }
+
+    #[test]
     fn custom_capacity_caps_the_cache() {
         let now = Instant::now();
         let mut sessions = Sessions::new(5);
         for port in 0..10 {
             let key = SocketAddr::from(([10, 0, 0, 1], port));
             let source = SocketAddr::from(([1, 1, 1, 1], port));
-            sessions.store(key, (source, ""), now, TTL);
+            sessions.store(key, (source, ""), now);
         }
         assert_eq!(sessions.len(), 5);
     }
@@ -288,7 +295,7 @@ mod tests {
         let mut sessions = Sessions::new(1);
         for port in 0..100 {
             let key = SocketAddr::from(([10, 0, 0, 1], port));
-            sessions.store(key, (addr("1.1.1.1:1"), ""), now, TTL);
+            sessions.store(key, (addr("1.1.1.1:1"), ""), now);
         }
         assert_eq!((sessions.len(), sessions.nodes.len()), (1, 1));
     }
@@ -301,7 +308,6 @@ mod tests {
             addr("10.0.0.1:5000"),
             (addr("192.168.1.1:1"), "ea0001ff"),
             now,
-            TTL,
         );
         let mut tlv = String::from("stale");
         sessions.lookup(addr("10.0.0.1:5000"), now, TTL, &mut tlv);

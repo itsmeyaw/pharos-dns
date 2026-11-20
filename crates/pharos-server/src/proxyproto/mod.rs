@@ -232,7 +232,7 @@ impl Config {
                     state
                         .sessions
                         .get_or_insert_with(|| Sessions::new(share(tracking, workers)))
-                        .store(peer, (source, &state.tlv), Instant::now(), tracking.ttl);
+                        .store(peer, (source, &state.tlv), Instant::now());
                 }
                 source
             }
