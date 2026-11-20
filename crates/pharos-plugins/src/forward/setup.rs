@@ -525,6 +525,7 @@ pub(crate) fn setup(
 ) -> Result<(), pharos_corefile::Error> {
     use crate::forward;
 
+    // CoreDNS v1.15.0 plugin/forward/setup.go setup: the Directive configures the Server Block's forward Plugin; a relative path joins `root`.
     let root = crate::root_path(&block.config);
     block.config.forward = Some(forward::Forward::parse(cursor, root)?);
     Ok(())
