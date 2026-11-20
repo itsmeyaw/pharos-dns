@@ -244,9 +244,20 @@ async fn read_reply(
     if parts.status != StatusCode::OK {
         return Err(invalid(format!("HTTP status {}", parts.status)));
     }
+    // PROTOCOL-HTTP2 "Responses": every response, Trailers-Only included, carries an application/grpc content-type.
+    if !parts
+        .headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(grpc::is_content_type)
+    {
+        return Err(invalid("missing or unexpected content-type"));
+    }
     let mut trailers = None;
+    let mut framed = false;
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|error| Failure::Other(io::Error::other(error)))?;
+        framed = true;
         match frame.into_data() {
             Ok(data) => {
                 // grpc-go MaxCallRecvMsgSize: a message over 65539 octets is ResourceExhausted.
@@ -257,6 +268,10 @@ async fn read_reply(
             }
             Err(frame) => trailers = frame.into_trailers().ok(),
         }
+    }
+    // PROTOCOL-HTTP2 "Responses": only the Trailers-Only form (no body at all) has `grpc-status` in the headers.
+    if parts.headers.contains_key("grpc-status") && framed {
+        return Err(invalid("grpc-status in headers of a response with a body"));
     }
     let headers = trailers.as_ref().unwrap_or(&parts.headers);
     // PROTOCOL-HTTP2 "Responses": a stream that ends without `grpc-status` is Unknown.

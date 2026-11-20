@@ -41,6 +41,10 @@ enum Reply {
     Status(u8),
     /// This exact response body, status OK.
     Body(Vec<u8>),
+    /// A reply with the wrong `content-type`.
+    WrongContentType(Vec<u8>),
+    /// `grpc-status: 0` in the initial headers, then a body and no trailers.
+    HeaderStatusWithBody(Vec<u8>),
     Hang,
 }
 
@@ -92,6 +96,18 @@ fn respond(reply: Reply) -> Response<BoxBody<Bytes, Infallible>> {
         }
         Reply::Message(message) => frame(&message),
         Reply::Body(body) => body,
+        Reply::WrongContentType(message) => {
+            return Response::builder()
+                .header("content-type", "text/plain")
+                .body(Full::new(Bytes::from(frame(&message))).boxed())
+                .unwrap();
+        }
+        Reply::HeaderStatusWithBody(message) => {
+            return builder
+                .header("grpc-status", "0")
+                .body(Full::new(Bytes::from(frame(&message))).boxed())
+                .unwrap();
+        }
         Reply::Hang => unreachable!("handled before"),
     };
     let mut trailers = HeaderMap::new();
@@ -325,6 +341,7 @@ async fn malformed_replies_are_upstream_errors() {
     };
     let mut twice = frame(&message);
     twice.extend(frame(&message));
+    let valid = message.clone();
     for (what, reply) in [
         ("compressed", Reply::Body(vec![1, 0, 0, 0, 0])),
         ("oversized", Reply::Body(vec![0, 0, 1, 0, 4])),
@@ -337,6 +354,13 @@ async fn malformed_replies_are_upstream_errors() {
         ("not DNS", Reply::Message(vec![1, 2, 3])),
         ("message too large", Reply::Message(vec![0; 65536])),
         ("unknown status", Reply::Status(99)),
+        // PROTOCOL-HTTP2 "Responses": the content-type must be application/grpc.
+        ("wrong content-type", Reply::WrongContentType(valid.clone())),
+        // PROTOCOL-HTTP2 "Responses": only the Trailers-Only form has grpc-status in the headers.
+        (
+            "header status with body",
+            Reply::HeaderStatusWithBody(valid),
+        ),
     ] {
         let upstream = stub(move |_| reply.clone()).await;
         let (server, _, _) = front(&grpc_block(&upstream.address.to_string(), ""));

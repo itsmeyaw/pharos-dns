@@ -13,6 +13,13 @@ use bytes::Buf;
 pub const PATH: &str = "/coredns.dns.DnsService/Query";
 /// gRPC over HTTP/2 PROTOCOL-HTTP2 "Content-Type": the unary call's request and Response type.
 pub const CONTENT_TYPE: &str = "application/grpc";
+/// Whether a `content-type` value names a gRPC call carrying protobuf.
+// PROTOCOL-HTTP2 "Content-Type": application/grpc with an optional +proto suffix and parameters.
+#[must_use]
+pub fn is_content_type(value: &str) -> bool {
+    let media = value.split(';').next().unwrap_or_default().trim();
+    matches!(media, "application/grpc" | "application/grpc+proto")
+}
 /// RFC 7301 §3.1: gRPC runs on HTTP/2 only, as CoreDNS v1.15.0 `NewServergRPC` offers.
 pub const ALPN: &[&[u8]] = &[b"h2"];
 /// CoreDNS v1.15.0 core/dnsserver `DefaultGRPCMaxStreams`.
@@ -353,6 +360,25 @@ const MAX_GROUP_DEPTH: usize = 100;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_types_name_protobuf_calls() {
+        for value in [
+            "application/grpc",
+            "application/grpc+proto",
+            "application/grpc; charset=utf-8",
+        ] {
+            assert!(is_content_type(value), "{value}");
+        }
+        for value in [
+            "",
+            "text/plain",
+            "application/grpc+json",
+            "application/grpcx",
+        ] {
+            assert!(!is_content_type(value), "{value}");
+        }
+    }
 
     fn flatten(mut buf: impl Buf) -> Vec<u8> {
         let mut out = Vec::new();

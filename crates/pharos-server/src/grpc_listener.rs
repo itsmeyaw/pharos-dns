@@ -204,9 +204,7 @@ fn check_headers(parts: &Parts) -> Result<Option<Duration>, (StatusCode, Status)
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    // PROTOCOL-HTTP2 "Content-Type": application/grpc with an optional +proto suffix and parameters.
-    let media = content_type.split(';').next().unwrap_or_default().trim();
-    if !matches!(media, "application/grpc" | "application/grpc+proto") {
+    if !grpc::is_content_type(content_type) {
         return Err((
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Status::new(
