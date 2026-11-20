@@ -4,7 +4,7 @@
 use std::{
     alloc::System,
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener},
 };
 
 use bytes::Bytes;
@@ -102,18 +102,6 @@ fn upstream(rcode: u8) -> (SocketAddr, std::thread::JoinHandle<()>) {
 struct Counts {
     allocations: usize,
     reallocations: usize,
-}
-
-fn measure(calls: usize, mut call: impl FnMut()) -> Counts {
-    let before = GLOBAL.stats();
-    for _ in 0..calls {
-        call();
-    }
-    let after = GLOBAL.stats();
-    Counts {
-        allocations: after.allocations - before.allocations,
-        reallocations: after.reallocations - before.reallocations,
-    }
 }
 
 fn runtime() -> tokio::runtime::Runtime {

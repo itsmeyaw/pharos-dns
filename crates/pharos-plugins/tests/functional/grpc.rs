@@ -335,7 +335,7 @@ async fn fallthrough_after_failures_runs_the_next_plugin() {
 // CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: a scheme grpc-go cannot dial passes setup and fails at the first Query.
 #[tokio::test]
 async fn an_undialable_target_fails_the_query_not_setup() {
-    let upstream = stub(|query| echo(query)).await;
+    let upstream = stub(echo).await;
     let port = upstream.address.port();
     for bad in [
         format!("grpc://127.0.0.1:{port}"),
