@@ -27,6 +27,7 @@ Each crate follows `src/` (code), `tests/` (integration tests), and `CHANGELOG.m
 - Commit in small functional changes.
 - Always add one-line comment citation to the standard for a logic. For example: `RFC 1034 §4.3.2: xxxxx`.
 - Use `implement` skills for implementation.
+- Use `caveman-commit` skill for a PR title and `pr` skill for writing the PR body.
 
 ## Performance Focus
 
