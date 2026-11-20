@@ -24,6 +24,11 @@ pub(super) enum Target {
         server_name: Option<String>,
         quic: bool,
     },
+    /// A DNS-over-HTTPS Upstream; the name the certificate must match, else its IP address.
+    Https {
+        address: SocketAddr,
+        server_name: Option<String>,
+    },
     Invalid(String),
 }
 
@@ -267,22 +272,37 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Conf
     let mut entries = 0;
     for to in &args[1..] {
         let (scheme, address) = to.split_once("://").unwrap_or(("dns", to));
-        if !matches!(scheme, "dns" | "tls" | "quic") {
+        if !matches!(scheme, "dns" | "tls" | "quic" | "https") {
             return Err(cursor.error(format!("{scheme} Upstreams are not supported")));
         }
         let quic = scheme == "quic";
-        let tls = quic || scheme == "tls";
-        // RFC 7858 §3.1: DoT uses TCP port 853 unless the Upstream names another.
-        // RFC 9250 §4.1.1: DoQ uses UDP port 853 unless the Upstream names another.
-        let default_port = if tls { 853 } else { 53 };
+        let (tls, https) = (quic || scheme == "tls", scheme == "https");
+        // CoreDNS v1.15.0 plugin/forward/setup.go: an HTTPS Upstream always uses the /dns-query path.
+        if https && address.contains('/') {
+            return Err(cursor.error(format!(
+                "paths are not allowed in HTTPS upstream addresses (the /dns-query path is used by default): {to}"
+            )));
+        }
+        // RFC 7858 §3.1: DoT uses TCP port 853; RFC 9250 §4.1.1: DoQ uses UDP port 853; RFC 8484 §3: DoH uses the https port 443; unless the Upstream names another.
+        let default_port = match scheme {
+            "tls" | "quic" => 853,
+            "https" => 443,
+            _ => 53,
+        };
         let (unscoped, zone) = split_zone(address);
-        // CoreDNS v1.15.0 plugin/forward/setup.go: the zone of a `tls://` or `quic://` Upstream is its TLS server name.
+        // CoreDNS v1.15.0 plugin/forward/setup.go: the zone of a `tls://`, `quic://` or `https://` Upstream is its TLS server name.
         let target = |address| {
+            let server_name = zone.as_ref().map(|zone| zone.to_ascii_lowercase());
             if tls {
                 Target::Tls {
                     address,
-                    server_name: zone.as_ref().map(|zone| zone.to_ascii_lowercase()),
+                    server_name,
                     quic,
+                }
+            } else if https {
+                Target::Https {
+                    address,
+                    server_name,
                 }
             } else {
                 Target::Address(address)
@@ -353,6 +373,15 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Conf
                 let scheme = if *quic { "quic" } else { "tls" };
                 return Err(cursor.error(format!(
                     "both forward ('{forward_name}') and proxy level ('{server_name}') TLS servernames are set for upstream proxy '{scheme}://{address}'"
+                )));
+            }
+            if let Target::Https {
+                address,
+                server_name: Some(server_name),
+            } = target
+            {
+                return Err(cursor.error(format!(
+                    "both forward ('{forward_name}') and proxy level ('{server_name}') TLS servernames are set for upstream proxy 'https://{address}'"
                 )));
             }
         }
@@ -596,7 +625,6 @@ mod tests {
         for text in [
             "forward .",
             "forward . invalid..domain",
-            "forward . https://1.1.1.1",
             "forward . grpc://1.1.1.1",
             "forward . unix:///run/dns.sock",
             "forward . 1.1.1.1 {\nunknown x\n}",
@@ -725,6 +753,66 @@ mod tests {
             ]
         );
         assert_eq!(config.tls_servername.as_deref(), Some("dns.example"));
+    }
+
+    fn https(address: &str, server_name: Option<&str>) -> Target {
+        Target::Https {
+            address: address.parse().unwrap(),
+            server_name: server_name.map(str::to_owned),
+        }
+    }
+
+    // CoreDNS v1.15.0 plugin/forward/setup_test.go TestSetupForward: `https://` defaults to port 443.
+    #[test]
+    fn https_upstreams_default_to_port_443_and_take_a_zone_as_server_name() {
+        let config = parse_text(
+            "forward . https://127.0.0.1 https://127.0.0.1%example.net:8443 https://[::1%example.net]:443 https://127.0.0.1",
+        )
+        .unwrap();
+        assert_eq!(
+            config.upstreams,
+            [
+                https("127.0.0.1:443", None),
+                https("127.0.0.1:8443", Some("example.net")),
+                https("[::1]:443", Some("example.net")),
+            ]
+        );
+        assert_eq!(config.doh_method, "POST");
+    }
+
+    // CoreDNS v1.15.0 plugin/forward/setup_test.go TestSetupForward: paths are not allowed in HTTPS Upstreams.
+    #[test]
+    fn https_upstreams_reject_paths() {
+        for text in [
+            "forward . https://1.1.1.1/",
+            "forward . https://1.1.1.1/dns-query",
+            "forward . https://1.1.1.1:443/x",
+        ] {
+            let error = parse_text(text).unwrap_err().to_string();
+            assert!(
+                error.contains("paths are not allowed in HTTPS upstream addresses"),
+                "{text}: {error}"
+            );
+        }
+    }
+
+    // CoreDNS v1.15.0 plugin/forward/setup.go: a proxy-level server name conflicts with `tls_servername` for HTTPS too.
+    #[test]
+    fn tls_servername_conflicts_with_an_https_zone() {
+        let error =
+            parse_text("forward . https://127.0.0.1%Other {\ntls_servername dns.example\n}")
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            error,
+            "Corefile:3: both forward ('dns.example') and proxy level ('other') TLS servernames are set for upstream proxy 'https://127.0.0.1:443'"
+        );
+        assert!(
+            parse_text(
+                "forward . https://127.0.0.1 {\ntls_servername dns.example\ndoh_method GET\n}"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

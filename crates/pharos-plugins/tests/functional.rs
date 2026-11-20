@@ -312,6 +312,8 @@ mod prometheus {
 mod proxy {
     #[path = "proxy.rs"]
     mod cases;
+    #[path = "proxy_https.rs"]
+    mod proxy_https;
     #[path = "proxy_quic.rs"]
     mod proxy_quic;
     #[path = "proxy_throughput.rs"]

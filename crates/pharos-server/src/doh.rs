@@ -11,7 +11,12 @@ use base64::{
     alphabet::URL_SAFE,
     engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
 };
-use hyper::{Method, StatusCode, Uri, header::HeaderValue};
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::{
+    Method, Request, StatusCode, Uri,
+    header::{ACCEPT, CONTENT_TYPE, HOST, HeaderValue},
+};
 use pharos_proto::{Message, ResponseType, Type, typify_response};
 
 use crate::metrics::{Registry, TransportStatus};
@@ -43,6 +48,7 @@ const MAXIMUM_TTL: u32 = 3600;
 const BASE64URL: GeneralPurpose = GeneralPurpose::new(
     &URL_SAFE,
     GeneralPurposeConfig::new()
+        .with_encode_padding(false)
         .with_decode_padding_mode(DecodePaddingMode::RequireNone)
         .with_decode_allow_trailing_bits(true),
 );
@@ -93,6 +99,47 @@ pub fn decode_get(value: &str, out: &mut Vec<u8>) -> Result<(), StatusCode> {
     BASE64URL
         .decode_vec(value, out)
         .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+/// The request that carries `wire` to the DoH server at `authority`, or `None` for a method DoH lacks.
+///
+/// `absolute` selects the absolute-form target HTTP/2 needs for `:scheme` and `:authority`; HTTP/1.1
+/// gets the origin form and a `Host` field.
+// CoreDNS v1.15.0 plugin/pkg/doh NewRequestWithContext: both methods set Content-Type and Accept.
+#[must_use]
+pub fn request(
+    method: &Method,
+    authority: &str,
+    absolute: bool,
+    wire: &[u8],
+) -> Option<Request<Full<Bytes>>> {
+    let mut target = String::with_capacity(authority.len() + PATH.len() + 12 + wire.len() * 4 / 3);
+    if absolute {
+        target.push_str("https://");
+        target.push_str(authority);
+    }
+    target.push_str(PATH);
+    let body = match *method {
+        // RFC 8484 §4.1: POST carries the Message as the body.
+        Method::POST => Bytes::copy_from_slice(wire),
+        // RFC 8484 §4.1: GET carries the Message as the unpadded base64url `dns` variable.
+        Method::GET => {
+            target.push_str("?dns=");
+            BASE64URL.encode_string(wire, &mut target);
+            Bytes::new()
+        }
+        _ => return None,
+    };
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(target)
+        .header(CONTENT_TYPE, HeaderValue::from_static(MEDIA_TYPE))
+        .header(ACCEPT, HeaderValue::from_static(MEDIA_TYPE));
+    if !absolute {
+        // RFC 9112 §3.2: HTTP/1.1 requests name the host in a Host field.
+        builder = builder.header(HOST, authority);
+    }
+    builder.body(Full::new(body)).ok()
 }
 
 /// Whether a DNS Message is a Query the Listener should answer.
