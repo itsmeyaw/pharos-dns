@@ -35,6 +35,8 @@ pub struct HealthConfig {
     pub tls: Option<super::Tls>,
     /// Probe over DNS-over-QUIC, sharing the Upstream's connection.
     pub doq: Option<std::sync::Arc<super::Doq>>,
+    /// Probe over DNS-over-HTTPS instead of UDP or TCP.
+    pub https: Option<super::Https>,
     pub max_fails: u32,
     pub interval: Duration,
     pub metrics: Option<ProxyMetrics>,
@@ -53,6 +55,7 @@ impl HealthConfig {
             source_address: None,
             tls: None,
             doq: None,
+            https: None,
             max_fails,
             interval: Duration::from_millis(500),
             metrics: None,
@@ -268,6 +271,21 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
         };
         wire.truncate(len);
         wire
+    } else if let Some(https) = &config.https {
+        let mut response = super::doh::probe(
+            config.address,
+            config.source_address,
+            https,
+            &query,
+            DIAL_TIMEOUT,
+            IO_TIMEOUT,
+        )
+        .await?;
+        // RFC 8484 §4.1: the HTTP exchange, not the Message ID, ties the Response to the Query.
+        if let Some(field) = response.get_mut(..2) {
+            field.copy_from_slice(&id);
+        }
+        response
     } else if let Some(tls) = &config.tls {
         // CoreDNS v1.15.0 plugin/pkg/proxy/health.go: a DoT probe's dial timeout covers the handshake; force_tcp is moot.
         let mut stream = timeout(

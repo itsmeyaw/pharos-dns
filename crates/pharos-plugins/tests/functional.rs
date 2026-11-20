@@ -188,6 +188,8 @@ mod forward {
     mod cases;
     #[path = "forward_debug.rs"]
     mod forward_debug;
+    #[path = "forward_https.rs"]
+    mod forward_https;
     #[path = "forward_ported.rs"]
     mod forward_ported;
     #[path = "forward_quic.rs"]
@@ -312,6 +314,8 @@ mod prometheus {
 mod proxy {
     #[path = "proxy.rs"]
     mod cases;
+    #[path = "proxy_https.rs"]
+    mod proxy_https;
     #[path = "proxy_quic.rs"]
     mod proxy_quic;
     #[path = "proxy_throughput.rs"]

@@ -7,7 +7,11 @@ repository.workspace = true
 description = "CoreDNS-compatible Plugins for the Pharos DNS server"
 
 [dependencies]
+bytes = "1"
 getrandom = "0.2"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
 pharos-kv = { version = "0.2.0", path = "../pharos-kv" }
 pharos-corefile = { version = "0.2.0", path = "../pharos-corefile" }
@@ -28,6 +32,7 @@ nix = { version = "0.31", features = ["net", "socket", "hostname"] }
 aws-lc-rs = "1"
 criterion = "0.5"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+hyper = { version = "1", features = ["server"] }
 stats_alloc = "0.1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "test-util"] }
 
