@@ -1,0 +1,12 @@
+tls://.:{port} {
+    tls {tls}/server.pem {tls}/server.key.pem {tls}/ca.pem {
+        client_auth require_and_verify
+    }
+    hosts {
+        192.0.2.1 www.example.org
+        fallthrough
+    }
+    template ANY ANY {
+        rcode NXDOMAIN
+    }
+}
