@@ -100,6 +100,7 @@ impl DoqClient {
     /// Complete a handshake with the Upstream, verifying its certificate for `server_name`.
     /// The caller bounds the handshake with its own timeout.
     pub async fn connect(&self, server_name: &str) -> io::Result<DoqConnection> {
+        // RFC 9250 §4.1.2: the client authenticates the server by its certificate for `server_name` (RFC 6125 §6.4.1).
         let connection = self
             .endpoint
             .connect_with(self.config.clone(), self.remote, server_name)

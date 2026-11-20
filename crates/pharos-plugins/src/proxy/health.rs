@@ -261,7 +261,7 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
         let len = loop {
             match doq.exchange(&mut wire, query.len(), Some(IO_TIMEOUT)).await {
                 Ok(reply) => break reply.len,
-                Err(super::Error::CachedClosed) if attempts < 2 => attempts += 1,
+                Err(super::Error::CachedClosed) if attempts < 1 => attempts += 1,
                 Err(super::Error::Io(error)) => return Err(error),
                 Err(error) => return Err(io::Error::other(error)),
             }
