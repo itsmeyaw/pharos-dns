@@ -70,6 +70,10 @@ fn setup_accepts_documented_syntax_and_rejects_the_rest() {
             "already defined",
         ),
         ("https {\nunknown_option 123\n}", "unknown property"),
+        (
+            "https {\nmax_streams 1\n}\nhttps {\nmax_streams 2\n}",
+            "already defined",
+        ),
         ("https extra_arg", "Wrong argument count"),
     ] {
         let error = configure_block(&format!("tls @CERT @KEY\n{input}"))
@@ -141,4 +145,15 @@ fn first_block_decides_max_connections_of_a_shared_listener() {
     .unwrap();
     let options = pharos_server::Handler::https(servers.values().next().unwrap());
     assert_eq!(options.max_connections, 3);
+}
+
+#[test]
+fn first_block_without_max_connections_keeps_the_default_for_the_listener() {
+    let block = |zone: &str, limit: &str| {
+        format!("https://{zone}:443 {{\n tls @CERT @KEY\n https {{\n{limit}\n }}\n whoami\n}}\n")
+    };
+    let servers =
+        servers(&(block("a.example", "") + &block("b.example", "max_connections 0"))).unwrap();
+    let options = pharos_server::Handler::https(servers.values().next().unwrap());
+    assert_eq!(options.max_connections, 200);
 }

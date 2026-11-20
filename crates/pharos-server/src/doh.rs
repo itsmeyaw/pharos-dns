@@ -29,6 +29,9 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 200;
 /// CoreDNS v1.15.0 core/dnsserver `DefaultHTTPSMaxStreams`.
 pub const DEFAULT_MAX_STREAMS: u32 = 250;
 
+/// Room for a 64 KiB request target plus ordinary header fields.
+pub const MAX_HEADER_LIST: u32 = 128 * 1024;
+
 // CoreDNS v1.15.0 plugin/pkg/doh `maxBase64Len`.
 const MAX_ENCODED_LEN: usize = (MAX_QUERY_LEN * 8).div_ceil(6);
 // CoreDNS v1.15.0 plugin/pkg/dnsutil `MinimalDefaultTTL` and `MaximumDefaultTTL`, in seconds.
@@ -141,23 +144,17 @@ pub fn max_age(response: &[u8], now: i64) -> u32 {
 /// A `Cache-Control` field value for a freshness lifetime.
 #[must_use]
 pub fn cache_control(max_age: u32) -> HeaderValue {
-    const PREFIX: &[u8] = b"max-age=";
-    let mut buffer = [0u8; PREFIX.len() + 10];
-    buffer[..PREFIX.len()].copy_from_slice(PREFIX);
-    let mut digits = [0u8; 10];
-    let (mut start, mut rest) = (digits.len(), max_age);
-    loop {
-        start -= 1;
-        digits[start] = b'0' + (rest % 10) as u8;
-        rest /= 10;
-        if rest == 0 {
-            break;
-        }
-    }
-    let length = PREFIX.len() + digits.len() - start;
-    buffer[PREFIX.len()..length].copy_from_slice(&digits[start..]);
-    // shortcut: HeaderValue owns a heap copy of the text; cache a value per second if profiling shows it.
-    HeaderValue::from_bytes(&buffer[..length]).expect("ASCII digits form a header value")
+    // Values are built once, so a Response clones a reference-counted value instead of allocating one.
+    static VALUES: OnceLock<Vec<HeaderValue>> = OnceLock::new();
+    let values = VALUES.get_or_init(|| {
+        (0..=MAXIMUM_TTL)
+            .map(|seconds| {
+                HeaderValue::from_str(&format!("max-age={seconds}"))
+                    .expect("ASCII digits form a header value")
+            })
+            .collect()
+    });
+    values[max_age.min(MAXIMUM_TTL) as usize].clone()
 }
 
 /// Response counters of one HTTP Listener, resolved on first use like CoreDNS's label values.

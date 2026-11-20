@@ -20,7 +20,7 @@ use hyper::{
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
 use pharos_server::{
-    Action, Handler, HttpsOptions, ListenerKey, ListenerRegistry, Protocol, Transport,
+    Action, Handler, HttpsOptions, ListenerKey, ListenerRegistry, Protocol, TcpOptions, Transport,
     doh::{self, Status},
     metrics::Registry,
     tls::{ClientAuth, ClientOptions, ServerOptions, ServerTls, TlsConnector, client_config},
@@ -56,6 +56,7 @@ struct Answering {
     tls: ServerTls,
     options: HttpsOptions,
     delay: Duration,
+    tcp: TcpOptions,
     running: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
 }
@@ -75,6 +76,7 @@ impl Answering {
             tls,
             options,
             delay: Duration::ZERO,
+            tcp: TcpOptions::default(),
             running: Arc::default(),
             peak: Arc::default(),
         }
@@ -87,6 +89,9 @@ impl Handler for Answering {
     }
     fn https(&self) -> HttpsOptions {
         self.options.clone()
+    }
+    fn tcp_options(&self) -> TcpOptions {
+        self.tcp
     }
     async fn handle(
         &self,
@@ -378,16 +383,59 @@ async fn max_connections_holds_back_further_connections() {
 #[tokio::test]
 async fn request_media_type_is_not_checked() {
     let (registry, address) = listening(Answering::new(HttpsOptions::default())).await;
-    let mut client = Client::new(address, &[b"h2"]).await;
-    let mut request = post(doh::PATH, query(5));
-    request
-        .headers_mut()
-        .insert("content-type", "text/plain".parse().unwrap());
-    assert_eq!(client.send(request).await.0, StatusCode::OK);
-    let mut request = post(doh::PATH, b"not dns".to_vec());
-    request
-        .headers_mut()
-        .insert("content-type", doh::MEDIA_TYPE.parse().unwrap());
-    assert_eq!(client.send(request).await.0, StatusCode::BAD_REQUEST);
+    for (name, alpn) in VERSIONS {
+        let mut client = Client::new(address, alpn).await;
+        let mut request = post(doh::PATH, query(5));
+        request
+            .headers_mut()
+            .insert("content-type", "text/plain".parse().unwrap());
+        assert_eq!(client.send(request).await.0, StatusCode::OK, "{name}");
+        let mut request = post(doh::PATH, b"not dns".to_vec());
+        request
+            .headers_mut()
+            .insert("content-type", doh::MEDIA_TYPE.parse().unwrap());
+        assert_eq!(
+            client.send(request).await.0,
+            StatusCode::BAD_REQUEST,
+            "{name}"
+        );
+    }
+    registry.shutdown().await.unwrap();
+}
+
+// RFC 7766 §6.2.3: idle time counts only while no Query is running.
+#[tokio::test]
+async fn a_running_query_is_not_cut_by_the_idle_timeout() {
+    let mut handler = Answering::new(HttpsOptions::default());
+    handler.delay = Duration::from_millis(900);
+    handler.tcp.idle = Duration::from_millis(300);
+    let (registry, address) = listening(handler).await;
+    for (name, alpn) in VERSIONS {
+        let mut client = Client::new(address, alpn).await;
+        assert_eq!(
+            client.send(post(doh::PATH, query(1))).await.0,
+            StatusCode::OK,
+            "{name}"
+        );
+    }
+    registry.shutdown().await.unwrap();
+}
+
+// RFC 9112 §2.2: a request head that never completes is dropped after the read timeout.
+#[tokio::test]
+async fn stalled_http1_headers_are_dropped() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut handler = Answering::new(HttpsOptions::default());
+    handler.tcp.read = Duration::from_millis(300);
+    handler.tcp.idle = Duration::from_secs(30);
+    let (registry, address) = listening(handler).await;
+    let mut stream = tls_connect(address, &[b"http/1.1"]).await;
+    stream
+        .write_all(b"POST /dns-query HTTP/1.1\r\nHost: x\r\n")
+        .await
+        .unwrap();
+    let mut buffer = [0; 256];
+    let read = timeout(Duration::from_secs(3), stream.read(&mut buffer)).await;
+    assert!(read.is_ok(), "connection stayed open");
     registry.shutdown().await.unwrap();
 }

@@ -23,8 +23,7 @@ fn number(cursor: &Cursor<'_>, name: &str, args: &[String]) -> Result<u64, Error
         .map_err(|_| cursor.error(format!("{name} must be a non-negative integer: {value}")))
 }
 
-pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Https, Error> {
-    let mut config = Https::default();
+pub(crate) fn parse(cursor: &mut Cursor<'_>, mut config: Https) -> Result<Https, Error> {
     while cursor.next() {
         if !cursor.remaining_args().is_empty() {
             return Err(cursor.arg_err());

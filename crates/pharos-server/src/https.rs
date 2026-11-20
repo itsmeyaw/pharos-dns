@@ -28,7 +28,7 @@ use hyper::{
     server::conn::{http1, http2},
     service::service_fn,
 };
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{OwnedSemaphorePermit, Semaphore, watch},
@@ -336,6 +336,8 @@ async fn serve<H: Handler>(
         if options.max_streams != 0 {
             builder.max_concurrent_streams(options.max_streams);
         }
+        // RFC 9113 §6.5.2: a GET target of up to the 64 KiB URI limit must fit in the header list.
+        builder.max_header_list_size(doh::MAX_HEADER_LIST);
         let connection = builder.serve_connection(io, service);
         tokio::pin!(connection);
         drive(
@@ -347,7 +349,12 @@ async fn serve<H: Handler>(
         )
         .await;
     } else {
-        let connection = http1::Builder::new().serve_connection(io, service);
+        let mut builder = http1::Builder::new();
+        // RFC 9112 §2.2: a request line and headers that never complete must not hold the connection.
+        builder
+            .timer(TokioTimer::new())
+            .header_read_timeout(limits.read);
+        let connection = builder.serve_connection(io, service);
         tokio::pin!(connection);
         drive(
             connection,
@@ -383,7 +390,8 @@ async fn drive<C: Future<Output = hyper::Result<()>>>(
                     // The grace period ended; dropping the connection closes the socket.
                     return;
                 }
-                if wake <= Instant::now() {
+                // A request that started after `wake` was computed keeps the connection open.
+                if activity.idle_deadline(limits.idle) <= Instant::now() {
                     graceful(connection.as_mut());
                     closing = Some(Instant::now() + limits.write);
                 }

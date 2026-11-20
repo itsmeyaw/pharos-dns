@@ -945,10 +945,11 @@ pub fn servers_with_registry(
             }
             #[cfg(feature = "plugin-https")]
             if listener.transport == Transport::Https {
+                let first = !https_limits.contains_key(&listener);
                 let limits = https_limits.entry(listener).or_default();
                 let configured = chain.https.as_ref();
-                // CoreDNS v1.15.0 core/dnsserver/server_https.go: the first block's max_connections applies.
-                if limits.0.is_none() {
+                // CoreDNS v1.15.0 core/dnsserver/server_https.go: only the first block's max_connections applies.
+                if first {
                     limits.0 = configured.and_then(|https| https.max_connections);
                 }
                 // CoreDNS v1.15.0 core/dnsserver/server_https.go: blocks sharing a Listener share one max_streams.

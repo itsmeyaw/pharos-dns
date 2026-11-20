@@ -4,6 +4,8 @@ pub(crate) fn setup(
 ) -> Result<(), pharos_corefile::Error> {
     use crate::https;
 
-    block.config.https = Some(https::parse(cursor)?);
+    // CoreDNS v1.15.0 plugin/https/setup.go: the limits live on the block, so a second `https` line cannot redefine them.
+    let current = block.config.https.take().unwrap_or_default();
+    block.config.https = Some(https::parse(cursor, current)?);
     Ok(())
 }
