@@ -1,0 +1,7 @@
+.:{port} {
+    grpc . resolv.conf {
+        except example.org
+        tls {tls}/ca.pem
+        tls_servername localhost
+    }
+}

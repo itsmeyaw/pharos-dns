@@ -1,0 +1,17 @@
+example.org:{port} {
+    grpc . 127.0.0.1:{port2} {
+        tls {tls}/ca.pem
+        tls_servername localhost
+    }
+}
+grpc://.:{port2} {
+    tls {tls}/server.pem {tls}/server.key.pem
+    hosts {
+        192.0.2.1 www.example.org
+        2001:db8::1 www.example.org
+        fallthrough
+    }
+    template ANY ANY {
+        rcode NXDOMAIN
+    }
+}
