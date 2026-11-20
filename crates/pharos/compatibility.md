@@ -243,6 +243,7 @@
 ## tls
 
 - [tls Plugin notes](../crates/pharos-plugins/src/tls/README.md)
+- RFC 8555: `tls { acme ... }` implements DNS-01 only with Pharos's own minimal client and storage layout (not certmagic's); ARI, EAB, OCSP stapling and other challenge types are not implemented, and a name has no certificate until the first issuance completes ([`plugin/tls/acme.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/tls/acme.go)).
 
 ## template
 
