@@ -1132,6 +1132,12 @@ fn scenario(
                         cresult.is_ok()
                     ));
                 }
+                // A crashed server also refuses, which must not satisfy `unanswered`.
+                if p.0.try_wait().map_err(|e| e.to_string())?.is_some()
+                    || c.0.try_wait().map_err(|e| e.to_string())?.is_some()
+                {
+                    return Err(format!("{line}: a server exited instead of refusing"));
+                }
                 count += 1;
                 continue;
             }
@@ -1291,6 +1297,15 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
     // PHAROS_DIFF_SCENARIOS=name1,name2 runs only those scenarios while iterating.
     if let Ok(only) = env::var("PHAROS_DIFF_SCENARIOS") {
         let only: Vec<_> = only.split(',').collect();
+        if let Some(missing) = only.iter().find(|name| {
+            !paths
+                .iter()
+                .any(|path| path.file_name().and_then(|n| n.to_str()) == Some(**name))
+        }) {
+            return Err(format!(
+                "PHAROS_DIFF_SCENARIOS names unknown scenario {missing}"
+            ));
+        }
         paths.retain(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
