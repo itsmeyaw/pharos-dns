@@ -139,6 +139,12 @@ impl DoqConnection {
         self.connection.close_reason().is_some()
     }
 
+    /// Close the connection without error.
+    pub fn close(&self) {
+        // RFC 9250 §5.3: DOQ_NO_ERROR closes a connection that did nothing wrong.
+        self.connection.close(NO_ERROR, b"");
+    }
+
     /// Send `wire[..query_len]` on a new stream and read the Response back into `wire`.
     ///
     /// The Query ID must be zero; the Response ID is zero too (RFC 9250 §4.2.1).
@@ -228,8 +234,7 @@ impl DoqConnection {
 
 impl Drop for DoqConnection {
     fn drop(&mut self) {
-        // RFC 9250 §5.3: DOQ_NO_ERROR closes a connection that did nothing wrong.
-        self.connection.close(NO_ERROR, b"");
+        self.close();
     }
 }
 
