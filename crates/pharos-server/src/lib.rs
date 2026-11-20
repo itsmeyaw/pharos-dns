@@ -217,6 +217,9 @@ pub struct Metadata<'a> {
     view_name: Option<Arc<str>>,
     metric_view: &'a str,
     enabled: bool,
+    // PROXY v2 TLVs of the Query's connection, hex-encoded; published once the metadata Plugin matches.
+    proxy_tlv: &'a str,
+    proxy_tlv_published: bool,
     self_lookup: Option<SelfLookupState<'a>>,
 }
 
@@ -238,8 +241,20 @@ impl<'a> Metadata<'a> {
             view_name: None,
             metric_view: "",
             enabled: true,
+            proxy_tlv: "",
+            proxy_tlv_published: false,
             self_lookup: None,
         }
+    }
+
+    /// Attach the hex PROXY v2 TLV vector of the Query's connection; it stays hidden until published.
+    pub fn set_proxy_tlv(&mut self, tlv: &'a str) {
+        self.proxy_tlv = tlv;
+    }
+
+    /// Expose the attached TLV vector as the `proxyproto/tlv` label.
+    pub fn publish_proxy_tlv(&mut self) {
+        self.proxy_tlv_published = true;
     }
 
     pub(crate) fn clear_collected(&mut self) {
@@ -259,6 +274,7 @@ impl<'a> Metadata<'a> {
         self.inline_len = 0;
         self.copied.fill(None);
         self.copied_len = 0;
+        self.proxy_tlv_published = false;
         self.source = None;
         self.view_name = None;
         self.enabled = true;
@@ -476,6 +492,12 @@ impl<'a> Metadata<'a> {
                     .flatten()
             })
             .or_else(|| self.source.as_ref().and_then(|source| source.get(name)))
+            .or_else(|| {
+                (self.proxy_tlv_published
+                    && name == proxyproto::TLV_LABEL
+                    && !self.proxy_tlv.is_empty())
+                .then_some(self.proxy_tlv)
+            })
     }
 }
 

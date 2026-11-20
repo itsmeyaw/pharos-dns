@@ -144,6 +144,7 @@ pub struct Server<C> {
     pub grpc: crate::GrpcOptions,
     /// Limits of a `quic://` Listener.
     pub quic: crate::QuicOptions,
+    pub proxyproto: Option<Arc<crate::proxyproto::Config>>,
     pub logger: fn(Error),
     metrics: Registry,
     dropped: Option<BlockMetrics>,
@@ -267,6 +268,7 @@ impl<C: Chain> Server<C> {
             },
             grpc: crate::GrpcOptions::default(),
             quic: crate::QuicOptions::default(),
+            proxyproto: None,
             logger: log_error,
             metrics,
             dropped,
@@ -326,6 +328,9 @@ impl<C: Chain> Handler for Server<C> {
     fn quic_metrics(&self) -> Option<crate::QuicMetrics> {
         self.quic_metrics.clone()
     }
+    fn proxyproto(&self) -> Option<Arc<crate::proxyproto::Config>> {
+        self.proxyproto.clone()
+    }
     fn udp_workers(&self) -> usize {
         self.udp_workers
     }
@@ -357,7 +362,7 @@ impl<C: Chain> Handler for Server<C> {
         protocol: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
-        self.handle_with_depth(wire, peer, protocol, response, (0, false, false), self)
+        self.handle_with_depth(wire, peer, protocol, response, (0, false, false), self, "")
             .await
     }
 
@@ -368,7 +373,19 @@ impl<C: Chain> Handler for Server<C> {
         protocol: Protocol,
         response: &mut Vec<u8>,
     ) -> Action {
-        self.handle_with_depth(wire, peer, protocol, response, (0, false, false), self)
+        self.handle_with_depth(wire, peer, protocol, response, (0, false, false), self, "")
+            .await
+    }
+
+    async fn handle_proxied(
+        self: &Arc<Self>,
+        wire: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        tlv: &str,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        self.handle_with_depth(wire, peer, protocol, response, (0, false, false), self, tlv)
             .await
     }
 }
@@ -391,6 +408,7 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             response,
             (depth, flags.0, flags.1),
             self,
+            "",
         ))
     }
 
@@ -406,6 +424,7 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             https: self.https.clone(),
             grpc: self.grpc,
             quic: self.quic,
+            proxyproto: self.proxyproto.clone(),
             logger: self.logger,
             metrics: self.metrics.clone(),
             shed: self.shed.clone(),
@@ -434,6 +453,7 @@ impl<C: Chain> crate::SelfLookupServer for Arc<Server<C>> {
             response,
             (depth, flags.0, flags.1),
             self,
+            "",
         ))
     }
 
@@ -460,6 +480,7 @@ impl<C: Chain> crate::OwnedSelfLookupServer for Server<C> {
                 response,
                 (depth, flags.0, flags.1),
                 &self,
+                "",
             )
             .await
         })
@@ -467,6 +488,7 @@ impl<C: Chain> crate::OwnedSelfLookupServer for Server<C> {
 }
 
 impl<C: Chain> Server<C> {
+    #[allow(clippy::too_many_arguments)]
     async fn handle_with_depth(
         &self,
         wire: &[u8],
@@ -475,6 +497,7 @@ impl<C: Chain> Server<C> {
         response: &mut Vec<u8>,
         lookup: (u8, bool, bool),
         lookup_server: &dyn crate::SelfLookupServer,
+        proxy_tlv: &str,
     ) -> Action {
         let start = Instant::now();
         let allow_update = wire.get(2).is_some_and(|flags| flags & 0x78 == 0x28)
@@ -523,6 +546,7 @@ impl<C: Chain> Server<C> {
             response,
             max_response_size,
         };
+        context.metadata.set_proxy_tlv(proxy_tlv);
         context.metadata.self_lookup = Some(crate::SelfLookupState {
             server: lookup_server,
             depth: lookup.0,
