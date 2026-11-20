@@ -2252,6 +2252,7 @@ dependencies = [
  "pharos-plugins",
  "pharos-proto",
  "pharos-server",
+ "rustls",
  "tokio",
 ]
 
@@ -2346,9 +2347,12 @@ dependencies = [
  "libc",
  "nix",
  "pharos-proto",
+ "rustls",
+ "rustls-native-certs",
  "socket2",
  "stats_alloc",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -3611,6 +3615,7 @@ dependencies = [
  "aws-lc-rs",
  "pharos-dnssec",
  "pharos-proto",
+ "rustls",
 ]
 
 [[package]]

@@ -4,7 +4,7 @@
 
 ## root
 
-- The README's TLS Listener example remains unavailable because TLS is deferred to M3.
+- The README's TLS Listener example (`tls://` with relative `tls` paths) resolves against `root` like CoreDNS.
 
 ## Sources
 

@@ -75,6 +75,7 @@ default = [
     "plugin-secondary",
     "plugin-sign",
     "plugin-template",
+    "plugin-tls",
     "plugin-view",
     "plugin-whoami",
 ]

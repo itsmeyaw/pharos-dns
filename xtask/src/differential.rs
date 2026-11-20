@@ -290,6 +290,10 @@ fn start(
                 .replace("{port2}", &port2.to_string())
                 .replace("{metrics_port}", &metrics_port.to_string())
                 .replace(
+                    "{tls}",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/tls"),
+                )
+                .replace(
                     "{loopback}",
                     if cfg!(target_os = "macos") {
                         "lo0"
@@ -390,6 +394,7 @@ fn exchange_with_key(
             data.truncate(n);
             Ok(vec![data])
         }
+        Transport::Tls => exchange_tls(port, wire, timeout).map(|reply| vec![reply]),
         Transport::Tcp => {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
             stream
@@ -422,6 +427,49 @@ fn exchange_with_key(
             }
         }
     }
+}
+
+// RFC 7858 §3.3: DNS over TLS carries the RFC 1035 §4.2.2 two-octet length framing.
+fn exchange_tls(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
+    use rustls::{
+        ClientConfig, ClientConnection, RootCertStore, StreamOwned,
+        crypto::aws_lc_rs,
+        pki_types::{CertificateDer, ServerName, pem::PemObject},
+    };
+
+    let ca = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/tls/ca.pem");
+    let mut roots = RootCertStore::empty();
+    for cert in CertificateDer::pem_file_iter(ca).map_err(|e| e.to_string())? {
+        roots
+            .add(cert.map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    }
+    let config =
+        ClientConfig::builder_with_provider(std::sync::Arc::new(aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| e.to_string())?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    let connection = ClientConnection::new(
+        std::sync::Arc::new(config),
+        ServerName::try_from("localhost").map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let tcp = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    tcp.set_read_timeout(timeout).map_err(|e| e.to_string())?;
+    tcp.set_write_timeout(timeout).map_err(|e| e.to_string())?;
+    let mut stream = StreamOwned::new(connection, tcp);
+    let len = u16::try_from(wire.len()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(&len.to_be_bytes())
+        .and_then(|()| stream.write_all(wire))
+        .and_then(|()| stream.flush())
+        .map_err(|e| e.to_string())?;
+    let mut len = [0; 2];
+    stream.read_exact(&mut len).map_err(|e| e.to_string())?;
+    let mut data = vec![0; u16::from_be_bytes(len) as usize];
+    stream.read_exact(&mut data).map_err(|e| e.to_string())?;
+    Ok(data)
 }
 
 // RFC 5936 §2.2: AXFR records remain in their individual DNS Messages.
@@ -511,7 +559,9 @@ pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(
     let wire = query::parse("ready. A IN udp")?.wire()?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let answered = exchange(port, Transport::Udp, &wire).is_ok();
+        // A TLS-only Corefile has no UDP Listener, so readiness also tries DNS over TLS.
+        let answered = exchange(port, Transport::Udp, &wire).is_ok()
+            || exchange(port, Transport::Tls, &wire).is_ok();
         if server.0.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
             return Err(format!(
                 "server on {port} did not start:\n{}",

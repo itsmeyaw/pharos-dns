@@ -141,6 +141,8 @@ pub mod shed;
 pub mod template;
 #[cfg(feature = "plugin-timeouts")]
 pub mod timeouts;
+#[cfg(feature = "plugin-tls")]
+pub mod tls;
 #[cfg(feature = "plugin-transfer")]
 pub mod transfer;
 #[cfg(feature = "plugin-tsig")]
@@ -531,6 +533,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("shed", include_str!("shed/README.md")),
     ("template", include_str!("template/README.md")),
     ("timeouts", include_str!("timeouts/README.md")),
+    ("tls", include_str!("tls/README.md")),
     ("tsig", include_str!("tsig/README.md")),
     ("transfer", include_str!("transfer/README.md")),
     ("view", include_str!("view/README.md")),
@@ -606,6 +609,8 @@ pub fn servers_with_registry(
         Option<usize>,
         pharos_server::TcpOptions,
         bool,
+        // The first Server Block's TLS identity and Domain, for the shared-Listener check.
+        Option<(pharos_server::tls::ServerTls, String)>,
     );
     let mut groups: HashMap<ListenerKey, ListenerGroup> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
@@ -731,14 +736,34 @@ pub fn servers_with_registry(
         let addresses = block.listen_addresses.clone();
         let empty = pharos_server::Chain::is_empty(&block.config);
         lifecycle.extend(&block.config.lifecycle);
+        #[cfg(feature = "plugin-tls")]
+        let tls = block.config.tls.as_ref().map(|tls| tls.server.clone());
+        #[cfg(not(feature = "plugin-tls"))]
+        let tls: Option<pharos_server::tls::ServerTls> = None;
         let mut routes = Vec::new();
         for key in keys {
-            if key.transport != "dns" {
-                return Err(io::Error::new(
+            // RFC 7858 §3.2: DoT is TLS; CoreDNS's other encrypted Transports need a certificate too.
+            let requires_tls = || {
+                io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "unsupported Listener transport",
-                ));
-            }
+                    format!(
+                        "{}:// Server Block Key requires the tls Directive",
+                        key.transport
+                    ),
+                )
+            };
+            let transport = match key.transport.as_str() {
+                "dns" => Transport::Dns,
+                "tls" if tls.is_some() => Transport::Tls,
+                "tls" => return Err(requires_tls()),
+                "https" | "grpc" | "quic" | "https3" if tls.is_none() => return Err(requires_tls()),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "unsupported Listener transport",
+                    ));
+                }
+            };
             let port: u16 = key.port.parse().map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid Listener port")
             })?;
@@ -769,7 +794,7 @@ pub fn servers_with_registry(
                 };
                 routes.push((
                     ListenerKey {
-                        transport: Transport::Dns,
+                        transport,
                         address: socket,
                     },
                     domain.clone(),
@@ -884,8 +909,29 @@ pub fn servers_with_registry(
                     workers,
                     pharos_server::TcpOptions::default(),
                     false,
+                    None,
                 )
             });
+            if listener.transport == Transport::Tls
+                && let Some(tls) = &tls
+            {
+                match &group.4 {
+                    // CoreDNS v1.15.0 core/dnsserver/tlsconfig.go sharedTLSConfig: blocks on one Listener agree.
+                    Some((first, zone)) => {
+                        if let Some(reason) = first.conflict(tls) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!(
+                                    "conflicting TLS configuration for shared listener tls://{} between zones {zone:?} and {:?}: {reason}",
+                                    listener.address,
+                                    domain.to_string(),
+                                ),
+                            ));
+                        }
+                    }
+                    None => group.4 = Some((tls.clone(), domain.to_string())),
+                }
+            }
             #[cfg(feature = "plugin-timeouts")]
             if let Some(options) = &chain.timeouts {
                 if let Some(value) = options.read {
@@ -914,9 +960,10 @@ pub fn servers_with_registry(
     tsig_keyrings.finish();
     let servers = groups
         .into_iter()
-        .map(|(key, (router, workers, tcp_options, allow_non_in))| {
+        .map(|(key, (router, workers, tcp_options, allow_non_in, tls))| {
             let mut server = Server::with_registry(router, key, metrics.clone());
             server.tcp_options = tcp_options;
+            server.tls = tls.map(|(tls, _)| tls);
             server.debug = debug;
             server.allow_non_in = allow_non_in;
             if let Some(workers) = workers {
@@ -1132,7 +1179,8 @@ impl pharos_server::Plugin for Unimplemented {
     feature = "plugin-auto",
     feature = "plugin-loadbalance",
     feature = "plugin-dnssec",
-    feature = "plugin-sign"
+    feature = "plugin-sign",
+    feature = "plugin-tls"
 ))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     #[cfg(feature = "plugin-root")]
@@ -1154,7 +1202,8 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     feature = "plugin-auto",
     feature = "plugin-loadbalance",
     feature = "plugin-dnssec",
-    feature = "plugin-sign"
+    feature = "plugin-sign",
+    feature = "plugin-tls"
 ))]
 fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std::path::PathBuf {
     use std::path::{Component, PathBuf};
