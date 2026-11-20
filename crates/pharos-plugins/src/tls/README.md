@@ -12,7 +12,7 @@
 - Certificates are read at startup and on every Reload. An invalid or unreadable file fails startup or the Reload (the previous configuration stays active). New connections after Reload use the new certificate on the same Listener; established connections keep their session. Replacing a certificate file alone does not trigger a Reload (as in CoreDNS); send SIGUSR1 or change the Corefile.
 - Server Blocks that share a Listener must have the same TLS identity, client authentication policy and client CA pool; otherwise setup fails with `conflicting TLS configuration for shared listener`.
 - `client_auth request` and `client_auth require` accept any presented client certificate without verifying its chain, like Go's `RequestClientCert` and `RequireAnyClientCert`. The handshake signature is still verified. `verify_if_given` and `require_and_verify` use `CA`, or the system trust store when `CA` is omitted.
-- `keylog FILE` appends NSS Key Log lines (mode 0600) and logs a warning at startup; the file is opened once per load.
+- `keylog FILE` appends NSS Key Log lines and logs a warning at startup; as in CoreDNS, mode 0600 applies only when the file is created and the file is opened once per load. rustls cannot report a failed key-log write, so Pharos drops it silently where CoreDNS fails the handshake.
 - A client that does not complete the TLS handshake within the TCP read timeout (default 3 seconds, see `timeouts`) is disconnected. The `timeouts` Directive and `max_queries` apply to DNS over TLS like TCP.
 - `server_tls_test.go` cases for HTTPS, gRPC and QUIC Transports are not ported until those Transports exist.
 

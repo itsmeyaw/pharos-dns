@@ -115,8 +115,18 @@ impl Chain for TkeyProbe {
 
 #[tokio::test]
 async fn update_admission_is_listener_and_block_scoped() {
+    update_admission(Transport::Dns, Protocol::Udp).await;
+}
+
+// CoreDNS v1.15.0 core/dnsserver/server_tls_test.go TestServerTLSUpdateAdmission: DoT admits UPDATE per block.
+#[tokio::test]
+async fn update_admission_applies_to_tls_listeners() {
+    update_admission(Transport::Tls, Protocol::Tcp).await;
+}
+
+async fn update_admission(transport: Transport, protocol: Protocol) {
     let key = ListenerKey {
-        transport: Transport::Dns,
+        transport,
         address: "127.0.0.1:53".parse().unwrap(),
     };
     let mut router = Router::default();
@@ -172,7 +182,7 @@ async fn update_admission_is_listener_and_block_scoped() {
                 .handle(
                     &wire,
                     "127.0.0.1:1234".parse().unwrap(),
-                    Protocol::Udp,
+                    protocol,
                     &mut response
                 )
                 .await,

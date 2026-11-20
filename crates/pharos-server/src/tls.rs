@@ -90,7 +90,7 @@ impl ServerTls {
         let chain = read_chain(&options.cert).map_err(load_error)?;
         let key = PrivateKeyDer::from_pem_file(&options.key)
             .map_err(|error| load_error(io::Error::other(error)))?;
-        // RFC 5280 §4.2.1.3: CA files and the client verifier agree on one pool.
+        // CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: one CA pool serves every client-verifying mode.
         let roots = match (&options.ca, options.client_auth) {
             (Some(path), _) => Some(read_roots(path)?),
             (None, ClientAuth::VerifyIfGiven | ClientAuth::RequireAndVerify) => {
@@ -138,6 +138,10 @@ impl ServerTls {
                 .map(|anchor| {
                     let mut identity = anchor.subject.to_vec();
                     identity.extend_from_slice(&anchor.subject_public_key_info);
+                    // RFC 5280 §4.2.1.10: name constraints change which chains a CA pool accepts.
+                    if let Some(constraints) = &anchor.name_constraints {
+                        identity.extend_from_slice(constraints);
+                    }
                     identity
                 })
                 .collect::<Vec<_>>()
