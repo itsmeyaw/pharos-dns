@@ -448,6 +448,16 @@ impl Plugin for Forward {
                 stanza.max_connect_attempts,
                 matches!(query_mode, QueryMode::UnsignedEcs),
             );
+            // CoreDNS v1.15.0 plugin/forward/forward.go ServeDNS: with retries left, a stalled TLS handshake gets half the window.
+            let started = Instant::now();
+            let options = Options {
+                tls_connect_deadline: Some(if attempt_limit == 1 {
+                    deadline
+                } else {
+                    started + (deadline - started) / 2
+                }),
+                ..stanza.options
+            };
             upstream_attempts.clear();
             upstream_attempts.resize(count, 0);
             let mut i = 0;
@@ -508,7 +518,7 @@ impl Plugin for Forward {
                     upstream_attempts[upstream_index] += 1;
                     let result = timeout_at(
                         deadline,
-                        proxy.exchange(query_wire, wire, protocol, stanza.options),
+                        proxy.exchange(query_wire, wire, protocol, options),
                     )
                     .await;
                     // RFC 7766 §6.2.4: Retry unanswered queries after a connection closes.
@@ -582,12 +592,7 @@ impl Plugin for Forward {
                     upstream_attempts[upstream_index] += 1;
                     let retry = timeout_at(
                         deadline,
-                        proxy.exchange(
-                            &fallback_buffer[..fallback_len],
-                            wire,
-                            protocol,
-                            stanza.options,
-                        ),
+                        proxy.exchange(&fallback_buffer[..fallback_len], wire, protocol, options),
                     )
                     .await;
                     match retry {

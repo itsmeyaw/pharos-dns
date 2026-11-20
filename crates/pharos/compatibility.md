@@ -105,7 +105,7 @@
 
 - [forward Plugin notes](../crates/pharos-plugins/src/forward/README.md)
 - `forward { allow_special }` permits upstream resolution for `.test` and RFC 6303 reverse names. `forward` returns NXDOMAIN for `.invalid`; an earlier explicit file Zone retains precedence (RFC 6761 §§6.1, 6.2, 6.4).
-- `forward` supports `tls://` Upstreams with `tls` and `tls_servername`; `quic://`, `https://`, `grpc://` and `unix://` Upstreams fail setup. AD is also cleared on Responses from `tls://` Upstreams (RFC 4035 §4.6, issue #110); CoreDNS preserves it.
+- `forward` supports `tls://` Upstreams with `tls` and `tls_servername`; `quic://`, `https://`, `grpc://` and `unix://` Upstreams fail setup. AD is also cleared on Responses from `tls://` Upstreams (RFC 4035 §4.6, issue #110); CoreDNS preserves it. TLS server names are lowercased, so `tls://IP%Name` and `tls://IP%name` are one Upstream.
 - **Partial**: Without the optional `local` Plugin, cache/forward may send `localhost.` queries upstream rather than synthesize loopback/negative answers (RFC 6761 §6.3).
 
 ## header
