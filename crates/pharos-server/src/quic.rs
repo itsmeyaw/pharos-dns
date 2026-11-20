@@ -162,18 +162,16 @@ fn server_config(
     transport.stream_receive_window(VarInt::from_u32(STREAM_WINDOW));
     transport.receive_window(VarInt::from_u64(window).unwrap_or(VarInt::MAX));
     transport.send_window(window);
+    // RFC 9250 §4.2, RFC 9114 §6.1: each Query or request uses its own client-initiated bidirectional stream.
+    transport.max_concurrent_bidi_streams(VarInt::from_u64(streams).unwrap_or(VarInt::MAX));
     match kind {
         Kind::Doq => {
-            // RFC 9250 §4.2: each Query uses its own client-initiated bidirectional stream.
-            transport.max_concurrent_bidi_streams(VarInt::from_u64(streams).unwrap_or(VarInt::MAX));
             // RFC 9250 §4.2: DoQ does not use unidirectional streams.
             transport.max_concurrent_uni_streams(VarInt::from_u32(0));
             // RFC 9250 §5.4: pad QUIC packets to the MTU against traffic analysis; quinn exposes this policy.
             transport.pad_to_mtu(true);
         }
         Kind::Doh3 => {
-            // RFC 9114 §6.1: each request uses its own client-initiated bidirectional stream.
-            transport.max_concurrent_bidi_streams(VarInt::from_u64(streams).unwrap_or(VarInt::MAX));
             // RFC 9114 §6.2: a client opens a control stream and two QPACK streams (RFC 9204 §4.2),
             // so fewer than three unidirectional streams would break every connection.
             transport.max_concurrent_uni_streams(

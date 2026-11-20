@@ -66,6 +66,7 @@ struct Answering {
     tls: ServerTls,
     options: HttpsOptions,
     delay: Duration,
+    drop: bool,
     tcp: TcpOptions,
     calls: Arc<AtomicUsize>,
     running: Arc<AtomicUsize>,
@@ -78,6 +79,7 @@ impl Answering {
             tls: identity("server"),
             options,
             delay: Duration::ZERO,
+            drop: false,
             tcp: TcpOptions::default(),
             calls: Arc::default(),
             running: Arc::default(),
@@ -116,6 +118,9 @@ impl Handler for Answering {
         self.peak.fetch_max(now, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
         self.running.fetch_sub(1, Ordering::SeqCst);
+        if self.drop {
+            return Action::Drop;
+        }
         let name: Name = "example.org.".parse().unwrap();
         let owner = NameRef::parse(name.as_wire(), 0).unwrap();
         let id = u16::from_be_bytes([query[0], query[1]]);
@@ -314,6 +319,20 @@ async fn invalid_requests_get_the_coredns_status_codes() {
     // A rejected request leaves the connection usable.
     let (status, ..) = client.send(post(doh::PATH, wire)).await;
     assert_eq!(status, StatusCode::OK);
+    registry.shutdown().await.unwrap();
+}
+
+// CoreDNS v1.15.0 server_https3.go ServeHTTP: a Query the Chain leaves unanswered is a 500 "No response".
+#[tokio::test]
+async fn dropped_query_is_a_500() {
+    let mut handler = Answering::new(options());
+    handler.drop = true;
+    let (registry, address) = listening(handler).await;
+    let mut client = Client::new(address).await;
+    let (status, headers, body) = client.send(post(doh::PATH, query(1))).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(&body[..], b"No response\n");
     registry.shutdown().await.unwrap();
 }
 
