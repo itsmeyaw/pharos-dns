@@ -42,7 +42,8 @@ impl Https {
         // RFC 9110 §7.2: the Host is the name the Corefile gives, else the Upstream's IP address.
         let authority = match &tls.server_name {
             ServerName::DnsName(name) => name.as_ref().to_owned(),
-            _ => host(address),
+            ServerName::IpAddress(ip) if IpAddr::from(*ip) == address.ip() => host(address),
+            other => other.to_str().into_owned(),
         };
         Self {
             tls: Tls {
@@ -90,6 +91,7 @@ pub(super) struct Connection {
 }
 
 impl Connection {
+    // CoreDNS v1.15.0 plugin/pkg/proxy/persistent.go: idle past `expire` or older than `max_age` is dropped.
     fn fresh(&self, expire: Duration, max_age: Duration) -> bool {
         !self.sender.is_closed()
             && self.used.elapsed() <= expire
@@ -106,6 +108,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub(super) struct Pool {
     h2: Mutex<Option<Connection>>,
     h1: Mutex<Vec<Connection>>,
+    // shortcut: HTTP/1.1 Upstreams dial one at a time too; split per protocol if cold-start latency there matters.
+    dial: tokio::sync::Mutex<()>,
 }
 
 impl Pool {
@@ -326,7 +330,7 @@ impl Proxy {
             sanitize_edns(response, query.len(), Transport::Https, false, opt_range)
         };
         let cached = self.https_pool.checkout(self.expire, self.max_age);
-        let reused = cached.is_some();
+        let mut reused = cached.is_some();
         if let Some(metrics) = &self.metrics
             && let Some(cache) = &metrics.cache[Transport::Https.index()]
         {
@@ -339,16 +343,25 @@ impl Proxy {
         let mut connection = match cached {
             Some(connection) => connection,
             None => {
-                let connection = self.dial_https(https, tls_connect_deadline).await?;
-                if let Sender::H2(sender) = &connection.sender
-                    && !self.stopped.load(Ordering::Acquire)
-                {
-                    *lock(&self.https_pool.h2) = Some(Connection {
-                        sender: Sender::H2(sender.clone()),
-                        ..connection
-                    });
+                // RFC 9113 §9.1: a burst of cold Queries shares the connection the first one opens.
+                let _dialing = self.https_pool.dial.lock().await;
+                if let Some(connection) = self.https_pool.checkout(self.expire, self.max_age) {
+                    reused = true;
+                    connection
+                } else {
+                    let connection = self.dial_https(https, tls_connect_deadline).await?;
+                    if let Sender::H2(sender) = &connection.sender {
+                        let mut slot = lock(&self.https_pool.h2);
+                        // `stop` clears the pool after setting the flag, so a check under the lock leaves no stray connection.
+                        if !self.stopped.load(Ordering::Acquire) {
+                            *slot = Some(Connection {
+                                sender: Sender::H2(sender.clone()),
+                                ..connection
+                            });
+                        }
+                    }
+                    connection
                 }
-                connection
             }
         };
         let request = doh::request(
@@ -372,9 +385,11 @@ impl Proxy {
             local_addr: connection.local_addr,
             transport: Transport::Https,
         };
-        if !connection.sender.is_h2() && !self.stopped.load(Ordering::Acquire) {
+        if !connection.sender.is_h2() {
             let mut idle = lock(&self.https_pool.h1);
-            if self.max_idle_conns == 0 || idle.len() < self.max_idle_conns {
+            if !self.stopped.load(Ordering::Acquire)
+                && (self.max_idle_conns == 0 || idle.len() < self.max_idle_conns)
+            {
                 connection.used = Instant::now();
                 idle.push(connection);
             }

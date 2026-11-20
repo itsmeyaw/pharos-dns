@@ -407,3 +407,29 @@ async fn handshake_failure_marks_the_upstream_unhealthy() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+// RFC 9113 §9.1: a burst of cold Queries opens one connection, not one each.
+#[tokio::test]
+async fn cold_burst_opens_a_single_http2_connection() {
+    let server = doh_server(H2, StatusCode::OK).await;
+    let proxy = proxy(&server, "localhost", Method::POST);
+    let results = futures_join(&proxy).await;
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+}
+
+// RFC 9110 §7.2: an IP `tls_servername` is also the Host.
+#[tokio::test]
+async fn ip_server_name_override_is_the_host() {
+    let server = doh_server(H2, StatusCode::OK).await;
+    let mut proxy = Proxy::new(server.address);
+    let mut tls = tls("localhost", "ca.pem");
+    tls.server_name = ServerName::try_from("127.0.0.1".to_owned()).unwrap();
+    proxy.set_https(Https::new(
+        "127.0.0.2:443".parse().unwrap(),
+        tls,
+        Method::POST,
+    ));
+    exchange(&proxy).await.unwrap();
+    assert_eq!(server.seen()[0].host.as_deref(), Some("127.0.0.1"));
+}
