@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 pharos-proto = { path = ".." }
+pharos-server = { path = "../../pharos-server" }
 domain = { version = "0.12.3", default-features = false, features = ["std"] }
 
 [[bin]]
@@ -43,6 +44,13 @@ bench = false
 [[bin]]
 name = "zone"
 path = "fuzz_targets/zone.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxyproto"
+path = "fuzz_targets/proxyproto.rs"
 test = false
 doc = false
 bench = false

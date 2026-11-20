@@ -17,7 +17,14 @@ use std::{
 };
 
 const FORBID_UNSAFE: &str = "#![forbid(unsafe_code)]";
-const FUZZ_TARGETS: &[&str] = &["message", "name", "roundtrip", "differential", "zone"];
+const FUZZ_TARGETS: &[&str] = &[
+    "message",
+    "name",
+    "roundtrip",
+    "differential",
+    "zone",
+    "proxyproto",
+];
 
 fn main() -> ExitCode {
     let args: Vec<_> = env::args().skip(1).collect();
