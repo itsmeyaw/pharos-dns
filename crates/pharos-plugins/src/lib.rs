@@ -630,6 +630,8 @@ pub fn servers_with_registry(
     let mut https_limits: HashMap<ListenerKey, (Option<usize>, Option<u32>)> = HashMap::new();
     // Limits of each `grpc://` Listener: the first Server Block's.
     let mut grpc_limits: HashMap<ListenerKey, pharos_server::GrpcOptions> = HashMap::new();
+    // Limits of each `https3://` Listener: the first Server Block's `https3` Directive decides both.
+    let mut https3_limits: HashMap<ListenerKey, (Option<usize>, Option<usize>)> = HashMap::new();
     let mut lifecycle = Lifecycle::default();
     #[cfg(feature = "plugin-debug")]
     let debug = blocks.iter().any(|block| block.config.debug.is_some());
@@ -775,6 +777,7 @@ pub fn servers_with_registry(
                 "tls" => return Err(requires_tls()),
                 "quic" if tls.is_some() => Transport::Quic,
                 "grpc" if tls.is_some() => Transport::Grpc,
+                "https3" if tls.is_some() => Transport::Https3,
                 "https" | "grpc" | "quic" | "https3" if tls.is_none() => return Err(requires_tls()),
                 "https" => Transport::Https,
                 _ => {
@@ -943,7 +946,11 @@ pub fn servers_with_registry(
             });
             if matches!(
                 listener.transport,
-                Transport::Tls | Transport::Https | Transport::Grpc | Transport::Quic
+                Transport::Tls
+                    | Transport::Https
+                    | Transport::Grpc
+                    | Transport::Https3
+                    | Transport::Quic
             ) && let Some(tls) = &tls
             {
                 match &group.4 {
@@ -958,6 +965,7 @@ pub fn servers_with_registry(
                                         Transport::Tls => "tls",
                                         Transport::Grpc => "grpc",
                                         Transport::Quic => "quic",
+                                        Transport::Https3 => "https3",
                                         _ => "https",
                                     },
                                     listener.address,
@@ -1002,6 +1010,15 @@ pub fn servers_with_registry(
                     limits.1 = Some(streams);
                 }
             }
+            // CoreDNS v1.15.0 core/dnsserver/server_https3.go NewServerHTTPS3: the first Server Block's limits apply.
+            #[cfg(feature = "plugin-https3")]
+            if listener.transport == Transport::Https3 {
+                https3_limits.entry(listener).or_insert_with(|| {
+                    chain.https3.as_ref().map_or((None, None), |https3| {
+                        (https3.max_streams, https3.max_connections)
+                    })
+                });
+            }
             #[cfg(feature = "plugin-timeouts")]
             if let Some(options) = &chain.timeouts {
                 if let Some(value) = options.read {
@@ -1038,6 +1055,10 @@ pub fn servers_with_registry(
                 server.tls = tls.map(|(tls, _)| match key.transport {
                     Transport::Https => tls.with_alpn(pharos_server::doh::ALPN),
                     Transport::Grpc => tls.with_alpn(pharos_server::grpc::ALPN),
+                    // RFC 9114 §3.1: HTTP/3 over QUIC is selected by ALPN "h3".
+                    Transport::Https3 => tls
+                        .with_quic_alpn(pharos_server::doh::H3_ALPN)
+                        .unwrap_or(tls),
                     _ => tls,
                 });
                 server.quic = quic;
@@ -1048,6 +1069,14 @@ pub fn servers_with_registry(
                     server.https.max_connections =
                         connections.unwrap_or(server.https.max_connections);
                     server.https.max_streams = streams.unwrap_or(server.https.max_streams);
+                }
+                if let Some((streams, connections)) = https3_limits.get(&key) {
+                    // CoreDNS v1.15.0 core/dnsserver/server_https3.go: 0 keeps the QUIC default or lifts the limit.
+                    server.https.max_streams = streams.map_or(server.https.max_streams, |value| {
+                        u32::try_from(value).unwrap_or(u32::MAX)
+                    });
+                    server.https.max_connections =
+                        connections.unwrap_or(server.https.max_connections);
                 }
                 server.debug = debug;
                 server.allow_non_in = allow_non_in;
