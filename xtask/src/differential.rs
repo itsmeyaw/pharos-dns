@@ -814,6 +814,8 @@ pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(
             || exchange(port, Transport::Grpc, &wire).is_ok()
             || exchange(port, Transport::Quic, &wire).is_ok()
             || exchange(port, Transport::Https3, &wire).is_ok()
+            // A Listener requiring a client certificate rejects every probe above but still accepts the connection.
+            || TcpStream::connect(("127.0.0.1", port)).is_ok()
         {
             return Ok(());
         }
