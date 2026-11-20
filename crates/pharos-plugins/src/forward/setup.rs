@@ -770,10 +770,13 @@ mod tests {
             "forward . https://1.1.1.1/dns-query",
             "forward . https://1.1.1.1:443/x",
         ] {
-            let error = parse_text(text).unwrap_err().to_string();
-            assert!(
-                error.contains("paths are not allowed in HTTPS upstream addresses"),
-                "{text}: {error}"
+            let to = text.trim_start_matches("forward . ");
+            assert_eq!(
+                parse_text(text).unwrap_err().to_string(),
+                format!(
+                    "Corefile:1: paths are not allowed in HTTPS upstream addresses (the /dns-query path is used by default): {to}"
+                ),
+                "{text}"
             );
         }
     }
