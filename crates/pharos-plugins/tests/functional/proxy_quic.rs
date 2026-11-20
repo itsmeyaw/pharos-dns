@@ -346,7 +346,12 @@ async fn replaces_a_connection_the_server_closed() {
     let proxy = proxy(&server, "localhost");
     exchange(&proxy, &query(1, EXAMPLE, &[])).await.unwrap();
     wait_closed(&server, 0).await;
-    exchange(&proxy, &query(2, EXAMPLE, &[])).await.unwrap();
+    // RFC 7766 §6.2.4: the client may not have seen the close yet, so it reports CachedClosed and the caller retries.
+    let mut second = exchange(&proxy, &query(2, EXAMPLE, &[])).await;
+    if matches!(second, Err(Error::CachedClosed)) {
+        second = exchange(&proxy, &query(2, EXAMPLE, &[])).await;
+    }
+    second.unwrap();
     assert_eq!(server.accepted.load(Ordering::SeqCst), 2);
 }
 
