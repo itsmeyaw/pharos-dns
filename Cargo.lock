@@ -2339,8 +2339,10 @@ version = "0.2.0"
 dependencies = [
  "arc-swap",
  "aws-lc-rs",
+ "base64 0.22.1",
  "bytes",
  "criterion",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",

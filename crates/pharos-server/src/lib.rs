@@ -24,6 +24,7 @@ use tokio::{
 };
 
 mod admission;
+pub mod doh;
 pub mod http;
 mod lifecycle;
 pub mod logging;
