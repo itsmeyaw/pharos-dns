@@ -395,6 +395,7 @@ fn exchange_with_key(
             Ok(vec![data])
         }
         Transport::Tls => exchange_tls(port, wire, timeout).map(|reply| vec![reply]),
+        Transport::Https => exchange_https(port, wire, timeout).map(|reply| vec![reply]),
         Transport::Tcp => {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
             stream
@@ -429,8 +430,11 @@ fn exchange_with_key(
     }
 }
 
-// RFC 7858 §3.3: DNS over TLS carries the RFC 1035 §4.2.2 two-octet length framing.
-fn exchange_tls(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
+fn tls_stream(
+    port: u16,
+    timeout: Option<Duration>,
+    alpn: &[&[u8]],
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
     use rustls::{
         ClientConfig, ClientConnection, RootCertStore, StreamOwned,
         crypto::aws_lc_rs,
@@ -444,12 +448,13 @@ fn exchange_tls(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec
             .add(cert.map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     }
-    let config =
+    let mut config =
         ClientConfig::builder_with_provider(std::sync::Arc::new(aws_lc_rs::default_provider()))
             .with_safe_default_protocol_versions()
             .map_err(|e| e.to_string())?
             .with_root_certificates(roots)
             .with_no_client_auth();
+    config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
     let connection = ClientConnection::new(
         std::sync::Arc::new(config),
         ServerName::try_from("localhost").map_err(|e| e.to_string())?,
@@ -458,7 +463,12 @@ fn exchange_tls(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec
     let tcp = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
     tcp.set_read_timeout(timeout).map_err(|e| e.to_string())?;
     tcp.set_write_timeout(timeout).map_err(|e| e.to_string())?;
-    let mut stream = StreamOwned::new(connection, tcp);
+    Ok(StreamOwned::new(connection, tcp))
+}
+
+// RFC 7858 §3.3: DNS over TLS carries the RFC 1035 §4.2.2 two-octet length framing.
+fn exchange_tls(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
+    let mut stream = tls_stream(port, timeout, &[])?;
     let len = u16::try_from(wire.len()).map_err(|e| e.to_string())?;
     stream
         .write_all(&len.to_be_bytes())
@@ -470,6 +480,36 @@ fn exchange_tls(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec
     let mut data = vec![0; u16::from_be_bytes(len) as usize];
     stream.read_exact(&mut data).map_err(|e| e.to_string())?;
     Ok(data)
+}
+
+// RFC 8484 §4.1: POST the Query to /dns-query; HTTP/1.1 with `Connection: close` keeps the client free of an HTTP library.
+fn exchange_https(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
+    let mut stream = tls_stream(port, timeout, &[b"http/1.1"])?;
+    let mut request = format!(
+        "POST /dns-query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nAccept: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        wire.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(wire);
+    stream
+        .write_all(&request)
+        .and_then(|()| stream.flush())
+        .map_err(|e| e.to_string())?;
+    let mut reply = Vec::new();
+    // A server that closes without close_notify still delivered the whole body, so only the bytes read matter.
+    let _ = stream.read_to_end(&mut reply);
+    let split = reply
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or("no HTTP response")?;
+    let head = String::from_utf8_lossy(&reply[..split]).into_owned();
+    if !head.starts_with("HTTP/1.1 200") {
+        return Err(format!(
+            "HTTP status: {}",
+            head.lines().next().unwrap_or_default()
+        ));
+    }
+    Ok(reply[split + 4..].to_vec())
 }
 
 // RFC 5936 §2.2: AXFR records remain in their individual DNS Messages.
@@ -561,7 +601,8 @@ pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(
     loop {
         // A TLS-only Corefile has no UDP Listener, so readiness also tries DNS over TLS.
         let answered = exchange(port, Transport::Udp, &wire).is_ok()
-            || exchange(port, Transport::Tls, &wire).is_ok();
+            || exchange(port, Transport::Tls, &wire).is_ok()
+            || exchange(port, Transport::Https, &wire).is_ok();
         if server.0.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
             return Err(format!(
                 "server on {port} did not start:\n{}",
