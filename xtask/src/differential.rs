@@ -396,6 +396,7 @@ fn exchange_with_key(
         }
         Transport::Tls => exchange_tls(port, wire, timeout).map(|reply| vec![reply]),
         Transport::Https => exchange_https(port, wire, timeout).map(|reply| vec![reply]),
+        Transport::Quic => exchange_quic(port, wire, timeout).map(|reply| vec![reply]),
         Transport::Tcp => {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
             stream
@@ -512,6 +513,70 @@ fn exchange_https(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<V
     Ok(reply[split + 4..].to_vec())
 }
 
+// RFC 9250 §4.2: DNS over QUIC sends one length-prefixed Query per stream with Message ID zero.
+fn exchange_quic(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
+    use quinn::{ClientConfig, Endpoint, crypto::rustls::QuicClientConfig};
+    use rustls::{
+        ClientConfig as TlsConfig, RootCertStore,
+        crypto::aws_lc_rs,
+        pki_types::{CertificateDer, pem::PemObject},
+    };
+
+    let ca = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/tls/ca.pem");
+    let mut roots = RootCertStore::empty();
+    for cert in CertificateDer::pem_file_iter(ca).map_err(|e| e.to_string())? {
+        roots
+            .add(cert.map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    }
+    let mut tls =
+        TlsConfig::builder_with_provider(std::sync::Arc::new(aws_lc_rs::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|e| e.to_string())?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    tls.alpn_protocols = vec![b"doq".to_vec()];
+    let client = QuicClientConfig::try_from(tls).map_err(|e| e.to_string())?;
+    let mut framed = u16::try_from(wire.len())
+        .map_err(|e| e.to_string())?
+        .to_be_bytes()
+        .to_vec();
+    framed.extend_from_slice(wire);
+    // RFC 9250 §4.2.1: the Message ID is zero over DoQ.
+    framed[2..4].fill(0);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let exchange = async {
+        let mut endpoint =
+            Endpoint::client(([127, 0, 0, 1], 0).into()).map_err(|e| e.to_string())?;
+        endpoint.set_default_client_config(ClientConfig::new(std::sync::Arc::new(client)));
+        let connection = endpoint
+            .connect(([127, 0, 0, 1], port).into(), "localhost")
+            .map_err(|e| e.to_string())?
+            .await
+            .map_err(|e| e.to_string())?;
+        let (mut send, mut recv) = connection.open_bi().await.map_err(|e| e.to_string())?;
+        send.write_all(&framed).await.map_err(|e| e.to_string())?;
+        send.finish().map_err(|e| e.to_string())?;
+        let reply = recv
+            .read_to_end(usize::from(u16::MAX) + 2)
+            .await
+            .map_err(|e| e.to_string())?;
+        connection.close(0u8.into(), b"");
+        reply
+            .get(2..)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| "short DoQ response".to_owned())
+    };
+    runtime
+        .block_on(async {
+            tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(2)), exchange).await
+        })
+        .map_err(|e| e.to_string())?
+}
+
 // RFC 5936 §2.2: AXFR records remain in their individual DNS Messages.
 fn collect_axfr(
     stream: &mut TcpStream,
@@ -599,10 +664,11 @@ pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(
     let wire = query::parse("ready. A IN udp")?.wire()?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        // A TLS-only Corefile has no UDP Listener, so readiness also tries DNS over TLS.
+        // A TLS-only or QUIC-only Corefile has no UDP Listener, so readiness also tries DNS over TLS and QUIC.
         let answered = exchange(port, Transport::Udp, &wire).is_ok()
             || exchange(port, Transport::Tls, &wire).is_ok()
-            || exchange(port, Transport::Https, &wire).is_ok();
+            || exchange(port, Transport::Https, &wire).is_ok()
+            || exchange(port, Transport::Quic, &wire).is_ok();
         if server.0.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
             return Err(format!(
                 "server on {port} did not start:\n{}",
