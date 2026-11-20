@@ -190,6 +190,8 @@ mod forward {
     mod forward_debug;
     #[path = "forward_ported.rs"]
     mod forward_ported;
+    #[path = "forward_tls.rs"]
+    mod forward_tls;
 }
 
 #[path = "functional"]

@@ -1180,6 +1180,7 @@ impl pharos_server::Plugin for Unimplemented {
     feature = "plugin-loadbalance",
     feature = "plugin-dnssec",
     feature = "plugin-sign",
+    feature = "plugin-forward",
     feature = "plugin-tls"
 ))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {
@@ -1203,6 +1204,7 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     feature = "plugin-loadbalance",
     feature = "plugin-dnssec",
     feature = "plugin-sign",
+    feature = "plugin-forward",
     feature = "plugin-tls"
 ))]
 fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std::path::PathBuf {
