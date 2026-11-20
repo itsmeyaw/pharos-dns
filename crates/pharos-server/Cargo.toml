@@ -10,6 +10,7 @@ description = "Listeners, Plugin Chain contract and metrics for the Pharos DNS s
 arc-swap = "1"
 aws-lc-rs = "1"
 base64 = "0.22"
+bcrypt = "0.19"
 bytes = "1"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"

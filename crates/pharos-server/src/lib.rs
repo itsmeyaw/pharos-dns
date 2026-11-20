@@ -24,6 +24,7 @@ use tokio::{
 };
 
 mod admission;
+pub mod basic_auth;
 mod conn;
 pub mod doh;
 pub mod doq_client;
