@@ -367,6 +367,12 @@ mod server {
 }
 
 #[path = "functional"]
+mod grpc {
+    #[path = "grpc.rs"]
+    mod cases;
+}
+
+#[path = "functional"]
 mod grpc_server {
     #[path = "grpc_server_setup.rs"]
     mod grpc_server_setup;
