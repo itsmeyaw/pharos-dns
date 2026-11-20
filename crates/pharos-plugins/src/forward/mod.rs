@@ -211,12 +211,18 @@ impl Forward {
             // RFC 1034 §5.3.1: Stub forwarding delegates resolution to configured servers.
             let mut tls_config = config.tls_client.clone();
             for target in config.upstreams {
+                let https = matches!(target, setup::Target::Https { .. });
+                let quic = matches!(target, setup::Target::Tls { quic: true, .. });
                 let (address, tls) = match target {
                     setup::Target::Address(address) => (address, None),
                     setup::Target::Tls {
                         address,
                         server_name,
-                        quic,
+                        ..
+                    }
+                    | setup::Target::Https {
+                        address,
+                        server_name,
                     } => {
                         let client = match &tls_config {
                             Some(client) => client.clone(),
@@ -258,6 +264,15 @@ impl Forward {
                 match tls {
                     // RFC 9250 §4.1.1: a `quic://` Upstream speaks DoQ.
                     Some((tls, true)) => proxy.set_quic(tls),
+                    Some((tls, false)) if https => {
+                        // RFC 8484 §4.1: `doh_method` picks GET or POST for Queries.
+                        let method = if config.doh_method == "GET" {
+                            hyper::Method::GET
+                        } else {
+                            hyper::Method::POST
+                        };
+                        proxy.set_https(proxy::Https::new(address, tls, method));
+                    }
                     Some((tls, false)) => proxy.set_tls(tls),
                     None => {}
                 }
