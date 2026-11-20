@@ -14,17 +14,54 @@ use pharos_server::{
 /// A loaded TLS identity and the settings it was loaded with.
 #[derive(Debug)]
 pub struct Tls {
-    /// The files of a `tls CERT KEY [CA]` identity.
-    pub options: Option<ServerOptions>,
-    /// The identity encrypted Listeners present; absent when the Server Block only answers challenges.
-    pub server: Option<ServerTls>,
-    /// The ACME configuration of a `tls { acme ... }` block.
-    pub acme: Option<Arc<acme::Entry>>,
+    identity: Identity,
     // The process-wide DNS-01 challenge state, attached to every Server Block when any block uses ACME.
     challenges: Option<Arc<acme::Solver>>,
 }
 
+/// Where a Server Block's certificates come from; the modes exclude each other.
+#[derive(Debug)]
+enum Identity {
+    /// The files of a `tls CERT KEY [CA]` identity.
+    Manual {
+        options: ServerOptions,
+        server: ServerTls,
+    },
+    /// The ACME configuration of a `tls { acme ... }` block.
+    Acme(Arc<acme::Entry>),
+    /// No `tls` Directive; the Server Block only answers challenges.
+    ChallengeOnly,
+}
+
 impl Tls {
+    /// The files of a `tls CERT KEY [CA]` identity.
+    #[must_use]
+    pub fn options(&self) -> Option<&ServerOptions> {
+        match &self.identity {
+            Identity::Manual { options, .. } => Some(options),
+            _ => None,
+        }
+    }
+
+    /// The identity encrypted Listeners present; absent when the Server Block only answers challenges.
+    #[must_use]
+    pub fn server(&self) -> Option<ServerTls> {
+        match &self.identity {
+            Identity::Manual { server, .. } => Some(server.clone()),
+            Identity::Acme(entry) => Some(entry.server()),
+            Identity::ChallengeOnly => None,
+        }
+    }
+
+    /// The ACME configuration of a `tls { acme ... }` block.
+    #[must_use]
+    pub fn acme(&self) -> Option<&Arc<acme::Entry>> {
+        match &self.identity {
+            Identity::Acme(entry) => Some(entry),
+            _ => None,
+        }
+    }
+
     /// Whether this Server Block answers `_acme-challenge` TXT Queries.
     #[must_use]
     pub fn answers_challenges(&self) -> bool {
@@ -34,9 +71,7 @@ impl Tls {
     /// A Server Block without a `tls` Directive that still answers challenges for other blocks' ACME entries.
     pub(crate) fn challenge_only(solver: Arc<acme::Solver>) -> Self {
         Self {
-            options: None,
-            server: None,
-            acme: None,
+            identity: Identity::ChallengeOnly,
             challenges: Some(solver),
         }
     }
@@ -65,9 +100,7 @@ pub(crate) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Tls,
             // CoreDNS v1.15.0 plugin/tls/tls.go parseTLS: no arguments selects ACME.
             let entry = acme::parse(cursor, root)?;
             Tls {
-                options: None,
-                server: Some(entry.server()),
-                acme: Some(Arc::new(entry)),
+                identity: Identity::Acme(Arc::new(entry)),
                 challenges: None,
             }
         } else {
@@ -126,9 +159,7 @@ fn parse_manual(
     };
     let server = ServerTls::load(&options).map_err(|error| cursor.error(error.to_string()))?;
     Ok(Tls {
-        options: Some(options),
-        server: Some(server),
-        acme: None,
+        identity: Identity::Manual { options, server },
         challenges: None,
     })
 }

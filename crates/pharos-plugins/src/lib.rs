@@ -779,7 +779,7 @@ pub fn servers_with_registry(
         let empty = pharos_server::Chain::is_empty(&block.config);
         lifecycle.extend(&block.config.lifecycle);
         #[cfg(feature = "plugin-tls")]
-        let tls = block.config.tls.as_ref().and_then(|tls| tls.server.clone());
+        let tls = block.config.tls.as_ref().and_then(|tls| tls.server());
         #[cfg(not(feature = "plugin-tls"))]
         let tls: Option<pharos_server::tls::ServerTls> = None;
         let mut routes = Vec::new();

@@ -84,7 +84,7 @@ fn client_auth_keywords_map_to_policies() {
     ] {
         let blocks = configure_block(&format!("tls @CERT @KEY @CA {option}")).unwrap();
         let tls = blocks[0].config.tls.as_ref().unwrap();
-        let options = tls.options.as_ref().unwrap();
+        let options = tls.options().unwrap();
         assert_eq!(options.client_auth, expected, "{option}");
         assert!(options.ca.is_some());
     }
@@ -121,14 +121,7 @@ fn relative_paths_resolve_against_root() {
         "root {FIXTURES}\ntls server.pem server.key.pem ca.pem"
     ))
     .unwrap();
-    let options = blocks[0]
-        .config
-        .tls
-        .as_ref()
-        .unwrap()
-        .options
-        .as_ref()
-        .unwrap();
+    let options = blocks[0].config.tls.as_ref().unwrap().options().unwrap();
     assert_eq!(
         options.cert,
         std::path::Path::new(FIXTURES)
@@ -162,9 +155,9 @@ fn acme_block_parses_every_option() {
     ))
     .unwrap();
     let tls = blocks[0].config.tls.as_ref().unwrap();
-    assert!(tls.server.is_some());
-    assert!(tls.options.is_none());
-    let acme = tls.acme.as_ref().unwrap();
+    assert!(tls.server().is_some());
+    assert!(tls.options().is_none());
+    let acme = tls.acme().unwrap();
     let root = root.canonicalize().unwrap();
     assert_eq!(acme.options.domains, ["dns.example"]);
     assert_eq!(acme.options.email.as_deref(), Some("admin@example.org"));
@@ -179,14 +172,7 @@ fn acme_block_parses_every_option() {
 fn acme_defaults_to_lets_encrypt_and_storage_below_root() {
     let blocks =
         configure_block(&format!("root {FIXTURES}\ntls {{\n acme dns.example\n}}")).unwrap();
-    let acme = blocks[0]
-        .config
-        .tls
-        .as_ref()
-        .unwrap()
-        .acme
-        .as_ref()
-        .unwrap();
+    let acme = blocks[0].config.tls.as_ref().unwrap().acme().unwrap();
     assert_eq!(
         acme.options.ca,
         "https://acme-v02.api.letsencrypt.org/directory"
