@@ -54,7 +54,9 @@ pub(crate) fn spawn<H: Handler>(
                             let (peer, handler) = (crate::canonical_peer(peer), Arc::clone(&handler));
                             let options = handler.tcp_options();
                             // RFC 1996 §3.5: Keep serving DNS during TCP NOTIFY transactions.
-                            if encrypted {
+                            if let Some(proxy) = handler.proxyproto() {
+                                connections.spawn(serve_proxied(stream, peer, (proxy, encrypted), handler, (stop, stopped), options));
+                            } else if encrypted {
                                 connections.spawn(serve_tls(stream, peer, handler, (stop, stopped), options));
                             } else {
                                 connections.spawn(serve_plain(stream, peer, handler, (stop, stopped), options));
@@ -144,17 +146,66 @@ async fn serve_plain<H: Handler>(
 ) {
     disable_nagle(&stream);
     let (reader, writer) = stream.into_split();
-    serve(reader, writer, peer, handler, stop, options).await;
+    serve(reader, writer, peer, handler, stop, options, None).await;
+}
+
+// PROXY protocol §2: the header precedes any other bytes, so it is read before the TLS handshake or first frame.
+async fn serve_proxied<H: Handler>(
+    stream: TcpStream,
+    peer: SocketAddr,
+    (proxy, encrypted): (Arc<crate::proxyproto::Config>, bool),
+    handler: Arc<H>,
+    (stop, mut stopped): Stop,
+    options: TcpOptions,
+) {
+    disable_nagle(&stream);
+    let accepted = tokio::select! {
+        biased;
+        _ = stopped.changed() => return,
+        accepted = proxy.accept_stream(stream, peer) => match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                crate::logging::log("DEBUG", "proxyproto", &format!("closing connection from {peer}: {error}"));
+                return;
+            }
+        },
+    };
+    let (peer, tlv) = (accepted.peer, accepted.tlv);
+    if encrypted {
+        serve_tls_stream(
+            accepted.stream,
+            peer,
+            tlv,
+            handler,
+            (stop, stopped),
+            options,
+        )
+        .await;
+    } else {
+        let (reader, writer) = tokio::io::split(accepted.stream);
+        serve(reader, writer, peer, handler, (stop, stopped), options, tlv).await;
+    }
 }
 
 async fn serve_tls<H: Handler>(
     stream: TcpStream,
     peer: SocketAddr,
     handler: Arc<H>,
-    (stop, mut stopped): Stop,
+    stop: Stop,
     options: TcpOptions,
 ) {
     disable_nagle(&stream);
+    serve_tls_stream(stream, peer, None, handler, stop, options).await;
+}
+
+async fn serve_tls_stream<H: Handler>(
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    peer: SocketAddr,
+    tlv: Option<Arc<str>>,
+    handler: Arc<H>,
+    (stop, mut stopped): Stop,
+    options: TcpOptions,
+) {
     let Some(tls) = handler.tls() else {
         crate::logging::log("ERROR", "server", "TLS Listener has no TLS identity");
         return;
@@ -170,7 +221,7 @@ async fn serve_tls<H: Handler>(
         },
     };
     let (reader, writer) = tokio::io::split(stream);
-    serve(reader, writer, peer, handler, (stop, stopped), options).await;
+    serve(reader, writer, peer, handler, (stop, stopped), options, tlv).await;
 }
 
 async fn serve<H, R, W>(
@@ -180,6 +231,7 @@ async fn serve<H, R, W>(
     handler: Arc<H>,
     (stop, mut stopped): Stop,
     options: TcpOptions,
+    tlv: Option<Arc<str>>,
 ) where
     H: Handler,
     R: AsyncRead + Unpin + Send,
@@ -301,11 +353,19 @@ async fn serve<H, R, W>(
         let writer = Arc::clone(&writer);
         let stop = stop.clone();
         let fin = Arc::clone(&fin);
+        let tlv = tlv.clone();
         let mut response = responses.pop().unwrap_or_default();
         response.clear();
         let mut task = Box::pin(async move {
-            let action =
-                H::handle_shared(&handler, &query, peer, Protocol::Tcp, &mut response).await;
+            let action = match &tlv {
+                Some(tlv) => {
+                    H::handle_proxied(&handler, &query, peer, Protocol::Tcp, tlv, &mut response)
+                        .await
+                }
+                None => {
+                    H::handle_shared(&handler, &query, peer, Protocol::Tcp, &mut response).await
+                }
+            };
             let mut transfer = match action {
                 Action::Drop => return response,
                 Action::Respond => None,

@@ -1,0 +1,234 @@
+#![forbid(unsafe_code)]
+
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+
+use pharos_server::{
+    Action, Handler, ListenerKey, ListenerRegistry, Protocol, Transport,
+    proxyproto::{Config, Policy, UdpTracking},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UdpSocket},
+    time::timeout,
+};
+
+const TEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Answers every Query with the peer address and TLV hex the Listener reported.
+struct Probe {
+    config: Arc<Config>,
+}
+
+impl Handler for Probe {
+    fn proxyproto(&self) -> Option<Arc<Config>> {
+        Some(Arc::clone(&self.config))
+    }
+    async fn handle(
+        &self,
+        _: &[u8],
+        peer: SocketAddr,
+        _: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        response.extend_from_slice(format!("{peer}|").as_bytes());
+        Action::Respond
+    }
+    async fn handle_shared(
+        self: &Arc<Self>,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        self.handle(query, peer, protocol, response).await
+    }
+    async fn handle_proxied(
+        self: &Arc<Self>,
+        _: &[u8],
+        peer: SocketAddr,
+        _: Protocol,
+        tlv: &str,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        response.extend_from_slice(format!("{peer}|{tlv}").as_bytes());
+        Action::Respond
+    }
+}
+
+fn config(policy: Policy) -> Config {
+    let mut config = Config::new(move |_| policy);
+    config.header_timeout = Duration::from_millis(300);
+    config.tlv_metadata = true;
+    config
+}
+
+fn key() -> ListenerKey {
+    ListenerKey {
+        transport: Transport::Dns,
+        address: "127.0.0.1:0".parse().unwrap(),
+    }
+}
+
+async fn listening(config: Config) -> (ListenerRegistry, SocketAddr) {
+    let mut registry = ListenerRegistry::default();
+    let handler = Probe {
+        config: Arc::new(config),
+    };
+    registry
+        .apply(HashMap::from([(key(), handler)]))
+        .await
+        .unwrap();
+    let address = registry.get(&key()).unwrap().local_addr();
+    (registry, address)
+}
+
+fn v1() -> Vec<u8> {
+    b"PROXY TCP4 192.0.2.1 192.0.2.53 12345 53\r\n".to_vec()
+}
+
+// PROXY protocol §2.2: a PROXY command header for IPv4; `family` 0x11 is STREAM, 0x12 DGRAM.
+fn v2(family: u8, tlvs: &[u8]) -> Vec<u8> {
+    let mut wire = b"\r\n\r\n\0\r\nQUIT\n".to_vec();
+    wire.extend([0x21, family]);
+    wire.extend(u16::try_from(12 + tlvs.len()).unwrap().to_be_bytes());
+    wire.extend([192, 0, 2, 1, 192, 0, 2, 53]);
+    wire.extend(12345u16.to_be_bytes());
+    wire.extend(53u16.to_be_bytes());
+    wire.extend(tlvs);
+    wire
+}
+
+fn framed(query: &[u8]) -> Vec<u8> {
+    let mut wire = u16::try_from(query.len()).unwrap().to_be_bytes().to_vec();
+    wire.extend(query);
+    wire
+}
+
+async fn read_response(stream: &mut TcpStream) -> Option<String> {
+    let length = timeout(TEST_TIMEOUT, stream.read_u16()).await.ok()?.ok()?;
+    let mut response = vec![0; length.into()];
+    stream.read_exact(&mut response).await.ok()?;
+    Some(String::from_utf8(response).unwrap())
+}
+
+async fn tcp_exchange(address: SocketAddr, wire: &[u8]) -> Option<String> {
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(wire).await.unwrap();
+    read_response(&mut stream).await
+}
+
+// PROXY protocol §2.1: a v1 header precedes the first DNS frame of the connection.
+#[tokio::test]
+async fn tcp_v1_header_sets_the_peer_seen_by_the_handler() {
+    let (registry, address) = listening(config(Policy::Use)).await;
+    let wire = [v1(), framed(b"query")].concat();
+    assert_eq!(
+        tcp_exchange(address, &wire).await.as_deref(),
+        Some("192.0.2.1:12345|")
+    );
+    registry.shutdown().await.unwrap();
+}
+
+// PROXY protocol §2.2: a v2 header carries the TLV vector that `tlv_metadata` publishes.
+#[tokio::test]
+async fn tcp_v2_header_sets_the_peer_and_the_tlv() {
+    let (registry, address) = listening(config(Policy::Use)).await;
+    let wire = [v2(0x11, &[0xEA, 0, 2, 0xCA, 0xFE]), framed(b"query")].concat();
+    assert_eq!(
+        tcp_exchange(address, &wire).await.as_deref(),
+        Some("192.0.2.1:12345|ea0002cafe")
+    );
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn tcp_header_applies_to_every_query_of_the_connection() {
+    let (registry, address) = listening(config(Policy::Use)).await;
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(&[v1(), framed(b"one"), framed(b"two")].concat())
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            read_response(&mut stream).await.as_deref(),
+            Some("192.0.2.1:12345|")
+        );
+    }
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn tcp_without_a_header_keeps_the_real_peer_under_use() {
+    let (registry, address) = listening(config(Policy::Use)).await;
+    let response = tcp_exchange(address, &framed(b"query")).await.unwrap();
+    assert!(response.starts_with("127.0.0.1:"), "{response}");
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn tcp_ignore_policy_consumes_the_header_but_keeps_the_real_peer() {
+    let (registry, address) = listening(config(Policy::Ignore)).await;
+    let wire = [v1(), framed(b"query")].concat();
+    let response = tcp_exchange(address, &wire).await.unwrap();
+    assert!(response.starts_with("127.0.0.1:"), "{response}");
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn tcp_reject_policy_closes_a_connection_with_a_header() {
+    let (registry, address) = listening(config(Policy::Reject)).await;
+    let wire = [v1(), framed(b"query")].concat();
+    assert_eq!(tcp_exchange(address, &wire).await, None);
+    assert!(tcp_exchange(address, &framed(b"query")).await.is_some());
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn tcp_skip_policy_leaves_the_header_to_the_application() {
+    let (registry, address) = listening(config(Policy::Skip)).await;
+    let wire = [v1(), framed(b"query")].concat();
+    // The header's bytes read as a DNS length prefix; no Response carries the client address.
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(&wire).await.unwrap();
+    stream.shutdown().await.unwrap();
+    assert_eq!(read_response(&mut stream).await, None);
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn tcp_header_that_never_completes_is_closed_after_the_header_timeout() {
+    let (registry, address) = listening(config(Policy::Use)).await;
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(b"PROXY TCP4 192.0.2.1 ").await.unwrap();
+    let mut byte = [0];
+    let read = timeout(TEST_TIMEOUT, stream.read(&mut byte)).await.unwrap();
+    assert!(matches!(read, Ok(0) | Err(_)));
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn tcp_truncated_and_malicious_headers_close_the_connection() {
+    let (registry, address) = listening(config(Policy::Use)).await;
+    let mut oversized = v2(0x11, &[]);
+    oversized[14..16].copy_from_slice(&u16::MAX.to_be_bytes());
+    let long_line = [b"PROXY UNKNOWN ".as_slice(), &[b'x'; 4096]].concat();
+    for wire in [
+        v1()[..20].to_vec(),
+        v2(0x11, &[])[..20].to_vec(),
+        oversized,
+        long_line,
+        b"PROXY TCP4 999.0.0.1 192.0.2.53 1 2\r\n".to_vec(),
+    ] {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(&wire).await.unwrap();
+        stream.shutdown().await.unwrap();
+        assert_eq!(read_response(&mut stream).await, None);
+    }
+    // The Listener still serves after the abuse.
+    assert!(tcp_exchange(address, &framed(b"query")).await.is_some());
+    registry.shutdown().await.unwrap();
+}
+
+#[allow(dead_code)]
+fn unused(_: UdpTracking, _: UdpSocket) {}

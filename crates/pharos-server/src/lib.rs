@@ -875,6 +875,10 @@ pub trait Handler: Send + Sync + 'static {
     fn quic_metrics(&self) -> Option<QuicMetrics> {
         None
     }
+    /// PROXY protocol settings applied to every connection and datagram of this Listener.
+    fn proxyproto(&self) -> Option<Arc<proxyproto::Config>> {
+        None
+    }
     /// Number of UDP worker sockets for this Listener.
     fn udp_workers(&self) -> usize {
         quota::worker_count()
@@ -900,6 +904,18 @@ pub trait Handler: Send + Sync + 'static {
         response: &mut Vec<u8>,
     ) -> impl Future<Output = Action> + Send {
         self.handle(query, peer, protocol, response)
+    }
+
+    /// Handle a Query whose connection or UDP session carried PROXY v2 TLVs, hex-encoded in `tlv`.
+    fn handle_proxied(
+        self: &Arc<Self>,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        _tlv: &str,
+        response: &mut Vec<u8>,
+    ) -> impl Future<Output = Action> + Send {
+        self.handle_shared(query, peer, protocol, response)
     }
 }
 
@@ -1777,6 +1793,9 @@ impl<H: Handler> Handler for Swappable<H> {
     fn quic_metrics(&self) -> Option<QuicMetrics> {
         self.0.load().quic_metrics()
     }
+    fn proxyproto(&self) -> Option<Arc<proxyproto::Config>> {
+        self.0.load().proxyproto()
+    }
     fn udp_workers(&self) -> usize {
         self.0.load().udp_workers()
     }
@@ -1792,5 +1811,16 @@ impl<H: Handler> Handler for Swappable<H> {
     ) -> Action {
         let handler = self.0.load();
         H::handle_shared(&handler, query, peer, protocol, response).await
+    }
+    async fn handle_proxied(
+        self: &Arc<Self>,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        tlv: &str,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        let handler = self.0.load();
+        H::handle_proxied(&handler, query, peer, protocol, tlv, response).await
     }
 }
