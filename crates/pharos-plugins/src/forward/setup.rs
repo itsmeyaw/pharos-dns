@@ -18,10 +18,11 @@ pub(super) enum Policy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Target {
     Address(SocketAddr),
-    /// A DNS-over-TLS Upstream; the name the certificate must match, else its IP address.
+    /// A DNS-over-TLS or, with `quic`, DNS-over-QUIC Upstream; the name the certificate must match, else its IP address.
     Tls {
         address: SocketAddr,
         server_name: Option<String>,
+        quic: bool,
     },
     Invalid(String),
 }
@@ -266,19 +267,22 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Conf
     let mut entries = 0;
     for to in &args[1..] {
         let (scheme, address) = to.split_once("://").unwrap_or(("dns", to));
-        if scheme != "dns" && scheme != "tls" {
+        if !matches!(scheme, "dns" | "tls" | "quic") {
             return Err(cursor.error(format!("{scheme} Upstreams are not supported")));
         }
-        let tls = scheme == "tls";
+        let quic = scheme == "quic";
+        let tls = quic || scheme == "tls";
         // RFC 7858 §3.1: DoT uses TCP port 853 unless the Upstream names another.
+        // RFC 9250 §4.1.1: DoQ uses UDP port 853 unless the Upstream names another.
         let default_port = if tls { 853 } else { 53 };
         let (unscoped, zone) = split_zone(address);
-        // CoreDNS v1.15.0 plugin/forward/setup.go: the zone of a `tls://` Upstream is its TLS server name.
+        // CoreDNS v1.15.0 plugin/forward/setup.go: the zone of a `tls://` or `quic://` Upstream is its TLS server name.
         let target = |address| {
             if tls {
                 Target::Tls {
                     address,
                     server_name: zone.as_ref().map(|zone| zone.to_ascii_lowercase()),
+                    quic,
                 }
             } else {
                 Target::Address(address)
@@ -343,10 +347,12 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Conf
             if let Target::Tls {
                 address,
                 server_name: Some(server_name),
+                quic,
             } = target
             {
+                let scheme = if *quic { "quic" } else { "tls" };
                 return Err(cursor.error(format!(
-                    "both forward ('{forward_name}') and proxy level ('{server_name}') TLS servernames are set for upstream proxy 'tls://{address}'"
+                    "both forward ('{forward_name}') and proxy level ('{server_name}') TLS servernames are set for upstream proxy '{scheme}://{address}'"
                 )));
             }
         }
@@ -530,6 +536,15 @@ mod tests {
         Target::Tls {
             address: address.parse().unwrap(),
             server_name: server_name.map(str::to_owned),
+            quic: false,
+        }
+    }
+
+    fn quic(address: &str, server_name: Option<&str>) -> Target {
+        Target::Tls {
+            address: address.parse().unwrap(),
+            server_name: server_name.map(str::to_owned),
+            quic: true,
         }
     }
 
@@ -582,7 +597,6 @@ mod tests {
             "forward .",
             "forward . invalid..domain",
             "forward . https://1.1.1.1",
-            "forward . quic://1.1.1.1",
             "forward . grpc://1.1.1.1",
             "forward . unix:///run/dns.sock",
             "forward . 1.1.1.1 {\nunknown x\n}",
@@ -603,10 +617,57 @@ mod tests {
             assert!(parse_text(text).is_err(), "accepted {text}");
         }
         assert!(
-            parse_text("forward . quic://1.1.1.1")
+            parse_text("forward . grpc://1.1.1.1")
                 .unwrap_err()
                 .to_string()
-                .contains("quic Upstreams are not supported")
+                .contains("grpc Upstreams are not supported")
+        );
+    }
+
+    // CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: `quic://` defaults to port 853.
+    #[test]
+    fn quic_upstreams_default_to_port_853() {
+        let config = parse_text(
+            "forward . quic://9.9.9.9 quic://[2620:fe::fe]:8853 quic://[::1] quic://127.0.0.1%Example.net:854",
+        )
+        .unwrap();
+        assert_eq!(
+            config.upstreams,
+            [
+                quic("9.9.9.9:853", None),
+                quic("[2620:fe::fe]:8853", None),
+                quic("[::1]:853", None),
+                quic("127.0.0.1:854", Some("example.net")),
+            ]
+        );
+    }
+
+    // CoreDNS v1.15.0 plugin/forward/setup.go: `tls_servername` covers `quic://` and conflicts with its zone.
+    #[test]
+    fn tls_servername_applies_to_quic_upstreams() {
+        let config = parse_text(
+            "forward . quic://127.0.0.1 tls://127.0.0.2 {\ntls_servername dns.example\n}",
+        )
+        .unwrap();
+        assert_eq!(
+            config.upstreams,
+            [quic("127.0.0.1:853", None), tls("127.0.0.2:853", None)]
+        );
+        assert_eq!(
+            parse_text("forward . quic://127.0.0.3%Other {\ntls_servername dns.example\n}")
+                .unwrap_err()
+                .to_string(),
+            "Corefile:3: both forward ('dns.example') and proxy level ('other') TLS servernames are set for upstream proxy 'quic://127.0.0.3:853'"
+        );
+    }
+
+    #[test]
+    fn dns_tls_and_quic_upstreams_at_one_address_stay_distinct() {
+        let config =
+            parse_text("forward . tls://127.0.0.1 quic://127.0.0.1 quic://127.0.0.1").unwrap();
+        assert_eq!(
+            config.upstreams,
+            [tls("127.0.0.1:853", None), quic("127.0.0.1:853", None)]
         );
     }
 
