@@ -909,13 +909,13 @@ impl Proxy {
             }
         };
         let reused = cached.is_some();
-        if let Some(metrics) = &self.metrics {
-            if let Some(cache) = &metrics.cache[protocol] {
-                if reused {
-                    cache.hit();
-                } else {
-                    cache.miss();
-                }
+        if let Some(metrics) = &self.metrics
+            && let Some(cache) = &metrics.cache[protocol]
+        {
+            if reused {
+                cache.hit();
+            } else {
+                cache.miss();
             }
         }
         // RFC 7766 §6.2.1: DNS clients should reuse persistent TCP connections.
