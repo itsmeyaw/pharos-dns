@@ -209,6 +209,30 @@ fn listener_uses_the_last_server_block_that_configures_proxyproto() {
     assert_eq!(proxy.policy(ip("192.0.2.1")), Policy::Skip);
 }
 
+// Every Transport's Listener takes the proxyproto settings of its Server Block.
+#[cfg(feature = "plugin-tls")]
+#[test]
+fn every_encrypted_transport_listener_gets_the_proxy_settings() {
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/tls");
+    for (scheme, transport) in [
+        ("tls", Transport::Tls),
+        ("https", Transport::Https),
+        ("grpc", Transport::Grpc),
+        ("quic", Transport::Quic),
+        ("https3", Transport::Https3),
+    ] {
+        let text = format!(
+            "{scheme}://.:8443 {{\n tls {fixtures}/server.pem {fixtures}/server.key.pem\n proxyproto {{\n default reject\n }}\n whoami\n}}"
+        );
+        let blocks = configure::<Chain>(&parse("Corefile", &text).unwrap(), directives()).unwrap();
+        let (servers, _) = pharos_plugins::servers(blocks).unwrap();
+        let (key, server) = servers.iter().next().unwrap();
+        assert_eq!(key.transport, transport, "{scheme}");
+        let proxy = server.proxyproto.as_ref().unwrap();
+        assert_eq!(proxy.policy(ip("192.0.2.1")), Policy::Reject, "{scheme}");
+    }
+}
+
 #[test]
 fn listener_without_proxyproto_has_no_proxy_settings() {
     let blocks = configure_block("whoami").unwrap();
