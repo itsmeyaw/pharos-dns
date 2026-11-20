@@ -13,7 +13,8 @@ use std::{
 };
 
 use rustls::{
-    DistinguishedName, RootCertStore, ServerConfig, SignatureScheme,
+    DistinguishedName, NamedGroup, RootCertStore, ServerConfig, SignatureScheme,
+    SupportedCipherSuite,
     client::danger::HandshakeSignatureValid,
     crypto::{
         CryptoProvider, WebPkiSupportedAlgorithms, aws_lc_rs, verify_tls12_signature,
@@ -58,6 +59,46 @@ pub struct ServerOptions {
     pub keylog: Option<PathBuf>,
 }
 
+/// A TLS protocol version Pharos can negotiate.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Version {
+    Tls12,
+    Tls13,
+}
+
+/// A key exchange group a Listener may be limited to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Curve {
+    P256,
+    P384,
+    /// Known, but rustls with aws-lc-rs cannot offer it.
+    P521,
+    X25519,
+}
+
+/// What a Listener negotiates beyond its identity; the default allows everything Pharos supports.
+#[derive(Clone, Debug)]
+pub struct Restrictions {
+    pub min_version: Version,
+    pub max_version: Version,
+    /// IANA names of the TLS 1.2 cipher suites to offer; none offers every suite. TLS 1.3 names are
+    /// accepted but ignored, because TLS 1.3 suites are not configurable (RFC 8446 §9.1).
+    pub cipher_suites: Vec<String>,
+    /// Key exchange groups to offer in order of preference; none offers every group.
+    pub curves: Vec<Curve>,
+}
+
+impl Default for Restrictions {
+    fn default() -> Self {
+        Self {
+            min_version: Version::Tls12,
+            max_version: Version::Tls13,
+            cipher_suites: Vec::new(),
+            curves: Vec::new(),
+        }
+    }
+}
+
 /// A loaded server identity. Cloning shares the same rustls configuration.
 #[derive(Clone)]
 pub struct ServerTls {
@@ -86,7 +127,16 @@ impl fmt::Debug for ServerTls {
 impl ServerTls {
     /// Read the certificate, key and client CA files; any unreadable or inconsistent file fails.
     pub fn load(options: &ServerOptions) -> io::Result<Self> {
-        let provider = provider();
+        Self::load_restricted(options, &Restrictions::default())
+    }
+
+    /// [`ServerTls::load`] that also limits protocol versions, TLS 1.2 cipher suites and key exchange groups.
+    pub fn load_restricted(
+        options: &ServerOptions,
+        restrictions: &Restrictions,
+    ) -> io::Result<Self> {
+        let provider = restricted_provider(restrictions)?;
+        let versions = versions(restrictions, &provider)?;
         let chain = read_chain(&options.cert).map_err(load_error)?;
         let key = PrivateKeyDer::from_pem_file(&options.key)
             .map_err(|error| load_error(io::Error::other(error)))?;
@@ -141,7 +191,7 @@ impl ServerTls {
                 Ok(config)
             };
         // RFC 7858 §3.2: DoT uses TLS; RFC 9325 §3.1.1 forbids versions below TLS 1.2.
-        let config = build(&[&TLS13, &TLS12])?;
+        let config = build(&versions)?;
         // RFC 9001 §4.2: QUIC requires TLS 1.3; RFC 9250 §4.1.1: DoQ negotiates ALPN "doq".
         let mut quic = build(&[&TLS13])?;
         quic.alpn_protocols = vec![b"doq".to_vec()];
@@ -271,6 +321,110 @@ pub fn client_config(options: &ClientOptions) -> io::Result<Arc<ClientConfig>> {
 
 fn provider() -> Arc<CryptoProvider> {
     Arc::new(aws_lc_rs::default_provider())
+}
+
+// RFC 8446 §9.1: TLS 1.3 suites are always on; the restricted names narrow only TLS 1.2 (RFC 5246 §7.4.1.2).
+fn restricted_provider(restrictions: &Restrictions) -> io::Result<Arc<CryptoProvider>> {
+    const TLS13_NAMES: [&str; 3] = [
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_AES_256_GCM_SHA384",
+        "TLS_CHACHA20_POLY1305_SHA256",
+    ];
+    const GO_ONLY_NAMES: [&str; 4] = [
+        "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+        "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
+        "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+        "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+    ];
+    let mut provider = aws_lc_rs::default_provider();
+    if !restrictions.cipher_suites.is_empty() {
+        let offered = |name: &str| {
+            provider.cipher_suites.iter().any(|suite| {
+                matches!(suite, SupportedCipherSuite::Tls12(_))
+                    && suite.suite().as_str() == Some(name)
+            })
+        };
+        for name in &restrictions.cipher_suites {
+            if TLS13_NAMES.contains(&name.as_str()) || offered(name) {
+                continue;
+            }
+            // Go's crypto/tls lists these as secure, but rustls has no CBC suites.
+            if GO_ONLY_NAMES.contains(&name.as_str()) {
+                crate::logging::log(
+                    "WARN",
+                    "tls",
+                    &format!("cipher suite {name} is not supported and will not be offered"),
+                );
+                continue;
+            }
+            return Err(invalid(format!("unknown cipher: {name}")));
+        }
+        provider.cipher_suites.retain(|suite| match suite {
+            SupportedCipherSuite::Tls13(_) => true,
+            SupportedCipherSuite::Tls12(_) => suite.suite().as_str().is_some_and(|name| {
+                restrictions
+                    .cipher_suites
+                    .iter()
+                    .any(|wanted| wanted == name)
+            }),
+        });
+    }
+    if !restrictions.curves.is_empty() {
+        let mut groups = Vec::new();
+        for curve in &restrictions.curves {
+            let wanted = match curve {
+                Curve::P256 => NamedGroup::secp256r1,
+                Curve::P384 => NamedGroup::secp384r1,
+                Curve::X25519 => NamedGroup::X25519,
+                Curve::P521 => {
+                    crate::logging::log(
+                        "WARN",
+                        "tls",
+                        "curve CurveP521 is not supported and will not be offered",
+                    );
+                    continue;
+                }
+            };
+            if let Some(group) = aws_lc_rs::ALL_KX_GROUPS
+                .iter()
+                .find(|group| group.name() == wanted)
+            {
+                groups.push(*group);
+            }
+        }
+        if groups.is_empty() {
+            return Err(invalid("no supported key exchange group configured"));
+        }
+        provider.kx_groups = groups;
+    }
+    Ok(Arc::new(provider))
+}
+
+// RFC 8446 §4.2.1: the versions between the configured bounds that still have a cipher suite.
+fn versions(
+    restrictions: &Restrictions,
+    provider: &CryptoProvider,
+) -> io::Result<Vec<&'static rustls::SupportedProtocolVersion>> {
+    if restrictions.min_version > restrictions.max_version {
+        return Err(invalid("minimum TLS version is above the maximum"));
+    }
+    let has = |tls13: bool| {
+        provider
+            .cipher_suites
+            .iter()
+            .any(|suite| matches!(suite, SupportedCipherSuite::Tls13(_)) == tls13)
+    };
+    let mut versions = Vec::new();
+    if restrictions.max_version >= Version::Tls13 && has(true) {
+        versions.push(&TLS13);
+    }
+    if restrictions.min_version <= Version::Tls12 && has(false) {
+        versions.push(&TLS12);
+    }
+    if versions.is_empty() {
+        return Err(invalid("no TLS version has a cipher suite to offer"));
+    }
+    Ok(versions)
 }
 
 fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
