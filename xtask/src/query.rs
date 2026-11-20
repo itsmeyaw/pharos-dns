@@ -10,6 +10,7 @@ pub(crate) enum Transport {
     Tcp,
     Tls,
     Https,
+    Quic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,6 +102,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         "tcp" => Transport::Tcp,
         "tls" => Transport::Tls,
         "https" => Transport::Https,
+        "quic" => Transport::Quic,
         _ => return Err(format!("invalid transport: {transport}")),
     };
     let mut query = Query {

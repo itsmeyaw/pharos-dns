@@ -361,6 +361,12 @@ mod server {
 }
 
 #[path = "functional"]
+mod quic {
+    #[path = "quic_setup.rs"]
+    mod quic_setup;
+}
+
+#[path = "functional"]
 mod shed {
     #[path = "shed_setup.rs"]
     mod shed_setup;

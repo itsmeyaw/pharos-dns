@@ -13,6 +13,7 @@ fn config_only(name: &str) -> bool {
             | "multisocket"
             | "tls"
             | "https"
+            | "quic"
             | "ready"
             | "health"
             | "reload"
@@ -89,6 +90,7 @@ fn main() {
             "multisocket" => "Option<usize>",
             "tls" => "tls::Tls",
             "https" => "https::Https",
+            "quic" => "quic::Quic",
             "whoami" => "whoami::Whoami",
             "view" => "view::View",
             "log" => "log::Log",
@@ -147,6 +149,7 @@ fn main() {
             "multisocket" => "multisocket::setup::setup",
             "tls" => "tls::setup::setup",
             "https" => "https::setup::setup",
+            "quic" => "quic::setup::setup",
             "whoami" => "whoami::setup::setup",
             "view" => "view::setup::setup",
             "log" => "log::setup::setup",
@@ -188,6 +191,7 @@ fn main() {
                 | "nsid"
                 | "kubernetes"
                 | "view"
+                | "quic"
         );
         writeln!(
             code,

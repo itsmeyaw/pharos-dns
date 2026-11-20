@@ -131,6 +131,8 @@ pub mod r#loop;
 pub mod metadata;
 #[cfg(feature = "plugin-prometheus")]
 pub mod prometheus;
+#[cfg(feature = "plugin-quic")]
+pub mod quic;
 #[cfg(feature = "plugin-ready")]
 pub mod ready;
 #[cfg(feature = "plugin-reload")]
@@ -527,6 +529,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("multisocket", include_str!("multisocket/README.md")),
     ("nsid", include_str!("nsid/README.md")),
     ("prometheus", include_str!("prometheus/README.md")),
+    ("quic", include_str!("quic/README.md")),
     ("ready", include_str!("ready/README.md")),
     ("reload", include_str!("reload/README.md")),
     ("rewrite", include_str!("rewrite/README.md")),
@@ -614,6 +617,7 @@ pub fn servers_with_registry(
         bool,
         // The first Server Block's TLS identity and Domain, for the shared-Listener check.
         Option<(pharos_server::tls::ServerTls, String)>,
+        pharos_server::QuicOptions,
     );
     let mut groups: HashMap<ListenerKey, ListenerGroup> = HashMap::new();
     // Limits of each `https://` Listener: the first Server Block's connection limit and the one explicit stream limit.
@@ -761,6 +765,7 @@ pub fn servers_with_registry(
                 "dns" => Transport::Dns,
                 "tls" if tls.is_some() => Transport::Tls,
                 "tls" => return Err(requires_tls()),
+                "quic" if tls.is_some() => Transport::Quic,
                 "https" | "grpc" | "quic" | "https3" if tls.is_none() => return Err(requires_tls()),
                 "https" => Transport::Https,
                 _ => {
@@ -908,6 +913,14 @@ pub fn servers_with_registry(
         if chain.ready.is_some() {
             chain.collect_readiness(&ready_state);
         }
+        // CoreDNS v1.15.0 core/dnsserver/server_quic.go NewServerQUIC: the first Server Block's limits apply.
+        #[cfg(feature = "plugin-quic")]
+        let quic = chain
+            .quic
+            .as_ref()
+            .map_or_else(Default::default, quic::Quic::options);
+        #[cfg(not(feature = "plugin-quic"))]
+        let quic = pharos_server::QuicOptions::default();
         for (listener, domain) in routes {
             let group = groups.entry(listener).or_insert_with(|| {
                 (
@@ -916,10 +929,13 @@ pub fn servers_with_registry(
                     pharos_server::TcpOptions::default(),
                     false,
                     None,
+                    quic,
                 )
             });
-            if matches!(listener.transport, Transport::Tls | Transport::Https)
-                && let Some(tls) = &tls
+            if matches!(
+                listener.transport,
+                Transport::Tls | Transport::Https | Transport::Quic
+            ) && let Some(tls) = &tls
             {
                 match &group.4 {
                     // CoreDNS v1.15.0 core/dnsserver/tlsconfig.go sharedTLSConfig: blocks on one Listener agree.
@@ -929,10 +945,10 @@ pub fn servers_with_registry(
                                 io::ErrorKind::InvalidInput,
                                 format!(
                                     "conflicting TLS configuration for shared listener {}://{} between zones {zone:?} and {:?}: {reason}",
-                                    if listener.transport == Transport::Tls {
-                                        "tls"
-                                    } else {
-                                        "https"
+                                    match listener.transport {
+                                        Transport::Tls => "tls",
+                                        Transport::Quic => "quic",
+                                        _ => "https",
                                     },
                                     listener.address,
                                     domain.to_string(),
@@ -994,28 +1010,32 @@ pub fn servers_with_registry(
     tsig_keyrings.finish();
     let servers = groups
         .into_iter()
-        .map(|(key, (router, workers, tcp_options, allow_non_in, tls))| {
-            let mut server = Server::with_registry(router, key, metrics.clone());
-            server.tcp_options = tcp_options;
-            // RFC 7301 §3.1: an HTTPS Listener offers h2 and http/1.1 through ALPN.
-            server.tls = tls.map(|(tls, _)| {
-                if key.transport == Transport::Https {
-                    tls.with_alpn(pharos_server::doh::ALPN)
-                } else {
-                    tls
+        .map(
+            |(key, (router, workers, tcp_options, allow_non_in, tls, quic))| {
+                let mut server = Server::with_registry(router, key, metrics.clone());
+                server.tcp_options = tcp_options;
+                // RFC 7301 §3.1: an HTTPS Listener offers h2 and http/1.1 through ALPN.
+                server.tls = tls.map(|(tls, _)| {
+                    if key.transport == Transport::Https {
+                        tls.with_alpn(pharos_server::doh::ALPN)
+                    } else {
+                        tls
+                    }
+                });
+                server.quic = quic;
+                if let Some((connections, streams)) = https_limits.get(&key) {
+                    server.https.max_connections =
+                        connections.unwrap_or(server.https.max_connections);
+                    server.https.max_streams = streams.unwrap_or(server.https.max_streams);
                 }
-            });
-            if let Some((connections, streams)) = https_limits.get(&key) {
-                server.https.max_connections = connections.unwrap_or(server.https.max_connections);
-                server.https.max_streams = streams.unwrap_or(server.https.max_streams);
-            }
-            server.debug = debug;
-            server.allow_non_in = allow_non_in;
-            if let Some(workers) = workers {
-                server.udp_workers = workers;
-            }
-            (key, server)
-        })
+                server.debug = debug;
+                server.allow_non_in = allow_non_in;
+                if let Some(workers) = workers {
+                    server.udp_workers = workers;
+                }
+                (key, server)
+            },
+        )
         .collect();
     #[cfg(feature = "plugin-health")]
     for (address, lameduck) in health_addresses {

@@ -140,10 +140,13 @@ pub struct Server<C> {
     pub tls: Option<crate::tls::ServerTls>,
     /// Connection limits and response counters of an `https://` Listener.
     pub https: crate::HttpsOptions,
+    /// Limits of a `quic://` Listener.
+    pub quic: crate::QuicOptions,
     pub logger: fn(Error),
     metrics: Registry,
     dropped: Option<BlockMetrics>,
     shed: Option<crate::metrics::ShedMetrics>,
+    quic_metrics: Option<crate::QuicMetrics>,
     has_views: Arc<AtomicBool>,
     root: pharos_proto::Name,
 }
@@ -230,6 +233,8 @@ impl<C: Chain> Server<C> {
             .metrics_enabled(&key)
             .then(|| metrics.block(&server, "dropped", ""));
         let shed = router.shed_enabled(&key).then(|| metrics.shed(&server));
+        let quic_metrics = (key.transport == crate::Transport::Quic)
+            .then(|| crate::QuicMetrics::new(&metrics, &server));
         Self {
             router: Arc::new(router),
             key,
@@ -248,10 +253,12 @@ impl<C: Chain> Server<C> {
                 }),
                 ..crate::HttpsOptions::default()
             },
+            quic: crate::QuicOptions::default(),
             logger: log_error,
             metrics,
             dropped,
             shed,
+            quic_metrics,
             has_views,
             root: ".".parse().expect("root Domain"),
         }
@@ -296,6 +303,12 @@ impl<C: Chain> Handler for Server<C> {
     }
     fn https(&self) -> crate::HttpsOptions {
         self.https.clone()
+    }
+    fn quic_options(&self) -> crate::QuicOptions {
+        self.quic
+    }
+    fn quic_metrics(&self) -> Option<crate::QuicMetrics> {
+        self.quic_metrics.clone()
     }
     fn udp_workers(&self) -> usize {
         self.udp_workers
@@ -375,9 +388,11 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             tcp_options: self.tcp_options,
             tls: self.tls.clone(),
             https: self.https.clone(),
+            quic: self.quic,
             logger: self.logger,
             metrics: self.metrics.clone(),
             shed: self.shed.clone(),
+            quic_metrics: self.quic_metrics.clone(),
             has_views: Arc::clone(&self.has_views),
             dropped: self.dropped.clone(),
             root: self.root.clone(),
