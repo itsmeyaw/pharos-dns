@@ -2,11 +2,12 @@
 //!
 //! The `proxyproto` Plugin builds one [`Config`] per Listener. The TCP and TLS accept
 //! loops of this crate and the UDP workers call it directly. The seam for a Transport
-//! that Pharos does not serve yet (https, grpc, quic, https3) is the same pair of calls:
-//! [`Config::accept_stream`] on each accepted TCP stream before TLS or HTTP reads it, and
-//! [`Config::accept_datagram`] on each received datagram before QUIC reads it.
+//! The https and grpc accept loops call [`Config::accept_stream`] before the TLS handshake. The
+//! quic and https3 endpoints read their UDP socket through [`quic::Socket`], which calls
+//! [`Config::accept_datagram`] on each received datagram before quinn sees it.
 
 pub mod header;
+pub(crate) mod quic;
 pub mod session;
 
 use std::{

@@ -50,7 +50,7 @@ struct Context<H> {
 /// Serve the requests of `connection` until it closes or the Listener stops.
 pub(crate) async fn serve<H: Handler>(
     connection: Connection,
-    handler: Arc<H>,
+    (handler, tlv): (Arc<H>, Option<Arc<str>>),
     pool: Arc<Pool>,
     tcp: TcpOptions,
     mut shutdown: watch::Receiver<bool>,
@@ -58,7 +58,7 @@ pub(crate) async fn serve<H: Handler>(
     let context = Arc::new(Context {
         status: handler.https().status,
         peer: crate::canonical_peer(connection.remote_address()),
-        tlv: None,
+        tlv,
         handler,
         pool,
         read: tcp.read,

@@ -16,13 +16,14 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use pharos_proto::{Class, MessageBuilder, Name, NameRef, Section, Type};
 use pharos_server::{
     Action, Handler, HttpsOptions, ListenerKey, ListenerRegistry, Protocol, Transport, doh, grpc,
-    proxyproto::{Config, Policy},
+    proxyproto::{Config, Policy, UdpTracking},
     tls::{ClientAuth, ClientOptions, ServerOptions, ServerTls, TlsConnector, client_config},
 };
+use quinn::{ClientConfig, Connection, Endpoint, crypto::rustls::QuicClientConfig};
 use rustls::pki_types::ServerName;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpStream, UdpSocket},
     time::timeout,
 };
 
@@ -365,5 +366,249 @@ async fn grpc_reject_policy_closes_a_connection_with_a_header() {
         .await;
     assert!(tls.is_err());
     assert!(seen.lock().unwrap().is_empty());
+    registry.shutdown().await.unwrap();
+}
+
+fn tracking() -> Config {
+    let mut config = config(Policy::Use);
+    config.udp_tracking = Some(UdpTracking {
+        ttl: Duration::from_secs(30),
+        max_sessions: 100,
+    });
+    config
+}
+
+/// How the relay presents the client's datagrams to the Listener.
+#[derive(Clone, Copy)]
+enum Relay {
+    /// Every datagram carries its own PROXY v2 header.
+    Every,
+    /// One header-only datagram opens the flow, as Cloudflare Spectrum does.
+    Spectrum,
+}
+
+/// A UDP relay in front of `server`: returns the address clients send to and the address the Listener sees.
+async fn relay(server: SocketAddr, mode: Relay) -> (SocketAddr, SocketAddr) {
+    let front = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let back = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    back.connect(server).await.unwrap();
+    let addresses = (front.local_addr().unwrap(), back.local_addr().unwrap());
+    let header = v2(0x12, &TLV);
+    tokio::spawn(async move {
+        let (mut inbound, mut outbound) = (vec![0; 65535], vec![0; 65535]);
+        let (mut client, mut opened) = (None, false);
+        loop {
+            tokio::select! {
+                received = front.recv_from(&mut inbound) => {
+                    let (length, from) = received.unwrap();
+                    client = Some(from);
+                    let mut wire = Vec::new();
+                    match mode {
+                        Relay::Every => wire.extend(&header),
+                        Relay::Spectrum if !opened => {
+                            opened = true;
+                            back.send(&header).await.unwrap();
+                        }
+                        Relay::Spectrum => {}
+                    }
+                    wire.extend(&inbound[..length]);
+                    back.send(&wire).await.unwrap();
+                }
+                received = back.recv(&mut outbound) => {
+                    let length = received.unwrap();
+                    if let Some(client) = client {
+                        front.send_to(&outbound[..length], client).await.unwrap();
+                    }
+                }
+            }
+        }
+    });
+    addresses
+}
+
+fn quic_client(alpn: &[u8]) -> Endpoint {
+    let mut tls = (*client_config(&ClientOptions {
+        ca: Some(fixture("ca.pem")),
+        identity: None,
+    })
+    .unwrap())
+    .clone();
+    tls.alpn_protocols = vec![alpn.to_vec()];
+    let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(ClientConfig::new(Arc::new(
+        QuicClientConfig::try_from(tls).unwrap(),
+    )));
+    endpoint
+}
+
+async fn quic_connect(alpn: &[u8], address: SocketAddr) -> (Endpoint, Connection) {
+    let endpoint = quic_client(alpn);
+    let connection = timeout(
+        TEST_TIMEOUT,
+        endpoint.connect(address, "localhost").unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    (endpoint, connection)
+}
+
+// RFC 9250 §4.2: the Query is length-prefixed and the stream ends with FIN.
+async fn doq_exchange(connection: &Connection) {
+    let message = query(0);
+    let (mut send, mut recv) = connection.open_bi().await.unwrap();
+    let mut wire = u16::try_from(message.len()).unwrap().to_be_bytes().to_vec();
+    wire.extend(&message);
+    send.write_all(&wire).await.unwrap();
+    send.finish().unwrap();
+    let response = timeout(TEST_TIMEOUT, recv.read_to_end(70_000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.len() > 2);
+}
+
+fn doq_probe(config: Config) -> (Probe, Seen) {
+    Probe::new(identity(), config)
+}
+
+fn expected() -> Vec<(SocketAddr, String)> {
+    vec![(CLIENT.parse().unwrap(), "ea000107".to_owned()); 2]
+}
+
+// CoreDNS v1.15.0 plugin/proxyproto README: with udp_session_tracking the header-only first datagram
+// ahead of the QUIC handshake links the later headerless datagrams to the client and its TLVs.
+#[tokio::test]
+async fn quic_session_tracking_links_the_handshake_to_the_header_only_datagram() {
+    let (probe, seen) = doq_probe(tracking());
+    let (registry, address) = listening(Transport::Quic, probe).await;
+    let (front, _) = relay(address, Relay::Spectrum).await;
+    let (_endpoint, connection) = quic_connect(b"doq", front).await;
+    doq_exchange(&connection).await;
+    doq_exchange(&connection).await;
+    assert_eq!(*seen.lock().unwrap(), expected());
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn quic_header_on_every_datagram_sets_the_peer_and_tlv() {
+    let (probe, seen) = doq_probe(config(Policy::Use));
+    let (registry, address) = listening(Transport::Quic, probe).await;
+    let (front, _) = relay(address, Relay::Every).await;
+    let (_endpoint, connection) = quic_connect(b"doq", front).await;
+    doq_exchange(&connection).await;
+    doq_exchange(&connection).await;
+    assert_eq!(*seen.lock().unwrap(), expected());
+    registry.shutdown().await.unwrap();
+}
+
+// A header-only datagram is dropped without session tracking, so the flow keeps the relay's address.
+#[tokio::test]
+async fn quic_without_session_tracking_keeps_the_proxy_address() {
+    let (probe, seen) = doq_probe(config(Policy::Use));
+    let (registry, address) = listening(Transport::Quic, probe).await;
+    let (front, back) = relay(address, Relay::Spectrum).await;
+    let (_endpoint, connection) = quic_connect(b"doq", front).await;
+    doq_exchange(&connection).await;
+    assert_eq!(*seen.lock().unwrap(), [(back, String::new())]);
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn quic_client_without_a_header_keeps_its_address_under_use() {
+    let (probe, seen) = doq_probe(tracking());
+    let (registry, address) = listening(Transport::Quic, probe).await;
+    let (endpoint, connection) = quic_connect(b"doq", address).await;
+    doq_exchange(&connection).await;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(endpoint.local_addr().unwrap(), String::new())]
+    );
+    registry.shutdown().await.unwrap();
+}
+
+// go-proxyproto REJECT: a datagram with a header is dropped, so the handshake never completes.
+#[tokio::test]
+async fn quic_reject_policy_drops_datagrams_with_a_header() {
+    let (probe, seen) = doq_probe(config(Policy::Reject));
+    let (registry, address) = listening(Transport::Quic, probe).await;
+    let (front, _) = relay(address, Relay::Every).await;
+    let endpoint = quic_client(b"doq");
+    let connecting = endpoint.connect(front, "localhost").unwrap();
+    assert!(timeout(Duration::from_secs(1), connecting).await.is_err());
+    assert!(seen.lock().unwrap().is_empty());
+    registry.shutdown().await.unwrap();
+}
+
+fn h3_probe(config: Config) -> (Probe, Seen) {
+    let tls = identity().with_quic_alpn(doh::H3_ALPN).unwrap();
+    let (mut probe, seen) = Probe::new(tls, config);
+    probe.https.max_streams = doh::DEFAULT_H3_MAX_STREAMS;
+    (probe, seen)
+}
+
+async fn h3_exchange(address: SocketAddr) -> (Endpoint, Connection) {
+    let (endpoint, connection) = quic_connect(b"h3", address).await;
+    let (mut driver, mut sender) = h3::client::new(h3_quinn::Connection::new(connection.clone()))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        driver.wait_idle().await;
+    });
+    for id in [1, 2] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("https://localhost{}", doh::PATH))
+            .header("content-type", doh::MEDIA_TYPE)
+            .body(())
+            .unwrap();
+        let mut stream = sender.send_request(request).await.unwrap();
+        stream.send_data(Bytes::from(query(id))).await.unwrap();
+        stream.finish().await.unwrap();
+        let response = timeout(TEST_TIMEOUT, stream.recv_response())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        while timeout(TEST_TIMEOUT, stream.recv_data())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_some()
+        {}
+    }
+    (endpoint, connection)
+}
+
+#[tokio::test]
+async fn https3_session_tracking_links_the_handshake_to_the_header_only_datagram() {
+    let (probe, seen) = h3_probe(tracking());
+    let (registry, address) = listening(Transport::Https3, probe).await;
+    let (front, _) = relay(address, Relay::Spectrum).await;
+    let _client = h3_exchange(front).await;
+    assert_eq!(*seen.lock().unwrap(), expected());
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn https3_header_on_every_datagram_sets_the_peer_and_tlv() {
+    let (probe, seen) = h3_probe(config(Policy::Use));
+    let (registry, address) = listening(Transport::Https3, probe).await;
+    let (front, _) = relay(address, Relay::Every).await;
+    let _client = h3_exchange(front).await;
+    assert_eq!(*seen.lock().unwrap(), expected());
+    registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn https3_client_without_a_header_keeps_its_address_under_use() {
+    let (probe, seen) = h3_probe(tracking());
+    let (registry, address) = listening(Transport::Https3, probe).await;
+    let (endpoint, _connection) = h3_exchange(address).await;
+    let local = endpoint.local_addr().unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(local, String::new()), (local, String::new())]
+    );
     registry.shutdown().await.unwrap();
 }

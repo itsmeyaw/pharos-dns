@@ -1103,13 +1103,14 @@ impl Listener {
         address: SocketAddr,
         handler: H,
     ) -> io::Result<Self> {
-        let (endpoint, address) = quic::endpoint(kind, address, &handler)?;
+        let handler = Arc::new(handler);
+        let (endpoint, address, socket) = quic::endpoint(kind, address, &handler)?;
         let (stop, receiver) = watch::channel(false);
         let (udp_stop, _) = watch::channel(false);
         Ok(Self {
             address,
             stop,
-            tasks: vec![quic::spawn(kind, endpoint, Arc::new(handler), receiver)],
+            tasks: vec![quic::spawn(kind, endpoint, handler, socket, receiver)],
             udp_stop,
             udp_tasks: Vec::new(),
             shed: false,

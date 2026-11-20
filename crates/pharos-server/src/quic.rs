@@ -16,8 +16,9 @@ use std::{
 
 use pharos_proto::{EdnsOption, Message};
 use quinn::{
-    Connecting, Connection, Endpoint, EndpointConfig, IdleTimeout, ReadError, ReadExactError,
-    RecvStream, SendStream, ServerConfig, TokioRuntime, TransportConfig, VarInt,
+    AsyncUdpSocket, Connecting, Connection, Endpoint, EndpointConfig, IdleTimeout, ReadError,
+    ReadExactError, RecvStream, Runtime, SendStream, ServerConfig, TokioRuntime, TransportConfig,
+    VarInt,
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, watch},
@@ -26,7 +27,8 @@ use tokio::{
 };
 
 use crate::{
-    Action, Handler, Protocol, TcpOptions, conn::Pool, metrics::TransportStatus, tls::ServerTls,
+    Action, Handler, TcpOptions, conn::Pool, metrics::TransportStatus, proxyproto::quic::Socket,
+    tls::ServerTls,
 };
 
 // RFC 9250 §4.1.1: the ALPN token of DoQ is "doq".
@@ -187,8 +189,8 @@ fn server_config(
 pub(crate) fn endpoint<H: Handler>(
     kind: Kind,
     address: SocketAddr,
-    handler: &H,
-) -> io::Result<(Endpoint, SocketAddr)> {
+    handler: &Arc<H>,
+) -> io::Result<(Endpoint, SocketAddr, Arc<Socket<H>>)> {
     let tls = handler.tls().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -198,17 +200,22 @@ pub(crate) fn endpoint<H: Handler>(
     let config = server_config(
         kind,
         &tls,
-        &limits(kind, handler),
+        &limits(kind, &**handler),
         handler.tcp_options().idle,
     );
-    let endpoint = Endpoint::new(
+    // PROXY protocol: the wrapper strips headers from datagrams before quinn reads them.
+    let socket = Socket::new(
+        TokioRuntime.wrap_udp_socket(bind(address)?)?,
+        Arc::clone(handler),
+    );
+    let endpoint = Endpoint::new_with_abstract_socket(
         EndpointConfig::default(),
         Some(config),
-        bind(address)?,
+        Arc::clone(&socket) as Arc<dyn AsyncUdpSocket>,
         Arc::new(TokioRuntime),
     )?;
     let address = endpoint.local_addr()?;
-    Ok((endpoint, address))
+    Ok((endpoint, address, socket))
 }
 
 /// What a connection task needs, rebuilt when a Reload changes any input.
@@ -277,6 +284,7 @@ pub(crate) fn spawn<H: Handler>(
     kind: Kind,
     endpoint: Endpoint,
     handler: Arc<H>,
+    socket: Arc<Socket<H>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<io::Result<()>> {
     tokio::spawn(async move {
@@ -349,7 +357,7 @@ pub(crate) fn spawn<H: Handler>(
                     connections.spawn(serve_connection(
                         kind,
                         connecting,
-                        Arc::clone(&handler),
+                        (Arc::clone(&handler), Arc::clone(&socket)),
                         current,
                         Arc::clone(&state),
                         handshake,
@@ -369,7 +377,7 @@ pub(crate) fn spawn<H: Handler>(
 async fn serve_connection<H: Handler>(
     kind: Kind,
     connecting: Connecting,
-    handler: Arc<H>,
+    (handler, socket): (Arc<H>, Arc<Socket<H>>),
     shared: Arc<Shared>,
     state: Arc<Connections>,
     handshake: Pending,
@@ -396,10 +404,11 @@ async fn serve_connection<H: Handler>(
         connection.close(code, b"too many connections");
         return;
     }
+    let tlv = socket.tlv(connection.remote_address());
     if kind == Kind::Doh3 {
         crate::https3::serve(
             connection,
-            handler,
+            (handler, tlv),
             Arc::clone(&state.pool),
             shared.tcp,
             shutdown,
@@ -431,6 +440,7 @@ async fn serve_connection<H: Handler>(
                     send,
                     recv,
                     peer,
+                    tlv: tlv.clone(),
                     tcp: shared.tcp,
                     metrics: metrics.clone(),
                     state: Arc::clone(&state),
@@ -450,6 +460,7 @@ struct Stream<H> {
     send: SendStream,
     recv: RecvStream,
     peer: SocketAddr,
+    tlv: Option<Arc<str>>,
     tcp: TcpOptions,
     metrics: Option<QuicMetrics>,
     state: Arc<Connections>,
@@ -560,8 +571,14 @@ async fn answer<H: Handler>(stream: &mut Stream<H>, buffers: &mut (Vec<u8>, Vec<
     let (query, response) = buffers;
     response.clear();
     // RFC 9250 §4.2: DoQ Messages follow DNS over TCP rules, with no UDP size limit.
-    let action =
-        H::handle_shared(&stream.handler, query, stream.peer, Protocol::Tcp, response).await;
+    let action = crate::conn::handle(
+        &stream.handler,
+        stream.tlv.as_deref(),
+        query,
+        stream.peer,
+        response,
+    )
+    .await;
     // A dropped Query or a Zone Transfer has no DoQ Response here.
     let (Action::Respond, Ok(length)) = (action, u16::try_from(response.len())) else {
         return fail(&mut stream.send, metrics);
