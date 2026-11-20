@@ -1,10 +1,11 @@
-//! Small HTTP/1 listener for operational endpoints.
+//! Small HTTP listener for operational endpoints: HTTP/1 over TCP, or HTTP/1 and HTTP/2 over TLS.
 
 use std::{
     borrow::Cow,
     convert::Infallible,
     io,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -16,22 +17,55 @@ use hyper::{
     Request, Response, StatusCode,
     body::Incoming,
     header::{
-        ALLOW, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MATCH, IF_NONE_MATCH,
+        ALLOW, AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, HeaderValue, IF_MATCH,
+        IF_NONE_MATCH, WWW_AUTHENTICATE, X_CONTENT_TYPE_OPTIONS,
     },
-    server::conn::http1,
-    service::service_fn,
+    server::conn::{http1, http2},
+    service::{Service, service_fn},
 };
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::TcpListener,
     sync::watch,
     task::{JoinHandle, JoinSet},
+    time::Sleep,
+};
+
+use crate::{
+    basic_auth::BasicAuth,
+    tls::{ServerTls, TlsAcceptor},
 };
 
 const MAX_CONNECTIONS: usize = 1024;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HTTP1_BUFFER_SIZE: usize = 16 * 1024;
+
+/// How a [`Listener`] protects its endpoints; the default is cleartext HTTP/1 without credentials.
+#[derive(Clone, Default)]
+pub struct Security {
+    /// Serve HTTPS with this identity.
+    pub tls: Option<ServerTls>,
+    /// Offer HTTP/2 through ALPN next to HTTP/1.1; ignored without `tls`.
+    pub http2: bool,
+    /// Header fields set on every response, including errors.
+    pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// Requests must carry credentials that match.
+    pub basic_auth: Option<Arc<BasicAuth>>,
+}
+
+struct Guard {
+    acceptor: Option<TlsAcceptor>,
+    http2: bool,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    basic_auth: Option<Arc<BasicAuth>>,
+}
+
+struct State<F> {
+    route: F,
+    guard: Guard,
+}
 
 /// HTTP listener whose callback maps GET paths to `(content_type, body)`.
 /// The callback runs on a Tokio worker and must not block it.
@@ -156,6 +190,28 @@ impl Listener {
     where
         F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
     {
+        Self::bind_secured(address, route, Security::default()).await
+    }
+
+    /// [`Listener::bind_with_methods`] with TLS, response headers and basic authentication.
+    pub async fn bind_secured<F>(address: &str, route: F, security: Security) -> io::Result<Self>
+    where
+        F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
+    {
+        let guard = Guard {
+            // RFC 7301 §3.1: the server selects h2 or http/1.1 from the client's offer.
+            acceptor: security.tls.as_ref().map(|tls| {
+                let protocols: &[&[u8]] = if security.http2 {
+                    &[b"h2", b"http/1.1"]
+                } else {
+                    &[b"http/1.1"]
+                };
+                tls.with_alpn(protocols).acceptor()
+            }),
+            http2: security.http2,
+            headers: security.headers,
+            basic_auth: security.basic_auth,
+        };
         let address = if address.ends_with(':') {
             Cow::Owned(format!("{address}0"))
         } else {
@@ -178,7 +234,7 @@ impl Listener {
         };
         let address = listener.local_addr()?;
         let (stop, mut receiver) = watch::channel(false);
-        let route = Arc::new(route);
+        let state = Arc::new(State { route, guard });
         let task = tokio::spawn(async move {
             let mut connections = JoinSet::new();
             let result = loop {
@@ -201,28 +257,27 @@ impl Listener {
                                 continue;
                             }
                         };
-                        let route = Arc::clone(&route);
+                        let state = Arc::clone(&state);
                         let mut stop = receiver.clone();
                         connections.spawn(async move {
-                            // RFC 9110 §6.5.1: Do not merge trailer fields into headers.
-                            let service = service_fn(move |request: Request<Incoming>| {
-                                std::future::ready(Ok::<_, Infallible>(response_for_request(
-                                    route.as_ref(),
-                                    request,
-                                )))
-                            });
-                            // RFC 9110 §5.6.7: Hyper emits dates in IMF-fixdate format.
-                            // RFC 9110 §17.5: Bound combined request-target and field buffering.
-                            let connection = http1::Builder::new().max_buf_size(MAX_HTTP1_BUFFER_SIZE).serve_connection(TokioIo::new(stream), service);
-                            tokio::pin!(connection);
-                            tokio::select! {
-                                _ = &mut connection => {},
-                                // shortcut: cap the connection lifetime until per-request read, write and idle deadlines are supported.
-                                _ = tokio::time::sleep(TIMEOUT) => {},
-                                _ = stop.changed() => {
-                                    connection.as_mut().graceful_shutdown();
-                                    let _ = connection.await;
-                                }
+                            // shortcut: cap the connection lifetime until per-request read, write and idle deadlines are supported.
+                            let deadline = tokio::time::sleep(TIMEOUT);
+                            tokio::pin!(deadline);
+                            let Some(acceptor) = &state.guard.acceptor else {
+                                serve_http1(stream, &state, &mut stop, deadline).await;
+                                return;
+                            };
+                            let handshake = tokio::select! {
+                                _ = stop.changed() => return,
+                                () = &mut deadline => return,
+                                handshake = acceptor.accept(stream) => handshake,
+                            };
+                            let Ok(stream) = handshake else { return };
+                            // RFC 7301 §3.2: the protocol the handshake selected decides the HTTP version.
+                            if state.guard.http2 && stream.get_ref().1.alpn_protocol() == Some(b"h2") {
+                                serve_http2(stream, &state, &mut stop, deadline).await;
+                            } else {
+                                serve_http1(stream, &state, &mut stop, deadline).await;
                             }
                         });
                     }
@@ -285,14 +340,135 @@ fn ipv6_unavailable(error: &io::Error) -> bool {
         || error.raw_os_error() == Some(libc::EAFNOSUPPORT)
 }
 
-fn response_for_request<F>(route: &F, request: Request<Incoming>) -> Response<Full<Bytes>>
+fn service<F>(
+    state: &Arc<State<F>>,
+) -> impl Service<
+    Request<Incoming>,
+    Response = Response<Full<Bytes>>,
+    Error = Infallible,
+    Future: Send + 'static,
+> + Send
++ 'static
+where
+    F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
+{
+    let state = Arc::clone(state);
+    service_fn(move |request: Request<Incoming>| {
+        let state = Arc::clone(&state);
+        async move { Ok::<_, Infallible>(respond(&state, request).await) }
+    })
+}
+
+async fn serve_http1<S, F>(
+    stream: S,
+    state: &Arc<State<F>>,
+    stop: &mut watch::Receiver<bool>,
+    deadline: Pin<&mut Sleep>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
+{
+    // RFC 9110 §5.6.7: Hyper emits dates in IMF-fixdate format.
+    // RFC 9110 §17.5: Bound combined request-target and field buffering.
+    let connection = http1::Builder::new()
+        .max_buf_size(MAX_HTTP1_BUFFER_SIZE)
+        .serve_connection(TokioIo::new(stream), service(state));
+    tokio::pin!(connection);
+    finish(
+        connection.as_mut(),
+        http1::Connection::graceful_shutdown,
+        stop,
+        deadline,
+    )
+    .await;
+}
+
+async fn serve_http2<S, F>(
+    stream: S,
+    state: &Arc<State<F>>,
+    stop: &mut watch::Receiver<bool>,
+    deadline: Pin<&mut Sleep>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
+{
+    let connection = http2::Builder::new(TokioExecutor::new())
+        .serve_connection(TokioIo::new(stream), service(state));
+    tokio::pin!(connection);
+    finish(
+        connection.as_mut(),
+        http2::Connection::graceful_shutdown,
+        stop,
+        deadline,
+    )
+    .await;
+}
+
+// RFC 9112 §9.8, RFC 9113 §6.8: a stop lets the request in flight finish before the connection closes.
+async fn finish<C: Future<Output = hyper::Result<()>>>(
+    mut connection: Pin<&mut C>,
+    graceful: impl FnOnce(Pin<&mut C>),
+    stop: &mut watch::Receiver<bool>,
+    deadline: Pin<&mut Sleep>,
+) {
+    tokio::select! {
+        _ = connection.as_mut() => {},
+        () = deadline => {},
+        _ = stop.changed() => {
+            graceful(connection.as_mut());
+            let _ = connection.await;
+        }
+    }
+}
+
+async fn respond<F>(state: &State<F>, request: Request<Incoming>) -> Response<Full<Bytes>>
+where
+    F: Fn(&str, &str) -> Option<(u16, &'static str, String)> + Send + Sync + 'static,
+{
+    let guard = &state.guard;
+    let permitted = match &guard.basic_auth {
+        // RFC 7617 §2: credentials travel in the Authorization request header field.
+        Some(auth) => auth.permits(request.headers().get(AUTHORIZATION)).await,
+        None => true,
+    };
+    let mut response = if permitted {
+        response_for_request(&state.route, request, guard.acceptor.is_some())
+    } else {
+        unauthorized()
+    };
+    for (name, value) in &guard.headers {
+        response.headers_mut().insert(name.clone(), value.clone());
+    }
+    response
+}
+
+fn unauthorized() -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(Bytes::from_static(b"Unauthorized\n")));
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    let headers = response.headers_mut();
+    // RFC 9110 §11.6.1: a 401 response carries a WWW-Authenticate challenge.
+    headers.insert(WWW_AUTHENTICATE, HeaderValue::from_static("Basic"));
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    // Go net/http http.Error sets nosniff on its plain-text errors.
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    response
+}
+
+fn response_for_request<F>(
+    route: &F,
+    request: Request<Incoming>,
+    secure: bool,
+) -> Response<Full<Bytes>>
 where
     F: Fn(&str, &str) -> Option<(u16, &'static str, String)>,
 {
     let method = request.method().as_str();
     let path = request.uri().path();
     let is_metrics = path == "/metrics";
-    let response = if request.uri().scheme_str() == Some("https") {
+    let response = if !secure && request.uri().scheme_str() == Some("https") {
         // RFC 9110 §7.4: Cleartext listeners reject absolute HTTPS targets.
         Some((
             421,
