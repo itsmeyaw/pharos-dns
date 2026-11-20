@@ -1,0 +1,3 @@
+example.org. A IN tls
+example.org. AAAA IN tls
+example.org. TXT IN tls +dnssec

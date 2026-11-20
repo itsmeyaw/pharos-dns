@@ -1,0 +1,4 @@
+tls://.:{port} {
+    tls {tls}/server.pem {tls}/server.key.pem
+    whoami
+}

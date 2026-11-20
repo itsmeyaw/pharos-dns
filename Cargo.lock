@@ -3614,6 +3614,7 @@ dependencies = [
  "aws-lc-rs",
  "pharos-dnssec",
  "pharos-proto",
+ "rustls",
 ]
 
 [[package]]

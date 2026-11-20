@@ -8,6 +8,7 @@ use pharos_proto::{
 pub(crate) enum Transport {
     Udp,
     Tcp,
+    Tls,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,6 +98,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
     let transport = match transport.to_ascii_lowercase().as_str() {
         "udp" => Transport::Udp,
         "tcp" => Transport::Tcp,
+        "tls" => Transport::Tls,
         _ => return Err(format!("invalid transport: {transport}")),
     };
     let mut query = Query {
