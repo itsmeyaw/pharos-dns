@@ -55,7 +55,7 @@ impl Solver {
     }
 
     /// The values published at `name`, sorted.
-    fn values(&self, name: &str) -> Vec<String> {
+    pub(super) fn values(&self, name: &str) -> Vec<String> {
         self.records
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -173,7 +173,7 @@ fn respond(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::sync::Arc;
 
     use pharos_proto::{Class, Message, MessageBuilder, Name, NameRef, Rcode, Rdata, Type};
@@ -181,6 +181,26 @@ mod tests {
 
     use super::Solver;
     use crate::tls::Tls;
+
+    /// Run `wire` through the Plugin as a UDP Query would be.
+    pub(in crate::tls) async fn answer(tls: &Tls, wire: &[u8]) -> (Outcome, Vec<u8>) {
+        let domain: Name = ".".parse().unwrap();
+        let mut response = Vec::with_capacity(65535);
+        let mut slots = [];
+        let mut cx = Context {
+            query: Message::parse(wire).unwrap(),
+            client: "127.0.0.1:1234".parse().unwrap(),
+            local: "127.0.0.1:53".parse().unwrap(),
+            transport: Transport::Dns,
+            protocol: Protocol::Udp,
+            domain: &domain,
+            metadata: Metadata::new(&mut slots),
+            response: &mut response,
+            max_response_size: 512,
+        };
+        let outcome = tls.serve(&mut cx, NextRefused).await;
+        (outcome, response)
+    }
 
     struct NextRefused;
     impl Next for NextRefused {
@@ -197,22 +217,7 @@ mod tests {
             .question(NameRef::parse(name.as_wire(), 0).unwrap(), qtype, class)
             .unwrap();
         let _ = builder.finish();
-        let domain: Name = ".".parse().unwrap();
-        let mut response = Vec::with_capacity(65535);
-        let mut slots = [];
-        let mut cx = Context {
-            query: Message::parse(&wire).unwrap(),
-            client: "127.0.0.1:1234".parse().unwrap(),
-            local: "127.0.0.1:53".parse().unwrap(),
-            transport: Transport::Dns,
-            protocol: Protocol::Udp,
-            domain: &domain,
-            metadata: Metadata::new(&mut slots),
-            response: &mut response,
-            max_response_size: 512,
-        };
-        let outcome = tls.serve(&mut cx, NextRefused).await;
-        (outcome, response)
+        answer(tls, &wire).await
     }
 
     fn texts(wire: &[u8]) -> Vec<Vec<u8>> {

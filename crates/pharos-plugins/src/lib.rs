@@ -661,7 +661,11 @@ pub fn servers_with_registry(
     #[cfg(feature = "plugin-tls")]
     let mut blocks = blocks;
     #[cfg(feature = "plugin-tls")]
-    let _acme = tls::acme::link(&mut blocks)?;
+    {
+        if let Some(acme) = tls::acme::link(&mut blocks)? {
+            acme.register(&mut lifecycle);
+        }
+    }
     #[cfg(feature = "plugin-health")]
     let mut health_addresses: Vec<(String, std::time::Duration)> = Vec::new();
     #[cfg(feature = "plugin-ready")]
