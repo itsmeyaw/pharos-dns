@@ -437,7 +437,7 @@ fn exchange_proxied(
             wire,
             &preface(false)?,
             std::sync::Arc::new(tls_client_config(&[b"h2"])?),
-            timeout.unwrap_or_default(),
+            Duration::from_secs(2),
         )
         .map(|reply| vec![reply]),
         Transport::Quic => exchange_quic(port, wire, timeout).map(|reply| vec![reply]),
