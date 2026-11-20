@@ -1,0 +1,3 @@
+www.example.org. A IN quic
+www.example.org. AAAA IN quic
+missing.example.org. A IN quic

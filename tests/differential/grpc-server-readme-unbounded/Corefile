@@ -1,0 +1,15 @@
+grpc://.:{port} {
+    tls {tls}/server.pem {tls}/server.key.pem
+    grpc_server {
+        max_streams 0
+        max_connections 0
+    }
+    hosts {
+        192.0.2.1 www.example.org
+        2001:db8::1 www.example.org
+        fallthrough
+    }
+    template ANY ANY {
+        rcode NXDOMAIN
+    }
+}

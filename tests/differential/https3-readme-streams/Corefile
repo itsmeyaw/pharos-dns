@@ -1,0 +1,14 @@
+https3://.:{port} {
+    tls {tls}/server.pem {tls}/server.key.pem
+    https3 {
+        max_streams 50
+    }
+    hosts {
+        192.0.2.1 www.example.org
+        2001:db8::1 www.example.org
+        fallthrough
+    }
+    template ANY ANY {
+        rcode NXDOMAIN
+    }
+}

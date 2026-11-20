@@ -1,0 +1,3 @@
+www.example.org. A IN tls
+www.example.org. AAAA IN tls
+missing.example.org. A IN tls

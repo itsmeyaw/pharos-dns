@@ -1,0 +1,16 @@
+quic://.:{port} {
+    tls {tls}/server.pem {tls}/server.key.pem
+    quic {
+        max_streams 16
+        max_connections 50
+        worker_pool_size 65536
+    }
+    hosts {
+        192.0.2.1 www.example.org
+        2001:db8::1 www.example.org
+        fallthrough
+    }
+    template ANY ANY {
+        rcode NXDOMAIN
+    }
+}
