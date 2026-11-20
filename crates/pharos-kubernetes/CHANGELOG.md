@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/itsmeyaw/pharos-dns/compare/pharos-kubernetes-v0.2.0...pharos-kubernetes-v0.3.0) - 2026-11-20
+
+### Other
+
+- *(test)* move large inline test modules to separate files
+
 ## [0.2.0](https://github.com/itsmeyaw/pharos-dns/compare/pharos-kubernetes-v0.1.0...pharos-kubernetes-v0.2.0) - 2026-11-18
 
 ### Added

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/itsmeyaw/pharos-dns/compare/pharos-server-v0.2.0...pharos-server-v0.3.0) - 2026-11-20
+
+### Added
+
+- *(proxyproto)* proxyproto Plugin on every Transport ([#170](https://github.com/itsmeyaw/pharos-dns/pull/170))
+- *(tls)* ACME certificate management (DNS-01) ([#169](https://github.com/itsmeyaw/pharos-dns/pull/169))
+- *(prometheus)* exporter-toolkit TLS and authentication ([#168](https://github.com/itsmeyaw/pharos-dns/pull/168))
+- *(grpc)* grpc Plugin ([#167](https://github.com/itsmeyaw/pharos-dns/pull/167))
+- *(https3)* https3 Plugin and https3:// Transport ([#165](https://github.com/itsmeyaw/pharos-dns/pull/165))
+- *(grpc_server)* grpc_server Plugin and grpc:// Transport ([#164](https://github.com/itsmeyaw/pharos-dns/pull/164))
+- *(forward)* DNS-over-HTTPS Upstreams ([#163](https://github.com/itsmeyaw/pharos-dns/pull/163))
+- *(forward)* DNS-over-QUIC Upstreams ([#162](https://github.com/itsmeyaw/pharos-dns/pull/162))
+- *(quic)* quic Plugin and quic:// Transport ([#161](https://github.com/itsmeyaw/pharos-dns/pull/161))
+- *(https)* https Plugin and https:// Transport ([#160](https://github.com/itsmeyaw/pharos-dns/pull/160))
+- *(forward)* DNS-over-TLS Upstreams ([#158](https://github.com/itsmeyaw/pharos-dns/pull/158))
+- *(tls)* tls Plugin and tls:// Transport ([#157](https://github.com/itsmeyaw/pharos-dns/pull/157))
+
+### Fixed
+
+- *(m3)* standards and spec review findings ([#183](https://github.com/itsmeyaw/pharos-dns/pull/183))
+
+### Other
+
+- *(test)* move large inline test modules to separate files
+
 ## [0.2.0](https://github.com/itsmeyaw/pharos-dns/compare/pharos-server-v0.1.0...pharos-server-v0.2.0) - 2026-11-18
 
 ### Added
