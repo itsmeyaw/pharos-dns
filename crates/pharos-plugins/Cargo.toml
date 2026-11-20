@@ -83,6 +83,7 @@ default = [
     "plugin-multisocket",
     "plugin-nsid",
     "plugin-prometheus",
+    "plugin-proxyproto",
     "plugin-quic",
     "plugin-ready",
     "plugin-reload",

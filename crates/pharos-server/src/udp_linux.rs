@@ -89,6 +89,7 @@ pub(crate) fn spawn<H: Handler>(
         let mut pending = tokio::task::JoinSet::new();
         let mut free = Vec::new();
         let mut scratch = None;
+        let mut proxy = crate::proxyproto::UdpState::default();
         'read: loop {
             tokio::select! {
                 biased;
@@ -124,14 +125,18 @@ pub(crate) fn spawn<H: Handler>(
             };
             for index in 0..count {
                 if let Some((length, peer)) = peers[index] {
-                    let client = crate::canonical_peer(peer);
+                    let Some((start, client)) =
+                        crate::udp::proxied(&*handler, &mut proxy, &buffers[index][..length], peer)
+                    else {
+                        continue;
+                    };
                     if let Some(cancelled) =
-                        handler.parallel_query(&buffers[index][..length], client)
+                        handler.parallel_query(&buffers[index][start..length], client)
                     {
                         crate::udp::spawn_parallel(
                             Arc::clone(&socket),
                             Arc::clone(&handler),
-                            &buffers[index][..length],
+                            &buffers[index][start..length],
                             peer,
                             shutdown.clone(),
                             cancelled,
@@ -176,9 +181,12 @@ pub(crate) fn spawn<H: Handler>(
                         break 'read;
                     }
                     crate::udp::take_slot(&mut slot, &mut free, &handler, &socket, None);
-                    slot.as_mut()
-                        .unwrap()
-                        .prepare(&buffers[index][..length], peer, client, None);
+                    slot.as_mut().unwrap().prepare(
+                        &buffers[index][start..length],
+                        (peer, client),
+                        &proxy.tlv,
+                        None,
+                    );
                     crate::udp::dispatch(
                         &mut slot,
                         &mut pending,

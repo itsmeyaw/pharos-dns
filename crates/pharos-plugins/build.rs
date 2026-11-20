@@ -15,6 +15,7 @@ fn config_only(name: &str) -> bool {
             | "grpc_server"
             | "https3"
             | "quic"
+            | "proxyproto"
             | "ready"
             | "health"
             | "reload"
@@ -105,6 +106,7 @@ fn main() {
             "https3" => "https3::Https3",
             "grpc" => "grpc::Grpc",
             "quic" => "quic::Quic",
+            "proxyproto" => "proxyproto::Proxyproto",
             "whoami" => "whoami::Whoami",
             "view" => "view::View",
             "log" => "log::Log",
@@ -167,6 +169,7 @@ fn main() {
             "https3" => "https3::setup::setup",
             "grpc" => "grpc::setup::setup",
             "quic" => "quic::setup::setup",
+            "proxyproto" => "proxyproto::setup::setup",
             "whoami" => "whoami::setup::setup",
             "view" => "view::setup::setup",
             "log" => "log::setup::setup",
@@ -211,6 +214,7 @@ fn main() {
                 | "quic"
                 | "https3"
                 | "grpc"
+                | "proxyproto"
         );
         writeln!(
             code,
@@ -271,6 +275,9 @@ fn main() {
     }
     if enabled.contains(&"metadata") && enabled.contains(&"kubernetes") {
         code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) && let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); } ");
+    }
+    if enabled.contains(&"metadata") && enabled.contains(&"proxyproto") {
+        code.push_str("\nif self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { cx.metadata.publish_proxy_tlv(); }\n");
     }
     writeln!(code, "}} self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
     if let Some(index) = enabled.iter().position(|name| *name == "cache") {
@@ -340,8 +347,14 @@ fn main() {
     }
     if enabled.contains(&"metadata") {
         code.push_str("fn has_metadata_collector(&self) -> bool { self.metadata.is_some() }\nfn collect_metadata(&self, cx: &mut pharos_server::Context<'_>) { let _ = &cx; ");
-        if enabled.contains(&"view") || enabled.contains(&"kubernetes") {
+        if enabled.contains(&"view")
+            || enabled.contains(&"kubernetes")
+            || enabled.contains(&"proxyproto")
+        {
             code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { ");
+            if enabled.contains(&"proxyproto") {
+                code.push_str("cx.metadata.publish_proxy_tlv(); ");
+            }
             if enabled.contains(&"view") {
                 code.push_str("if let Some(view) = &self.view { cx.metadata.set_view_name(std::sync::Arc::clone(&view.name)); }\n");
             }

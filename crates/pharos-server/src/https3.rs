@@ -41,6 +41,7 @@ type Stream = RequestStream<h3_quinn::BidiStream<Chunk>, Chunk>;
 struct Context<H> {
     handler: Arc<H>,
     peer: SocketAddr,
+    tlv: Option<Arc<str>>,
     pool: Arc<Pool>,
     status: Option<Arc<Status>>,
     read: Duration,
@@ -49,7 +50,7 @@ struct Context<H> {
 /// Serve the requests of `connection` until it closes or the Listener stops.
 pub(crate) async fn serve<H: Handler>(
     connection: Connection,
-    handler: Arc<H>,
+    (handler, tlv): (Arc<H>, Option<Arc<str>>),
     pool: Arc<Pool>,
     tcp: TcpOptions,
     mut shutdown: watch::Receiver<bool>,
@@ -57,6 +58,7 @@ pub(crate) async fn serve<H: Handler>(
     let context = Arc::new(Context {
         status: handler.https().status,
         peer: crate::canonical_peer(connection.remote_address()),
+        tlv,
         handler,
         pool,
         read: tcp.read,
@@ -113,7 +115,15 @@ async fn request<H: Handler>(resolver: Resolver, context: Arc<Context<H>>) {
         return;
     };
     let result = match read_query(&request, &mut stream, &mut query, deadline).await {
-        Ok(()) => dispatch(&context.handler, context.peer, &context.pool, &query).await,
+        Ok(()) => {
+            dispatch(
+                &context.handler,
+                (context.peer, context.tlv.as_deref()),
+                &context.pool,
+                &query,
+            )
+            .await
+        }
         Err(status) => Err(status),
     };
     let (head, chunk) = reply(result);

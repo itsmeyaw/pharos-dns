@@ -14,6 +14,29 @@ use tokio::{net::UdpSocket, sync::watch};
 
 use crate::{Action, Handler, Protocol};
 
+/// Apply the Listener's PROXY settings to one datagram: the payload offset and the client address.
+pub(crate) fn proxied<H: Handler>(
+    handler: &H,
+    state: &mut crate::proxyproto::UdpState,
+    datagram: &[u8],
+    peer: SocketAddr,
+) -> Option<(usize, SocketAddr)> {
+    let client = crate::canonical_peer(peer);
+    match handler.proxyproto() {
+        None => {
+            // Reload: a Listener without PROXY settings must not reuse the TLVs of an earlier datagram.
+            state.tlv.clear();
+            Some((0, client))
+        }
+        Some(config) => {
+            if state.workers == 0 && config.udp_tracking.is_some() {
+                state.workers = handler.udp_workers();
+            }
+            config.accept_datagram(state, datagram, client, state.workers)
+        }
+    }
+}
+
 // Implementation limit: bound pending work and retained coroutine slots per worker.
 pub(crate) const MAX_IN_FLIGHT: usize = 256;
 // Implementation limit: retain 16 slots; larger bursts allocate again.
@@ -34,6 +57,8 @@ impl Drop for ResponseBuffer<'_> {
 
 struct SlotData {
     query: Vec<u8>,
+    // PROXY protocol v2 TLVs, hex-encoded; empty when the datagram carried none.
+    tlv: String,
     response: Option<Vec<u8>>,
     peer: Option<(SocketAddr, SocketAddr)>,
     done: bool,
@@ -53,6 +78,7 @@ impl Slot {
     ) -> Self {
         let data = Arc::new(Mutex::new(SlotData {
             query: Vec::with_capacity(65535),
+            tlv: String::new(),
             response: stack.is_none().then(|| Vec::with_capacity(65535)),
             peer: None,
             done: false,
@@ -72,14 +98,16 @@ impl Slot {
     pub(crate) fn prepare(
         &mut self,
         query: &[u8],
-        peer: SocketAddr,
-        client: SocketAddr,
+        (peer, client): (SocketAddr, SocketAddr),
+        tlv: &str,
         response: Option<Vec<u8>>,
     ) {
         let mut data = self.data.lock().unwrap();
         debug_assert!(data.peer.is_none() && !data.done);
         data.query.clear();
         data.query.extend_from_slice(query);
+        data.tlv.clear();
+        data.tlv.push_str(tlv);
         // RFC 4007 §8: Retain the scoped peer address for processing and replies.
         data.peer = Some((peer, client));
         if response.is_some() {
@@ -106,11 +134,12 @@ async fn serve_slot<H: Handler>(
 ) {
     loop {
         // Rust Future::poll: idle slots are polled explicitly after input is installed.
-        let (query, response, peer, client) = poll_fn(|_| {
+        let (query, tlv, response, peer, client) = poll_fn(|_| {
             let mut data = data.lock().unwrap();
             match data.peer.take() {
                 Some((peer, client)) => Poll::Ready((
                     std::mem::take(&mut data.query),
+                    std::mem::take(&mut data.tlv),
                     data.response.take(),
                     peer,
                     client,
@@ -126,7 +155,11 @@ async fn serve_slot<H: Handler>(
         };
         let body = response.data.as_mut().unwrap();
         body.clear();
-        let action = H::handle_shared(&handler, &query, client, Protocol::Udp, body).await;
+        let action = if tlv.is_empty() {
+            H::handle_shared(&handler, &query, client, Protocol::Udp, body).await
+        } else {
+            H::handle_proxied(&handler, &query, client, Protocol::Udp, &tlv, body).await
+        };
         // RFC 2136 §3.8: Send the UDP response to the requestor's source port.
         if action == Action::Respond {
             if let Some(stack) = response.stack {
@@ -156,6 +189,7 @@ async fn serve_slot<H: Handler>(
         }
         let mut data = data.lock().unwrap();
         data.query = query;
+        data.tlv = tlv;
         if response.stack.is_none() {
             data.response = response.data.take();
         }
@@ -459,6 +493,7 @@ fn spawn_shed<H: Handler>(
         let mut pending = JoinSet::new();
         let mut free = Vec::new();
         let mut scratch = None;
+        let mut proxy = crate::proxyproto::UdpState::default();
         loop {
             let received = tokio::select! {
                 biased;
@@ -474,15 +509,18 @@ fn spawn_shed<H: Handler>(
                     continue;
                 }
             };
-            let client = crate::canonical_peer(peer);
-            if should_shed(&stack, &*handler, &query[..length], client) {
+            let Some((start, client)) = proxied(&*handler, &mut proxy, &query[..length], peer)
+            else {
+                continue;
+            };
+            if should_shed(&stack, &*handler, &query[start..length], client) {
                 continue;
             }
-            if let Some(cancelled) = handler.parallel_query(&query[..length], client) {
+            if let Some(cancelled) = handler.parallel_query(&query[start..length], client) {
                 spawn_parallel(
                     Arc::clone(&socket),
                     Arc::clone(&handler),
-                    &query[..length],
+                    &query[start..length],
                     peer,
                     shutdown.clone(),
                     cancelled,
@@ -509,9 +547,12 @@ fn spawn_shed<H: Handler>(
                 break;
             };
             take_slot(&mut slot, &mut free, &handler, &socket, Some(&stack));
-            slot.as_mut()
-                .unwrap()
-                .prepare(&query[..length], peer, client, Some(response));
+            slot.as_mut().unwrap().prepare(
+                &query[start..length],
+                (peer, client),
+                &proxy.tlv,
+                Some(response),
+            );
             dispatch(
                 &mut slot,
                 &mut pending,
@@ -563,6 +604,7 @@ fn spawn_plain<H: Handler>(
         let mut pending = JoinSet::new();
         let mut free = Vec::new();
         let mut scratch = None;
+        let mut proxy = crate::proxyproto::UdpState::default();
         'read: loop {
             tokio::select! {
                 biased;
@@ -580,14 +622,14 @@ fn spawn_plain<H: Handler>(
                             continue;
                         }
                     };
-                    let client = crate::canonical_peer(peer);
-                    if let Some(cancelled) = handler.parallel_query(&query[..length], client) {
-                        spawn_parallel(Arc::clone(&socket), Arc::clone(&handler), &query[..length], peer, shutdown.clone(), cancelled, None);
+                    let Some((start, client)) = proxied(&*handler, &mut proxy, &query[..length], peer) else { continue };
+                    if let Some(cancelled) = handler.parallel_query(&query[start..length], client) {
+                        spawn_parallel(Arc::clone(&socket), Arc::clone(&handler), &query[start..length], peer, shutdown.clone(), cancelled, None);
                         continue;
                     }
                     if !capacity(&mut pending, &mut free, &mut shutdown, &socket, &handler, None, &mut scratch).await { break 'read; }
                     take_slot(&mut slot, &mut free, &handler, &socket, None);
-                    slot.as_mut().unwrap().prepare(&query[..length], peer, client, None);
+                    slot.as_mut().unwrap().prepare(&query[start..length], (peer, client), &proxy.tlv, None);
                     dispatch(&mut slot, &mut pending, &mut free, &handler, &socket, None).await;
                 }
             }
@@ -644,7 +686,9 @@ mod tests {
         let peer = "127.0.0.1:53".parse().unwrap();
         // Rust Pin: repeated ready Queries must keep the same coroutine allocation.
         for _ in 0..32 {
-            slot.as_mut().unwrap().prepare(b"query", peer, peer, None);
+            slot.as_mut()
+                .unwrap()
+                .prepare(b"query", (peer, peer), "", None);
             dispatch(&mut slot, &mut pending, &mut free, &handler, &socket, None).await;
             let current = slot.as_ref().unwrap().future.as_ref().get_ref() as *const _ as *const ();
             assert_eq!(current, address);
@@ -735,7 +779,7 @@ mod tests {
             let peer = "127.0.0.1:53".parse().unwrap();
             slot.as_mut()
                 .unwrap()
-                .prepare(&[0], peer, peer, Some(response));
+                .prepare(&[0], (peer, peer), "", Some(response));
             dispatch(
                 &mut slot,
                 &mut pending,
@@ -752,7 +796,7 @@ mod tests {
             let response = stack.checkout().unwrap();
             slot.as_mut()
                 .unwrap()
-                .prepare(&[1], peer, peer, Some(response));
+                .prepare(&[1], (peer, peer), "", Some(response));
             dispatch(
                 &mut slot,
                 &mut pending,

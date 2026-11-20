@@ -1,0 +1,33 @@
+# proxyproto
+
+[CoreDNS v1.15.0 README](https://github.com/coredns/coredns/blob/v1.15.0/plugin/proxyproto/README.md)
+
+## proxyproto
+
+- `proxyproto { allow CIDR... ; default use|ignore|reject|skip ; udp_session_tracking DURATION [MAX_SESSIONS] ; tlv_metadata }` is supported with CoreDNS's defaults: without `allow` and `default`, every peer's header is used; without `default`, peers outside `allow` are ignored; `MAX_SESSIONS` defaults to 10240. A zero or negative `DURATION` disables session tracking. `proxyproto` is configured once per Server Block; when Server Blocks share a Listener, the last one that configures it wins, as in CoreDNS.
+- The Directive is configuration only. The Listener reads the PROXY header (v1 and v2) as soon as a TCP connection is accepted, before the TLS handshake of a `tls://`, `https://` or `grpc://` Listener and before the first DNS frame of a `dns://` Listener, and replaces the peer address of every Query on that connection. A `LOCAL` command and v1 `UNKNOWN` keep the connection's own address. The header must complete within 10 seconds, the go-proxyproto default CoreDNS relies on; the timeout is not configurable. A header is bounded to 107 octets (v1) or 4096 octets of payload (v2), and the parser never reads past the header into the DNS stream.
+- Under `use` and `ignore` a connection or datagram without a header is served normally with its own address (go-proxyproto `USE` and `IGNORE`); under `reject` only a header is refused; under `skip` Pharos does not look for a header at all, so the header's bytes reach the application protocol.
+- UDP datagrams carry a v2 header with the DGRAM protocol, removed from each datagram that starts with one. A malformed header, a v1 header, a stream-protocol header or a truncated header drops that datagram only. With `udp_session_tracking` the header-only first datagram of a Cloudflare Spectrum flow opens a session keyed by the Spectrum-side address, and later headerless datagrams from it take the cached client address and TLVs until the session has been idle for `DURATION`. A header-only datagram is never delivered as a Query.
+- `tlv_metadata` publishes the hex TLV vector of the connection's (or UDP session's) v2 header as the `proxyproto/tlv` Metadata label. It is visible only in Server Blocks that enable `metadata` (and for the zones `metadata` lists) and only when the header carried TLVs; `view` expressions can read it with `metadata('proxyproto/tlv')`.
+- `quic://` and `https3://` Listeners read their UDP socket through a wrapper that applies the same datagram rules before QUIC sees a datagram. A header-only first datagram (Spectrum style) needs `udp_session_tracking`: it opens a session keyed by the proxy-side address, and the QUIC datagrams that follow without a header are attributed to the header's client. A proxy that prefixes every datagram with a header works without it. Either way the QUIC connection's client address, and so the peer address of every Query on it, is the header's source, and datagrams sent back to that client go to the proxy that carried the flow. `tlv_metadata` publishes the TLVs the connection's first datagrams carried, for every stream (`quic://`) or request (`https3://`) of the connection.
+
+## Differences from CoreDNS
+
+- A header-only UDP datagram is dropped under every policy; CoreDNS delivers an empty datagram unless `udp_session_tracking` is set.
+- The session cache is a bounded LRU like CoreDNS's, but each UDP worker holds its own share: `MAX_SESSIONS` divided by the worker count, rounded up. The kernel hashes a flow to one worker, so a flow keeps its session. Sessions survive a Reload; the capacity of a worker is fixed when the worker first needs it.
+- A v2 header with the UNIX address family is rejected; go-proxyproto accepts it and CoreDNS then reports a UNIX address as the client.
+- While a worker holds 256 Queries in flight, datagrams it inspects to find forwarding-loop probes are not parsed for PROXY headers, so a Spectrum header-only datagram received during that overload is lost and its flow stays unmapped until the next header.
+- Reload applies new `allow`, `default`, `tlv_metadata` and `udp_session_tracking` TTL values to connections and datagrams accepted afterwards; established connections keep the peer address and TLVs they were accepted with.
+- A QUIC connection keeps the client address and TLVs it was accepted with; the proxy-to-client mapping outlives `udp_session_tracking`'s `DURATION` for as long as the connection can stay idle (`timeouts` idle, 10 seconds by default), so replies keep reaching the proxy. A connection that migrates to a new proxy-side address is not followed.
+- For `quic://` and `https3://` CoreDNS captures TLVs only with `udp_session_tracking`; Pharos also captures them from per-datagram headers.
+- While a QUIC client's route is live, a header that names that client from another proxy address is dropped, so a second proxy cannot take the connection over.
+- UDP datagrams that the kernel coalesces (GRO) are inspected one by one and delivered to QUIC one by one, so a coalesced batch can mix clients.
+- go-proxyproto's `REQUIRE` policy has no Directive option and is not offered.
+- The `plugin/pkg/proxyproto` tests for `TLVListener`, `Addr` and the miekg/dns `ResponseWriter` boundary are not ported: Pharos passes the address and TLVs to the Handler directly. The TLV encoding, the session cache and the packet-header cases are ported as Rust unit tests in `pharos-server`.
+
+## Sources
+
+- [CoreDNS v1.15.0 `plugin/proxyproto`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/proxyproto)
+- [CoreDNS v1.15.0 `plugin/pkg/proxyproto`](https://github.com/coredns/coredns/tree/v1.15.0/plugin/pkg/proxyproto)
+- [PROXY protocol specification](https://www.haproxy.org/download/2.3/doc/proxy-protocol.txt)
+- [go-proxyproto v0.15.0](https://github.com/pires/go-proxyproto/tree/v0.15.0)

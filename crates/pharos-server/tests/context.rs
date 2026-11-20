@@ -261,3 +261,21 @@ fn metadata_retains_values_from_multiple_providers() {
     assert_eq!(metadata.get("test/key3"), Some("testvalue3"));
     assert_eq!(metadata.get("test/missing"), None);
 }
+
+// CoreDNS plugin/proxyproto/metadata.go: the TLV label exists only for a Query whose connection carried TLVs.
+#[test]
+fn proxy_tlv_is_hidden_until_published_and_absent_when_empty() {
+    let mut slots = [None; 1];
+    let mut metadata = Metadata::new(&mut slots);
+    metadata.set_proxy_tlv("ea000107");
+    assert_eq!(metadata.get(pharos_server::proxyproto::TLV_LABEL), None);
+    metadata.publish_proxy_tlv();
+    assert_eq!(
+        metadata.get(pharos_server::proxyproto::TLV_LABEL),
+        Some("ea000107")
+    );
+    let mut slots = [None; 1];
+    let mut empty = Metadata::new(&mut slots);
+    empty.publish_proxy_tlv();
+    assert_eq!(empty.get(pharos_server::proxyproto::TLV_LABEL), None);
+}

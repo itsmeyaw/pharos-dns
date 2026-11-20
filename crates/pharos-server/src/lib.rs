@@ -41,6 +41,7 @@ pub mod metrics;
 mod outcome;
 mod panic;
 mod process_metrics;
+pub mod proxyproto;
 mod quic;
 mod quota;
 pub use admission::{Admission, admit, admit_with_update};
@@ -216,6 +217,9 @@ pub struct Metadata<'a> {
     view_name: Option<Arc<str>>,
     metric_view: &'a str,
     enabled: bool,
+    // PROXY v2 TLVs of the Query's connection, hex-encoded; published once the metadata Plugin matches.
+    proxy_tlv: &'a str,
+    proxy_tlv_published: bool,
     self_lookup: Option<SelfLookupState<'a>>,
 }
 
@@ -237,8 +241,20 @@ impl<'a> Metadata<'a> {
             view_name: None,
             metric_view: "",
             enabled: true,
+            proxy_tlv: "",
+            proxy_tlv_published: false,
             self_lookup: None,
         }
+    }
+
+    /// Attach the hex PROXY v2 TLV vector of the Query's connection; it stays hidden until published.
+    pub fn set_proxy_tlv(&mut self, tlv: &'a str) {
+        self.proxy_tlv = tlv;
+    }
+
+    /// Expose the attached TLV vector as the `proxyproto/tlv` label.
+    pub fn publish_proxy_tlv(&mut self) {
+        self.proxy_tlv_published = true;
     }
 
     pub(crate) fn clear_collected(&mut self) {
@@ -258,6 +274,7 @@ impl<'a> Metadata<'a> {
         self.inline_len = 0;
         self.copied.fill(None);
         self.copied_len = 0;
+        self.proxy_tlv_published = false;
         self.source = None;
         self.view_name = None;
         self.enabled = true;
@@ -475,6 +492,12 @@ impl<'a> Metadata<'a> {
                     .flatten()
             })
             .or_else(|| self.source.as_ref().and_then(|source| source.get(name)))
+            .or_else(|| {
+                (self.proxy_tlv_published
+                    && name == proxyproto::TLV_LABEL
+                    && !self.proxy_tlv.is_empty())
+                .then_some(self.proxy_tlv)
+            })
     }
 }
 
@@ -874,6 +897,10 @@ pub trait Handler: Send + Sync + 'static {
     fn quic_metrics(&self) -> Option<QuicMetrics> {
         None
     }
+    /// PROXY protocol settings applied to every connection and datagram of this Listener.
+    fn proxyproto(&self) -> Option<Arc<proxyproto::Config>> {
+        None
+    }
     /// Number of UDP worker sockets for this Listener.
     fn udp_workers(&self) -> usize {
         quota::worker_count()
@@ -899,6 +926,18 @@ pub trait Handler: Send + Sync + 'static {
         response: &mut Vec<u8>,
     ) -> impl Future<Output = Action> + Send {
         self.handle(query, peer, protocol, response)
+    }
+
+    /// Handle a Query whose connection or UDP session carried PROXY v2 TLVs, hex-encoded in `tlv`.
+    fn handle_proxied(
+        self: &Arc<Self>,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        _tlv: &str,
+        response: &mut Vec<u8>,
+    ) -> impl Future<Output = Action> + Send {
+        self.handle_shared(query, peer, protocol, response)
     }
 }
 
@@ -1064,13 +1103,14 @@ impl Listener {
         address: SocketAddr,
         handler: H,
     ) -> io::Result<Self> {
-        let (endpoint, address) = quic::endpoint(kind, address, &handler)?;
+        let handler = Arc::new(handler);
+        let (endpoint, address, socket) = quic::endpoint(kind, address, &handler)?;
         let (stop, receiver) = watch::channel(false);
         let (udp_stop, _) = watch::channel(false);
         Ok(Self {
             address,
             stop,
-            tasks: vec![quic::spawn(kind, endpoint, Arc::new(handler), receiver)],
+            tasks: vec![quic::spawn(kind, endpoint, handler, socket, receiver)],
             udp_stop,
             udp_tasks: Vec::new(),
             shed: false,
@@ -1776,6 +1816,9 @@ impl<H: Handler> Handler for Swappable<H> {
     fn quic_metrics(&self) -> Option<QuicMetrics> {
         self.0.load().quic_metrics()
     }
+    fn proxyproto(&self) -> Option<Arc<proxyproto::Config>> {
+        self.0.load().proxyproto()
+    }
     fn udp_workers(&self) -> usize {
         self.0.load().udp_workers()
     }
@@ -1791,5 +1834,16 @@ impl<H: Handler> Handler for Swappable<H> {
     ) -> Action {
         let handler = self.0.load();
         H::handle_shared(&handler, query, peer, protocol, response).await
+    }
+    async fn handle_proxied(
+        self: &Arc<Self>,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        tlv: &str,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        let handler = self.0.load();
+        H::handle_proxied(&handler, query, peer, protocol, tlv, response).await
     }
 }

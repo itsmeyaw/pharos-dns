@@ -28,8 +28,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::{net::TcpListener, sync::watch, task::JoinHandle, time::timeout};
 
 use crate::{
-    Action, Handler, Protocol,
-    conn::{Accepted, Activity, InFlight, Pool, Pooled, drive},
+    Action, Handler,
+    conn::{Accepted, Activity, InFlight, Pool, Pooled, Secured, drive},
     doh::{self, Source},
 };
 
@@ -105,6 +105,7 @@ impl Body for Reply {
 struct Connection<H> {
     handler: Arc<H>,
     peer: SocketAddr,
+    tlv: Option<Arc<str>>,
     status: Option<Arc<doh::Status>>,
     pool: Arc<Pool>,
     activity: Arc<Activity>,
@@ -136,7 +137,9 @@ async fn serve<H: Handler>(accepted: Accepted<H>) {
     } = accepted;
     let options = handler.https();
     let limits = handler.tcp_options();
-    let Some(stream) = crate::conn::handshake(stream, &*handler, limits, &mut stopped).await else {
+    let Some(Secured { stream, peer, tlv }) =
+        crate::conn::handshake(stream, peer, &*handler, limits, &mut stopped).await
+    else {
         return;
     };
     // RFC 7301 §3.2: the protocol the handshake selected decides the HTTP version.
@@ -145,6 +148,7 @@ async fn serve<H: Handler>(accepted: Accepted<H>) {
     let connection = Arc::new(Connection {
         handler,
         peer,
+        tlv,
         status: options.status,
         pool,
         activity: Arc::clone(&activity),
@@ -258,7 +262,7 @@ async fn answer<H: Handler>(
     }
     dispatch(
         &connection.handler,
-        connection.peer,
+        (connection.peer, connection.tlv.as_deref()),
         &connection.pool,
         query,
     )
@@ -268,7 +272,7 @@ async fn answer<H: Handler>(
 /// Run a DNS Query received over HTTP through the Plugin Chain, or name the status that rejects it.
 pub(crate) async fn dispatch<H: Handler>(
     handler: &Arc<H>,
-    peer: SocketAddr,
+    (peer, tlv): (SocketAddr, Option<&str>),
     pool: &Arc<Pool>,
     query: &[u8],
 ) -> Result<Pooled, StatusCode> {
@@ -278,7 +282,7 @@ pub(crate) async fn dispatch<H: Handler>(
     }
     let mut response = pool.take();
     // RFC 8484 §4.2.1: every DNS Response, including SERVFAIL, travels in a 2xx response; no Response is a 500.
-    match H::handle_shared(handler, query, peer, Protocol::Tcp, &mut response).await {
+    match crate::conn::handle(handler, tlv, query, peer, &mut response).await {
         Action::Respond => Ok(response),
         Action::Drop | Action::Stream(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
