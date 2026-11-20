@@ -1,9 +1,12 @@
 use std::{
     net::{IpAddr, SocketAddr},
+    path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
 use pharos_corefile::{Cursor, Error, normalize_domain};
+use pharos_server::tls::{ClientConfig, ClientOptions, client_config};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Policy {
@@ -15,6 +18,11 @@ pub(super) enum Policy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Target {
     Address(SocketAddr),
+    /// A DNS-over-TLS Upstream; the name the certificate must match, else its IP address.
+    Tls {
+        address: SocketAddr,
+        server_name: Option<String>,
+    },
     Invalid(String),
 }
 
@@ -44,10 +52,13 @@ pub(super) struct Config {
     pub source_address: Option<IpAddr>,
     pub resolver: Vec<SocketAddr>,
     pub doh_method: String,
+    pub tls_servername: Option<String>,
+    /// Built from the `tls` option's arguments; absent when it had none, which keeps the system roots.
+    pub tls_client: Option<Arc<ClientConfig>>,
 }
 
 /// Parse one Directive, advancing from before its `forward` token.
-pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
+pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Config, Error> {
     if !cursor.next() || cursor.val() != "forward" {
         return Err(cursor.error("expected forward Directive"));
     }
@@ -85,13 +96,24 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
         source_address: None,
         resolver: Vec::new(),
         doh_method: "POST".into(),
+        tls_servername: None,
+        tls_client: None,
     };
 
     while cursor.next_block() {
         let option = cursor.val().to_owned();
         let args = cursor.remaining_args();
         match option.as_str() {
-            "tls" | "tls_servername" => return Err(cursor.error("TLS is not supported")),
+            "tls" => {
+                // CoreDNS v1.15.0 plugin/forward/setup.go parseBlock: at most CERT KEY CA.
+                if args.len() > 3 {
+                    return Err(cursor.arg_err());
+                }
+                // CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: no arguments keeps the system CAs.
+                config.tls_client =
+                    tls_client(&args, root).map_err(|error| cursor.error(error.to_string()))?;
+            }
+            "tls_servername" => config.tls_servername = Some(one_arg(cursor, &args)?.to_owned()),
             "except" => {
                 if args.is_empty() {
                     return Err(cursor.arg_err());
@@ -222,7 +244,7 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
                 config.resolver = args
                     .iter()
                     .map(|arg| {
-                        socket_address(arg)
+                        socket_address(arg, 53)
                             .ok_or_else(|| cursor.error("resolver must be a numeric IP address"))
                     })
                     .collect::<Result<_, _>>()?;
@@ -243,18 +265,28 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
     }
     let mut entries = 0;
     for to in &args[1..] {
-        if let Some((scheme, _)) = to.split_once("://")
-            && scheme != "dns"
-        {
-            return Err(cursor.error(format!(
-                "{scheme} Upstreams are not supported; TLS is not supported"
-            )));
+        let (scheme, address) = to.split_once("://").unwrap_or(("dns", to));
+        if scheme != "dns" && scheme != "tls" {
+            return Err(cursor.error(format!("{scheme} Upstreams are not supported")));
         }
-        let address = to.strip_prefix("dns://").unwrap_or(to);
-        let unscoped = strip_scope(address);
-        if let Some(address) = socket_address(&unscoped) {
+        let tls = scheme == "tls";
+        // RFC 7858 §3.1: DoT uses TCP port 853 unless the Upstream names another.
+        let default_port = if tls { 853 } else { 53 };
+        let (unscoped, zone) = split_zone(address);
+        // CoreDNS v1.15.0 plugin/forward/setup.go: the zone of a `tls://` Upstream is its TLS server name.
+        let target = |address| {
+            if tls {
+                Target::Tls {
+                    address,
+                    server_name: zone.as_ref().map(|zone| zone.to_ascii_lowercase()),
+                }
+            } else {
+                Target::Address(address)
+            }
+        };
+        if let Some(address) = socket_address(&unscoped, default_port) {
             entries += 1;
-            let target = Target::Address(address);
+            let target = target(address);
             if !config.upstreams.contains(&target) {
                 config.upstreams.push(target);
             }
@@ -272,12 +304,12 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
                     let target = ip.parse::<IpAddr>().map_or_else(
                         |_| {
                             Target::Invalid(if ip.contains(':') {
-                                format!("[{ip}]:53")
+                                format!("[{ip}]:{default_port}")
                             } else {
-                                format!("{ip}:53")
+                                format!("{ip}:{default_port}")
                             })
                         },
-                        |ip| Target::Address(SocketAddr::new(ip, 53)),
+                        |ip| target(SocketAddr::new(ip, default_port)),
                     );
                     if !config.upstreams.contains(&target) {
                         config.upstreams.push(target);
@@ -293,16 +325,29 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
                         .map_err(|_| cursor.error("invalid Upstream port"))?;
                     (host, port)
                 }
-                _ => (unscoped.as_str(), 53),
+                _ => (unscoped.as_str(), default_port),
             };
             let ips = super::resolve::resolve(host, &config.resolver)
                 .map_err(|error| cursor.error(format!("failed to resolve {host}: {error}")))?;
             entries += 1;
             for ip in ips {
-                let target = Target::Address(SocketAddr::new(ip, port));
+                let target = target(SocketAddr::new(ip, port));
                 if !config.upstreams.contains(&target) {
                     config.upstreams.push(target);
                 }
+            }
+        }
+    }
+    if let Some(forward_name) = &config.tls_servername {
+        for target in &config.upstreams {
+            if let Target::Tls {
+                address,
+                server_name: Some(server_name),
+            } = target
+            {
+                return Err(cursor.error(format!(
+                    "both forward ('{forward_name}') and proxy level ('{server_name}') TLS servernames are set for upstream proxy 'tls://{address}'"
+                )));
             }
         }
     }
@@ -315,17 +360,39 @@ pub(super) fn parse(cursor: &mut Cursor<'_>) -> Result<Config, Error> {
     Ok(config)
 }
 
-fn strip_scope(value: &str) -> String {
+// CoreDNS v1.15.0 plugin/forward/setup.go splitZone: `HOST%ZONE[:PORT]` yields the host with its port and the zone.
+fn split_zone(value: &str) -> (String, Option<String>) {
     let Some(percent) = value.rfind('%') else {
-        return value.to_owned();
+        return (value.to_owned(), None);
     };
     let mut host = value[..percent].to_owned();
-    if let Some(close) = value[percent..].find(']') {
-        host.push_str(&value[percent + close..]);
-    } else if let Some(colon) = value[percent..].rfind(':') {
-        host.push_str(&value[percent + colon..]);
+    let mut zone = &value[percent + 1..];
+    if host.starts_with('[') {
+        host.push(']');
     }
-    host
+    if let Some(colon) = zone.rfind(':') {
+        host.push_str(&zone[colon..]);
+        zone = &zone[..colon];
+    }
+    (host, Some(zone.trim_end_matches(']').to_owned()))
+}
+
+// CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: `CA`, `CERT KEY` or `CERT KEY CA`.
+fn tls_client(args: &[String], root: Option<&Path>) -> std::io::Result<Option<Arc<ClientConfig>>> {
+    let path = |index: usize| -> PathBuf { crate::resolve_path(args[index].clone().into(), root) };
+    let options = match args.len() {
+        0 => return Ok(None),
+        1 => ClientOptions {
+            ca: Some(path(0)),
+            identity: None,
+        },
+        2 | 3 => ClientOptions {
+            ca: (args.len() == 3).then(|| path(2)),
+            identity: Some((path(0), path(1))),
+        },
+        _ => return Err(std::io::ErrorKind::InvalidInput.into()),
+    };
+    client_config(&options).map(Some)
 }
 
 fn one_arg<'a>(cursor: &Cursor<'_>, args: &'a [String]) -> Result<&'a str, Error> {
@@ -336,15 +403,15 @@ fn one_arg<'a>(cursor: &Cursor<'_>, args: &'a [String]) -> Result<&'a str, Error
     }
 }
 
-// RFC 1035 §4.2.1: DNS queries over UDP use server port 53 by default.
-fn socket_address(value: &str) -> Option<SocketAddr> {
+// RFC 1035 §4.2.1: DNS uses server port 53 by default; RFC 7858 §3.1 uses 853 for DoT.
+fn socket_address(value: &str, default_port: u16) -> Option<SocketAddr> {
     value.parse::<SocketAddr>().ok().or_else(|| {
         value
             .trim_start_matches('[')
             .trim_end_matches(']')
             .parse::<IpAddr>()
             .ok()
-            .map(|ip| SocketAddr::new(ip, 53))
+            .map(|ip| SocketAddr::new(ip, default_port))
     })
 }
 
@@ -441,7 +508,8 @@ pub(crate) fn setup(
 ) -> Result<(), pharos_corefile::Error> {
     use crate::forward;
 
-    block.config.forward = Some(forward::Forward::parse(cursor)?);
+    let root = crate::root_path(&block.config);
+    block.config.forward = Some(forward::Forward::parse(cursor, root)?);
     Ok(())
 }
 
@@ -453,7 +521,16 @@ mod tests {
 
     fn parse_text(text: &str) -> Result<Config, pharos_corefile::Error> {
         let tokens = lex("Corefile", text);
-        parse(&mut Cursor::new("Corefile", &tokens))
+        parse(&mut Cursor::new("Corefile", &tokens), None)
+    }
+
+    const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/tls");
+
+    fn tls(address: &str, server_name: Option<&str>) -> Target {
+        Target::Tls {
+            address: address.parse().unwrap(),
+            server_name: server_name.map(str::to_owned),
+        }
     }
 
     #[test]
@@ -504,11 +581,10 @@ mod tests {
         for text in [
             "forward .",
             "forward . invalid..domain",
-            "forward . tls://1.1.1.1",
             "forward . https://1.1.1.1",
             "forward . quic://1.1.1.1",
-            "forward . 1.1.1.1 {\ntls\n}",
-            "forward . 1.1.1.1 {\ntls_servername x\n}",
+            "forward . grpc://1.1.1.1",
+            "forward . unix:///run/dns.sock",
             "forward . 1.1.1.1 {\nunknown x\n}",
             "forward . 1.1.1.1 {\nforce_tcp x\n}",
             "forward . 1.1.1.1 {\nallow_special x\n}",
@@ -527,11 +603,152 @@ mod tests {
             assert!(parse_text(text).is_err(), "accepted {text}");
         }
         assert!(
-            parse_text("forward . tls://1.1.1.1")
+            parse_text("forward . quic://1.1.1.1")
                 .unwrap_err()
                 .to_string()
-                .contains("TLS")
+                .contains("quic Upstreams are not supported")
         );
+    }
+
+    // CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: `tls://` defaults to port 853.
+    #[test]
+    fn tls_upstreams_default_to_port_853() {
+        let config =
+            parse_text("forward . tls://9.9.9.9 tls://[2620:fe::fe]:8853 tls://[::1]").unwrap();
+        assert_eq!(
+            config.upstreams,
+            [
+                tls("9.9.9.9:853", None),
+                tls("[2620:fe::fe]:8853", None),
+                tls("[::1]:853", None),
+            ]
+        );
+    }
+
+    // CoreDNS v1.15.0 plugin/forward/setup_test.go TestSplitZone, TestSetupTLS.
+    #[test]
+    fn tls_endpoint_zone_sets_the_server_name() {
+        let config = parse_text(
+            "forward . tls://127.0.0.1%Example.net:854 tls://127.0.0.2%example.net tls://[fe80::1%example.com] tls://[2400:3200::1%dns.alidns.com]:853",
+        )
+        .unwrap();
+        assert_eq!(
+            config.upstreams,
+            [
+                tls("127.0.0.1:854", Some("example.net")),
+                tls("127.0.0.2:853", Some("example.net")),
+                tls("[fe80::1]:853", Some("example.com")),
+                tls("[2400:3200::1]:853", Some("dns.alidns.com")),
+            ]
+        );
+    }
+
+    // CoreDNS v1.15.0 plugin/forward/setup_test.go TestSetupTLS.
+    #[test]
+    fn tls_servername_applies_to_every_tls_upstream_only() {
+        let config = parse_text(
+            "forward . tls://127.0.0.1 127.0.0.2 tls://127.0.0.3%Other {\ntls_servername dns.example\n}",
+        );
+        assert_eq!(
+            config.unwrap_err().to_string(),
+            "Corefile:3: both forward ('dns.example') and proxy level ('other') TLS servernames are set for upstream proxy 'tls://127.0.0.3:853'"
+        );
+        let config =
+            parse_text("forward . tls://127.0.0.1 127.0.0.2 {\ntls_servername dns.example\n}")
+                .unwrap();
+        assert_eq!(
+            config.upstreams,
+            [
+                tls("127.0.0.1:853", None),
+                Target::Address("127.0.0.2:53".parse().unwrap()),
+            ]
+        );
+        assert_eq!(config.tls_servername.as_deref(), Some("dns.example"));
+    }
+
+    #[test]
+    fn dns_zone_is_a_scope_not_a_server_name() {
+        let config =
+            parse_text("forward . 127.0.0.1%eth0 dns://127.0.0.1%eth1 {\ntls_servername dns\n}")
+                .unwrap();
+        assert_eq!(
+            config.upstreams,
+            [Target::Address("127.0.0.1:53".parse().unwrap())]
+        );
+    }
+
+    // CoreDNS v1.15.0 plugin/forward/resolve.go dedupKey: transport and server name keep upstreams distinct.
+    #[test]
+    fn dns_and_tls_upstreams_at_one_address_stay_distinct() {
+        let config = parse_text("forward . 127.0.0.1:853 tls://127.0.0.1 tls://127.0.0.1 tls://127.0.0.1%A tls://127.0.0.1%a tls://127.0.0.1%b").unwrap();
+        assert_eq!(
+            config.upstreams,
+            [
+                Target::Address("127.0.0.1:853".parse().unwrap()),
+                tls("127.0.0.1:853", None),
+                tls("127.0.0.1:853", Some("a")),
+                tls("127.0.0.1:853", Some("b")),
+            ]
+        );
+    }
+
+    // CoreDNS v1.15.0 plugin/forward/setup_test.go TestSetupTLS: the options are accepted without a TLS upstream.
+    #[test]
+    fn tls_options_are_accepted_for_plain_upstreams() {
+        assert!(parse_text("forward . 127.0.0.1 {\ntls\ntls_servername dns\n}").is_ok());
+        assert!(parse_text("forward . tls://127.0.0.1%example.net {\ntls\n}").is_ok());
+    }
+
+    // CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: zero to three arguments.
+    #[test]
+    fn tls_option_takes_ca_or_cert_key_and_optional_ca() {
+        let ca = format!("{FIXTURES}/ca.pem");
+        let cert = format!("{FIXTURES}/client.pem");
+        let key = format!("{FIXTURES}/client.key.pem");
+        assert!(
+            parse_text("forward . tls://127.0.0.1 {\ntls\n}")
+                .unwrap()
+                .tls_client
+                .is_none()
+        );
+        for line in [
+            format!("tls {ca}"),
+            format!("tls {cert} {key}"),
+            format!("tls {cert} {key} {ca}"),
+        ] {
+            let config = parse_text(&format!("forward . tls://127.0.0.1 {{\n{line}\n}}"))
+                .unwrap_or_else(|error| panic!("{line}: {error}"));
+            assert!(config.tls_client.is_some(), "{line}");
+        }
+    }
+
+    #[test]
+    fn tls_option_rejects_bad_arguments_and_files() {
+        let ca = format!("{FIXTURES}/ca.pem");
+        let key = format!("{FIXTURES}/client.key.pem");
+        let missing = format!("{FIXTURES}/missing.pem");
+        for line in [
+            format!("tls {ca} {ca} {ca} {ca}"),
+            format!("tls {missing}"),
+            format!("tls {ca} {key} {ca}"),
+            format!("tls {ca} {missing}"),
+            format!("tls {key}"),
+        ] {
+            assert!(
+                parse_text(&format!("forward . 127.0.0.1 {{\n{line}\n}}")).is_err(),
+                "accepted {line}"
+            );
+        }
+    }
+
+    // CoreDNS v1.15.0 plugin/forward/setup.go parseBlock: relative `tls` paths join the `root`.
+    #[test]
+    fn tls_option_paths_resolve_against_root() {
+        let tokens = lex("Corefile", "forward . tls://127.0.0.1 {\ntls ca.pem\n}");
+        let root = std::path::Path::new(FIXTURES);
+        let config = parse(&mut Cursor::new("Corefile", &tokens), Some(root)).unwrap();
+        assert!(config.tls_client.is_some());
+        assert!(parse_text("forward . tls://127.0.0.1 {\ntls ca.pem\n}").is_err());
     }
 
     #[test]
@@ -564,8 +781,8 @@ mod tests {
             "forward . 192.0.2.1 {\npolicy sequential\n}\nforward example.org 192.0.2.2",
         );
         let mut cursor = Cursor::new("Corefile", &tokens);
-        assert_eq!(parse(&mut cursor).unwrap().policy, Policy::Sequential);
-        assert_eq!(parse(&mut cursor).unwrap().from, "example.org.");
+        assert_eq!(parse(&mut cursor, None).unwrap().policy, Policy::Sequential);
+        assert_eq!(parse(&mut cursor, None).unwrap().from, "example.org.");
     }
 
     #[test]

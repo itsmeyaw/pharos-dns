@@ -190,6 +190,8 @@ mod forward {
     mod forward_debug;
     #[path = "forward_ported.rs"]
     mod forward_ported;
+    #[path = "forward_tls.rs"]
+    mod forward_tls;
 }
 
 #[path = "functional"]
@@ -310,6 +312,8 @@ mod proxy {
     mod cases;
     #[path = "proxy_throughput.rs"]
     mod proxy_throughput;
+    #[path = "proxy_tls.rs"]
+    mod proxy_tls;
 }
 
 #[path = "functional"]

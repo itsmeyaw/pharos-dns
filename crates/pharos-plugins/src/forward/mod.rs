@@ -10,7 +10,11 @@ use std::sync::{
 use std::time::Duration;
 
 use pharos_proto::{Message, Name, NameRef, Rcode, TsigRecord, Type};
-use pharos_server::{Context, Next, Outcome, Plugin, Protocol, metrics::ForwardMetrics};
+use pharos_server::{
+    Context, Next, Outcome, Plugin, Protocol,
+    metrics::ForwardMetrics,
+    tls::{ClientOptions, ServerName},
+};
 use tokio::time::{Instant, timeout_at};
 
 use crate::proxy::{self, Options, Proxy};
@@ -177,10 +181,11 @@ impl Drop for InFlight<'_> {
 impl Forward {
     pub(crate) fn parse(
         cursor: &mut pharos_corefile::Cursor<'_>,
+        root: Option<&std::path::Path>,
     ) -> Result<Self, pharos_corefile::Error> {
         let mut result = Self::default();
         while cursor.has_next() {
-            let config = setup::parse(cursor)?;
+            let config = setup::parse(cursor, root)?;
             let parse_name = |name: &str| {
                 name.parse::<Name>()
                     .map_err(|_| cursor.error(format!("invalid Domain {name}")))
@@ -204,9 +209,39 @@ impl Forward {
             let domain = parse_name(&config.health_domain)?;
             let mut proxies = Vec::new();
             // RFC 1034 §5.3.1: Stub forwarding delegates resolution to configured servers.
+            let mut tls_config = config.tls_client.clone();
             for target in config.upstreams {
-                let address = match target {
-                    setup::Target::Address(address) => address,
+                let (address, tls) = match target {
+                    setup::Target::Address(address) => (address, None),
+                    setup::Target::Tls {
+                        address,
+                        server_name,
+                    } => {
+                        let client = match &tls_config {
+                            Some(client) => client.clone(),
+                            None => {
+                                // CoreDNS v1.15.0 plugin/pkg/tls/tls.go: without `tls` arguments the system roots verify the server.
+                                let client =
+                                    pharos_server::tls::client_config(&ClientOptions::default())
+                                        .map_err(|error| cursor.error(error.to_string()))?;
+                                tls_config = Some(client.clone());
+                                client
+                            }
+                        };
+                        // RFC 6125 §6.4.1: verify the name the Corefile gives, else the Upstream's IP address.
+                        let name = server_name
+                            .or_else(|| config.tls_servername.clone())
+                            .unwrap_or_else(|| address.ip().to_string());
+                        let server_name = ServerName::try_from(name.clone())
+                            .map_err(|_| cursor.error(format!("invalid TLS server name {name}")))?;
+                        (
+                            address,
+                            Some(proxy::Tls {
+                                config: client,
+                                server_name,
+                            }),
+                        )
+                    }
                     setup::Target::Invalid(address) => {
                         proxies.push(Upstream {
                             proxy: None,
@@ -216,6 +251,9 @@ impl Forward {
                     }
                 };
                 let mut proxy = Proxy::new(address);
+                if let Some(tls) = tls {
+                    proxy.set_tls(tls);
+                }
                 proxy.set_expire(config.expire);
                 proxy.set_max_age(config.max_age);
                 proxy.set_max_idle_conns(config.max_idle_conns);
@@ -241,6 +279,7 @@ impl Forward {
                 options: Options {
                     force_tcp: config.force_tcp,
                     prefer_udp: config.prefer_udp,
+                    ..Options::default()
                 },
                 policy: config.policy,
                 robin: AtomicUsize::new(0),
@@ -409,6 +448,16 @@ impl Plugin for Forward {
                 stanza.max_connect_attempts,
                 matches!(query_mode, QueryMode::UnsignedEcs),
             );
+            // CoreDNS v1.15.0 plugin/forward/forward.go ServeDNS: with retries left, a stalled TLS handshake gets half the window.
+            let started = Instant::now();
+            let options = Options {
+                tls_connect_deadline: Some(if attempt_limit == 1 {
+                    deadline
+                } else {
+                    started + (deadline - started) / 2
+                }),
+                ..stanza.options
+            };
             upstream_attempts.clear();
             upstream_attempts.resize(count, 0);
             let mut i = 0;
@@ -469,7 +518,7 @@ impl Plugin for Forward {
                     upstream_attempts[upstream_index] += 1;
                     let result = timeout_at(
                         deadline,
-                        proxy.exchange(query_wire, wire, protocol, stanza.options),
+                        proxy.exchange(query_wire, wire, protocol, options),
                     )
                     .await;
                     // RFC 7766 §6.2.4: Retry unanswered queries after a connection closes.
@@ -543,12 +592,7 @@ impl Plugin for Forward {
                     upstream_attempts[upstream_index] += 1;
                     let retry = timeout_at(
                         deadline,
-                        proxy.exchange(
-                            &fallback_buffer[..fallback_len],
-                            wire,
-                            protocol,
-                            stanza.options,
-                        ),
+                        proxy.exchange(&fallback_buffer[..fallback_len], wire, protocol, options),
                     )
                     .await;
                     match retry {

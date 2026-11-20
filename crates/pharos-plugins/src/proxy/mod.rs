@@ -1,6 +1,7 @@
 //! Upstream DNS exchange. Independent cache shards hold idle connections only;
 //! no lock or manager task is held while a Query waits for its Response.
-//! DNS-over-TLS is deferred to M3.
+//! DNS-over-TLS Upstreams keep one idle connection cache like TCP; the dial
+//! timeout bounds the TCP dial plus the TLS handshake.
 //! CoreDNS's `forward` performs the `prefer_udp` TC retry; Pharos does it here,
 //! so a `forward` caller must not retry the same truncated Response again.
 //! UDP source ports: the OS picks a random port for each new socket, a socket
@@ -16,6 +17,7 @@ use pharos_proto::{
 };
 use pharos_server::{
     metrics::{ProxyConnectionCache, ProxyMetrics, ProxyRequestDuration, Registry},
+    tls::{ClientConfig, ClientStream, ServerName, TlsConnector},
     write_tcp_frame,
 };
 use std::{
@@ -24,15 +26,15 @@ use std::{
     fmt, io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncRead, AsyncReadExt},
     net::{TcpSocket, TcpStream, UdpSocket},
-    time::timeout,
+    time::{timeout, timeout_at},
 };
 
 const SHARDS: usize = 32;
@@ -84,6 +86,36 @@ async fn connect_tcp(address: SocketAddr, source: Option<IpAddr>) -> io::Result<
     Ok(stream)
 }
 
+/// How an Upstream's DNS-over-TLS connections verify the server.
+#[derive(Clone, Debug)]
+pub struct Tls {
+    pub config: Arc<ClientConfig>,
+    /// Name the certificate must match, and the SNI sent.
+    pub server_name: ServerName<'static>,
+}
+
+// RFC 7858 §3.1: DoT clients authenticate the server before sending Queries.
+async fn connect_tls(
+    address: SocketAddr,
+    source: Option<IpAddr>,
+    tls: &Tls,
+) -> io::Result<ClientStream<TcpStream>> {
+    let tcp = connect_tcp(address, source).await?;
+    TlsConnector::from(Arc::clone(&tls.config))
+        .connect(tls.server_name.clone(), tcp)
+        .await
+}
+
+// RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
+async fn read_framed(stream: &mut (impl AsyncRead + Unpin), wire: &mut [u8]) -> io::Result<usize> {
+    let len = usize::from(stream.read_u16().await?);
+    if len > wire.len() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    stream.read_exact(&mut wire[..len]).await?;
+    Ok(len)
+}
+
 fn is_overflow(error: &MessageError) -> bool {
     matches!(
         error,
@@ -95,12 +127,24 @@ fn is_overflow(error: &MessageError) -> bool {
 pub enum Transport {
     Udp,
     Tcp,
+    /// DNS over TLS (RFC 7858); chosen by the Upstream, never by `force_tcp` or `prefer_udp`.
+    Tls,
+}
+
+impl Transport {
+    const COUNT: usize = 3;
+
+    const fn index(self) -> usize {
+        self as usize
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     pub force_tcp: bool,
     pub prefer_udp: bool,
+    /// Latest moment a new DoT connection (TCP dial plus handshake) may still be completing.
+    pub tls_connect_deadline: Option<tokio::time::Instant>,
 }
 
 #[derive(Debug)]
@@ -165,6 +209,7 @@ fn next_use_count(transport: Transport, uses: u32) -> u32 {
 enum Socket {
     Udp(UdpSocket),
     Tcp(TcpStream),
+    Tls(Box<ClientStream<TcpStream>>),
 }
 
 fn ecs_option(message: &Message<'_>) -> Result<Option<ClientSubnet>, ()> {
@@ -444,7 +489,7 @@ fn sanitize_edns(
             read += option_len;
             continue;
         }
-        if code == 11 && transport == Transport::Tcp {
+        if code == 11 && transport != Transport::Udp {
             // RFC 7828 §3.2.1: TCP Queries carry a zero-length TIMEOUT option.
             wire.copy_within(read..read + 4, write);
             wire[write + 2..write + 4].fill(0);
@@ -494,6 +539,7 @@ impl Socket {
         match self {
             Self::Udp(s) => s.local_addr(),
             Self::Tcp(s) => s.local_addr(),
+            Self::Tls(s) => s.get_ref().0.local_addr(),
         }
     }
     async fn send(&mut self, wire: &[u8]) -> io::Result<()> {
@@ -505,45 +551,44 @@ impl Socket {
             }
             // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
             Self::Tcp(s) => write_tcp_frame(s, wire).await,
+            // RFC 7858 §3.3: DoT frames Messages like TCP inside the TLS stream.
+            Self::Tls(s) => write_tcp_frame(s, wire).await,
         }
     }
     async fn receive(&mut self, wire: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Udp(s) => s.recv(wire).await,
             // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
-            Self::Tcp(s) => {
-                let len = usize::from(s.read_u16().await?);
-                if len > wire.len() {
-                    return Err(io::ErrorKind::InvalidData.into());
-                }
-                s.read_exact(&mut wire[..len]).await?;
-                Ok(len)
-            }
+            Self::Tcp(s) => read_framed(s, wire).await,
+            // RFC 7858 §3.3: DoT frames Messages like TCP inside the TLS stream.
+            Self::Tls(s) => read_framed(s, wire).await,
         }
     }
 }
 
 pub struct Proxy {
     address: SocketAddr,
-    shards: [[Mutex<VecDeque<Cached>>; SHARDS]; 2],
+    shards: [[Mutex<VecDeque<Cached>>; SHARDS]; Transport::COUNT],
     expire: Duration,
     max_age: Duration,
     max_idle_conns: usize,
     udp_max_uses: u32,
-    idle: [AtomicUsize; 2],
+    idle: [AtomicUsize; Transport::COUNT],
     stopped: AtomicBool,
     started: Instant,
     next_sweep: AtomicU64,
     read_timeout: Duration,
     average_dial_nanos: AtomicI64,
     source_address: Option<IpAddr>,
+    tls: Option<Tls>,
     metrics: Option<Metrics>,
     health: Health,
 }
 
 struct Metrics {
     proxy: ProxyMetrics,
-    cache: [ProxyConnectionCache; 2],
+    // Only the protocols this Upstream uses are registered, as in CoreDNS.
+    cache: [Option<ProxyConnectionCache>; Transport::COUNT],
     durations: Box<[OnceLock<ProxyRequestDuration>]>,
 }
 
@@ -557,13 +602,14 @@ impl Proxy {
             max_age: Duration::ZERO,
             max_idle_conns: 0,
             udp_max_uses: UDP_MAX_USES,
-            idle: [AtomicUsize::new(0), AtomicUsize::new(0)],
+            idle: std::array::from_fn(|_| AtomicUsize::new(0)),
             stopped: AtomicBool::new(false),
             started: Instant::now(),
             next_sweep: AtomicU64::new(EXPIRE.as_nanos() as u64),
             read_timeout: READ_TIMEOUT,
             average_dial_nanos: AtomicI64::new(15_000_000_000),
             source_address: None,
+            tls: None,
             metrics: None,
             health: Health::new(address, 2),
         }
@@ -671,10 +717,26 @@ impl Proxy {
             .fetch_add((observed - average) / 4, Ordering::Relaxed);
     }
 
-    async fn dial(&self, transport: Transport) -> io::Result<Socket> {
+    async fn dial(
+        &self,
+        transport: Transport,
+        tls_connect_deadline: Option<tokio::time::Instant>,
+    ) -> io::Result<Socket> {
         let start = Instant::now();
-        let result = timeout(self.dial_timeout(), async {
-            if transport == Transport::Tcp {
+        let mut limit = tokio::time::Instant::now() + self.dial_timeout();
+        if let (Transport::Tls, Some(deadline)) = (transport, tls_connect_deadline) {
+            // CoreDNS v1.15.0 plugin/pkg/proxy/connect.go: the TLS connect deadline caps the TCP dial plus handshake.
+            limit = limit.min(deadline);
+        }
+        let result = timeout_at(limit, async {
+            if transport == Transport::Tls {
+                let Some(tls) = &self.tls else {
+                    return Err(io::Error::other("no TLS configuration for Upstream"));
+                };
+                Ok(Socket::Tls(Box::new(
+                    connect_tls(self.address, self.source_address, tls).await?,
+                )))
+            } else if transport == Transport::Tcp {
                 Ok(Socket::Tcp(
                     connect_tcp(self.address, self.source_address).await?,
                 ))
@@ -696,6 +758,21 @@ impl Proxy {
         .await;
         self.update_dial_timeout(start.elapsed());
         result.map_err(|_| io::ErrorKind::TimedOut)?
+    }
+
+    /// Reach this Upstream over DNS-over-TLS, whatever Transport a Query asks for.
+    /// Call before `set_metrics` so the connection cache is labelled `tcp-tls`.
+    pub fn set_tls(&mut self, tls: Tls) {
+        let mut config = self.health.config();
+        config.tls = Some(tls.clone());
+        self.health = Health::with_config(config);
+        self.tls = Some(tls);
+    }
+
+    /// Whether Queries to this Upstream travel over DNS-over-TLS.
+    #[must_use]
+    pub fn is_tls(&self) -> bool {
+        self.tls.is_some()
     }
 
     /// Bind new Upstream and health-check connections to this local IP.
@@ -722,7 +799,15 @@ impl Proxy {
         config.metrics = Some(proxy.clone());
         self.health = Health::with_config(config);
         self.metrics = Some(Metrics {
-            cache: [proxy.connection_cache("udp"), proxy.connection_cache("tcp")],
+            cache: [
+                ("udp", false),
+                ("tcp", false),
+                // CoreDNS v1.15.0 plugin/pkg/proxy/connect.go: DoT connections count as `tcp-tls`.
+                ("tcp-tls", true),
+            ]
+            .map(|(proto, encrypted)| {
+                (encrypted == self.tls.is_some()).then(|| proxy.connection_cache(proto))
+            }),
             durations: (0..4096).map(|_| OnceLock::new()).collect(),
             proxy,
         });
@@ -733,6 +818,9 @@ impl Proxy {
         assert_eq!(config.address, self.address);
         if config.source_address.is_none() {
             config.source_address = self.source_address;
+        }
+        if config.tls.is_none() {
+            config.tls.clone_from(&self.tls);
         }
         if let Some(metrics) = &self.metrics {
             config.metrics = Some(metrics.proxy.clone());
@@ -756,14 +844,19 @@ impl Proxy {
         }
         self.sweep();
         // RFC 7766 §5: DNS forwarders must support both UDP and TCP transport.
-        let selected = if options.force_tcp {
+        // CoreDNS v1.15.0 plugin/pkg/proxy/connect.go: a TLS-configured Upstream always uses TLS.
+        let selected = if self.tls.is_some() {
+            Transport::Tls
+        } else if options.force_tcp {
             Transport::Tcp
         } else if options.prefer_udp {
             Transport::Udp
         } else {
             transport
         };
-        let result = self.exchange_once(query, response, selected).await;
+        let result = self
+            .exchange_once(query, response, selected, options.tls_connect_deadline)
+            .await;
         // RFC 2181 §9: a client can retry a truncated response over TCP.
         // RFC 9520 §3.1: Retry a truncated UDP response over TCP to the same server.
         let result = match result {
@@ -773,7 +866,8 @@ impl Proxy {
                     && !options.force_tcp
                     && response[2] & 0x02 != 0 =>
             {
-                self.exchange_once(query, response, Transport::Tcp).await
+                self.exchange_once(query, response, Transport::Tcp, None)
+                    .await
             }
             other => other,
         };
@@ -788,6 +882,7 @@ impl Proxy {
         query: &[u8],
         response: &mut [u8],
         transport: Transport,
+        tls_connect_deadline: Option<tokio::time::Instant>,
     ) -> Result<Exchange, Error> {
         let start = Instant::now();
         // RFC 5625 §4.1: Accept packets with unknown DNS flags for proxying.
@@ -795,7 +890,7 @@ impl Proxy {
         if query.len() > response.len() || query.len() > u16::MAX as usize {
             return Err(Error::InvalidRequest);
         }
-        let protocol = usize::from(transport == Transport::Tcp);
+        let protocol = transport.index();
         let shard = SHARD.with(|index| *index);
         let cached = {
             let mut queue = self.shards[protocol][shard].lock().unwrap();
@@ -814,18 +909,24 @@ impl Proxy {
             }
         };
         let reused = cached.is_some();
-        if let Some(metrics) = &self.metrics {
+        if let Some(metrics) = &self.metrics
+            && let Some(cache) = &metrics.cache[protocol]
+        {
             if reused {
-                metrics.cache[protocol].hit();
+                cache.hit();
             } else {
-                metrics.cache[protocol].miss();
+                cache.miss();
             }
         }
         // RFC 7766 §6.2.1: DNS clients should reuse persistent TCP connections.
         let (mut socket, created, uses) = if let Some(cached) = cached {
             (cached.socket, cached.created, cached.uses)
         } else {
-            (self.dial(transport).await?, Instant::now(), 0)
+            (
+                self.dial(transport, tls_connect_deadline).await?,
+                Instant::now(),
+                0,
+            )
         };
         let mut id = [0; 2];
         // RFC 8945 §5.5: forward messages with unshared TSIG keys unchanged.
@@ -864,7 +965,7 @@ impl Proxy {
         let received = timeout(self.read_timeout, async {
             loop {
                 let len = socket.receive(response).await?;
-                if len < 12 && transport == Transport::Tcp {
+                if len < 12 && transport != Transport::Udp {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 // RFC 5452 §9.1: match response IDs to outstanding queries.
@@ -949,7 +1050,7 @@ impl Proxy {
         let max_idle = match (transport, self.max_idle_conns) {
             (Transport::Udp, 0) => UDP_MAX_IDLE,
             (Transport::Udp, max) => max.min(UDP_MAX_IDLE),
-            (Transport::Tcp, max) => max,
+            (Transport::Tcp | Transport::Tls, max) => max,
         };
         if !spent {
             let mut queue = self.shards[protocol][shard].lock().unwrap();

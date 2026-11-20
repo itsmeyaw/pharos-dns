@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite},
     net::UdpSocket,
     task::JoinHandle,
     time::{sleep, timeout},
@@ -31,6 +31,8 @@ pub struct HealthConfig {
     pub recursive: bool,
     pub force_tcp: bool,
     pub source_address: Option<IpAddr>,
+    /// Probe over DNS-over-TLS instead of UDP or TCP.
+    pub tls: Option<super::Tls>,
     pub max_fails: u32,
     pub interval: Duration,
     pub metrics: Option<ProxyMetrics>,
@@ -47,6 +49,7 @@ impl HealthConfig {
             recursive: true,
             force_tcp: false,
             source_address: None,
+            tls: None,
             max_fails,
             interval: Duration::from_millis(500),
             metrics: None,
@@ -243,25 +246,21 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
     // RFC 1035 §3.2.4: IN has class 1.
     query.extend_from_slice(&[0, 2, 0, 1]);
 
-    let response = if config.force_tcp {
+    let response = if let Some(tls) = &config.tls {
+        // CoreDNS v1.15.0 plugin/pkg/proxy/health.go: a DoT probe's dial timeout covers the handshake; force_tcp is moot.
+        let mut stream = timeout(
+            DIAL_TIMEOUT,
+            super::connect_tls(config.address, config.source_address, tls),
+        )
+        .await??;
+        framed_exchange(&mut stream, &query).await?
+    } else if config.force_tcp {
         let mut stream = timeout(
             DIAL_TIMEOUT,
             super::connect_tcp(config.address, config.source_address),
         )
         .await??;
-        timeout(IO_TIMEOUT, async {
-            // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
-            super::write_tcp_frame(&mut stream, &query).await
-        })
-        .await??;
-        timeout(IO_TIMEOUT, async {
-            // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
-            let len = stream.read_u16().await?;
-            let mut response = vec![0; usize::from(len)];
-            stream.read_exact(&mut response).await?;
-            Ok::<_, io::Error>(response)
-        })
-        .await??
+        framed_exchange(&mut stream, &query).await?
     } else {
         let ip = if config.address.is_ipv4() {
             IpAddr::V4(Ipv4Addr::UNSPECIFIED)
@@ -289,6 +288,25 @@ async fn check(config: &HealthConfig) -> io::Result<()> {
     } else {
         Err(io::ErrorKind::InvalidData.into())
     }
+}
+
+async fn framed_exchange(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    query: &[u8],
+) -> io::Result<Vec<u8>> {
+    timeout(IO_TIMEOUT, async {
+        // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
+        super::write_tcp_frame(stream, query).await
+    })
+    .await??;
+    timeout(IO_TIMEOUT, async {
+        // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
+        let len = stream.read_u16().await?;
+        let mut response = vec![0; usize::from(len)];
+        stream.read_exact(&mut response).await?;
+        Ok::<_, io::Error>(response)
+    })
+    .await?
 }
 
 fn response_matches_query(response: &[u8], id: [u8; 2], domain: &Name) -> bool {
