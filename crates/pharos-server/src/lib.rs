@@ -41,6 +41,7 @@ pub mod metrics;
 mod outcome;
 mod panic;
 mod process_metrics;
+pub mod proxyproto;
 mod quic;
 mod quota;
 pub use admission::{Admission, admit, admit_with_update};
