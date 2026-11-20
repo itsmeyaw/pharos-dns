@@ -16,9 +16,12 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Stats, StatsAlloc};
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
+// Queries seen, then the allocator stats at the 101st and 201st.
+type Counts = (usize, Option<Stats>, Option<Stats>);
+
 struct Probe {
     config: Arc<Config>,
-    counts: Arc<Mutex<(usize, Option<Stats>, Option<Stats>)>>,
+    counts: Arc<Mutex<Counts>>,
 }
 
 impl Handler for Probe {

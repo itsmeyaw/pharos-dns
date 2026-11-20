@@ -277,7 +277,7 @@ fn main() {
         code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) && let Some(plugin) = &self.kubernetes { plugin.collect_metadata(cx); } ");
     }
     if enabled.contains(&"metadata") && enabled.contains(&"proxyproto") {
-        code.push_str("if self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { cx.metadata.publish_proxy_tlv(); } ");
+        code.push_str("\nif self.metadata.as_ref().is_some_and(|plugin| plugin.matches(cx)) { cx.metadata.publish_proxy_tlv(); }\n");
     }
     writeln!(code, "}} self.serve_{}(cx) }}", next_plugin(&enabled, 0)).unwrap();
     if let Some(index) = enabled.iter().position(|name| *name == "cache") {
