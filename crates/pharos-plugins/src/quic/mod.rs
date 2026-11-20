@@ -12,6 +12,18 @@ pub struct Quic {
     pub worker_pool_size: Option<usize>,
 }
 
+impl Quic {
+    /// The Listener limits, with defaults for every value left unset.
+    pub fn options(&self) -> pharos_server::QuicOptions {
+        let defaults = pharos_server::QuicOptions::default();
+        pharos_server::QuicOptions {
+            max_streams: self.max_streams.unwrap_or(defaults.max_streams),
+            max_connections: self.max_connections.unwrap_or(defaults.max_connections),
+            worker_pool_size: self.worker_pool_size.unwrap_or(defaults.worker_pool_size),
+        }
+    }
+}
+
 // CoreDNS v1.15.0 plugin/quic/setup.go parseQuic: three limits, each set at most once.
 pub(crate) fn parse(cursor: &mut Cursor<'_>) -> Result<Quic, Error> {
     let mut quic = Quic::default();
