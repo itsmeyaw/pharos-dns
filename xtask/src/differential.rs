@@ -798,20 +798,23 @@ pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(
     let wire = query::parse("ready. A IN udp")?.wire()?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        // A TLS-only or QUIC-only Corefile has no UDP Listener, so readiness also tries DNS over TLS and QUIC.
-        let answered = exchange(port, Transport::Udp, &wire).is_ok()
-            || exchange(port, Transport::Tls, &wire).is_ok()
-            || exchange(port, Transport::Https, &wire).is_ok()
-            || exchange(port, Transport::Grpc, &wire).is_ok()
-            || exchange(port, Transport::Quic, &wire).is_ok()
-            || exchange(port, Transport::Https3, &wire).is_ok();
+        if exchange(port, Transport::Udp, &wire).is_ok() {
+            return Ok(());
+        }
         if server.0.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
             return Err(format!(
                 "server on {port} did not start:\n{}",
                 fs::read_to_string(log_path).unwrap_or_default()
             ));
         }
-        if answered {
+        // A TLS-only or QUIC-only Corefile has no UDP Listener, so readiness also tries DNS over TLS and QUIC.
+        // These probes can stall on a TCP Listener that expects a PROXY header, so UDP is retried before the deadline check.
+        if exchange(port, Transport::Tls, &wire).is_ok()
+            || exchange(port, Transport::Https, &wire).is_ok()
+            || exchange(port, Transport::Grpc, &wire).is_ok()
+            || exchange(port, Transport::Quic, &wire).is_ok()
+            || exchange(port, Transport::Https3, &wire).is_ok()
+        {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
