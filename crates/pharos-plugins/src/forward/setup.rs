@@ -1,12 +1,12 @@
 use std::{
     net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::Duration,
 };
 
 use pharos_corefile::{Cursor, Error, normalize_domain};
-use pharos_server::tls::{ClientConfig, ClientOptions, client_config};
+use pharos_server::tls::ClientConfig;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Policy {
@@ -116,8 +116,8 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Conf
                     return Err(cursor.arg_err());
                 }
                 // CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: no arguments keeps the system CAs.
-                config.tls_client =
-                    tls_client(&args, root).map_err(|error| cursor.error(error.to_string()))?;
+                config.tls_client = crate::tls_client_from_args(&args, root)
+                    .map_err(|error| cursor.error(error.to_string()))?;
             }
             "tls_servername" => config.tls_servername = Some(one_arg(cursor, &args)?.to_owned()),
             "except" => {
@@ -410,24 +410,6 @@ fn split_zone(value: &str) -> (String, Option<String>) {
         zone = &zone[..colon];
     }
     (host, Some(zone.trim_end_matches(']').to_owned()))
-}
-
-// CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: `CA`, `CERT KEY` or `CERT KEY CA`.
-fn tls_client(args: &[String], root: Option<&Path>) -> std::io::Result<Option<Arc<ClientConfig>>> {
-    let path = |index: usize| -> PathBuf { crate::resolve_path(args[index].clone().into(), root) };
-    let options = match args.len() {
-        0 => return Ok(None),
-        1 => ClientOptions {
-            ca: Some(path(0)),
-            identity: None,
-        },
-        2 | 3 => ClientOptions {
-            ca: (args.len() == 3).then(|| path(2)),
-            identity: Some((path(0), path(1))),
-        },
-        _ => return Err(std::io::ErrorKind::InvalidInput.into()),
-    };
-    client_config(&options).map(Some)
 }
 
 fn one_arg<'a>(cursor: &Cursor<'_>, args: &'a [String]) -> Result<&'a str, Error> {
