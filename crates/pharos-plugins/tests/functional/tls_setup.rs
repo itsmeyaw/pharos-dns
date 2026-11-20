@@ -341,3 +341,22 @@ fn blocks_sharing_a_listener_must_share_a_tls_identity() {
         );
     }
 }
+
+#[test]
+fn blocks_sharing_a_listener_must_share_a_keylog_path() {
+    let dir = std::env::temp_dir();
+    let block = |zone: &str, log: &str| {
+        let path = dir.join(format!("pharos-shared-{log}-{}", std::process::id()));
+        format!(
+            "tls://{zone}:853 {{\n tls @CERT @KEY {{\n  keylog {}\n }}\n whoami\n}}\n",
+            path.display()
+        )
+    };
+    let same = block("a.example", "a") + &block("b.example", "a");
+    assert_eq!(servers(&same).unwrap().len(), 1);
+    let error = servers(&(block("a.example", "a") + &block("b.example", "b")))
+        .err()
+        .expect("rejected")
+        .to_string();
+    assert!(error.contains("TLS key log paths differ"), "{error}");
+}
