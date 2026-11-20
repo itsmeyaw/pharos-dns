@@ -27,6 +27,7 @@ use rustls::{
     version::{TLS12, TLS13},
 };
 
+pub use quinn::crypto::rustls::QuicServerConfig;
 pub use rustls::{ClientConfig, pki_types::ServerName};
 pub use tokio_rustls::{TlsAcceptor, TlsConnector, client::TlsStream as ClientStream};
 
@@ -61,6 +62,7 @@ pub struct ServerOptions {
 #[derive(Clone)]
 pub struct ServerTls {
     config: Arc<ServerConfig>,
+    quic: Arc<QuicServerConfig>,
     policy: Arc<Policy>,
 }
 
@@ -84,10 +86,6 @@ impl ServerTls {
     /// Read the certificate, key and client CA files; any unreadable or inconsistent file fails.
     pub fn load(options: &ServerOptions) -> io::Result<Self> {
         let provider = provider();
-        // RFC 7858 §3.2: DoT uses TLS; RFC 9325 §3.1.1 forbids versions below TLS 1.2.
-        let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
-            .with_protocol_versions(&[&TLS13, &TLS12])
-            .map_err(invalid)?;
         let chain = read_chain(&options.cert).map_err(load_error)?;
         let key = PrivateKeyDer::from_pem_file(&options.key)
             .map_err(|error| load_error(io::Error::other(error)))?;
@@ -100,38 +98,53 @@ impl ServerTls {
             (None, _) => None,
         };
         let algorithms = provider.signature_verification_algorithms;
-        let builder = match options.client_auth {
-            ClientAuth::NoCert => builder.with_no_client_auth(),
-            ClientAuth::Request | ClientAuth::Require => {
-                builder.with_client_cert_verifier(Arc::new(UnverifiedClientCert {
-                    mandatory: options.client_auth == ClientAuth::Require,
-                    hints: roots
-                        .as_ref()
-                        .map(RootCertStore::subjects)
-                        .unwrap_or_default(),
-                    algorithms,
-                }))
-            }
+        let verifier: Arc<dyn ClientCertVerifier> = match options.client_auth {
+            ClientAuth::NoCert => WebPkiClientVerifier::no_client_auth(),
+            ClientAuth::Request | ClientAuth::Require => Arc::new(UnverifiedClientCert {
+                mandatory: options.client_auth == ClientAuth::Require,
+                hints: roots
+                    .as_ref()
+                    .map(RootCertStore::subjects)
+                    .unwrap_or_default(),
+                algorithms,
+            }),
             ClientAuth::VerifyIfGiven | ClientAuth::RequireAndVerify => {
                 let roots = Arc::new(roots.clone().expect("verifying modes load roots"));
-                let verifier = WebPkiClientVerifier::builder_with_provider(roots, provider);
+                let verifier = WebPkiClientVerifier::builder_with_provider(roots, provider.clone());
                 let verifier = if options.client_auth == ClientAuth::VerifyIfGiven {
                     verifier.allow_unauthenticated()
                 } else {
                     verifier
                 };
-                builder.with_client_cert_verifier(verifier.build().map_err(invalid)?)
+                verifier.build().map_err(invalid)?
             }
         };
         let der_chain = chain.iter().map(|cert| cert.as_ref().to_vec()).collect();
-        let mut config = builder
-            .with_single_cert(chain, key)
-            .map_err(|error| load_error(invalid(error)))?;
-        // RFC 8446 §4.6.1: stateless tickets let reconnecting clients resume without server state.
-        config.ticketer = aws_lc_rs::Ticketer::new().map_err(invalid)?;
-        if let Some(path) = &options.keylog {
-            config.key_log = Arc::new(KeyLogFile::open(path)?);
-        }
+        let key_log: Option<Arc<KeyLogFile>> = match &options.keylog {
+            Some(path) => Some(Arc::new(KeyLogFile::open(path)?)),
+            None => None,
+        };
+        let build =
+            |versions: &[&'static rustls::SupportedProtocolVersion]| -> io::Result<ServerConfig> {
+                let mut config = ServerConfig::builder_with_provider(Arc::clone(&provider))
+                    .with_protocol_versions(versions)
+                    .map_err(invalid)?
+                    .with_client_cert_verifier(Arc::clone(&verifier))
+                    .with_single_cert(chain.clone(), key.clone_key())
+                    .map_err(|error| load_error(invalid(error)))?;
+                // RFC 8446 §4.6.1: stateless tickets let reconnecting clients resume without server state.
+                config.ticketer = aws_lc_rs::Ticketer::new().map_err(invalid)?;
+                if let Some(log) = &key_log {
+                    config.key_log = log.clone();
+                }
+                Ok(config)
+            };
+        // RFC 7858 §3.2: DoT uses TLS; RFC 9325 §3.1.1 forbids versions below TLS 1.2.
+        let config = build(&[&TLS13, &TLS12])?;
+        // RFC 9001 §4.2: QUIC requires TLS 1.3; RFC 9250 §4.1.1: DoQ negotiates ALPN "doq".
+        let mut quic = build(&[&TLS13])?;
+        quic.alpn_protocols = vec![b"doq".to_vec()];
+        let quic = QuicServerConfig::try_from(Arc::new(quic)).map_err(invalid)?;
         let mut client_cas = roots.map(|roots| {
             roots
                 .roots
@@ -153,12 +166,19 @@ impl ServerTls {
         }
         Ok(Self {
             config: Arc::new(config),
+            quic: Arc::new(quic),
             policy: Arc::new(Policy {
                 client_auth: options.client_auth,
                 client_cas,
                 chain: der_chain,
             }),
         })
+    }
+
+    /// The TLS 1.3 identity with ALPN `doq` for QUIC connections.
+    #[must_use]
+    pub fn quic(&self) -> Arc<QuicServerConfig> {
+        Arc::clone(&self.quic)
     }
 
     #[must_use]
@@ -174,6 +194,7 @@ impl ServerTls {
         config.alpn_protocols = protocols.iter().map(|protocol| protocol.to_vec()).collect();
         Self {
             config: Arc::new(config),
+            quic: Arc::clone(&self.quic),
             policy: Arc::clone(&self.policy),
         }
     }
