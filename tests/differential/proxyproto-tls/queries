@@ -1,0 +1,3 @@
+example.org. TXT IN tls
+example.org. TXT IN tls +proxy=v2,192.0.2.7:4242
+example.org. TXT IN tls +proxy=v1,198.51.100.9:5353

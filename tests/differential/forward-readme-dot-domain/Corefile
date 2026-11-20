@@ -1,0 +1,19 @@
+.:{port} {
+    forward . tls://127.0.0.1:{port2} {
+        tls {tls}/ca.pem
+        tls_servername localhost
+        health_check 5s domain example.org
+    }
+    cache 30
+}
+tls://.:{port2} {
+    tls {tls}/server.pem {tls}/server.key.pem
+    hosts {
+        192.0.2.1 www.example.org
+        2001:db8::1 www.example.org
+        fallthrough
+    }
+    template ANY ANY {
+        rcode NXDOMAIN
+    }
+}

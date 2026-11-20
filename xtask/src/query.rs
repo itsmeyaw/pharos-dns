@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::proxy_header::Proxy;
+
 use pharos_proto::{
     Class, EdnsOptions, MessageBuilder, Name, NameRef, Opt, Section, TsigAlgorithm, TsigKey, Type,
 };
@@ -12,6 +14,7 @@ pub(crate) enum Transport {
     Https,
     Quic,
     Https3,
+    Grpc,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +43,7 @@ pub(crate) struct Query {
     tsig: Option<(Name, Vec<u8>, TsigCase)>,
     ixfr_serial: Option<u32>,
     additions: Vec<(Name, Type, u32, Vec<u8>)>,
+    pub(crate) proxy: Option<Proxy>,
 }
 
 impl fmt::Display for Query {
@@ -105,6 +109,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         "https" => Transport::Https,
         "quic" => Transport::Quic,
         "https3" => Transport::Https3,
+        "grpc" => Transport::Grpc,
         _ => return Err(format!("invalid transport: {transport}")),
     };
     let mut query = Query {
@@ -124,6 +129,7 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
         tsig: None,
         ixfr_serial: None,
         additions: Vec::new(),
+        proxy: None,
     };
     for flag in parts {
         let lower = flag.to_ascii_lowercase();
@@ -170,6 +176,12 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
                     return Err(format!("invalid flag: {flag}"));
                 }
                 query.additions.push((owner, kind, ttl, data));
+            }
+            _ if lower.starts_with("+proxy=") => {
+                if query.proxy.is_some() {
+                    return Err(format!("invalid flag: {flag}"));
+                }
+                query.proxy = Some(Proxy::parse(&flag[7..])?);
             }
             _ if lower.starts_with("+ixfr=") => {
                 if query.qtype != Type::IXFR || query.ixfr_serial.is_some() {
@@ -251,6 +263,10 @@ pub(crate) fn parse(line: &str) -> Result<Query, String> {
     // RFC 8490 §4.2: DSO uses TCP or TLS, never UDP.
     if query.opcode == 6 && query.transport == Transport::Udp {
         return Err("DSO requires TCP".into());
+    }
+    // PROXY protocol §2: the header precedes the TCP stream or the TLS handshake; QUIC carries it per datagram, which this client cannot do.
+    if query.proxy.is_some() && matches!(query.transport, Transport::Quic | Transport::Https3) {
+        return Err("+proxy does not support QUIC Transports".into());
     }
     Ok(query)
 }
@@ -768,6 +784,22 @@ mod tests {
         let question = message.questions().next().unwrap();
         assert_eq!(question.qtype, Type(65535));
         assert_eq!(question.qclass, Class(0));
+    }
+
+    #[test]
+    fn grpc_transport_and_proxy_flag_parse() {
+        let query = parse("example. A IN grpc +proxy=v2,192.0.2.7:4242").unwrap();
+        assert_eq!(query.transport, Transport::Grpc);
+        assert!(query.proxy.is_some());
+        assert!(parse("example. A IN tcp").unwrap().proxy.is_none());
+        for line in [
+            "example. A IN quic +proxy=v2,192.0.2.7:1",
+            "example. A IN https3 +proxy=v2,192.0.2.7:1",
+            "example. A IN tcp +proxy=v9,192.0.2.7:1",
+            "example. A IN tcp +proxy=v1,192.0.2.7:1 +proxy=v1,192.0.2.8:1",
+        ] {
+            assert!(parse(line).is_err(), "accepted {line:?}");
+        }
     }
 
     #[test]

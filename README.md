@@ -5,6 +5,10 @@ Pharos is a performance-first Rust DNS server and a Corefile-compatible successo
 Migrating from CoreDNS? See the [migration guide](MIGRATION.md) and
 [compatibility document](docs/compatibility.md).
 
+## Transports
+
+Pharos serves UDP, TCP, DNS over TLS (`tls://`), DNS over HTTPS (`https://`), DNS over HTTP/3 (`https3://`), DNS over QUIC (`quic://`) and gRPC (`grpc://`) Listeners, and `proxyproto` accepts PROXY headers on all of them. `forward` reaches `tls://`, `quic://` and `https://` Upstreams, and `grpc` forwards over gRPC. `cargo xtask diff` compares each against CoreDNS v1.15.0; see [tests/differential](tests/differential/README.md).
+
 ## Git hooks
 
 Run `git config core.hooksPath .githooks` once after cloning. The pre-commit hook runs

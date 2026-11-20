@@ -1,0 +1,3 @@
+www.example.org. A IN https3
+www.example.org. AAAA IN https3
+missing.example.org. A IN https3

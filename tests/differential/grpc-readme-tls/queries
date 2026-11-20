@@ -1,0 +1,7 @@
+www.example.org. A IN udp
+www.example.org. AAAA IN udp
+missing.example.org. A IN udp
+www.example.org. A IN tcp
+www.example.org. AAAA IN tcp
+missing.example.org. A IN tcp
+www.example.org. A IN udp

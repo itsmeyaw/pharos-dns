@@ -1,0 +1,19 @@
+.:{port} {
+    view proxied {
+        expr incidr(client_ip(), '192.0.2.0/24')
+    }
+    proxyproto {
+        allow 127.0.0.1/32
+    }
+    hosts {
+        192.0.2.1 example.org
+    }
+}
+.:{port} {
+    proxyproto {
+        allow 127.0.0.1/32
+    }
+    hosts {
+        192.0.2.2 example.org
+    }
+}

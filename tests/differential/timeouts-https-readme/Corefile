@@ -1,0 +1,17 @@
+https://.:{port} {
+    tls {tls}/server.pem {tls}/server.key.pem {tls}/ca.pem
+    timeouts {
+        read 1m
+    }
+    forward . 127.0.0.1:{port2}
+}
+.:{port2} {
+    hosts {
+        192.0.2.1 www.example.org
+        2001:db8::1 www.example.org
+        fallthrough
+    }
+    template ANY ANY {
+        rcode NXDOMAIN
+    }
+}

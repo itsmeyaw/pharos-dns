@@ -1,0 +1,18 @@
+.:{port} {
+    forward . quic://127.0.0.1%localhost:{port2} {
+        tls {tls}/ca.pem
+        health_check 5s
+    }
+    cache 30
+}
+quic://.:{port2} {
+    tls {tls}/server.pem {tls}/server.key.pem
+    hosts {
+        192.0.2.1 www.example.org
+        2001:db8::1 www.example.org
+        fallthrough
+    }
+    template ANY ANY {
+        rcode NXDOMAIN
+    }
+}

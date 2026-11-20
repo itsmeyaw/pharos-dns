@@ -1,6 +1,7 @@
 # Differential scenarios
 
 Run `cargo xtask coredns` once with Go installed, then `cargo xtask diff`.
+Set `PHAROS_DIFF_SCENARIOS=name1,name2` to run only those scenarios.
 `cargo xtask check` runs the scenarios when that binary is cached. The cache
 is `target/coredns/v1.15.0/coredns`. `cargo xtask diff --self-test` deliberately
 changes a Response and succeeds only when it detects that injected mismatch.
@@ -19,12 +20,13 @@ Each scenario is a directory containing:
   `web.default.svc.cluster.local. A` with the fixture's ClusterIP before
   comparing Queries. Scenarios use `{metrics_port}` for the readiness endpoint.
   The API and DNS Listeners use the same non-ephemeral port reservation helper.
-- `queries`: one Query per line, `name type class udp|tcp|tls|https|quic|https3 [flags...]`; `tls` is DNS over TLS to the same port (a TLS-only Corefile has no UDP Listener) and trusts `tests/fixtures/tls/ca.pem`; `https` POSTs the Query to `/dns-query` over HTTP/1.1 on the same port (RFC 8484 §4.1) and compares the DNS Message in a 200 response; `quic` is DNS over QUIC (RFC 9250) to the same port with ALPN `doq`, and the client sets the Message ID to zero as RFC 9250 §4.2.1 requires; `https3` POSTs the Query to `/dns-query` over HTTP/3 (RFC 9114) on the same port with ALPN `h3`.
+- `queries`: one Query per line, `name type class udp|tcp|tls|https|quic|https3|grpc [flags...]`; `tls` is DNS over TLS to the same port (a TLS-only Corefile has no UDP Listener) and trusts `tests/fixtures/tls/ca.pem`; `https` POSTs the Query to `/dns-query` over HTTP/1.1 on the same port (RFC 8484 §4.1) and compares the DNS Message in a 200 response; `quic` is DNS over QUIC (RFC 9250) to the same port with ALPN `doq`, and the client sets the Message ID to zero as RFC 9250 §4.2.1 requires; `https3` POSTs the Query to `/dns-query` over HTTP/3 (RFC 9114) on the same port with ALPN `h3`; `grpc` sends a `coredns.dns.DnsService/Query` unary call over HTTP/2 with TLS ALPN `h2` and a `DnsPacket` message whose field 1 holds the wire Query.
   Names are absolute; comments begin with `#`. Supported flags are `+dnssec`,
   `+bufsize=N`, `+nsid`, `+ednsoption=CODE:HEX`, `+norec`, `+ednsversion=N`, `+opcode=NAME` or a number,
   `+ixfr=SERIAL` for an IXFR SOA in Authority,
   `+add=OWNER:TYPE:TTL:HEX` for an UPDATE-section addition with wire-format RDATA,
-  and `+tsig=NAME:BASE64[:badkey|badsig|badtime]` (HMAC-SHA256).
+  `+tsig=NAME:BASE64[:badkey|badsig|badtime]` (HMAC-SHA256),
+  and `+proxy=v1|v2,SOURCE[,tlv=HEX][,first]` (not on `quic` or `https3`), which sends a PROXY protocol header (SOURCE is `ADDR:PORT`; `tlv=` is the raw v2 TLV vector; `first` sends a UDP header as its own datagram before the Query).
 - `expect` (optional): one setting per line. `ttl N` permits a TTL difference
   of N seconds for ordinary records; default is zero. `mask
   additional.srv.port` ignores only the SRV port in Additional (whoami reports
@@ -44,6 +46,8 @@ Each scenario is a directory containing:
    additionally checks that both servers return the specified RCODE.
    `answer 192.0.2.1 | exact Query line` additionally requires that address in
    each Answer section.
+   `unanswered QUERY_LINE` requires both servers to refuse or drop that Query
+   (for example a rejected PROXY source or a failed TLS handshake).
 - Any other files or subdirectories are copied into separate temporary working
   directories for both processes, preserving relative paths.
 - `wait-zone` (optional): a Query whose positive answer indicates that an
@@ -149,8 +153,13 @@ The `view` README scenarios use loopback clients, so the non-loopback CIDR
 branches require Rust tests. The forwarding examples replace the documented
 external Upstreams with separate local IPv4 and IPv6 fixtures.
 
-The `root` TLS and `timeouts` TLS, HTTPS and QUIC examples are skipped because
-encrypted Listeners are deferred to M3. The `rewrite` imaginary `some-plugin`
-example cannot run because that Plugin does not exist. The `sign` examples
+The encrypted Transport examples skip `tls { acme }` (needs a live ACME CA),
+client certificates (the harness presents none, so `client_auth` is compared
+for `nocert` and handshake refusal only), PROXY headers on `quic://` and
+`https3://` (the header must precede the QUIC handshake) and `forward` Server
+Blocks with different `tls_servername` values (the fixture certificate has one
+name; `%` per-endpoint names are covered). DoT, DoH and DoQ benchmarks are
+tracked in #171. The `rewrite` imaginary `some-plugin` example cannot run because that Plugin
+does not exist. The `sign` examples
 using `key directory` are rejected by CoreDNS itself. The final `sign` example
 demonstrates a configuration pitfall rather than a stable Response.

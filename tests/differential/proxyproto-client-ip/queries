@@ -1,0 +1,5 @@
+example.org. A IN tcp
+example.org. A IN tcp +proxy=v2,192.0.2.7:4242
+example.org. A IN tcp +proxy=v1,192.0.2.8:5353
+example.org. A IN udp +proxy=v2,192.0.2.7:4242
+example.org. A IN udp +proxy=v2,192.0.2.7:4242,first

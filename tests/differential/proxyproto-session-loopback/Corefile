@@ -1,0 +1,9 @@
+.:{port} {
+    proxyproto {
+        allow 127.0.0.1/32
+        udp_session_tracking 28s
+    }
+    template IN TXT {
+        answer "{{ .Name }} 60 IN TXT \"{{ .Remote }}\""
+    }
+}

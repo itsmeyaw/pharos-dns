@@ -6,7 +6,9 @@ mod coredns;
 mod differential;
 mod dnssec;
 mod e2e;
+mod grpc_client;
 mod hickory;
+mod proxy_header;
 mod query;
 
 use std::{
