@@ -24,7 +24,7 @@ use tokio::{
 };
 use tokio_rustls::server::TlsStream;
 
-use crate::{Handler, TcpOptions};
+use crate::{Action, Handler, Protocol, TcpOptions, proxyproto::Prefixed};
 
 // Buffers kept for reuse are bounded in count and size so a burst of large Responses cannot pin memory.
 const POOL_BUFFERS: usize = 128;
@@ -230,23 +230,63 @@ where
     })
 }
 
-/// Complete the TLS handshake within the read timeout, or give up when the Listener stops.
+/// A connection whose PROXY header, if any, was consumed and whose TLS handshake completed.
+pub(crate) struct Secured {
+    pub(crate) stream: TlsStream<Prefixed<TcpStream>>,
+    /// The client address: the PROXY header's source when the Listener uses one, else the TCP peer.
+    pub(crate) peer: SocketAddr,
+    /// The PROXY v2 TLV vector, hex-encoded, for every Query of the connection.
+    pub(crate) tlv: Option<Arc<str>>,
+}
+
+/// Read the PROXY header, then complete the TLS handshake within the read timeout, or give up when the Listener stops.
 pub(crate) async fn handshake<H: Handler>(
     stream: TcpStream,
+    peer: SocketAddr,
     handler: &H,
     limits: TcpOptions,
     stopped: &mut watch::Receiver<bool>,
-) -> Option<TlsStream<TcpStream>> {
+) -> Option<Secured> {
     crate::tcp::disable_nagle(&stream);
     let Some(tls) = handler.tls() else {
         crate::logging::log("ERROR", "server", "HTTP Listener has no TLS identity");
         return None;
     };
+    let (stream, peer, tlv) = match handler.proxyproto() {
+        // PROXY protocol §2: the header precedes the TLS ClientHello.
+        Some(proxy) => tokio::select! {
+            biased;
+            _ = stopped.changed() => return None,
+            accepted = proxy.accept_stream(stream, peer) => match accepted {
+                Ok(accepted) => (accepted.stream, accepted.peer, accepted.tlv),
+                Err(error) => {
+                    crate::logging::log("DEBUG", "proxyproto", &format!("closing connection from {peer}: {error}"));
+                    return None;
+                }
+            },
+        },
+        None => (Prefixed::new(stream), peer, None),
+    };
     // CoreDNS v1.15.0 server_https.go: net/http's ReadTimeout bounds the handshake as well.
-    tokio::select! {
+    let stream = tokio::select! {
         biased;
-        _ = stopped.changed() => None,
-        result = timeout(limits.read, tls.acceptor().accept(stream)) => result.ok()?.ok(),
+        _ = stopped.changed() => return None,
+        result = timeout(limits.read, tls.acceptor().accept(stream)) => result.ok()?.ok()?,
+    };
+    Some(Secured { stream, peer, tlv })
+}
+
+/// Run a Query through the Plugin Chain, with the PROXY TLVs of its connection when it has any.
+pub(crate) async fn handle<H: Handler>(
+    handler: &Arc<H>,
+    tlv: Option<&str>,
+    query: &[u8],
+    peer: SocketAddr,
+    response: &mut Vec<u8>,
+) -> Action {
+    match tlv {
+        Some(tlv) => H::handle_proxied(handler, query, peer, Protocol::Tcp, tlv, response).await,
+        None => H::handle_shared(handler, query, peer, Protocol::Tcp, response).await,
     }
 }
 

@@ -274,6 +274,17 @@ pub struct Prefixed<S> {
     position: usize,
 }
 
+impl<S> Prefixed<S> {
+    /// Wrap a stream that needs no bytes replayed, for Listeners that serve connections with and without a header alike.
+    pub(crate) fn new(inner: S) -> Self {
+        Self {
+            inner,
+            buffered: Vec::new(),
+            position: 0,
+        }
+    }
+}
+
 impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
     fn poll_read(
         mut self: Pin<&mut Self>,

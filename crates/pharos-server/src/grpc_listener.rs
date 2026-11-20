@@ -29,8 +29,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::{net::TcpListener, sync::watch, task::JoinHandle, time::timeout};
 
 use crate::{
-    Action, Handler, Protocol,
-    conn::{Accepted, Activity, InFlight, Pool, Pooled, drive},
+    Action, Handler,
+    conn::{Accepted, Activity, InFlight, Pool, Pooled, Secured, drive},
     doh,
     grpc::{self, Code, FramePrefix, Status},
 };
@@ -95,6 +95,7 @@ impl Body for Reply {
 struct Connection<H> {
     handler: Arc<H>,
     peer: SocketAddr,
+    tlv: Option<Arc<str>>,
     pool: Arc<Pool>,
     activity: Arc<Activity>,
     read: Duration,
@@ -125,7 +126,9 @@ async fn serve<H: Handler>(accepted: Accepted<H>) {
     } = accepted;
     let options = handler.grpc();
     let limits = handler.tcp_options();
-    let Some(stream) = crate::conn::handshake(stream, &*handler, limits, &mut stopped).await else {
+    let Some(Secured { stream, peer, tlv }) =
+        crate::conn::handshake(stream, peer, &*handler, limits, &mut stopped).await
+    else {
         return;
     };
     // RFC 7301 §3.2: gRPC needs HTTP/2; grpc-go v1.84 refuses a handshake that did not select "h2".
@@ -136,6 +139,7 @@ async fn serve<H: Handler>(accepted: Accepted<H>) {
     let connection = Arc::new(Connection {
         handler,
         peer,
+        tlv,
         pool,
         activity: Arc::clone(&activity),
         read: limits.read,
@@ -286,11 +290,11 @@ async fn call<H: Handler>(connection: &Connection<H>, body: Incoming) -> Result<
         return Err(Status::new(Code::Unknown, "dns: invalid request message"));
     }
     let mut response = connection.pool.take();
-    match H::handle_shared(
+    match crate::conn::handle(
         &connection.handler,
+        connection.tlv.as_deref(),
         message,
         connection.peer,
-        Protocol::Tcp,
         &mut response,
     )
     .await
