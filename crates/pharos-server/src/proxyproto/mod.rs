@@ -88,6 +88,8 @@ struct Seen {
 pub struct UdpState {
     sessions: Option<Sessions>,
     pub tlv: String,
+    /// The Listener's UDP worker count, read once because looking it up allocates.
+    pub workers: usize,
 }
 
 impl Config {

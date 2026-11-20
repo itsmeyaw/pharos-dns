@@ -24,7 +24,12 @@ pub(crate) fn proxied<H: Handler>(
     let client = crate::canonical_peer(peer);
     match handler.proxyproto() {
         None => Some((0, client)),
-        Some(config) => config.accept_datagram(state, datagram, client, handler.udp_workers()),
+        Some(config) => {
+            if state.workers == 0 && config.udp_tracking.is_some() {
+                state.workers = handler.udp_workers();
+            }
+            config.accept_datagram(state, datagram, client, state.workers)
+        }
     }
 }
 

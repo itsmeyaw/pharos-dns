@@ -1,0 +1,166 @@
+#![forbid(unsafe_code)]
+
+use std::{
+    alloc::System,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use pharos_server::{
+    Action, Handler, Listener, Protocol,
+    proxyproto::{Config, Policy, UdpTracking},
+};
+use stats_alloc::{INSTRUMENTED_SYSTEM, Stats, StatsAlloc};
+
+#[global_allocator]
+static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+
+struct Probe {
+    config: Arc<Config>,
+    counts: Arc<Mutex<(usize, Option<Stats>, Option<Stats>)>>,
+}
+
+impl Handler for Probe {
+    fn proxyproto(&self) -> Option<Arc<Config>> {
+        Some(Arc::clone(&self.config))
+    }
+    async fn handle(&self, _: &[u8], _: SocketAddr, _: Protocol, _: &mut Vec<u8>) -> Action {
+        Action::Drop
+    }
+    async fn handle_shared(
+        self: &Arc<Self>,
+        query: &[u8],
+        peer: SocketAddr,
+        protocol: Protocol,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        self.handle_proxied(query, peer, protocol, "", response)
+            .await
+    }
+    async fn handle_proxied(
+        self: &Arc<Self>,
+        query: &[u8],
+        _: SocketAddr,
+        _: Protocol,
+        tlv: &str,
+        response: &mut Vec<u8>,
+    ) -> Action {
+        let mut counts = self.counts.lock().unwrap();
+        counts.0 += 1;
+        if counts.0 == 101 {
+            counts.1 = Some(GLOBAL.stats());
+        }
+        if counts.0 == 201 {
+            counts.2 = Some(GLOBAL.stats());
+        }
+        response.extend_from_slice(query);
+        response.extend_from_slice(tlv.as_bytes());
+        Action::Respond
+    }
+}
+
+// PROXY protocol §2.2: a v2 DGRAM PROXY header for IPv4 with one TLV.
+fn header() -> Vec<u8> {
+    let mut wire = b"\r\n\r\n\0\r\nQUIT\n".to_vec();
+    wire.extend([0x21, 0x12, 0, 16]);
+    wire.extend([192, 0, 2, 1, 192, 0, 2, 53, 0x30, 0x39, 0, 53]);
+    wire.extend([0xEA, 0, 1, 7]);
+    wire
+}
+
+async fn measure(config: Config, header_first: bool, with_header: bool, expected: &'static [u8]) {
+    let counts = Arc::new(Mutex::new((0, None, None)));
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        Probe {
+            config: Arc::new(config),
+            counts: Arc::clone(&counts),
+        },
+    )
+    .await
+    .unwrap();
+    let address = listener.local_addr();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let client = std::thread::spawn(move || {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        if header_first {
+            // Cloudflare Spectrum: the header-only datagram opens the session and gets no reply.
+            socket.send_to(&header(), address).unwrap();
+        }
+        let mut buf = [0; 64];
+        // The client thread shares the global allocator, so it builds its datagram once.
+        let wire = if with_header {
+            [header(), b"query".to_vec()].concat()
+        } else {
+            b"query".to_vec()
+        };
+        // A burst makes the worker retain several slots, as the plain UDP allocation test does.
+        for _ in 0..8 {
+            socket.send_to(&wire, address).unwrap();
+        }
+        for _ in 0..8 {
+            socket.recv_from(&mut buf).unwrap();
+        }
+        for _ in 0..201 {
+            socket.send_to(&wire, address).unwrap();
+            let (n, _) = socket.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..n], expected);
+        }
+        let _ = done.send(());
+    });
+    finished.await.unwrap();
+    client.join().unwrap();
+    let (before, after) = {
+        let counts = counts.lock().unwrap();
+        (counts.1.unwrap(), counts.2.unwrap())
+    };
+    assert_eq!(
+        after.allocations - before.allocations,
+        0,
+        "allocations (header_first={header_first}, with_header={with_header})"
+    );
+    assert_eq!(
+        after.reallocations - before.reallocations,
+        0,
+        "reallocations (header_first={header_first}, with_header={with_header})"
+    );
+    listener.shutdown().await.unwrap();
+}
+
+// A separate test process and one runtime thread isolate allocation counts.
+#[tokio::test(flavor = "current_thread")]
+async fn proxied_udp_queries_allocate_nothing_after_the_first_datagram() {
+    let mut per_datagram = Config::new(|_| Policy::Use);
+    per_datagram.tlv_metadata = true;
+    let mut session = Config::new(|_| Policy::Use);
+    session.tlv_metadata = true;
+    session.udp_tracking = Some(UdpTracking {
+        ttl: Duration::from_secs(30),
+        max_sessions: 100,
+    });
+    let plain = Config::new(|_| Policy::Use);
+    measure(plain, false, false, b"query").await;
+    measure(session, true, false, b"queryea000107").await;
+    measure(per_datagram, false, true, b"queryea000107").await;
+}
+
+#[test]
+fn accept_datagram_allocates_nothing_after_the_first_header() {
+    let mut config = Config::new(|_| Policy::Use);
+    config.tlv_metadata = true;
+    let mut state = pharos_server::proxyproto::UdpState::default();
+    let wire = [header(), b"query".to_vec()].concat();
+    let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    assert!(config.accept_datagram(&mut state, &wire, peer, 1).is_some());
+    let before = GLOBAL.stats();
+    for _ in 0..100 {
+        assert!(config.accept_datagram(&mut state, &wire, peer, 1).is_some());
+    }
+    let after = GLOBAL.stats();
+    assert_eq!(after.allocations - before.allocations, 0);
+    assert_eq!(after.reallocations - before.reallocations, 0);
+}
