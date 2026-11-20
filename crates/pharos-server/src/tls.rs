@@ -166,6 +166,18 @@ impl ServerTls {
         TlsAcceptor::from(Arc::clone(&self.config))
     }
 
+    /// The same identity advertising `protocols` through ALPN, in server preference order.
+    // RFC 7301 §3.1: the server selects an application protocol from the client's list.
+    #[must_use]
+    pub fn with_alpn(&self, protocols: &[&[u8]]) -> Self {
+        let mut config = (*self.config).clone();
+        config.alpn_protocols = protocols.iter().map(|protocol| protocol.to_vec()).collect();
+        Self {
+            config: Arc::new(config),
+            policy: Arc::clone(&self.policy),
+        }
+    }
+
     /// Why this identity cannot share a Listener with `other`, if it cannot.
     // CoreDNS v1.15.0 core/dnsserver/tlsconfig.go compatibleTLSConfig: same wording and order.
     #[must_use]
