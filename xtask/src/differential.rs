@@ -1,6 +1,6 @@
 use std::{
     collections::hash_map::DefaultHasher,
-    fs,
+    env, fs,
     hash::{Hash, Hasher},
     io::{Read, Write},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -13,7 +13,8 @@ use std::{
 use pharos_proto::{Message, Rcode, Rdata, Type};
 
 use crate::{
-    compare, dnssec,
+    compare, dnssec, grpc_client,
+    proxy_header::Proxy,
     query::{self, Transport},
 };
 
@@ -27,6 +28,7 @@ struct Expect {
     deviations: Vec<(String, u16, u16)>,
     rcodes: Vec<(String, Rcode)>,
     addresses: Vec<(String, std::net::Ipv4Addr)>,
+    unanswered: Vec<String>,
 }
 
 fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
@@ -63,6 +65,7 @@ fn parse_expect(input: &str, docs: &str) -> Result<Expect, String> {
                 }
                 expect.rcodes.push((query.trim().to_owned(), rcode));
             }
+            "unanswered" if !value.is_empty() => expect.unanswered.push(value.to_owned()),
             "answer" => {
                 let (address, query) = value
                     .split_once('|')
@@ -377,7 +380,25 @@ fn exchange_with_key(
     wire: &[u8],
     key: Option<&pharos_proto::TsigKey>,
 ) -> Result<Vec<Vec<u8>>, String> {
+    exchange_proxied(port, transport, wire, key, None)
+}
+
+// PROXY protocol §2: a Query line with `+proxy` sends its header first on the stream, or as a datagram prefix.
+fn exchange_proxied(
+    port: u16,
+    transport: Transport,
+    wire: &[u8],
+    key: Option<&pharos_proto::TsigKey>,
+    proxy: Option<&Proxy>,
+) -> Result<Vec<Vec<u8>>, String> {
     let timeout = Some(Duration::from_secs(2));
+    let destination = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let preface = |datagram| {
+        proxy
+            .map(|proxy| proxy.header(datagram, destination))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    };
     // RFC 7766 §5: General-purpose DNS implementations support both UDP and TCP.
     match transport {
         Transport::Udp => {
@@ -388,14 +409,37 @@ fn exchange_with_key(
             socket
                 .connect(("127.0.0.1", port))
                 .map_err(|e| e.to_string())?;
-            socket.send(wire).map_err(|e| e.to_string())?;
+            let header = preface(true)?;
+            match proxy {
+                // A Spectrum style flow sends its header alone, then headerless Queries.
+                Some(proxy) if proxy.header_first() => {
+                    socket.send(&header).map_err(|e| e.to_string())?;
+                    socket.send(wire).map_err(|e| e.to_string())?;
+                }
+                _ => socket
+                    .send(&[header.as_slice(), wire].concat())
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())?,
+            }
             let mut data = vec![0; 65535];
             let n = socket.recv(&mut data).map_err(|e| e.to_string())?;
             data.truncate(n);
             Ok(vec![data])
         }
-        Transport::Tls => exchange_tls(port, wire, timeout).map(|reply| vec![reply]),
-        Transport::Https => exchange_https(port, wire, timeout).map(|reply| vec![reply]),
+        Transport::Tls => {
+            exchange_tls(port, wire, timeout, &preface(false)?).map(|reply| vec![reply])
+        }
+        Transport::Https => {
+            exchange_https(port, wire, timeout, &preface(false)?).map(|reply| vec![reply])
+        }
+        Transport::Grpc => grpc_client::exchange(
+            port,
+            wire,
+            &preface(false)?,
+            std::sync::Arc::new(tls_client_config(&[b"h2"])?),
+            timeout.unwrap_or_default(),
+        )
+        .map(|reply| vec![reply]),
         Transport::Quic => exchange_quic(port, wire, timeout).map(|reply| vec![reply]),
         Transport::Https3 => exchange_https3(port, wire, timeout).map(|reply| vec![reply]),
         Transport::Tcp => {
@@ -405,6 +449,9 @@ fn exchange_with_key(
                 .map_err(|e| e.to_string())?;
             stream
                 .set_write_timeout(timeout)
+                .map_err(|e| e.to_string())?;
+            stream
+                .write_all(&preface(false)?)
                 .map_err(|e| e.to_string())?;
             // RFC 1035 §4.2.2: TCP DNS messages use a two-byte length excluding the prefix.
             let len = u16::try_from(wire.len()).map_err(|e| e.to_string())?;
@@ -432,15 +479,11 @@ fn exchange_with_key(
     }
 }
 
-fn tls_stream(
-    port: u16,
-    timeout: Option<Duration>,
-    alpn: &[&[u8]],
-) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
+fn tls_client_config(alpn: &[&[u8]]) -> Result<rustls::ClientConfig, String> {
     use rustls::{
-        ClientConfig, ClientConnection, RootCertStore, StreamOwned,
+        ClientConfig, RootCertStore,
         crypto::aws_lc_rs,
-        pki_types::{CertificateDer, ServerName, pem::PemObject},
+        pki_types::{CertificateDer, pem::PemObject},
     };
 
     let ca = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/tls/ca.pem");
@@ -457,20 +500,38 @@ fn tls_stream(
             .with_root_certificates(roots)
             .with_no_client_auth();
     config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
+    Ok(config)
+}
+
+fn tls_stream(
+    port: u16,
+    timeout: Option<Duration>,
+    alpn: &[&[u8]],
+    preface: &[u8],
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
+    use rustls::{ClientConnection, StreamOwned, pki_types::ServerName};
+
     let connection = ClientConnection::new(
-        std::sync::Arc::new(config),
+        std::sync::Arc::new(tls_client_config(alpn)?),
         ServerName::try_from("localhost").map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let tcp = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    let mut tcp = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+    // PROXY protocol §2: the header precedes the TLS handshake on the same connection.
+    tcp.write_all(preface).map_err(|e| e.to_string())?;
     tcp.set_read_timeout(timeout).map_err(|e| e.to_string())?;
     tcp.set_write_timeout(timeout).map_err(|e| e.to_string())?;
     Ok(StreamOwned::new(connection, tcp))
 }
 
 // RFC 7858 §3.3: DNS over TLS carries the RFC 1035 §4.2.2 two-octet length framing.
-fn exchange_tls(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
-    let mut stream = tls_stream(port, timeout, &[])?;
+fn exchange_tls(
+    port: u16,
+    wire: &[u8],
+    timeout: Option<Duration>,
+    preface: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut stream = tls_stream(port, timeout, &[], preface)?;
     let len = u16::try_from(wire.len()).map_err(|e| e.to_string())?;
     stream
         .write_all(&len.to_be_bytes())
@@ -485,8 +546,13 @@ fn exchange_tls(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec
 }
 
 // RFC 8484 §4.1: POST the Query to /dns-query; HTTP/1.1 with `Connection: close` keeps the client free of an HTTP library.
-fn exchange_https(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
-    let mut stream = tls_stream(port, timeout, &[b"http/1.1"])?;
+fn exchange_https(
+    port: u16,
+    wire: &[u8],
+    timeout: Option<Duration>,
+    preface: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut stream = tls_stream(port, timeout, &[b"http/1.1"], preface)?;
     let mut request = format!(
         "POST /dns-query HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nAccept: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         wire.len()
@@ -736,6 +802,7 @@ pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(
         let answered = exchange(port, Transport::Udp, &wire).is_ok()
             || exchange(port, Transport::Tls, &wire).is_ok()
             || exchange(port, Transport::Https, &wire).is_ok()
+            || exchange(port, Transport::Grpc, &wire).is_ok()
             || exchange(port, Transport::Quic, &wire).is_ok()
             || exchange(port, Transport::Https3, &wire).is_ok();
         if server.0.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
@@ -1044,10 +1111,27 @@ fn scenario(
             let query = query::parse(line).map_err(|e| format!("{line}: {e}"))?;
             let wire = query.wire()?;
             let key = query.axfr_key();
-            let pwires = exchange_with_key(pp_num, query.transport, &wire, key.as_ref())
-                .map_err(|e| format!("Pharos {line}: {e}"))?;
-            let cwires = exchange_with_key(cp_num, query.transport, &wire, key.as_ref())
-                .map_err(|e| format!("CoreDNS {line}: {e}"))?;
+            let (proxy, key) = (query.proxy.as_ref(), key.as_ref());
+            let presult = exchange_proxied(pp_num, query.transport, &wire, key, proxy);
+            let cresult = exchange_proxied(cp_num, query.transport, &wire, key, proxy);
+            // A Query listed as `unanswered` must be refused or dropped by both servers, as a PROXY `reject` policy does.
+            if expect
+                .unanswered
+                .iter()
+                .any(|unanswered| unanswered == line)
+            {
+                if presult.is_ok() || cresult.is_ok() {
+                    return Err(format!(
+                        "{line}: expected no answer (Pharos answered: {}, CoreDNS answered: {})",
+                        presult.is_ok(),
+                        cresult.is_ok()
+                    ));
+                }
+                count += 1;
+                continue;
+            }
+            let pwires = presult.map_err(|e| format!("Pharos {line}: {e}"))?;
+            let cwires = cresult.map_err(|e| format!("CoreDNS {line}: {e}"))?;
             let is_axfr = Message::parse(&wire)
                 .map_err(|e| format!("{line}: {e}"))?
                 .questions()
@@ -1199,6 +1283,15 @@ pub(crate) fn run(root: &Path, coredns: &Path, self_test: bool) -> Result<(), St
         .filter(|p| p.is_dir())
         .collect::<Vec<_>>();
     paths.sort();
+    // PHAROS_DIFF_SCENARIOS=name1,name2 runs only those scenarios while iterating.
+    if let Ok(only) = env::var("PHAROS_DIFF_SCENARIOS") {
+        let only: Vec<_> = only.split(',').collect();
+        paths.retain(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| only.contains(&name))
+        });
+    }
     if paths.is_empty() {
         return Err("no differential scenarios".into());
     }
@@ -1730,6 +1823,78 @@ mod tests {
         let docs = "# Compatibility\n\n## EDNS\n";
         assert!(parse_expect("deviation EDNS\n", docs).is_ok());
         assert!(parse_expect("deviation Missing\n", docs).is_err());
+    }
+
+    #[test]
+    fn unanswered_expectation_names_a_query() {
+        let expect = parse_expect("unanswered example. A IN tcp\n", "").unwrap();
+        assert_eq!(expect.unanswered, ["example. A IN tcp"]);
+        assert!(parse_expect("unanswered \n", "").is_err());
+    }
+
+    #[test]
+    fn proxy_header_prefixes_the_datagram_or_precedes_it() {
+        let request = crate::query::parse("example. A IN udp +proxy=v2,192.0.2.7:4242,first")
+            .unwrap()
+            .wire()
+            .unwrap();
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let proxy = crate::proxy_header::Proxy::parse("v2,192.0.2.7:4242,first").unwrap();
+        let server = std::thread::spawn(move || {
+            let mut datagram = [0; 512];
+            let (len, peer) = socket.recv_from(&mut datagram).unwrap();
+            let header = datagram[..len].to_vec();
+            let (len, _) = socket.recv_from(&mut datagram).unwrap();
+            socket.send_to(&datagram[..len], peer).unwrap();
+            header
+        });
+        let reply = super::exchange_proxied(
+            port,
+            crate::query::Transport::Udp,
+            &request,
+            None,
+            Some(&proxy),
+        )
+        .unwrap();
+        // The first datagram is the 28-octet header alone; the second is the unmodified Query.
+        assert_eq!(server.join().unwrap().len(), 28);
+        assert_eq!(reply, [request]);
+    }
+
+    #[test]
+    fn proxy_header_precedes_the_tcp_stream() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut head = [0; 64];
+            let length = socket.read(&mut head).unwrap();
+            head[..length].to_vec()
+        });
+        let request = crate::query::parse("example. A IN tcp +proxy=v1,255.255.255.255:65535")
+            .unwrap()
+            .wire()
+            .unwrap();
+        let proxy = crate::proxy_header::Proxy::parse("v1,255.255.255.255:65535").unwrap();
+        // The stub never answers, so only the header the client wrote first is checked.
+        let _ = super::exchange_proxied(
+            port,
+            crate::query::Transport::Tcp,
+            &request,
+            None,
+            Some(&proxy),
+        );
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .starts_with(b"PROXY TCP4 255.255.255.255 127.0.0.1 65535")
+        );
     }
 
     #[test]

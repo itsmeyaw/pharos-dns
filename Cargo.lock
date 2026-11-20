@@ -3817,11 +3817,17 @@ name = "xtask"
 version = "0.2.0"
 dependencies = [
  "aws-lc-rs",
+ "bytes",
+ "h2",
+ "h3",
+ "h3-quinn",
+ "http",
  "pharos-dnssec",
  "pharos-proto",
  "quinn",
  "rustls",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
