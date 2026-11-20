@@ -45,6 +45,10 @@ SERVFAIL for names it cannot find, as CoreDNS does. The example manifest's
 RBAC does not grant ServiceImports; add `list` and `watch` on
 `serviceimports` in API group `multicluster.x-k8s.io`.
 
+## Transports
+
+Pharos serves `dns://`, `tls://`, `https://`, `https3://`, `quic://` and `grpc://` (`grpc_server`) Listeners, with `proxyproto` on each, and the differential suite compares them with CoreDNS v1.15.0. `forward` accepts `tls://`, `quic://` and `https://` Upstreams; `grpc` forwards over gRPC. Known differences, such as `grpc://` and `unix://` `forward` Upstreams being rejected, AD cleared on encrypted Upstream Responses, and ACME limited to DNS-01, are listed in the [compatibility document](docs/compatibility.md).
+
 ## Metrics
 
 Rewrite `coredns_` to `pharos_` in PromQL alerts and Grafana dashboards, for

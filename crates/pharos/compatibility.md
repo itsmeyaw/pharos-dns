@@ -232,6 +232,7 @@
 
 - [proxyproto Plugin notes](../crates/pharos-plugins/src/proxyproto/README.md)
 - PROXY headers apply to the `dns://`, `tls://`, `https://`, `grpc://`, `quic://` and `https3://` Listeners. TCP Transports read the header before the TLS handshake; the QUIC Transports strip it from datagrams before QUIC reads them, and a Spectrum style header-only first datagram needs `udp_session_tracking`.
+- The differential suite compares PROXY headers on `dns://`, `tls://`, `https://` and `grpc://`; it does not send them ahead of a QUIC handshake, so `quic://` and `https3://` PROXY handling is not compared with CoreDNS.
 
 ## timeouts
 
@@ -249,6 +250,7 @@
 
 - [tls Plugin notes](../crates/pharos-plugins/src/tls/README.md)
 - RFC 8555: `tls { acme ... }` implements DNS-01 only with Pharos's own minimal client and storage layout (not certmagic's); ARI, EAB, OCSP stapling and other challenge types are not implemented, and a name has no certificate until the first issuance completes ([`plugin/tls/acme.go`](https://github.com/coredns/coredns/blob/v1.15.0/plugin/tls/acme.go)).
+- The differential suite does not compare `tls { acme }`, which needs a live ACME CA, and sends no client certificate, so `client_auth` is compared only for handshake refusal and `nocert`.
 
 ## template
 
