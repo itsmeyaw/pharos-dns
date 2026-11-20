@@ -84,8 +84,9 @@ fn client_auth_keywords_map_to_policies() {
     ] {
         let blocks = configure_block(&format!("tls @CERT @KEY @CA {option}")).unwrap();
         let tls = blocks[0].config.tls.as_ref().unwrap();
-        assert_eq!(tls.options.client_auth, expected, "{option}");
-        assert!(tls.options.ca.is_some());
+        let options = tls.options.as_ref().unwrap();
+        assert_eq!(options.client_auth, expected, "{option}");
+        assert!(options.ca.is_some());
     }
 }
 
@@ -120,7 +121,14 @@ fn relative_paths_resolve_against_root() {
         "root {FIXTURES}\ntls server.pem server.key.pem ca.pem"
     ))
     .unwrap();
-    let options = &blocks[0].config.tls.as_ref().unwrap().options;
+    let options = blocks[0]
+        .config
+        .tls
+        .as_ref()
+        .unwrap()
+        .options
+        .as_ref()
+        .unwrap();
     assert_eq!(
         options.cert,
         std::path::Path::new(FIXTURES)
@@ -142,12 +150,117 @@ fn unreadable_certificates_fail_setup() {
     }
 }
 
+// CoreDNS v1.15.0 plugin/tls/acme_test.go TestParseACMETLS.
 #[test]
-fn acme_block_is_rejected_with_a_clear_error() {
-    let error = configure_block("tls {\nacme dns.example.org\n}").unwrap_err();
-    assert!(error.contains("ACME"), "{error}");
-    let error = configure_block("tls").unwrap_err();
-    assert!(error.contains("ACME"), "{error}");
+fn acme_block_parses_every_option() {
+    let root = std::env::temp_dir().join(format!("pharos-acme-parse-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::copy(format!("{FIXTURES}/ca.pem"), root.join("roots.pem")).unwrap();
+    let blocks = configure_block(&format!(
+        "root {}\ntls {{\n acme DNS.Example. dns.example\n email admin@example.org\n ca https://ca.example/directory\n storage certs\n ca_root roots.pem\n resolver 1.1.1.1:53\n}}",
+        root.display()
+    ))
+    .unwrap();
+    let tls = blocks[0].config.tls.as_ref().unwrap();
+    assert!(tls.server.is_some());
+    assert!(tls.options.is_none());
+    let acme = tls.acme.as_ref().unwrap();
+    let root = root.canonicalize().unwrap();
+    assert_eq!(acme.options.domains, ["dns.example"]);
+    assert_eq!(acme.options.email.as_deref(), Some("admin@example.org"));
+    assert_eq!(acme.options.ca, "https://ca.example/directory");
+    assert_eq!(acme.options.resolver.as_deref(), Some("1.1.1.1:53"));
+    assert_eq!(acme.options.storage, root.join("certs"));
+    assert_eq!(acme.options.ca_root, Some(root.join("roots.pem")));
+}
+
+// CoreDNS v1.15.0 plugin/tls/acme.go defaultACMEOptions: Let's Encrypt, `.coredns/acme` below the root.
+#[test]
+fn acme_defaults_to_lets_encrypt_and_storage_below_root() {
+    let blocks =
+        configure_block(&format!("root {FIXTURES}\ntls {{\n acme dns.example\n}}")).unwrap();
+    let acme = blocks[0]
+        .config
+        .tls
+        .as_ref()
+        .unwrap()
+        .acme
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        acme.options.ca,
+        "https://acme-v02.api.letsencrypt.org/directory"
+    );
+    assert_eq!(
+        acme.options.storage,
+        std::path::Path::new(FIXTURES)
+            .canonicalize()
+            .unwrap()
+            .join(".coredns/acme")
+    );
+    assert_eq!(acme.options.email, None);
+}
+
+// CoreDNS v1.15.0 plugin/tls/acme_test.go TestParseACMETLSErrors.
+#[test]
+fn acme_block_rejects_invalid_configuration() {
+    for (name, input, expected) in [
+        ("missing domain", "tls", "at least one domain"),
+        ("missing acme arguments", "tls {\nacme\n}", "Wrong argument"),
+        (
+            "IP identifier",
+            "tls {\nacme 192.0.2.1\n}",
+            "invalid ACME domain",
+        ),
+        (
+            "invalid CA",
+            "tls {\nacme dns.example\nca ftp://ca.example\n}",
+            "invalid ACME CA URL",
+        ),
+        (
+            "invalid resolver",
+            "tls {\nacme dns.example\nresolver 1.1.1.1\n}",
+            "invalid ACME resolver",
+        ),
+        (
+            "invalid resolver port",
+            "tls {\nacme dns.example\nresolver 1.1.1.1:dns\n}",
+            "invalid ACME resolver port",
+        ),
+        (
+            "invalid wildcard",
+            "tls {\nacme *.*.example\n}",
+            "invalid ACME domain",
+        ),
+        (
+            "missing CA root",
+            "tls {\nacme dns.example\nca_root missing.pem\n}",
+            "reading ACME CA root",
+        ),
+        (
+            "duplicate option",
+            "tls {\nacme dns.example\nacme other.example\n}",
+            "only be specified once",
+        ),
+        (
+            "unknown option",
+            "tls {\nacme dns.example\nprovider example\n}",
+            "unknown ACME option",
+        ),
+        (
+            "CA root without certificates",
+            "tls {\nacme dns.example\nca_root @KEY\n}",
+            "contains no certificates",
+        ),
+        (
+            "internationalised name",
+            "tls {\nacme dnş.example\n}",
+            "invalid ACME domain",
+        ),
+    ] {
+        let error = configure_block(input).unwrap_err();
+        assert!(error.contains(expected), "{name}: {error}");
+    }
 }
 
 fn servers(text: &str) -> Result<pharos_plugins::Servers, String> {
