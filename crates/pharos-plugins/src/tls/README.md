@@ -5,7 +5,7 @@
 ## tls
 
 - `tls CERT KEY [CA]`, `client_auth nocert|request|require|verify_if_given|require_and_verify` and `keylog FILE` are supported. Relative paths resolve against `root`, as in CoreDNS.
-- The `tls` Directive serves `tls://` Server Block Keys (default port 853). `tls` also serves `quic://` Server Blocks (default port 853; see `quic`), `https://` Keys (see `https`) and `grpc://` Keys (default port 443; see `grpc_server`). Server Blocks with `https3://` Keys fail setup with or without `tls` until those Transports exist, instead of silently serving nothing.
+- The `tls` Directive serves `tls://` Server Block Keys (default port 853). `tls` also serves `quic://` Server Blocks (default port 853; see `quic`), `https://` Keys (see `https`) and `grpc://` Keys (default port 443; see `grpc_server`). `https3://` Keys are served the same way (see `https3`).
 - A `tls://`, `https://`, `grpc://`, `quic://` or `https3://` Server Block without a `tls` Directive fails setup, as in CoreDNS. A `tls` Directive in a plain-DNS Server Block is loaded and validated but not used.
 - The minimum protocol version is TLS 1.2. Pharos uses rustls with the aws-lc-rs provider; CoreDNS uses Go's `crypto/tls`, so cipher-suite preference order and supported curves follow rustls rather than Go. TLS 1.3 session tickets use a rotating stateless ticketer.
 - `tls { acme DOMAIN... }` obtains and renews certificates over ACME ([RFC 8555](https://www.rfc-editor.org/rfc/rfc8555)) with the DNS-01 challenge; see [ACME](#acme). A `tls` Directive without arguments must have that block.

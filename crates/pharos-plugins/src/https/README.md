@@ -13,7 +13,7 @@
 - Responses carry `Content-Type: application/dns-message` and `Cache-Control: max-age=N`, with N the lowest record TTL capped at 3600 seconds (SOA `MINIMUM` is not consulted, as in CoreDNS); error and empty responses use 5 seconds. If the Plugin Chain gives no Response the status is 500.
 - Plain-text error bodies follow Go's `http.Error` (`Content-Type: text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`).
 - Statuses are counted in `pharos_dns_https_responses_total{server,status}`.
-- The client address is the TCP peer; `proxyproto` and `X-Forwarded-For` are not used yet.
+- The client address is the TCP peer; `proxyproto` applies to the TCP peer (`proxyproto-https`); `X-Forwarded-For` is not used.
 - The TCP `read` timeout bounds the TLS handshake, HTTP/1.1 request head and request body, `write` bounds the graceful close, and `idle` closes connections with no request in flight (see `timeouts`).
 - A Reload that changes `max_connections` counts connections of the old limit separately until they close, so the total can briefly exceed either limit. Pharos has no listener-wide byte budget: worst case memory is `max_connections` × `max_streams` × the 64 KiB message limit, as in CoreDNS.
 - Pharos has no per-IP rate or in-flight limit beyond `max_connections` and `max_streams`.

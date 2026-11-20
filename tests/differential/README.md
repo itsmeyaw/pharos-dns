@@ -153,7 +153,13 @@ The `view` README scenarios use loopback clients, so the non-loopback CIDR
 branches require Rust tests. The forwarding examples replace the documented
 external Upstreams with separate local IPv4 and IPv6 fixtures.
 
-The `rewrite` imaginary `some-plugin` example cannot run because that Plugin
+The encrypted Transport examples skip `tls { acme }` (needs a live ACME CA),
+client certificates (the harness presents none, so `client_auth` is compared
+for `nocert` and handshake refusal only), PROXY headers on `quic://` and
+`https3://` (the header must precede the QUIC handshake) and `forward` Server
+Blocks with different `tls_servername` values (the fixture certificate has one
+name; `%` per-endpoint names are covered). DoT, DoH and DoQ benchmarks are
+tracked in #171. The `rewrite` imaginary `some-plugin` example cannot run because that Plugin
 does not exist. The `sign` examples
 using `key directory` are rejected by CoreDNS itself. The final `sign` example
 demonstrates a configuration pitfall rather than a stable Response.
