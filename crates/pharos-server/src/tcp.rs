@@ -121,7 +121,7 @@ async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>
     Ok(query)
 }
 
-fn disable_nagle(stream: &TcpStream) {
+pub(crate) fn disable_nagle(stream: &TcpStream) {
     // RFC 7766 §7: send each Response as soon as it is available.
     // RFC 9293 §3.7.4: Nagle would hold it until the previous segment is ACKed.
     if let Err(error) = stream.set_nodelay(true) {

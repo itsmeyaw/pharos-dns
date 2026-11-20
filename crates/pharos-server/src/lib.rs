@@ -26,6 +26,8 @@ use tokio::{
 mod admission;
 pub mod doh;
 pub mod http;
+mod https;
+pub use https::HttpsOptions;
 mod lifecycle;
 pub mod logging;
 pub mod metrics;
@@ -847,6 +849,10 @@ pub trait Handler: Send + Sync + 'static {
     fn tls(&self) -> Option<tls::ServerTls> {
         None
     }
+    /// Connection limits and response counters of an `https://` Listener.
+    fn https(&self) -> HttpsOptions {
+        HttpsOptions::default()
+    }
     /// Number of UDP worker sockets for this Listener.
     fn udp_workers(&self) -> usize {
         quota::worker_count()
@@ -982,6 +988,23 @@ impl Listener {
             address,
             stop,
             tasks: vec![tcp::spawn(tcp, handler, receiver, true)],
+            udp_stop,
+            udp_tasks: Vec::new(),
+            shed: false,
+        })
+    }
+
+    /// Bind a TCP Listener that serves DNS over HTTPS (RFC 8484); it has no UDP sockets.
+    pub async fn bind_https<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
+        let tcp = bind_tcp(address).await?;
+        let address = tcp.local_addr()?;
+        let (stop, receiver) = watch::channel(false);
+        let (udp_stop, _) = watch::channel(false);
+        let handler = Arc::new(handler);
+        Ok(Self {
+            address,
+            stop,
+            tasks: vec![https::spawn(tcp, handler, receiver)],
             udp_stop,
             udp_tasks: Vec::new(),
             shed: false,
@@ -1461,10 +1484,12 @@ impl ListenerRegistry {
         mut servers: HashMap<ListenerKey, H>,
     ) -> io::Result<Vec<RetiredHandler<H>>> {
         let desired: HashSet<_> = servers.keys().copied().collect();
-        if desired
-            .iter()
-            .any(|key| !matches!(key.transport, Transport::Dns | Transport::Tls))
-        {
+        if desired.iter().any(|key| {
+            !matches!(
+                key.transport,
+                Transport::Dns | Transport::Tls | Transport::Https
+            )
+        }) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unsupported Listener transport",
@@ -1511,6 +1536,7 @@ impl ListenerRegistry {
             let handler_for_listener = Swappable(Arc::clone(&handler));
             let bound = match key.transport {
                 Transport::Tls => Listener::bind_tls(key.address, handler_for_listener).await,
+                Transport::Https => Listener::bind_https(key.address, handler_for_listener).await,
                 _ => Listener::bind(key.address, handler_for_listener).await,
             };
             let listener = match bound {
@@ -1663,6 +1689,9 @@ impl<H: Handler> Handler for Swappable<H> {
     }
     fn tls(&self) -> Option<tls::ServerTls> {
         self.0.load().tls()
+    }
+    fn https(&self) -> HttpsOptions {
+        self.0.load().https()
     }
     fn udp_workers(&self) -> usize {
         self.0.load().udp_workers()

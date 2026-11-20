@@ -30,7 +30,7 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 200;
 pub const DEFAULT_MAX_STREAMS: u32 = 250;
 
 // CoreDNS v1.15.0 plugin/pkg/doh `maxBase64Len`.
-const MAX_ENCODED_LEN: usize = (MAX_QUERY_LEN * 8 + 5) / 6;
+const MAX_ENCODED_LEN: usize = (MAX_QUERY_LEN * 8).div_ceil(6);
 // CoreDNS v1.15.0 plugin/pkg/dnsutil `MinimalDefaultTTL` and `MaximumDefaultTTL`, in seconds.
 const MINIMAL_TTL: u32 = 5;
 const MAXIMUM_TTL: u32 = 3600;
