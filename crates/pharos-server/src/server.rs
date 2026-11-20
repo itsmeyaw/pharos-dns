@@ -245,15 +245,25 @@ impl<C: Chain> Server<C> {
             udp_workers: crate::quota::worker_count(),
             tcp_options: crate::TcpOptions::default(),
             tls: None,
-            https: crate::HttpsOptions {
-                status: (key.transport == crate::Transport::Https).then(|| {
-                    Arc::new(crate::doh::Status::new(
+            https: match key.transport {
+                crate::Transport::Https => crate::HttpsOptions {
+                    status: Some(Arc::new(crate::doh::Status::new(
                         metrics.clone(),
                         "https",
                         server.clone(),
-                    ))
-                }),
-                ..crate::HttpsOptions::default()
+                    ))),
+                    ..crate::HttpsOptions::default()
+                },
+                crate::Transport::Https3 => crate::HttpsOptions {
+                    max_streams: crate::doh::DEFAULT_H3_MAX_STREAMS,
+                    status: Some(Arc::new(crate::doh::Status::new(
+                        metrics.clone(),
+                        "https3",
+                        server.clone(),
+                    ))),
+                    ..crate::HttpsOptions::default()
+                },
+                _ => crate::HttpsOptions::default(),
             },
             grpc: crate::GrpcOptions::default(),
             quic: crate::QuicOptions::default(),

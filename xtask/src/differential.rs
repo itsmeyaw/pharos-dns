@@ -397,6 +397,7 @@ fn exchange_with_key(
         Transport::Tls => exchange_tls(port, wire, timeout).map(|reply| vec![reply]),
         Transport::Https => exchange_https(port, wire, timeout).map(|reply| vec![reply]),
         Transport::Quic => exchange_quic(port, wire, timeout).map(|reply| vec![reply]),
+        Transport::Https3 => exchange_https3(port, wire, timeout).map(|reply| vec![reply]),
         Transport::Tcp => {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
             stream
@@ -513,9 +514,9 @@ fn exchange_https(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<V
     Ok(reply[split + 4..].to_vec())
 }
 
-// RFC 9250 §4.2: DNS over QUIC sends one length-prefixed Query per stream with Message ID zero.
-fn exchange_quic(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
-    use quinn::{ClientConfig, Endpoint, crypto::rustls::QuicClientConfig};
+// RFC 9114 §3.1, RFC 9250 §4.1.1: QUIC clients select their application protocol by ALPN over TLS 1.3.
+fn quic_client(alpn: &[u8]) -> Result<quinn::ClientConfig, String> {
+    use quinn::{ClientConfig, crypto::rustls::QuicClientConfig};
     use rustls::{
         ClientConfig as TlsConfig, RootCertStore,
         crypto::aws_lc_rs,
@@ -535,8 +536,75 @@ fn exchange_quic(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Ve
             .map_err(|e| e.to_string())?
             .with_root_certificates(roots)
             .with_no_client_auth();
-    tls.alpn_protocols = vec![b"doq".to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
     let client = QuicClientConfig::try_from(tls).map_err(|e| e.to_string())?;
+    Ok(ClientConfig::new(std::sync::Arc::new(client)))
+}
+
+// RFC 8484 §4.1: POST the Query to /dns-query over HTTP/3 (RFC 9114) on the same port.
+fn exchange_https3(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
+    use bytes::{Buf, Bytes};
+    let client = quic_client(b"h3")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let exchange = async {
+        let mut endpoint =
+            quinn::Endpoint::client(([127, 0, 0, 1], 0).into()).map_err(|e| e.to_string())?;
+        endpoint.set_default_client_config(client);
+        let connection = endpoint
+            .connect(([127, 0, 0, 1], port).into(), "localhost")
+            .map_err(|e| e.to_string())?
+            .await
+            .map_err(|e| e.to_string())?;
+        let (mut driver, mut sender) =
+            h3::client::new(h3_quinn::Connection::new(connection.clone()))
+                .await
+                .map_err(|e| e.to_string())?;
+        let request = http::Request::post("https://localhost/dns-query")
+            .header("content-type", "application/dns-message")
+            .header("accept", "application/dns-message")
+            .body(())
+            .map_err(|e| e.to_string())?;
+        let result = async {
+            let mut stream = sender
+                .send_request(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            stream
+                .send_data(Bytes::copy_from_slice(wire))
+                .await
+                .map_err(|e| e.to_string())?;
+            stream.finish().await.map_err(|e| e.to_string())?;
+            let response = stream.recv_response().await.map_err(|e| e.to_string())?;
+            if response.status() != http::StatusCode::OK {
+                return Err(format!("HTTP status: {}", response.status()));
+            }
+            let mut body = Vec::new();
+            while let Some(mut chunk) = stream.recv_data().await.map_err(|e| e.to_string())? {
+                body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+            }
+            Ok(body)
+        };
+        let body = tokio::select! {
+            body = result => body,
+            _ = driver.wait_idle() => Err("HTTP/3 connection closed".to_owned()),
+        };
+        // RFC 9114 §5.2: H3_NO_ERROR closes the connection once the client has its Response.
+        connection.close(0x100u32.into(), b"");
+        body
+    };
+    runtime
+        .block_on(async {
+            tokio::time::timeout(timeout.unwrap_or(Duration::from_secs(2)), exchange).await
+        })
+        .map_err(|e| e.to_string())?
+}
+
+// RFC 9250 §4.2: DNS over QUIC sends one length-prefixed Query per stream with Message ID zero.
+fn exchange_quic(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Vec<u8>, String> {
+    let client = quic_client(b"doq")?;
     let mut framed = u16::try_from(wire.len())
         .map_err(|e| e.to_string())?
         .to_be_bytes()
@@ -550,8 +618,8 @@ fn exchange_quic(port: u16, wire: &[u8], timeout: Option<Duration>) -> Result<Ve
         .map_err(|e| e.to_string())?;
     let exchange = async {
         let mut endpoint =
-            Endpoint::client(([127, 0, 0, 1], 0).into()).map_err(|e| e.to_string())?;
-        endpoint.set_default_client_config(ClientConfig::new(std::sync::Arc::new(client)));
+            quinn::Endpoint::client(([127, 0, 0, 1], 0).into()).map_err(|e| e.to_string())?;
+        endpoint.set_default_client_config(client);
         let connection = endpoint
             .connect(([127, 0, 0, 1], port).into(), "localhost")
             .map_err(|e| e.to_string())?
@@ -668,7 +736,8 @@ pub(crate) fn ready(server: &mut Server, log_path: &Path, port: u16) -> Result<(
         let answered = exchange(port, Transport::Udp, &wire).is_ok()
             || exchange(port, Transport::Tls, &wire).is_ok()
             || exchange(port, Transport::Https, &wire).is_ok()
-            || exchange(port, Transport::Quic, &wire).is_ok();
+            || exchange(port, Transport::Quic, &wire).is_ok()
+            || exchange(port, Transport::Https3, &wire).is_ok();
         if server.0.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
             return Err(format!(
                 "server on {port} did not start:\n{}",

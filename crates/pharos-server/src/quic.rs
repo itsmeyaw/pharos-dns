@@ -1,7 +1,8 @@
 //! DNS over QUIC (RFC 9250) Listener: one quinn endpoint per `quic://` Listener key.
 //!
-//! The endpoint, accept loop and stream framing are generic over [`Handler`];
-//! DoH3 and DoQ upstream forwarding share [`bind`] and [`QuicOptions`].
+//! The endpoint and accept loop are generic over [`Handler`] and serve either DoQ or, through
+//! [`Kind::Doh3`], the HTTP/3 connections of [`crate::https3`]; DoQ upstream forwarding shares
+//! [`bind`] and [`QuicOptions`].
 
 use std::{
     io,
@@ -24,7 +25,9 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{Action, Handler, Protocol, TcpOptions, metrics::TransportStatus, tls::ServerTls};
+use crate::{
+    Action, Handler, Protocol, TcpOptions, conn::Pool, metrics::TransportStatus, tls::ServerTls,
+};
 
 // RFC 9250 §4.1.1: the ALPN token of DoQ is "doq".
 pub(crate) const ALPN: &[u8] = b"doq";
@@ -33,10 +36,24 @@ pub(crate) const ALPN: &[u8] = b"doq";
 pub(crate) const NO_ERROR: VarInt = VarInt::from_u32(0);
 const INTERNAL_ERROR: VarInt = VarInt::from_u32(1);
 pub(crate) const PROTOCOL_ERROR: VarInt = VarInt::from_u32(2);
+// RFC 9114 §8.1: H3_EXCESSIVE_LOAD.
+const H3_EXCESSIVE_LOAD: VarInt = VarInt::from_u32(0x107);
+
+/// The application protocol a QUIC Listener serves.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Kind {
+    /// DNS over QUIC (RFC 9250): one Query per bidirectional stream.
+    Doq,
+    /// DNS over HTTPS over HTTP/3 (RFC 8484, RFC 9114).
+    Doh3,
+}
 
 /// Keep at most this many scratch buffer pairs, each no larger than `MAX_POOLED_CAPACITY`.
 const MAX_POOLED: usize = 64;
 const MAX_POOLED_CAPACITY: usize = 8192;
+
+/// RFC 9114 §6.2.1, RFC 9204 §4.2: the control stream and the QPACK encoder and decoder streams.
+const MIN_UNI_STREAMS: u64 = 3;
 
 /// One DoQ Message is at most 65535 octets plus its two-octet length (RFC 9250 §4.2).
 pub(crate) const STREAM_WINDOW: u32 = 66 * 1024;
@@ -108,30 +125,67 @@ pub fn bind(address: SocketAddr) -> io::Result<std::net::UdpSocket> {
     socket(address, false)
 }
 
+/// The limits `handler` sets for a Listener of `kind`.
+fn limits<H: Handler>(kind: Kind, handler: &H) -> QuicOptions {
+    match kind {
+        Kind::Doq => handler.quic_options(),
+        Kind::Doh3 => {
+            // CoreDNS v1.15.0 core/dnsserver/server_https3.go: the https3 limits are streams and connections.
+            let https = handler.https();
+            QuicOptions {
+                max_streams: https.max_streams as usize,
+                max_connections: https.max_connections,
+                ..QuicOptions::default()
+            }
+        }
+    }
+}
+
 /// Build the QUIC server configuration for `tls` and the limits in force.
-fn server_config(tls: &ServerTls, options: &QuicOptions, idle: Duration) -> ServerConfig {
+fn server_config(
+    kind: Kind,
+    tls: &ServerTls,
+    options: &QuicOptions,
+    idle: Duration,
+) -> ServerConfig {
     let mut config = ServerConfig::with_crypto(tls.quic());
     let mut transport = TransportConfig::default();
-    // RFC 9250 §4.2: each Query uses its own client-initiated bidirectional stream.
-    transport.max_concurrent_bidi_streams(
-        VarInt::from_u64(options.max_streams as u64).unwrap_or(VarInt::MAX),
-    );
-    // RFC 9250 §4.2: DoQ does not use unidirectional streams.
-    transport.max_concurrent_uni_streams(VarInt::from_u32(0));
     transport.max_idle_timeout(IdleTimeout::try_from(idle).ok());
+    // Zero keeps quinn's own stream credit (100), which CoreDNS calls the QUIC transport default.
+    let streams = if options.max_streams == 0 {
+        100
+    } else {
+        options.max_streams as u64
+    };
     // RFC 9250 §5.8: bound what a connection can make the server buffer to its stream credit times one Message.
-    let window = u64::from(STREAM_WINDOW) * options.max_streams.max(1) as u64;
+    let window = u64::from(STREAM_WINDOW) * streams;
     transport.stream_receive_window(VarInt::from_u32(STREAM_WINDOW));
     transport.receive_window(VarInt::from_u64(window).unwrap_or(VarInt::MAX));
     transport.send_window(window);
-    // RFC 9250 §5.4: pad QUIC packets to the MTU against traffic analysis; quinn exposes this policy.
-    transport.pad_to_mtu(true);
+    // RFC 9250 §4.2, RFC 9114 §6.1: each Query or request uses its own client-initiated bidirectional stream.
+    transport.max_concurrent_bidi_streams(VarInt::from_u64(streams).unwrap_or(VarInt::MAX));
+    match kind {
+        Kind::Doq => {
+            // RFC 9250 §4.2: DoQ does not use unidirectional streams.
+            transport.max_concurrent_uni_streams(VarInt::from_u32(0));
+            // RFC 9250 §5.4: pad QUIC packets to the MTU against traffic analysis; quinn exposes this policy.
+            transport.pad_to_mtu(true);
+        }
+        Kind::Doh3 => {
+            // RFC 9114 §6.2: a client opens a control stream and two QPACK streams (RFC 9204 §4.2),
+            // so fewer than three unidirectional streams would break every connection.
+            transport.max_concurrent_uni_streams(
+                VarInt::from_u64(streams.max(MIN_UNI_STREAMS)).unwrap_or(VarInt::MAX),
+            );
+        }
+    }
     config.transport_config(Arc::new(transport));
     config
 }
 
 /// Open the endpoint of a `quic://` Listener; returns it with its bound address.
 pub(crate) fn endpoint<H: Handler>(
+    kind: Kind,
     address: SocketAddr,
     handler: &H,
 ) -> io::Result<(Endpoint, SocketAddr)> {
@@ -141,7 +195,12 @@ pub(crate) fn endpoint<H: Handler>(
             "QUIC Listener has no TLS identity",
         )
     })?;
-    let config = server_config(&tls, &handler.quic_options(), handler.tcp_options().idle);
+    let config = server_config(
+        kind,
+        &tls,
+        &limits(kind, handler),
+        handler.tcp_options().idle,
+    );
     let endpoint = Endpoint::new(
         EndpointConfig::default(),
         Some(config),
@@ -187,6 +246,8 @@ struct Connections {
     /// Handshakes in progress; they count against `max_connections` before a connection exists.
     pending: Arc<AtomicUsize>,
     buffers: Buffers,
+    /// Query and Response buffers of HTTP/3 requests.
+    pool: Arc<Pool>,
 }
 
 struct Pending(Arc<AtomicUsize>);
@@ -213,6 +274,7 @@ impl Drop for ActiveGuard<'_> {
 }
 
 pub(crate) fn spawn<H: Handler>(
+    kind: Kind,
     endpoint: Endpoint,
     handler: Arc<H>,
     mut shutdown: watch::Receiver<bool>,
@@ -222,6 +284,7 @@ pub(crate) fn spawn<H: Handler>(
             active: AtomicUsize::new(0),
             pending: Arc::new(AtomicUsize::new(0)),
             buffers: Buffers(Mutex::new(Vec::new())),
+            pool: Arc::default(),
         });
         let mut connections = JoinSet::new();
         let mut shared: Option<Arc<Shared>> = None;
@@ -240,7 +303,7 @@ pub(crate) fn spawn<H: Handler>(
                         continue;
                     };
                     let (quic, options, tcp) =
-                        (tls.quic(), handler.quic_options(), handler.tcp_options());
+                        (tls.quic(), limits(kind, &*handler), handler.tcp_options());
                     let current = match &shared {
                         Some(current)
                             if Arc::ptr_eq(&current.tls, &quic)
@@ -248,7 +311,7 @@ pub(crate) fn spawn<H: Handler>(
                                 && current.tcp == tcp => Arc::clone(current),
                         _ => {
                             let current = Arc::new(Shared {
-                                config: server_config(&tls, &options, tcp.idle),
+                                config: server_config(kind, &tls, &options, tcp.idle),
                                 // One pool per size, so a Reload that keeps it does not double the workers.
                                 pool: match &shared {
                                     Some(old) if old.options.worker_pool_size == options.worker_pool_size => {
@@ -284,6 +347,7 @@ pub(crate) fn spawn<H: Handler>(
                         continue;
                     };
                     connections.spawn(serve_connection(
+                        kind,
                         connecting,
                         Arc::clone(&handler),
                         current,
@@ -303,6 +367,7 @@ pub(crate) fn spawn<H: Handler>(
 }
 
 async fn serve_connection<H: Handler>(
+    kind: Kind,
     connecting: Connecting,
     handler: Arc<H>,
     shared: Arc<Shared>,
@@ -320,10 +385,26 @@ async fn serve_connection<H: Handler>(
     };
     drop(handshake);
     // CoreDNS v1.15.0 core/dnsserver/server_quic.go ServeQUIC: a connection over the limit is closed with code 0.
+    // CoreDNS server_https3.go limitQUICListener.Accept: HTTP/3 closes it with H3_EXCESSIVE_LOAD instead.
     let count = state.active.fetch_add(1, Ordering::Relaxed) + 1;
     let _active = ActiveGuard(&state.active);
     if shared.options.max_connections != 0 && count > shared.options.max_connections {
-        connection.close(NO_ERROR, b"too many connections");
+        let code = match kind {
+            Kind::Doq => NO_ERROR,
+            Kind::Doh3 => H3_EXCESSIVE_LOAD,
+        };
+        connection.close(code, b"too many connections");
+        return;
+    }
+    if kind == Kind::Doh3 {
+        crate::https3::serve(
+            connection,
+            handler,
+            Arc::clone(&state.pool),
+            shared.tcp,
+            shutdown,
+        )
+        .await;
         return;
     }
     let peer = crate::canonical_peer(connection.remote_address());

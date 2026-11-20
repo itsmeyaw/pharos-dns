@@ -401,6 +401,12 @@ mod https {
 }
 
 #[path = "functional"]
+mod https3 {
+    #[path = "https3_setup.rs"]
+    mod https3_setup;
+}
+
+#[path = "functional"]
 mod tls {
     #[path = "tls_setup.rs"]
     mod tls_setup;

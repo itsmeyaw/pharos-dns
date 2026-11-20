@@ -66,6 +66,7 @@ default = [
     "plugin-health",
     "plugin-hosts",
     "plugin-https",
+    "plugin-https3",
     "plugin-k8s-external",
     "plugin-kubernetes",
     "plugin-loadbalance",

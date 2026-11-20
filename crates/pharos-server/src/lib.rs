@@ -33,6 +33,7 @@ pub use grpc_listener::GrpcOptions;
 pub mod http;
 mod https;
 pub use https::HttpsOptions;
+mod https3;
 mod lifecycle;
 pub mod logging;
 pub mod metrics;
@@ -1049,13 +1050,26 @@ impl Listener {
 
     /// Bind a QUIC Listener that serves DNS over QUIC (RFC 9250); it has no TCP or plain UDP sockets.
     pub async fn bind_quic<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
-        let (endpoint, address) = quic::endpoint(address, &handler)?;
+        Self::bind_quic_kind(quic::Kind::Doq, address, handler)
+    }
+
+    /// Bind a QUIC Listener that serves DNS over HTTPS over HTTP/3 (RFC 8484, RFC 9114); it has no TCP or plain UDP sockets.
+    pub async fn bind_https3<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
+        Self::bind_quic_kind(quic::Kind::Doh3, address, handler)
+    }
+
+    fn bind_quic_kind<H: Handler>(
+        kind: quic::Kind,
+        address: SocketAddr,
+        handler: H,
+    ) -> io::Result<Self> {
+        let (endpoint, address) = quic::endpoint(kind, address, &handler)?;
         let (stop, receiver) = watch::channel(false);
         let (udp_stop, _) = watch::channel(false);
         Ok(Self {
             address,
             stop,
-            tasks: vec![quic::spawn(endpoint, Arc::new(handler), receiver)],
+            tasks: vec![quic::spawn(kind, endpoint, Arc::new(handler), receiver)],
             udp_stop,
             udp_tasks: Vec::new(),
             shed: false,
@@ -1542,6 +1556,7 @@ impl ListenerRegistry {
                     | Transport::Tls
                     | Transport::Https
                     | Transport::Grpc
+                    | Transport::Https3
                     | Transport::Quic
             )
         }) {
@@ -1594,6 +1609,7 @@ impl ListenerRegistry {
                 Transport::Https => Listener::bind_https(key.address, handler_for_listener).await,
                 Transport::Grpc => Listener::bind_grpc(key.address, handler_for_listener).await,
                 Transport::Quic => Listener::bind_quic(key.address, handler_for_listener).await,
+                Transport::Https3 => Listener::bind_https3(key.address, handler_for_listener).await,
                 _ => Listener::bind(key.address, handler_for_listener).await,
             };
             let listener = match bound {

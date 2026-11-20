@@ -13,6 +13,7 @@
 - The tls Plugin, shared-Listener TLS checks and tests follow CoreDNS v1.15.0's `plugin/tls`, `plugin/pkg/tls` and `core/dnsserver/tlsconfig.go`; fixtures in `tests/fixtures/tls` are newly generated.
 - The https Plugin, DoH request handling (`crates/pharos-server/src/doh.rs`) and tests follow CoreDNS v1.15.0's `plugin/https`, `plugin/pkg/doh` and `core/dnsserver/server_https.go`.
 - The quic Plugin, DoQ stream handling and tests follow CoreDNS v1.15.0's `plugin/quic`, `core/dnsserver/server_quic.go` and `server_quic_test.go`.
+- The https3 Plugin, HTTP/3 Listener and tests follow CoreDNS v1.15.0's `plugin/https3`, `core/dnsserver/server_https3.go` and `server_https3_test.go`.
 - The acl Plugin setup and tests follow CoreDNS v1.15.0's `plugin/acl`.
 - The transfer Plugin setup and tests follow CoreDNS v1.15.0's `plugin/transfer`.
 - The file Plugin and tests follow CoreDNS v1.15.0's `plugin/file`.

@@ -14,6 +14,7 @@ fn config_only(name: &str) -> bool {
             | "tls"
             | "https"
             | "grpc_server"
+            | "https3"
             | "quic"
             | "ready"
             | "health"
@@ -92,6 +93,7 @@ fn main() {
             "tls" => "tls::Tls",
             "https" => "https::Https",
             "grpc_server" => "grpc_server::GrpcServer",
+            "https3" => "https3::Https3",
             "quic" => "quic::Quic",
             "whoami" => "whoami::Whoami",
             "view" => "view::View",
@@ -152,6 +154,7 @@ fn main() {
             "tls" => "tls::setup::setup",
             "https" => "https::setup::setup",
             "grpc_server" => "grpc_server::setup::setup",
+            "https3" => "https3::setup::setup",
             "quic" => "quic::setup::setup",
             "whoami" => "whoami::setup::setup",
             "view" => "view::setup::setup",
@@ -195,6 +198,7 @@ fn main() {
                 | "kubernetes"
                 | "view"
                 | "quic"
+                | "https3"
         );
         writeln!(
             code,
