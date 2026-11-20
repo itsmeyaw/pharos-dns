@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use arc_swap::ArcSwapOption;
 use rustls::{
     DistinguishedName, NamedGroup, RootCertStore, ServerConfig, SignatureScheme,
     SupportedCipherSuite,
@@ -22,9 +23,10 @@ use rustls::{
     },
     pki_types::{CertificateDer, PrivateKeyDer, UnixTime, pem::PemObject},
     server::{
-        WebPkiClientVerifier,
+        ClientHello, ResolvesServerCert, WebPkiClientVerifier,
         danger::{ClientCertVerified, ClientCertVerifier},
     },
+    sign::CertifiedKey,
     version::{TLS12, TLS13},
 };
 
@@ -114,6 +116,8 @@ struct Policy {
     client_auth: ClientAuth,
     client_cas: Option<Vec<Vec<u8>>>,
     chain: Vec<Vec<u8>>,
+    // The identity of a swappable certificate slot, which has no fixed chain to compare.
+    slot: Option<String>,
 }
 
 impl fmt::Debug for ServerTls {
@@ -224,6 +228,43 @@ impl ServerTls {
                 client_auth: options.client_auth,
                 client_cas,
                 chain: der_chain,
+                slot: None,
+            }),
+        })
+    }
+
+    /// An identity whose certificates `slot` supplies and may replace while Listeners serve.
+    /// `identity` names the slot's configuration: Server Blocks may share a Listener only when it is equal.
+    pub fn from_slot(slot: &Arc<CertSlot>, identity: &str) -> io::Result<Self> {
+        let provider = provider();
+        let build =
+            |versions: &[&'static rustls::SupportedProtocolVersion]| -> io::Result<ServerConfig> {
+                let mut config = ServerConfig::builder_with_provider(Arc::clone(&provider))
+                    .with_protocol_versions(versions)
+                    .map_err(invalid)?
+                    .with_no_client_auth()
+                    .with_cert_resolver(Arc::clone(slot) as Arc<dyn ResolvesServerCert>);
+                // RFC 8446 §4.6.1: stateless tickets let reconnecting clients resume without server state.
+                config.ticketer = aws_lc_rs::Ticketer::new().map_err(invalid)?;
+                Ok(config)
+            };
+        // RFC 7858 §3.2: DoT uses TLS; RFC 9325 §3.1.1 forbids versions below TLS 1.2.
+        let config = build(&[&TLS13, &TLS12])?;
+        // RFC 9001 §4.2: QUIC requires TLS 1.3; RFC 9250 §4.1.1: DoQ negotiates ALPN "doq".
+        let mut quic = build(&[&TLS13])?;
+        quic.alpn_protocols = vec![b"doq".to_vec()];
+        // Every derived config (`with_alpn`, `with_quic_alpn`) clones one of these, so all keep the slot's resolver.
+        let quic_tls = Arc::new(quic);
+        let quic = QuicServerConfig::try_from(Arc::clone(&quic_tls)).map_err(invalid)?;
+        Ok(Self {
+            config: Arc::new(config),
+            quic_tls,
+            quic: Arc::new(quic),
+            policy: Arc::new(Policy {
+                client_auth: ClientAuth::NoCert,
+                client_cas: None,
+                chain: Vec::new(),
+                slot: Some(identity.to_owned()),
             }),
         })
     }
@@ -277,11 +318,87 @@ impl ServerTls {
             Some("client authentication policies differ")
         } else if a.client_cas != b.client_cas {
             Some("client CA pools differ")
-        } else if a.chain != b.chain {
+        } else if a.chain != b.chain || a.slot != b.slot {
             Some("server certificates differ")
         } else {
             None
         }
+    }
+}
+
+/// Certificates for a fixed set of names that can be replaced while handshakes are served.
+///
+/// A name that has no certificate yet fails its handshakes until [`CertSlot::load`] supplies one.
+#[derive(Debug)]
+pub struct CertSlot {
+    slots: Vec<(String, ArcSwapOption<CertifiedKey>)>,
+}
+
+impl CertSlot {
+    /// One empty slot per name, lowercase and without a trailing dot; `*.` prefixes match one label.
+    /// A ClientHello without a server name gets the first name's certificate.
+    #[must_use]
+    pub fn new(names: &[String]) -> Arc<Self> {
+        Arc::new(Self {
+            slots: names
+                .iter()
+                .map(|name| (name.clone(), ArcSwapOption::empty()))
+                .collect(),
+        })
+    }
+
+    /// Replace `name`'s certificate with the PEM chain and private key in these files.
+    pub fn load(&self, name: &str, cert: &Path, key: &Path) -> io::Result<()> {
+        let (_, slot) = self
+            .slots
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .ok_or_else(|| invalid(format!("{name} is not managed by this slot")))?;
+        let chain = read_chain(cert).map_err(load_error)?;
+        let key = PrivateKeyDer::from_pem_file(key)
+            .map_err(|error| load_error(io::Error::other(error)))?;
+        let signing = aws_lc_rs::sign::any_supported_type(&key)
+            .map_err(|error| load_error(invalid(error)))?;
+        let certified = CertifiedKey::new(chain, signing);
+        // RFC 8555 §7.4: the issued certificate certifies the key the CSR carried.
+        certified
+            .keys_match()
+            .map_err(|error| load_error(invalid(error)))?;
+        slot.store(Some(Arc::new(certified)));
+        Ok(())
+    }
+
+    /// Whether `name` has a certificate to serve.
+    #[must_use]
+    pub fn ready(&self, name: &str) -> bool {
+        self.slots
+            .iter()
+            .any(|(candidate, slot)| candidate == name && slot.load().is_some())
+    }
+}
+
+impl ResolvesServerCert for CertSlot {
+    fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let slot = match hello.server_name() {
+            Some(server_name) => {
+                let server_name = server_name.trim_end_matches('.');
+                self.slots
+                    .iter()
+                    .find(|(name, _)| matches_name(name, server_name))
+            }
+            None => self.slots.first(),
+        };
+        slot.and_then(|(_, certificate)| certificate.load_full())
+    }
+}
+
+// RFC 6125 §6.4.3: a wildcard stands for exactly one leftmost label; DNS names compare case-insensitively (RFC 4343 §3).
+fn matches_name(pattern: &str, server_name: &str) -> bool {
+    match pattern.strip_prefix("*.") {
+        Some(suffix) => server_name
+            .split_once('.')
+            .is_some_and(|(label, rest)| !label.is_empty() && rest.eq_ignore_ascii_case(suffix)),
+        None => pattern.eq_ignore_ascii_case(server_name),
     }
 }
 
@@ -316,6 +433,25 @@ pub fn client_config(options: &ClientOptions) -> io::Result<Arc<ClientConfig>> {
                 .map_err(|error| load_error(invalid(error)))?
         }
     };
+    Ok(Arc::new(config))
+}
+
+/// A client configuration that trusts the system roots and every certificate in `extra`.
+// certmagic v0.25 ACMEIssuer.TrustedRoots: the system pool plus the extra bundle; an unreadable system pool is not fatal.
+pub fn client_config_with_roots(extra: Option<&Path>) -> io::Result<Arc<ClientConfig>> {
+    let mut roots = system_roots().unwrap_or_else(|_| RootCertStore::empty());
+    if let Some(path) = extra {
+        roots.roots.extend(read_roots(path)?.roots);
+    }
+    if roots.is_empty() {
+        return Err(invalid("no trusted root certificates"));
+    }
+    // RFC 9325 §3.1.1: TLS 1.2 is the oldest version in use.
+    let config = ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&TLS13, &TLS12])
+        .map_err(invalid)?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
     Ok(Arc::new(config))
 }
 
@@ -582,6 +718,26 @@ impl rustls::KeyLog for KeyLogFile {
         line.push('\n');
         if let Ok(mut file) = self.0.lock() {
             let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_name;
+
+    // CoreDNS v1.15.0 plugin/tls/acme_test.go TestACMEEntryManagedNames.
+    #[test]
+    fn names_match_exactly_or_through_one_wildcard_label() {
+        for (pattern, name, expected) in [
+            ("dns.example", "DNS.EXAMPLE", true),
+            ("*.wild.example", "one.wild.example", true),
+            ("*.wild.example", "two.one.wild.example", false),
+            ("*.wild.example", "wild.example", false),
+            ("*.wild.example", ".wild.example", false),
+            ("dns.example", "other.example", false),
+        ] {
+            assert_eq!(matches_name(pattern, name), expected, "{pattern} {name}");
         }
     }
 }
