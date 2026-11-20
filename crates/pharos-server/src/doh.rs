@@ -11,8 +11,6 @@ use base64::{
     alphabet::URL_SAFE,
     engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
 };
-use bytes::Bytes;
-use http_body_util::Full;
 use hyper::{
     Method, Request, StatusCode, Uri,
     header::{ACCEPT, CONTENT_TYPE, HOST, HeaderValue},
@@ -105,45 +103,82 @@ pub fn decode_get(value: &str, out: &mut Vec<u8>) -> Result<(), StatusCode> {
         .map_err(|_| StatusCode::BAD_REQUEST)
 }
 
-/// The request that carries `wire` to the DoH server at `authority`, or `None` for a method DoH lacks.
-///
-/// `absolute` selects the absolute-form target HTTP/2 needs for `:scheme` and `:authority`; HTTP/1.1
-/// gets the origin form and a `Host` field.
-// CoreDNS v1.15.0 plugin/pkg/doh NewRequestWithContext: both methods set Content-Type and Accept.
-#[must_use]
-pub fn request(
-    method: &Method,
-    authority: &str,
-    absolute: bool,
-    wire: &[u8],
-) -> Option<Request<Full<Bytes>>> {
-    let mut target = String::with_capacity(authority.len() + PATH.len() + 12 + wire.len() * 4 / 3);
-    if absolute {
-        target.push_str("https://");
-        target.push_str(authority);
+/// The parts of a DoH request that stay the same for one server, built once so a Query reuses them.
+#[derive(Clone, Debug)]
+pub struct Endpoint {
+    authority: String,
+    /// The absolute-form POST target HTTP/2 needs for `:scheme` and `:authority`.
+    absolute: Uri,
+    /// The origin-form POST target of HTTP/1.1, which names the host in `host` instead.
+    origin: Uri,
+    host: HeaderValue,
+}
+
+impl Endpoint {
+    /// The endpoint of the DoH server at `authority`, or `None` if it is not a valid HTTP authority.
+    #[must_use]
+    pub fn new(authority: &str) -> Option<Self> {
+        Some(Self {
+            authority: authority.to_owned(),
+            absolute: format!("https://{authority}{PATH}").parse().ok()?,
+            origin: Uri::from_static(PATH),
+            host: HeaderValue::from_str(authority).ok()?,
+        })
     }
-    target.push_str(PATH);
-    let body = match *method {
-        // RFC 8484 §4.1: POST carries the Message as the body.
-        Method::POST => Bytes::copy_from_slice(wire),
-        // RFC 8484 §4.1: GET carries the Message as the unpadded base64url `dns` variable.
-        Method::GET => {
-            target.push_str("?dns=");
-            BASE64URL.encode_string(wire, &mut target);
-            Bytes::new()
+
+    /// The request that carries `wire` to the server, or `None` for a method DoH lacks.
+    ///
+    /// `absolute` selects the absolute-form target HTTP/2 needs; HTTP/1.1 gets the origin form and a
+    /// `Host` field. `body` is cleared and left holding the request body: `wire` for POST, nothing
+    /// for GET, whose target is encoded in `body` first, so a caller's pooled buffer serves both.
+    // CoreDNS v1.15.0 plugin/pkg/doh NewRequestWithContext: both methods set Content-Type and Accept.
+    #[must_use]
+    pub fn request(
+        &self,
+        method: &Method,
+        absolute: bool,
+        wire: &[u8],
+        body: &mut Vec<u8>,
+    ) -> Option<Request<()>> {
+        body.clear();
+        let uri = match *method {
+            // RFC 8484 §4.1: POST carries the Message as the body.
+            Method::POST => {
+                body.extend_from_slice(wire);
+                if absolute {
+                    self.absolute.clone()
+                } else {
+                    self.origin.clone()
+                }
+            }
+            // RFC 8484 §4.1: GET carries the Message as the unpadded base64url `dns` variable.
+            Method::GET => {
+                if absolute {
+                    body.extend_from_slice(b"https://");
+                    body.extend_from_slice(self.authority.as_bytes());
+                }
+                body.extend_from_slice(PATH.as_bytes());
+                body.extend_from_slice(b"?dns=");
+                let at = body.len();
+                body.resize(at + base64::encoded_len(wire.len(), false)?, 0);
+                BASE64URL.encode_slice(wire, &mut body[at..]).ok()?;
+                let uri = Uri::try_from(body.as_slice()).ok();
+                body.clear();
+                uri?
+            }
+            _ => return None,
+        };
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(CONTENT_TYPE, HeaderValue::from_static(MEDIA_TYPE))
+            .header(ACCEPT, HeaderValue::from_static(MEDIA_TYPE));
+        if !absolute {
+            // RFC 9112 §3.2: HTTP/1.1 requests name the host in a Host field.
+            builder = builder.header(HOST, self.host.clone());
         }
-        _ => return None,
-    };
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(target)
-        .header(CONTENT_TYPE, HeaderValue::from_static(MEDIA_TYPE))
-        .header(ACCEPT, HeaderValue::from_static(MEDIA_TYPE));
-    if !absolute {
-        // RFC 9112 §3.2: HTTP/1.1 requests name the host in a Host field.
-        builder = builder.header(HOST, authority);
+        builder.body(()).ok()
     }
-    builder.body(Full::new(body)).ok()
 }
 
 /// Whether a DNS Message is a Query the Listener should answer.

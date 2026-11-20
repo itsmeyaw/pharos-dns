@@ -4,11 +4,11 @@
 use std::{
     io,
     net::{IpAddr, SocketAddr},
-    sync::{Mutex, MutexGuard, PoisonError, atomic::Ordering},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering},
     time::{Duration, Instant},
 };
 
-use bytes::Bytes;
+use bytes::Buf;
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Method, Request, StatusCode,
@@ -18,6 +18,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use pharos_proto::{Message, Type};
 use pharos_server::{
     doh,
+    pool::{MESSAGE_CAPACITY, Stash},
     tls::{ServerName, TlsConnector},
 };
 use tokio::time::{timeout, timeout_at};
@@ -29,7 +30,7 @@ use super::{Error, Exchange, Proxy, Tls, Transport, connect_tcp, opt_rdata_range
 pub struct Https {
     tls: Tls,
     method: Method,
-    authority: String,
+    endpoint: Option<doh::Endpoint>,
 }
 
 impl Https {
@@ -51,7 +52,7 @@ impl Https {
                 server_name: tls.server_name,
             },
             method,
-            authority,
+            endpoint: doh::Endpoint::new(&authority),
         }
     }
 }
@@ -65,9 +66,44 @@ fn host(address: SocketAddr) -> String {
     }
 }
 
+/// The most request buffers a [`Pool`] keeps, and the most memory they hold in all.
+const POOL_BUFFERS: usize = 64;
+const POOL_BYTES: usize = POOL_BUFFERS * 4096;
+
+/// A request body in a pooled buffer, which goes back to its pool when hyper drops the body.
+pub(super) struct Body {
+    buffer: Vec<u8>,
+    position: usize,
+    pool: Arc<Stash<Vec<u8>>>,
+}
+
+impl Buf for Body {
+    fn remaining(&self) -> usize {
+        self.buffer.len() - self.position
+    }
+
+    fn chunk(&self) -> &[u8] {
+        &self.buffer[self.position..]
+    }
+
+    fn advance(&mut self, count: usize) {
+        assert!(count <= self.remaining(), "advance past the end");
+        self.position += count;
+    }
+}
+
+impl Drop for Body {
+    fn drop(&mut self) {
+        let mut buffer = std::mem::take(&mut self.buffer);
+        buffer.clear();
+        let size = buffer.capacity();
+        self.pool.put(buffer, size);
+    }
+}
+
 enum Sender {
-    H2(http2::SendRequest<Full<Bytes>>),
-    H1(http1::SendRequest<Full<Bytes>>),
+    H2(http2::SendRequest<Full<Body>>),
+    H1(http1::SendRequest<Full<Body>>),
 }
 
 impl Sender {
@@ -103,16 +139,36 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Upstream connections kept for reuse: one shared HTTP/2 connection, or idle HTTP/1.1 ones.
-#[derive(Default)]
+/// Upstream connections kept for reuse, and the buffers of requests: one shared HTTP/2 connection, or
+/// idle HTTP/1.1 ones.
 pub(super) struct Pool {
     h2: Mutex<Option<Connection>>,
     h1: Mutex<Vec<Connection>>,
     // shortcut: HTTP/1.1 Upstreams dial one at a time too; split per protocol if cold-start latency there matters.
     dial: tokio::sync::Mutex<()>,
+    buffers: Arc<Stash<Vec<u8>>>,
+}
+
+impl Default for Pool {
+    fn default() -> Self {
+        Self {
+            h2: Mutex::default(),
+            h1: Mutex::default(),
+            dial: tokio::sync::Mutex::default(),
+            buffers: Arc::new(Stash::new(POOL_BUFFERS, MESSAGE_CAPACITY, POOL_BYTES)),
+        }
+    }
 }
 
 impl Pool {
+    fn body(&self) -> Body {
+        Body {
+            buffer: self.buffers.take().unwrap_or_default(),
+            position: 0,
+            pool: Arc::clone(&self.buffers),
+        }
+    }
+
     pub(super) fn clear(&self) {
         lock(&self.h2).take();
         lock(&self.h1).clear();
@@ -221,7 +277,7 @@ pub(super) async fn connect(
 /// Send `request` and copy the Response Message into `out`, returning its length.
 async fn round_trip(
     sender: &mut Sender,
-    request: Request<Full<Bytes>>,
+    request: Request<Full<Body>>,
     out: &mut [u8],
 ) -> Result<usize, Failure> {
     let response = match sender {
@@ -264,13 +320,20 @@ pub(super) async fn probe(
 ) -> io::Result<Vec<u8>> {
     let mut connection = timeout(dial, connect(address, source, https)).await??;
     // CoreDNS v1.15.0 plugin/pkg/proxy/health.go dohHc.send: health checks always POST.
-    let request = doh::request(
-        &Method::POST,
-        &https.authority,
-        connection.sender.is_h2(),
-        query,
-    )
-    .ok_or(io::ErrorKind::InvalidInput)?;
+    let mut body = Pool::default().body();
+    let request = https
+        .endpoint
+        .as_ref()
+        .and_then(|endpoint| {
+            endpoint.request(
+                &Method::POST,
+                connection.sender.is_h2(),
+                query,
+                &mut body.buffer,
+            )
+        })
+        .ok_or(io::ErrorKind::InvalidInput)?
+        .map(|()| Full::new(body));
     let mut response = vec![0; usize::from(u16::MAX)];
     let len = timeout(
         exchange,
@@ -364,13 +427,20 @@ impl Proxy {
                 }
             }
         };
-        let request = doh::request(
-            &https.method,
-            &https.authority,
-            connection.sender.is_h2(),
-            &response[..outgoing_len],
-        )
-        .ok_or(Error::InvalidRequest)?;
+        let mut body = self.https_pool.body();
+        let request = https
+            .endpoint
+            .as_ref()
+            .and_then(|endpoint| {
+                endpoint.request(
+                    &https.method,
+                    connection.sender.is_h2(),
+                    &response[..outgoing_len],
+                    &mut body.buffer,
+                )
+            })
+            .ok_or(Error::InvalidRequest)?
+            .map(|()| Full::new(body));
         let length = timeout(
             self.read_timeout,
             round_trip(&mut connection.sender, request, response),
