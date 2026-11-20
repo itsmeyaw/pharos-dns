@@ -254,36 +254,85 @@ pub fn decode_packet(payload: &[u8]) -> Result<&[u8], &'static str> {
     let mut rest = payload;
     let mut message: &[u8] = &[];
     while !rest.is_empty() {
-        let tag = varint(&mut rest)?;
-        let (field, wire_type) = (tag >> 3, tag & 7);
-        if field == 0 {
-            return Err("invalid field number");
-        }
-        match wire_type {
-            0 => {
-                varint(&mut rest)?;
+        let (field, wire_type) = tag(&mut rest)?;
+        if wire_type == 2 {
+            let value = length_delimited(&mut rest)?;
+            // Protobuf encoding: a mismatched wire type for a known field is an unknown field.
+            if field == 1 {
+                message = value;
             }
-            1 => skip(&mut rest, 8)?,
-            2 => {
-                let len = usize::try_from(varint(&mut rest)?).map_err(|_| "truncated message")?;
-                let value = rest.get(..len).ok_or("truncated message")?;
-                rest = &rest[len..];
-                // Protobuf encoding: a mismatched wire type for a known field is an unknown field.
-                if field == 1 {
-                    message = value;
-                }
-            }
-            5 => skip(&mut rest, 4)?,
-            _ => return Err("unsupported wire type"),
+        } else {
+            skip_value(&mut rest, field, wire_type, 0)?;
         }
     }
     Ok(message)
+}
+
+/// Protobuf encoding "Message Structure": a tag is a varint of `field << 3 | wire type`.
+fn tag(rest: &mut &[u8]) -> Result<(u64, u64), &'static str> {
+    let tag = varint(rest)?;
+    let field = tag >> 3;
+    // Protobuf encoding "Field numbers": 1 to 2^29 - 1.
+    if field == 0 || field > MAX_FIELD_NUMBER {
+        return Err("invalid field number");
+    }
+    Ok((field, tag & 7))
+}
+
+fn length_delimited<'a>(rest: &mut &'a [u8]) -> Result<&'a [u8], &'static str> {
+    let len = usize::try_from(varint(rest)?).map_err(|_| "truncated message")?;
+    let value = rest.get(..len).ok_or("truncated message")?;
+    *rest = &rest[len..];
+    Ok(value)
+}
+
+/// Skip an unknown field's value whose tag was just read.
+fn skip_value(
+    rest: &mut &[u8],
+    field: u64,
+    wire_type: u64,
+    depth: usize,
+) -> Result<(), &'static str> {
+    match wire_type {
+        0 => {
+            varint(rest)?;
+        }
+        1 => skip(rest, 8)?,
+        2 => {
+            length_delimited(rest)?;
+        }
+        // Protobuf encoding "Groups" (deprecated): a start-group tag to the end-group tag of the same field.
+        3 => {
+            // shortcut: protobuf-go allows 10000 nested groups, 100 here keeps the stack small; raise on demand.
+            if depth >= MAX_GROUP_DEPTH {
+                return Err("group nesting too deep");
+            }
+            loop {
+                let (inner, inner_type) = tag(rest)?;
+                if inner_type == 4 {
+                    return if inner == field {
+                        Ok(())
+                    } else {
+                        Err("mismatched end group")
+                    };
+                }
+                skip_value(rest, inner, inner_type, depth + 1)?;
+            }
+        }
+        5 => skip(rest, 4)?,
+        _ => return Err("unsupported wire type"),
+    }
+    Ok(())
 }
 
 fn varint(rest: &mut &[u8]) -> Result<u64, &'static str> {
     let mut value = 0u64;
     // Protobuf encoding "Base 128 Varints": at most ten octets, least significant group first.
     for (index, &octet) in rest.iter().take(10).enumerate() {
+        // Protobuf encoding: the tenth octet holds bit 63 only; larger values overflow 64 bits.
+        if index == 9 && octet > 1 {
+            return Err("varint overflow");
+        }
         value |= u64::from(octet & 0x7f) << (7 * index);
         if octet & 0x80 == 0 {
             *rest = &rest[index + 1..];
@@ -297,6 +346,9 @@ fn skip(rest: &mut &[u8], count: usize) -> Result<(), &'static str> {
     *rest = rest.get(count..).ok_or("truncated message")?;
     Ok(())
 }
+
+const MAX_FIELD_NUMBER: u64 = (1 << 29) - 1;
+const MAX_GROUP_DEPTH: usize = 100;
 
 #[cfg(test)]
 mod tests {
@@ -371,6 +423,17 @@ mod tests {
         assert_eq!(decode_packet(&[]).unwrap(), &[] as &[u8]);
     }
 
+    // Protobuf encoding "Groups": a well-formed unknown group, nested or not, is skipped.
+    #[test]
+    fn decode_skips_unknown_groups() {
+        let payload = [
+            0x1b, 0x08, 0x01, 0x23, 0x24,
+            0x1c, // field 3 group holding a nested field 4 group
+            0x0a, 0x01, 0xaa, // field 1
+        ];
+        assert_eq!(decode_packet(&payload).unwrap(), [0xaa]);
+    }
+
     #[test]
     fn decode_rejects_malformed_protobuf() {
         for payload in [
@@ -378,7 +441,13 @@ mod tests {
             &[0x0a, 0x05, 1, 2], // length past the end
             &[0x0a, 0x80],       // unterminated varint
             &[0x00, 0x01],       // field number zero
-            &[0x0b],             // start group
+            &[0x0b],             // start group, never closed
+            &[0x1b, 0x24],       // group of field 3 closed by field 4
+            &[0x24],             // end group with no start
+            &[
+                0x0a, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02, 0x0a, 0x01, 0xaa,
+            ], // varint over 64 bits
+            &[0xf8, 0xff, 0xff, 0xff, 0x1f, 0x00], // field number 2^29
             &[0x15, 1, 2],       // short fixed32
             &[0x19, 1, 2, 3],    // short fixed64
             &[

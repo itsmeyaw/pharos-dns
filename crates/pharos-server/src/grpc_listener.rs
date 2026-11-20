@@ -297,6 +297,15 @@ async fn call<H: Handler>(connection: &Connection<H>, body: Incoming) -> Result<
     )
     .await
     {
+        // grpc-go server.go sendResponse: ResourceExhausted above grpc.MaxSendMsgSize(maxProtobufPayloadBytes).
+        Action::Respond if response.len() > grpc::MAX_MESSAGE_LEN => Err(Status::new(
+            Code::ResourceExhausted,
+            format!(
+                "grpc: trying to send message larger than max ({} vs. {})",
+                response.len() + 4,
+                grpc::MAX_PAYLOAD_LEN
+            ),
+        )),
         Action::Respond => Ok(response),
         Action::Drop | Action::Stream(_) => Err(Status::new(Code::Internal, "no response")),
     }

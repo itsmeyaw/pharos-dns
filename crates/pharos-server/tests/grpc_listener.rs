@@ -56,6 +56,7 @@ struct Answering {
     tls: ServerTls,
     options: GrpcOptions,
     delay: Duration,
+    oversize: bool,
     tcp: TcpOptions,
     calls: Arc<AtomicUsize>,
     running: Arc<AtomicUsize>,
@@ -78,6 +79,7 @@ impl Answering {
             tls,
             options,
             delay: Duration::ZERO,
+            oversize: false,
             tcp: TcpOptions::default(),
             calls: Arc::default(),
             running: Arc::default(),
@@ -128,6 +130,9 @@ impl Handler for Answering {
             )
             .unwrap();
         let _ = builder.finish();
+        if self.oversize {
+            response.resize(grpc::MAX_MESSAGE_LEN + 1, 0);
+        }
         Action::Respond
     }
 }
@@ -486,6 +491,24 @@ async fn message_size_limits_follow_coredns() {
     registry.shutdown().await.unwrap();
 }
 
+// grpc-go server.go sendResponse: a Response over grpc.MaxSendMsgSize is ResourceExhausted.
+#[tokio::test]
+async fn an_oversize_response_is_resource_exhausted() {
+    let mut handler = Answering::new(GrpcOptions::default());
+    handler.oversize = true;
+    let (registry, address) = listening(handler).await;
+    let (mut sender, _) = connect(address).await;
+    let reply = send(&mut sender, call(&query(1))).await;
+    assert_eq!(
+        reply.status(),
+        (
+            Code::ResourceExhausted,
+            "grpc: trying to send message larger than max (65540 vs. 65539)".to_owned()
+        )
+    );
+    registry.shutdown().await.unwrap();
+}
+
 // PROTOCOL-HTTP2 "Timeout": a call that outlives grpc-timeout ends with DEADLINE_EXCEEDED.
 #[tokio::test]
 async fn grpc_timeout_ends_a_slow_call() {
@@ -696,5 +719,31 @@ async fn a_running_call_is_not_cut_by_the_idle_timeout() {
         send(&mut sender, call(&query(1))).await.status().0,
         Code::Ok
     );
+    registry.shutdown().await.unwrap();
+}
+
+// RFC 9113 §6.8: a Reload swaps the handler for new connections without closing the Listener or established connections.
+#[tokio::test]
+async fn reload_serves_new_connections_with_the_new_handler_and_keeps_old_ones() {
+    let (mut registry, address) = listening(Answering::new(GrpcOptions::default())).await;
+    let (mut old, _) = connect(address).await;
+    assert_eq!(send(&mut old, call(&query(1))).await.status().0, Code::Ok);
+    let mut renewed = Answering::new(GrpcOptions {
+        max_connections: 7,
+        ..GrpcOptions::default()
+    });
+    renewed.oversize = true;
+    registry
+        .apply(HashMap::from([(key(), renewed)]))
+        .await
+        .unwrap();
+    assert_eq!(registry.get(&key()).unwrap().local_addr(), address);
+    let (mut new, _) = connect(address).await;
+    assert_eq!(
+        send(&mut new, call(&query(2))).await.status().0,
+        Code::ResourceExhausted
+    );
+    // The established connection is still open.
+    assert!(!old.is_closed());
     registry.shutdown().await.unwrap();
 }
