@@ -31,7 +31,14 @@ type Sender = http2::SendRequest<Body>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Target {
     Tcp(SocketAddr),
+    /// A name or scoped IPv6 address that getaddrinfo resolves at dial, as grpc-go's resolver does.
+    Host {
+        host: String,
+        port: u16,
+    },
     Unix(PathBuf),
+    /// A target CoreDNS accepts at setup that grpc-go cannot dial; every call fails with this reason.
+    Invalid(String),
 }
 
 /// How the Upstream is verified and the name its certificate must carry.
@@ -74,7 +81,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// One Upstream: dialled on first use, as `grpc.NewClient` does, and kept for later calls.
 pub(super) struct Client {
-    target: Target,
+    pub(super) target: Target,
     tls: Option<Tls>,
     uri: Uri,
     sender: Mutex<Option<Sender>>,
@@ -171,14 +178,22 @@ impl Client {
 
     async fn connect(&self) -> io::Result<Sender> {
         match &self.target {
-            Target::Tcp(address) => {
-                let tcp = TcpStream::connect(address).await?;
-                // grpc-go sets TCP_NODELAY on every connection.
-                tcp.set_nodelay(true)?;
-                self.start(tcp).await
+            Target::Tcp(address) => self.connect_tcp(TcpStream::connect(address).await?).await,
+            Target::Host { host, port } => {
+                self.connect_tcp(TcpStream::connect((host.as_str(), *port)).await?)
+                    .await
             }
             Target::Unix(path) => self.start(UnixStream::connect(path).await?).await,
+            Target::Invalid(reason) => {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, reason.as_str()))
+            }
         }
+    }
+
+    async fn connect_tcp(&self, tcp: TcpStream) -> io::Result<Sender> {
+        // grpc-go sets TCP_NODELAY on every connection.
+        tcp.set_nodelay(true)?;
+        self.start(tcp).await
     }
 
     async fn start<T>(&self, stream: T) -> io::Result<Sender>
@@ -305,4 +320,44 @@ async fn read_reply(
     out.copy_within(start..end, 0);
     out.truncate(end - start);
     Ok(Reply::Message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    async fn reaches(bind: &str, host: &str) {
+        let Ok(listener) = TcpListener::bind(bind).await else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        let target = Target::Host {
+            host: host.into(),
+            port,
+        };
+        let client = Client::new(target, None, "localhost").unwrap();
+        let (accepted, connected) = tokio::join!(listener.accept(), client.connect());
+        connected.unwrap();
+        accepted.unwrap();
+    }
+
+    // Go net: a name is resolved when dialling.
+    #[tokio::test]
+    async fn a_host_name_is_resolved_at_dial() {
+        reaches("127.0.0.1:0", "localhost").await;
+    }
+
+    // Go net: an IPv6 zone is resolved when dialling; interface index 1 is the loopback.
+    #[tokio::test]
+    async fn a_scoped_ipv6_address_is_dialled_with_its_zone() {
+        reaches("[::1]:0", "::1%1").await;
+    }
+
+    #[tokio::test]
+    async fn an_invalid_target_fails_every_dial() {
+        let client = Client::new(Target::Invalid("bad".into()), None, "localhost").unwrap();
+        let error = client.connect().await.err().unwrap();
+        assert_eq!(error.to_string(), "bad");
+    }
 }

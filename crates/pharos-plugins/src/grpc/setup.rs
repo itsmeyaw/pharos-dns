@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicU32},
 };
@@ -124,28 +124,36 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Grpc
         None
     };
     let mut upstreams = Vec::with_capacity(targets.len());
-    for target in targets {
-        let (to, host) = match &target {
-            Target::Tcp(address) => (address.to_string(), address.ip().to_string()),
-            Target::Unix(path) => (format!("unix://{}", path.display()), "localhost".to_owned()),
+    for Resolved { to, mut target } in targets {
+        let host = match &target {
+            Target::Tcp(address) => address.ip().to_string(),
+            Target::Host { host, .. } => strip_zone(host).to_owned(),
+            Target::Unix(_) | Target::Invalid(_) => "localhost".to_owned(),
         };
-        let tls = config
-            .as_ref()
-            .map(|config| {
-                // RFC 6125 §6.4.1: verify the name the Corefile gives, else the Upstream's address.
-                let name = tls_servername.clone().unwrap_or(host);
-                ServerName::try_from(name.clone())
-                    .map(|server_name| Tls {
+        // RFC 6125 §6.4.1: verify the name the Corefile gives, else the Upstream's address.
+        let mut tls = None;
+        if let Some(config) = &config {
+            let name = tls_servername.clone().unwrap_or(host);
+            match ServerName::try_from(name.clone()) {
+                Ok(server_name) => {
+                    tls = Some(Tls {
                         config: Arc::clone(config),
                         server_name,
-                    })
-                    .map_err(|_| cursor.error(format!("invalid TLS server name {name}")))
-            })
-            .transpose()?;
+                    });
+                }
+                // CoreDNS v1.15.0 plugin/grpc/proxy.go newProxy: a name that cannot be verified fails at dial, not setup.
+                Err(_) if tls_servername.is_none() => {
+                    target = Target::Invalid(format!("invalid TLS server name {name}"));
+                }
+                Err(_) => return Err(cursor.error(format!("invalid TLS server name {name}"))),
+            }
+        }
         // grpc-go takes the `:authority` from the credentials' server name, else the target.
         let authority = tls_servername.clone().unwrap_or_else(|| match &target {
             Target::Tcp(address) => address.to_string(),
-            Target::Unix(_) => "localhost".to_owned(),
+            // RFC 6874 §2: a zone in a URI host is written after `%25`.
+            Target::Host { host, port } => join_host_port(&host.replace('%', "%25"), *port),
+            Target::Unix(_) | Target::Invalid(_) => "localhost".to_owned(),
         });
         let client = Client::new(target, tls, &authority)
             .map_err(|error| cursor.error(error.to_string()))?;
@@ -172,51 +180,173 @@ pub(super) fn parse(cursor: &mut Cursor<'_>, root: Option<&Path>) -> Result<Grpc
     })
 }
 
-// CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: each TO is `IP`, `IP:PORT`, `unix://PATH` or a resolv.conf-style file.
-fn targets(to: &[String]) -> Result<Vec<Target>, String> {
+/// One TO as CoreDNS parses it: the text its metrics label and `grpc.NewClient` receive, and where Pharos dials.
+struct Resolved {
+    to: String,
+    target: Target,
+}
+
+/// CoreDNS v1.15.0 plugin/pkg/parse/transport.go Transport: a recognised scheme prefix and the rest.
+fn transport(entry: &str) -> (Option<&'static str>, &str) {
+    for scheme in ["tls", "dns", "quic", "grpc", "https3", "https", "unix"] {
+        if let Some(rest) = entry
+            .strip_prefix(scheme)
+            .and_then(|rest| rest.strip_prefix("://"))
+        {
+            return (Some(scheme), rest);
+        }
+    }
+    (None, entry)
+}
+
+/// CoreDNS v1.15.0 plugin/pkg/parse/host.go stripZone: drop the last `%` and what follows.
+fn strip_zone(host: &str) -> &str {
+    host.rsplit_once('%').map_or(host, |(host, _)| host)
+}
+
+/// Go net.SplitHostPort: `None` where Go returns an error.
+fn split_host_port(value: &str) -> Option<(&str, &str)> {
+    let colon = value.rfind(':')?;
+    let (host, open, close) = if value.starts_with('[') {
+        let end = value.find(']')?;
+        // Go net.SplitHostPort: the first `]` must sit just before the last `:`.
+        if end + 1 != colon {
+            return None;
+        }
+        (&value[1..end], 1, end + 1)
+    } else {
+        let host = &value[..colon];
+        if host.contains(':') {
+            return None;
+        }
+        (host, 0, 0)
+    };
+    if value[open..].contains('[') || value[close..].contains(']') {
+        return None;
+    }
+    Some((host, &value[colon + 1..]))
+}
+
+/// Go net.JoinHostPort.
+fn join_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Go net.ParseIP, which has no zone.
+fn is_ip(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok()
+}
+
+/// Where `host` and `port` lead when grpc-go dials them; what grpc-go cannot dial fails at the first call.
+fn dial(host: &str, port: &str) -> Target {
+    let Ok(port) = port.parse::<u16>() else {
+        // shortcut: grpc-go also dials a service name such as `domain`; only numeric ports are, so a name fails at dial.
+        return Target::Invalid(format!("invalid port {port:?}"));
+    };
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Target::Tcp(SocketAddr::new(ip, port));
+    }
+    // Go net: an IPv6 zone names an interface that is looked up when dialling, so it is kept for getaddrinfo.
+    let zoned = host
+        .split_once('%')
+        .is_some_and(|(ip, _)| ip.parse::<Ipv6Addr>().is_ok());
+    if host.contains(':') && !zoned {
+        return Target::Invalid(format!("invalid target address {host}:{port}"));
+    }
+    Target::Host {
+        host: host.to_owned(),
+        port,
+    }
+}
+
+// CoreDNS v1.15.0 plugin/pkg/parse/host.go tryFile: miekg/dns ClientConfigFromFile takes the second field of each `nameserver` line, on port 53, with the zone dropped.
+fn file(host: &str) -> Result<Vec<Resolved>, String> {
+    let text = std::fs::read_to_string(host)
+        .map_err(|error| format!("not an IP address or file {host:?}: {error}"))?;
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some("nameserver")).then(|| words.next())?
+        })
+        .map(|server| {
+            let server = strip_zone(server);
+            Resolved {
+                to: join_host_port(server, 53),
+                target: dial(server, "53"),
+            }
+        })
+        .collect())
+}
+
+// CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: each TO is `[SCHEME://]IP`, `[SCHEME://]IP:PORT`, `unix://PATH` or a resolv.conf-style file.
+fn targets(to: &[String]) -> Result<Vec<Resolved>, String> {
     let mut targets = Vec::new();
     for entry in to {
-        if let Some(path) = entry.strip_prefix("unix://") {
-            if path.is_empty() {
-                return Err(format!("invalid address: {entry:?}"));
-            }
-            targets.push(Target::Unix(path.into()));
-        } else if let Some((scheme, _)) = entry.split_once("://") {
-            // shortcut: other schemes reach grpc-go as an unusable target and only fail at the first Query; rejecting them at setup is clearer.
-            return Err(format!("{scheme} Upstreams are not supported"));
-        } else if let Some(address) = address(entry) {
-            targets.push(Target::Tcp(address));
-        } else {
-            let file = std::fs::read_to_string(entry)
-                .map_err(|error| format!("not an IP address or file {entry:?}: {error}"))?;
-            // miekg/dns ClientConfigFromFile: the second field of each `nameserver` line, on port 53.
-            for line in file.lines() {
-                let mut words = line.split_whitespace();
-                if words.next() == Some("nameserver")
-                    && let Some(server) = words.next()
-                {
-                    let address = address(server)
-                        .ok_or_else(|| format!("invalid nameserver {server:?} in {entry:?}"))?;
-                    targets.push(Target::Tcp(address));
-                }
-            }
+        let (scheme, host) = transport(entry);
+        if host.is_empty() {
+            return Err(format!("invalid address: {entry:?}"));
         }
+        if scheme == Some("unix") {
+            targets.push(Resolved {
+                to: format!("unix://{host}"),
+                target: Target::Unix(host.into()),
+            });
+            continue;
+        }
+        let Some((address, port)) = split_host_port(host) else {
+            let host = host.trim_matches(['[', ']']);
+            if !is_ip(strip_zone(host)) {
+                targets.extend(file(host)?);
+                continue;
+            }
+            // CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: each scheme has its own default port.
+            let port = match scheme {
+                None | Some("dns") => 53,
+                Some("tls" | "quic") => 853,
+                _ => 443,
+            };
+            let joined = join_host_port(host, port);
+            targets.push(match scheme {
+                None | Some("dns") => Resolved {
+                    to: joined,
+                    target: dial(host, "53"),
+                },
+                // CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: `https3` has no case, so its address is empty.
+                Some("https3") => Resolved {
+                    to: String::new(),
+                    target: Target::Invalid("empty target".into()),
+                },
+                // grpc-go has no resolver for these schemes, so the call fails at dial.
+                Some(scheme) => Resolved {
+                    target: Target::Invalid(format!("unsupported scheme {scheme}")),
+                    to: format!("{scheme}://{joined}"),
+                },
+            });
+            continue;
+        };
+        if !is_ip(strip_zone(address)) {
+            targets.extend(file(host)?);
+            continue;
+        }
+        // CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: an address with a port is kept as written.
+        targets.push(Resolved {
+            to: entry.clone(),
+            target: match scheme {
+                None => dial(address, port),
+                // grpc-go reads `SCHEME://ADDRESS:PORT` as a target with an authority and no endpoint.
+                Some(scheme) => Target::Invalid(format!("unsupported scheme {scheme}")),
+            },
+        });
     }
     if targets.is_empty() {
         return Err("no nameservers found".into());
     }
     Ok(targets)
-}
-
-// RFC 1035 §4.2.1: DNS uses server port 53 by default; like CoreDNS, an IPv6 zone is dropped.
-fn address(value: &str) -> Option<SocketAddr> {
-    value.parse::<SocketAddr>().ok().or_else(|| {
-        let host = value.trim_matches(['[', ']']);
-        let host = host.rsplit_once('%').map_or(host, |(host, _)| host);
-        host.parse::<IpAddr>()
-            .ok()
-            .map(|ip| SocketAddr::new(ip, 53))
-    })
 }
 
 // CoreDNS v1.15.0 plugin/pkg/tls/tls.go NewTLSConfigFromArgs: `CA`, `CERT KEY` or `CERT KEY CA`, and no arguments for the system roots.
@@ -284,20 +414,88 @@ mod tests {
         }
     }
 
+    fn targets_of(grpc: &Grpc) -> Vec<&Target> {
+        grpc.upstreams.iter().map(|u| &u.client.target).collect()
+    }
+
+    fn tcp(text: &str) -> Target {
+        Target::Tcp(text.parse().unwrap())
+    }
+
+    fn host(host: &str, port: u16) -> Target {
+        Target::Host {
+            host: host.into(),
+            port,
+        }
+    }
+
+    // CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: an address without a port gets 53 and keeps its zone.
     #[test]
-    fn addresses_default_to_port_53_and_zones_are_dropped() {
-        let grpc =
-            parse_text("grpc . 127.0.0.1 [::1] 127.0.0.2:8080 [fe80::1%eth0] [::2]:853").unwrap();
+    fn addresses_default_to_port_53_and_keep_their_text() {
+        let grpc = parse_text(
+            "grpc . 127.0.0.1 [::1] 127.0.0.2:8080 fe80::1%eth0 [fe80::1%eth0] [fe80::2%2]:853 [0:0:0:0:0:0:0:1]:53 dns://10.0.0.1",
+        )
+        .unwrap();
         assert_eq!(
             labels(&grpc),
             [
                 "127.0.0.1:53",
                 "[::1]:53",
                 "127.0.0.2:8080",
-                "[fe80::1]:53",
-                "[::2]:853"
+                "[fe80::1%eth0]:53",
+                "[fe80::1%eth0]:53",
+                "[fe80::2%2]:853",
+                "[0:0:0:0:0:0:0:1]:53",
+                "10.0.0.1:53",
             ]
         );
+        assert_eq!(
+            targets_of(&grpc),
+            [
+                &tcp("127.0.0.1:53"),
+                &tcp("[::1]:53"),
+                &tcp("127.0.0.2:8080"),
+                &host("fe80::1%eth0", 53),
+                &host("fe80::1%eth0", 53),
+                &host("fe80::2%2", 853),
+                &tcp("[::1]:53"),
+                &tcp("10.0.0.1:53"),
+            ]
+        );
+    }
+
+    // CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: a scheme other than dns:// and unix:// passes setup and fails at dial.
+    #[test]
+    fn other_schemes_and_bad_ports_are_accepted_and_fail_at_dial() {
+        let grpc = parse_text(
+            "grpc . tls://127.0.0.1 grpc://127.0.0.1:8080 https://[::1] quic://10.0.0.1:853 https3://10.0.0.1 dns://127.0.0.1:53 127.0.0.1:99999 127.0.0.1:",
+        )
+        .unwrap();
+        assert_eq!(
+            labels(&grpc),
+            [
+                "tls://127.0.0.1:853",
+                "grpc://127.0.0.1:8080",
+                "https://[::1]:443",
+                "quic://10.0.0.1:853",
+                "",
+                "dns://127.0.0.1:53",
+                "127.0.0.1:99999",
+                "127.0.0.1:",
+            ]
+        );
+        assert!(
+            targets_of(&grpc)
+                .iter()
+                .all(|target| matches!(target, Target::Invalid(_)))
+        );
+    }
+
+    // CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: a port is not checked, so port 0 is accepted.
+    #[test]
+    fn port_zero_is_accepted() {
+        let grpc = parse_text("grpc . 127.0.0.1:0").unwrap();
+        assert_eq!(targets_of(&grpc), [&tcp("127.0.0.1:0")]);
     }
 
     #[test]
@@ -339,14 +537,25 @@ mod tests {
         let file = dir.join("resolv.conf");
         std::fs::write(
             &file,
-            "# comment\nsearch example.org\nnameserver 10.10.255.252\nnameserver 10.10.255.253\nnameserver fe80::1%eth0\n",
+            "# comment\nsearch example.org\nnameserver 10.10.255.252\nnameserver 10.10.255.253\nnameserver fe80::1%eth0\nnameserver dns.example.org\nnameserver 10.0.0.1:5\n",
         )
         .unwrap();
         let grpc = parse_text(&format!("grpc . {}", file.display())).unwrap();
+        // CoreDNS v1.15.0 plugin/pkg/parse/host.go tryFile: the zone is dropped, and any other name is kept for the dial.
         assert_eq!(
             labels(&grpc),
-            ["10.10.255.252:53", "10.10.255.253:53", "[fe80::1]:53"]
+            [
+                "10.10.255.252:53",
+                "10.10.255.253:53",
+                "[fe80::1]:53",
+                "dns.example.org:53",
+                "[10.0.0.1:5]:53"
+            ]
         );
+        let targets = targets_of(&grpc);
+        assert_eq!(targets[2], &tcp("[fe80::1]:53"));
+        assert_eq!(targets[3], &host("dns.example.org", 53));
+        assert!(matches!(targets[4], Target::Invalid(_)));
         std::fs::write(&file, "search example.org\n").unwrap();
         assert!(
             parse_text(&format!("grpc . {}", file.display()))
@@ -415,16 +624,36 @@ mod tests {
     }
 
     #[test]
-    fn missing_arguments_and_unsupported_schemes_fail() {
+    fn missing_arguments_and_unusable_addresses_fail() {
         for input in [
             "grpc",
             "grpc .",
             "grpc . unix://",
-            "grpc . tls://127.0.0.1",
-            "grpc . grpc://127.0.0.1",
+            "grpc . tls://",
             "grpc . localhost",
+            "grpc . example.com:53",
+            "grpc . 127.0.0.1 localhost",
         ] {
             assert!(parse_text(input).is_err(), "accepted {input}");
+        }
+    }
+
+    // Go net.SplitHostPort.
+    #[test]
+    fn host_and_port_split_as_go_does() {
+        for (input, expected) in [
+            ("127.0.0.1:53", Some(("127.0.0.1", "53"))),
+            ("[::1]:53", Some(("::1", "53"))),
+            ("[fe80::1%eth0]:", Some(("fe80::1%eth0", ""))),
+            ("127.0.0.1", None),
+            ("::1", None),
+            ("[::1]", None),
+            ("[::1]x:53", None),
+            ("[::1:53", None),
+            ("a[b:53", None),
+            ("a]b:53", None),
+        ] {
+            assert_eq!(split_host_port(input), expected, "{input}");
         }
     }
 }

@@ -332,6 +332,25 @@ async fn fallthrough_after_failures_runs_the_next_plugin() {
     assert!(from_whoami(&ask(&server, "www.example.org.").await));
 }
 
+// CoreDNS v1.15.0 plugin/pkg/parse/host.go HostPortOrFile: a scheme grpc-go cannot dial passes setup and fails at the first Query.
+#[tokio::test]
+async fn an_undialable_target_fails_the_query_not_setup() {
+    let upstream = stub(|query| echo(query)).await;
+    let port = upstream.address.port();
+    for bad in [
+        format!("grpc://127.0.0.1:{port}"),
+        format!("tls://127.0.0.1:{port}"),
+        "127.0.0.1:99999".to_owned(),
+    ] {
+        let (server, _, _) = front(&grpc_block(&bad, ""));
+        assert_eq!(rcode(&ask(&server, "www.example.org.").await), 2, "{bad}");
+    }
+    assert_eq!(upstream.calls(), 0);
+    let to = format!("grpc://127.0.0.1:{port} {}", upstream.address);
+    let (server, _, _) = front(&grpc_block(&to, " policy sequential"));
+    assert_eq!(rcode(&ask(&server, "www.example.org.").await), 0);
+}
+
 // Replies that are not one acceptable DNS Message count as an error of the Upstream.
 #[tokio::test]
 async fn malformed_replies_are_upstream_errors() {
