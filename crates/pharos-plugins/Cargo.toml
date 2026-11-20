@@ -70,6 +70,7 @@ default = [
     "plugin-multisocket",
     "plugin-nsid",
     "plugin-prometheus",
+    "plugin-quic",
     "plugin-ready",
     "plugin-reload",
     "plugin-rewrite",

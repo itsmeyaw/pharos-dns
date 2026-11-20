@@ -131,6 +131,8 @@ pub mod r#loop;
 pub mod metadata;
 #[cfg(feature = "plugin-prometheus")]
 pub mod prometheus;
+#[cfg(feature = "plugin-quic")]
+pub mod quic;
 #[cfg(feature = "plugin-ready")]
 pub mod ready;
 #[cfg(feature = "plugin-reload")]
@@ -527,6 +529,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("multisocket", include_str!("multisocket/README.md")),
     ("nsid", include_str!("nsid/README.md")),
     ("prometheus", include_str!("prometheus/README.md")),
+    ("quic", include_str!("quic/README.md")),
     ("ready", include_str!("ready/README.md")),
     ("reload", include_str!("reload/README.md")),
     ("rewrite", include_str!("rewrite/README.md")),
