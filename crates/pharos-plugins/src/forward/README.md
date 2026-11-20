@@ -5,13 +5,13 @@
 ## forward
 
 - Plain UDP and TCP Upstream exchange is available for `forward`.
-- DNS-over-TLS is reserved for M3.
+- DNS-over-TLS Upstreams are reserved for a later milestone.
 - The proxy retries a truncated UDP Response over TCP only when `prefer_udp` is set, as CoreDNS's `forward` does.
 - Idle sockets are swept across shards at most once per expiry interval on Query traffic. Unlike CoreDNS’s periodic cleanup, an idle Proxy retains expired sockets until another Query or shutdown.
 - Upstream TSIG Messages retain their original ID rather than rewriting the signed Message.
 - Proxy metric RCODE series are initialized on first observation, allocating once per distinct RCODE.
 - Connections rotate FIFO within each worker shard rather than in one global FIFO.
-- Encrypted Upstreams (`tls://`, `quic://` and `https://`) and `tls` or `tls_servername` options fail setup rather than silently downgrade; TLS is deferred to M3.
+- Encrypted Upstreams (`tls://`, `quic://` and `https://`) and `tls` or `tls_servername` options fail setup rather than silently downgrade; Upstream TLS is not implemented yet.
 - Hostname Upstreams resolve at setup using the system resolver or the configured `resolver`.
 - `doh_method` has no effect on plain DNS.
 - Special names `test.` and RFC 6303 reverse domains defer to the Chain's terminal NXDOMAIN unless a matching stanza opts into upstream lookup with `allow_special` or an explicit special-use `from` Zone. `invalid.` always gets terminal NXDOMAIN; explicit `forward .invalid` setup is rejected (RFC 6761 §§6.1, 6.2, 6.4).

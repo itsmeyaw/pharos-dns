@@ -10,6 +10,7 @@
 - The dnssec Plugin, setup, metrics and tests follow CoreDNS v1.15.0's `plugin/dnssec`; the BIND key fixtures in `crates/pharos-plugins/tests/fixtures/dnssec` derive from its `plugin/sign/testdata`.
 - The BIND key pair in `crates/pharos-dnssec/tests/fixtures` is from CoreDNS v1.15.0's `plugin/sign/testdata`.
 - `crates/pharos-plugins/plugin.cfg` follows CoreDNS v1.15.0.
+- The tls Plugin, shared-Listener TLS checks and tests follow CoreDNS v1.15.0's `plugin/tls`, `plugin/pkg/tls` and `core/dnsserver/tlsconfig.go`; fixtures in `tests/fixtures/tls` are newly generated.
 - The acl Plugin setup and tests follow CoreDNS v1.15.0's `plugin/acl`.
 - The transfer Plugin setup and tests follow CoreDNS v1.15.0's `plugin/transfer`.
 - The file Plugin and tests follow CoreDNS v1.15.0's `plugin/file`.

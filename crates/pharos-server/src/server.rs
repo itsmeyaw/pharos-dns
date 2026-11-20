@@ -136,6 +136,8 @@ pub struct Server<C> {
     pub debug: bool,
     pub udp_workers: usize,
     pub tcp_options: crate::TcpOptions,
+    /// TLS identity of an encrypted Transport's Listener.
+    pub tls: Option<crate::tls::ServerTls>,
     pub logger: fn(Error),
     metrics: Registry,
     dropped: Option<BlockMetrics>,
@@ -233,6 +235,7 @@ impl<C: Chain> Server<C> {
             debug: false,
             udp_workers: crate::quota::worker_count(),
             tcp_options: crate::TcpOptions::default(),
+            tls: None,
             logger: log_error,
             metrics,
             dropped,
@@ -275,6 +278,9 @@ impl<C: Chain> Handler for Server<C> {
     }
     fn tcp_options(&self) -> crate::TcpOptions {
         self.tcp_options
+    }
+    fn tls(&self) -> Option<crate::tls::ServerTls> {
+        self.tls.clone()
     }
     fn udp_workers(&self) -> usize {
         self.udp_workers
@@ -352,6 +358,7 @@ impl<C: Chain> crate::SelfLookupServer for Server<C> {
             debug: self.debug,
             udp_workers: self.udp_workers,
             tcp_options: self.tcp_options,
+            tls: self.tls.clone(),
             logger: self.logger,
             metrics: self.metrics.clone(),
             shed: self.shed.clone(),

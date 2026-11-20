@@ -11,6 +11,7 @@ fn config_only(name: &str) -> bool {
             | "debug"
             | "bind"
             | "multisocket"
+            | "tls"
             | "ready"
             | "health"
             | "reload"
@@ -85,6 +86,7 @@ fn main() {
             "header" => "header::Header",
             "minimal" => "minimal::Minimal",
             "multisocket" => "Option<usize>",
+            "tls" => "tls::Tls",
             "whoami" => "whoami::Whoami",
             "view" => "view::View",
             "log" => "log::Log",
@@ -141,6 +143,7 @@ fn main() {
             "header" => "header::setup::setup",
             "minimal" => "minimal::setup::setup",
             "multisocket" => "multisocket::setup::setup",
+            "tls" => "tls::setup::setup",
             "whoami" => "whoami::setup::setup",
             "view" => "view::setup::setup",
             "log" => "log::setup::setup",

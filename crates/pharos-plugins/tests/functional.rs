@@ -373,6 +373,12 @@ mod siit {
 }
 
 #[path = "functional"]
+mod tls {
+    #[path = "tls_setup.rs"]
+    mod tls_setup;
+}
+
+#[path = "functional"]
 mod timeouts {
     #[path = "timeouts_setup.rs"]
     mod timeouts_setup;
