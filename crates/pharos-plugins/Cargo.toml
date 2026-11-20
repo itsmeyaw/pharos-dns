@@ -13,12 +13,12 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
-pharos-kv = { version = "0.2.0", path = "../pharos-kv" }
-pharos-corefile = { version = "0.2.0", path = "../pharos-corefile" }
-pharos-proto = { version = "0.2.0", path = "../pharos-proto" }
-pharos-server = { version = "0.2.0", path = "../pharos-server" }
-pharos-dnssec = { version = "0.2.0", path = "../pharos-dnssec", optional = true }
-pharos-kubernetes = { version = "0.2.0", path = "../pharos-kubernetes", optional = true }
+pharos-kv = { version = "0.3.0", path = "../pharos-kv" }
+pharos-corefile = { version = "0.3.0", path = "../pharos-corefile" }
+pharos-proto = { version = "0.3.0", path = "../pharos-proto" }
+pharos-server = { version = "0.3.0", path = "../pharos-server" }
+pharos-dnssec = { version = "0.3.0", path = "../pharos-dnssec", optional = true }
+pharos-kubernetes = { version = "0.3.0", path = "../pharos-kubernetes", optional = true }
 aws-config = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"], optional = true }
 aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }

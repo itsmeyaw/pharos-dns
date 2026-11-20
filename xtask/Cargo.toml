@@ -13,7 +13,7 @@ h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 http = "1"
-pharos-dnssec = { path = "../crates/pharos-dnssec", version = "0.2.0" }
+pharos-dnssec = { path = "../crates/pharos-dnssec", version = "0.3.0" }
 pharos-proto = { path = "../crates/pharos-proto" }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }

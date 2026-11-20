@@ -19,7 +19,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
-pharos-proto = { version = "0.2.0", path = "../pharos-proto" }
+pharos-proto = { version = "0.3.0", path = "../pharos-proto" }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 rustls-native-certs = "0.8"
