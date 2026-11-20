@@ -11,8 +11,8 @@ use std::{
 };
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream, tcp::OwnedReadHalf},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     sync::{Mutex, watch},
     task::{JoinHandle, JoinSet},
     time::{Instant, timeout},
@@ -30,6 +30,7 @@ pub(crate) fn spawn<H: Handler>(
     listener: TcpListener,
     handler: Arc<H>,
     mut shutdown: watch::Receiver<bool>,
+    encrypted: bool,
 ) -> JoinHandle<io::Result<()>> {
     tokio::spawn(async move {
         let mut connections = JoinSet::new();
@@ -50,11 +51,14 @@ pub(crate) fn spawn<H: Handler>(
                             stops.retain(|stop| !stop.is_closed());
                             let (stop, stopped) = watch::channel(false);
                             stops.push(stop.clone());
+                            let (peer, handler) = (crate::canonical_peer(peer), Arc::clone(&handler));
+                            let options = handler.tcp_options();
                             // RFC 1996 §3.5: Keep serving DNS during TCP NOTIFY transactions.
-                            connections.spawn(serve(
-                                stream, crate::canonical_peer(peer), Arc::clone(&handler),
-                                (stop, stopped), handler.tcp_options(),
-                            ));
+                            if encrypted {
+                                connections.spawn(serve_tls(stream, peer, handler, (stop, stopped), options));
+                            } else {
+                                connections.spawn(serve_plain(stream, peer, handler, (stop, stopped), options));
+                            }
                         }
                         Err(error) => {
                             crate::logging::log("ERROR", "server", &format!("TCP accept failed: {error}"));
@@ -103,10 +107,11 @@ pub async fn write_tcp_frame(
         }
         written += n;
     }
-    Ok(())
+    // RFC 8446 §5.1: a TLS stream may hold the written record until flushed.
+    stream.flush().await
 }
 
-async fn read_frame(reader: &mut OwnedReadHalf) -> io::Result<Vec<u8>> {
+async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
     // RFC 1035 §4.2.2: TCP DNS messages have a two-octet length prefix.
     let mut length = [0; 2];
     reader.read_exact(&mut length).await?;
@@ -116,13 +121,7 @@ async fn read_frame(reader: &mut OwnedReadHalf) -> io::Result<Vec<u8>> {
     Ok(query)
 }
 
-async fn serve<H: Handler>(
-    stream: TcpStream,
-    peer: SocketAddr,
-    handler: Arc<H>,
-    (stop, mut stopped): (watch::Sender<bool>, watch::Receiver<bool>),
-    options: TcpOptions,
-) {
+fn disable_nagle(stream: &TcpStream) {
     // RFC 7766 §7: send each Response as soon as it is available.
     // RFC 9293 §3.7.4: Nagle would hold it until the previous segment is ACKed.
     if let Err(error) = stream.set_nodelay(true) {
@@ -132,7 +131,60 @@ async fn serve<H: Handler>(
             &format!("failed to disable Nagle on TCP connection: {error}"),
         );
     }
-    let (mut reader, writer) = stream.into_split();
+}
+
+type Stop = (watch::Sender<bool>, watch::Receiver<bool>);
+
+async fn serve_plain<H: Handler>(
+    stream: TcpStream,
+    peer: SocketAddr,
+    handler: Arc<H>,
+    stop: Stop,
+    options: TcpOptions,
+) {
+    disable_nagle(&stream);
+    let (reader, writer) = stream.into_split();
+    serve(reader, writer, peer, handler, stop, options).await;
+}
+
+async fn serve_tls<H: Handler>(
+    stream: TcpStream,
+    peer: SocketAddr,
+    handler: Arc<H>,
+    (stop, mut stopped): Stop,
+    options: TcpOptions,
+) {
+    disable_nagle(&stream);
+    let Some(tls) = handler.tls() else {
+        crate::logging::log("ERROR", "server", "TLS Listener has no TLS identity");
+        return;
+    };
+    // RFC 7858 §3.4: a server bounds the handshake like any idle connection phase; the read timeout covers it.
+    let handshake = timeout(options.read, tls.acceptor().accept(stream));
+    let stream = tokio::select! {
+        biased;
+        _ = stopped.changed() => return,
+        result = handshake => match result {
+            Ok(Ok(stream)) => stream,
+            _ => return,
+        },
+    };
+    let (reader, writer) = tokio::io::split(stream);
+    serve(reader, writer, peer, handler, (stop, stopped), options).await;
+}
+
+async fn serve<H, R, W>(
+    mut reader: R,
+    writer: W,
+    peer: SocketAddr,
+    handler: Arc<H>,
+    (stop, mut stopped): Stop,
+    options: TcpOptions,
+) where
+    H: Handler,
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let writer = Arc::new(Mutex::new(Some(writer)));
     let mut queries: JoinSet<Vec<u8>> = JoinSet::new();
     let mut responses = Vec::with_capacity(MAX_IN_FLIGHT_PER_CONNECTION);
@@ -380,6 +432,10 @@ async fn serve<H: Handler>(
         }
     } else {
         drain.await;
+    }
+    // RFC 8446 §6.1: send close_notify before closing a TLS connection.
+    if let Some(mut writer) = writer.lock().await.take() {
+        let _ = timeout(options.write, writer.shutdown()).await;
     }
 }
 

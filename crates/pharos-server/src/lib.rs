@@ -842,6 +842,10 @@ pub trait Handler: Send + Sync + 'static {
     fn tcp_options(&self) -> TcpOptions {
         TcpOptions::default()
     }
+    /// TLS identity for each connection accepted on an encrypted Transport's Listener.
+    fn tls(&self) -> Option<tls::ServerTls> {
+        None
+    }
     /// Number of UDP worker sockets for this Listener.
     fn udp_workers(&self) -> usize {
         quota::worker_count()
@@ -955,7 +959,7 @@ impl Listener {
                 ))
             })
             .collect::<io::Result<Vec<_>>>()?;
-        let tasks = vec![tcp::spawn(tcp, handler, receiver)];
+        let tasks = vec![tcp::spawn(tcp, handler, receiver, false)];
         Ok(Self {
             address,
             stop,
@@ -963,6 +967,23 @@ impl Listener {
             udp_stop,
             udp_tasks,
             shed,
+        })
+    }
+
+    /// Bind a TCP Listener that serves DNS over TLS (RFC 7858); it has no UDP sockets.
+    pub async fn bind_tls<H: Handler>(address: SocketAddr, handler: H) -> io::Result<Self> {
+        let tcp = bind_tcp(address).await?;
+        let address = tcp.local_addr()?;
+        let (stop, receiver) = watch::channel(false);
+        let (udp_stop, _) = watch::channel(false);
+        let handler = Arc::new(handler);
+        Ok(Self {
+            address,
+            stop,
+            tasks: vec![tcp::spawn(tcp, handler, receiver, true)],
+            udp_stop,
+            udp_tasks: Vec::new(),
+            shed: false,
         })
     }
 
@@ -1006,6 +1027,17 @@ impl Listener {
         }
         result.map(|()| timed_out)
     }
+}
+
+async fn bind_tcp(address: SocketAddr) -> io::Result<TcpListener> {
+    if address.is_ipv6() && address.ip().is_unspecified() {
+        // A wildcard falls back to IPv4 where the host has no IPv6.
+        if let Some(tcp) = optional_ipv6(bind_ipv6_dual(address))? {
+            return Ok(tcp);
+        }
+        return TcpListener::bind((Ipv4Addr::UNSPECIFIED, address.port())).await;
+    }
+    TcpListener::bind(address).await
 }
 
 fn bind_ipv6_dual(address: SocketAddr) -> io::Result<TcpListener> {
@@ -1428,7 +1460,10 @@ impl ListenerRegistry {
         mut servers: HashMap<ListenerKey, H>,
     ) -> io::Result<Vec<RetiredHandler<H>>> {
         let desired: HashSet<_> = servers.keys().copied().collect();
-        if desired.iter().any(|key| key.transport != Transport::Dns) {
+        if desired
+            .iter()
+            .any(|key| !matches!(key.transport, Transport::Dns | Transport::Tls))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unsupported Listener transport",
@@ -1453,6 +1488,7 @@ impl ListenerRegistry {
         // A reload must keep at least one UDP worker per Listener.
         let workers: HashMap<_, _> = servers
             .iter()
+            .filter(|(key, _)| key.transport == Transport::Dns)
             .map(|(key, server)| (*key, server.udp_workers()))
             .collect();
         if workers.values().any(|count| *count == 0) {
@@ -1471,8 +1507,12 @@ impl ListenerRegistry {
             let handler = Arc::new(ArcSwap::from_pointee(
                 servers.remove(&key).expect("new Listener"),
             ));
-            let listener = match Listener::bind(key.address, Swappable(Arc::clone(&handler))).await
-            {
+            let handler_for_listener = Swappable(Arc::clone(&handler));
+            let bound = match key.transport {
+                Transport::Tls => Listener::bind_tls(key.address, handler_for_listener).await,
+                _ => Listener::bind(key.address, handler_for_listener).await,
+            };
+            let listener = match bound {
                 Ok(listener) => listener,
                 Err(error) => {
                     for (_, listener, _) in added {
@@ -1488,6 +1528,10 @@ impl ListenerRegistry {
         }
         let mut replacements = Vec::new();
         for (key, server) in &servers {
+            // RFC 7858 §3.1: an encrypted Transport listens on TCP only.
+            if key.transport != Transport::Dns {
+                continue;
+            }
             let listener = &self.listeners[key];
             let count = workers[key];
             if count == listener.udp_tasks.len() && listener.shed == server.shed_metrics().is_some()
@@ -1615,6 +1659,9 @@ impl<H: Handler> Handler for Swappable<H> {
     }
     fn tcp_options(&self) -> TcpOptions {
         self.0.load().tcp_options()
+    }
+    fn tls(&self) -> Option<tls::ServerTls> {
+        self.0.load().tls()
     }
     fn udp_workers(&self) -> usize {
         self.0.load().udp_workers()
