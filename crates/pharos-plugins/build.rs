@@ -94,6 +94,7 @@ fn main() {
             "https" => "https::Https",
             "grpc_server" => "grpc_server::GrpcServer",
             "https3" => "https3::Https3",
+            "grpc" => "grpc::Grpc",
             "quic" => "quic::Quic",
             "whoami" => "whoami::Whoami",
             "view" => "view::View",
@@ -155,6 +156,7 @@ fn main() {
             "https" => "https::setup::setup",
             "grpc_server" => "grpc_server::setup::setup",
             "https3" => "https3::setup::setup",
+            "grpc" => "grpc::setup::setup",
             "quic" => "quic::setup::setup",
             "whoami" => "whoami::setup::setup",
             "view" => "view::setup::setup",
@@ -199,6 +201,7 @@ fn main() {
                 | "view"
                 | "quic"
                 | "https3"
+                | "grpc"
         );
         writeln!(
             code,

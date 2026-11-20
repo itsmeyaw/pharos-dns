@@ -8,6 +8,7 @@ use pharos_corefile::{BlockContext, Cursor, Directive, Error};
 #[cfg(any(
     feature = "plugin-cache",
     feature = "plugin-forward",
+    feature = "plugin-grpc",
     feature = "plugin-local"
 ))]
 use pharos_proto::Name;
@@ -57,6 +58,8 @@ pub mod expression;
 #[cfg(feature = "plugin-file")]
 pub mod file;
 pub mod gotemplate;
+#[cfg(feature = "plugin-grpc")]
+pub mod grpc;
 #[cfg(feature = "plugin-grpc-server")]
 pub mod grpc_server;
 #[cfg(feature = "plugin-header")]
@@ -322,6 +325,7 @@ fn has_suffix(labels: &[&[u8]; 34], count: usize, suffix: &[&[u8]]) -> bool {
 #[cfg(any(
     feature = "plugin-cache",
     feature = "plugin-forward",
+    feature = "plugin-grpc",
     feature = "plugin-local"
 ))]
 pub(crate) fn name_within(name: NameRef<'_>, zone: &Name) -> bool {
@@ -518,6 +522,7 @@ pub const COMPATIBILITY: &[(&str, &str)] = &[
     ("auto", include_str!("auto/README.md")),
     ("secondary", include_str!("secondary/README.md")),
     ("forward", include_str!("forward/README.md")),
+    ("grpc", include_str!("grpc/README.md")),
     ("grpc_server", include_str!("grpc_server/README.md")),
     ("header", include_str!("header/README.md")),
     ("health", include_str!("health/README.md")),
@@ -681,6 +686,7 @@ pub fn servers_with_registry(
     for block in blocks {
         #[cfg(any(
             feature = "plugin-forward",
+            feature = "plugin-grpc",
             feature = "plugin-cache",
             feature = "plugin-local",
             feature = "plugin-acl",
@@ -696,6 +702,10 @@ pub fn servers_with_registry(
         #[cfg(feature = "plugin-forward")]
         if let Some(forward) = &mut block.config.forward {
             forward.set_metrics(&metrics);
+        }
+        #[cfg(feature = "plugin-grpc")]
+        if let Some(grpc) = &mut block.config.grpc {
+            grpc.set_metrics(&metrics);
         }
         #[cfg(feature = "plugin-local")]
         if let Some(local) = &mut block.config.local {
@@ -917,6 +927,16 @@ pub fn servers_with_registry(
             lifecycle.register_sync(pharos_server::Phase::Shutdown, move || {
                 if let Some(forward) = &chain.forward {
                     forward.stop();
+                }
+                Ok(())
+            });
+        }
+        #[cfg(feature = "plugin-grpc")]
+        if chain.grpc.is_some() {
+            let chain = Arc::clone(&chain);
+            lifecycle.register_sync(pharos_server::Phase::Shutdown, move || {
+                if let Some(grpc) = &chain.grpc {
+                    grpc.stop();
                 }
                 Ok(())
             });
@@ -1296,6 +1316,7 @@ impl pharos_server::Plugin for Unimplemented {
     feature = "plugin-dnssec",
     feature = "plugin-sign",
     feature = "plugin-forward",
+    feature = "plugin-grpc",
     feature = "plugin-tls"
 ))]
 fn root_path(chain: &Chain) -> Option<&std::path::Path> {
@@ -1320,6 +1341,7 @@ fn root_path(chain: &Chain) -> Option<&std::path::Path> {
     feature = "plugin-dnssec",
     feature = "plugin-sign",
     feature = "plugin-forward",
+    feature = "plugin-grpc",
     feature = "plugin-tls"
 ))]
 fn resolve_path(path: std::path::PathBuf, root: Option<&std::path::Path>) -> std::path::PathBuf {

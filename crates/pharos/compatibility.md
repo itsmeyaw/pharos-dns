@@ -112,6 +112,11 @@
 
 - [header Plugin notes](../crates/pharos-plugins/src/header/README.md)
 
+## grpc
+
+- [grpc Plugin notes](../crates/pharos-plugins/src/grpc/README.md)
+- `grpc` TOs follow CoreDNS `HostPortOrFile`, including schemes and file nameservers that only fail at the first Query. A service-name port such as `:domain` fails the call, where grpc-go dials it. AD is cleared on replies (RFC 4035 §4.6), CoreDNS preserves it.
+
 ## grpc_server
 
 - [grpc_server Plugin notes](../crates/pharos-plugins/src/grpc_server/README.md)

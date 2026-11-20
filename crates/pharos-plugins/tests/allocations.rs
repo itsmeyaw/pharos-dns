@@ -174,6 +174,12 @@ mod forward {
 }
 
 #[path = "allocations"]
+mod grpc {
+    #[path = "grpc_allocations.rs"]
+    mod grpc_allocations;
+}
+
+#[path = "allocations"]
 mod header {
     #[path = "header_allocations.rs"]
     mod header_allocations;
